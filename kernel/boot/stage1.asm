@@ -4,15 +4,21 @@
 ;
 ; The BIOS loads this 512-byte sector to 0x0000:0x7C00 and jumps to it in
 ; 16-bit real mode with DL = boot drive number. This stage prints a status
-; message, loads stage 2 from disk via INT 13h, and jumps into it.
+; message, loads stage 2 from disk, and jumps into it.
+;
+; Disk reads use INT 13h's extended (LBA) read (AH=42h) rather than the
+; classic CHS read: CHS caps sector counts at 63 per track, which stage2's
+; kernel loader (kernel/boot/stage2.asm) will blow past as the kernel
+; grows. LBA addressing sidesteps that entirely, so both stages use it
+; consistently. LBA 0 is this boot sector itself.
 
 bits 16
 org 0x7C00
 
 STAGE2_LOAD_SEGMENT equ 0x0000
 STAGE2_LOAD_OFFSET  equ 0x7E00   ; immediately after this boot sector
-STAGE2_START_SECTOR equ 2        ; CHS sectors are 1-indexed; sector 1 is us
-STAGE2_SECTOR_COUNT equ 4        ; 4 * 512 = 2 KiB reserved for stage 2
+STAGE2_START_LBA    equ 1        ; LBA 0 is this boot sector
+STAGE2_SECTOR_COUNT equ 8        ; 8 * 512 = 4 KiB reserved for stage 2
 
 start:
     cli
@@ -50,35 +56,24 @@ print_string:
     popa
     ret
 
-; load_stage2: reads STAGE2_SECTOR_COUNT sectors starting at
-; STAGE2_START_SECTOR from the boot drive (DL, set by the BIOS) into
-; STAGE2_LOAD_SEGMENT:STAGE2_LOAD_OFFSET.
+; load_stage2: reads STAGE2_SECTOR_COUNT sectors starting at LBA
+; STAGE2_START_LBA from the boot drive (DL, set by the BIOS) into
+; STAGE2_LOAD_SEGMENT:STAGE2_LOAD_OFFSET via INT 13h's extended read.
 load_stage2:
-    push ax
-    push bx
-    push cx
-    push dx
-    push es
+    pusha
 
-    mov ax, STAGE2_LOAD_SEGMENT
-    mov es, ax
-    mov bx, STAGE2_LOAD_OFFSET
+    mov word [dap.count], STAGE2_SECTOR_COUNT
+    mov word [dap.offset], STAGE2_LOAD_OFFSET
+    mov word [dap.segment], STAGE2_LOAD_SEGMENT
+    mov dword [dap.lba_low], STAGE2_START_LBA
+    mov dword [dap.lba_high], 0
 
-    mov ah, 0x02                    ; BIOS: read sectors into ES:BX
-    mov al, STAGE2_SECTOR_COUNT
-    mov ch, 0x00                    ; cylinder 0
-    mov cl, STAGE2_START_SECTOR
-    mov dh, 0x00                    ; head 0
-    ; DL already holds the BIOS-provided boot drive number
-
+    mov si, dap
+    mov ah, 0x42
     int 0x13
     jc .disk_error
 
-    pop es
-    pop dx
-    pop cx
-    pop bx
-    pop ax
+    popa
     ret
 
 .disk_error:
@@ -94,6 +89,17 @@ halt:
 msg_stage1:     db "lean_os stage1: booting...", 13, 10, 0
 msg_jump:       db "lean_os stage1: stage2 loaded, jumping...", 13, 10, 0
 msg_disk_error: db "lean_os stage1: DISK READ ERROR", 13, 10, 0
+
+; Disk Address Packet for INT 13h, AH=42h (extended read).
+align 4
+dap:
+    .size     db 0x10
+    .reserved db 0
+    .count    dw 0
+    .offset   dw 0
+    .segment  dw 0
+    .lba_low  dd 0
+    .lba_high dd 0
 
 times 510 - ($ - $$) db 0
 dw 0xAA55
