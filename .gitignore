@@ -53,3 +53,11 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# build output
+/build/
+
+# module-level readmes (keep only the top-level README.md tracked)
+**/README.md
+!/README.md
+milestones.md
