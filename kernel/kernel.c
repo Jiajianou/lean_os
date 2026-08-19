@@ -1,5 +1,8 @@
 #include <stdint.h>
 
+#include "arch/x86_64/gdt.h"
+#include "arch/x86_64/idt.h"
+#include "arch/x86_64/pic.h"
 #include "drivers/vga.h"
 #include "panic.h"
 
@@ -18,6 +21,18 @@ typedef struct __attribute__((packed)) {
 void kernel_main(uint32_t *e820_map) {
     vga_clear();
     vga_puts("lean_os kernel: hello from C!\n\n");
+
+    gdt_init();
+    idt_init();
+    pic_remap();
+    vga_puts("GDT/TSS, IDT, and PIC remap initialized.\n");
+
+    /* Self-test: a real trip through the IDT/ISR pipeline (gate -> stub
+     * -> C handler -> iretq) rather than just trusting it compiled.
+     * int3 is the one exception vector that's meant to be resumed, so
+     * this proves the round trip works without ending in a panic. */
+    __asm__ volatile("int3");
+    vga_puts("Resumed after breakpoint self-test.\n\n");
 
     uint32_t count = *e820_map;
     if (count == 0) {

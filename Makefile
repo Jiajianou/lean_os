@@ -24,9 +24,9 @@ KERNEL_SECTORS_FILE := $(BUILD)/kernel.sectors
 IMAGE      := $(BUILD)/os-image.bin
 
 KERNEL_C_SRCS := $(shell find kernel -name '*.c' -not -path 'kernel/boot/*')
-KERNEL_ASM_SRCS := kernel/arch/x86_64/entry.asm
+KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*')
 
-KERNEL_OBJS := $(KOBJ)/entry.o \
+KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
 .PHONY: all run clean
@@ -47,7 +47,8 @@ $(STAGE1_BIN): $(BOOT)/stage1.asm | $(BUILD)
 $(STAGE2_BIN): $(BOOT)/stage2.asm $(KERNEL_BIN) | $(BUILD)
 	$(AS) -f bin -D KERNEL_SECTOR_COUNT=$$(cat $(KERNEL_SECTORS_FILE)) $< -o $@
 
-$(KOBJ)/entry.o: $(KERNEL_ASM_SRCS) | $(KOBJ)
+$(KOBJ)/%.o: kernel/%.asm | $(KOBJ)
+	@mkdir -p $(dir $@)
 	$(AS) -f elf64 $< -o $@
 
 $(KOBJ)/%.o: kernel/%.c | $(KOBJ)

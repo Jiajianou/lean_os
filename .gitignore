@@ -60,4 +60,3 @@ dkms.conf
 # module-level readmes (keep only the top-level README.md tracked)
 **/README.md
 !/README.md
-milestones.md
