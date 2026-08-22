@@ -28,6 +28,15 @@ BUILD := build
 BOOT  := kernel/boot
 KOBJ  := $(BUILD)/kernel_obj
 
+# Package/build tooling stretch goal: a *host* program (ordinary libc,
+# built with the host's own cc, not the x86_64-elf cross-compiler - it
+# never runs as part of the OS) that writes a file straight into an
+# already-built disk image's leanfs filesystem. See its own header
+# comment and tools/build-user-program.sh for the full third-party
+# program workflow this exists for.
+HOSTCC       := cc
+LEANFS_PUT   := $(BUILD)/leanfs-put
+
 # -O1: added at M20 - a from-scratch software compositor doing
 # per-pixel fill_rect/blit calls at -O0 turned out genuinely too slow to
 # be usable (verified directly during M20 bring-up: a single full-screen
@@ -94,7 +103,7 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run run-uefi clean
+.PHONY: all run run-uefi leanfs-put preseed clean
 
 all: $(IMAGE)
 
@@ -238,6 +247,40 @@ run: all
 # rest of this Makefile.
 run-uefi: all
 	@./tools/run-qemu-uefi.sh
+
+$(LEANFS_PUT): tools/leanfs-put.c | $(BUILD)
+	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -o $@ $<
+
+leanfs-put: $(LEANFS_PUT)
+
+# Optional, one-time-per-image step for the third-party program workflow
+# (tools/build-user-program.sh + tools/leanfs-put.c): writes every
+# built-in program straight into the disk image's leanfs, host-side, in
+# the same order kernel.c's own FOR_EACH_EMBEDDED_PROGRAM seeds them in.
+#
+# Not part of `all` and never runs automatically - default boot behavior
+# (the kernel seeding these itself on first boot, M12) is untouched
+# either way, since it already skips any program that's already present.
+# The reason this exists at all: kernel.c's M22 self-test hardcodes
+# "launcher slot 0 is hello, the first file ever seeded" and checks
+# actual rendered pixels for it: leanfs-put'ing a third-party program
+# onto a disk image that has *never* booted claims the first free inode
+# for itself, which - if that inode happens to be slot 0 - shifts hello
+# out of it and fails that self-test. Running this once first, before
+# adding any third-party program to a fresh image, avoids the question
+# entirely by making sure every built-in program's slot is already
+# spoken for.
+preseed: $(IMAGE) $(LEANFS_PUT)
+	@for p in $(USER_PROGRAMS); do \
+		$(LEANFS_PUT) $(IMAGE) $(BUILD)/$$p.elf $$p; \
+	done
+
+# Lets tools/build-user-program.sh (and anyone else) read this Makefile's
+# own variables - e.g. `make print-USER_CFLAGS` - instead of hardcoding a
+# second copy of flags that would silently drift out of sync with the
+# ones actually used to build this project's own user-space programs.
+print-%:
+	@echo $($*)
 
 clean:
 	rm -rf $(BUILD)

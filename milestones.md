@@ -304,13 +304,45 @@ runtime dependency).
       spec-safe `EfiLoaderData` instead; there was never a real need for
       a custom type
 
+## M25 — Package/build tooling for third-party user programs ✅
+
+- [x] `tools/build-user-program.sh`: compiles a standalone third-party
+      `.c` file against `user_space/lib` (crt0 + syscall_wrappers +
+      str/malloc/gfx/font8x16/wmclient) with the exact flags this
+      project's own programs build with, pulled live from the Makefile
+      (`make print-USER_CFLAGS`/`print-USER_LIBOBJS` - a small new
+      generic `print-%` target) rather than a second hardcoded copy that
+      could drift
+- [x] `tools/leanfs-put.c`: a *host* program (ordinary hosted C, built
+      with the system `cc`, never runs as part of the OS) that
+      duplicates kernel/fs/leanfs.c's on-disk structs and allocation
+      logic byte-for-byte and writes a file straight into an
+      already-built disk image's leanfs region - the missing host-side
+      half of M12's filesystem, letting a third-party program get onto
+      disk without a kernel rebuild at all. Verified both via the
+      kernel's own boot self-tests passing and an independent
+      byte-for-byte round-trip check (including the indirect-block path)
+      written from scratch against the format, not reusing leanfs-put's
+      own code
+- [x] `make preseed`: found a real interaction the hard way - leanfs-put
+      writing onto a disk image that's never booted claims the first
+      free inode, and if that's inode 0 it shifts kernel.c's M22 boot
+      self-test's hardcoded "launcher slot 0 is hello, the first file
+      ever seeded" assumption right out from under it, panicking on the
+      very next boot. `make preseed` writes every built-in program via
+      leanfs-put itself, in seed order, before any third-party program
+      is added - not part of `all` and changes no default behavior (the
+      kernel's own first-boot seeding already skips anything already
+      present), just makes the third-party workflow safe by construction
+      instead of by instruction
+- [x] `docs/third-party-programs.md`: the end-to-end workflow
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support
 - [x] UEFI boot path as an alternative to BIOS (M24, above)
+- [x] Package/build tooling for third-party user programs (M25, above)
 - [ ] Networking stack + NIC driver
 - [ ] Port to real hardware (USB boot test)
-- [ ] Package/build tooling for third-party user programs (still built from
-      scratch, just easier to author)
 
 ---
