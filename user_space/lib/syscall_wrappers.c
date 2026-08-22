@@ -104,3 +104,11 @@ long sys_pipe_poll(int fd) {
 long sys_uptime_ms(void) {
     return do_syscall(SYS_uptime_ms, 0, 0, 0);
 }
+
+long sys_dup2(int oldfd, int newfd) {
+    return do_syscall(SYS_dup2, oldfd, newfd, 0);
+}
+
+long sys_wait_nb(long pid) {
+    return do_syscall(SYS_wait_nb, pid, 0, 0);
+}

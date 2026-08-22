@@ -91,3 +91,15 @@ global desktop_shell_elf_end
 desktop_shell_elf_start:
     incbin "build/desktop_shell.elf"
 desktop_shell_elf_end:
+
+global desktop_icons_elf_start
+global desktop_icons_elf_end
+desktop_icons_elf_start:
+    incbin "build/desktop_icons.elf"
+desktop_icons_elf_end:
+
+global gui_terminal_elf_start
+global gui_terminal_elf_end
+gui_terminal_elf_start:
+    incbin "build/gui_terminal.elf"
+gui_terminal_elf_end:

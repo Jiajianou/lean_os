@@ -101,3 +101,16 @@ long sys_pipe_poll(int fd);
 /* M21: milliseconds since the timer was initialized - for time-driven
  * redraws that have nothing to do with input arriving. */
 long sys_uptime_ms(void);
+
+/* Duplicates oldfd's fd-table slot into newfd (overwriting whatever was
+ * there - no SYS_close exists to release it first). Returns newfd, or -1
+ * if either fd is out of range or oldfd isn't open. Lets a caller point
+ * its own fd 1 at a pipe write end before SYS_spawn, so the child it
+ * spawns inherits that pipe as its stdout instead of the global console. */
+long sys_dup2(int oldfd, int newfd);
+
+/* Non-blocking counterpart to sys_wait: returns pid's exit code (and
+ * reaps it) if it has already terminated, -2 if it's still running, or
+ * -1 if pid is invalid. For a caller (a GUI terminal) that can't afford
+ * to block on sys_wait while it still has window events to service. */
+long sys_wait_nb(long pid);

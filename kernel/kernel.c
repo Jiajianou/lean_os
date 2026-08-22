@@ -45,7 +45,9 @@
     X(wm_demo)                       \
     X(gui_clock)                     \
     X(gui_paint)                     \
-    X(desktop_shell)
+    X(desktop_shell)                 \
+    X(desktop_icons)                 \
+    X(gui_terminal)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -862,7 +864,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             {996, 742, 0x0055AA33u, "running slot 0 background (focused)"},
             {958, 749, 0x0055AA33u, "running slot 0 '#' glyph - off pixel"},
             {960, 749, 0x00FFFFFFu, "running slot 0 '#' glyph - on pixel"},
-            {920, 752, 0x00181828u, "panel background (no slot, gap between launcher and running-window slots)"},
+            {500, 738, 0x00181828u, "panel background (margin strip above the slot row, y=2 - never overdrawn by any slot regardless of file count)"},
             {500, 500, 0x001A1A2Eu, "desktop background color, above the panel"},
         };
         uint32_t got[sizeof(checks) / sizeof(checks[0])];

@@ -518,6 +518,54 @@ static long sys_uptime_ms(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, ui
     return (long)(pit_get_ticks() * (1000 / PIT_HZ));
 }
 
+/* The missing half of SYS_pipe/SYS_pipe_open: those only ever install a
+ * pipe's ends at brand-new fd numbers, so a caller that wants an
+ * *existing* fd number (its own stdout, fd 1) to become a pipe end
+ * instead - so a child it's about to SYS_spawn inherits that pipe as its
+ * own fd 1 - has no way to get there without this. Plain slot copy, no
+ * refcounting: this project has no SYS_close to release whatever newfd
+ * used to hold, the same "hasn't been needed yet" simplicity pipe.h's
+ * header comment already notes for pipe ownership generally. */
+static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (oldfd >= MAX_FDS || newfd >= MAX_FDS) {
+        return -1;
+    }
+    task_t *self = sched_current();
+    if (self->fds[oldfd].type == FD_NONE) {
+        return -1;
+    }
+    self->fds[newfd] = self->fds[oldfd];
+    return (long)newfd;
+}
+
+/* Non-blocking counterpart to SYS_wait: never yields, just reports
+ * whether pid has already terminated - -2 (not -1, which already means
+ * "no such task") is "still running", so a caller with its own event
+ * loop to keep servicing (a GUI terminal, spawning a child while it
+ * keeps redrawing/routing input) can poll this every iteration instead
+ * of blocking. Reaps pid the same way SYS_wait does once it does report
+ * a real exit code. */
+static long sys_wait_nb(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *t = sched_task_by_id((int)pid_arg);
+    if (!t) {
+        return -1;
+    }
+    if (t->state != TASK_TERMINATED) {
+        return -2;
+    }
+    t->reaped = 1;
+    return t->exit_code;
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -540,6 +588,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_kbd_read] = sys_kbd_read,
     [SYS_pipe_poll] = sys_pipe_poll,
     [SYS_uptime_ms] = sys_uptime_ms,
+    [SYS_dup2] = sys_dup2,
+    [SYS_wait_nb] = sys_wait_nb,
 };
 
 void syscall_handler(isr_regs_t *regs) {

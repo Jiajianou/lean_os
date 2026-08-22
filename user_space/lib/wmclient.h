@@ -37,6 +37,13 @@ int wm_connect(uint32_t width, uint32_t height, wm_window_t *out);
  * this. */
 int wm_connect_panel(uint32_t height, wm_window_t *out);
 
+/* Like wm_connect, but requests the chrome-less, full-screen, always-on-
+ * *bottom* desktop background (wm_create_request_t.desktop) instead of an
+ * ordinary floating window - both dimensions are the compositor's own
+ * call (always the full display), so no size is asked for here at all.
+ * Only user_space/bin/desktop_icons.c calls this. */
+int wm_connect_desktop(wm_window_t *out);
+
 /* M22: fills *out with a snapshot of every window the compositor
  * currently knows about (system_api/include/wm.h's wm_query_response_t).
  * Returns 0, or -1 on failure (no compositor listening). */

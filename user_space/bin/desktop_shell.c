@@ -107,7 +107,7 @@ static void refresh_running_slots(wm_window_t *self) {
     running_count = 0;
     for (int32_t i = 0; i < q.count && running_count < MAX_RUNNING_SLOTS; i++) {
         const wm_window_info_t *info = &q.windows[i];
-        if (info->is_panel || info->window_id == self->window_id) {
+        if (info->is_panel || info->is_desktop || info->window_id == self->window_id) {
             continue;
         }
         running_slot_t *slot = &running_slots[running_count];
@@ -124,10 +124,29 @@ static void refresh_running_slots(wm_window_t *self) {
     }
 }
 
+/* How many launcher_slots entries actually fit before colliding with the
+ * running-window row's own left edge (running_slots[0].x - see
+ * refresh_running_slots's positioning loop: index 0 ends up leftmost
+ * regardless of running_count) - the file list this project ships has
+ * only ever grown (M15's own note on leanfs headroom, this project's
+ * general direction), so a fixed slot count was always going to run into
+ * this on a fixed-width panel eventually. Any launcher_slots entry past
+ * this point is simply not drawn or clickable rather than overlapping the
+ * taskbar - an honest "ran out of room" rather than visual corruption. */
+static int visible_launcher_count(const wm_window_t *self) {
+    int32_t boundary = running_count > 0 ? running_slots[0].x - SLOT_MARGIN : (int32_t)self->width;
+    int n = 0;
+    while (n < launcher_count && launcher_slots[n].x + launcher_slots[n].w <= boundary) {
+        n++;
+    }
+    return n;
+}
+
 static void redraw(wm_window_t *self) {
     gfx_fill_rect(&self->gfx, 0, 0, (int32_t)self->width, (int32_t)self->height, PANEL_BG);
 
-    for (int i = 0; i < launcher_count; i++) {
+    int visible = visible_launcher_count(self);
+    for (int i = 0; i < visible; i++) {
         const launcher_slot_t *slot = &launcher_slots[i];
         gfx_fill_rect(&self->gfx, slot->x, SLOT_MARGIN, slot->w, SLOT_H, LAUNCHER_SLOT_BG);
         draw_label(&self->gfx, slot->x + 2, SLOT_MARGIN + 4, slot->name);
@@ -146,7 +165,8 @@ static void redraw(wm_window_t *self) {
 }
 
 static void handle_click(wm_window_t *self, int32_t x, int32_t y) {
-    for (int i = 0; i < launcher_count; i++) {
+    int visible = visible_launcher_count(self);
+    for (int i = 0; i < visible; i++) {
         const launcher_slot_t *slot = &launcher_slots[i];
         if (x >= slot->x && x < slot->x + slot->w && y >= SLOT_MARGIN && y < SLOT_MARGIN + SLOT_H) {
             sys_spawn(slot->name, "");

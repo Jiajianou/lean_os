@@ -231,6 +231,30 @@ runtime dependency).
 - [x] This is the milestone where "desktop environment running custom
       apps" is genuinely true, not aspirational
 
+## M23 — Desktop icon + GUI terminal ✅
+
+- [x] `wm_create_request_t.desktop`: a chrome-less, full-screen, always-
+      on-*bottom* window kind (compositor.c's mirror image of M22's
+      panel) - the actual "desktop" background a real icon can be drawn
+      on and double-clicked through gaps in other windows
+- [x] `desktop_icons.c`: one double-click-to-launch "Terminal" icon on
+      that background (`WM_EVENT_MOUSE_BUTTON` timestamp pair via
+      `sys_uptime_ms`, no drag/select/rename - launching is the only
+      interaction a single-icon desktop needs)
+- [x] `SYS_dup2` + `SYS_wait_nb`: the two missing fd-table/process
+      primitives a real in-window shell needs that no earlier milestone
+      did - pointing a client's own stdout at a pipe before `SYS_spawn`
+      so a *child's* output can be captured instead of hitting the global
+      console, and polling a spawned child non-blockingly so a GUI event
+      loop never stalls waiting for it
+- [x] `gui_terminal.c`: a real line-editing shell in its own window
+      (own text-grid renderer over `WM_EVENT_KEY`, not `user_space/shell`'s
+      fd 0/1 console path) - runs the same coreutils the panel launcher
+      already spawns, with their real stdout captured and rendered in
+      the window instead of racing the compositor for the framebuffer
+- [x] `init.c` now also spawns `desktop_icons` alongside the compositor
+      and desktop shell, torn down and respawned together
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support

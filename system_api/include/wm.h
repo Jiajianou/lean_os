@@ -34,9 +34,10 @@ typedef struct {
 #define WM_RESPONSE_PIPE "wm_resp"
 
 typedef struct {
-    uint32_t width;  /* ignored if panel != 0 - a panel always spans the full display width, the compositor's own call */
-    uint32_t height;
+    uint32_t width;  /* ignored if panel or desktop != 0 - both always span the full display width, the compositor's own call */
+    uint32_t height; /* ignored if desktop != 0 - a desktop window is always the full display, both dimensions */
     uint8_t panel; /* M22: 0 for a normal window, 1 for a chrome-less, always-on-top, screen-bottom-docked panel - see wm.h's M22 comment below and desktop_shell.c, the one client that ever sets this */
+    uint8_t desktop; /* chrome-less, full-screen, always-on-*bottom* (the exact opposite z-order from panel) background window - see desktop_icons.c, the one client that ever sets this. Mutually exclusive with panel; nothing enforces that since only one client ever sets either flag. */
 } wm_create_request_t;
 
 typedef struct {
@@ -112,6 +113,7 @@ typedef struct {
     uint8_t focused;
     uint8_t minimized;
     uint8_t is_panel; /* lets a panel client filter itself (and any other panel) out of what it lists as a "running app" */
+    uint8_t is_desktop; /* same idea as is_panel - the desktop background is never a "running app" either */
 } wm_window_info_t;
 
 typedef struct {

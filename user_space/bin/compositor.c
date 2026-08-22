@@ -24,6 +24,13 @@
  * (system_api/include/wm.h's WM_QUERY_PIPE/WM_ACTION_PIPE) so a panel
  * can see every other window and focus/minimize one - the two things an
  * ordinary client's own per-window event pipe was never meant to do.
+ *
+ * A "desktop" client (wm_create_request_t.desktop - user_space/bin/
+ * desktop_icons.c is the only one that ever sets it) is a panel's mirror
+ * image: also chrome-less and full-screen, but drawn *first*, underneath
+ * every ordinary window and panel, and only ever wins a click hit-test
+ * that nothing else on screen claimed - the background layer a desktop
+ * icon gets drawn on and double-clicked through gaps in other windows.
  */
 #include "str.h"
 #include "syscall_wrappers.h"
@@ -45,6 +52,7 @@ typedef struct {
     uint32_t *pixels;
     int evt_write_fd; /* write end of this window's own event pipe - see wm_event_pipe_name */
     uint8_t is_panel;  /* M22: chrome-less, always-on-top, screen-bottom-docked - see wm_create_request_t.panel */
+    uint8_t is_desktop; /* chrome-less, full-screen, always-on-*bottom* - see wm_create_request_t.desktop */
     uint8_t minimized; /* M22: hidden from redraw() and from click hit-testing, but the client process keeps running (WM_ACTION_TOGGLE_MINIMIZE) */
 } window_t;
 
@@ -126,16 +134,22 @@ static void draw_cursor(void) {
 
 static void redraw(void) {
     fill_rect(0, 0, (int32_t)fb_info.width, (int32_t)fb_info.height, BG_COLOR);
-    /* Ordinary windows first, in creation order (no z-order raise on
-     * focus - a later connection or click just changes titlebar color,
-     * not paint order; see M20/M21's own notes on this simplification).
-     * Panels are drawn in a second pass, after every ordinary window, so
-     * they're always on top regardless of when they connected - the one
-     * piece of z-ordering this compositor does enforce, since a taskbar
-     * that could be occluded wouldn't be much of a taskbar. */
+    /* Desktop windows first (a background layer under everything else -
+     * the opposite end of the z-order from panels below), then ordinary
+     * windows in creation order (no z-order raise on focus - a later
+     * connection or click just changes titlebar color, not paint order;
+     * see M20/M21's own notes on this simplification), then panels last
+     * so they're always on top regardless of when they connected - the
+     * one piece of z-ordering this compositor does enforce, since a
+     * taskbar that could be occluded wouldn't be much of a taskbar. */
+    for (int i = 0; i < window_count; i++) {
+        if (windows[i].is_desktop) {
+            blit_window(&windows[i]); /* no border/titlebar - a desktop background is its own chrome, same as a panel */
+        }
+    }
     for (int i = 0; i < window_count; i++) {
         const window_t *win = &windows[i];
-        if (win->is_panel || win->minimized) {
+        if (win->is_panel || win->is_desktop || win->minimized) {
             continue;
         }
         uint32_t titlebar_color = (i == focused_window) ? TITLEBAR_FOCUS_COLOR : TITLEBAR_COLOR;
@@ -154,10 +168,10 @@ static void redraw(void) {
 
 /* Titlebar counts as part of a window's clickable/routable area, same as
  * its content - a real WM lets you drag/focus by the titlebar too. A
- * panel has no titlebar (it's undecorated), so its clickable area is
- * just its own content rect. */
+ * panel or desktop background has no titlebar (both are undecorated), so
+ * its clickable area is just its own content rect. */
 static int point_in_window(const window_t *win, int32_t x, int32_t y) {
-    int32_t top = win->is_panel ? win->y : win->y - TITLEBAR_H;
+    int32_t top = (win->is_panel || win->is_desktop) ? win->y : win->y - TITLEBAR_H;
     return x >= win->x && x < win->x + win->w &&
            y >= top && y < win->y + win->h;
 }
@@ -202,11 +216,12 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
         return;
     }
 
-    /* A panel's width is never the requester's call - always the full
-     * display, so it genuinely spans edge to edge regardless of what
-     * desktop_shell.c happens to ask for. */
-    uint32_t width = req.panel ? fb_info.width : req.width;
-    uint32_t height = req.height;
+    /* A panel's width, or a desktop background's width and height, are
+     * never the requester's call - always the full display, so each
+     * genuinely spans edge to edge regardless of what the client happens
+     * to ask for. */
+    uint32_t width = (req.panel || req.desktop) ? fb_info.width : req.width;
+    uint32_t height = req.desktop ? fb_info.height : req.height;
 
     long shm_id = sys_shm_create((size_t)width * height * sizeof(uint32_t));
     long vaddr = shm_id < 0 ? -1 : sys_shm_map(shm_id);
@@ -232,6 +247,9 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     if (req.panel) {
         win->x = 0;
         win->y = (int32_t)fb_info.height - (int32_t)height;
+    } else if (req.desktop) {
+        win->x = 0;
+        win->y = 0;
     } else {
         win->x = 100 + idx * 40;
         win->y = 100 + idx * 40;
@@ -241,6 +259,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     win->pixels = (uint32_t *)vaddr;
     win->evt_write_fd = evt_fds[1];
     win->is_panel = req.panel;
+    win->is_desktop = req.desktop;
     win->minimized = 0;
 
     resp.window_id = idx;
@@ -275,6 +294,7 @@ static void accept_pending_query(int query_read_fd, int query_resp_write_fd) {
         resp.windows[i].focused = (i == focused_window);
         resp.windows[i].minimized = win->minimized;
         resp.windows[i].is_panel = win->is_panel;
+        resp.windows[i].is_desktop = win->is_desktop;
     }
     sys_write(query_resp_write_fd, &resp, sizeof(resp));
 }
@@ -334,7 +354,19 @@ static void handle_mouse(void) {
             }
             if (hit < 0) {
                 for (int i = window_count - 1; i >= 0; i--) {
-                    if (!windows[i].is_panel && !windows[i].minimized && point_in_window(&windows[i], cursor_x, cursor_y)) {
+                    if (!windows[i].is_panel && !windows[i].is_desktop && !windows[i].minimized &&
+                        point_in_window(&windows[i], cursor_x, cursor_y)) {
+                        hit = i;
+                        break;
+                    }
+                }
+            }
+            /* Desktop background checked last, at the very bottom of the
+             * z-order - only ever wins a click that landed on empty
+             * desktop, nothing else on screen. */
+            if (hit < 0) {
+                for (int i = window_count - 1; i >= 0; i--) {
+                    if (windows[i].is_desktop && !windows[i].minimized && point_in_window(&windows[i], cursor_x, cursor_y)) {
                         hit = i;
                         break;
                     }

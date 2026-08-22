@@ -27,7 +27,7 @@ static long read_exact(int fd, void *buf, size_t len) {
     return (long)got;
 }
 
-static int connect_common(uint32_t width, uint32_t height, uint8_t panel, wm_window_t *out) {
+static int connect_common(uint32_t width, uint32_t height, uint8_t panel, uint8_t desktop, wm_window_t *out) {
     int req_fds[2];
     int resp_fds[2];
     if (sys_pipe_open(WM_REQUEST_PIPE, req_fds) != 0 || sys_pipe_open(WM_RESPONSE_PIPE, resp_fds) != 0) {
@@ -38,6 +38,7 @@ static int connect_common(uint32_t width, uint32_t height, uint8_t panel, wm_win
     req.width = width;
     req.height = height;
     req.panel = panel;
+    req.desktop = desktop;
     if (sys_write(req_fds[1], &req, sizeof(req)) != (long)sizeof(req)) {
         return -1;
     }
@@ -70,11 +71,15 @@ static int connect_common(uint32_t width, uint32_t height, uint8_t panel, wm_win
 }
 
 int wm_connect(uint32_t width, uint32_t height, wm_window_t *out) {
-    return connect_common(width, height, 0, out);
+    return connect_common(width, height, 0, 0, out);
 }
 
 int wm_connect_panel(uint32_t height, wm_window_t *out) {
-    return connect_common(0, height, 1, out);
+    return connect_common(0, height, 1, 0, out);
+}
+
+int wm_connect_desktop(wm_window_t *out) {
+    return connect_common(0, 0, 0, 1, out);
 }
 
 int wm_wait_event(wm_window_t *win, wm_event_t *out) {
