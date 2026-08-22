@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "cpu.h"
+
 /* Standard 8-byte segment descriptor. Base/limit are meaningless for the
  * 64-bit code/data segments below (the CPU runs them flat regardless) but
  * are still encoded for completeness/documentation. */
@@ -31,7 +33,7 @@ typedef struct __attribute__((packed)) {
     gdt_entry_t      null;
     gdt_entry_t      kernel_code;
     gdt_entry_t      kernel_data;
-    tss_descriptor_t tss;
+    tss_descriptor_t tss[MAX_CPUS];
     gdt_entry_t      user_code;
     gdt_entry_t      user_data;
 } gdt_table_t;
@@ -67,9 +69,9 @@ typedef struct __attribute__((packed)) {
 #define DOUBLE_FAULT_STACK_SIZE 4096
 
 static gdt_table_t gdt;
-static tss_t tss;
+static tss_t tss[MAX_CPUS]; /* one per possible CPU - see gdt.h's header comment */
 static table_ptr_t gdtp;
-static uint8_t double_fault_stack[DOUBLE_FAULT_STACK_SIZE] __attribute__((aligned(16)));
+static uint8_t double_fault_stack[MAX_CPUS][DOUBLE_FAULT_STACK_SIZE] __attribute__((aligned(16)));
 
 extern void gdt_flush(table_ptr_t *ptr);
 extern void tss_flush(uint16_t selector);
@@ -95,16 +97,19 @@ static void tss_set_descriptor(tss_descriptor_t *d, uint64_t base, uint32_t limi
 }
 
 void gdt_init(void) {
-    for (uint64_t i = 0; i < sizeof(tss); i++) {
-        ((uint8_t *)&tss)[i] = 0;
-    }
-    tss.ist1 = (uint64_t)&double_fault_stack[DOUBLE_FAULT_STACK_SIZE];
-    tss.iomap_base = sizeof(tss_t); /* no I/O bitmap: place it past the TSS limit */
-
     gdt_set_entry(&gdt.null, 0, 0);
     gdt_set_entry(&gdt.kernel_code, GDT_ACCESS_KERNEL_CODE, GDT_GRAN_LONG_MODE);
     gdt_set_entry(&gdt.kernel_data, GDT_ACCESS_KERNEL_DATA, 0);
-    tss_set_descriptor(&gdt.tss, (uint64_t)&tss, sizeof(tss_t) - 1);
+
+    for (int i = 0; i < MAX_CPUS; i++) {
+        for (uint64_t b = 0; b < sizeof(tss[i]); b++) {
+            ((uint8_t *)&tss[i])[b] = 0;
+        }
+        tss[i].ist1 = (uint64_t)&double_fault_stack[i][DOUBLE_FAULT_STACK_SIZE];
+        tss[i].iomap_base = sizeof(tss_t); /* no I/O bitmap: place it past the TSS limit */
+        tss_set_descriptor(&gdt.tss[i], (uint64_t)&tss[i], sizeof(tss_t) - 1);
+    }
+
     gdt_set_entry(&gdt.user_code, GDT_ACCESS_USER_CODE, GDT_GRAN_LONG_MODE);
     gdt_set_entry(&gdt.user_data, GDT_ACCESS_USER_DATA, 0);
 
@@ -112,9 +117,19 @@ void gdt_init(void) {
     gdtp.base = (uint64_t)&gdt;
 
     gdt_flush(&gdtp);
-    tss_flush(GDT_TSS_SEL);
+    tss_flush(gdt_tss_selector(0));
 }
 
-void tss_set_rsp0(uint64_t rsp0) {
-    tss.rsp0 = rsp0;
+void gdt_init_ap(int cpu_id) {
+    gdt_flush(&gdtp); /* per-CPU register (GDTR), same shared table gdt_init already built */
+    tss_flush(gdt_tss_selector(cpu_id));
+}
+
+void tss_set_rsp0(int cpu_id, uint64_t rsp0) {
+    tss[cpu_id].rsp0 = rsp0;
+}
+
+void gdt_get_table_ptr(uint16_t *limit_out, uint64_t *base_out) {
+    *limit_out = gdtp.limit;
+    *base_out = gdtp.base;
 }

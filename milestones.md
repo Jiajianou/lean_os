@@ -149,9 +149,91 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Signals (basic set: kill, term, etc.)
 - [x] Process groups / more complete `wait` semantics
 
-## Stretch goals (unordered, post-M14)
+## Path to a desktop environment (M15+)
 
-- [ ] SMP (multi-core) support
+Everything through M14 is text-mode only — no framebuffer, no pointing
+device, no windowing, no user-space heap. This is the ordered path from
+there to "boot into a graphical desktop and run my own custom apps,"
+zero dependencies preserved throughout (BIOS VBE calls are dev-time boot
+handoff, same category as the existing E820/disk-read BIOS calls — not a
+runtime dependency).
+
+## M15 — Filesystem headroom ✅
+
+- [x] Current cap (`LEANFS_MAX_FILE_SIZE` = 16 direct blocks x 512 B = 8 KiB)
+      is already tight: existing user ELFs are ~7 KiB. Raise it before
+      anything bigger (fonts, a UI toolkit, GUI apps) needs to land on disk.
+- [x] Add indirect blocks (or grow direct block count / block size) to
+      leanfs; grow the data region accordingly
+- [x] Re-verify M12/M13's persistence tests still pass at the new limits
+
+## M16 — Linear framebuffer & graphics primitives ✅
+
+- [x] Extend stage2 to set a VBE/VESA linear framebuffer mode (`INT 10h
+      AX=4F02h`) and query mode info (`AX=4F01h`) for physical base/pitch/
+      width/height/bpp before the protected-mode transition
+- [x] Pass framebuffer info through the existing boot handoff struct
+      (alongside the E820 pointer)
+- [x] `kernel/drivers/fb.c`: map the framebuffer physical region, pixel
+      plot / fill-rect / blit primitives
+- [x] Retire VGA text mode as the primary display (keep serial/klog for
+      debug logging either way) — deferred the actual text-mode retirement
+      to M17 (framebuffer console), since VGA text is still the only
+      logging surface until then; klog/serial are untouched either way
+
+## M17 — Framebuffer text console + font rendering ✅
+
+- [x] Embed a fixed-width bitmap font in the kernel image
+- [x] Software glyph renderer + scrolling text console drawn over the
+      framebuffer
+- [x] Route existing klog output through it, so all prior boot logging
+      stays visible without touching every call site again
+
+## M18 — PS/2 mouse driver & cursor ✅
+
+- [x] IRQ12 driver, 3-byte packet decode (dx/dy/buttons) — same shape as
+      M6's keyboard driver
+- [x] Cursor sprite draw/erase over the framebuffer (save/restore pixels
+      underneath; no compositor yet to own this properly)
+
+## M19 — User-space heap allocator & shared memory ✅
+
+- [x] `SYS_sbrk`-style syscall to grow a process's address space on demand
+- [x] `user_space/lib` malloc/free (mirrors the kernel heap's design) so
+      apps can allocate dynamically — nothing in user space can today
+- [x] A shared-memory syscall (compositor <-> app pixel buffers) — pipes
+      are the wrong tool for whole-frame pixel data
+
+## M20 — Windowing compositor ✅
+
+- [x] User-space compositor process owns the framebuffer exclusively
+- [x] IPC protocol for apps to create a window (request a shared pixel
+      buffer), submit damage/redraw, and receive input events — damage/
+      redraw and input receipt landed in a narrower form than originally
+      scoped; see the progress log for exactly what and why
+- [x] Compositor blits windows to the real framebuffer in z-order, draws
+      borders/title bars — z-order exists structurally (a window list,
+      painted in order) but is unproven beyond one window; see M21
+
+## M21 — App UI toolkit + input routing ✅
+
+- [x] `user_space/lib` drawing API (rects, lines, text) targeting an app's
+      window buffer
+- [x] Compositor routes keyboard/mouse events to the focused window;
+      focus-follows-click
+- [x] 1-2 demo GUI apps (clock, simple paint) proving the full pipeline
+      end to end
+
+## M22 — Desktop shell ✅
+
+- [x] Taskbar/dock listing running apps, click to focus/minimize
+- [x] App launcher reading the filesystem for available executables
+- [x] This is the milestone where "desktop environment running custom
+      apps" is genuinely true, not aspirational
+
+## Stretch goals (unordered, orthogonal to the desktop path)
+
+- [x] SMP (multi-core) support
 - [ ] Networking stack + NIC driver
 - [ ] UEFI boot path as an alternative to BIOS
 - [ ] Port to real hardware (USB boot test)
@@ -830,3 +912,717 @@ Keep it terse — this is a changelog, not a diary.
   package tooling) - each one a substantially larger, independent body
   of work rather than a next sequential step, so which (if any) to
   pursue is an open decision rather than an assumed "next."
+- 2026-08-22 — M15 complete: leanfs gained singly-indirect block support
+  and a much bigger data region, closing the concrete blocker flagged
+  when this milestone was scoped - existing user ELFs (~7 KiB) were
+  already nearly at the old 8 KiB direct-only cap, before any GUI/toolkit
+  code existed to make it worse.
+  `leanfs_inode_t` gained one `indirect` field: a block number pointing
+  at a data block used as a 128-entry `uint32_t` pointer table (one 512 B
+  block / 4 bytes per pointer). `LEANFS_MAX_FILE_SIZE` is now
+  `(16 direct + 128 indirect) * 512 B` = 72 KiB, deliberately stopping at
+  one level of indirection - doubly-indirect would be more complexity
+  than anything this project ships actually needs. `leanfs_read`/
+  `leanfs_write` both grew a `block_for_index`-style branch (direct
+  lookup below block 16, else lazily-read/written indirect table above
+  it); `leanfs_write`'s allocation-failure rollback path now has to unwind
+  both direct and indirect-table entries plus the indirect block itself,
+  not just a flat `direct[]` array - the trickiest part of this change,
+  since a partial allocation mid-indirect-table isn't yet reflected in
+  `inode->size` and the indirect table isn't on disk yet, so rollback
+  works off local counters rather than re-reading anything back.
+  Data region grew from `LEANFS_DATA_BLOCKS` = 4096 (2 MiB, 1-sector
+  bitmap) to 65536 (32 MiB, 16-sector bitmap) - sized for several GUI app
+  binaries plus a toolkit and font assets, not just a handful of ~7 KiB
+  coreutils. `Makefile`'s `FS_TOTAL_SECTORS`/`IMAGE_SECTORS` grew to match
+  (65560 sectors for the filesystem region; 69632-sector, ~34 MiB disk
+  image overall, with headroom past the filesystem's own end).
+  Added a new self-test in `kernel_main` (`kernel/kernel.c`), right after
+  the existing M12 disk-seeding step: every file that existed before this
+  milestone (the seeded coreutils) fits entirely in direct blocks, so
+  none of them would have exercised the new indirect path at all -
+  "compiles" isn't "works", so a dedicated 20000-byte buffer (deliberately
+  past the 8 KiB direct-only boundary, well inside the new 72 KiB cap) is
+  written to a file named `fstest` and read back byte-for-byte.
+  Verified via `tools/qemu-serial-test.sh`: `[fs] leanfs ready:
+  data_lba=0x00000818 data_blocks=0x00010000` (0x818 = 2072 = 2048 +
+  1 superblock + 7 inode-table + 16 bitmap sectors, confirming the new
+  layout math; 0x10000 = 65536 data blocks), followed by `[fs] leanfs
+  indirect-block self-test passed (20000-byte round trip)`. Re-ran the
+  same image a second time without rebuilding (same persistence check
+  M12 relied on) - no "formatting fresh" message the second time,
+  confirming the new on-disk layout persists correctly across boots.
+  Also re-ran M13's interactive shell regression check (QEMU monitor
+  `sendkey` injection) - `ls` correctly lists all seven files now
+  (the six coreutils plus `fstest`), confirming the self-test's file
+  coexists cleanly with normal filesystem use rather than corrupting it.
+  `-d int,cpu_reset` over both runs shows no faults.
+  Next: M16 (linear framebuffer & graphics primitives - VBE mode set in
+  stage2, framebuffer info threaded through the boot handoff struct,
+  `kernel/drivers/fb.c` pixel/rect/blit primitives).
+- 2026-08-22 — M16 complete: lean_os has real graphics now - a VESA VBE
+  linear framebuffer set up entirely from scratch in 16-bit real mode,
+  mapped and driven by a new kernel driver.
+  `kernel/boot/stage2.asm` gained `setup_vbe_mode` (called from `start:`
+  right after `collect_e820_map`, still in real mode - the only place a
+  BIOS `INT 10h` VBE call can happen): `AX=4F00h` fetches a VbeInfoBlock
+  (after writing the "VBE2" signature into the buffer first, since some
+  BIOSes only populate the VBE2-only linear-mode-list pointer if asked
+  that way), a new `scan_modes` helper walks that mode list looking for
+  one that's supported, graphics-capable, and linear-framebuffer-capable
+  (`ModeAttributes` bits 0 and 7) at a target resolution/depth - tried at
+  1024x768x32 first, falling back to 800x600x32 for less-capable
+  BIOSes/VMs. `AX=4F02h` sets the matched mode with bit 14 (linear
+  framebuffer model), and the matched ModeInfoBlock's `PhysBasePtr`/
+  `BytesPerScanLine`/`XResolution`/`YResolution`/`BitsPerPixel` get
+  packed into a new compact `fb_boot_info_t` at a fixed low-memory
+  address (`FB_INFO_ADDR` = 0x9B00, alongside the existing E820 scratch
+  structures) - any VBE failure halts with a diagnosable message via the
+  same pattern `load_kernel`'s `.disk_error` already used, rather than
+  silently continuing into a kernel that assumes graphics exist.
+  Boot handoff grew a second argument: `long_mode_entry` now loads RSI
+  (the System V ABI's second integer-arg register) with `FB_INFO_ADDR`
+  alongside RDI's existing E820 pointer - `kernel_main` picked it up as
+  `fb_boot_info_t *fb_info` with zero entry.asm changes needed (a plain
+  `jmp`, not a `call`, so RDI/RSI just ride through from stage2 untouched).
+  New `kernel/drivers/fb.{h,c}`: `fb_init` maps the framebuffer's physical
+  region into the kernel's address space page-by-page via the existing
+  `vmm_map_page` (identity-style, virt == phys - PCI MMIO framebuffer
+  addresses live well above the kernel's 1 GiB huge-page identity range
+  on every target tested, so this never collides with it; `vmm_map_page`
+  itself would panic outright if that ever stopped being true, rather
+  than silently corrupting a huge mapping). `fb_put_pixel`/`fb_get_pixel`/
+  `fb_fill_rect`/`fb_clear`/`fb_blit` treat the framebuffer as packed
+  XRGB8888 (the near-universal layout for 32bpp VBE/Bochs direct-color
+  modes, and the only depth `setup_vbe_mode` ever requests) and panic on
+  out-of-bounds coordinates - the same "diagnosable panic over silent
+  corruption" discipline as every other driver in this kernel.
+  `kernel_main` calls `fb_init` right after the heap self-tests (needs
+  `vmm_init` already live), then a new self-test: clear to a background
+  color, fill a smaller rectangle with a different one, and read three
+  pixels back (inside the rectangle, outside it, and the origin) to
+  confirm the write landed exactly where expected.
+  Verified via `tools/qemu-serial-test.sh`: `[fb] framebuffer at
+  0x00000000FD000000 00000400x00000300 pitch=0x00001000 (0x300 pages
+  mapped)` (1024x768, pitch exactly 4096 = 1024*4 with no padding, 768
+  pages = 1024*768*4/4096 exactly) and `[fb] framebuffer clear/fill/
+  readback self-test passed`. `-d int,cpu_reset` over a 5s run: 490 `v=20`
+  (timer) + 20 `v=80` (syscall) + 1 `v=03` (int3 self-test), no faults.
+  Went further than an in-kernel readback self-test can prove, though:
+  reading back your own writes only proves the mapping and pixel math are
+  right, not that anything actually reaches the emulated display - so
+  also took a real QEMU `screendump` mid-boot (monitor pipe, same
+  technique M1-M5 used before serial logging took over) and sampled its
+  PPM pixel data programmatically. Background pixel (0,0) = (26,26,46) =
+  0x1A1A2E, inside the rectangle (60,35) = (233,69,96) = 0xE94560, and
+  outside it (200,200) back to 0x1A1A2E - an exact match against what the
+  self-test wrote, confirming QEMU's emulated VBE display genuinely
+  renders this framebuffer, not just that the memory round-trips.
+  Deliberately left VGA text mode (`kernel/drivers/vga.c`) and its klog
+  fan-out both in place rather than retiring them in this milestone as
+  originally scoped - they're still the only logging surface until M17
+  gives the framebuffer console something to replace them with; retiring
+  them now would leave a boot with no visible log output at all in
+  between milestones.
+  Next: M17 (framebuffer text console + font rendering - embed a bitmap
+  font, software glyph renderer, scrolling console over the framebuffer,
+  then route klog through it and retire VGA text mode for real).
+- 2026-08-22 — M17 complete: lean_os's boot log now renders as real
+  graphical text over the M16 framebuffer, and a genuine concurrency bug
+  got caught and fixed along the way.
+  Font data (`kernel/drivers/font8x16.{h,c}`): 128 ASCII glyphs, 8x16
+  1bpp each. Rather than transcribe a classic bitmap font from memory
+  (risk of silent transcription errors) or add a font-rasterization
+  dependency to the actual OS build, generated it once as an authoring
+  step - rasterized each glyph from a system monospace font (Courier New
+  Bold) at 4x supersampling then downsampled/thresholded to 8x16 - and
+  committed the result as a plain static array, the same category of
+  thing as this project's other embedded binary blobs. Caught during
+  visual verification (not assumed correct because it compiled): five
+  glyphs with descenders - g/j/p/q/y - didn't survive the downsample
+  intact ('g' was visually indistinguishable from '9'). Two rounds of
+  fixing: first attempt hand-authored replacements but placed them at
+  cap-height instead of x-height, which made them read as accidental
+  capitals next to correctly-sized neighbors ("keypress" rendering as
+  "keYPress"); second attempt fixed the vertical alignment to match the
+  x-height/baseline rows already established by the auto-rasterized
+  lowercase letters (verified against 'i'/'a'/'n'/'v' byte patterns) and
+  gave 'g' a distinctive swept-left foot so it can't be confused with
+  '9'. Verified each round with an actual rendered pixel comparison
+  before touching the kernel, not by eye on the byte table.
+  `kernel/drivers/console.{h,c}`: fixed-cell scrolling text console
+  (cols/rows computed from `fb_width()`/`fb_height()` / font cell size -
+  128x48 at the current 1024x768 mode), handles `\n`/`\r`/`\b`/`\t`,
+  scrolls via a new `fb_scroll_up` (fb.c) that memcpy's whole scanlines
+  rather than per-pixel calls - the console is the first caller with any
+  real per-frame volume, so this was worth doing properly from the start.
+  `klog.c` gained `klog_use_console()`: VGA text mode stays the *only*
+  visual output until graphics come up (console_init needs vmm live, so
+  it can't happen at klog_init's very first call) - kernel_main calls it
+  right after the M16 fb self-test, so everything from GDT/IDT setup
+  through fb bring-up itself is VGA-only, and everything after is
+  framebuffer-only. Satisfies the original milestone wording ("retire
+  VGA as the primary display") without a boot-log blackout in between.
+  **Real bug, caught on the very first boot with the console wired up:**
+  a kernel panic, `fb_put_pixel: coordinates out of bounds`, right after
+  init spawned the shell - the first point in boot with more than one
+  runnable task that could call `klog_putc` concurrently. `console.c`'s
+  cursor state (`cur_col`/`cur_row`) had zero locking - it never needed
+  any before, because `vga.c`'s equivalent globals have had the exact
+  same unprotected-shared-state shape since M3, but `vga_putc` just
+  silently wraps/scrolls on a bad value instead of validating coordinates
+  and panicking. The framebuffer console's stricter "diagnosable panic
+  over silent corruption" bounds checking (the same discipline every
+  other driver in this kernel already follows) is what turned a
+  pre-existing, previously-invisible race into a hard crash. Fixed by
+  giving `klog_putc` a proper critical section (`cli`/`pushfq`/`popfq`
+  around the single-character draw - the standard single-core technique;
+  no SMP yet per the stretch goals, so no second CPU to still race with)
+  and changing `klog_puts` to call `klog_putc` per character instead of
+  handing whole strings to `vga_puts`/`console_puts` unlocked. Confirmed
+  by testing, not just reasoning: same boot sequence, same two
+  concurrent tasks, panic gone.
+  Verified via `tools/qemu-serial-test.sh`: fb self-test, console
+  switchover message, and every M12-M14 self-test all still print
+  "passed" in sequence (regression coverage - this touched shared logging
+  infrastructure every prior milestone depends on). `-d int,cpu_reset`
+  over a 5s run: 488 `v=20` + 20 `v=80` + 1 `v=03`, no faults. Went beyond
+  the serial log again for the part serial can't show: three rounds of
+  QEMU `screendump` + pixel-level PNG inspection confirmed first the
+  crash's absence, then the g/j/p/q/y legibility bug, then its fix -
+  cropped/zoomed regions of real boot-log text ("waiting up to 3s for a
+  test keypress", "logging switched over from VGA text mode") read
+  correctly with no ambiguous glyphs.
+  Next: M18 (PS/2 mouse driver & cursor - IRQ12 packet decode, same
+  shape as M6's keyboard driver, cursor sprite draw/erase over the
+  framebuffer).
+- 2026-08-22 — M18 complete: a real IRQ12-driven PS/2 mouse and a visible
+  cursor, with a genuine sync bug caught and root-caused during bring-up
+  rather than papered over.
+  `kernel/drivers/mouse.{h,c}`: same overall shape as M6's keyboard
+  driver (IRQ handler decodes into a small ring buffer, `mouse_read()`
+  drains it non-blocking) but with a real init handshake first - enable
+  the auxiliary device (`0xA8`), set defaults + enable reporting (`0xF6`/
+  `0xF4` via the controller's "write to aux" command `0xD4`, each ACKed
+  with `0xFA`), decode the standard 3-byte packet (status byte with
+  button bits + sign/overflow flags, then X/Y deltas sign-extended from
+  9-bit two's complement) - Y negated once, since the wire protocol is
+  up-positive and screen coordinates are down-positive.
+  `kernel/drivers/cursor.{h,c}`: an 8x8 hand-authored arrow sprite drawn
+  directly over the framebuffer, save-then-draw on move and restore on
+  erase - explicitly scoped as a stopgap (documented in the header): once
+  a compositor (M20) can put other content under the cursor without going
+  through this code, "restore what I saved" stops being correct.
+  **Real bug, caught via raw-packet logging, not assumed away:** the
+  first interactive test showed a cursor position wildly off from the
+  commanded delta, and a spurious `buttons` bit that no command had set.
+  Added temporary per-byte and per-ACK debug logging (removed once fixed)
+  and found the actual fault: the very first IRQ12 event after unmasking
+  delivered a phantom `0xFA` that didn't belong to any real movement
+  packet, permanently shifting 3-byte packet sync by one from that point
+  on - a plain output-buffer flush placed right before unmasking didn't
+  help, which ruled out "leftover buffered byte" as the mechanism.
+  Root cause: `mouse_init` was setting the controller's IRQ12-enable
+  configuration bit *before* running the `0xF6`/`0xF4` handshake, so
+  IRQ12 generation was live (at the 8042 level, independent of the PIC
+  mask) during a polling-only exchange - something about that combination
+  left a stale/latched interrupt condition that fired the instant the PIC
+  mask itself was cleared, even though every byte up to that point had
+  already been drained via polling. Fixed by reordering: the `0xF6`/`0xF4`
+  handshake (and a defensive buffer flush) now happens entirely before
+  the controller's IRQ12-enable bit is ever set, so that condition never
+  gets a chance to latch. Verified precisely, not just "no more crash":
+  logged raw packet bytes for an isolated `mouse_move 50 0` now show
+  `status=0x08 dx=0x32(50) dy=0x00` exactly, and the resulting cursor
+  position matched hand-computed expected coordinates exactly across
+  three independent single-axis/button test cases (pure X, pure Y with
+  sign inversion, and a button-only packet) before the debug logging was
+  removed.
+  Verified via `tools/qemu-serial-test.sh` (regression: every M12-M17
+  self-test still passes, mouse driver reaches its own clean timeout path
+  with no monitor input) and interactively via QEMU monitor `mouse_move`/
+  `mouse_button` injection: exact-match coordinate checks as above, plus
+  a `screendump` crop showing the actual arrow sprite correctly rendered
+  at the commanded position. `-d int,cpu_reset` over the interactive run
+  shows only the expected `v=20`/`v=80`/`v=2c` (IRQ12)/`v=21` (IRQ1)/`v=03`
+  traffic, no faults.
+  Next: M19 (user-space heap allocator & shared memory - `SYS_sbrk`-style
+  syscall, `user_space/lib` malloc/free, a shared-memory syscall for
+  compositor/app pixel buffers).
+- 2026-08-22 — M19 complete: user-space processes can allocate memory
+  dynamically for the first time in this project's history, and two
+  independent processes can genuinely share physical memory - both
+  proved by real ring-3 code, not just kernel-side plumbing.
+  **Address space layout** (`kernel/proc/proc.h`, new constants - moved
+  out of proc.c since syscall.c now needs to bounds-check against them
+  too): `USER_HEAP_START`/`USER_HEAP_LIMIT` (512 GiB + 4 MiB, growing up
+  to a 256 MiB ceiling) and `USER_SHM_BASE` (512 GiB + 512 MiB) - both
+  comfortably clear of the existing stack/arg region, generous gaps
+  rather than packed tightly so nothing has to reason about exact
+  boundaries.
+  **`SYS_sbrk`** (`kernel/arch/x86_64/syscall.c`): growth-only (negative
+  increment rejected outright - nothing a free-list allocator does ever
+  needs to give pages back), maps whole new pages on demand via
+  `vmm_map_page_in`, same "grow by exactly what's needed" shape as the
+  kernel's own `heap.c`. `task_t` (`sched.h`) gained `heap_brk`/
+  `heap_mapped_end` (M19) plus `shm_next_vaddr` - all zeroed for a plain
+  kernel thread (meaningless there, only a ring-3 process's syscalls ever
+  read them) and set to their real starting addresses in `process_spawn`
+  right after `task_spawn_in` returns.
+  **`kernel/ipc/shm.{h,c}`** (new, alongside `pipe.h/c`): a flat global
+  registry of shared segments - `shm_create(size)` allocates physical
+  frames and registers them under an id, independent of any process's
+  address space; `shm_map_into(id, pml4_phys, vaddr, flags)` maps an
+  existing segment's frames into a given address space. `SYS_shm_create`/
+  `SYS_shm_map` wrap these; a process's own `shm_next_vaddr` cursor picks
+  where each of its own `SYS_shm_map` calls lands (same "only ever grows
+  forward" pattern as the heap).
+  **`user_space/lib/malloc.{h,c}`** (new): first-fit free list, same
+  split/coalesce rules as `kernel/mm/heap.c`, grown via `sys_sbrk` instead
+  of `pmm_alloc_frame`/`vmm_map_page` directly - the same design one
+  privilege level up, not a different shape invented for user space.
+  `free()` on an already-free block is a silent no-op rather than a
+  panic (documented): user space has no abort/assert mechanism yet, so
+  crashing the whole kernel over a user program's double-free would be
+  the wrong failure mode.
+  **`user_space/bin/memtest.c`** (new, seeded/embedded like every other
+  coreutil): the actual proof. With no arg (the role `kernel_main` spawns
+  it in): exercises malloc/free (allocate three blocks, verify no
+  overlap, free the middle one, allocate something that should reuse it,
+  verify the untouched blocks survived), then `shm_create`s a segment,
+  writes a distinctive byte pattern into it, and spawns *a second copy of
+  itself* via `sys_spawn("memtest", <id>)` - passing the shm id through
+  lean_os's one-string argv mechanism - and waits for that child's exit
+  code. With an arg (only ever reached by that spawn): maps the same id
+  and verifies the pattern is really there. Two *different* processes,
+  two *different* address spaces, same physical pages - this is what
+  actually distinguishes shm from "one process talking to itself," and
+  it's what the test is structured to prove.
+  Verified via `tools/qemu-serial-test.sh` (needed a longer window than
+  earlier milestones - one more embedded program and self-test genuinely
+  pushed boot past 8s, not a hang): `[memtest] malloc/free self-test
+  passed`, then `[memtest] cross-process shm self-test passed (writer +
+  reader agree)`. `kernel_main` itself waits on the creator child via
+  `do_syscall(SYS_wait, ...)` and panics on a nonzero exit code, so a
+  regression here would stop boot outright, not just log a failure.
+  `-d int,cpu_reset` over a 15s run: 1475 `v=20` + 37 `v=80` + 1 `v=21` +
+  1 `v=03`, no faults. Re-ran the M13 interactive shell regression (`ls`
+  via QEMU monitor `sendkey`) - now lists eight files including
+  `memtest`, confirming the new program coexists cleanly with the
+  existing filesystem/shell flow.
+  Next: M20 (windowing compositor - a user-space process taking exclusive
+  ownership of the framebuffer, an IPC protocol for apps to create
+  windows and receive input events, z-ordered blitting).
+- 2026-08-22 — M20 complete: a real user-space compositor
+  (`user_space/bin/compositor.c`) now owns the framebuffer exclusively,
+  and a real client (`wm_demo.c`) can get a window on it and draw into it
+  - genuine ring-3 IPC, not kernel-side plumbing standing in for it.
+  `system_api/include/wm.h` (new): `wm_fb_info_t` (`SYS_fb_info`'s
+  output), and the window-creation protocol - a client writes a
+  `wm_create_request_t` to the well-known named pipe `wm_req`
+  (`SYS_pipe_open`, not an inherited fd, since the compositor and its
+  clients aren't parent/child), the compositor replies with a
+  `wm_create_response_t` (a shm id) on `wm_resp`. Three new syscalls in
+  `kernel/arch/x86_64/syscall.c`: `SYS_fb_info`/`SYS_fb_map` (geometry,
+  then the real mapped pixels - by convention only the compositor calls
+  `SYS_fb_map`, unenforced, matching this project's no-permission-model
+  trust level so far) and `SYS_mouse_read` (non-blocking, wraps
+  `kernel/drivers/mouse.h`'s existing ring buffer).
+  `compositor.c`: maps the real framebuffer, blocks on one client
+  connection (`accept_one_window` - deliberately narrow, M21's own job to
+  generalize into something that isn't one-shot), allocates a shm pixel
+  buffer per window (`SYS_shm_create`/`SYS_shm_map`, M19), then redraws
+  the desktop (background, window border/titlebar, window content
+  blitted from the client's shm buffer, cursor) - continuously at first,
+  then only on real mouse movement once a real perf problem showed up
+  during bring-up (below).
+  **Two real bugs, both caught during verification, not assumed away:**
+  (1) a from-scratch software compositor doing per-pixel `fill_rect`/
+  blit calls at the Makefile's previous `-O0` turned out genuinely too
+  slow - a single full-screen redraw took close to a second. Fixed with
+  `-O1` (Makefile's `CFLAGS`/`USER_CFLAGS`), which in turn required
+  `-mgeneral-regs-only`: at `-O1` GCC started auto-vectorizing some code
+  (struct copies) into SSE instructions, and this kernel never sets up
+  FPU/SSE state (no `CR0`/`CR4` `OSFXSR` etc.), so the first one executed
+  faulted as an invalid opcode - caught as a real boot panic, not
+  anticipated in advance. (2) with `-O1` fixing the *speed*, the
+  self-test's pixel-verification still failed inconsistently run to run -
+  traced to redrawing unconditionally in a tight loop, which meant the
+  overwhelming majority of sampled instants caught the frame mid-repaint
+  (background cleared, window not yet composited back in) rather than a
+  finished frame. Not a compositing bug at all - fixed by redrawing only
+  when real input arrived, which also happens to be the more sensible
+  behavior for a static desktop.
+  Verified via `tools/qemu-serial-test.sh`: spawns the real compositor
+  and `wm_demo` (a client that requests a 200x120 window and draws a
+  deterministic pattern - solid content color, smaller accent square),
+  waits for settlement, then reads pixels straight out of the physical
+  framebuffer via the kernel's own `fb_get_pixel` (always live in every
+  address space via `PML4[0]`, the exact same physical frames the
+  compositor's `SYS_fb_map` points at - genuinely observing what the
+  compositor drew, not a kernel-side copy) - 5/5 checks (content color,
+  accent color, titlebar, border, desktop background) matched. Caught a
+  third, subtler issue this way too: both the compositor's and the
+  self-test's own status messages go through the same graphical console
+  (M17) the compositor is compositing onto, so printing anything between
+  drawing and verifying risked a console scroll shifting the frame under
+  test out from under itself - fixed by finishing all output before the
+  frame that needs to hold still, and capturing every pixel read into a
+  local variable before printing anything about the results.
+  Next: M21 (app UI toolkit + input routing - `user_space/lib` drawing
+  API, focus-follows-click keyboard/mouse routing, 1-2 demo GUI apps).
+- 2026-08-22 — M21 complete: a real drawing API, real multi-window input
+  routing with focus-follows-click, and two real GUI apps proving the
+  whole pipeline - closing the gap M20 itself flagged ("z-order... 
+  unproven beyond one window").
+  **Three new syscalls** (`system_api/include/syscall.h`,
+  `kernel/arch/x86_64/syscall.c`): `SYS_kbd_read` (the `SYS_mouse_read`-
+  shaped, never-blocks counterpart to `SYS_read(fd=0)`'s line-blocking
+  contract - wraps the same `keyboard.h` ring buffer, so a process
+  juggling several input sources in one loop, i.e. the compositor, isn't
+  stuck picking one to block on), `SYS_pipe_poll` (bytes currently
+  buffered on a pipe read end, without consuming - `pipe_t`'s `count`
+  field was already right there, so this needed no new `pipe.c` entry
+  point) and `SYS_uptime_ms` (a unit conversion over the PIT's existing
+  tick counter - backs time-driven redraws that have nothing to do with
+  input arriving). `MAX_FDS` (`sched.h`) bumped 8 -> 32 and
+  `MAX_NAMED_PIPES` (`pipe.c`) bumped 8 -> 24 - a compositor now juggling
+  several windows' worth of event pipes plus the request/response pair
+  needed real headroom, the same "bump the fixed cap when a real need
+  arrives" precedent as `MAX_TASKS`'s M13 8->64.
+  **Input-routing protocol** (`wm.h`): `wm_event_t`
+  (KEY/MOUSE_MOVE/MOUSE_BUTTON/FOCUS/UNFOCUS), one named pipe per window
+  (`wm_event_pipe_name` - `wm_evt0`..`wm_evt9`, both compositor and
+  client build the name from the same function so the scheme can't drift
+  apart) - kernel/ipc/pipe.h's `pipe_read` consumes what it reads, so a
+  shared channel across clients would mean two windows stealing each
+  other's events, hence one pipe per window rather than one global one.
+  `wm_create_response_t` gained `width`/`height` fields (the
+  compositor's actual allocation, not an echo of the request) - not
+  needed yet at M21 itself but added because M22's panel windows would
+  need it and duplicating the response struct later would've been worse.
+  **`user_space/lib/gfx.{h,c}`** (new): `gfx_put_pixel`/`fill_rect`/
+  `draw_rect` (outline)/`draw_line` (integer Bresenham - no FPU/SSE state
+  anywhere in this kernel, see M20's own note on that) /`draw_char`/
+  `draw_text`, operating on a caller-supplied `gfx_ctx_t` (pixels + width
+  + height) - has no idea a compositor or framebuffer exist at all, same
+  separation `fb.c`/`console.c` keep kernel-side. Needs the bitmap font
+  (M17's `kernel/drivers/font8x16.c`) but a user program can't link
+  against the kernel image, so `user_space/lib/font8x16.{h,c}` is a
+  verbatim duplicate of the data table - the same kernel/user split
+  reasoning M20's compositor.c already used for its hand-authored cursor
+  sprite.
+  **`user_space/lib/wmclient.{h,c}`** (new): the connect/event handshake
+  factored out once a *second* real client needed the exact same
+  request/response/shm-map/event-pipe-open sequence M20's `wm_demo.c`
+  had inlined for itself - `wm_connect`, `wm_wait_event` (blocking),
+  `wm_poll_event` (non-blocking, for a client with its own reason to keep
+  running with no input, i.e. the clock demo).
+  **`compositor.c` rewritten** for M21: `accept_pending_window` is now
+  non-blocking (`SYS_pipe_poll` before ever calling the blocking
+  `SYS_read`) so the same loop that accepts new clients also drains
+  input and redraws - M20's version could get away with one blocking
+  accept because it only ever served one client, once. Tracks
+  `focused_window`; a left-click inside a window's content-or-titlebar
+  rect focuses it (a brand-new connection also takes focus immediately);
+  every mouse/keyboard event gets translated to window-relative
+  coordinates and routed to whichever window is currently focused.
+  Redraws periodically (100ms) now, not just on input - M20's "only
+  redraw on input" fix stops being sufficient once a client's content can
+  change with nothing external driving it (the clock demo).
+  **Two new demo apps**: `gui_clock.c` (a 200x90 window, static "CLOCK"
+  caption drawn once via `gfx_draw_text`, a live "uptime: Ns" line
+  updated from `sys_uptime_ms()` every 250ms - proves periodic,
+  input-independent redraw reaches a real client) and `gui_paint.c` (a
+  220x140 window with a static caption/border/separator drawn via
+  `gfx_fill_rect`/`gfx_draw_rect`/`gfx_draw_line`, then a real event loop:
+  mouse-move-with-left-button-held draws a small square at the routed
+  window-relative position, the `'c'` key clears the canvas - the one
+  demo that can only really be proven with live input).
+  Verified two ways, matching M18's own precedent for input-shaped
+  behavior: (1) automated, via `tools/qemu-serial-test.sh` - kernel_main
+  spawns the compositor plus *both* demo apps at once (serialized with
+  `pit_sleep_ms` between each spawn so which window lands at index 0 vs 1
+  is deterministic, not a race), then pixel-checks 12 points straight out
+  of the physical framebuffer: gui_clock's titlebar/border/background/
+  caption-glyph-on-and-off-pixel (deliberately in the region gui_paint,
+  drawn second and so on top, doesn't visually overlap), gui_paint's
+  titlebar (focused - the later connection)/own border/background/
+  caption glyph/separator line, and the untouched desktop background -
+  12/12 matched. (2) interactive, via a QEMU monitor pipe scripted with
+  `mouse_move`/`mouse_button`/`sendkey` (the same technique M18's mouse
+  driver verification used) plus `screendump` + programmatic PPM pixel
+  sampling: clicking gui_clock's titlebar swapped focus away from
+  gui_paint (both titlebars' colors flipped exactly as expected);
+  dragging with the left button held over gui_paint produced 95
+  stroke-colored pixels along the drag path where there had been zero
+  before; pressing `'c'` while gui_paint was focused brought that back to
+  zero - keyboard routing and mouse-drag routing both confirmed with real
+  hardware-shaped input, not just the automated structural checks.
+  Also re-ran the M13 interactive shell regression (`ls`/`exit` via
+  `sendkey`) since this touched shared `kernel_main` state - unaffected,
+  `ls` now lists ten files including both new demos, `exit` still
+  triggers a respawn.
+  Next: M22 (desktop shell - taskbar/dock listing running apps with
+  click to focus/minimize, an app launcher reading the filesystem).
+- 2026-08-22 — M22 complete: `user_space/bin/desktop_shell.c`, a real
+  taskbar-and-launcher client, making "desktop environment running custom
+  apps" genuinely true rather than aspirational (this milestone's own
+  framing) - the last item on the numbered milestone list.
+  **Panel windows** (`wm.h`'s `wm_create_request_t.panel` flag,
+  `compositor.c`): a panel ignores its own requested width (the
+  compositor always gives it the full display width) and docks to the
+  bottom of the screen with no border/titlebar chrome, and - the one
+  piece of z-ordering this compositor enforces at all - is always drawn
+  in a second pass *after* every ordinary window, so it can never be
+  occluded regardless of connection order. `wm_create_response_t`'s M21
+  width/height fields (added ahead of needing them, see that entry) are
+  what let a panel client size its own `gfx_ctx_t` correctly despite not
+  knowing the display resolution itself.
+  **Query/action protocol** (`wm.h`): `WM_QUERY_PIPE`/`WM_QUERY_RESP_PIPE`
+  (a client pings, the compositor snapshots every window it knows about -
+  id, geometry, focused, minimized, is_panel - into a
+  `wm_query_response_t`) and `WM_ACTION_PIPE` (`WM_ACTION_FOCUS`/
+  `WM_ACTION_TOGGLE_MINIMIZE` by window id) - the two things a desktop
+  shell needs that no ordinary client does: seeing every *other* window,
+  and being able to change one. `window_t` (`compositor.c`) gained a
+  `minimized` flag; a minimized window is skipped by both `redraw()` and
+  click hit-testing (nothing on screen to click), and
+  `WM_ACTION_TOGGLE_MINIMIZE` clears focus if it minimizes the window
+  that currently holds it - `WM_ACTION_FOCUS` un-minimizes on its way to
+  focusing, so a taskbar's "click an unfocused/minimized entry" and
+  "click the focused entry" cases naturally map to two different verbs
+  from the same one click.
+  **A real race, caught during interactive bring-up, not assumed away:**
+  `wm_query_response_t` is far bigger than any struct M20/M21 ever put on
+  a pipe (up to `WM_MAX_ROUTABLE_WINDOWS` entries), and desktop_shell
+  calls `wm_query_windows` repeatedly (once per redraw tick) rather than
+  once like `wm_connect`. `kernel/ipc/pipe.h`'s `pipe_read` only
+  guarantees "at least one byte, then whatever else is immediately
+  ready" - it never promised a whole struct arrives in one `sys_read`,
+  since the writer's own `pipe_write` can be preempted mid-copy
+  (`SCHED_QUANTUM_TICKS`) and a reader that's been sitting blocked wakes
+  the instant the first byte lands. M20/M21's small structs (tens of
+  bytes) never hit this in practice; the taskbar's bigger, far more
+  frequent reads did - query replies started arriving short, and once
+  one read landed short, every later read desynced against the leftover
+  unread bytes of a previous reply, permanently freezing the taskbar's
+  view of the world (confirmed by watching it: launching a second app
+  via the launcher rendered correctly on the *desktop*, but the taskbar
+  never picked up the new running-window entry no matter how long you
+  waited). Fixed with a `read_exact` helper (loops `sys_read` until the
+  full byte count is in) added to both `wmclient.c` and `compositor.c`
+  and used everywhere a fixed-size struct comes off one of these pipes,
+  not just the query response - the same latent risk existed for every
+  earlier protocol here too, just too small in practice to have shown
+  up yet.
+  **`desktop_shell.c`**: connects a chrome-less panel
+  (`wm_connect_panel`), reads the real on-disk file list once
+  (`SYS_listfiles`, M13) into launcher slots (one per file, 64px wide,
+  clicking spawns it via `sys_spawn`), and polls `wm_query_windows` every
+  300ms into running-window slots (one per non-panel, non-self window,
+  right-aligned, colored by focus state) - clicking an unfocused/
+  minimized one sends `WM_ACTION_FOCUS`, clicking the already-focused one
+  sends `WM_ACTION_TOGGLE_MINIMIZE`. Reuses M21's whole event-routing
+  path unmodified: the panel is just another window from the compositor's
+  point of view, so "click the taskbar" arrives as the exact same
+  `WM_EVENT_MOUSE_BUTTON` any other window would get.
+  Verified the same two ways as M21: (1) automated, via
+  `tools/qemu-serial-test.sh` - kernel_main spawns the compositor,
+  desktop_shell, and gui_clock together, then pixel-checks 8 points:
+  launcher slot 0's background and its "hello" caption's `'h'` glyph
+  on/off pixels (computed straight from `font8x16.c`'s bitmap table, same
+  method M21's checks used), the running-window slot's background
+  (focused color, since gui_clock is the only other window) and its
+  `'#1'` label's `'#'` glyph on/off pixels, an empty stretch of panel
+  background between the two slot groups, and the untouched desktop
+  background above the panel - 8/8 matched. (2) interactive, via QEMU
+  monitor `mouse_move`/`mouse_button` injection: clicking a launcher slot
+  spawned a real second window at the expected cascade position (found by
+  scanning the screendump for its background color's bounding box);
+  clicking a running window's taskbar slot while it was already focused
+  minimized it (window content and titlebar both reverted to plain
+  desktop background, taskbar slot's own color flipped to "not focused");
+  clicking the same slot again focused-and-restored it (content
+  reappeared, taskbar slot flipped back) - confirming click-to-focus and
+  click-to-minimize both work with real routed input, not just the
+  automated structural checks.
+  Also re-ran the M13 interactive shell regression - `ls` now lists all
+  twelve files including `desktop_shell` itself, `exit` still respawns.
+  This closes out every milestone through M22 - the numbered list in
+  this file is now complete. What's left is the explicitly-unordered
+  "Stretch goals" section below (SMP, networking, UEFI, real-hardware
+  boot, third-party package tooling) - each a substantially larger,
+  independent body of work, so which (if any) to pursue next is an open
+  decision rather than an assumed "next."
+- 2026-08-22 — Stretch goal complete: SMP (multi-core) support. Every core
+  QEMU starts (`-smp N`, N up to `MAX_CPUS`=8) now genuinely runs kernel
+  and user tasks in parallel, not just time-sliced on one - proven, not
+  assumed, by a self-test whose probe tasks record which physical CPU
+  (read live off each core's own Local APIC ID) actually executed them.
+  **New `kernel/acpi/`**: `acpi.c` finds the RSDP (EBDA + the legacy
+  0xE0000-0xFFFFF BIOS range), walks the RSDT or XSDT (whichever the
+  RSDP's revision indicates), and parses the MADT for the Local APIC's
+  physical MMIO base plus every *enabled* Processor Local APIC entry
+  (type 0) - just enough ACPI to answer "how many CPUs, and what are
+  their APIC IDs", not a general table walker. Missing ACPI/MADT is
+  treated as a normal fallback to single-core, not a panic - a
+  legitimate platform state this kernel has no reason to refuse to boot
+  on.
+  **New `kernel/arch/x86_64/lapic.{h,c}`**: Local APIC driver, distinct
+  from the still-unmodified 8259 (`pic.c`, which keeps delivering every
+  legacy device IRQ to the BSP exactly as it always has - no I/O APIC,
+  no rerouting). `lapic_init` maps the MMIO region virt==phys and enables
+  the software bit in the Spurious Interrupt Vector Register;
+  `lapic_send_ipi`/`lapic_send_ipi_all_excl_self` are what starts an AP
+  at all (INIT-SIPI-SIPI) and what lets already-running cores signal each
+  other afterward.
+  **New `kernel/arch/x86_64/smp.{h,c}`**: orchestrates bring-up. APs are
+  started strictly one at a time - a single shared low-memory scratch
+  struct (`AP_PARAMS_ADDR`, physical 0x7000) hands each one its target
+  CR3, its own kmalloc'd stack, the kernel's real GDT pointer, and its
+  assigned cpu index, and the BSP waits (bounded, with a diagnosable
+  timeout - the same pattern M6/M18's keyboard/mouse self-tests already
+  used for "real hardware might just not respond") for that AP to set an
+  `ap_ready` flag before reusing the struct for the next one.
+  `smp_current_cpu()` is a live Local APIC ID MMIO read + a linear scan
+  over `MAX_CPUS` (=8) - no per-CPU storage mechanism exists in this
+  kernel (no GS-base/swapgs setup), and at this scale a live read is
+  simple and fast enough not to need one; "correct, not maximally
+  efficient" is a repeat theme across this codebase (SYS_wait's
+  cooperative polling, PIT_HZ's 10 ms granularity) and applies here too.
+  **New `kernel/arch/x86_64/ap_trampoline.asm`**: a standalone 16-bit
+  flat binary (built separately with `nasm -f bin`, like stage1/stage2 -
+  excluded from the normal kernel `-f elf64` glob in the Makefile),
+  copied to physical 0x8000 before every SIPI. Walks real -> protected ->
+  long mode exactly like `stage2.asm` already does for the BSP, minus any
+  BIOS calls (an AP has none of its own to make, and the BSP already
+  enabled A20 for the whole machine) - reads its own transient 32/64-bit
+  GDT descriptor bytes copied verbatim from stage2's already-proven
+  `gdt_code32`/`gdt_data32`/`gdt_code64`, reaches 64-bit mode, then
+  immediately retires that GDT for the kernel's real one (read out of
+  `AP_PARAMS_ADDR`) and jumps to a normal linked kernel symbol -
+  `kernel/arch/x86_64/ap_entry.asm`'s `ap_entry_asm_stub`, which switches
+  onto the AP's real stack and calls into C (`ap_main`, `smp.c`).
+  **GDT/TSS** (`gdt.c`/`gdt.h`): the single shared TSS became `MAX_CPUS`
+  TSS descriptors, one per possible core - RSP0 (the ring3->ring0 entry
+  stack) is inherently per-CPU the instant two cores can each be running
+  a different user-mode task at once; a single shared TSS would have one
+  core's RSP0 stomped by the other's on every context switch. User
+  selector constants (`GDT_USER_CODE_SEL`/`GDT_USER_DATA_SEL`) are now
+  computed from `MAX_CPUS` rather than hardcoded, so they can't silently
+  drift out of sync with the TSS block's real size.
+  **Scheduler** (`sched.c`): `current_task`/`ticks_in_slice`/
+  `loaded_pml4_phys` all went from single globals to `[MAX_CPUS]` arrays -
+  every CPU pulls from the exact same shared `tasks` table (no per-CPU
+  run queue, no task affinity: any online CPU can pick up any READY
+  task), so "what am I running" and "how far into my own time slice am I"
+  had to stop being single answers. A new `sched_lock` spinlock protects
+  the table and the pick-next/state-transition half of `schedule()` -
+  *not* the `context_switch()` call itself, which can't run under a lock
+  a different CPU might need in order to make progress. Ownership
+  protocol (the same technique xv6 uses for exactly this problem): the
+  outgoing task acquires the lock and holds it across `context_switch`;
+  whichever task/CPU resumes it next releases it - either right after its
+  own earlier `context_switch` call inside `schedule()`, or at the top of
+  `task_entry_trampoline` for a task that's never run before. Both are
+  genuine resume points symmetric with the acquire, so exactly one
+  release always pairs with exactly one acquire regardless of which CPU
+  does which half.
+  **Locking swept through every already-shared kernel structure now that
+  a second CPU can genuinely be inside it at the same instant**: `pmm.c`
+  (the frame bitmap), `heap.c` (the free list - held across its own
+  `pmm`/`vmm` calls, so lock order is always heap -> {pmm, vmm}, never
+  reversed, so no cycle), `vmm.c` (page-table mutation), and `klog.c`
+  (console/serial output - its old comment about `cli` alone being
+  sufficient explicitly said "no SMP yet, no second CPU to still race
+  with"; that stopped being true, so a real `klog_lock` was added
+  alongside it). New `kernel/lib/spinlock.h`: a plain test-and-set lock
+  over `__atomic_exchange_n`/`__atomic_store_n`, which lower to `lock
+  xchg`/a plain store on x86_64 - no libatomic, nothing this freestanding
+  kernel doesn't already have.
+  **Two real bugs found by testing, not caught by inspection** (matching
+  this project's long-running "prove it, don't just trust it" discipline
+  at every earlier milestone):
+  1. Every `sched_lock`-taking function (`schedule()`, `task_spawn_common`,
+     `sched_init_ap`) needed its critical section wrapped in
+     `irq_save_disable`/`irq_restore` (promoted from klog.c's old local
+     helper into `arch/x86_64/io.h`, since sched.c needed the identical
+     primitive) - not just `spin_lock`/`spin_unlock`. Without it, the
+     periodic scheduler-tick IPI (see below) landing on a CPU that
+     already held `sched_lock` would reenter `schedule()` from inside its
+     own interrupt handler and deadlock on a lock it already held. Caught
+     by an actual multi-hour debugging session against a genuine `-smp 4`
+     hang, not anticipated in advance.
+  2. `lapic_vector_handler` (`smp.c`) sent the Local APIC's EOI *after*
+     dispatching to `scheduler_tick_cpu` - the exact same mistake, in the
+     exact same shape, that M7's own progress log already recorded once
+     for the 8259 PIC (`pic_send_eoi`) and fixed the same way:
+     `scheduler_tick_cpu` can call `schedule()`, which can
+     `context_switch` that CPU away entirely, and that call doesn't
+     "return" until the exact interrupted context is resumed - which
+     itself needs *another* interrupt on that CPU to happen, one EOI was
+     withholding. Every AP would run fine for a handful of ticks, then go
+     silent forever the first time its own 5th-tick reschedule actually
+     switched tasks. Fixed the same way M7's version was: send EOI first.
+  **AP preemption is a broadcast off the BSP's one real hardware timer,
+  not per-core APIC timers** - a deliberate simplification, not an
+  oversight: `scheduler_tick` (still driven only by the real PIT IRQ0,
+  which the 8259 only ever delivers to the BSP) calls
+  `smp_broadcast_schedule_tick()` every tick, sending `IPI_SCHEDULE_
+  VECTOR` (0xF0) to every other online CPU via the "all excluding self"
+  ICR destination shorthand; each receiving CPU's
+  `lapic_vector_handler` runs the identical `scheduler_tick_cpu` logic
+  (per-tick SIGKILL/SIGTERM check, per-5th-tick quantum reschedule) a
+  real per-core APIC timer would, just off one shared clock instead of
+  N independent ones.
+  **`panic.c` gained an SMP-safety hook**: the first CPU to panic
+  broadcasts an NMI to every other online CPU (guarded by an atomic
+  exchange so only the *first* panicking CPU ever broadcasts - otherwise
+  every other core's own NMI-triggered panic would re-broadcast to
+  everyone else, including cores already spinning in their own
+  `cli;hlt`, forever, since NMI isn't maskable by `cli`). No new
+  fault-handling code needed for the receiving side: `isr.c`'s
+  `isr_handler` already treats any non-breakpoint exception - NMI
+  included - as fatal, so a halted-via-NMI core just prints and spins
+  exactly like any other unrecoverable exception would.
+  **The M20-M22 compositor self-tests turned out to depend on
+  single-core scheduling determinism they'd never had to name out loud
+  until SMP could break it** - their own comments already said "spawned
+  one at a time... deterministic instead of a race", an assumption that
+  held on one core (however many tasks exist, only one instruction
+  stream ever executes) and doesn't automatically hold once genuine
+  hardware parallelism exists. `smp_init()` is deliberately called
+  *after* every M-numbered self-test, not right after M7's scheduler one
+  where SMP bring-up would otherwise naturally have landed - every
+  earlier milestone keeps the exact single-core-equivalent environment it
+  was written and verified against, and real multi-core support stands up
+  as additive capability from that point in boot onward. This also
+  surfaced a second, unrelated pre-existing gap while building the SMP
+  self-test's own cleanup: M20-M22's compositor/client processes are
+  killed via `SYS_kill(SIGKILL)` rather than let exit normally (a real
+  window manager isn't expected to exit on its own), and nothing before
+  this point ever called `SYS_wait(-1)` afterward - so those signals sat
+  pending, unnoticed, on tasks nothing ever rescheduled again. Once SMP's
+  idle cores started actually picking them back up, they *did* eventually
+  notice and terminate, just slowly under heavy scheduler contention -
+  harmless, since nothing depended on it, but slow enough that the SMP
+  self-test's own cleanup was rewritten to reap its 4 probe tasks by
+  specific pid rather than draining every unreaped child of task 0 with
+  `SYS_wait(-1)`.
+  Verified via `tools/qemu-serial-test.sh` across `-smp 1/2/4/8/9`: every
+  configuration reaches the shell prompt cleanly with zero panics; `-smp
+  N` (N>1) shows `[smp] N CPU(s) online` and the probe self-test
+  reporting exactly N distinct physical CPUs observed (1 for the
+  single-core/default-QEMU case, correctly skipping the "more than one
+  actually ran it" assertion there); `-smp 9` is silently capped to
+  `MAX_CPUS`=8 by `acpi.c`'s own MADT-parse-time bound. Confirmed via
+  QEMU's `-d int,cpu_reset` trace during the debugging session (no
+  faults, no resets, the real PIT vector firing continuously throughout)
+  that the earlier hangs were genuine software deadlocks, not silent CPU
+  resets - which is what pointed at the EOI-ordering bug specifically
+  once the "stuck AP receives no further IPIs" pattern matched M7's own
+  documented PIC bug shape.
+  Next: whichever of the remaining stretch goals (networking, UEFI,
+  real-hardware boot, package tooling) is picked next - still an open,
+  independent decision, same as before.

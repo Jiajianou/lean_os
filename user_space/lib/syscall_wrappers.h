@@ -12,6 +12,9 @@
 
 #include <stddef.h>
 
+#include "input.h" /* system_api/include/input.h - mouse_event_t */
+#include "wm.h"    /* system_api/include/wm.h - wm_fb_info_t */
+
 long sys_write(int fd, const void *buf, size_t len);
 void sys_exit(int code) __attribute__((noreturn));
 long sys_getpid(void);
@@ -46,3 +49,55 @@ long sys_kill(long pid, int sig);
 long sys_pipe(int fds_out[2]);
 
 long sys_getpgid(long pid);
+
+/* M19: grows this process's heap by `increment` bytes (must be >= 0 -
+ * this sbrk is growth-only) and returns the previous break, or -1 on
+ * failure. Backs malloc.h - programs that just want to allocate memory
+ * should use that instead of calling this directly. */
+long sys_sbrk(long increment);
+
+/* M19: allocates a kernel-owned shared-memory segment of `size` bytes,
+ * not yet mapped into anyone's address space. Returns its id (>= 0), or
+ * -1 on failure. */
+long sys_shm_create(size_t size);
+
+/* M19: maps shm segment `id` (created by this process or handed to it -
+ * e.g. via the single-string argv mechanism SYS_spawn already supports -
+ * by a different one) into this process's own address space. Returns the
+ * mapped virtual address, or -1 on failure (unknown id). */
+long sys_shm_map(long id);
+
+/* M20: fills *out with the real display's geometry. Returns 0, or -1 if
+ * out is NULL. */
+long sys_fb_info(wm_fb_info_t *out);
+
+/* M20: maps the real linear framebuffer into this process's own address
+ * space (by convention, only the compositor should call this). Returns
+ * the mapped virtual address, or -1 on failure. */
+long sys_fb_map(void);
+
+/* M20: pops the next buffered mouse event into *out. Returns 1 if one
+ * was available, 0 if not (never blocks) - same contract as the
+ * kernel-internal mouse_read() this wraps. */
+long sys_mouse_read(mouse_event_t *out);
+
+/* M20: like sys_pipe, but rendezvous by name (kernel/ipc/pipe.h's
+ * pipe_named) instead of only via an inherited fd - the mechanism two
+ * unrelated processes (e.g. a compositor and a client the shell launched
+ * separately) use to find each other. Returns 0, or -1 on failure. */
+long sys_pipe_open(const char *name, int fds_out[2]);
+
+/* M21: pops the next raw decoded keystroke into *out. Returns 1 if one
+ * was available, 0 if not (never blocks) - same non-blocking contract as
+ * sys_mouse_read, for a caller (the compositor) that can't afford to
+ * block on any one input source. */
+long sys_kbd_read(char *out);
+
+/* M21: bytes currently buffered on pipe read-end `fd`, without consuming
+ * them - lets a caller check whether sys_read would return immediately
+ * before calling it. Returns -1 if fd isn't a pipe read end. */
+long sys_pipe_poll(int fd);
+
+/* M21: milliseconds since the timer was initialized - for time-driven
+ * redraws that have nothing to do with input arriving. */
+long sys_uptime_ms(void);

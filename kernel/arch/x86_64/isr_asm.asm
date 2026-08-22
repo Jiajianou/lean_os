@@ -18,6 +18,7 @@ bits 64
 extern isr_handler
 extern irq_handler
 extern syscall_handler
+extern lapic_vector_handler
 
 %macro ISR_NOERR 1
 isr%1:
@@ -101,6 +102,20 @@ isr128:
     push qword 0x80
     jmp syscall_common_stub
 
+; SMP: the two Local-APIC-raised vectors (idt.c's IPI_SCHEDULE_VECTOR=0xF0/
+; LAPIC_SPURIOUS_VECTOR=0xFF) - same "own stub, own common path" reasoning
+; as isr128 above, since lapic_vector_handler's dispatch (and EOI target -
+; the Local APIC, not the 8259) is different from every other path here.
+isr_ipi_schedule:
+    push qword 0
+    push qword 0xF0
+    jmp lapic_common_stub
+
+isr_lapic_spurious:
+    push qword 0
+    push qword 0xFF
+    jmp lapic_common_stub
+
 %macro SAVE_REGS 0
     push rax
     push rbx
@@ -164,6 +179,14 @@ syscall_common_stub:
     add rsp, 16
     iretq
 
+lapic_common_stub:
+    SAVE_REGS
+    mov rdi, rsp
+    call lapic_vector_handler
+    RESTORE_REGS
+    add rsp, 16
+    iretq
+
 ; Address tables idt.c installs into the IDT - keeps idt.c from needing
 ; 48+ individual extern declarations.
 section .rodata
@@ -183,3 +206,11 @@ irq_stub_table:
 global syscall_stub_addr
 syscall_stub_addr:
     dq isr128
+
+global isr_ipi_schedule_addr
+isr_ipi_schedule_addr:
+    dq isr_ipi_schedule
+
+global isr_lapic_spurious_addr
+isr_lapic_spurious_addr:
+    dq isr_lapic_spurious

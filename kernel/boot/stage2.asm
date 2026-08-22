@@ -31,6 +31,10 @@
 ;   0x3000            PD   (1 page, 512 * 2 MiB entries = first 1 GiB)
 ;   0x9000            E820 entry count (dword)
 ;   0x9008            E820 entries (24 bytes each, up to MAX_E820_ENTRIES)
+;   0x9800            VBE VbeInfoBlock scratch (512 bytes, M16)
+;   0x9A00            VBE ModeInfoBlock scratch (256 bytes, M16)
+;   0x9B00            fb_boot_info_t handed off to the kernel (24 bytes,
+;                     M16 - see kernel/drivers/fb.h for the matching struct)
 ;   0x10000           kernel scratch load buffer (real-mode addressable;
 ;                     capped at 64 KiB for now — see KERNEL_SECTOR_COUNT
 ;                     guard below)
@@ -47,6 +51,10 @@ PD_ADDR           equ 0x3000
 E820_COUNT_ADDR   equ 0x9000
 E820_ENTRIES_ADDR equ 0x9008
 MAX_E820_ENTRIES  equ 64
+
+VBE_INFO_ADDR     equ 0x9800    ; 512-byte VbeInfoBlock
+MODE_INFO_ADDR    equ 0x9A00    ; 256-byte ModeInfoBlock
+FB_INFO_ADDR      equ 0x9B00    ; our own compact struct - see kernel/drivers/fb.h
 
 KERNEL_SCRATCH_SEGMENT equ 0x1000
 KERNEL_SCRATCH_PHYS    equ 0x10000    ; = KERNEL_SCRATCH_SEGMENT * 16
@@ -86,6 +94,7 @@ start:
     call print_string_rm
 
     call collect_e820_map
+    call setup_vbe_mode
     call load_kernel
     call enable_a20
 
@@ -145,6 +154,149 @@ collect_e820_map:
 .done:
     mov [E820_COUNT_ADDR], bp
     popa
+    ret
+
+; setup_vbe_mode: queries VBE (INT 10h, AX=4F00h/4F01h/4F02h), finds the
+; first mode matching a preferred-resolution list (1024x768x32, falling
+; back to 800x600x32 for less-capable BIOSes/VMs) that's supported and
+; linear-framebuffer-capable, sets it with the linear-framebuffer bit
+; (0x4000), and fills FB_INFO_ADDR from its ModeInfoBlock. Halts with a
+; diagnosable message (same pattern as load_kernel's .disk_error) on any
+; VBE failure - M16 onward, the kernel assumes a working framebuffer
+; exists, so continuing on without one would just fail more confusingly
+; later deep inside fb_init.
+setup_vbe_mode:
+    pusha
+    push es
+    push ds
+
+    ; ES:DI = VBE_INFO_ADDR, ask for VBE2+ info - write the "VBE2"
+    ; signature into the buffer first, since some BIOSes only fill in the
+    ; VBE2-only fields (like the linear mode-list pointer this needs) if
+    ; they see the caller asking for it that way.
+    xor ax, ax
+    mov es, ax
+    mov di, VBE_INFO_ADDR
+    mov dword [es:di], 0x32454256    ; "VBE2", little-endian
+    mov ax, 0x4F00
+    int 0x10
+    cmp ax, 0x004F
+    jne .vbe_error
+
+    ; Try 1024x768x32 first, then 800x600x32. The video mode list is a
+    ; far pointer at VbeInfoBlock+14 (seg:off) - re-read it before each
+    ; attempt since scan_modes repoints DS at that segment to walk it.
+    mov ax, [es:VBE_INFO_ADDR + 16]
+    mov ds, ax
+    mov si, [es:VBE_INFO_ADDR + 14]
+    mov word [target_width], 1024
+    mov word [target_height], 768
+    mov byte [target_bpp], 32
+    call scan_modes
+    cmp word [found_mode], 0
+    jne .mode_found
+
+    mov ax, [es:VBE_INFO_ADDR + 16]
+    mov ds, ax
+    mov si, [es:VBE_INFO_ADDR + 14]
+    mov word [target_width], 800
+    mov word [target_height], 600
+    mov byte [target_bpp], 32
+    call scan_modes
+    cmp word [found_mode], 0
+    je .vbe_error
+
+.mode_found:
+    ; MODE_INFO_ADDR still holds the matched mode's ModeInfoBlock, from
+    ; scan_modes' last (successful) AX=4F01h call - no need to re-fetch it.
+    xor ax, ax
+    mov es, ax
+    mov bx, [found_mode]
+    or bx, 0x4000                    ; bit 14: use the linear framebuffer model
+    mov ax, 0x4F02
+    int 0x10
+    cmp ax, 0x004F
+    jne .vbe_error
+
+    ; Fill fb_boot_info_t (kernel/drivers/fb.h) from the ModeInfoBlock:
+    ; phys_addr(8) + pitch(4) + width(4) + height(4) + bpp(4) = 24 bytes.
+    mov edi, FB_INFO_ADDR
+    mov eax, [es:MODE_INFO_ADDR + 0x28]        ; PhysBasePtr
+    mov [edi], eax
+    mov dword [edi + 4], 0                      ; phys_addr high dword
+    movzx eax, word [es:MODE_INFO_ADDR + 0x10]  ; BytesPerScanLine
+    mov [edi + 8], eax
+    movzx eax, word [es:MODE_INFO_ADDR + 0x12]  ; XResolution
+    mov [edi + 12], eax
+    movzx eax, word [es:MODE_INFO_ADDR + 0x14]  ; YResolution
+    mov [edi + 16], eax
+    movzx eax, byte [es:MODE_INFO_ADDR + 0x19]  ; BitsPerPixel
+    mov [edi + 20], eax
+
+    pop ds
+    pop es
+    popa
+    ret
+
+.vbe_error:
+    pop ds
+    pop es
+    popa
+    mov si, msg_vbe_error
+    call print_string_rm
+    jmp halt
+
+; scan_modes: DS:SI = far pointer to a VBE mode-number list (words,
+; terminated by 0xFFFF). Sets [found_mode] to the first mode whose
+; ModeInfoBlock is supported (attributes bit 0), graphics-capable with a
+; linear framebuffer (bit 7), and matches [target_width]/[target_height]/
+; [target_bpp] exactly - or 0 if none match. On a match, MODE_INFO_ADDR is
+; left holding that mode's info for the caller to use directly.
+scan_modes:
+    push ax
+    push bx
+    push cx
+    push di
+    push es
+
+    mov word [found_mode], 0
+.next_mode:
+    mov cx, [si]
+    add si, 2
+    cmp cx, 0xFFFF
+    je .done
+
+    xor ax, ax
+    mov es, ax
+    mov di, MODE_INFO_ADDR
+    mov ax, 0x4F01
+    int 0x10
+    cmp ax, 0x004F
+    jne .next_mode                   ; this mode number wasn't valid - skip it
+
+    mov ax, [es:MODE_INFO_ADDR + 0x00]  ; ModeAttributes
+    test ax, 0x0001                     ; bit 0: mode supported
+    jz .next_mode
+    test ax, 0x0080                     ; bit 7: linear framebuffer available
+    jz .next_mode
+
+    mov ax, [es:MODE_INFO_ADDR + 0x12]  ; XResolution
+    cmp ax, [target_width]
+    jne .next_mode
+    mov ax, [es:MODE_INFO_ADDR + 0x14]  ; YResolution
+    cmp ax, [target_height]
+    jne .next_mode
+    mov al, [es:MODE_INFO_ADDR + 0x19]  ; BitsPerPixel
+    cmp al, [target_bpp]
+    jne .next_mode
+
+    mov [found_mode], cx
+.done:
+    pop es
+    pop di
+    pop cx
+    pop bx
+    pop ax
     ret
 
 ; load_kernel: reads KERNEL_SECTOR_COUNT sectors starting at LBA
@@ -312,6 +464,7 @@ long_mode_entry:
     rep movsb
 
     mov rdi, E820_COUNT_ADDR         ; first-arg register per System V ABI
+    mov rsi, FB_INFO_ADDR            ; second-arg register (M16)
     jmp KERNEL_LOAD_ADDR             ; flat binary: byte 0 is the entry point
 
 ; ---------------------------------------------------------------------
@@ -319,6 +472,12 @@ long_mode_entry:
 ; ---------------------------------------------------------------------
 msg_stage2:     db "lean_os stage2: loading kernel, entering long mode...", 13, 10, 0
 msg_disk_error: db "lean_os stage2: KERNEL DISK READ ERROR", 13, 10, 0
+msg_vbe_error:  db "lean_os stage2: VBE graphics mode not available", 13, 10, 0
+
+target_width:  dw 0
+target_height: dw 0
+target_bpp:    db 0
+found_mode:    dw 0
 
 cur_segment: dw 0
 cur_offset:  dw 0

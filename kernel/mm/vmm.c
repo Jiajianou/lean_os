@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "drivers/klog.h"
+#include "lib/spinlock.h"
 #include "mm/pmm.h"
 #include "panic.h"
 
@@ -28,6 +29,21 @@
 
 static uint64_t *kernel_pml4;
 static uint64_t kernel_pml4_phys;
+
+/* SMP: guards every page-table-mutating call below (vmm_map_page_in,
+ * vmm_unmap_page, vmm_create_address_space) - a multi-level table walk
+ * that allocates and links intermediate tables as it goes is a real
+ * read-modify-write on shared structure (kernel_pml4[0]'s subtree is
+ * literally shared across every address space, see vmm_create_address_
+ * space), not safe from two CPUs at once. One coarse global lock rather
+ * than per-table locking: this kernel has no concurrent-heavy-mapping
+ * workload to make finer-grained locking worth the added complexity.
+ * vmm_init/vmm_map_page/vmm_switch_address_space don't need it -
+ * vmm_init runs single-threaded before SMP exists, vmm_map_page is a thin
+ * wrapper whose real work happens (and is already locked) inside
+ * vmm_map_page_in, and vmm_switch_address_space only ever touches this
+ * CPU's own CR3, never shared table contents. */
+static spinlock_t vmm_lock;
 
 /* Every frame pmm_alloc_frame() can return lives within the 1 GiB this
  * file identity-maps, under whichever page tables are currently active
@@ -98,6 +114,7 @@ uint64_t vmm_kernel_pml4_phys(void) {
 }
 
 void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
+    spin_lock(&vmm_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);
     uint64_t extra = flags & PTE_USER;
 
@@ -110,6 +127,7 @@ void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t 
 
     pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | (flags & (PTE_WRITABLE | PTE_USER)) | PTE_PRESENT;
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+    spin_unlock(&vmm_lock);
 }
 
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -117,6 +135,7 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
 }
 
 void vmm_unmap_page(uint64_t virt) {
+    spin_lock(&vmm_lock);
     uint64_t *pdpt = table_walk(kernel_pml4, PML4_INDEX(virt), 0, 0);
     uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(virt), 0, 0) : (uint64_t *)0;
     if (!pd || (pd[PD_INDEX(virt)] & PTE_HUGE)) {
@@ -129,12 +148,15 @@ void vmm_unmap_page(uint64_t virt) {
 
     pt[PT_INDEX(virt)] = 0;
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+    spin_unlock(&vmm_lock);
 }
 
 uint64_t vmm_create_address_space(void) {
+    spin_lock(&vmm_lock);
     uint64_t new_phys = alloc_table();
     uint64_t *new_pml4 = phys_to_table(new_phys);
     new_pml4[0] = kernel_pml4[0]; /* share the kernel's identity map + heap */
+    spin_unlock(&vmm_lock);
     return new_phys;
 }
 

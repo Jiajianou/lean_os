@@ -23,15 +23,17 @@ typedef struct __attribute__((packed)) {
     uint32_t size;
     uint32_t used;
     uint32_t direct[LEANFS_DIRECT_BLOCKS];
+    uint32_t indirect; /* block number of the pointer table, valid only
+                         * once size implies more than LEANFS_DIRECT_BLOCKS
+                         * blocks are in use */
 } leanfs_inode_t;
 
 #define INODE_TABLE_SECTORS ((sizeof(leanfs_inode_t) * LEANFS_MAX_INODES + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE)
-#define BITMAP_SECTORS       1u
-#define MAX_DATA_BLOCKS      (BITMAP_SECTORS * LEANFS_BLOCK_SIZE * 8u)
+#define BITMAP_SECTORS       (LEANFS_DATA_BLOCKS / 8 / LEANFS_BLOCK_SIZE)
 
 static leanfs_superblock_t sb;
 static leanfs_inode_t inodes[LEANFS_MAX_INODES];
-static uint8_t bitmap[LEANFS_BLOCK_SIZE];
+static uint8_t bitmap[BITMAP_SECTORS * LEANFS_BLOCK_SIZE];
 
 static void save_superblock(void) {
     uint8_t buf[LEANFS_BLOCK_SIZE];
@@ -60,7 +62,7 @@ static void format(void) {
     sb.bitmap_lba = sb.inode_table_lba + INODE_TABLE_SECTORS;
     sb.bitmap_sectors = BITMAP_SECTORS;
     sb.data_lba = sb.bitmap_lba + BITMAP_SECTORS;
-    sb.data_blocks = MAX_DATA_BLOCKS;
+    sb.data_blocks = LEANFS_DATA_BLOCKS;
     sb.reserved = 0;
 
     k_memset(inodes, 0, sizeof(inodes));
@@ -154,6 +156,29 @@ size_t leanfs_list(char *buf, size_t maxlen) {
     return written;
 }
 
+/* Frees every block currently backing inode (per its *current* size and
+ * on-disk indirect table, if any) - used before an overwrite reallocates
+ * a fresh set. Does not touch inode->size/direct/indirect themselves. */
+static void free_inode_blocks(leanfs_inode_t *inode) {
+    uint32_t nblocks = (inode->size + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
+    uint32_t indirect_table[LEANFS_INDIRECT_POINTERS];
+    int have_indirect = 0;
+    for (uint32_t b = 0; b < nblocks; b++) {
+        if (b < LEANFS_DIRECT_BLOCKS) {
+            bitmap_clear(inode->direct[b]);
+        } else {
+            if (!have_indirect) {
+                ata_read_sectors(sb.data_lba + inode->indirect, 1, (uint8_t *)indirect_table);
+                have_indirect = 1;
+            }
+            bitmap_clear(indirect_table[b - LEANFS_DIRECT_BLOCKS]);
+        }
+    }
+    if (nblocks > LEANFS_DIRECT_BLOCKS) {
+        bitmap_clear(inode->indirect);
+    }
+}
+
 int64_t leanfs_read(const char *name, void *buf, size_t maxlen) {
     int idx = find_inode(name);
     if (idx < 0) {
@@ -164,8 +189,20 @@ int64_t leanfs_read(const char *name, void *buf, size_t maxlen) {
     size_t to_copy = inode->size < maxlen ? inode->size : maxlen;
     size_t copied = 0;
     uint8_t block_buf[LEANFS_BLOCK_SIZE];
+    uint32_t indirect_table[LEANFS_INDIRECT_POINTERS];
+    int have_indirect = 0;
     for (uint32_t b = 0; copied < to_copy; b++) {
-        ata_read_sectors(sb.data_lba + inode->direct[b], 1, block_buf);
+        uint32_t block;
+        if (b < LEANFS_DIRECT_BLOCKS) {
+            block = inode->direct[b];
+        } else {
+            if (!have_indirect) {
+                ata_read_sectors(sb.data_lba + inode->indirect, 1, (uint8_t *)indirect_table);
+                have_indirect = 1;
+            }
+            block = indirect_table[b - LEANFS_DIRECT_BLOCKS];
+        }
+        ata_read_sectors(sb.data_lba + block, 1, block_buf);
         size_t chunk = to_copy - copied;
         if (chunk > LEANFS_BLOCK_SIZE) {
             chunk = LEANFS_BLOCK_SIZE;
@@ -195,36 +232,62 @@ int leanfs_write(const char *name, const void *buf, size_t len) {
         /* Overwriting: free the file's current blocks before reallocating -
          * a fresh write always gets a fresh set, kept simple rather than
          * trying to reuse blocks in place. */
-        uint32_t old_blocks = (inodes[idx].size + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
-        for (uint32_t b = 0; b < old_blocks; b++) {
-            bitmap_clear(inodes[idx].direct[b]);
-        }
+        free_inode_blocks(&inodes[idx]);
     }
 
     leanfs_inode_t *inode = &inodes[idx];
     uint32_t needed_blocks = (uint32_t)((len + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE);
+    uint32_t indirect_table[LEANFS_INDIRECT_POINTERS];
+    int indirect_block = -1;
+
+    if (needed_blocks > LEANFS_DIRECT_BLOCKS) {
+        indirect_block = alloc_block();
+        if (indirect_block < 0) {
+            return -1;
+        }
+    }
+
+    uint32_t allocated = 0;
     for (uint32_t b = 0; b < needed_blocks; b++) {
         int blk = alloc_block();
         if (blk < 0) {
-            for (uint32_t j = 0; j < b; j++) {
-                bitmap_clear(inode->direct[j]);
+            for (uint32_t j = 0; j < allocated; j++) {
+                bitmap_clear(j < LEANFS_DIRECT_BLOCKS ? inode->direct[j] : indirect_table[j - LEANFS_DIRECT_BLOCKS]);
+            }
+            if (indirect_block >= 0) {
+                bitmap_clear((uint32_t)indirect_block);
             }
             return -1;
         }
-        inode->direct[b] = (uint32_t)blk;
+        if (b < LEANFS_DIRECT_BLOCKS) {
+            inode->direct[b] = (uint32_t)blk;
+        } else {
+            indirect_table[b - LEANFS_DIRECT_BLOCKS] = (uint32_t)blk;
+        }
+        allocated++;
     }
+
+    inode->indirect = (indirect_block >= 0) ? (uint32_t)indirect_block : 0;
     inode->size = (uint32_t)len;
+
+    if (indirect_block >= 0) {
+        uint8_t table_buf[LEANFS_BLOCK_SIZE];
+        k_memset(table_buf, 0, sizeof(table_buf));
+        k_memcpy(table_buf, indirect_table, (needed_blocks - LEANFS_DIRECT_BLOCKS) * sizeof(uint32_t));
+        ata_write_sectors(sb.data_lba + (uint32_t)indirect_block, 1, table_buf);
+    }
 
     size_t written = 0;
     uint8_t block_buf[LEANFS_BLOCK_SIZE];
     for (uint32_t b = 0; b < needed_blocks; b++) {
+        uint32_t block = (b < LEANFS_DIRECT_BLOCKS) ? inode->direct[b] : indirect_table[b - LEANFS_DIRECT_BLOCKS];
         size_t chunk = len - written;
         if (chunk > LEANFS_BLOCK_SIZE) {
             chunk = LEANFS_BLOCK_SIZE;
         }
         k_memset(block_buf, 0, sizeof(block_buf));
         k_memcpy(block_buf, (const uint8_t *)buf + written, chunk);
-        ata_write_sectors(sb.data_lba + inode->direct[b], 1, block_buf);
+        ata_write_sectors(sb.data_lba + block, 1, block_buf);
         written += chunk;
     }
 

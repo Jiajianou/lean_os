@@ -13,8 +13,23 @@ BUILD := build
 BOOT  := kernel/boot
 KOBJ  := $(BUILD)/kernel_obj
 
-CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-pic \
-          -mno-red-zone -Wall -Wextra -Werror -Ikernel -Isystem_api/include -c
+# -O1: added at M20 - a from-scratch software compositor doing
+# per-pixel fill_rect/blit calls at -O0 turned out genuinely too slow to
+# be usable (verified directly during M20 bring-up: a single full-screen
+# redraw took close to a second, unoptimized function-call overhead per
+# pixel dominating). -O1 is enough to get GCC inlining these small static
+# helpers without pulling in anything that would fight -ffreestanding.
+# -mgeneral-regs-only: required alongside it, not optional polish - at
+# -O1 GCC started auto-vectorizing/optimizing some code into SSE
+# instructions (struct copies etc.), and this kernel never sets up FPU/
+# SSE state (CR0/CR4 OSFXSR and friends), so the first one executed
+# faulted as an invalid opcode. Caught by an actual boot panic during
+# M20 verification, not anticipated in advance - this flag forces
+# scalar/GPR-only codegen, the standard freestanding-kernel fix for
+# exactly this.
+CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
+          -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Werror \
+          -Ikernel -Isystem_api/include -c
 
 # user_space code is freestanding for the same reasons kernel code is (see
 # milestones.md's ground rules) but has its own include root (its own
@@ -26,8 +41,8 @@ CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-pic \
 # takes the address of anything in .rodata/.data), and PIC/PLT machinery
 # would be pure overhead for statically-linked, position-*dependent*
 # binaries like these.
-USER_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-pic \
-               -mcmodel=large -mno-red-zone -Wall -Wextra -Werror \
+USER_CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
+               -mcmodel=large -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Werror \
                -Iuser_space/lib -Isystem_api/include -c
 
 STAGE1_BIN := $(BUILD)/stage1.bin
@@ -39,7 +54,8 @@ IMAGE      := $(BUILD)/os-image.bin
 
 UOBJ      := $(BUILD)/user_obj
 USER_LD   := user_space/lib/user.ld
-USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o
+USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/malloc.o \
+                $(UOBJ)/gfx.o $(UOBJ)/font8x16.o $(UOBJ)/wmclient.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
 # init and shell in their own directories. Each becomes build/NAME.elf,
@@ -48,11 +64,15 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o
 # no filesystem driver *stage2* can use to load from disk, only the
 # kernel's own (M12), so this is still how anything gets onto the disk
 # leanfs formats on first boot in the first place.
-USER_PROGRAMS := hello echo cat ls init shell
+USER_PROGRAMS := hello echo cat ls init shell memtest compositor wm_demo gui_clock gui_paint desktop_shell
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
 KERNEL_C_SRCS := $(shell find kernel -name '*.c' -not -path 'kernel/boot/*')
-KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*')
+# ap_trampoline.asm is excluded here the same way kernel/boot/*.asm is: it's
+# a standalone 16-bit flat binary (bits16, org 0x8000 - see its own header
+# comment), not `-f elf64` kernel object code, so it gets its own build rule
+# below instead of the normal pattern rule.
+KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' -not -name 'ap_trampoline.asm')
 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
@@ -111,6 +131,19 @@ $(UOBJ)/%.o: user_space/shell/%.c | $(UOBJ)
 $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(USER_LD)
 	$(LD) -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/$*.o
 
+# AP_TRAMPOLINE_BIN: the standalone 16-bit SMP AP bring-up blob (see
+# kernel/arch/x86_64/ap_trampoline.asm's header comment) - built like
+# stage1/stage2 (flat `-f bin`, no ELF, no linking), then incbin'd into the
+# kernel image by embed_ap_trampoline.o, the same "explicit extra
+# prerequisite the generic *.asm pattern rule wouldn't know to guarantee"
+# situation embed_programs.o's USER_PROGRAM_ELFS dependency is already in.
+AP_TRAMPOLINE_BIN := $(BUILD)/ap_trampoline.bin
+
+$(AP_TRAMPOLINE_BIN): kernel/arch/x86_64/ap_trampoline.asm | $(BUILD)
+	$(AS) -f bin $< -o $@
+
+$(KOBJ)/proc/embed_ap_trampoline.o: $(AP_TRAMPOLINE_BIN)
+
 $(KOBJ)/proc/embed_programs.o: $(USER_PROGRAM_ELFS)
 
 $(KERNEL_ELF): $(KERNEL_OBJS) kernel/linker.ld
@@ -129,15 +162,17 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 	echo $$sectors > $(KERNEL_SECTORS_FILE)
 
 # leanfs (kernel/fs/leanfs.c) starts at sector 2048 (1 MiB) and needs
-# 4105 sectors (1 superblock + 7 inode-table + 1 bitmap + 4096 data,
-# matching leanfs.c's own layout constants exactly - if those ever
-# change, this has to move with them). The boot image (stage1+stage2+
-# kernel.bin) has to stay well clear of that, and the disk file itself
-# has to actually be big enough to hold the whole filesystem region, or
-# QEMU has nothing there for the ATA driver to read/write.
+# 65560 sectors (1 superblock + 7 inode-table + 16 bitmap + 65536 data,
+# matching leanfs.c/leanfs.h's own layout constants exactly - if those
+# ever change, this has to move with them; M15 grew this from the
+# original 4105 to add indirect-block support and a much bigger data
+# region). The boot image (stage1+stage2+kernel.bin) has to stay well
+# clear of that, and the disk file itself has to actually be big enough
+# to hold the whole filesystem region, or QEMU has nothing there for the
+# ATA driver to read/write.
 FS_START_LBA     := 2048
-FS_TOTAL_SECTORS := 4105
-IMAGE_SECTORS    := 8192
+FS_TOTAL_SECTORS := 65560
+IMAGE_SECTORS    := 69632
 
 $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN)
 	@boot_sectors=$$(( ($$(stat -f%z $(STAGE1_BIN)) + $$(stat -f%z $(STAGE2_BIN)) + $$(stat -f%z $(KERNEL_BIN))) / 512 )); \

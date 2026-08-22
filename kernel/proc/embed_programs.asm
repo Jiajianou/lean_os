@@ -55,3 +55,39 @@ global shell_elf_end
 shell_elf_start:
     incbin "build/shell.elf"
 shell_elf_end:
+
+global memtest_elf_start
+global memtest_elf_end
+memtest_elf_start:
+    incbin "build/memtest.elf"
+memtest_elf_end:
+
+global compositor_elf_start
+global compositor_elf_end
+compositor_elf_start:
+    incbin "build/compositor.elf"
+compositor_elf_end:
+
+global wm_demo_elf_start
+global wm_demo_elf_end
+wm_demo_elf_start:
+    incbin "build/wm_demo.elf"
+wm_demo_elf_end:
+
+global gui_clock_elf_start
+global gui_clock_elf_end
+gui_clock_elf_start:
+    incbin "build/gui_clock.elf"
+gui_clock_elf_end:
+
+global gui_paint_elf_start
+global gui_paint_elf_end
+gui_paint_elf_start:
+    incbin "build/gui_paint.elf"
+gui_paint_elf_end:
+
+global desktop_shell_elf_start
+global desktop_shell_elf_end
+desktop_shell_elf_start:
+    incbin "build/desktop_shell.elf"
+desktop_shell_elf_end:

@@ -64,3 +64,43 @@ long sys_pipe(int fds_out[2]) {
 long sys_getpgid(long pid) {
     return do_syscall(SYS_getpgid, pid, 0, 0);
 }
+
+long sys_sbrk(long increment) {
+    return do_syscall(SYS_sbrk, increment, 0, 0);
+}
+
+long sys_shm_create(size_t size) {
+    return do_syscall(SYS_shm_create, (long)size, 0, 0);
+}
+
+long sys_shm_map(long id) {
+    return do_syscall(SYS_shm_map, id, 0, 0);
+}
+
+long sys_fb_info(wm_fb_info_t *out) {
+    return do_syscall(SYS_fb_info, (long)out, 0, 0);
+}
+
+long sys_fb_map(void) {
+    return do_syscall(SYS_fb_map, 0, 0, 0);
+}
+
+long sys_mouse_read(mouse_event_t *out) {
+    return do_syscall(SYS_mouse_read, (long)out, 0, 0);
+}
+
+long sys_pipe_open(const char *name, int fds_out[2]) {
+    return do_syscall(SYS_pipe_open, (long)name, (long)fds_out, 0);
+}
+
+long sys_kbd_read(char *out) {
+    return do_syscall(SYS_kbd_read, (long)out, 0, 0);
+}
+
+long sys_pipe_poll(int fd) {
+    return do_syscall(SYS_pipe_poll, fd, 0, 0);
+}
+
+long sys_uptime_ms(void) {
+    return do_syscall(SYS_uptime_ms, 0, 0, 0);
+}

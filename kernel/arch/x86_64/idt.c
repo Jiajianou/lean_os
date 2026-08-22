@@ -29,6 +29,10 @@ typedef struct __attribute__((packed)) {
 
 #define SYSCALL_VECTOR 0x80
 
+/* IPI_SCHEDULE_VECTOR/LAPIC_SPURIOUS_VECTOR (SMP: the two vectors every
+ * CPU's Local APIC can raise once more than one core exists) are defined
+ * in isr.h, shared with lapic.c and smp.c. */
+
 static idt_entry_t idt[IDT_ENTRIES];
 static table_ptr_t idtp;
 
@@ -57,7 +61,14 @@ void idt_init(void) {
      * anything for the kernel-only self-test M8 verifies with today. */
     idt_set_gate(SYSCALL_VECTOR, syscall_stub_addr, 0, IDT_GATE_INTERRUPT_RING3);
 
+    idt_set_gate(IPI_SCHEDULE_VECTOR, isr_ipi_schedule_addr, 0, IDT_GATE_INTERRUPT_RING0);
+    idt_set_gate(LAPIC_SPURIOUS_VECTOR, isr_lapic_spurious_addr, 0, IDT_GATE_INTERRUPT_RING0);
+
     idtp.limit = sizeof(idt) - 1;
     idtp.base = (uint64_t)&idt;
+    idt_flush(&idtp);
+}
+
+void idt_load_ap(void) {
     idt_flush(&idtp);
 }

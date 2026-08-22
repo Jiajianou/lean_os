@@ -34,3 +34,24 @@ static inline uint16_t inw(uint16_t port) {
 static inline void io_wait(void) {
     outb(0x80, 0);
 }
+
+/* Saves RFLAGS and disables interrupts on *this* CPU, returning the saved
+ * value so irq_restore can put it back exactly as it was - not
+ * unconditionally re-enable, since the caller might already be running
+ * inside an interrupt handler (IF already 0) where blindly turning
+ * interrupts back on would be wrong (only the eventual `iretq` is
+ * supposed to do that). Originally klog.c's own local helper (see its
+ * header comment on why one character's console update needs this);
+ * promoted here once kernel/sched/sched.c needed the exact same "keep
+ * this CPU's own interrupt handlers out of a critical section" primitive
+ * for sched_lock (SMP: an IPI landing on a CPU that already holds
+ * sched_lock would otherwise reenter schedule() and deadlock on itself). */
+static inline uint64_t irq_save_disable(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags)::"memory");
+    return flags;
+}
+
+static inline void irq_restore(uint64_t flags) {
+    __asm__ volatile("push %0; popfq" ::"r"(flags) : "memory", "cc");
+}

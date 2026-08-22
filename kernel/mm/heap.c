@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "drivers/klog.h"
+#include "lib/spinlock.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "panic.h"
@@ -25,6 +26,14 @@ typedef struct block_header {
 
 static uint64_t heap_virt_end; /* one past the last mapped heap byte */
 static block_header_t *heap_head;
+
+/* SMP: guards the whole free list plus heap_virt_end - kmalloc/kfree walk
+ * and mutate the list (and, on growth, extend the mapped range) as one
+ * multi-step operation that has to look atomic to another CPU doing the
+ * same. Held across grow_heap's own pmm_alloc_frame/vmm_map_page calls,
+ * so lock order is always heap_lock -> {pmm_lock, vmm_lock}, never the
+ * other way around anywhere in this kernel - no cycle, no deadlock risk. */
+static spinlock_t heap_lock;
 
 static uint64_t align_up(uint64_t x, uint64_t a) {
     return (x + a - 1) & ~(a - 1);
@@ -58,6 +67,8 @@ void *kmalloc(size_t size) {
     }
     size = (size_t)align_up(size, HEAP_ALIGN);
 
+    spin_lock(&heap_lock);
+
     block_header_t *prev = (block_header_t *)0;
     for (block_header_t *b = heap_head; b; b = b->next) {
         if (b->free && b->size >= size) {
@@ -73,6 +84,7 @@ void *kmalloc(size_t size) {
                 b->size = size;
             }
             b->free = 0;
+            spin_unlock(&heap_lock);
             return (void *)(b + 1);
         }
         prev = b;
@@ -96,6 +108,7 @@ void *kmalloc(size_t size) {
         heap_head = b;
     }
 
+    spin_unlock(&heap_lock);
     return (void *)(b + 1);
 }
 
@@ -103,6 +116,7 @@ void kfree(void *ptr) {
     if (!ptr) {
         return;
     }
+    spin_lock(&heap_lock);
     block_header_t *b = (block_header_t *)ptr - 1;
     if (b->free) {
         panic("kfree: double free");
@@ -118,4 +132,5 @@ void kfree(void *ptr) {
         b->size += sizeof(block_header_t) + b->next->size;
         b->next = b->next->next;
     }
+    spin_unlock(&heap_lock);
 }

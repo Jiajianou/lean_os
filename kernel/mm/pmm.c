@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "drivers/klog.h"
+#include "lib/spinlock.h"
 #include "mm/e820.h"
 #include "panic.h"
 
@@ -33,6 +34,13 @@ static uint64_t total_frames;
  * kernel lifetime of allocations doesn't re-scan an ever-growing prefix
  * of known-used frames on every call. */
 static uint64_t search_hint;
+
+/* SMP: a bitmap scan-and-claim (or clear-and-credit) is a read-modify-write
+ * on shared state - two CPUs calling pmm_alloc_frame concurrently without
+ * this could both walk into the same free bit and hand it out twice. A
+ * leaf lock: nothing pmm.c itself calls ever takes another kernel lock, so
+ * this can never be part of a lock-ordering cycle. */
+static spinlock_t pmm_lock;
 
 static inline void bitmap_set(uint64_t frame) {
     bitmap[frame / 8] |= (uint8_t)(1u << (frame % 8));
@@ -106,11 +114,13 @@ void pmm_init(const uint32_t *e820_map) {
 }
 
 uint64_t pmm_alloc_frame(void) {
+    spin_lock(&pmm_lock);
     for (uint64_t f = search_hint; f < total_frames; f++) {
         if (!bitmap_test(f)) {
             bitmap_set(f);
             free_frames--;
             search_hint = f + 1;
+            spin_unlock(&pmm_lock);
             return f * PAGE_SIZE;
         }
     }
@@ -118,6 +128,7 @@ uint64_t pmm_alloc_frame(void) {
 }
 
 void pmm_free_frame(uint64_t phys_addr) {
+    spin_lock(&pmm_lock);
     uint64_t f = phys_addr / PAGE_SIZE;
     if (f >= total_frames || !bitmap_test(f)) {
         panic("pmm_free_frame: double-free or invalid frame");
@@ -127,4 +138,5 @@ void pmm_free_frame(uint64_t phys_addr) {
     if (f < search_hint) {
         search_hint = f;
     }
+    spin_unlock(&pmm_lock);
 }

@@ -7,3 +7,10 @@
 #pragma once
 
 void idt_init(void);
+
+/* Loads this AP's own IDTR from the already-built, shared IDT (idt_init
+ * has to run once, on the BSP, before any AP calls this - the table
+ * content is identical for every core, only the per-CPU IDTR register
+ * needs repeating, the same "shared table, per-CPU register" situation
+ * gdt_init_ap is in). */
+void idt_load_ap(void);

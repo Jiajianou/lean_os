@@ -8,17 +8,13 @@
 #include "mm/vmm.h"
 #include "panic.h"
 
-/* All three land in the private PML4[1]-rooted region
+/* Stack/arg/heap/shm all land in the private PML4[1]-rooted region
  * vmm_create_address_space leaves empty (PML4[0] is the only slot shared
  * with the kernel) - well clear of the ELF images this project links
- * (kept low, well under 1 MiB), so code/stack/arg can't collide for
- * anything this loader is expected to handle so far. The arg page sits
- * just past the stack's top (an otherwise-unused address once the stack
- * itself is bounded to USER_STACK_PAGES below it). */
-#define USER_STACK_TOP   0x0000008000200000ULL
-#define USER_STACK_PAGES 4 /* 16 KiB */
-#define USER_ARG_ADDR    USER_STACK_TOP
-#define PAGE_SIZE        4096ULL
+ * (kept low, well under 1 MiB), so nothing collides for anything this
+ * loader is expected to handle so far. See proc.h for the actual address
+ * constants (USER_STACK_TOP etc.) - shared with syscall.c now that M19's
+ * SYS_sbrk/SYS_shm_map need to bounds-check growth into the same layout. */
 
 extern void enter_user_mode(uint64_t entry, uint64_t user_stack, uint64_t arg_ptr,
                              uint64_t user_data_sel, uint64_t user_code_sel);
@@ -77,5 +73,16 @@ task_t *process_spawn(const uint8_t *image, size_t image_size, const char *arg) 
     args->user_stack_top = USER_STACK_TOP;
     args->arg_ptr = USER_ARG_ADDR;
 
-    return task_spawn_in(pml4_phys, user_task_launcher, args);
+    task_t *t = task_spawn_in(pml4_phys, user_task_launcher, args);
+    /* M19: starting points for this process's own heap (SYS_sbrk) and
+     * shared-memory mapping (SYS_shm_map) regions. Safe to set after
+     * task_spawn_in returns even though the task is already READY and
+     * could in principle be preempted into - it can't reach a syscall
+     * that reads these fields until it actually runs user code, which
+     * takes far longer than the few instructions between here and this
+     * function returning. */
+    t->heap_brk = USER_HEAP_START;
+    t->heap_mapped_end = USER_HEAP_START;
+    t->shm_next_vaddr = USER_SHM_BASE;
+    return t;
 }

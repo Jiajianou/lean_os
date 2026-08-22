@@ -3,8 +3,10 @@
 ; Kernel entry point. The bootloader (kernel/boot/stage2.asm) jumps here
 ; directly in 64-bit long mode — this is byte 0 of the flat kernel.bin, at
 ; its linked load address (see kernel/linker.ld). RDI holds a pointer to
-; the E820 memory map header, per the System V AMD64 ABI's first-argument
-; register, matching what stage2 loads it with before the jump.
+; the E820 memory map header and RSI a pointer to the fb_boot_info_t
+; framebuffer descriptor (M16) - the System V AMD64 ABI's first and
+; second integer-argument registers, matching what stage2 loads them
+; with before the jump.
 
 bits 64
 

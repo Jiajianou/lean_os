@@ -33,7 +33,7 @@ typedef enum {
     FD_PIPE_WRITE,
 } fd_type_t;
 
-#define MAX_FDS 8
+#define MAX_FDS 32 /* M21: bumped from 8 - a compositor juggling several windows needs stdin/stdout plus a request/response pipe pair plus one event-pipe write end per connected client, well past 8 (same "bump the fixed cap when a real need arrives" precedent as MAX_TASKS's M13 8->64). */
 
 typedef struct {
     fd_type_t type;
@@ -55,12 +55,37 @@ typedef struct task {
     int pgid; /* process group: a process's own id if it's a group leader, otherwise inherited from whoever spawned it - read-only (SYS_getpgid), no job control to ever need changing it yet */
     int pending_signal; /* 0 = none, else SIGKILL/SIGTERM (system_api/include/signal.h) - checked at the next syscall entry or scheduler tick, see syscall.c/sched.c */
     int reaped; /* SYS_wait(-1) sets this once it's returned this task's id, so a later wait(-1) call doesn't hand back the same dead child twice */
+    /* M19: per-process virtual memory bookkeeping (proc.h's USER_HEAP_
+     * and USER_SHM_BASE constants) - meaningless (left zeroed) for a plain
+     * kernel thread spawned via task_spawn rather than process_spawn,
+     * since only a ring-3 process can ever reach the syscalls that read
+     * them (SYS_sbrk, SYS_shm_map). */
+    uint64_t heap_brk;        /* current break - SYS_sbrk's return/growth point */
+    uint64_t heap_mapped_end; /* one past the last vmm-mapped heap page; heap_brk <= this always */
+    uint64_t shm_next_vaddr;  /* next free address for this process's own SYS_shm_map calls */
 } task_t;
 
 /* Turns the currently executing context (kernel_main, at whatever point
  * it calls this) into task 0 and installs the PIT tick hook. Must run
  * before task_spawn. */
 void sched_init(void);
+
+/* SMP: the AP-side equivalent of sched_init - turns the calling AP's own
+ * boot context (kernel/arch/x86_64/smp.c's ap_main) into a new task in
+ * the same shared table sched_init's task 0 lives in, so this core has a
+ * "current task" identity for schedule()/pick_next to work with. Every
+ * CPU pulls from the same run queue - there's no per-CPU task affinity -
+ * so this is really just "register one more idle-loop task", not a
+ * separate scheduler instance. */
+void sched_init_ap(int cpu_id);
+
+/* Runs the same per-tick bookkeeping scheduler_tick (sched.c, static) does
+ * for the BSP's real PIT interrupt, but for an arbitrary CPU - called
+ * directly for cpu 0 from the PIT path, and via IPI_SCHEDULE_VECTOR
+ * (kernel/arch/x86_64/smp.c's lapic_vector_handler) for every other online
+ * CPU, since the 8259 only ever delivers the real timer interrupt to the
+ * BSP. */
+void scheduler_tick_cpu(int cpu);
 
 /* Allocates a kernel stack and a task_t, marks it READY, and adds it to
  * the round-robin rotation. Runs in the kernel's own (shared) address

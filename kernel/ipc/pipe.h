@@ -24,6 +24,17 @@ typedef struct pipe {
 } pipe_t;
 
 pipe_t *pipe_create(void);
+
+/* M20: a small find-or-create registry of pipes identified by name
+ * instead of inherited fds - the rendezvous mechanism two *unrelated*
+ * processes (a compositor and a client the shell launched separately,
+ * not parent/child) need, since SYS_pipe's fds only ever reach a child
+ * spawned afterward. First call with a given name creates the pipe;
+ * every later call with the same name (from any process) returns the
+ * exact same one. Fixed small table (8 names) - this project has no
+ * dynamic multi-service discovery need beyond M20's own window-creation
+ * protocol yet. Returns NULL if the table is full. */
+pipe_t *pipe_named(const char *name);
 void pipe_close_read(pipe_t *p);
 void pipe_close_write(pipe_t *p);
 
