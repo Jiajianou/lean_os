@@ -57,6 +57,10 @@ dkms.conf
 # build output
 /build/
 
+# tools/build-ovmf.sh's edk2 checkout - deliberately outside /build/ (see
+# that script's header comment), but still not something to commit
+/ovmf-build/
+
 # module-level readmes (keep only the top-level README.md tracked)
 **/README.md
 !/README.md

@@ -255,11 +255,60 @@ runtime dependency).
 - [x] `init.c` now also spawns `desktop_icons` alongside the compositor
       and desktop shell, torn down and respawned together
 
+## M24 — UEFI boot path ✅
+
+- [x] `kernel/boot/uefi/{efi.h,efi_proto.h}`: hand-written UEFI base types
+      and the handful of protocols needed (Simple Text Output, Boot
+      Services, Loaded Image, Block I/O, Graphics Output) - no GNU-EFI or
+      edk2 headers linked in, same "write it ourselves" ethos as
+      everything else this project ships, just matching a public spec's
+      ABI instead of a BIOS one
+- [x] `kernel/boot/uefi/boot.c`: the UEFI counterpart to stage1+stage2 -
+      GetMemoryMap → the exact e820_entry_t handoff format kernel/mm/
+      e820.h already defines, GOP → the exact fb_boot_info_t format
+      kernel/drivers/fb.h already defines, raw EFI_BLOCK_IO_PROTOCOL
+      reads (not a filesystem) to fetch kernel.bin from the same fixed
+      LBA stage2.asm reads it from, then ExitBootServices and a raw-asm
+      jump into kernel_main with the identical RDI/RSI register handoff
+      - producing byte-compatible structures is what let kernel.c/pmm.c/
+      fb.c stay completely unmodified; this milestone is 100% new files
+      plus a 16-byte partition-table patch to stage1.asm
+- [x] `kernel/boot/stage1.asm`: the disk's boot sector is now also a
+      valid legacy MBR (one partition entry, type 0xEF, sitting in the
+      gap between the existing boot blob and leanfs's start) - UEFI reads
+      that table and finds the ESP; BIOS still just runs the boot code
+      above it and never looks at the table at all. One disk image, two
+      independent boot paths, no GPT needed since the kernel is fetched
+      by raw LBA rather than from inside the ESP's filesystem
+- [x] Toolchain: `clang -target x86_64-unknown-windows` + `lld-link`
+      (PE32+ output - a UEFI application has to be PE, not ELF) and
+      `mtools` (formats the ESP directly inside the disk image via
+      `mformat -i image@@byteoffset`, no loopback mount needed) - see
+      docs/toolchain.md
+- [x] `tools/build-ovmf.sh` + `tools/run-qemu-uefi.sh`: OVMF firmware
+      built from source (tianocore/edk2, CLANGPDB toolchain) rather than
+      installed, because the only prebuilt OVMF available on this
+      machine (a 2021 build from a third-party tap) reliably crashes
+      under current QEMU - a firmware bug with nothing to do with this
+      project's own boot code, confirmed by reproducing it against a
+      trivial "print a string" EFI app before writing any real logic
+- [x] One real bug worth remembering: boot.c's own scratch pool
+      allocations were originally tagged with a custom EFI_MEMORY_TYPE
+      value in the UEFI spec's OS-reserved range (0x80000000+). That
+      value doesn't fit EFI_MEMORY_TYPE's signed-int underlying
+      representation, got sign-extended to garbage crossing the ms_abi
+      call boundary into the firmware, and corrupted DxeCore's own state
+      badly enough to crash *inside the firmware*, several calls later -
+      diagnosed by rebuilding OVMF as a DEBUG build to get real PDB
+      symbol attribution on the crash. Fixed by just using the always-
+      spec-safe `EfiLoaderData` instead; there was never a real need for
+      a custom type
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support
+- [x] UEFI boot path as an alternative to BIOS (M24, above)
 - [ ] Networking stack + NIC driver
-- [ ] UEFI boot path as an alternative to BIOS
 - [ ] Port to real hardware (USB boot test)
 - [ ] Package/build tooling for third-party user programs (still built from
       scratch, just easier to author)

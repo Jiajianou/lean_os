@@ -9,6 +9,21 @@ ground rules in [milestones.md](../milestones.md)).
 | `x86_64-elf-ld` | binutils 2.47 | linker, uses our own linker scripts | `brew install x86_64-elf-binutils` |
 | `nasm` | 3.02 | assembler for boot code and other `.asm` | `brew install nasm` |
 | `qemu-system-x86_64` | 10.1.3 | emulator for fast boot testing | already present |
+| `clang` + `lld-link` | any recent | compiles/links `kernel/boot/uefi`'s `BOOTX64.EFI` (M24) | `brew install lld` (clang: Apple's own is enough) |
+| `mtools` | any recent | formats the UEFI boot path's FAT ESP directly inside the disk image | `brew install mtools` |
+| `llvm` (full keg) + `acpica` | any recent | only for `tools/build-ovmf.sh` (builds OVMF firmware from source) | `brew install llvm acpica` |
+
+## M24: the UEFI toolchain is a separate, parallel one
+
+Everything above builds the OS itself (ELF64 kernel/user binaries, flat
+BIOS boot sectors). `kernel/boot/uefi/boot.c` builds to a *PE32+* EFI
+application instead — a hard requirement of the UEFI spec, not a choice —
+so it needs its own compiler target (`clang -target x86_64-unknown-windows`)
+and its own linker (`lld-link`, not `x86_64-elf-ld`). See that file's own
+header comment for why hand-written headers instead of GNU-EFI/edk2, and
+`tools/build-ovmf.sh`'s header comment for why OVMF (the firmware QEMU
+needs to actually *test* that boot path) has to be built from source here
+rather than `brew install`ed like everything else in this table.
 
 ## Why a real cross-compiler instead of Apple clang
 

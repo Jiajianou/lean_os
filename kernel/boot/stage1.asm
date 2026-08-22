@@ -20,6 +20,18 @@ STAGE2_LOAD_OFFSET  equ 0x7E00   ; immediately after this boot sector
 STAGE2_START_LBA    equ 1        ; LBA 0 is this boot sector
 STAGE2_SECTOR_COUNT equ 8        ; 8 * 512 = 4 KiB reserved for stage 2
 
+; M24 (UEFI boot path): this same disk image is also a valid legacy-MBR
+; partitioned disk, so a UEFI firmware (which never executes any of the
+; code above - it reads this sector only as a partition table, never as
+; boot code) can find and boot the EFI System Partition below. Chosen to
+; sit in the gap this image already left between the boot blob (stage1 +
+; stage2 + kernel.bin, currently ~500 sectors, growing over time) and
+; leanfs's own start (kernel/fs/leanfs.h's LEANFS_START_LBA, 2048) - see
+; the top-level Makefile's IMAGE recipe for where this partition actually
+; gets formatted and populated with kernel/boot/uefi's BOOTX64.EFI.
+ESP_START_LBA    equ 1024
+ESP_SECTOR_COUNT equ 1024        ; ends exactly at LEANFS_START_LBA (2048)
+
 start:
     cli
     xor ax, ax
@@ -100,6 +112,22 @@ dap:
     .segment  dw 0
     .lba_low  dd 0
     .lba_high dd 0
+
+; Legacy MBR partition table (offset 0x1BE / 446) - one entry, the rest
+; left zeroed (a valid MBR with fewer than 4 partitions). CHS fields are
+; the conventional "exceeds CHS range, use LBA" filler (0xFE,0xFF,0xFF):
+; this disk is never addressed by CHS on either boot path. Type 0xEF is
+; the standard "EFI System Partition" id UEFI firmware's partition
+; driver looks for when auto-generating a boot option.
+times 0x1BE - ($ - $$) db 0
+db 0x00                  ; status: not BIOS-bootable (irrelevant to UEFI,
+                          ; and stage1's own code above is what BIOS runs
+                          ; regardless of this table)
+db 0xFE, 0xFF, 0xFF       ; CHS start (unused)
+db 0xEF                   ; type: EFI System Partition
+db 0xFE, 0xFF, 0xFF       ; CHS end (unused)
+dd ESP_START_LBA
+dd ESP_SECTOR_COUNT
 
 times 510 - ($ - $$) db 0
 dw 0xAA55

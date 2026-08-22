@@ -9,6 +9,21 @@ LD      := x86_64-elf-ld
 OBJCOPY := x86_64-elf-objcopy
 QEMU    := qemu-system-x86_64
 
+# M24 (UEFI boot path): a completely separate toolchain from the rest of
+# this project (see kernel/boot/uefi/boot.c's header comment) - clang
+# targeting a PE/COFF triple plus lld's PE-mode linker, because a UEFI
+# application has to *be* a PE32+ binary, not an ELF one. Still dev-time
+# only, still nothing shipped in the OS image (this compiles to
+# BOOTX64.EFI, firmware-loaded scaffolding that hands off to the exact
+# same kernel.bin the BIOS path builds - it never becomes part of the OS
+# itself). `brew install lld` if lld-link isn't already on PATH.
+UEFI_CC      := clang
+UEFI_CC_TARGET := x86_64-unknown-windows
+UEFI_LINK    := lld-link
+MFORMAT      := mformat
+MMD          := mmd
+MCOPY        := mcopy
+
 BUILD := build
 BOOT  := kernel/boot
 KOBJ  := $(BUILD)/kernel_obj
@@ -51,6 +66,8 @@ KERNEL_ELF := $(BUILD)/kernel.elf
 KERNEL_BIN := $(BUILD)/kernel.bin
 KERNEL_SECTORS_FILE := $(BUILD)/kernel.sectors
 IMAGE      := $(BUILD)/os-image.bin
+UEFI_BOOT_OBJ := $(BUILD)/uefi_boot.obj
+UEFI_BOOT_EFI := $(BUILD)/BOOTX64.EFI
 
 UOBJ      := $(BUILD)/user_obj
 USER_LD   := user_space/lib/user.ld
@@ -77,7 +94,7 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run clean
+.PHONY: all run run-uefi clean
 
 all: $(IMAGE)
 
@@ -149,6 +166,20 @@ $(KOBJ)/proc/embed_programs.o: $(USER_PROGRAM_ELFS)
 $(KERNEL_ELF): $(KERNEL_OBJS) kernel/linker.ld
 	$(LD) -T kernel/linker.ld -o $@ $(KERNEL_OBJS)
 
+# BOOTX64.EFI needs KERNEL_SECTOR_COUNT for the same reason stage2.bin
+# does (see stage2.bin's own recipe comment above) - both loaders read
+# the kernel blob from the same fixed on-disk LBA range, so both need to
+# agree on exactly how many sectors that is.
+$(UEFI_BOOT_OBJ): kernel/boot/uefi/boot.c kernel/boot/uefi/efi.h kernel/boot/uefi/efi_proto.h $(KERNEL_BIN) | $(BUILD)
+	$(UEFI_CC) -target $(UEFI_CC_TARGET) -ffreestanding -fshort-wchar -mno-red-zone \
+	           -fno-stack-protector -std=c11 -Wall -Wextra -Werror \
+	           -DKERNEL_SECTOR_COUNT=$$(cat $(KERNEL_SECTORS_FILE)) \
+	           -Ikernel/boot/uefi -c kernel/boot/uefi/boot.c -o $@
+
+$(UEFI_BOOT_EFI): $(UEFI_BOOT_OBJ)
+	$(UEFI_LINK) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:X64 \
+	             /dll /dynamicbase:no /out:$@ $<
+
 # Pads kernel.bin up to a whole number of 512-byte sectors (so the image
 # layout is exact — no relying on how a short final sector reads off
 # disk) and records that sector count for stage2 to read the kernel back
@@ -174,17 +205,39 @@ FS_START_LBA     := 2048
 FS_TOTAL_SECTORS := 65560
 IMAGE_SECTORS    := 69632
 
-$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN)
+# M24: the EFI System Partition a UEFI firmware boots from - see
+# kernel/boot/stage1.asm's hybrid-MBR partition entry, which hardcodes
+# these same two numbers (ESP_START_LBA/ESP_SECTOR_COUNT there) and must
+# move with them if they ever change here. Sits in the same "boot blob
+# has to stay clear of this" gap FS_START_LBA already carves out below;
+# unlike leanfs, nothing here needs to persist rebuild to rebuild, so
+# every `make` reformats it from scratch alongside BOOTX64.EFI.
+ESP_START_LBA    := 1024
+ESP_SECTOR_COUNT := 1024
+
+$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)
 	@boot_sectors=$$(( ($$(stat -f%z $(STAGE1_BIN)) + $$(stat -f%z $(STAGE2_BIN)) + $$(stat -f%z $(KERNEL_BIN))) / 512 )); \
-	if [ $$boot_sectors -ge $(FS_START_LBA) ]; then \
-		echo "error: boot image ($$boot_sectors sectors) has grown into leanfs's start (LBA $(FS_START_LBA)) - move FS_START_LBA out further" >&2; \
+	if [ $$boot_sectors -ge $(ESP_START_LBA) ]; then \
+		echo "error: boot image ($$boot_sectors sectors) has grown into the ESP's start (LBA $(ESP_START_LBA)) - move ESP_START_LBA out further here and in stage1.asm" >&2; \
 		exit 1; \
 	fi
 	cat $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) > $(IMAGE)
 	truncate -s $$(( $(IMAGE_SECTORS) * 512 )) $(IMAGE)
+	$(MFORMAT) -i $(IMAGE)@@$$(( $(ESP_START_LBA) * 512 )) -T $(ESP_SECTOR_COUNT)
+	$(MMD) -i $(IMAGE)@@$$(( $(ESP_START_LBA) * 512 )) ::EFI
+	$(MMD) -i $(IMAGE)@@$$(( $(ESP_START_LBA) * 512 )) ::EFI/BOOT
+	$(MCOPY) -i $(IMAGE)@@$$(( $(ESP_START_LBA) * 512 )) -o $(UEFI_BOOT_EFI) ::EFI/BOOT/BOOTX64.EFI
 
 run: all
 	@./tools/run-qemu.sh
+
+# M24: boots the identical image via UEFI (OVMF) instead of BIOS. Needs
+# `tools/build-ovmf.sh` run once first - not a dependency of this target
+# since it builds firmware from source (minutes, not seconds) and has its
+# own toolchain preconditions (see its header comment) separate from the
+# rest of this Makefile.
+run-uefi: all
+	@./tools/run-qemu-uefi.sh
 
 clean:
 	rm -rf $(BUILD)
