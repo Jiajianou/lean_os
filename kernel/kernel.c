@@ -986,8 +986,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
     process_spawn(init_image, (size_t)init_size, "");
     kfree(init_image);
 
-    klog_puts("[init] PID 1 spawned - handing off to the shell. Try 'ls', "
-              "'cat <file>', 'echo <text>', 'hello', or 'exit'.\n\n");
+    klog_puts("[init] PID 1 spawned - handing off to the desktop shell.\n\n");
 
     for (;;) {
         __asm__ volatile("hlt");
