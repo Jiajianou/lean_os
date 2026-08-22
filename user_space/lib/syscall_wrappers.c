@@ -112,3 +112,7 @@ long sys_dup2(int oldfd, int newfd) {
 long sys_wait_nb(long pid) {
     return do_syscall(SYS_wait_nb, pid, 0, 0);
 }
+
+long sys_yield(void) {
+    return do_syscall(SYS_yield, 0, 0, 0);
+}

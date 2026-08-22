@@ -45,7 +45,7 @@
 #define TITLEBAR_FOCUS_COLOR 0x004C99E6u
 #define CURSOR_COLOR         0x00FFFFFFu
 #define CURSOR_SIZE          8
-#define REDRAW_INTERVAL_MS   100 /* periodic redraw, not just on-input - a client (M21's clock demo) can change its own buffer with no input at all */
+#define REDRAW_INTERVAL_MS   100 /* fallback cadence for changes the compositor has no way to notice itself - a client (M21's clock demo) redrawing its own window's pixels with no input involved at all. Input-driven changes no longer wait on this - see `dirty`, below. */
 
 typedef struct {
     int32_t x, y, w, h;
@@ -61,11 +61,53 @@ static int window_count;
 static int focused_window = -1; /* -1 = nothing focused yet */
 
 static wm_fb_info_t fb_info;
-static uint32_t *fb;
+static uint32_t *real_fb;       /* the live, scanned-out hardware framebuffer - write-only, touched only by present() */
 static uint32_t fb_pitch_pixels;
+
+/* Off-screen render target: every draw call in redraw() (fill_rect,
+ * blit_window, draw_cursor) targets this, never real_fb directly.
+ * Drawing straight onto the hardware framebuffer - clearing it, then
+ * blitting windows back over the clear, one syscall's worth of pixels
+ * at a time - let the display scan out those intermediate, half-drawn
+ * frames, which is what the visible flicker was. Compositing into back_buf
+ * first and copying the whole finished frame to real_fb in one pass
+ * (present(), below) means the hardware only ever shows complete frames. */
+static uint32_t *back_buf;
+static uint32_t back_pitch_pixels; /* == fb_info.width - back_buf is allocated tightly packed, no pitch padding */
 
 static int32_t cursor_x, cursor_y;
 static uint8_t prev_buttons;
+static int32_t last_drawn_cursor_x, last_drawn_cursor_y; /* cursor position as of the last redraw - compared against cursor_x/y each loop to detect motion needing a (cheap, cursor-sized) partial redraw */
+
+/* Set whenever something changed that a small cursor-sized partial
+ * redraw can't account for on its own - a window was created/focused/
+ * minimized, or the periodic fallback (below) fired - so the next
+ * redraw must recomposite the *whole* screen rather than just the
+ * cursor's old/new footprint. Plain cursor movement (the common,
+ * highest-frequency case) is handled separately - see
+ * last_drawn_cursor_x/y above and the main loop below - specifically
+ * because folding it into this flag would mean every mouse-move event
+ * re-drew and re-presented the entire screen, by far the largest cost
+ * of any single redraw, for a change that only ever touches an 8x8
+ * pixel box. */
+static int dirty = 1; /* starts dirty: draw the first frame */
+
+/* Every draw call below (fill_rect/blit_window/draw_cursor, all via
+ * put_pixel) is clipped to this rect, and present() only ever copies
+ * this same rect to the real framebuffer - see redraw_rect(), the only
+ * place that sets it. A full redraw sets it to the whole screen; a
+ * cursor-only partial redraw sets it to just the cursor's old/new
+ * bounding box, so neither the compositing passes nor the final copy
+ * to real_fb do any more work than the actual change requires. */
+static int32_t clip_x0, clip_y0, clip_x1, clip_y1;
+
+static inline int32_t min_i32(int32_t a, int32_t b) {
+    return a < b ? a : b;
+}
+
+static inline int32_t max_i32(int32_t a, int32_t b) {
+    return a > b ? a : b;
+}
 
 /* Same silhouette as kernel/drivers/cursor.c's arrow - reimplemented
  * here rather than shared, since that file is kernel-only and this
@@ -98,41 +140,86 @@ static long read_exact(int fd, void *buf, size_t len) {
     return (long)got;
 }
 
-static void put_pixel(int32_t x, int32_t y, uint32_t color) {
-    if (x < 0 || y < 0 || (uint32_t)x >= fb_info.width || (uint32_t)y >= fb_info.height) {
-        return;
+/* No bounds/clip check of its own - every caller (fill_rect/blit_window/
+ * draw_cursor below) already intersects against clip_x0..clip_y1 (itself
+ * always clamped to the real screen - see redraw_rect) before ever
+ * computing an (x, y) to pass in here, so doing it again per-pixel would
+ * just be redundant branching on the hottest loop in this process. */
+static inline void put_pixel(int32_t x, int32_t y, uint32_t color) {
+    back_buf[(uint32_t)y * back_pitch_pixels + (uint32_t)x] = color;
+}
+
+/* Copies just the current clip rect from back_buf to the real hardware
+ * framebuffer - the only place this process ever writes to real_fb. A
+ * full redraw's clip rect is the whole screen; a cursor-only partial
+ * redraw's is a handful of rows a few pixels wide, so this ends up doing
+ * anywhere from "the whole frame" down to "next to nothing" depending on
+ * what redraw_rect was actually asked to recomposite. */
+static void present(void) {
+    for (int32_t y = clip_y0; y < clip_y1; y++) {
+        memcpy(&real_fb[(uint32_t)y * fb_pitch_pixels + (uint32_t)clip_x0],
+               &back_buf[(uint32_t)y * back_pitch_pixels + (uint32_t)clip_x0],
+               (size_t)(clip_x1 - clip_x0) * sizeof(uint32_t));
     }
-    fb[(uint32_t)y * fb_pitch_pixels + (uint32_t)x] = color;
 }
 
 static void fill_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
-    for (int32_t row = 0; row < h; row++) {
-        for (int32_t col = 0; col < w; col++) {
-            put_pixel(x + col, y + row, color);
+    int32_t x0 = max_i32(x, clip_x0);
+    int32_t y0 = max_i32(y, clip_y0);
+    int32_t x1 = min_i32(x + w, clip_x1);
+    int32_t y1 = min_i32(y + h, clip_y1);
+    for (int32_t row = y0; row < y1; row++) {
+        for (int32_t col = x0; col < x1; col++) {
+            put_pixel(col, row, color);
         }
     }
 }
 
 static void blit_window(const window_t *win) {
-    for (int32_t row = 0; row < win->h; row++) {
-        for (int32_t col = 0; col < win->w; col++) {
-            put_pixel(win->x + col, win->y + row, win->pixels[(uint32_t)row * (uint32_t)win->w + (uint32_t)col]);
+    int32_t x0 = max_i32(win->x, clip_x0);
+    int32_t y0 = max_i32(win->y, clip_y0);
+    int32_t x1 = min_i32(win->x + win->w, clip_x1);
+    int32_t y1 = min_i32(win->y + win->h, clip_y1);
+    for (int32_t row = y0; row < y1; row++) {
+        const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y) * (uint32_t)win->w;
+        for (int32_t col = x0; col < x1; col++) {
+            put_pixel(col, row, src_row[col - win->x]);
         }
     }
 }
 
 static void draw_cursor(void) {
-    for (uint32_t y = 0; y < CURSOR_SIZE; y++) {
-        uint8_t row = cursor_shape[y];
-        for (uint32_t x = 0; x < CURSOR_SIZE; x++) {
-            if (row & (0x80 >> x)) {
-                put_pixel(cursor_x + (int32_t)x, cursor_y + (int32_t)y, CURSOR_COLOR);
+    int32_t x0 = max_i32(cursor_x, clip_x0);
+    int32_t y0 = max_i32(cursor_y, clip_y0);
+    int32_t x1 = min_i32(cursor_x + CURSOR_SIZE, clip_x1);
+    int32_t y1 = min_i32(cursor_y + CURSOR_SIZE, clip_y1);
+    for (int32_t row = y0; row < y1; row++) {
+        uint8_t bits = cursor_shape[row - cursor_y];
+        for (int32_t col = x0; col < x1; col++) {
+            if (bits & (0x80 >> (col - cursor_x))) {
+                put_pixel(col, row, CURSOR_COLOR);
             }
         }
     }
 }
 
-static void redraw(void) {
+/* Recomposites and re-presents only [x0,x1) x [y0,y1) (clamped to the
+ * real screen) rather than assuming the whole display - see clip_x0..
+ * clip_y1's own comment above for why: a cursor moving is by far the
+ * most frequent reason this runs, and it only ever needs an 8x8-ish box
+ * touched, not a full-screen clear/recomposite/copy every single time.
+ * Every draw call in here still walks the same z-order a full redraw
+ * would (desktop, then windows, then panels, then cursor) - correctness
+ * doesn't depend on how big the clip rect is, only speed does. */
+static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
+    clip_x0 = max_i32(x0, 0);
+    clip_y0 = max_i32(y0, 0);
+    clip_x1 = min_i32(x1, (int32_t)fb_info.width);
+    clip_y1 = min_i32(y1, (int32_t)fb_info.height);
+    if (clip_x0 >= clip_x1 || clip_y0 >= clip_y1) {
+        return;
+    }
+
     fill_rect(0, 0, (int32_t)fb_info.width, (int32_t)fb_info.height, BG_COLOR);
     /* Desktop windows first (a background layer under everything else -
      * the opposite end of the z-order from panels below), then ordinary
@@ -164,6 +251,11 @@ static void redraw(void) {
         }
     }
     draw_cursor();
+    present();
+}
+
+static void redraw(void) {
+    redraw_rect(0, 0, (int32_t)fb_info.width, (int32_t)fb_info.height);
 }
 
 /* Titlebar counts as part of a window's clickable/routable area, same as
@@ -195,6 +287,7 @@ static void set_focus(int idx) {
         ev.type = WM_EVENT_FOCUS;
         send_event(&windows[focused_window], &ev);
     }
+    dirty = 1;
 }
 
 /* Non-blocking: only touches the request pipe (and does the one
@@ -319,12 +412,17 @@ static void accept_pending_action(int action_read_fd) {
         if (win->minimized && focused_window == req.window_id) {
             set_focus(-1);
         }
+        dirty = 1;
     }
 }
 
 static void handle_mouse(void) {
     mouse_event_t mev;
     while (sys_mouse_read(&mev)) {
+        /* Cursor motion itself isn't `dirty = 1` (full redraw) - see
+         * last_drawn_cursor_x/y's comment. A click that changes focus
+         * still goes through set_focus() below, which sets `dirty`
+         * itself. */
         cursor_x += mev.dx;
         cursor_y += mev.dy;
         if (cursor_x < 0) {
@@ -414,8 +512,16 @@ int main(void) {
     if (fb_vaddr < 0) {
         sys_exit(1);
     }
-    fb = (uint32_t *)fb_vaddr;
+    real_fb = (uint32_t *)fb_vaddr;
     fb_pitch_pixels = fb_info.pitch / sizeof(uint32_t);
+
+    long back_shm_id = sys_shm_create((size_t)fb_info.width * fb_info.height * sizeof(uint32_t));
+    long back_vaddr = back_shm_id < 0 ? -1 : sys_shm_map(back_shm_id);
+    if (back_vaddr < 0) {
+        sys_exit(1);
+    }
+    back_buf = (uint32_t *)back_vaddr;
+    back_pitch_pixels = fb_info.width;
 
     cursor_x = (int32_t)(fb_info.width / 2);
     cursor_y = (int32_t)(fb_info.height / 2);
@@ -444,6 +550,9 @@ int main(void) {
     sys_write(1, msg, strlen(msg));
 
     redraw(); /* first frame: empty desktop + cursor, before any client connects */
+    dirty = 0;
+    last_drawn_cursor_x = cursor_x;
+    last_drawn_cursor_y = cursor_y;
 
     long last_redraw_ms = sys_uptime_ms();
     for (;;) {
@@ -454,9 +563,38 @@ int main(void) {
         handle_keyboard();
 
         long now = sys_uptime_ms();
-        if (now - last_redraw_ms >= REDRAW_INTERVAL_MS) {
+        if (dirty || now - last_redraw_ms >= REDRAW_INTERVAL_MS) {
             redraw();
+            dirty = 0;
             last_redraw_ms = now;
+            last_drawn_cursor_x = cursor_x;
+            last_drawn_cursor_y = cursor_y;
+        } else if (cursor_x != last_drawn_cursor_x || cursor_y != last_drawn_cursor_y) {
+            /* Nothing else changed - just recomposite the small box the
+             * cursor has moved through (old footprint union new one)
+             * instead of the whole screen. This is the hot path: every
+             * mouse-move event used to force a full-screen redraw +
+             * present, by far the largest cost in this process, for a
+             * change that only ever touches an 8x8 pixel box. */
+            int32_t x0 = min_i32(last_drawn_cursor_x, cursor_x);
+            int32_t y0 = min_i32(last_drawn_cursor_y, cursor_y);
+            int32_t x1 = max_i32(last_drawn_cursor_x, cursor_x) + CURSOR_SIZE;
+            int32_t y1 = max_i32(last_drawn_cursor_y, cursor_y) + CURSOR_SIZE;
+            redraw_rect(x0, y0, x1, y1);
+            last_drawn_cursor_x = cursor_x;
+            last_drawn_cursor_y = cursor_y;
         }
+
+        /* Every check above is a non-blocking poll - accept_pending_*
+         * on empty pipes, handle_mouse/handle_keyboard on empty ring
+         * buffers - so with nothing to do this pass, this loop would
+         * otherwise busy-spin for its full 50ms scheduler quantum
+         * (sched.h's SCHED_QUANTUM_TICKS) doing nothing, and every
+         * *other* runnable task (every client window) would wait that
+         * same 50ms for its own turn to come back around. Yielding here
+         * hands the rest of the quantum back to round-robin immediately
+         * instead - see SYS_yield's comment in system_api/include/
+         * syscall.h. */
+        sys_yield();
     }
 }

@@ -8,6 +8,7 @@
 #include "arch/x86_64/io.h" /* irq_save_disable/irq_restore */
 #include "arch/x86_64/smp.h"
 #include "drivers/pit.h"
+#include "ipc/shm.h" /* shm_free_by_owner - see task_exit_with_code */
 #include "lib/spinlock.h"
 #include "mm/heap.h"
 #include "mm/vmm.h"
@@ -296,6 +297,15 @@ void schedule(void) {
 
 void task_exit_with_code(int code) {
     task_t *t = current_task[smp_current_cpu()];
+    /* Reclaims whatever shm segments this task created (kernel/ipc/
+     * shm.h's own comment has the full "why" - MAX_SHM_SEGMENTS is small
+     * and fixed, and nothing else ever frees one) before this id is gone
+     * for good. Every exit path funnels through here - SYS_exit, a
+     * SIGKILL/SIGTERM delivered either at the next syscall (syscall.c's
+     * syscall_handler) or at the next timer tick (scheduler_tick_cpu,
+     * below) - so this is the one place that's guaranteed to run exactly
+     * once per task, right as it leaves the scheduler for good. */
+    shm_free_by_owner(t->id);
     t->exit_code = code;
     t->state = TASK_TERMINATED;
     schedule();

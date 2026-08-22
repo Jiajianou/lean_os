@@ -852,18 +852,20 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         /* Panel docks at the bottom: y = 768 - PANEL_HEIGHT(32) = 736.
          * Launcher slot 0 is "hello" (first file ever seeded, M12/M13) at
          * local (4,4) 64x24; running slot 0 is gui_clock's window (id 1,
-         * the only non-panel window, focused) right-aligned at
-         * local (1024-4-64, 4) = (956,4). Coordinates below are absolute
-         * (panel-local + the panel's own (0,736) origin) - see
+         * the only non-panel window, focused) right-aligned, but left of
+         * the panel's own reserved clock area (CLOCK_AREA_W = 56, see
+         * desktop_shell.c) rather than the panel's bare right edge:
+         * local (1024-4-56-64, 4) = (900,4). Coordinates below are
+         * absolute (panel-local + the panel's own (0,736) origin) - see
          * milestones.md's M22 entry for the glyph-bitmap math behind the
          * on/off pixel picks, same method M21's already proved out. */
         static const struct { uint32_t x, y; uint32_t expected; const char *what; } checks[] = {
             {44, 742,  0x00334455u, "launcher slot 0 background"},
             {9,  749,  0x00334455u, "launcher slot 0 'h' glyph - off pixel"},
             {6,  749,  0x00FFFFFFu, "launcher slot 0 'h' glyph - on pixel"},
-            {996, 742, 0x0055AA33u, "running slot 0 background (focused)"},
-            {958, 749, 0x0055AA33u, "running slot 0 '#' glyph - off pixel"},
-            {960, 749, 0x00FFFFFFu, "running slot 0 '#' glyph - on pixel"},
+            {940, 742, 0x0055AA33u, "running slot 0 background (focused)"},
+            {902, 749, 0x0055AA33u, "running slot 0 '#' glyph - off pixel"},
+            {904, 749, 0x00FFFFFFu, "running slot 0 '#' glyph - on pixel"},
             {500, 738, 0x00181828u, "panel background (margin strip above the slot row, y=2 - never overdrawn by any slot regardless of file count)"},
             {500, 500, 0x001A1A2Eu, "desktop background color, above the panel"},
         };

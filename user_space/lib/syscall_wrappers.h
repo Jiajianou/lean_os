@@ -114,3 +114,10 @@ long sys_dup2(int oldfd, int newfd);
  * -1 if pid is invalid. For a caller (a GUI terminal) that can't afford
  * to block on sys_wait while it still has window events to service. */
 long sys_wait_nb(long pid);
+
+/* Voluntarily gives up the rest of this task's current time slice right
+ * away instead of spinning through it - for a non-blocking poller (no
+ * event/work found this pass) that would otherwise busy-spin doing
+ * nothing until the next PIT tick preempts it. See SYS_yield's comment
+ * in system_api/include/syscall.h. */
+long sys_yield(void);

@@ -10,6 +10,7 @@
 
 typedef struct {
     int used;
+    int owner_task_id;
     uint64_t size;       /* requested size in bytes, not page-rounded */
     uint64_t page_count;
     uint64_t *frames;    /* kmalloc'd array of page_count physical addresses */
@@ -26,7 +27,7 @@ static int find_free_slot(void) {
     return -1;
 }
 
-int shm_create(size_t size) {
+int shm_create(size_t size, int owner_task_id) {
     if (size == 0) {
         return -1;
     }
@@ -48,10 +49,25 @@ int shm_create(size_t size) {
     }
 
     segments[id].used = 1;
+    segments[id].owner_task_id = owner_task_id;
     segments[id].size = (uint64_t)size;
     segments[id].page_count = page_count;
     segments[id].frames = frames;
     return id;
+}
+
+void shm_free_by_owner(int owner_task_id) {
+    for (int i = 0; i < MAX_SHM_SEGMENTS; i++) {
+        if (!segments[i].used || segments[i].owner_task_id != owner_task_id) {
+            continue;
+        }
+        for (uint64_t p = 0; p < segments[i].page_count; p++) {
+            pmm_free_frame(segments[i].frames[p]);
+        }
+        kfree(segments[i].frames);
+        segments[i].used = 0;
+        segments[i].frames = (uint64_t *)0;
+    }
 }
 
 int64_t shm_get_size(int id) {

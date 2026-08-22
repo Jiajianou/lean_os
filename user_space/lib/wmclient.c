@@ -89,6 +89,17 @@ int wm_wait_event(wm_window_t *win, wm_event_t *out) {
 
 int wm_poll_event(wm_window_t *win, wm_event_t *out) {
     if (sys_pipe_poll(win->evt_fd) < (long)sizeof(*out)) {
+        /* Every GUI client's own loop (gui_clock.c, gui_terminal.c,
+         * desktop_shell.c, desktop_icons.c) is `for (;;) { while
+         * (wm_poll_event(...)) {...} ... }` with no blocking call of its
+         * own - nothing stops a whole 50ms scheduler quantum (sched.h's
+         * SCHED_QUANTUM_TICKS) going to a client just re-checking an
+         * empty pipe millions of times. Yielding here, the one place
+         * every such loop already passes through on the "nothing to do"
+         * result, hands the rest of that quantum back to round-robin
+         * immediately instead - see SYS_yield's comment in
+         * system_api/include/syscall.h for the full picture. */
+        sys_yield();
         return 0;
     }
     return read_exact(win->evt_fd, out, sizeof(*out)) == (long)sizeof(*out);

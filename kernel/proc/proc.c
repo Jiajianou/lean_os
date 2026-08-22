@@ -74,6 +74,21 @@ task_t *process_spawn(const uint8_t *image, size_t image_size, const char *arg) 
     args->arg_ptr = USER_ARG_ADDR;
 
     task_t *t = task_spawn_in(pml4_phys, user_task_launcher, args);
+    if (!t) {
+        /* Fixed MAX_TASKS table (sched.c) is full - task_spawn_in already
+         * reports this cleanly (NULL, not a panic - unlike out-of-memory
+         * above, a full task table is a normal, recoverable condition a
+         * caller might hit and retry from). Every caller of process_spawn
+         * (sys_spawn in syscall.c, and kernel.c's own self-tests) already
+         * treats a NULL/-1 result as an ordinary failure, so propagate
+         * cleanly instead of dereferencing NULL below - the pml4/arg-page
+         * this function allocated above are leaked on this path, but
+         * that's the table being full anyway, an already-degraded state
+         * this project doesn't otherwise try to recover resources from
+         * (see shm.h's own note on the same tradeoff). */
+        kfree(args);
+        return (task_t *)0;
+    }
     /* M19: starting points for this process's own heap (SYS_sbrk) and
      * shared-memory mapping (SYS_shm_map) regions. Safe to set after
      * task_spawn_in returns even though the task is already READY and

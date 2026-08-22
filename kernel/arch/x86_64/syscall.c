@@ -336,7 +336,7 @@ static long sys_shm_create(uint64_t size, uint64_t a2, uint64_t a3, uint64_t a4,
     (void)a4;
     (void)a5;
     (void)a6;
-    return shm_create((size_t)size);
+    return shm_create((size_t)size, sched_current()->id);
 }
 
 /* Maps segment `id` into the caller's own address space at the next free
@@ -566,6 +566,22 @@ static long sys_wait_nb(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4,
     return t->exit_code;
 }
 
+/* Voluntary cooperative yield - see SYS_yield's comment in
+ * system_api/include/syscall.h for why the GUI stack needs this. Just
+ * forces an immediate reschedule the same way scheduler_tick_cpu does at
+ * the end of a real time slice, except on the caller's own request
+ * rather than the PIT's. */
+static long sys_yield(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    schedule();
+    return 0;
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -590,6 +606,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_uptime_ms] = sys_uptime_ms,
     [SYS_dup2] = sys_dup2,
     [SYS_wait_nb] = sys_wait_nb,
+    [SYS_yield] = sys_yield,
 };
 
 void syscall_handler(isr_regs_t *regs) {
