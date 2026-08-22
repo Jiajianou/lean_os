@@ -32,6 +32,8 @@ typedef struct __attribute__((packed)) {
     gdt_entry_t      kernel_code;
     gdt_entry_t      kernel_data;
     tss_descriptor_t tss;
+    gdt_entry_t      user_code;
+    gdt_entry_t      user_data;
 } gdt_table_t;
 
 typedef struct __attribute__((packed)) {
@@ -39,10 +41,12 @@ typedef struct __attribute__((packed)) {
     uint64_t base;
 } table_ptr_t;
 
-/* x86_64 TSS: only the RSP0/IST slots matter without ring 3 tasks yet
- * (M9). IST1 gives the double-fault handler its own known-good stack, so
- * a fault caused by a corrupt/overflowed kernel stack doesn't turn into a
- * silent triple fault when the CPU tries to push the exception frame. */
+/* x86_64 TSS: only the RSP0/IST slots are used. IST1 gives the
+ * double-fault handler its own known-good stack, so a fault caused by a
+ * corrupt/overflowed kernel stack doesn't turn into a silent triple fault
+ * when the CPU tries to push the exception frame. RSP0 is the stack the
+ * CPU switches to on any ring3->ring0 transition (M9) - see
+ * tss_set_rsp0, updated per-task by the scheduler. */
 typedef struct __attribute__((packed)) {
     uint32_t reserved0;
     uint64_t rsp0, rsp1, rsp2;
@@ -56,6 +60,8 @@ typedef struct __attribute__((packed)) {
 #define GDT_ACCESS_KERNEL_CODE 0x9A /* present, ring0, code, exec/read */
 #define GDT_ACCESS_KERNEL_DATA 0x92 /* present, ring0, data, read/write */
 #define GDT_ACCESS_TSS         0x89 /* present, ring0, 64-bit TSS (available) */
+#define GDT_ACCESS_USER_CODE   0xFA /* present, ring3, code, exec/read */
+#define GDT_ACCESS_USER_DATA   0xF2 /* present, ring3, data, read/write */
 #define GDT_GRAN_LONG_MODE     0x20 /* L bit: 64-bit code segment */
 
 #define DOUBLE_FAULT_STACK_SIZE 4096
@@ -99,10 +105,16 @@ void gdt_init(void) {
     gdt_set_entry(&gdt.kernel_code, GDT_ACCESS_KERNEL_CODE, GDT_GRAN_LONG_MODE);
     gdt_set_entry(&gdt.kernel_data, GDT_ACCESS_KERNEL_DATA, 0);
     tss_set_descriptor(&gdt.tss, (uint64_t)&tss, sizeof(tss_t) - 1);
+    gdt_set_entry(&gdt.user_code, GDT_ACCESS_USER_CODE, GDT_GRAN_LONG_MODE);
+    gdt_set_entry(&gdt.user_data, GDT_ACCESS_USER_DATA, 0);
 
     gdtp.limit = sizeof(gdt_table_t) - 1;
     gdtp.base = (uint64_t)&gdt;
 
     gdt_flush(&gdtp);
     tss_flush(GDT_TSS_SEL);
+}
+
+void tss_set_rsp0(uint64_t rsp0) {
+    tss.rsp0 = rsp0;
 }

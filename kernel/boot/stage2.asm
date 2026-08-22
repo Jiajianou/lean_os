@@ -61,12 +61,18 @@ MAX_SECTORS_PER_READ    equ 64        ; conservative per-call chunk size
 %ifndef KERNEL_SECTOR_COUNT
 %define KERNEL_SECTOR_COUNT 32
 %endif
-; The scratch buffer is one real-mode segment (64 KiB) with no bounds
-; growth logic beyond a single segment bump — see load_kernel. 128
-; sectors (64 KiB) is the hard ceiling until that's revisited (naturally
-; around when the kernel outgrows it — see milestones.md).
-%if KERNEL_SECTOR_COUNT > 128
-%error "kernel.bin exceeds the 64 KiB stage2 scratch-buffer loader; extend load_kernel before growing further"
+; load_kernel's segment-bumping loop (below) already handles a scratch
+; buffer spanning many 64 KiB real-mode segments correctly - cur_segment
+; just keeps advancing every time cur_offset overflows, all the way up to
+; just past the 1 MiB mark where 16-bit segment arithmetic itself would
+; start to wrap. The real ceiling on kernel size isn't that loop, it's
+; that the kernel has to stay clear of leanfs's on-disk region (M12),
+; which starts at sector 2048 (kernel/fs/leanfs.c's LEANFS_START_LBA,
+; mirrored in the top-level Makefile's FS_START_LBA and enforced there
+; too, at final-image-build time, using the *actual* built size rather
+; than this compile-time guard's necessarily-conservative constant).
+%if KERNEL_SECTOR_COUNT > 2048
+%error "kernel.bin has grown into leanfs's on-disk region (LBA 2048) - see FS_START_LBA in the top-level Makefile"
 %endif
 
 VGA_BASE          equ 0xB8000

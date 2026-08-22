@@ -22,6 +22,16 @@ typedef struct __attribute__((packed)) {
 
 extern uint64_t isr_stub_table[32];
 extern uint64_t irq_stub_table[16];
+extern uint64_t syscall_stub_addr; /* vector 0x80's stub - installed separately, see idt.c */
+
+typedef void (*irq_handler_fn)(isr_regs_t *regs);
 
 void isr_handler(isr_regs_t *regs);
 void irq_handler(isr_regs_t *regs);
+
+/* Registers a C handler for a remapped IRQ line (0-15, i.e. vectors
+ * 32-47). irq_handler dispatches to it and still sends the PIC EOI
+ * afterward either way - drivers don't need to (and shouldn't) send
+ * their own. Line still has to be unmasked separately via
+ * pic_clear_mask(). */
+void irq_register_handler(uint8_t irq, irq_handler_fn handler);

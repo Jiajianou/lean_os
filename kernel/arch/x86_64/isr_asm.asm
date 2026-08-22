@@ -17,6 +17,7 @@ bits 64
 
 extern isr_handler
 extern irq_handler
+extern syscall_handler
 
 %macro ISR_NOERR 1
 isr%1:
@@ -90,6 +91,16 @@ IRQ 13, 45
 IRQ 14, 46
 IRQ 15, 47
 
+; Dedicated software-interrupt gate for syscalls (M8) - not a CPU
+; exception or a PIC IRQ, so it gets its own stub and common path rather
+; than reusing isr_common_stub/irq_common_stub, whose C dispatchers mean
+; something different ("unhandled -> panic", "unhandled -> EOI+ignore").
+; `int 0x80` pushes no error code, same as any ISR_NOERR vector.
+isr128:
+    push qword 0
+    push qword 0x80
+    jmp syscall_common_stub
+
 %macro SAVE_REGS 0
     push rax
     push rbx
@@ -142,8 +153,19 @@ irq_common_stub:
     add rsp, 16
     iretq
 
+; syscall_handler sets regs->rax to the return value before returning;
+; RESTORE_REGS pops rax last, so that value is what the caller sees in
+; RAX once this iretq's done - no separate return-value plumbing needed.
+syscall_common_stub:
+    SAVE_REGS
+    mov rdi, rsp
+    call syscall_handler
+    RESTORE_REGS
+    add rsp, 16
+    iretq
+
 ; Address tables idt.c installs into the IDT - keeps idt.c from needing
-; 48 individual extern declarations.
+; 48+ individual extern declarations.
 section .rodata
 
 global isr_stub_table
@@ -157,3 +179,7 @@ global irq_stub_table
 irq_stub_table:
     dq irq0, irq1, irq2,  irq3,  irq4,  irq5,  irq6,  irq7
     dq irq8, irq9, irq10, irq11, irq12, irq13, irq14, irq15
+
+global syscall_stub_addr
+syscall_stub_addr:
+    dq isr128
