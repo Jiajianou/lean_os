@@ -361,13 +361,51 @@ runtime dependency).
 - [x] `docs/flow.md` rewritten to walk through the UEFI boot flow in place
       of the removed BIOS stage1/stage2 deep-dive
 
+## M27 — Networking stack + NIC driver ✅
+
+- [x] `kernel/drivers/pci.h/.c`: brute-force PCI config-space enumeration
+      (bus/slot/function, port 0xCF8/0xCFC) - just enough to find a device
+      by vendor/device ID, read its I/O-mapped BAR0, and enable bus
+      mastering + I/O space. No bridge walking, capability lists, or
+      memory-mapped BARs - one device (the NIC below) is all this kernel
+      has ever needed to find.
+- [x] `kernel/drivers/rtl8139.h/.c`: RTL8139 Fast Ethernet driver (QEMU's
+      `-device rtl8139`) - chosen over e1000/virtio-net as the smallest
+      real register interface of the three (one I/O BAR, a fixed 8K RX
+      ring the NIC DMAs into directly, 4 fixed TX descriptor slots, no
+      descriptor-ring bookkeeping). PCI interrupt line hooks into the
+      existing PIC-based `irq_register_handler` infra (M6) unchanged - a
+      legacy `pc`-machine NIC's routed IRQ is just another PIC line, SMP's
+      LAPIC/IOAPIC bring-up notwithstanding. `kernel/mm/pmm.h/.c` gained
+      `pmm_alloc_contiguous`/`pmm_free_contiguous` for the RX ring's
+      physically-contiguous DMA buffer - the single-frame allocator alone
+      can't promise that.
+- [x] `kernel/net/{ethernet,arp,ip,icmp,net}.h/.c`: Ethernet II framing,
+      RFC 826 ARP (request/reply, small fixed cache, opportunistic
+      learning from any received ARP or IP packet), minimal IPv4 (no
+      fragmentation, on-link-vs-gateway next-hop resolution, standard
+      Internet checksum), and ICMP echo request/reply in both directions.
+      Static IP config (10.0.2.15/10.0.2.2, matching QEMU usermode
+      networking's fixed DHCP lease and gateway) rather than a DHCP client -
+      out of scope for "driver + ARP + ICMP", and the only network this
+      kernel actually boots on.
+- [x] `tools/run-qemu.sh` / `tools/qemu-serial-test.sh`: both now attach
+      `-netdev user -device rtl8139` - QEMU's built-in SLIRP NAT, no root/
+      tap setup required.
+- [x] Boot self-test (`kernel/kernel.c`, after the SMP self-test): sends a
+      real ICMP echo request to the gateway and blocks on a matching reply
+      arriving asynchronously via the RX IRQ handler - proves NIC TX/RX,
+      PCI IRQ routing, ARP resolution, and ICMP matching all work against
+      a real peer (SLIRP), not a kernel-side loopback stand-in. Verified
+      passing twice in a row via `tools/qemu-serial-test.sh`.
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support
 - [x] UEFI boot path as an alternative to BIOS (M24, above; BIOS itself
       later removed in M26, leaving UEFI as the only path)
 - [x] Package/build tooling for third-party user programs (M25, above)
-- [ ] Networking stack + NIC driver
+- [x] Networking stack + NIC driver (M27, above)
 - [ ] Port to real hardware (USB boot test)
 
 ---

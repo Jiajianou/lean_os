@@ -1,8 +1,10 @@
 /* kernel/arch/x86_64/io.h
  *
  * Port I/O helpers shared by anything that talks to legacy PC hardware
- * (PIC, PIT, serial, PS/2, and now (M12) ATA PIO, which transfers its
- * 512-byte sectors 16 bits at a time through one data port).
+ * (PIC, PIT, serial, PS/2, ATA PIO which transfers its 512-byte sectors
+ * 16 bits at a time through one data port, and now (stretch goal:
+ * networking) PCI config space and the RTL8139 NIC, both of which are
+ * 32-bit-register hardware).
  */
 #pragma once
 
@@ -25,6 +27,16 @@ static inline void outw(uint16_t port, uint16_t val) {
 static inline uint16_t inw(uint16_t port) {
     uint16_t ret;
     __asm__ volatile("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+static inline void outl(uint16_t port, uint32_t val) {
+    __asm__ volatile("outl %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static inline uint32_t inl(uint16_t port) {
+    uint32_t ret;
+    __asm__ volatile("inl %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
 }
 

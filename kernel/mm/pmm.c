@@ -140,3 +140,55 @@ void pmm_free_frame(uint64_t phys_addr) {
     }
     spin_unlock(&pmm_lock);
 }
+
+/* Scans from the very start of the bitmap rather than search_hint: unlike
+ * pmm_alloc_frame's single-page case, a multi-frame *contiguous* run can
+ * exist entirely below search_hint (freed single frames scattered there
+ * don't advance it), and this is only ever called a handful of times at
+ * driver init, not on any hot path, so the extra scan cost doesn't matter. */
+uint64_t pmm_alloc_contiguous(uint64_t count) {
+    spin_lock(&pmm_lock);
+    uint64_t run_start = 0;
+    uint64_t run_len = 0;
+    for (uint64_t f = 0; f < total_frames; f++) {
+        if (!bitmap_test(f)) {
+            if (run_len == 0) {
+                run_start = f;
+            }
+            run_len++;
+            if (run_len == count) {
+                for (uint64_t i = 0; i < count; i++) {
+                    bitmap_set(run_start + i);
+                }
+                free_frames -= count;
+                if (run_start <= search_hint && search_hint < run_start + count) {
+                    search_hint = run_start + count;
+                }
+                spin_unlock(&pmm_lock);
+                return run_start * PAGE_SIZE;
+            }
+        } else {
+            run_len = 0;
+        }
+    }
+    panic("pmm_alloc_contiguous: no contiguous run of that size found");
+}
+
+void pmm_free_contiguous(uint64_t phys_addr, uint64_t count) {
+    spin_lock(&pmm_lock);
+    uint64_t first = phys_addr / PAGE_SIZE;
+    if (first + count > total_frames) {
+        panic("pmm_free_contiguous: invalid range");
+    }
+    for (uint64_t f = first; f < first + count; f++) {
+        if (!bitmap_test(f)) {
+            panic("pmm_free_contiguous: double-free or invalid frame");
+        }
+        bitmap_clear(f);
+        free_frames++;
+    }
+    if (first < search_hint) {
+        search_hint = first;
+    }
+    spin_unlock(&pmm_lock);
+}

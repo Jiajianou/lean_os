@@ -26,7 +26,12 @@ fi
 # template every other invocation depends on staying pristine.
 cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 
+# -netdev user is QEMU's built-in SLIRP NAT - no root/tap setup needed.
+# It always hands the guest 10.0.2.15 and answers as gateway 10.0.2.2
+# itself, the two addresses kernel/net/net.h hardcodes (no DHCP client -
+# see its header comment).
 qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
-  -drive format=raw,file="$IMAGE"
+  -drive format=raw,file="$IMAGE" \
+  -netdev user,id=net0 -device rtl8139,netdev=net0

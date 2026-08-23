@@ -20,6 +20,8 @@
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "net/icmp.h"
+#include "net/net.h"
 #include "panic.h"
 #include "proc/proc.h"
 #include "sched/sched.h"
@@ -970,6 +972,48 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             do_syscall(SYS_wait, (uint64_t)probe_tasks[i]->id, 0, 0);
         }
         klog_puts("[smp] self-test passed.\n\n");
+    }
+
+    /* Stretch goal: networking. rtl8139_init() (via net_init) panics if no
+     * NIC is attached at all, same as every other driver's init in this
+     * kernel - but tools/run-qemu.sh and tools/qemu-serial-test.sh always
+     * attach one (`-netdev user -device rtl8139`) precisely so this is
+     * true of every boot, not just an opt-in one.
+     *
+     * Self-test: a real ICMP echo request/reply round trip against QEMU's
+     * usermode-networking gateway (10.0.2.2, net.h's NET_GATEWAY_IP) -
+     * exercises the whole stack end to end (NIC TX/RX, ARP resolution via
+     * ip_send's neighbor lookup, ICMP request/reply matching) against a
+     * real peer, not a kernel-side loopback stand-in, the same "prove it
+     * against something real" discipline as M20's compositor self-test
+     * spawning an actual client process instead of asserting compositor.c
+     * internals directly. Chosen over pinging an arbitrary Internet host
+     * because SLIRP (QEMU's usermode net backend) always answers ARP/ICMP
+     * for its own gateway address itself - no dependency on this
+     * environment actually having outbound internet access. */
+    {
+        net_init();
+
+        uint8_t ping_payload[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+        uint16_t ping_id = 0x1EA5;
+        uint16_t ping_seq = 1;
+        icmp_send_echo_request(NET_GATEWAY_IP, ping_id, ping_seq, ping_payload, sizeof(ping_payload));
+
+        int got_reply = 0;
+        uint64_t deadline = pit_get_ticks() + 3 * PIT_HZ;
+        while (pit_get_ticks() < deadline) {
+            if (icmp_echo_reply_seen(ping_id, ping_seq)) {
+                got_reply = 1;
+                break;
+            }
+            __asm__ volatile("hlt");
+        }
+        if (!got_reply) {
+            panic("net self-test: no ICMP echo reply from the gateway within 3s");
+        }
+        klog_puts("[net] ICMP echo request/reply self-test passed (ping to gateway 0x");
+        klog_put_hex32(NET_GATEWAY_IP);
+        klog_puts(" round-tripped).\n\n");
     }
 
     /* M13: hand off to init (PID 1), which spawns the shell - this is

@@ -21,3 +21,12 @@
 void pmm_init(const uint32_t *e820_map);
 uint64_t pmm_alloc_frame(void);
 void pmm_free_frame(uint64_t phys_addr);
+
+/* Allocates `count` physically *contiguous* frames, returning the base
+ * address of the run - pmm_alloc_frame alone can't guarantee that, and
+ * hardware DMA rings (the RTL8139 NIC driver's receive buffer) are
+ * described by a single base address plus a length, not a scatter list.
+ * Frees as a block via pmm_free_contiguous, not `count` separate
+ * pmm_free_frame calls. */
+uint64_t pmm_alloc_contiguous(uint64_t count);
+void pmm_free_contiguous(uint64_t phys_addr, uint64_t count);

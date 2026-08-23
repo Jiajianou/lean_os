@@ -31,10 +31,14 @@ fi
 
 cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 
+# -netdev user: see tools/run-qemu.sh's comment - needed here too since
+# the boot self-test (kernel/kernel.c) pings the gateway and would panic
+# without a NIC attached at all.
 qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
   -drive format=raw,file="$IMAGE" -display none \
+  -netdev user,id=net0 -device rtl8139,netdev=net0 \
   -serial file:"$LOG" -monitor none ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} &
 QEMU_PID=$!
 disown "$QEMU_PID" 2>/dev/null || true
