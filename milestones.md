@@ -975,6 +975,115 @@ didn't also take on.
       `tools/qemu-serial-test.sh`: 24/24 required boot markers, no
       panic
 
+## M39 — Sharper system text everywhere ✅
+
+The premise this milestone started from, found while scoping it: the
+reason text looked soft across this OS was never the renderer, it was
+the glyphs. Every text path in the project - `console.c`'s kernel
+console, `gfx_draw_char`, and `compositor.c`'s own `draw_char_clipped` -
+was already a correct, exact 1:1 blit of one byte-per-row bitmap onto a
+pixel grid. No scaling, no resampling, no filtering anywhere in that
+path that *could* blur anything. What all three were faithfully
+blitting was a malformed `font8x16[128][16]`: 'A' had no clean apex and
+two stems of different weights, 'o' was a lopsided ring with stray
+pixels above and below, 'i' and '1' each carried a doubled two-row
+baseline bar no other glyph had, and - the one that dominated
+everything else - glyphs routinely used all 8 columns of their cell, so
+adjacent letters physically touched. Fixing the table fixed text in
+every one of those places at once, with no change to any drawing code.
+That's what made "everywhere" one milestone instead of a per-app sweep.
+
+- [x] Re-authored all 95 printable glyphs (0x20-0x7E) on one enforced
+      metric: shared baseline (row 11), shared cap line (row 2), shared
+      x-height line (row 5), shared descender row (row 14), uniform 2px
+      stems. The old table held none of these consistently - glyphs
+      started and ended on whatever row they happened to, which is why a
+      line of text read as visually noisy even though each glyph was
+      blitted perfectly
+- [x] **Column 7 of every cell is now reserved blank** - the single
+      biggest legibility win, and not part of the original plan. It
+      turned out the old font had no inter-character gap at all: text
+      drawing advances exactly `FONT_WIDTH` with no tracking of its own,
+      so the gap has to live *inside* the cell, and glyphs that used
+      column 7 simply collided with the next letter. Restricting every
+      glyph to columns 0-6 gives uniform 1px letter spacing everywhere
+      for free
+- [x] Both copies generated from one source. `tools/gen-font.c` is a
+      *host* program (ordinary libc, built with `$(HOSTCC)`, never runs
+      as part of the OS - the same arrangement `tools/leanfs-put.c`
+      already used) holding the glyph art plus the metric checks, and
+      emitting all four files. The duplication itself is unchanged and
+      unavoidable (a user program still can't link against the kernel
+      image); what's gone is the hand-sync. Worth restating: the two
+      tables were verified in sync *before* this milestone changed
+      anything - byte-identical glyph data - so this prevented a
+      divergence rather than repairing one
+- [x] `make font-check` wired into the build via a stamp file both
+      `font8x16.o` objects depend on, so neither can compile while a
+      checked-in table disagrees with the generator. Verified by
+      hand-editing a byte and confirming the build fails with a pointed
+      message rather than silently shipping. A stamp rather than a
+      `.PHONY` prerequisite so this stays incremental and doesn't
+      relink the kernel on every build
+- [x] Real generated bold weight replacing M38's runtime faux-bold.
+      M38's `bits | (bits >> 1)` thickened rightward *within the byte*,
+      so ink already in column 7 shifted off the end and was silently
+      dropped - the old 'A', whose bottom rows were `0xE7`, lost its
+      thickening on exactly the stem that most needed it. With column 7
+      now reserved, that same one-column dilation is lossless, so
+      `font8x16_bold` is generated once by `gen-font.c` and
+      `draw_char_clipped` became a table lookup instead of per-pixel
+      arithmetic on every redraw. Deviation from the plan, stated
+      plainly: this is a generated dilation, not a separately
+      hand-drawn second weight - the reserved column is what makes it
+      correct, and hand-authoring 95 more glyphs bought nothing on top
+      of that
+- [x] Scope trim held as planned: no anti-aliasing. It's the obvious
+      thing to reach for under "sharper" and it's the wrong tool at
+      this size - it trades edge contrast for perceived smoothness,
+      which on an 8px-wide cell means blurrier text, not sharper. It
+      would also need a higher-resolution glyph source to downsample
+      from (8x16 bitmaps carry no sub-pixel information to recover).
+      Crisp, hinted bitmaps aligned to the pixel grid are the correct
+      answer for a fixed-size bitmap font
+- [x] Scope trim held as planned: no scalable/multi-size text. Every
+      consumer hardcodes `FONT_WIDTH`/`FONT_HEIGHT` for layout
+      (`console.c` derives `cols`/`rows` from them, `gfx_draw_button`
+      centers labels with them, `gui_terminal.c`'s fixed
+      `grid[ROWS][COLS]` is sized by them), so a second size is a
+      layout-system change across ~9 files, not a font change
+- [x] Two pre-existing self-tests needed re-aiming, which is worth
+      recording rather than burying: M21's and M22's pixel checks each
+      probe a specific pixel *inside* a caption glyph ('C' in
+      "CLOCK"/"Clock", 'P' in "PAINT"), and those coordinates are
+      coupled to the letterform by construction. Re-authoring 'C' and
+      'P' inverted them - the probes now sit on the left stem (ink) and
+      the bowl interior (background) of the new shapes. Not a
+      regression in either test, and their neighbouring probes
+      deliberately sample flat fills for exactly this reason
+- [x] New self-test `[font39]`, and unlike every GUI-facing milestone
+      since M18 it needs no manual/interactive caveat - glyph geometry
+      is exact data, not a mouse hover or a "does it look bold"
+      judgement call. Two halves. The table half proves what actually
+      shipped inside the kernel image is what `gen-font.c`'s checks
+      passed on (column 7 clear in all 128 entries, every printable
+      codepoint non-blank, control codes blank, `font8x16_bold` exactly
+      the lossless dilation). The rendered half draws "Axg" through the
+      real console blit path and reads it back out of the framebuffer:
+      'A' must start on the cap line, 'x' on the x-height line, both
+      must land on the same baseline, 'g' must reach the descender row,
+      and column 7 of all three cells must stay background - M39's
+      whole premise measured in real pixels rather than asserted.
+      Confirmed non-vacuous by deliberately lifting 'x' one row off the
+      baseline and watching it panic with `expected 0000000B got
+      0000000A`
+- [x] Verified via `tools/qemu-serial-test.sh`: 25/25 required boot
+      markers, no panic. Also confirmed visually with a QEMU
+      screendump of the booted desktop - the icon labels
+      (Terminal/Editor/Files/Settings/Clock/Paint) now sit on one
+      baseline with even spacing, where the old font ran them together
+      into a single connected mass
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support

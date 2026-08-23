@@ -76,6 +76,7 @@ REQUIRED_MARKERS=(
   "[vmm] map/unmap self-test passed."
   "[heap] kmalloc/kfree self-test passed."
   "[fb] framebuffer clear/fill/readback self-test passed."
+  "[font39] glyph table + shared-baseline render self-test passed."
   "[sched] back on the main task - preemption round trip verified."
   "[syscall] SYS_exit self-test task ran and terminated."
   "[pipe] kernel-level producer/consumer self-test passed."

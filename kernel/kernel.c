@@ -8,6 +8,7 @@
 #include "drivers/console.h"
 #include "drivers/cursor.h"
 #include "drivers/fb.h"
+#include "drivers/font8x16.h" /* M39 self-test reads the glyph tables and the shared metric directly */
 #include "drivers/keyboard.h"
 #include "drivers/klog.h"
 #include "drivers/mouse.h"
@@ -317,6 +318,157 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
      * first; serial output (tools/qemu-serial-test.sh) is unaffected
      * either way. */
     console_init();
+
+    /* M39 self-test: unlike almost every GUI-facing milestone since M18,
+     * this one is fully checkable headlessly - glyph geometry is exact
+     * data, not a mouse hover or a "does it look bold" judgement call.
+     * Two halves:
+     *
+     *   1. The table itself. gen-font.c already enforces M39's shared
+     *      metric at generation time, but that's a host program that
+     *      never boots; this proves the table that actually shipped
+     *      inside the kernel image is the one those checks passed on -
+     *      column 7 reserved blank everywhere, every printable
+     *      codepoint present, control codes blank, and font8x16_bold
+     *      exactly the lossless one-column dilation compositor.c now
+     *      looks up instead of recomputing per pixel.
+     *   2. The rendered result. "Axg" through the real console blit
+     *      path, read back out of the framebuffer: 'A' must start on
+     *      the cap line, 'x' on the x-height line, both must sit on the
+     *      same baseline, 'g' must reach the descender row, and column
+     *      7 of all three cells must stay background. That is M39's
+     *      whole premise - text on one shared baseline with uniform
+     *      spacing - measured in real pixels rather than asserted.
+     *
+     * Runs after console_init() (so the framebuffer holds a cleared
+     * console with the cursor at 0,0) but before klog_use_console(), so
+     * the screen this reads back is exactly what it drew and nothing
+     * else. It re-inits the console afterward to hand a clean screen to
+     * the logging that follows. */
+    {
+        int all_ok = 1;
+
+        for (int code = 0; code < 128 && all_ok; code++) {
+            for (int row = 0; row < FONT_HEIGHT; row++) {
+                if (font8x16[code][row] & 0x01u) {
+                    klog_puts("[font39] glyph 0x");
+                    klog_put_hex32((uint32_t)code);
+                    klog_puts(" has ink in column 7, the reserved advance gap.\n");
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+
+        for (int code = 0x21; code <= 0x7E && all_ok; code++) {
+            int blank = 1;
+            for (int row = 0; row < FONT_HEIGHT; row++) {
+                if (font8x16[code][row]) {
+                    blank = 0;
+                    break;
+                }
+            }
+            if (blank) {
+                klog_puts("[font39] printable codepoint 0x");
+                klog_put_hex32((uint32_t)code);
+                klog_puts(" is blank - the table is incomplete.\n");
+                all_ok = 0;
+            }
+        }
+
+        for (int code = 0; code < 128 && all_ok; code++) {
+            if (code > 0x20 && code < 0x7F) {
+                continue; /* printable, checked non-blank above */
+            }
+            for (int row = 0; row < FONT_HEIGHT; row++) {
+                if (font8x16[code][row]) {
+                    klog_puts("[font39] non-printable codepoint 0x");
+                    klog_put_hex32((uint32_t)code);
+                    klog_puts(" should be blank but isn't.\n");
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+
+        /* Lossless bold: with column 7 reserved (proved above), nothing
+         * can shift off the end, so the dilation is exactly reversible
+         * in the sense that matters - no ink is dropped. M38's runtime
+         * smear had no such guarantee. */
+        for (int code = 0; code < 128 && all_ok; code++) {
+            for (int row = 0; row < FONT_HEIGHT; row++) {
+                uint8_t bits = font8x16[code][row];
+                if (font8x16_bold[code][row] != (uint8_t)(bits | (bits >> 1))) {
+                    klog_puts("[font39] font8x16_bold disagrees with the dilation of font8x16 at 0x");
+                    klog_put_hex32((uint32_t)code);
+                    klog_putc('\n');
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+
+        if (all_ok) {
+            /* Cell 0 row 0 is blank in every glyph (nothing reaches
+             * above FONT_CAP_TOP), so this samples the console's own
+             * background without needing console.c's private constant. */
+            console_puts("Axg");
+            uint32_t bg = fb_get_pixel(0, 0);
+
+            /* top/bottom lit row per cell, and whether column 7 stayed clear */
+            int top[3], bot[3], gap_clear[3];
+            for (int cell = 0; cell < 3; cell++) {
+                top[cell] = -1;
+                bot[cell] = -1;
+                gap_clear[cell] = 1;
+                for (int y = 0; y < FONT_HEIGHT; y++) {
+                    for (int x = 0; x < FONT_WIDTH; x++) {
+                        if (fb_get_pixel((uint32_t)(cell * FONT_WIDTH + x), (uint32_t)y) != bg) {
+                            if (top[cell] < 0) {
+                                top[cell] = y;
+                            }
+                            bot[cell] = y;
+                            if (x == FONT_WIDTH - 1) {
+                                gap_clear[cell] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+
+            struct { const char *what; int got; int want; } checks[] = {
+                { "'A' does not start on the shared cap line",        top[0], FONT_CAP_TOP },
+                { "'A' does not sit on the shared baseline",          bot[0], FONT_BASELINE - 1 },
+                { "'x' does not start on the shared x-height line",   top[1], FONT_X_TOP },
+                { "'x' does not sit on the shared baseline",          bot[1], FONT_BASELINE - 1 },
+                { "'g' does not start on the shared x-height line",   top[2], FONT_X_TOP },
+                { "'g' does not reach the shared descender row",      bot[2], FONT_DESC_LAST },
+                { "'A' drew into its advance gap (column 7)",         gap_clear[0], 1 },
+                { "'x' drew into its advance gap (column 7)",         gap_clear[1], 1 },
+                { "'g' drew into its advance gap (column 7)",         gap_clear[2], 1 },
+            };
+            for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
+                if (checks[i].got != checks[i].want) {
+                    klog_puts("[font39] rendered-pixel check failed: ");
+                    klog_puts(checks[i].what);
+                    klog_puts(" - expected ");
+                    klog_put_hex32((uint32_t)checks[i].want);
+                    klog_puts(" got ");
+                    klog_put_hex32((uint32_t)checks[i].got);
+                    klog_putc('\n');
+                    all_ok = 0;
+                }
+            }
+
+            console_init(); /* clear the sample text back off the screen */
+        }
+
+        if (!all_ok) {
+            panic("M39 font self-test: glyph table and/or rendered text metric is wrong");
+        }
+        klog_puts("[font39] glyph table + shared-baseline render self-test passed.\n\n");
+    }
+
     klog_use_console();
     klog_puts("[console] framebuffer text console active - logging switched over from VGA text mode.\n\n");
 
@@ -773,14 +925,22 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             {150, 90,  0x00335577u, "clock titlebar color (unfocused)"},
             {98,  150, 0x00444466u, "clock compositor border color"},
             {105, 105, 0x00122438u, "clock content background color"},
-            {110, 115, 0x00122438u, "clock caption 'C' glyph - off pixel"},
-            {112, 115, 0x00FFFFFFu, "clock caption 'C' glyph - on pixel"},
+            /* M39 moved these two: probing a pixel *inside* a glyph is
+             * inherently coupled to that glyph's bitmap, and re-authoring
+             * the font changed which columns of 'C' are ink. Same cell
+             * (window 0 at 100,100 + gui_clock's local 10,10), same row 5
+             * of the glyph, columns picked off the new letterform: the
+             * left stem is ink, the bowl's interior isn't. */
+            {110, 115, 0x00FFFFFFu, "clock caption 'C' glyph - on pixel (left stem)"},
+            {113, 115, 0x00122438u, "clock caption 'C' glyph - off pixel (bowl interior)"},
             /* gui_paint (window 1, focused): */
             {200, 130, 0x004C99E6u, "paint titlebar color (focused)"},
             {140, 190, 0x0088AA55u, "paint's own border frame color"},
             {150, 240, 0x00202020u, "paint canvas background color"},
-            {150, 151, 0x00202020u, "paint caption 'P' glyph - off pixel"},
-            {151, 151, 0x00FFFFFFu, "paint caption 'P' glyph - on pixel"},
+            /* Same M39 re-aim as the clock caption above (window 1 at
+             * 140,140 + gui_paint's local 10,6). */
+            {150, 151, 0x00FFFFFFu, "paint caption 'P' glyph - on pixel (left stem)"},
+            {153, 151, 0x00202020u, "paint caption 'P' glyph - off pixel (bowl interior)"},
             {240, 164, 0x0088AA55u, "paint separator line color"},
             /* desktop, unoccupied by either window: */
             {500, 500, 0x001A1A2Eu, "desktop background color"},
@@ -862,15 +1022,19 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
          * window, focused), left-aligned at local (4,4) 96x24 - the
          * taskbar's only row now that the launcher is gone. Its label is
          * gui_clock's own title, "Clock" - glyph math below is for 'C'
-         * (font8x16.c's row 5: 0x3E = 00111110, so column 0 is off and
-         * column 2 is on within that row). Coordinates below are absolute
+         * (M39's font8x16.c row 5: 0xC0 = 11000000, the left stem - so
+         * column 0 is ink and the bowl's interior at column 3 isn't.
+         * These two flipped when M39 re-authored the glyphs; probing a
+         * pixel inside a letterform is coupled to that letterform by
+         * construction, which is exactly why the two neighbours here
+         * deliberately sample flat fills instead). Coordinates below are absolute
          * (panel-local + the panel's own (0,736) origin) - see
          * milestones.md's M22 entry for the glyph-bitmap method this
          * follows, same one M21's own pixel checks already proved out. */
         static const struct { uint32_t x, y; uint32_t expected; const char *what; } checks[] = {
             {44, 742, 0x002E4A63u, "running slot 0 background (focused)"},
-            {6,  749, 0x002E4A63u, "running slot 0 'C' glyph - off pixel"},
-            {8,  749, 0x00FFFFFFu, "running slot 0 'C' glyph - on pixel"},
+            {6,  749, 0x00FFFFFFu, "running slot 0 'C' glyph - on pixel (left stem)"},
+            {9,  749, 0x002E4A63u, "running slot 0 'C' glyph - off pixel (bowl interior)"},
             {500, 738, 0x00181828u, "panel background (margin strip above the slot row, y=2 - never overdrawn by any slot regardless of window count)"},
             {500, 500, 0x001A1A2Eu, "desktop background color, above the panel"},
         };

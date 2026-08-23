@@ -360,23 +360,24 @@ static void draw_titlebar_buttons(const window_t *win) {
  * gfx.c's primitives only clip to a ctx's own 0..width/height, with no
  * idea this file's clip_x0..clip_y1 partial-redraw rect exists, and
  * title text (drawn on every window, every full redraw) is exactly the
- * kind of per-pixel work that rect exists to bound. bold synthesizes a
- * second weight from the one 8x16 bitmap font this project has (no
- * floating point anywhere in this toolchain - see gfx.h's own note - so
- * "OR each row with itself shifted one pixel right" is the cheap,
- * integer-only way to get a second weight out of one glyph table
- * instead of hand-authoring a whole second one). */
+ * kind of per-pixel work that rect exists to bound.
+ *
+ * M39: bold is now a lookup into the generated font8x16_bold table
+ * rather than the `bits | (bits >> 1)` this did per-pixel at draw time.
+ * Same one-column dilation, but done once in tools/gen-font.c and - the
+ * actual fix - lossless: the old smear thickened rightward *inside the
+ * byte*, so any glyph with ink already in column 7 had that column
+ * silently dropped instead of thickened. Every glyph now leaves column
+ * 7 blank as a reserved advance gap (font8x16.h's FONT_GLYPH_COLS, which
+ * gen-font.c enforces), so there is nothing left to fall off the end. */
 static void draw_char_clipped(int32_t x, int32_t y, char c, uint32_t color, int bold) {
     uint8_t code = (uint8_t)c;
     if (code >= 128) {
         return;
     }
-    const uint8_t *glyph = font8x16[code];
+    const uint8_t *glyph = bold ? font8x16_bold[code] : font8x16[code];
     for (int32_t row = 0; row < FONT_HEIGHT; row++) {
         uint8_t bits = glyph[row];
-        if (bold) {
-            bits = (uint8_t)(bits | (bits >> 1));
-        }
         int32_t py = y + row;
         if (py < clip_y0 || py >= clip_y1) {
             continue;

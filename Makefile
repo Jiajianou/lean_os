@@ -37,6 +37,19 @@ KOBJ  := $(BUILD)/kernel_obj
 HOSTCC       := cc
 LEANFS_PUT   := $(BUILD)/leanfs-put
 
+# M39: a second host program, same arrangement - tools/gen-font.c holds the
+# single glyph source both copies of the 8x16 font table are generated from
+# (kernel/drivers/font8x16.{h,c} and user_space/lib/font8x16.{h,c}), plus the
+# metric checks that keep them honest. The generated files stay checked in, so
+# an ordinary build never needs to run this; what the stamp below guarantees is
+# that they can't be edited by hand - or drift apart - without the build
+# noticing. See tools/gen-font.c's header for why the duplication itself is
+# unavoidable.
+GEN_FONT     := $(BUILD)/gen-font
+FONT_STAMP   := $(BUILD)/.font-check-stamp
+FONT_FILES   := kernel/drivers/font8x16.h kernel/drivers/font8x16.c \
+                user_space/lib/font8x16.h user_space/lib/font8x16.c
+
 # -O1: added at M20 - a from-scratch software compositor doing
 # per-pixel fill_rect/blit calls at -O0 turned out genuinely too slow to
 # be usable (verified directly during M20 bring-up: a single full-screen
@@ -102,7 +115,7 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run leanfs-put preseed clean
+.PHONY: all run leanfs-put preseed font font-check clean
 
 all: $(IMAGE)
 
@@ -239,6 +252,31 @@ $(LEANFS_PUT): tools/leanfs-put.c | $(BUILD)
 	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -o $@ $<
 
 leanfs-put: $(LEANFS_PUT)
+
+$(GEN_FONT): tools/gen-font.c | $(BUILD)
+	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -o $@ $<
+
+# Regenerate the four font files from tools/gen-font.c's glyph source. The
+# only supported way to change the font - editing a generated table by hand
+# fails font-check below on the next build.
+font: $(GEN_FONT)
+	@$(GEN_FONT) --write
+
+font-check: $(GEN_FONT)
+	@$(GEN_FONT) --check
+
+# The stamp is what actually wires the check into an ordinary `make`: both
+# font8x16.o objects depend on it, so neither can be compiled while a
+# checked-in table disagrees with the generator (or with the other copy -
+# they're emitted from the same array, so matching the generator *is* the
+# byte-identity guarantee). A stamp file rather than a .PHONY prerequisite
+# so this stays incremental and doesn't relink the kernel on every build.
+$(FONT_STAMP): tools/gen-font.c $(FONT_FILES) $(GEN_FONT) | $(BUILD)
+	@$(GEN_FONT) --check
+	@touch $@
+
+$(KOBJ)/drivers/font8x16.o: $(FONT_STAMP)
+$(UOBJ)/font8x16.o: $(FONT_STAMP)
 
 # Optional, one-time-per-image step for the third-party program workflow
 # (tools/build-user-program.sh + tools/leanfs-put.c): writes every
