@@ -39,6 +39,14 @@ int wm_connect(uint32_t width, uint32_t height, const char *title, wm_window_t *
  * this. */
 int wm_connect_panel(uint32_t height, wm_window_t *out);
 
+/* M41: the screen-*top* counterpart, for the shared menu bar. `height` is
+ * the whole buffer, tall enough to paint an open dropdown into;
+ * `dock_height` is the much smaller strip every window has to stay clear
+ * of. Use wm_send_action_value(self, WM_ACTION_SET_PANEL_EXTENT, n) to
+ * change how much of the buffer is actually shown. See
+ * wm_create_request_t.panel_dock_h for why the two are separate. */
+int wm_connect_panel_top(uint32_t height, uint32_t dock_height, wm_window_t *out);
+
 /* Like wm_connect, but requests the chrome-less, full-screen, always-on-
  * *bottom* desktop background (wm_create_request_t.desktop) instead of an
  * ordinary floating window - both dimensions are the compositor's own
@@ -62,6 +70,33 @@ int wm_query_windows(wm_query_response_t *out);
 /* M22: asks the compositor to focus or toggle-minimize window_id (see
  * wm_action_type_t). Returns 0, or -1 on failure. */
 int wm_send_action(int32_t window_id, uint32_t action);
+
+/* M41: WM_ACTION_SET_PANEL_OVERHANG with its rect filled in - the one
+ * region below a panel's docked height the compositor should also show
+ * and route clicks into (a menu bar's open dropdown). A zero width or
+ * height clears it. Only a panel's own client ever calls this. */
+int wm_set_panel_overhang(int32_t window_id, int32_t x, int32_t w, int32_t h);
+
+/* M41: declare (or replace) this window's menus, for the shared top menu
+ * bar to show whenever this window is focused. Sticky - call it once at
+ * startup, or again whenever the menus themselves change. The window_id
+ * field of `menus` is ignored and filled in from `win`.
+ *
+ * A client that declares menus must also handle WM_EVENT_MENU_COMMAND on
+ * its own event pipe; nothing happens otherwise, the same "an app that
+ * doesn't implement it just doesn't respond to it" contract
+ * WM_EVENT_CLOSE_REQUEST already uses. */
+int wm_declare_menus(const wm_window_t *win, const wm_menu_set_t *menus);
+
+/* M41: what the *focused* window has declared, for the menu bar to draw.
+ * out->window_id is -1 when nothing focused has any menus (including
+ * "nothing is focused"). menu_bar.c is the only caller. */
+int wm_query_focused_menus(wm_menu_set_t *out);
+
+/* M41: the pick coming back - the compositor turns this into a
+ * WM_EVENT_MENU_COMMAND on window_id's own event pipe. menu_bar.c is the
+ * only caller. */
+int wm_send_menu_command(int32_t window_id, int32_t menu_index, int32_t item_index);
 
 /* M33/M38: sets the compositor's desktop background and focused-titlebar
  * accent colors together (system_api/include/wm.h's WM_SETTINGS_PIPE,

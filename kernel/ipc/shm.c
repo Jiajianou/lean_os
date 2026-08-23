@@ -6,7 +6,13 @@
 #include "mm/vmm.h"
 
 #define PAGE_SIZE 4096ULL
-#define MAX_SHM_SEGMENTS 16
+/* M41: 16 -> 32. One segment per window plus the compositor's own back
+ * buffer, and a segment is deliberately leaked (not freed) whenever a
+ * window slot is reused - see user_space/bin/compositor.c's
+ * reclaim_window. With MAX_WINDOWS now 12, 16 was less than two full
+ * desktops' worth, i.e. an exact-fit cap of exactly the kind M40 found
+ * silently breaking the desktop. */
+#define MAX_SHM_SEGMENTS 32
 
 typedef struct {
     int used;

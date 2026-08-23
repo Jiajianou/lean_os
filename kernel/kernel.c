@@ -50,6 +50,7 @@
     X(gui_clock)                     \
     X(gui_paint)                     \
     X(desktop_shell)                 \
+    X(menu_bar)                      \
     X(desktop_icons)                 \
     X(gui_terminal)                  \
     X(text_editor)                   \
@@ -535,7 +536,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
                "up to 3s for test movement (QEMU monitor: 'mouse_move dx dy' "
                "/ 'mouse_button val')...\n");
     int got_mouse_event = 0;
-    mouse_event_t last_ev = {0, 0, 0};
+    mouse_event_t last_ev = {0, 0, 0, 0};
     uint64_t mouse_deadline = pit_get_ticks() + 3 * PIT_HZ;
     while (pit_get_ticks() < mouse_deadline) {
         mouse_event_t ev;
@@ -1636,6 +1637,186 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
      * so entry.asm's post-kernel_main `cli` (which would permanently
      * disable interrupts, freezing the scheduler for every other task)
      * is never reached. */
+    /* M41 self-test: the shared top menu bar, end to end at the protocol
+     * level - a real menu_bar.c panel and a real text_editor.c client,
+     * with this self-test standing in for the *user* rather than for
+     * either of them. Three separate claims, checked with pixels and a
+     * protocol round trip:
+     *
+     *   1. The bar really is docked at the screen's top edge, and the
+     *      editor's own window really was placed clear of it. Before
+     *      M41 nothing docked to the top at all, and the cascade
+     *      placement started at y=100 unconditionally.
+     *   2. The menu query round-trips: asking the compositor what the
+     *      focused window's menus are comes back with the File menu
+     *      text_editor.c declared, with its four items - which is the
+     *      one genuinely new protocol this milestone adds.
+     *   3. A menu command reaches the owning client and *does something*
+     *      - here "Quit" (item 3), which text_editor's own
+     *      run_file_menu_item turns into the same clean sys_exit(1) M36's
+     *      self-test already established for an unmodified buffer. That
+     *      it exits with its own code, rather than being killed, is what
+     *      proves the pick arrived as an event the app acted on.
+     *
+     * Whether a *click at the right pixel* opens the dropdown goes
+     * through M40's input harness (tools/qemu-input-test.sh), which is
+     * exactly the split that milestone's whole point was to make
+     * possible. */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *bar_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *editor_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !bar_image || !editor_image) {
+            panic("out of memory reading compositor/menu_bar/text_editor back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t bar_size = vfs_read("menu_bar", bar_image, LEANFS_MAX_FILE_SIZE);
+        int64_t editor_size = vfs_read("text_editor", editor_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || bar_size < 0 || editor_size < 0) {
+            panic("vfs_read: compositor/menu_bar/text_editor missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+
+        task_t *bar_task = process_spawn(bar_image, (size_t)bar_size, "");
+        kfree(bar_image);
+        pit_sleep_ms(400); /* connects as window 0 (the top panel), draws its first frame */
+
+        task_t *editor_task = process_spawn(editor_image, (size_t)editor_size, "");
+        kfree(editor_image);
+        pit_sleep_ms(700); /* connects as window 1, declares its File menu, draws */
+
+        /* (1) Pixels. menu_bar.c's BAR_BG fills the whole strip; (600, 8)
+         * is inside it and clear of both the app name on the left and the
+         * clock on the right, so it can only ever read the flat bar fill.
+         * (600, 40) is just below the bar's 24px docked height, where the
+         * compositor's own desktop background must show through.
+         *
+         * The clamp itself is checked by maximizing: content_top_limit
+         * puts a maximized window's content at 24 + TITLEBAR_H(20) +
+         * BORDER(2) = 46, so its titlebar occupies y:[26, 46) and its
+         * outer border starts at exactly 24 - the bar's bottom edge,
+         * touching it and not a pixel higher. Probing at y=30 for that
+         * titlebar and at y=8 for the bar *after* maximizing checks both
+         * halves at once: the window grew to fill everything below the
+         * bar, and the bar is still on top of it. Before M41 a maximized
+         * window started at y=22 and would have covered the strip
+         * outright. */
+        const uint32_t bar_bg = 0x001E2233u; /* menu_bar.c BAR_BG */
+        uint32_t bar_pixel = fb_get_pixel(600, 8);
+        uint32_t below_bar_pixel = fb_get_pixel(600, 40);
+
+        int action_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+            panic("M41 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
+        }
+        wm_action_request_t max_req;
+        k_memset(&max_req, 0, sizeof(max_req));
+        max_req.window_id = 1; /* the editor - the bar took window 0 */
+        max_req.action = WM_ACTION_MAXIMIZE;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&max_req, sizeof(max_req));
+        pit_sleep_ms(400);
+        /* x=300: inside the maximized window's titlebar, past the
+         * "Editor" title text (which ends around x:58) and well left of
+         * the three titlebar buttons, which sit at the right edge of its
+         * 640-wide buffer around x:590-640. */
+        uint32_t maximized_titlebar = fb_get_pixel(300, 30);
+        uint32_t bar_over_maximized = fb_get_pixel(600, 8);
+
+        /* (2) The menu query, driven straight off WM_MENU_QUERY_PIPE the
+         * same way M30/M33/M36 drive their own protocol pipes. */
+        int mq_fds[2];
+        int mqr_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_MENU_QUERY_PIPE, (uint64_t)mq_fds, 0) != 0 ||
+            do_syscall(SYS_pipe_open, (uint64_t)WM_MENU_QUERY_RESP_PIPE, (uint64_t)mqr_fds, 0) != 0) {
+            panic("M41 self-test: kernel-side SYS_pipe_open(WM_MENU_QUERY_*) failed");
+        }
+        /* The bar polls this same pair every 300ms, so a reply meant for
+         * it could already be sitting in the response pipe - drain it, so
+         * what gets read below is the answer to *this* question. */
+        do_syscall(SYS_pipe_reset, (uint64_t)mqr_fds[0], 0, 0);
+        uint8_t ping = 1;
+        do_syscall(SYS_write, (uint64_t)mq_fds[1], (uint64_t)&ping, sizeof(ping));
+        pit_sleep_ms(300);
+        wm_menu_set_t menus;
+        k_memset(&menus, 0, sizeof(menus));
+        long menu_read = do_syscall(SYS_read, (uint64_t)mqr_fds[0], (uint64_t)&menus, sizeof(menus));
+
+        /* (3) Pick File > Quit and let the editor act on it. */
+        int cmd_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_MENU_CMD_PIPE, (uint64_t)cmd_fds, 0) != 0) {
+            panic("M41 self-test: kernel-side SYS_pipe_open(WM_MENU_CMD_PIPE) failed");
+        }
+        wm_menu_command_t cmd;
+        cmd.window_id = menus.window_id;
+        cmd.menu_index = 0;
+        cmd.item_index = 3; /* "Quit" - text_editor.c's FILE_MENU_ITEMS[3] */
+        do_syscall(SYS_write, (uint64_t)cmd_fds[1], (uint64_t)&cmd, sizeof(cmd));
+        pit_sleep_ms(500);
+        long editor_exit = do_syscall(SYS_wait, (uint64_t)editor_task->id, 0, 0);
+
+        do_syscall(SYS_kill, (uint64_t)bar_task->id, SIGKILL, 0);
+        do_syscall(SYS_wait, (uint64_t)bar_task->id, 0, 0);
+        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        console_init();
+        klog_use_console();
+
+        int all_ok = 1;
+        if (bar_pixel != bar_bg) {
+            klog_puts("[m41] pixel check failed: the top menu bar should fill the screen's top strip - expected 0x");
+            klog_put_hex32(bar_bg);
+            klog_puts(" got 0x");
+            klog_put_hex32(bar_pixel);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (below_bar_pixel == bar_bg) {
+            klog_puts("[m41] pixel check failed: the menu bar is taller than its 24px docked height\n");
+            all_ok = 0;
+        }
+        if (maximized_titlebar != 0x004C99E6u) {
+            klog_puts("[m41] pixel check failed: a maximized window's titlebar should start immediately below the 24px menu bar - expected the focused-titlebar accent 0x004C99E6 at (300, 30), got 0x");
+            klog_put_hex32(maximized_titlebar);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (bar_over_maximized != bar_bg) {
+            klog_puts("[m41] pixel check failed: the menu bar must stay on top of a maximized window - expected 0x");
+            klog_put_hex32(bar_bg);
+            klog_puts(" got 0x");
+            klog_put_hex32(bar_over_maximized);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (menu_read != (long)sizeof(menus)) {
+            klog_puts("[m41] menu query returned the wrong number of bytes\n");
+            all_ok = 0;
+        } else if (menus.window_id < 0 || menus.menu_count != 1 ||
+                   k_strcmp(menus.menus[0].title, "File") != 0 ||
+                   menus.menus[0].item_count != 4 ||
+                   k_strcmp(menus.menus[0].items[3], "Quit") != 0) {
+            klog_puts("[m41] menu query did not round-trip text_editor's declared File menu (count 0x");
+            klog_put_hex32((uint32_t)menus.menu_count);
+            klog_puts(", window 0x");
+            klog_put_hex32((uint32_t)menus.window_id);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+        if (editor_exit != 1) {
+            klog_puts("[m41] File > Quit did not reach text_editor as a WM_EVENT_MENU_COMMAND it acted on - expected its own sys_exit(1), got 0x");
+            klog_put_hex32((uint32_t)editor_exit);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M41 menu-bar self-test: the shared top bar did not behave as expected");
+        }
+        klog_puts("[m41] top menu bar (top-docked panel, menu query round-trip, "
+                   "menu command reaching its client) self-test passed (6/6 checks matched).\n\n");
+    }
+
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
      * exactly where a user program would reach them. Before this
      * milestone the middle case here didn't fail at all - it panicked the

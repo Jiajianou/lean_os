@@ -102,7 +102,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # no filesystem driver the *boot loader* can use to load from disk, only
 # the kernel's own (M12), so this is still how anything gets onto the disk
 # leanfs formats on first boot in the first place.
-USER_PROGRAMS := hello echo cat ls init shell memtest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings
+USER_PROGRAMS := hello echo cat ls init shell memtest compositor wm_demo gui_clock gui_paint desktop_shell menu_bar desktop_icons gui_terminal text_editor file_manager settings
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
 KERNEL_C_SRCS := $(shell find kernel -name '*.c' -not -path 'kernel/boot/*')
@@ -174,7 +174,25 @@ $(AP_TRAMPOLINE_BIN): kernel/arch/x86_64/ap_trampoline.asm | $(BUILD)
 
 $(KOBJ)/proc/embed_ap_trampoline.o: $(AP_TRAMPOLINE_BIN)
 
-$(KOBJ)/proc/embed_programs.o: $(USER_PROGRAM_ELFS)
+# M41: every name in USER_PROGRAMS has to appear in embed_programs.asm too,
+# or the kernel gets a dangling `extern NAME_elf_start` and the *link*
+# fails - a real error, but one that reads as a wall of undefined-reference
+# lines several build steps away from the one-word list that actually
+# caused it. (Adding menu_bar without this check cost a genuinely
+# confusing debugging detour: the stale image from the last good build
+# stayed on disk and kept booting, so every test kept exercising the old
+# kernel.) Failing here instead names the missing program and the file to
+# add it to.
+$(KOBJ)/proc/embed_programs.o: $(USER_PROGRAM_ELFS) | check-embedded-programs
+
+.PHONY: check-embedded-programs
+check-embedded-programs:
+	@for p in $(USER_PROGRAMS); do \
+	  grep -q "^$${p}_elf_start:" kernel/proc/embed_programs.asm || { \
+	    echo "Makefile: '$$p' is in USER_PROGRAMS but has no incbin block in kernel/proc/embed_programs.asm." >&2; \
+	    echo "          Add one (see that file's header comment on why it is written out longhand)." >&2; \
+	    exit 1; }; \
+	done
 
 $(KERNEL_ELF): $(KERNEL_OBJS) kernel/linker.ld
 	$(LD) -T kernel/linker.ld -o $@ $(KERNEL_OBJS)

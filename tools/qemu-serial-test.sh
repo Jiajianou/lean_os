@@ -34,13 +34,16 @@
 # Usage: tools/qemu-serial-test.sh [SECONDS] [-- extra qemu args, e.g. -monitor pipe:/tmp/mon for key injection]
 set -euo pipefail
 
-# 20s: empirically enough to carry a from-scratch (unformatted-disk) boot
-# through every self-test below and into the M22/M23 desktop handoff (the
-# last REQUIRED_MARKERS entry) - see the M29 progress notes for the actual
-# timings this was measured against. Bump if a future milestone adds
-# enough boot-time work to push past it; this is a real budget, not a
-# magic number to leave stale.
-SECONDS_TO_RUN="${1:-24}"
+# Enough to carry a from-scratch (unformatted-disk) boot through every
+# self-test below and into the desktop handoff (the last REQUIRED_MARKERS
+# entry) - see the M29 progress notes for the timings the original 24s was
+# measured against. A real budget, not a magic number to leave stale: bump
+# it when a milestone adds enough boot-time work to push past it, which
+# M40 (two new self-tests) and M41 (a fourth desktop client, and every
+# self-test's own compositor now opening four more pipes) between them
+# did - 32s was measured failing and 34s passing, so 40 leaves real
+# headroom rather than sitting one slow boot away from a false failure.
+SECONDS_TO_RUN="${1:-40}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -111,6 +114,7 @@ REQUIRED_MARKERS=(
   "[settings] WM_SETTINGS_PIPE background-color self-test passed."
   "[wm36] confirm_close opt-in (WM_EVENT_CLOSE_REQUEST via WM_ACTION_PIPE) self-test passed"
   "[wm38] drop shadow + WM_SETTINGS_PIPE accent-color self-test passed"
+  "[m41] top menu bar (top-docked panel, menu query round-trip, menu command reaching its client) self-test passed"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

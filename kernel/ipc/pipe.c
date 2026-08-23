@@ -33,7 +33,14 @@ void pipe_reset(pipe_t *p) {
     p->write_closed = 0;
 }
 
-#define MAX_NAMED_PIPES     24 /* M21: bumped from 8 - wm_req/wm_resp plus one event pipe per connected window (system_api/include/wm.h's wm_event_pipe_name) can now outgrow the old cap. */
+/* M21: bumped from 8 - wm_req/wm_resp plus one event pipe per connected
+ * window (system_api/include/wm.h's wm_event_pipe_name) outgrew the old
+ * cap. M41: 24 -> 32, since the shared menu bar's protocol adds four more
+ * well-known names (WM_MENU_*) on top of the six the window/query/action/
+ * settings channels already use, leaving only two spare above the eight
+ * per-window event pipes. Same "bump the fixed cap when a real need
+ * arrives" precedent as MAX_TASKS and MAX_FDS. */
+#define MAX_NAMED_PIPES     32
 #define NAMED_PIPE_NAME_LEN 16
 
 typedef struct {

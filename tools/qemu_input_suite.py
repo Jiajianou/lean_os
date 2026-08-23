@@ -58,6 +58,16 @@ ICON_BOX = 0x4C99E6          # desktop_icons.c ICON_BOX_COLOR
 CTX_MENU_BG = 0x243040       # desktop_icons.c CTX_MENU_BG
 EMPTY_DESKTOP = (500, 500)   # far from every icon and every cascaded window
 
+# menu_bar.c (M41): a 24px top-docked bar - app name left, the focused
+# app's menus next to it, clock right. Its dropdown hangs below the bar as
+# a compositor-blitted "overhang" rect, MENU_ITEM_W wide.
+MENU_BAR_H = 24
+MENU_BAR_BG = 0x1E2233       # BAR_BG
+MENU_DROP_BG = 0x243040      # DROP_BG
+MENU_ITEM_W = 132
+MENU_ITEM_H = 20             # FONT_HEIGHT + 4
+BAR_PROBE = (600, 8)         # inside the bar, clear of the app name and the clock
+
 # desktop_shell.c: PANEL_HEIGHT 32 at the screen bottom, taskbar slots
 # SLOT_W 96 wide with SLOT_MARGIN 4 between them, SLOT_H 24 tall starting
 # SLOT_MARGIN down from the panel's top edge. Reading the taskbar rather
@@ -71,6 +81,7 @@ SLOT_FOCUS_BG = 0x2E4A63     # RUNNING_SLOT_FOCUS_BG
 SLOT_MIN_BG = 0x352A20       # RUNNING_SLOT_MIN_BG - minimized
 SLOT_COLORS = (SLOT_BG, SLOT_FOCUS_BG, SLOT_MIN_BG)
 
+FONT_H = 16
 PANEL_TOP = 768 - 32
 SLOT_MARGIN = 4
 SLOT_W = 96
@@ -105,13 +116,24 @@ CLOCK_W = 200  # gui_clock.c WIN_W
 
 
 # compositor.c: an ordinary window is placed at (100 + idx*40, 100 + idx*40).
-# At boot the desktop background takes slot 0 and the panel slot 1, so the
-# first app launched lands at slot 2.
-FIRST_APP_IDX = 2
+# init spawns the desktop background, then the top menu bar, then the
+# bottom dock, so those take slots 0-2 and the first app launched lands at
+# slot 3.
+FIRST_APP_IDX = 3
 
 
 def app_origin(slot):
     return (100 + slot * 40, 100 + slot * 40)
+
+
+def menu_title_center(app_name, index=0):
+    """Where menu `index`'s clickable box sits in the top bar, mirroring
+    menu_bar.c's layout_menu_titles: titles start 24px past the focused
+    app's name and each is its label plus TITLE_PAD either side. Only the
+    single-menu case (every app in this project) is modelled."""
+    font_w, pad = 8, 10
+    x = 10 + len(app_name) * font_w + 24
+    return (x + pad + 2 * font_w, MENU_BAR_H // 2)
 
 
 class Failure(Exception):
@@ -159,15 +181,17 @@ def save_failure_shot(machine, name):
 
 
 def desktop_is_painted(shot):
-    """The desktop background, its first icon, and the panel all actually
-    on screen - i.e. all three of the boot clients have connected *and*
-    drawn their first frame. Waiting for this instead of a fixed sleep is
-    what makes "click something immediately after boot" reliable: the
-    serial log's [init] marker fires well before any of these pixels
-    exist, and a click that lands in that gap goes nowhere at all."""
+    """The desktop background, its first icon, the bottom dock and (M41)
+    the top menu bar all actually on screen - i.e. every one of the boot
+    clients has connected *and* drawn its first frame. Waiting for this
+    instead of a fixed sleep is what makes "click something immediately
+    after boot" reliable: the serial log's [init] marker fires well before
+    any of these pixels exist, and a click that lands in that gap goes
+    nowhere at all."""
     return (shot.px(*EMPTY_DESKTOP) == DESKTOP_BG and
             shot.px(76, 76) == ICON_BOX and
-            shot.px(512, PANEL_TOP + 2) == PANEL_BG)
+            shot.px(512, PANEL_TOP + 2) == PANEL_BG and
+            shot.px(*BAR_PROBE) == MENU_BAR_BG)
 
 
 def boot(machine, timeout=90):
@@ -207,6 +231,14 @@ def wait_for(machine, predicate, what, timeout=12.0):
 def wait_for_windows(machine, n, timeout=12.0):
     return wait_for(machine, lambda s: count_app_windows(s) == n,
                     "expected %d app window(s)" % n, timeout)
+
+
+def bar_name_pixels(shot):
+    """A cheap fingerprint of whatever text the top bar is currently
+    drawing on its left: how many pixels in the app-name area are the
+    bar's own background. Comparing this across an action says "the label
+    changed" without this file needing its own copy of the font."""
+    return shot.count_color(MENU_BAR_BG, 8, 4, 140, FONT_H)
 
 
 def focused_slot(shot):
@@ -358,6 +390,60 @@ def test_launch_close_stress(m):
           "windows: %s" % (rounds, refused))
 
 
+def test_menu_bar_shows_focused_app(m):
+    """M41: the top bar names whichever app is focused. Reads the bar the
+    way a person does - the app name is drawn there and nowhere else, so
+    "did the bar follow focus" is a question about pixels changing in that
+    strip, checked by opening two apps in turn."""
+    boot(m)
+    before = m.screenshot()
+    check(before.px(*BAR_PROBE) == MENU_BAR_BG,
+          "the top menu bar is not painted at all")
+    empty_name = bar_name_pixels(before)
+
+    m.double_click(ICON_X, ICONS[4][2])  # Clock
+    wait_for_windows(m, 1)
+    with_clock = wait_for(m, lambda s: bar_name_pixels(s) != empty_name,
+                          "the menu bar did not change when an app took focus")
+
+    m.double_click(ICON_X, ICONS[5][2])  # Paint
+    wait_for_windows(m, 2)
+    wait_for(m, lambda s: bar_name_pixels(s) != bar_name_pixels(with_clock),
+             "the menu bar still shows the previous app after focus moved")
+
+
+def test_menu_bar_dropdown_runs_a_command(m):
+    """M41's whole point, end to end through real clicks: the Editor's own
+    File menu, drawn by a different process in the shared bar, opened by
+    clicking its title there, and picking Quit closing the app.
+
+    The protocol round trip has its own boot-time self-test (kernel.c's
+    [m41]); what only this can show is that the labels are where a person
+    would click and that clicking them lands on the right item."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[1][2])  # Editor
+    wait_for_windows(m, 1)
+
+    title = menu_title_center("Editor")
+    m.click(*title)
+    shot = wait_for(m,
+                    lambda s: s.count_color(MENU_DROP_BG, title[0] - 20, MENU_BAR_H + 2,
+                                             MENU_ITEM_W, MENU_ITEM_H) > 200,
+                    "clicking File in the top bar did not open its dropdown")
+    # The dropdown must not paint a full-width band across the bar's row -
+    # it is an overhang rect exactly MENU_ITEM_W wide (see
+    # WM_ACTION_SET_PANEL_OVERHANG). The desktop has to still be visible
+    # well to its right.
+    check(shot.px(900, MENU_BAR_H + 20) == DESKTOP_BG,
+          "the open dropdown painted over the desktop outside its own rect")
+
+    # File > Quit is item 3; text_editor exits cleanly on it for an
+    # unmodified buffer.
+    m.click(title[0], MENU_BAR_H + 3 * MENU_ITEM_H + MENU_ITEM_H // 2)
+    wait_for(m, lambda s: count_app_windows(s) == 0,
+             "picking File > Quit in the top bar did not close the Editor")
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -365,6 +451,8 @@ TESTS = [
     ("titlebar_drag_moves_window", test_titlebar_drag_moves_window),
     ("alt_tab_cycles_focus", test_alt_tab_cycles_focus),
     ("desktop_context_menu", test_desktop_context_menu),
+    ("menu_bar_shows_focused_app", test_menu_bar_shows_focused_app),
+    ("menu_bar_dropdown_runs_a_command", test_menu_bar_dropdown_runs_a_command),
     ("launch_close_stress", test_launch_close_stress),
 ]
 

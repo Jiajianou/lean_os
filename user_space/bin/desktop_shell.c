@@ -19,9 +19,12 @@
  * desktop_icons.c's job (double-click on the desktop background); this
  * file's only job now is to honestly reflect what's actually open, the
  * same way a real desktop's taskbar app list works. An empty desktop
- * means an empty taskbar - just the clock.
+ * means an empty taskbar.
+ *
+ * M41: the clock moved out of this panel's right corner and into
+ * menu_bar.c's, the top-docked half of the "menu bar top, dock bottom"
+ * convention. This is now purely the running-app list.
  */
-#include "font8x16.h" /* FONT_WIDTH - sizing the clock's fixed-width text area */
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
@@ -33,21 +36,17 @@
 #define MAX_RUNNING_SLOTS  WM_MAX_ROUTABLE_WINDOWS
 #define REFRESH_INTERVAL_MS 300
 
-/* System-tray-style clock pinned to the panel's right edge, "MM:SS" of
- * sys_uptime_ms (this project has no RTC/wall-clock source - see
- * gui_clock.c's own uptime-based display for the same reason) - the
- * one always-present, unmistakably-a-taskbar element, the way a real
- * desktop's taskbar clock is. CLOCK_PAD separates the divider line from
- * the text on one side and the text from the panel's own right edge on
- * the other. */
-#define CLOCK_TEXT_W (5 * FONT_WIDTH)
-#define CLOCK_PAD     8
-#define CLOCK_AREA_W (CLOCK_PAD * 2 + CLOCK_TEXT_W)
+/* M41: the clock used to live here, pinned to this panel's right edge.
+ * It moved to menu_bar.c's right edge - the other half of the real "menu
+ * bar top, dock bottom" convention - taking format_clock with it rather
+ * than leaving a second copy behind. What's left is the reason this
+ * milestone wanted it gone: that corner of the dock is now free, which
+ * is what M42 needs to center the running-app tiles across the whole
+ * panel width. */
 
 #define PANEL_BG            0x00181828u
 #define PANEL_BORDER_COLOR  0x00445566u /* 1px top edge - the panel's only visual separation from the desktop above it otherwise */
 #define PANEL_BEVEL_COLOR   0x00223349u /* faint 1px highlight just under the top edge - a cheap two-tone "lit from above" bevel, the only depth cue available without alpha blending */
-#define SEPARATOR_COLOR     0x00445566u
 #define SLOT_BORDER_COLOR   0x00445566u /* every slot is outlined so it reads as a button, not a flat color swatch */
 #define RUNNING_SLOT_BG            0x00263447u
 #define RUNNING_SLOT_FOCUS_BG      0x002E4A63u
@@ -96,7 +95,7 @@ static void refresh_running_slots(wm_window_t *self) {
         running_count = 0;
         return;
     }
-    int32_t boundary = (int32_t)self->width - CLOCK_AREA_W - SLOT_MARGIN;
+    int32_t boundary = (int32_t)self->width - SLOT_MARGIN;
     int32_t x = SLOT_MARGIN;
     running_count = 0;
     for (int32_t i = 0; i < q.count && running_count < MAX_RUNNING_SLOTS; i++) {
@@ -119,23 +118,6 @@ static void refresh_running_slots(wm_window_t *self) {
     }
 }
 
-/* "MM:SS" of uptime, zero-padded - no itoa in this project's str.h
- * (gui_clock.c's format_uint hit the same gap for its own free-form
- * "uptime: Ns" text), but a fixed two-digit field is simpler to write
- * directly than to generalize for. Minutes wrap at 100 purely so the
- * field never grows past its reserved CLOCK_TEXT_W. */
-static void format_clock(long now_ms, char *out) {
-    long total_s = now_ms / 1000;
-    long mins = (total_s / 60) % 100;
-    long secs = total_s % 60;
-    out[0] = (char)('0' + (mins / 10) % 10);
-    out[1] = (char)('0' + mins % 10);
-    out[2] = ':';
-    out[3] = (char)('0' + secs / 10);
-    out[4] = (char)('0' + secs % 10);
-    out[5] = '\0';
-}
-
 static void redraw(wm_window_t *self) {
     gfx_fill_rect(&self->gfx, 0, 0, (int32_t)self->width, (int32_t)self->height, PANEL_BG);
     /* Top edge is otherwise the only thing telling this panel apart from
@@ -154,12 +136,6 @@ static void redraw(wm_window_t *self) {
         gfx_draw_rect(&self->gfx, slot->x, SLOT_MARGIN, slot->w, SLOT_H, border);
         gfx_draw_text(&self->gfx, slot->x + 2, SLOT_MARGIN + 4, slot->name, LABEL_COLOR);
     }
-
-    int32_t clock_x = (int32_t)self->width - CLOCK_AREA_W;
-    gfx_draw_line(&self->gfx, clock_x, SLOT_MARGIN, clock_x, SLOT_MARGIN + SLOT_H, SEPARATOR_COLOR);
-    char clock_text[6];
-    format_clock(sys_uptime_ms(), clock_text);
-    gfx_draw_text(&self->gfx, clock_x + CLOCK_PAD, SLOT_MARGIN + 4, clock_text, LABEL_COLOR);
 }
 
 static void handle_click(wm_window_t *self, int32_t x, int32_t y) {

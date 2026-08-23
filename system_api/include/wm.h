@@ -40,10 +40,31 @@ typedef struct {
  * NUL-terminated; a client that doesn't care leaves it empty. */
 #define WM_TITLE_MAX 16
 
+/* M41: which screen edge a panel docks to. M22's original flag was a
+ * plain 0/1 "is this a panel", which is exactly WM_PANEL_NONE and
+ * WM_PANEL_BOTTOM here - the numbering is chosen so every existing
+ * caller and every existing `if (req.panel)` test keeps meaning what it
+ * always did. WM_PANEL_TOP is the new one (menu_bar.c), and the
+ * compositor's own plumbing was already generic over "a panel" rather
+ * than bottom-specific, so this is a placement rule and a second clamp,
+ * not a second mechanism. */
+#define WM_PANEL_NONE   0
+#define WM_PANEL_BOTTOM 1
+#define WM_PANEL_TOP    2
+
 typedef struct {
     uint32_t width;  /* ignored if panel or desktop != 0 - both always span the full display width, the compositor's own call */
     uint32_t height; /* ignored if desktop != 0 - a desktop window is always the full display, both dimensions */
-    uint8_t panel; /* M22: 0 for a normal window, 1 for a chrome-less, always-on-top, screen-bottom-docked panel - see wm.h's M22 comment below and desktop_shell.c, the one client that ever sets this */
+    uint8_t panel; /* M22: 0 for a normal window, otherwise one of WM_PANEL_BOTTOM/WM_PANEL_TOP (M41) - a chrome-less, always-on-top, edge-docked panel. See wm.h's M22 comment below and desktop_shell.c/menu_bar.c, the only clients that ever set this */
+    /* M41: a panel's on-screen height, when that's less than the buffer
+     * it asked for. A menu bar is 24px of bar that every window has to
+     * stay clear of, plus enough room underneath to *draw* an open
+     * dropdown into - and a dropdown must not push every window on the
+     * desktop down when it opens. So `height` sizes the buffer while
+     * this sizes the docked bar, and the dropdown is shown separately
+     * via WM_ACTION_SET_PANEL_OVERHANG. 0 means "the whole thing is
+     * docked", which is every panel before this milestone. */
+    uint32_t panel_dock_h;
     uint8_t desktop; /* chrome-less, full-screen, always-on-*bottom* (the exact opposite z-order from panel) background window - see desktop_icons.c, the one client that ever sets this. Mutually exclusive with panel; nothing enforces that since only one client ever sets either flag. */
     char title[WM_TITLE_MAX];
     int32_t client_pid; /* M29: this client's own SYS_getpid() - lets the compositor notice (SYS_task_alive) when a connected client dies without an orderly disconnect, and reclaim its window slot. Not a security boundary (nothing stops a client lying about it), just bookkeeping - same trust level as everything else in this protocol. */
@@ -74,6 +95,7 @@ typedef enum {
     WM_EVENT_FOCUS = 4,        /* this window just became the focused one - no extra fields */
     WM_EVENT_UNFOCUS = 5,      /* this window just stopped being the focused one - no extra fields */
     WM_EVENT_CLOSE_REQUEST = 6, /* M36: sent instead of an immediate SIGTERM when this window's own wm_create_request_t.confirm_close was set and a close was requested (a titlebar close button or an external WM_ACTION_CLOSE) - no extra fields. The client decides what to do next; see confirm_close's own comment above. */
+    WM_EVENT_MENU_COMMAND = 7,  /* M41: one of this window's declared menu items was picked in the shared top menu bar (menu_bar.c). x is the menu index, y the item index, both into the wm_menu_set_t this client declared - reusing the two coordinate fields rather than growing the struct, since a menu pick has no other payload. The client acts on it exactly as it would on its own in-window menu click; nothing about what an item *means* is known to the compositor or to the bar. */
 } wm_event_type_t;
 
 typedef struct {
@@ -92,25 +114,41 @@ typedef struct {
 } wm_event_t;
 
 #define WM_EVENT_PIPE_PREFIX "wm_evt"
-#define WM_MAX_ROUTABLE_WINDOWS 10 /* window ids 0-9 - the name below only reserves one ASCII digit */
+/* M41: 10 -> 12, and the event-pipe name below grew a second digit to
+ * carry it. The desktop's own always-on clients went from three to four
+ * (compositor's desktop background, the bottom dock, and now the top menu
+ * bar), so a cap of 10 minus those left too few for the six apps a
+ * desktop icon can launch - the first thing M40's harness caught after
+ * the menu bar landed. Bounded above by what a wm_query_response_t can be
+ * without approaching PIPE_BUF_SIZE (kernel/ipc/pipe.h, 1024): at 12 that
+ * response is under 600 bytes. */
+#define WM_MAX_ROUTABLE_WINDOWS 12
 
-/* Builds this window's event-pipe name into out (must be >= 8 bytes).
- * window_id must be 0-9 (WM_MAX_ROUTABLE_WINDOWS) - both compositor.c
- * (the writer) and wmclient.c (the reader) call this instead of
- * formatting the string twice by hand, so the two can't silently drift
- * apart on the naming scheme. A plain function rather than a macro,
- * since building a string needs real code either way and a static
- * inline here is no different from one in a .c file except not needing
- * its own translation unit for two call sites. */
-static inline void wm_event_pipe_name(int window_id, char out[8]) {
+/* Builds this window's event-pipe name into out (must be >= 9 bytes).
+ * window_id must be 0..WM_MAX_ROUTABLE_WINDOWS-1. Both compositor.c (the
+ * writer) and wmclient.c (the reader) call this instead of formatting the
+ * string twice by hand, so the two can't silently drift apart on the
+ * naming scheme. A plain function rather than a macro, since building a
+ * string needs real code either way and a static inline here is no
+ * different from one in a .c file except not needing its own translation
+ * unit for two call sites.
+ *
+ * M41: always two digits ("wm_evt00", not "wm_evt0"), now that ids run
+ * past 9. Fixed-width rather than only widening past 9 so there is
+ * exactly one name per id, with no chance of "wm_evt1" and "wm_evt01"
+ * both existing and being different pipes. */
+#define WM_EVENT_PIPE_NAME_LEN 9
+
+static inline void wm_event_pipe_name(int window_id, char out[WM_EVENT_PIPE_NAME_LEN]) {
     out[0] = WM_EVENT_PIPE_PREFIX[0];
     out[1] = WM_EVENT_PIPE_PREFIX[1];
     out[2] = WM_EVENT_PIPE_PREFIX[2];
     out[3] = WM_EVENT_PIPE_PREFIX[3];
     out[4] = WM_EVENT_PIPE_PREFIX[4];
     out[5] = WM_EVENT_PIPE_PREFIX[5];
-    out[6] = (char)('0' + (window_id % 10));
-    out[7] = '\0';
+    out[6] = (char)('0' + (window_id / 10) % 10);
+    out[7] = (char)('0' + window_id % 10);
+    out[8] = '\0';
 }
 
 /* M22: a read-only snapshot query plus a two-verb action request - the
@@ -134,6 +172,7 @@ typedef struct {
     uint8_t maximized; /* M30: mirrors compositor.c's window_t.maximized - lets a caller (a future titlebar/panel indicator) reflect current state without guessing */
     uint8_t is_panel; /* lets a panel client filter itself (and any other panel) out of what it lists as a "running app" */
     uint8_t is_desktop; /* same idea as is_panel - the desktop background is never a "running app" either */
+    uint8_t panel_edge; /* M41: WM_PANEL_NONE/BOTTOM/TOP - lets a panel tell itself and any other panel apart (the bottom dock filters both out of its running-app list either way, but the menu bar needs to know which one it is looking at) */
     char title[WM_TITLE_MAX]; /* echo of wm_create_request_t.title - may be empty */
 } wm_window_info_t;
 
@@ -157,12 +196,75 @@ typedef enum {
     WM_ACTION_CLOSE = 3,            /* SIGTERMs window_id's owning client (system_api/include/signal.h) - the process's own termination is what actually frees the window slot, via M29's SYS_task_alive-driven reap_dead_clients, the same reclaim path a real crash goes through. Not instantaneous (signal delivery isn't - see signal.h) but visibly so: the window stops responding immediately, and disappears within one compositor loop iteration. */
     WM_ACTION_MAXIMIZE = 4,         /* saves window_id's current x/y/w/h and grows it to fill the screen minus any docked panel - clamped to never exceed its own shm-backed pixel buffer (there's no resize protocol yet - M31 - so a window smaller than the available area is repositioned to fill as much of it as its buffer actually holds, never stretched past what it allocated). No-op if already maximized. */
     WM_ACTION_RESTORE = 5,          /* undoes WM_ACTION_MAXIMIZE - restores the saved x/y/w/h. No-op if not maximized. */
+    WM_ACTION_SET_PANEL_OVERHANG = 6, /* M41: sets the one rect *below* a panel's docked height that the compositor should also blit (and route clicks into), from the overhang_* fields below. A menu bar's dropdown is taller than the bar and narrower than the screen, and it must neither be clipped away nor paint a full-width opaque band over everything either side of it. Zero width or height clears the overhang. Only meaningful for a panel; ignored otherwise. Deliberately separate from the panel's docked height, which never changes - opening a menu must not shove every window on the desktop down and then pull it back up. */
 } wm_action_type_t;
 
 typedef struct {
     int32_t window_id;
     uint32_t action; /* wm_action_type_t */
+    /* M41: WM_ACTION_SET_PANEL_OVERHANG's payload, in the panel's own
+     * window-local coordinates - x/width of the rect, and how many rows
+     * of it hang below the panel's docked height. Unused (and ignored)
+     * by every other action; carried here rather than on a pipe of their
+     * own because this is an ordinary window-state change like the five
+     * actions above it, and the one writer and one reader change
+     * together. */
+    int32_t overhang_x, overhang_w, overhang_h;
 } wm_action_request_t;
+
+/* M41: the shared top menu bar's protocol.
+ *
+ * M35 established that a menu is drawn client-side, inside the window
+ * that owns it - deliberately, to avoid a compositor-owned overlay.
+ * A macOS-style menu bar breaks that in one specific way: the menu has
+ * to be drawn by a *different* process (the bar) than the one that owns
+ * it. So the owner keeps defining what its menus are and keeps deciding
+ * what picking an item does; all that moves across the boundary is the
+ * list of labels and, coming back, which one was picked.
+ *
+ * Three pipes, each with the same one-way or request/response shape as
+ * everything else here:
+ *   WM_MENU_PIPE        a client writes its wm_menu_set_t to declare (or
+ *                       replace) its menus. Sticky - the compositor holds
+ *                       the last one per window, and a client that never
+ *                       writes one simply has no menus.
+ *   WM_MENU_QUERY_PIPE  any byte asks for the *focused* window's menu
+ *   /_RESP_PIPE         set; the reply's window_id is -1 if nothing
+ *                       focused has declared any.
+ *   WM_MENU_CMD_PIPE    the bar writes a wm_menu_command_t; the
+ *                       compositor turns it into a WM_EVENT_MENU_COMMAND
+ *                       on that window's own event pipe.
+ *
+ * The size caps below are what a fixed-size struct through a
+ * PIPE_BUF_SIZE (1024) pipe can carry comfortably, and are generous for
+ * the one real menu this project has (text_editor.c's File). */
+#define WM_MENU_PIPE            "wm_menu"
+#define WM_MENU_QUERY_PIPE      "wm_menu_query"
+#define WM_MENU_QUERY_RESP_PIPE "wm_menu_qresp"
+#define WM_MENU_CMD_PIPE        "wm_menu_cmd"
+
+#define WM_MENU_TITLE_MAX 12 /* "File", "Edit", ... including the NUL */
+#define WM_MENU_ITEM_MAX  16 /* "Save As", "Quit", ... including the NUL */
+#define WM_MENU_MAX_ITEMS 8
+#define WM_MENU_MAX_MENUS 3
+
+typedef struct {
+    char title[WM_MENU_TITLE_MAX];
+    int32_t item_count;
+    char items[WM_MENU_MAX_ITEMS][WM_MENU_ITEM_MAX];
+} wm_menu_t;
+
+typedef struct {
+    int32_t window_id; /* filled in by wmclient.c from the client's own id; -1 in a query response means "nothing focused has menus" */
+    int32_t menu_count;
+    wm_menu_t menus[WM_MENU_MAX_MENUS];
+} wm_menu_set_t;
+
+typedef struct {
+    int32_t window_id;
+    int32_t menu_index;
+    int32_t item_index;
+} wm_menu_command_t;
 
 /* M33: the compositor's first genuinely global (not per-window) setting -
  * the desktop background color, previously a compile-time constant in

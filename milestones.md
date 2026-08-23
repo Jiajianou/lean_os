@@ -1209,31 +1209,71 @@ snapping, and a final visual-consistency pass.
 - [x] Full `tools/qemu-serial-test.sh` pass (27/27 markers, zero
       regressions) and `tools/qemu-input-test.sh` pass (7/7)
 
-## M41 — macOS-style top menu bar
+## M41 — macOS-style top menu bar ✅
 
-- [ ] New always-on-top, screen-*top*-docked panel mirroring
-      `desktop_shell.c`'s existing bottom dock (`compositor.c`'s
-      `is_panel` plumbing is already generic over "a panel," not
-      bottom-specific - this reuses it rather than inventing a second
-      mechanism), showing the focused app's name on the left
-- [ ] Promote M35's per-window File-menu convention from "drawn inside
-      each app's own window" to "shown in the shared top bar for
-      whichever app is focused" - a new query lets the top bar ask the
-      focused client what menu(s) it currently has, so
-      `text_editor.c`'s existing File menu becomes the top bar's menu
-      instead of a second copy living in two places
-- [ ] Move the system clock from the bottom dock's corner
-      (`desktop_shell.c`'s `CLOCK_AREA_W`) to the top bar's right edge -
-      the other half of the real "menu bar top, dock bottom" macOS
-      convention, and it frees that corner of the bottom dock for M42
-- [ ] Every place the compositor already clamps against
-      `connected_panel_height()` (window placement, maximize, drag
-      bounds - M22/M30/M31) needs the same clamp against the new top
-      bar's height too, not just the bottom one
-- [ ] Self-tests for the protocol-level behavior (menu query
-      round-trip, clock rendering, placement clamped below the new bar)
-      the same shape as M30/M33/M38's own; real click-reaches-the-
-      menu-item verification goes through M40's new harness
+- [x] `user_space/bin/menu_bar.c`: an always-on-top, screen-*top*-docked
+      panel showing the focused app's name on the left. Reuses
+      `compositor.c`'s existing `is_panel` plumbing rather than inventing
+      a second mechanism - `wm_create_request_t.panel` went from a 0/1
+      flag to `WM_PANEL_NONE/BOTTOM/TOP`, numbered so every existing
+      caller and every existing `if (req.panel)` keeps meaning what it
+      always did
+- [x] `text_editor.c`'s File menu is now the *shared bar's* menu rather
+      than a second copy drawn inside its own window - M35's in-window
+      menu row is gone and the reclaimed height went back to the text.
+      A new three-channel protocol (`WM_MENU_PIPE` to declare,
+      `WM_MENU_QUERY_PIPE` to ask what the focused window has,
+      `WM_MENU_CMD_PIPE` for the pick coming back as
+      `WM_EVENT_MENU_COMMAND`) draws the split as narrowly as it can:
+      the owning app still defines its menus and still decides what an
+      item *does*; only a list of labels goes out and an index comes
+      back. Neither the bar nor the compositor knows what "Save As" means
+- [x] The clock moved from the bottom dock's corner to the top bar's
+      right edge, taking `format_clock` with it rather than leaving a
+      second copy behind - and freeing that corner of the dock for M42
+- [x] A dropdown is taller than the bar and narrower than the screen, so
+      a panel can now declare a docked height smaller than its buffer
+      (`panel_dock_h`) plus one *overhang* rect below it
+      (`WM_ACTION_SET_PANEL_OVERHANG`) that the compositor also blits and
+      routes clicks into. Both halves matter: growing the panel outright
+      would have shoved every window on the desktop down and pulled them
+      back up as menus opened, and blitting full width would have painted
+      an opaque band across everything either side of the menu (which the
+      first version did - caught by looking at it)
+- [x] Every `connected_panel_height()` clamp is now edge-aware, behind
+      one `content_top_limit()`/`content_bottom_limit()` pair so window
+      placement, maximize and drag bounds can't drift apart on which
+      bars they remember
+- [x] `MAX_WINDOWS` 8 -> `WM_MAX_ROUTABLE_WINDOWS`, itself 10 -> 12 (the
+      event-pipe name grew a second digit), and `MAX_SHM_SEGMENTS`
+      16 -> 32. A fourth always-on desktop client meant the old caps left
+      too few slots for the six apps a desktop icon can launch - M40's
+      harness caught it the same day the bar landed, which is exactly
+      what it was built for. The compositor holding fewer windows than
+      the protocol can route to was never deliberate; the two are tied
+      together now
+- [x] New boot self-test (`[m41]`, 6/6 checks): the bar really is docked
+      at the top edge and only its declared height tall, a maximized
+      window's titlebar starts immediately below it while the bar stays
+      on top of it, the menu query round-trips the editor's declared File
+      menu, and File > Quit reaches the editor as an event it acts on
+      (its own clean exit code, not a kill)
+- [x] Two new interactive tests through M40's harness - the bar follows
+      focus, and a real click on "File" opens the dropdown and picking
+      Quit closes the app (including that the dropdown doesn't paint
+      outside its own rect)
+- [x] `make` now fails with a readable message if a name in
+      `USER_PROGRAMS` has no `incbin` block in `embed_programs.asm`.
+      Adding `menu_bar` without one produced a wall of
+      undefined-reference lines several steps from the cause, and the
+      previous good image stayed on disk and kept booting - so every test
+      kept passing against a kernel that no longer existed. An hour lost
+      to a one-word list
+- [x] `tools/qemu-serial-test.sh`'s capture budget 24s -> 40s: M40's two
+      new self-tests and M41's fourth desktop client pushed a
+      from-scratch boot past it (32s measured failing, 34s passing)
+- [x] Full `tools/qemu-serial-test.sh` pass (28/28) and
+      `tools/qemu-input-test.sh` pass (9/9)
 
 ## M42 — Dock-style taskbar
 
