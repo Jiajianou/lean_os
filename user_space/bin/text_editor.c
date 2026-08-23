@@ -108,6 +108,16 @@ static pending_action_t pending_action; /* what to do once a PROMPT_CONFIRM_DISC
 static char prompt_buf[PROMPT_MAX_LEN + 1];
 static int prompt_len;
 
+/* M37: click-drag text selection - the piece M32's own header comment on
+ * gui_terminal.c's Ctrl+C flagged as missing ("there's no text selection
+ * UI to copy from") ever since. sel_dragging is true only while the
+ * mouse button is physically held; sel_active survives the button
+ * release so the highlight (and a later Ctrl+C) still has something to
+ * act on until the next click or keystroke clears it. */
+static int sel_dragging, sel_active;
+static int sel_anchor_row, sel_anchor_col, sel_end_row, sel_end_col;
+#define SELECTION_COLOR 0x00355070u
+
 static void load_file(const char *name) {
     static char file_buf[EDITOR_MAX_FILE];
     long n = sys_readfile(name, file_buf, sizeof(file_buf));
@@ -244,6 +254,11 @@ static void handle_char(char ch) {
     clamp_cursor();
 }
 
+static void clear_selection(void) {
+    sel_active = 0;
+    sel_dragging = 0;
+}
+
 static void reset_to_new_file(void) {
     line_count = 1;
     line_len[0] = 0;
@@ -253,6 +268,7 @@ static void reset_to_new_file(void) {
     memcpy(filename, "untitled", sizeof("untitled"));
     dirty = 0;
     status[0] = '\0';
+    clear_selection(); /* M37: the old selection's row indices may no longer even exist in the fresh, 1-line buffer */
 }
 
 /* M36: the exit code deliberately isn't 0 - M29's reap_dead_clients only
@@ -332,8 +348,76 @@ static void run_file_menu_item(int idx) {
     }
 }
 
+static void pixel_to_grid(int32_t px, int32_t py, int *out_row, int *out_col) {
+    int row = scroll_top + (int)(py - CONTENT_Y0) / FONT_HEIGHT;
+    if (row < 0) {
+        row = 0;
+    }
+    if (row >= line_count) {
+        row = line_count - 1;
+    }
+    int col = (int)px / FONT_WIDTH;
+    if (col < 0) {
+        col = 0;
+    }
+    if (col > line_len[row]) {
+        col = line_len[row];
+    }
+    *out_row = row;
+    *out_col = col;
+}
+
+static void normalized_selection(int *sr, int *sc, int *er, int *ec) {
+    if (sel_anchor_row < sel_end_row || (sel_anchor_row == sel_end_row && sel_anchor_col <= sel_end_col)) {
+        *sr = sel_anchor_row;
+        *sc = sel_anchor_col;
+        *er = sel_end_row;
+        *ec = sel_end_col;
+    } else {
+        *sr = sel_end_row;
+        *sc = sel_end_col;
+        *er = sel_anchor_row;
+        *ec = sel_anchor_col;
+    }
+}
+
+static void copy_selection_to_clipboard(void) {
+    int sr, sc, er, ec;
+    normalized_selection(&sr, &sc, &er, &ec);
+    static char buf[1024];
+    size_t n = 0;
+    for (int r = sr; r <= er && n < sizeof(buf); r++) {
+        int col_start = (r == sr) ? sc : 0;
+        int col_end = (r == er) ? ec : line_len[r];
+        for (int c = col_start; c < col_end && n < sizeof(buf); c++) {
+            buf[n++] = lines[r][c];
+        }
+        if (r != er && n < sizeof(buf)) {
+            buf[n++] = '\n';
+        }
+    }
+    sys_clipboard_set(buf, n);
+}
+
 static void redraw(wm_window_t *win) {
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
+
+    if (sel_active || sel_dragging) {
+        int sr, sc, er, ec;
+        normalized_selection(&sr, &sc, &er, &ec);
+        for (int r = sr; r <= er; r++) {
+            if (r < scroll_top || r >= scroll_top + TEXT_ROWS) {
+                continue;
+            }
+            int col_start = (r == sr) ? sc : 0;
+            int col_end = (r == er) ? ec : line_len[r];
+            if (col_end <= col_start) {
+                continue; /* an empty span on this row (e.g. selection starts at EOL) - nothing to shade */
+            }
+            int32_t y = CONTENT_Y0 + (r - scroll_top) * FONT_HEIGHT;
+            gfx_fill_rect(&win->gfx, col_start * FONT_WIDTH, y, (col_end - col_start) * FONT_WIDTH, FONT_HEIGHT, SELECTION_COLOR);
+        }
+    }
 
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, CONTENT_Y0, MENU_BG);
     gfx_draw_text(&win->gfx, FILE_MENU_X, 2, "File", MENU_TEXT);
@@ -447,6 +531,11 @@ int main(const char *arg) {
 
             if (ev.type == WM_EVENT_CLOSE_REQUEST) {
                 request_action(PENDING_QUIT);
+            } else if (ev.type == WM_EVENT_MOUSE_MOVE && sel_dragging) {
+                pixel_to_grid(ev.x, ev.y, &sel_end_row, &sel_end_col);
+                cur_row = sel_end_row;
+                cur_col = sel_end_col;
+                clamp_cursor();
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 /* M35: the "File" label toggles the dropdown; any other
                  * click while it's open either picks an item or - same
@@ -461,13 +550,34 @@ int main(const char *arg) {
                     if (idx >= 0) {
                         run_file_menu_item(idx);
                     }
+                } else if (ev.y >= CONTENT_Y0 && ev.y < CONTENT_Y0 + TEXT_ROWS * FONT_HEIGHT) {
+                    /* M37: a plain click (no drag) just moves the cursor
+                     * there, same as a real editor - sel_active only
+                     * turns on at button-up if the drag actually covered
+                     * more than one grid cell. */
+                    sel_active = 0;
+                    sel_dragging = 1;
+                    pixel_to_grid(ev.x, ev.y, &sel_anchor_row, &sel_anchor_col);
+                    sel_end_row = sel_anchor_row;
+                    sel_end_col = sel_anchor_col;
+                    cur_row = sel_anchor_row;
+                    cur_col = sel_anchor_col;
+                    clamp_cursor();
                 }
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && !(ev.buttons & 1) && sel_dragging) {
+                sel_dragging = 0;
+                sel_active = (sel_anchor_row != sel_end_row || sel_anchor_col != sel_end_col);
             } else if (ev.type == WM_EVENT_KEY) {
                 long mods = sys_kbd_modifiers();
-                if ((mods & KBD_MOD_CTRL) && (ev.ch == 's' || ev.ch == 'S')) {
+                if ((mods & KBD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
+                    if (sel_active) {
+                        copy_selection_to_clipboard();
+                    }
+                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 's' || ev.ch == 'S')) {
                     save_file();
                 } else {
                     status[0] = '\0';
+                    clear_selection();
                     handle_char(ev.ch);
                 }
             }

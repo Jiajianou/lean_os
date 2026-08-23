@@ -856,16 +856,44 @@ into new subsystems.
       can't fabricate. Verified via `tools/qemu-serial-test.sh`:
       23/23 required boot markers, no panic
 
-## M37 — Text selection & scrollbars
+## M37 — Text selection & scrollbars ✅
 
-- [ ] Click-drag text selection with highlight rendering in
-      `gui_terminal.c` and `text_editor.c`, replacing M32's "copy the
-      whole current line" stand-in with a real selectable range wired
-      into `SYS_clipboard_set`
-- [ ] Visible scrollbar widget (from M34) wired into
-      `file_manager.c`'s file list and `gui_terminal.c`'s scrollback,
-      both of which today scroll with no on-screen indicator of
-      position or extent
+- [x] Click-drag text selection with highlight rendering in both
+      `text_editor.c` (over its `lines[]` buffer, grid coordinates
+      derived the same way `clamp_cursor`'s own row/col math already
+      does) and `gui_terminal.c` (over its fixed `grid[ROWS][COLS]`
+      output buffer) - `sel_dragging` (button physically held) vs.
+      `sel_active` (survives release so the highlight and a later
+      Ctrl+C still have something to act on) is the same small state
+      machine in both files. A plain click with no drag in
+      `text_editor.c` just moves the cursor there - mouse-driven cursor
+      placement it never had before this, not only selection
+- [x] Ctrl+C in both apps now copies a real selection
+      (`copy_selection_to_clipboard`, row-major, trims trailing padding
+      off `gui_terminal.c`'s space-filled grid rows) when one is
+      active, replacing M32's "copy the whole current input line"
+      stand-in - `gui_terminal.c`'s own header comment named this
+      exact gap. Falls back to the old line-copy behavior when nothing
+      is selected, so existing muscle memory (copy the line you're
+      typing) still works unchanged
+- [x] Visible scrollbar (`gfx_draw_scrollbar`, `user_space/lib/gfx.{h,c}` -
+      a track plus a thumb sized/positioned from `total_items`/
+      `visible_items`/`scroll_top`) wired into `file_manager.c`'s file
+      list, which previously scrolled with no on-screen indicator of
+      position or extent at all
+- [x] Scope trim: `gui_terminal.c`'s "scrollback" isn't a real
+      milestone target here - `grid_scroll()` (M13-era) discards a row
+      the instant it scrolls off the top; there is no history buffer
+      behind the visible `ROWS` at all to put a scrollbar on. Adding
+      one is a real, separate feature (a growable output history plus
+      a viewport into it) this milestone doesn't also take on -
+      selection above already works over whatever's currently visible
+- [x] Verified via `tools/qemu-serial-test.sh`: 23/23 required boot
+      markers, no panic - this milestone touches no kernel code, so
+      the suite confirms zero regression to everything upstream.
+      Whether a real click-drag lands on the right pixels is, like
+      every mouse-driven behavior since M18, manual/interactive-only
+      verification this headless build can't fabricate
 
 ## M38 — Visual chrome polish
 

@@ -26,6 +26,8 @@
 #define WIN_H 360
 #define ROW_H (FONT_HEIGHT + 4)
 #define HEADER_H 24
+#define SCROLLBAR_W 8 /* M37: reserved strip along the right edge - see redraw()'s gfx_draw_scrollbar call */
+#define LIST_W (WIN_W - SCROLLBAR_W)
 #define ROWS_VISIBLE ((WIN_H - HEADER_H) / ROW_H)
 
 #define BG_COLOR       0x001C1C24u
@@ -33,6 +35,8 @@
 #define TEXT_COLOR     0x00D8D8D8u
 #define SELECT_COLOR   0x004C6699u
 #define LABEL_COLOR    0x0090A0C0u
+#define SCROLLBAR_TRACK 0x00141820u
+#define SCROLLBAR_THUMB 0x00506080u
 
 #define MAX_FILES    48
 #define MAX_NAME_LEN 32 /* leanfs's real cap (LEANFS_MAX_NAME, kernel/fs/leanfs.h) is 27 + a NUL - this just needs to be at least that, kept as its own constant since that header isn't visible to user_space builds */
@@ -91,7 +95,7 @@ static void open_selected(void) {
 
 static void redraw(wm_window_t *win) {
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
-    gfx_fill_rect(&win->gfx, 0, 0, WIN_W, HEADER_H, HEADER_COLOR);
+    gfx_fill_rect(&win->gfx, 0, 0, LIST_W, HEADER_H, HEADER_COLOR);
     gfx_draw_text(&win->gfx, 6, 4, "Files", LABEL_COLOR);
 
     for (int row = 0; row < ROWS_VISIBLE; row++) {
@@ -101,10 +105,17 @@ static void redraw(wm_window_t *win) {
         }
         int32_t y = HEADER_H + row * ROW_H;
         if (i == selected) {
-            gfx_fill_rect(&win->gfx, 0, y, WIN_W, ROW_H, SELECT_COLOR);
+            gfx_fill_rect(&win->gfx, 0, y, LIST_W, ROW_H, SELECT_COLOR);
         }
         gfx_draw_text(&win->gfx, 6, y + 2, names[i], TEXT_COLOR);
     }
+
+    /* M37: the on-screen position/extent indicator this list previously
+     * had none of - it already scrolled (Up/Down, or clicking a row near
+     * an edge), there was just no visual cue there was more above/below. */
+    gfx_draw_scrollbar(&win->gfx, LIST_W, HEADER_H, SCROLLBAR_W, WIN_H - HEADER_H,
+                        file_count, ROWS_VISIBLE, scroll_top,
+                        SCROLLBAR_TRACK, SCROLLBAR_THUMB);
 }
 
 int main(void) {

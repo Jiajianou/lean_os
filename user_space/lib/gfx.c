@@ -117,3 +117,20 @@ int gfx_menu_hit_test(int32_t px, int32_t py, int32_t x, int32_t y, int32_t item
     }
     return (py - y) / item_h;
 }
+
+void gfx_draw_scrollbar(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
+                         int32_t total_items, int32_t visible_items, int32_t scroll_top,
+                         uint32_t track_color, uint32_t thumb_color) {
+    gfx_fill_rect(ctx, x, y, w, h, track_color);
+    if (total_items <= visible_items || total_items <= 0) {
+        gfx_fill_rect(ctx, x, y, w, h, thumb_color);
+        return;
+    }
+    int32_t thumb_h = h * visible_items / total_items;
+    if (thumb_h < 4) {
+        thumb_h = 4;
+    }
+    int32_t max_top = total_items - visible_items;
+    int32_t thumb_y = y + (h - thumb_h) * scroll_top / max_top;
+    gfx_fill_rect(ctx, x, thumb_y, w, thumb_h, thumb_color);
+}

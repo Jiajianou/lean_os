@@ -53,6 +53,13 @@ static int line_len;
 static int running_pid = -1;
 static int read_fd, write_fd;
 
+/* M37: click-drag text selection over the output grid - the gap M32's own
+ * header comment on Ctrl+C flagged ("there's no text selection UI to copy
+ * from"). Same dragging/active split as text_editor.c's own selection. */
+static int sel_dragging, sel_active;
+static int sel_anchor_row, sel_anchor_col, sel_end_row, sel_end_col;
+#define SELECTION_COLOR 0x00355070u
+
 static void grid_clear(void) {
     for (int r = 0; r < ROWS; r++) {
         memset(grid[r], ' ', COLS);
@@ -100,8 +107,79 @@ static void print_str_term(const char *s) {
     print_term(s, strlen(s));
 }
 
+static void pixel_to_cell(int32_t px, int32_t py, int *out_row, int *out_col) {
+    int row = (int)py / FONT_HEIGHT;
+    if (row < 0) {
+        row = 0;
+    }
+    if (row >= ROWS) {
+        row = ROWS - 1;
+    }
+    int col = (int)px / FONT_WIDTH;
+    if (col < 0) {
+        col = 0;
+    }
+    if (col > COLS) {
+        col = COLS;
+    }
+    *out_row = row;
+    *out_col = col;
+}
+
+static void normalized_selection(int *sr, int *sc, int *er, int *ec) {
+    if (sel_anchor_row < sel_end_row || (sel_anchor_row == sel_end_row && sel_anchor_col <= sel_end_col)) {
+        *sr = sel_anchor_row;
+        *sc = sel_anchor_col;
+        *er = sel_end_row;
+        *ec = sel_end_col;
+    } else {
+        *sr = sel_end_row;
+        *sc = sel_end_col;
+        *er = sel_anchor_row;
+        *ec = sel_anchor_col;
+    }
+}
+
+/* Trims trailing spaces off each row's contribution - grid[] is always
+ * space-padded to COLS (grid_clear/grid_scroll), so copying a row-
+ * spanning selection verbatim would paste a mostly-blank COLS-wide line
+ * for every row it covers. */
+static void copy_selection_to_clipboard(void) {
+    int sr, sc, er, ec;
+    normalized_selection(&sr, &sc, &er, &ec);
+    static char buf[1024];
+    size_t n = 0;
+    for (int r = sr; r <= er && n < sizeof(buf); r++) {
+        int col_start = (r == sr) ? sc : 0;
+        int col_end = (r == er) ? ec : COLS;
+        while (col_end > col_start && grid[r][col_end - 1] == ' ') {
+            col_end--;
+        }
+        for (int c = col_start; c < col_end && n < sizeof(buf); c++) {
+            buf[n++] = grid[r][c];
+        }
+        if (r != er && n < sizeof(buf)) {
+            buf[n++] = '\n';
+        }
+    }
+    sys_clipboard_set(buf, n);
+}
+
 static void redraw(wm_window_t *win, int show_cursor) {
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
+    if (sel_active || sel_dragging) {
+        int sr, sc, er, ec;
+        normalized_selection(&sr, &sc, &er, &ec);
+        for (int r = sr; r <= er; r++) {
+            int col_start = (r == sr) ? sc : 0;
+            int col_end = (r == er) ? ec : COLS;
+            if (col_end <= col_start) {
+                continue;
+            }
+            gfx_fill_rect(&win->gfx, col_start * FONT_WIDTH, r * FONT_HEIGHT,
+                          (col_end - col_start) * FONT_WIDTH, FONT_HEIGHT, SELECTION_COLOR);
+        }
+    }
     for (int r = 0; r < ROWS; r++) {
         gfx_draw_text(&win->gfx, 0, r * FONT_HEIGHT, grid[r], TEXT_COLOR);
     }
@@ -206,7 +284,21 @@ int main(void) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_KEY && running_pid < 0) {
+            if (ev.type == WM_EVENT_MOUSE_MOVE && sel_dragging) {
+                pixel_to_cell(ev.x, ev.y, &sel_end_row, &sel_end_col);
+                changed = 1;
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+                sel_active = 0;
+                sel_dragging = 1;
+                pixel_to_cell(ev.x, ev.y, &sel_anchor_row, &sel_anchor_col);
+                sel_end_row = sel_anchor_row;
+                sel_end_col = sel_anchor_col;
+                changed = 1;
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && !(ev.buttons & 1) && sel_dragging) {
+                sel_dragging = 0;
+                sel_active = (sel_anchor_row != sel_end_row || sel_anchor_col != sel_end_col);
+                changed = 1;
+            } else if (ev.type == WM_EVENT_KEY && running_pid < 0) {
                 /* M32: Ctrl+C/V is checked before ordinary line-editing -
                  * the decoded character alone ('c'/'v') can't tell a
                  * chord from a plain keypress, so SYS_kbd_modifiers'
@@ -215,14 +307,21 @@ int main(void) {
                  * enough" rather than exact: modifier and character
                  * arrive as two separate reads of two separate pieces of
                  * live/buffered state, not one atomic event, but Ctrl is
-                 * physically held for the whole chord in practice). Copy
-                 * targets the current input line (there's no text
-                 * selection UI to copy *from* instead); paste inserts at
-                 * the end of it, silently dropping whatever wouldn't fit -
-                 * same truncation behavior ordinary typing already has. */
+                 * physically held for the whole chord in practice).
+                 * M37: Ctrl+C now prefers a real selection (sel_active)
+                 * over the old "copy the whole current input line"
+                 * stand-in, which only still fires when nothing's
+                 * selected - the exact gap M32's own comment here used to
+                 * flag. Paste still inserts at the end of the input line,
+                 * silently dropping whatever wouldn't fit - same
+                 * truncation behavior ordinary typing already has. */
                 long mods = sys_kbd_modifiers();
                 if ((mods & KBD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
-                    sys_clipboard_set(line_buf, (size_t)line_len);
+                    if (sel_active) {
+                        copy_selection_to_clipboard();
+                    } else {
+                        sys_clipboard_set(line_buf, (size_t)line_len);
+                    }
                 } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'v' || ev.ch == 'V')) {
                     char paste_buf[LINE_MAX];
                     long n = sys_clipboard_get(paste_buf, sizeof(paste_buf));

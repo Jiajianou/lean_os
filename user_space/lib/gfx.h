@@ -63,3 +63,14 @@ void gfx_draw_menu(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t item_w, int32_t
 /* Which item index (0..count-1) contains (px, py), or -1 if none - the
  * hit-test companion to gfx_draw_menu, same rect math. */
 int gfx_menu_hit_test(int32_t px, int32_t py, int32_t x, int32_t y, int32_t item_w, int32_t item_h, int count);
+
+/* M37: a track (filled x,y,w,h) plus a thumb sized/positioned by
+ * visible_items/total_items and scroll_top - the on-screen position/
+ * extent indicator file_manager.c's file list previously had no visual
+ * cue for at all (it scrolled, but nothing on screen showed there was
+ * more above/below). total_items <= visible_items draws a full-track
+ * thumb (nothing to scroll). Draw-only, no hit-test companion yet - this
+ * milestone only promises a visible indicator, not thumb-drag scrolling. */
+void gfx_draw_scrollbar(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
+                         int32_t total_items, int32_t visible_items, int32_t scroll_top,
+                         uint32_t track_color, uint32_t thumb_color);
