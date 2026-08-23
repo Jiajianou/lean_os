@@ -33,11 +33,19 @@ typedef struct {
 #define WM_REQUEST_PIPE  "wm_req"
 #define WM_RESPONSE_PIPE "wm_resp"
 
+/* Short human-readable app name (e.g. "Terminal") a client hands the
+ * compositor at connect time - carried through to wm_window_info_t.title
+ * below so a panel (desktop_shell.c's taskbar) can label a running
+ * window by name instead of only its numeric window_id. Always
+ * NUL-terminated; a client that doesn't care leaves it empty. */
+#define WM_TITLE_MAX 16
+
 typedef struct {
     uint32_t width;  /* ignored if panel or desktop != 0 - both always span the full display width, the compositor's own call */
     uint32_t height; /* ignored if desktop != 0 - a desktop window is always the full display, both dimensions */
     uint8_t panel; /* M22: 0 for a normal window, 1 for a chrome-less, always-on-top, screen-bottom-docked panel - see wm.h's M22 comment below and desktop_shell.c, the one client that ever sets this */
     uint8_t desktop; /* chrome-less, full-screen, always-on-*bottom* (the exact opposite z-order from panel) background window - see desktop_icons.c, the one client that ever sets this. Mutually exclusive with panel; nothing enforces that since only one client ever sets either flag. */
+    char title[WM_TITLE_MAX];
 } wm_create_request_t;
 
 typedef struct {
@@ -114,6 +122,7 @@ typedef struct {
     uint8_t minimized;
     uint8_t is_panel; /* lets a panel client filter itself (and any other panel) out of what it lists as a "running app" */
     uint8_t is_desktop; /* same idea as is_panel - the desktop background is never a "running app" either */
+    char title[WM_TITLE_MAX]; /* echo of wm_create_request_t.title - may be empty */
 } wm_window_info_t;
 
 typedef struct {

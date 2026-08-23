@@ -24,10 +24,12 @@ typedef struct {
 
 /* Requests a width x height window from the compositor (blocks on the
  * well-known request/response pipes, then opens this window's own event
- * pipe) and fills *out. Returns 0 on success, -1 on any failure (no
- * compositor listening, compositor rejected the request, or the shm/
- * event-pipe setup that follows failed). */
-int wm_connect(uint32_t width, uint32_t height, wm_window_t *out);
+ * pipe) and fills *out. title (may be NULL/empty) is the short app name
+ * shown in a panel's running-window list (system_api/include/wm.h's
+ * WM_TITLE_MAX) - truncated silently if longer. Returns 0 on success, -1
+ * on any failure (no compositor listening, compositor rejected the
+ * request, or the shm/event-pipe setup that follows failed). */
+int wm_connect(uint32_t width, uint32_t height, const char *title, wm_window_t *out);
 
 /* M22: like wm_connect, but requests a chrome-less, always-on-top panel
  * docked to the bottom of the screen (system_api/include/wm.h's

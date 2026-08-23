@@ -813,16 +813,18 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
     /* M22 self-test: a real desktop_shell panel client, connected as
      * wm_create_request_t's chrome-less "panel" kind for the first time
      * (M20/M21's self-tests only ever exercised ordinary windows),
-     * proving it reads the real on-disk file list (SYS_listfiles) into
-     * real launcher slots and reflects a real second window (gui_clock,
-     * spawned here the same way M21's did) into a real running-window
-     * slot via the M22 query protocol (system_api/include/wm.h's
-     * WM_QUERY_PIPE). What this can't prove headlessly: that *clicking*
-     * a launcher slot really spawns its program, or that clicking a
-     * running-window slot really focuses/minimizes it - both need real
-     * mouse input, verified manually via QEMU monitor injection the same
-     * way M21's focus-follows-click and gui_paint strokes were; see
-     * milestones.md's M22 entry for that verification's results. */
+     * proving it reflects a real second window (gui_clock, spawned here
+     * the same way M21's did) into a real running-window slot - labeled
+     * with gui_clock's own title ("Clock", wm_create_request_t.title) -
+     * via the M22 query protocol (system_api/include/wm.h's
+     * WM_QUERY_PIPE). The taskbar has no launcher of its own (removed
+     * once it started surfacing every on-disk coreutil as clutter -
+     * launching is desktop_icons.c's job); what this can't prove
+     * headlessly is that *clicking* a running-window slot really focuses/
+     * minimizes it - that needs real mouse input, verified manually via
+     * QEMU monitor injection the same way M21's focus-follows-click and
+     * gui_paint strokes were; see milestones.md's M22 entry for that
+     * verification's results. */
     {
         uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
         uint8_t *shell_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
@@ -850,23 +852,20 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         pit_sleep_ms(1000); /* connects (window 1, focused); desktop_shell's next periodic query picks it up */
 
         /* Panel docks at the bottom: y = 768 - PANEL_HEIGHT(32) = 736.
-         * Launcher slot 0 is "hello" (first file ever seeded, M12/M13) at
-         * local (4,4) 64x24; running slot 0 is gui_clock's window (id 1,
-         * the only non-panel window, focused) right-aligned, but left of
-         * the panel's own reserved clock area (CLOCK_AREA_W = 56, see
-         * desktop_shell.c) rather than the panel's bare right edge:
-         * local (1024-4-56-64, 4) = (900,4). Coordinates below are
-         * absolute (panel-local + the panel's own (0,736) origin) - see
-         * milestones.md's M22 entry for the glyph-bitmap math behind the
-         * on/off pixel picks, same method M21's already proved out. */
+         * Running slot 0 is gui_clock's window (id 1, the only non-panel
+         * window, focused), left-aligned at local (4,4) 96x24 - the
+         * taskbar's only row now that the launcher is gone. Its label is
+         * gui_clock's own title, "Clock" - glyph math below is for 'C'
+         * (font8x16.c's row 5: 0x3E = 00111110, so column 0 is off and
+         * column 2 is on within that row). Coordinates below are absolute
+         * (panel-local + the panel's own (0,736) origin) - see
+         * milestones.md's M22 entry for the glyph-bitmap method this
+         * follows, same one M21's own pixel checks already proved out. */
         static const struct { uint32_t x, y; uint32_t expected; const char *what; } checks[] = {
-            {44, 742,  0x00334455u, "launcher slot 0 background"},
-            {9,  749,  0x00334455u, "launcher slot 0 'h' glyph - off pixel"},
-            {6,  749,  0x00FFFFFFu, "launcher slot 0 'h' glyph - on pixel"},
-            {940, 742, 0x0055AA33u, "running slot 0 background (focused)"},
-            {902, 749, 0x0055AA33u, "running slot 0 '#' glyph - off pixel"},
-            {904, 749, 0x00FFFFFFu, "running slot 0 '#' glyph - on pixel"},
-            {500, 738, 0x00181828u, "panel background (margin strip above the slot row, y=2 - never overdrawn by any slot regardless of file count)"},
+            {44, 742, 0x002E4A63u, "running slot 0 background (focused)"},
+            {6,  749, 0x002E4A63u, "running slot 0 'C' glyph - off pixel"},
+            {8,  749, 0x00FFFFFFu, "running slot 0 'C' glyph - on pixel"},
+            {500, 738, 0x00181828u, "panel background (margin strip above the slot row, y=2 - never overdrawn by any slot regardless of window count)"},
             {500, 500, 0x001A1A2Eu, "desktop background color, above the panel"},
         };
         uint32_t got[sizeof(checks) / sizeof(checks[0])];
@@ -896,8 +895,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         if (!all_ok) {
             panic("M22 desktop shell self-test: framebuffer content did not match");
         }
-        klog_puts("[wm22] desktop shell (panel + launcher + taskbar query) self-test passed "
-                  "(8/8 pixel checks matched).\n\n");
+        klog_puts("[wm22] desktop shell (panel + taskbar query, no launcher) self-test passed "
+                  "(5/5 pixel checks matched).\n\n");
     }
 
     /* Stretch goal: SMP. Deliberately brought up *after* every M-numbered

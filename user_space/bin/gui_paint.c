@@ -34,7 +34,7 @@ static void clear_canvas(gfx_ctx_t *gfx) {
 
 int main(void) {
     wm_window_t win;
-    if (wm_connect(WIN_W, WIN_H, &win) != 0) {
+    if (wm_connect(WIN_W, WIN_H, "Paint", &win) != 0) {
         sys_exit(1);
     }
 

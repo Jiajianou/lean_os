@@ -39,7 +39,7 @@ static int format_uint(uint32_t v, char *buf) {
 
 int main(void) {
     wm_window_t win;
-    if (wm_connect(WIN_W, WIN_H, &win) != 0) {
+    if (wm_connect(WIN_W, WIN_H, "Clock", &win) != 0) {
         sys_exit(1);
     }
 

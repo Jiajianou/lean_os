@@ -1,35 +1,35 @@
 /* user_space/bin/desktop_shell.c
  *
- * M22: the piece that makes "desktop environment running custom apps"
- * genuinely true rather than aspirational (this milestone's own
- * framing) - a real user-space client, connected as a chrome-less panel
- * (system_api/include/wm.h's wm_create_request_t.panel, compositor.c's
- * M22 addition), docked to the bottom of the screen.
+ * The taskbar: a chrome-less panel client (system_api/include/wm.h's
+ * wm_create_request_t.panel, compositor.c's M22 addition), docked to the
+ * bottom of the screen. One row of clickable slots, one per *running*
+ * window (system_api/include/wm.h's WM_QUERY_PIPE query protocol via
+ * wm_query_windows), labeled with the app's own title
+ * (wm_create_request_t.title, threaded through to wm_window_info_t.title)
+ * rather than a bare window id - skipping this panel itself and any other
+ * panel/desktop-background client via wm_window_info_t.is_panel/
+ * is_desktop. Clicking an unfocused/minimized slot focuses it; clicking
+ * the already-focused one minimizes it - one click doing both jobs
+ * depending on current state.
  *
- * Two rows of clickable slots in that one panel:
- *   - launcher (left, growing right): one slot per file SYS_listfiles
- *     reports on disk - clicking spawns it (SYS_spawn). No filtering by
- *     file type: this project doesn't have one, and a coreutil like
- *     `ls` is harmless to spawn from here (it runs, writes to a stdout
- *     nothing is reading, and exits) rather than something the launcher
- *     needs to guard against.
- *   - running windows (right, growing left): one slot per window
- *     wm_query_windows reports (skipping this panel itself via
- *     wm_window_info_t.is_panel) - clicking an unfocused/minimized one
- *     focuses it, clicking the already-focused one minimizes it. The
- *     "click to focus/minimize" milestone wording, read literally as one
- *     click doing both jobs depending on current state.
+ * No launcher row: this used to also list every file on disk
+ * (SYS_listfiles) as a spawnable slot, which meant every coreutil this
+ * project ships (hello, cat, ls, ...) showed up as taskbar clutter with
+ * no relation to "what's currently running". Launching programs is
+ * desktop_icons.c's job (double-click on the desktop background); this
+ * file's only job now is to honestly reflect what's actually open, the
+ * same way a real desktop's taskbar app list works. An empty desktop
+ * means an empty taskbar - just the clock.
  */
 #include "font8x16.h" /* FONT_WIDTH - sizing the clock's fixed-width text area */
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
 #define PANEL_HEIGHT      32
-#define SLOT_W            64
+#define SLOT_W            96
 #define SLOT_H            24
 #define SLOT_MARGIN       4
-#define LABEL_MAX         7 /* truncated to fit SLOT_W at 8px/char with margin */
-#define MAX_LAUNCHER_SLOTS 16
+#define LABEL_MAX         11 /* (SLOT_W - 2px left pad - 2px right pad) / 8px per glyph, rounded down */
 #define MAX_RUNNING_SLOTS  WM_MAX_ROUTABLE_WINDOWS
 #define REFRESH_INTERVAL_MS 300
 
@@ -44,118 +44,79 @@
 #define CLOCK_PAD     8
 #define CLOCK_AREA_W (CLOCK_PAD * 2 + CLOCK_TEXT_W)
 
-#define PANEL_BG        0x00181828u
-#define PANEL_BORDER_COLOR 0x00445566u /* 1px top edge - the panel's only visual separation from the desktop above it otherwise */
-#define SEPARATOR_COLOR    0x00445566u
-#define SLOT_BORDER_COLOR  0x00445566u /* every slot is outlined so it reads as a button, not a flat color swatch */
-#define LAUNCHER_SLOT_BG 0x00334455u
-#define RUNNING_SLOT_BG  0x00335522u
-#define RUNNING_SLOT_FOCUS_BG 0x0055AA33u
-#define RUNNING_SLOT_FOCUS_BORDER 0x0099EE55u
-#define RUNNING_SLOT_MIN_BG   0x00553322u
-#define LABEL_COLOR     0x00FFFFFFu
-
-/* Duplicated rather than pulled from kernel/fs/leanfs.h (kernel-only,
- * this process can't include it) - just needs to be big enough for any
- * name SYS_listfiles ever hands back. */
-#define LEANFS_MAX_NAME_LOCAL 28
-
-typedef struct {
-    int32_t x, w;
-    char name[LEANFS_MAX_NAME_LOCAL];
-} launcher_slot_t;
-
-static char list_buf[2048];
-static launcher_slot_t launcher_slots[MAX_LAUNCHER_SLOTS];
-static int launcher_count;
+#define PANEL_BG            0x00181828u
+#define PANEL_BORDER_COLOR  0x00445566u /* 1px top edge - the panel's only visual separation from the desktop above it otherwise */
+#define PANEL_BEVEL_COLOR   0x00223349u /* faint 1px highlight just under the top edge - a cheap two-tone "lit from above" bevel, the only depth cue available without alpha blending */
+#define SEPARATOR_COLOR     0x00445566u
+#define SLOT_BORDER_COLOR   0x00445566u /* every slot is outlined so it reads as a button, not a flat color swatch */
+#define RUNNING_SLOT_BG            0x00263447u
+#define RUNNING_SLOT_FOCUS_BG      0x002E4A63u
+#define RUNNING_SLOT_FOCUS_BORDER  0x004C99E6u /* same blue as compositor.c's TITLEBAR_FOCUS_COLOR - the focused window's titlebar and its taskbar slot read as the same "this one" accent */
+#define RUNNING_SLOT_MIN_BG        0x00352A20u /* dim, warm - visually distinct from both normal and focused so a minimized app doesn't look like it just quietly vanished */
+#define LABEL_COLOR         0x00FFFFFFu
 
 typedef struct {
     int32_t x, w;
     int32_t window_id;
     uint8_t focused;
+    uint8_t minimized;
+    char name[LABEL_MAX + 1];
 } running_slot_t;
 
 static running_slot_t running_slots[MAX_RUNNING_SLOTS];
 static int running_count;
 
-static void parse_file_list(long n) {
-    launcher_count = 0;
-    int start = 0;
-    for (long i = 0; i <= n && launcher_count < MAX_LAUNCHER_SLOTS; i++) {
-        if (i == n || list_buf[i] == '\n') {
-            int len = (int)i - start;
-            if (len > 0) {
-                launcher_slot_t *slot = &launcher_slots[launcher_count];
-                int copy_len = len < LEANFS_MAX_NAME_LOCAL - 1 ? len : LEANFS_MAX_NAME_LOCAL - 1;
-                for (int j = 0; j < copy_len; j++) {
-                    slot->name[j] = list_buf[start + j];
-                }
-                slot->name[copy_len] = '\0';
-                slot->w = SLOT_W;
-                launcher_count++;
-            }
-            start = (int)i + 1;
+/* Bounded copy of a window's title into a slot label, falling back to a
+ * generic name for the (currently theoretical - every GUI client sets a
+ * title) case of a client that connects without one, so a slot never
+ * renders as blank. */
+static void copy_label(char *dst, const char *src) {
+    int i = 0;
+    if (src && src[0]) {
+        for (; i < LABEL_MAX && src[i]; i++) {
+            dst[i] = src[i];
+        }
+    } else {
+        static const char fallback[] = "App";
+        for (; fallback[i]; i++) {
+            dst[i] = fallback[i];
         }
     }
-    int32_t x = SLOT_MARGIN;
-    for (int i = 0; i < launcher_count; i++) {
-        launcher_slots[i].x = x;
-        x += launcher_slots[i].w + SLOT_MARGIN;
-    }
+    dst[i] = '\0';
 }
 
-static void draw_label(gfx_ctx_t *gfx, int32_t x, int32_t y, const char *name) {
-    char label[LABEL_MAX + 1];
-    int i = 0;
-    for (; i < LABEL_MAX && name[i]; i++) {
-        label[i] = name[i];
-    }
-    label[i] = '\0';
-    gfx_draw_text(gfx, x, y, label, LABEL_COLOR);
-}
-
+/* Lays out one slot per non-panel/non-desktop window left to right from
+ * the panel's left edge, stopping (rather than overlapping) once the next
+ * slot would collide with the clock's own reserved area - an honest "ran
+ * out of room" past MAX_RUNNING_SLOTS or a narrow display, same as this
+ * file's old launcher row did for the same reason. */
 static void refresh_running_slots(wm_window_t *self) {
     wm_query_response_t q;
     if (wm_query_windows(&q) != 0) {
         running_count = 0;
         return;
     }
+    int32_t boundary = (int32_t)self->width - CLOCK_AREA_W - SLOT_MARGIN;
+    int32_t x = SLOT_MARGIN;
     running_count = 0;
     for (int32_t i = 0; i < q.count && running_count < MAX_RUNNING_SLOTS; i++) {
         const wm_window_info_t *info = &q.windows[i];
         if (info->is_panel || info->is_desktop || info->window_id == self->window_id) {
             continue;
         }
+        if (x + SLOT_W > boundary) {
+            break;
+        }
         running_slot_t *slot = &running_slots[running_count];
+        slot->x = x;
+        slot->w = SLOT_W;
         slot->window_id = info->window_id;
         slot->focused = info->focused;
-        slot->w = SLOT_W;
+        slot->minimized = info->minimized;
+        copy_label(slot->name, info->title);
+        x += SLOT_W + SLOT_MARGIN;
         running_count++;
     }
-    int32_t x = self->width - SLOT_MARGIN - CLOCK_AREA_W;
-    for (int i = running_count - 1; i >= 0; i--) {
-        x -= running_slots[i].w;
-        running_slots[i].x = x;
-        x -= SLOT_MARGIN;
-    }
-}
-
-/* How many launcher_slots entries actually fit before colliding with the
- * running-window row's own left edge (running_slots[0].x - see
- * refresh_running_slots's positioning loop: index 0 ends up leftmost
- * regardless of running_count) - the file list this project ships has
- * only ever grown (M15's own note on leanfs headroom, this project's
- * general direction), so a fixed slot count was always going to run into
- * this on a fixed-width panel eventually. Any launcher_slots entry past
- * this point is simply not drawn or clickable rather than overlapping the
- * taskbar - an honest "ran out of room" rather than visual corruption. */
-static int visible_launcher_count(const wm_window_t *self) {
-    int32_t boundary = running_count > 0 ? running_slots[0].x - SLOT_MARGIN : (int32_t)self->width - CLOCK_AREA_W;
-    int n = 0;
-    while (n < launcher_count && launcher_slots[n].x + launcher_slots[n].w <= boundary) {
-        n++;
-    }
-    return n;
 }
 
 /* "MM:SS" of uptime, zero-padded - no itoa in this project's str.h
@@ -179,33 +140,19 @@ static void redraw(wm_window_t *self) {
     gfx_fill_rect(&self->gfx, 0, 0, (int32_t)self->width, (int32_t)self->height, PANEL_BG);
     /* Top edge is otherwise the only thing telling this panel apart from
      * the desktop it's docked to - one line makes it read as a distinct
-     * bar rather than the desktop background bleeding into it. */
+     * bar rather than the desktop background bleeding into it. The
+     * second, fainter line right under it is a one-pixel bevel highlight
+     * - together they read as a lit top edge instead of a flat outline. */
     gfx_draw_line(&self->gfx, 0, 0, (int32_t)self->width - 1, 0, PANEL_BORDER_COLOR);
-
-    int visible = visible_launcher_count(self);
-    for (int i = 0; i < visible; i++) {
-        const launcher_slot_t *slot = &launcher_slots[i];
-        gfx_fill_rect(&self->gfx, slot->x, SLOT_MARGIN, slot->w, SLOT_H, LAUNCHER_SLOT_BG);
-        gfx_draw_rect(&self->gfx, slot->x, SLOT_MARGIN, slot->w, SLOT_H, SLOT_BORDER_COLOR);
-        draw_label(&self->gfx, slot->x + 2, SLOT_MARGIN + 4, slot->name);
-    }
-
-    if (running_count > 0) {
-        int32_t sep_x = running_slots[0].x - SLOT_MARGIN / 2 - 1;
-        gfx_draw_line(&self->gfx, sep_x, SLOT_MARGIN, sep_x, SLOT_MARGIN + SLOT_H, SEPARATOR_COLOR);
-    }
+    gfx_draw_line(&self->gfx, 0, 1, (int32_t)self->width - 1, 1, PANEL_BEVEL_COLOR);
 
     for (int i = 0; i < running_count; i++) {
         const running_slot_t *slot = &running_slots[i];
-        uint32_t bg = slot->focused ? RUNNING_SLOT_FOCUS_BG : RUNNING_SLOT_BG;
+        uint32_t bg = slot->minimized ? RUNNING_SLOT_MIN_BG : (slot->focused ? RUNNING_SLOT_FOCUS_BG : RUNNING_SLOT_BG);
         uint32_t border = slot->focused ? RUNNING_SLOT_FOCUS_BORDER : SLOT_BORDER_COLOR;
         gfx_fill_rect(&self->gfx, slot->x, SLOT_MARGIN, slot->w, SLOT_H, bg);
         gfx_draw_rect(&self->gfx, slot->x, SLOT_MARGIN, slot->w, SLOT_H, border);
-        char num[4];
-        num[0] = '#';
-        num[1] = (char)('0' + (slot->window_id % 10));
-        num[2] = '\0';
-        gfx_draw_text(&self->gfx, slot->x + 2, SLOT_MARGIN + 4, num, LABEL_COLOR);
+        gfx_draw_text(&self->gfx, slot->x + 2, SLOT_MARGIN + 4, slot->name, LABEL_COLOR);
     }
 
     int32_t clock_x = (int32_t)self->width - CLOCK_AREA_W;
@@ -216,14 +163,7 @@ static void redraw(wm_window_t *self) {
 }
 
 static void handle_click(wm_window_t *self, int32_t x, int32_t y) {
-    int visible = visible_launcher_count(self);
-    for (int i = 0; i < visible; i++) {
-        const launcher_slot_t *slot = &launcher_slots[i];
-        if (x >= slot->x && x < slot->x + slot->w && y >= SLOT_MARGIN && y < SLOT_MARGIN + SLOT_H) {
-            sys_spawn(slot->name, "");
-            return;
-        }
-    }
+    (void)self;
     for (int i = 0; i < running_count; i++) {
         const running_slot_t *slot = &running_slots[i];
         if (x >= slot->x && x < slot->x + slot->w && y >= SLOT_MARGIN && y < SLOT_MARGIN + SLOT_H) {
@@ -232,7 +172,6 @@ static void handle_click(wm_window_t *self, int32_t x, int32_t y) {
             } else {
                 wm_send_action(slot->window_id, WM_ACTION_FOCUS);
             }
-            (void)self;
             return;
         }
     }
@@ -243,12 +182,6 @@ int main(void) {
     if (wm_connect_panel(PANEL_HEIGHT, &win) != 0) {
         sys_exit(1);
     }
-
-    long n = sys_listfiles(list_buf, sizeof(list_buf));
-    if (n < 0) {
-        n = 0;
-    }
-    parse_file_list(n);
 
     refresh_running_slots(&win);
     redraw(&win);

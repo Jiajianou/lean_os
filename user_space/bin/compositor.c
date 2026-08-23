@@ -54,6 +54,7 @@ typedef struct {
     uint8_t is_panel;  /* M22: chrome-less, always-on-top, screen-bottom-docked - see wm_create_request_t.panel */
     uint8_t is_desktop; /* chrome-less, full-screen, always-on-*bottom* - see wm_create_request_t.desktop */
     uint8_t minimized; /* M22: hidden from redraw() and from click hit-testing, but the client process keeps running (WM_ACTION_TOGGLE_MINIMIZE) */
+    char title[WM_TITLE_MAX]; /* echoed straight from wm_create_request_t.title into wm_window_info_t.title on every query - see accept_pending_query */
 } window_t;
 
 static window_t windows[MAX_WINDOWS];
@@ -354,6 +355,11 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     win->is_panel = req.panel;
     win->is_desktop = req.desktop;
     win->minimized = 0;
+    int ti = 0;
+    for (; req.title[ti] && ti < WM_TITLE_MAX - 1; ti++) {
+        win->title[ti] = req.title[ti];
+    }
+    win->title[ti] = '\0';
 
     resp.window_id = idx;
     resp.shm_id = (int32_t)shm_id;
@@ -388,6 +394,7 @@ static void accept_pending_query(int query_read_fd, int query_resp_write_fd) {
         resp.windows[i].minimized = win->minimized;
         resp.windows[i].is_panel = win->is_panel;
         resp.windows[i].is_desktop = win->is_desktop;
+        memcpy(resp.windows[i].title, win->title, WM_TITLE_MAX);
     }
     sys_write(query_resp_write_fd, &resp, sizeof(resp));
 }
