@@ -581,13 +581,40 @@ app baseline toward something worth calling a usable OS.
       same category M21's own self-test already deferred focus-follows-
       click to
 
-## M31 — Window dragging & resizing
+## M31 — Window dragging & resizing ✅
 
-- [ ] Mouse-down-on-titlebar + drag = move window - compositor.c has no
-      drag/move state machine at all today, this is genuinely new
-- [ ] Resize via edge/corner hit-test + drag, with a sane minimum size
-- [ ] Bounds clamping so a window can't be dragged fully off-screen or
-      behind the panel unreachably
+- [x] Mouse-down-on-titlebar (excluding the M30 buttons) starts a real
+      move-drag state machine (`drag_mode`/`drag_window` and friends,
+      `user_space/bin/compositor.c`) - once active, every further mouse
+      event updates the dragged window's position directly instead of
+      going through the normal hit-test/focus/content-event-forwarding
+      path at all, until button-up ends it
+- [x] Resize via 5px edge/corner hit zones around each ordinary window's
+      outer (border-inclusive) rect (`resize_hit_mask`) - checked ahead
+      of the move-drag check so a corner wins over "click the titlebar."
+      Minimum size 60x40 (`MIN_WIN_W`/`MIN_WIN_H`). Like M30's maximize,
+      clamped to never exceed the window's own fixed shm-backed buffer
+      size (`buf_w`/`buf_h`) - there's still no protocol for a client to
+      grow its own buffer, so this can shrink a window from its native
+      size but never stretch it past what its buffer actually holds; the
+      opposite (undragged) edge is always kept fixed by deriving the
+      dragged edge's new position from the clamped new width/height,
+      not by tracking and separately patching it
+- [x] Move is bounds-clamped: at least 40px of a dragged window's
+      titlebar must stay on-screen horizontally, its top can't go above
+      the screen's own top edge, and its titlebar bottom can't dip below
+      a docked panel's top edge - so a window can never be dragged fully
+      off-screen or parked unreachably behind the panel
+- [x] Not automated, by design: whether a real mouse click/drag at the
+      *right pixel coordinates* actually reaches this state machine needs
+      real hardware-shaped input this headless build has no way to
+      fabricate - the same boundary M18's mouse driver, M21's focus-
+      follows-click, and M22's click-to-minimize already drew between
+      "self-test proves the logic" and "manual/interactive QEMU-monitor
+      verification proves a real click reaches it." The build is clean
+      and the full boot regression suite (`tools/qemu-serial-test.sh`)
+      still passes with zero behavior change to anything upstream of
+      this.
 
 ## M32 — Desktop & input polish
 

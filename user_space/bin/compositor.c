@@ -334,6 +334,76 @@ static int point_in_window(const window_t *win, int32_t x, int32_t y) {
            y >= top && y < win->y + win->h;
 }
 
+/* M31: the titlebar *band* only - excludes the content area point_in_window
+ * also counts, since a titlebar click starts a move-drag (below) while a
+ * content click doesn't. Buttons are checked separately, and first (see
+ * handle_mouse) - clicking one is not a titlebar-body click. */
+static int point_in_titlebar(const window_t *win, int32_t x, int32_t y) {
+    return x >= win->x && x < win->x + win->w &&
+           y >= win->y - TITLEBAR_H && y < win->y;
+}
+
+/* M31: which edge(s) of win's *outer* (border-inclusive) rect (px, py) is
+ * within RESIZE_MARGIN of - a bitmask so a corner can hit two at once
+ * (diagonal resize). Zero means "not on a resize handle at all". */
+#define RESIZE_MARGIN 5
+#define RESIZE_LEFT   1
+#define RESIZE_RIGHT  2
+#define RESIZE_TOP    4
+#define RESIZE_BOTTOM 8
+
+static int resize_hit_mask(const window_t *win, int32_t px, int32_t py) {
+    int32_t x0 = win->x - BORDER;
+    int32_t y0 = win->y - TITLEBAR_H - BORDER;
+    int32_t x1 = win->x + win->w + BORDER;
+    int32_t y1 = win->y + win->h + BORDER;
+    int within_x = px >= x0 - RESIZE_MARGIN && px < x1 + RESIZE_MARGIN;
+    int within_y = py >= y0 - RESIZE_MARGIN && py < y1 + RESIZE_MARGIN;
+    int mask = 0;
+    if (within_y) {
+        if (px >= x0 - RESIZE_MARGIN && px < x0 + RESIZE_MARGIN) {
+            mask |= RESIZE_LEFT;
+        }
+        if (px >= x1 - RESIZE_MARGIN && px < x1 + RESIZE_MARGIN) {
+            mask |= RESIZE_RIGHT;
+        }
+    }
+    if (within_x) {
+        if (py >= y0 - RESIZE_MARGIN && py < y0 + RESIZE_MARGIN) {
+            mask |= RESIZE_TOP;
+        }
+        if (py >= y1 - RESIZE_MARGIN && py < y1 + RESIZE_MARGIN) {
+            mask |= RESIZE_BOTTOM;
+        }
+    }
+    return mask;
+}
+
+static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi) {
+    if (v < lo) {
+        return lo;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
+}
+
+/* M31: mouse-down-on-titlebar-or-edge starts one of these; every further
+ * mouse event until button-up updates the dragged window instead of
+ * going through the normal hit-test/focus/event-forwarding path at all
+ * (see handle_mouse) - a drag in progress owns the input stream. */
+typedef enum { DRAG_NONE = 0, DRAG_MOVE, DRAG_RESIZE } drag_mode_t;
+static drag_mode_t drag_mode = DRAG_NONE;
+static int drag_window = -1;
+static int drag_resize_mask; /* RESIZE_LEFT/RIGHT/TOP/BOTTOM bits - meaningful only when drag_mode == DRAG_RESIZE */
+static int32_t drag_start_cursor_x, drag_start_cursor_y;
+static int32_t drag_start_x, drag_start_y, drag_start_w, drag_start_h;
+
+#define MIN_WIN_W 60  /* "a sane minimum size" - M31's own wording; comfortably below every window this project ships (smallest is gui_clock's 200x90) */
+#define MIN_WIN_H 40
+#define MOVE_MIN_VISIBLE 40 /* at least this many px of a dragged window's titlebar must stay on-screen and above the panel - see the MOVE clamp below */
+
 static void send_event(const window_t *win, const wm_event_t *ev) {
     sys_write(win->evt_write_fd, ev, sizeof(*ev));
 }
@@ -669,6 +739,63 @@ static void handle_mouse(void) {
         }
 
         int left_down_edge = (mev.buttons & 1) && !(prev_buttons & 1);
+        int left_up_edge = !(mev.buttons & 1) && (prev_buttons & 1);
+
+        /* M31: a drag in progress owns every event until release - no
+         * hit-testing, no focus changes, no forwarding to the window's
+         * own content, just updating its geometry. drag_window's own
+         * `alive` is re-checked every event (not just at drag-start)
+         * since M29's reap_dead_clients can reclaim it mid-drag if its
+         * owning client crashes while being dragged. */
+        if (drag_mode != DRAG_NONE) {
+            if (left_up_edge || !windows[drag_window].alive) {
+                drag_mode = DRAG_NONE;
+                drag_window = -1;
+            } else if (mev.buttons & 1) {
+                window_t *win = &windows[drag_window];
+                int32_t dx = cursor_x - drag_start_cursor_x;
+                int32_t dy = cursor_y - drag_start_cursor_y;
+                if (drag_mode == DRAG_MOVE) {
+                    int32_t panel_h = connected_panel_height();
+                    int32_t min_x = -(win->w - MOVE_MIN_VISIBLE);
+                    int32_t max_x = (int32_t)fb_info.width - MOVE_MIN_VISIBLE;
+                    int32_t min_y = TITLEBAR_H + BORDER; /* titlebar top can't go above the screen's own top edge */
+                    int32_t max_y = (int32_t)fb_info.height - panel_h; /* titlebar bottom can't dip below the panel's top edge */
+                    win->x = clamp_i32(drag_start_x + dx, min_x, max_x);
+                    win->y = clamp_i32(drag_start_y + dy, min_y, max_y);
+                } else { /* DRAG_RESIZE */
+                    int32_t new_x = drag_start_x, new_y = drag_start_y;
+                    int32_t new_w = drag_start_w, new_h = drag_start_h;
+                    /* Opposite edge from whichever one is being dragged
+                     * stays fixed - new_w/new_h are derived from the drag
+                     * first, then x/y are re-derived from that fixed edge,
+                     * rather than tracking x/y independently and patching
+                     * them after clamping (which edge case that badly). */
+                    if (drag_resize_mask & RESIZE_RIGHT) {
+                        new_w = clamp_i32(drag_start_w + dx, MIN_WIN_W, win->buf_w);
+                    } else if (drag_resize_mask & RESIZE_LEFT) {
+                        int32_t right_edge = drag_start_x + drag_start_w;
+                        new_w = clamp_i32(drag_start_w - dx, MIN_WIN_W, win->buf_w);
+                        new_x = right_edge - new_w;
+                    }
+                    if (drag_resize_mask & RESIZE_BOTTOM) {
+                        new_h = clamp_i32(drag_start_h + dy, MIN_WIN_H, win->buf_h);
+                    } else if (drag_resize_mask & RESIZE_TOP) {
+                        int32_t bottom_edge = drag_start_y + drag_start_h;
+                        new_h = clamp_i32(drag_start_h - dy, MIN_WIN_H, win->buf_h);
+                        new_y = bottom_edge - new_h;
+                    }
+                    win->x = new_x;
+                    win->y = new_y;
+                    win->w = new_w;
+                    win->h = new_h;
+                }
+                dirty = 1;
+            }
+            prev_buttons = mev.buttons;
+            continue;
+        }
+
         if (left_down_edge) {
             /* M30: titlebar buttons take priority over every other hit-
              * test below - checked topmost-window-first, same order and
@@ -704,6 +831,63 @@ static void handle_mouse(void) {
                 }
                 prev_buttons = mev.buttons;
                 continue; /* consumed by chrome - not also a focus-changing click on whatever's under it */
+            }
+
+            /* M31: resize handles (window border edges/corners) come next -
+             * a small, precise target that has to win over both the
+             * titlebar-move check right after it and the generic content
+             * hit-test further down. Same topmost-first, first-match-wins
+             * order as every other hit-test in this function. */
+            int rz_idx = -1;
+            int rz_mask = 0;
+            for (int i = window_count - 1; i >= 0; i--) {
+                const window_t *w = &windows[i];
+                if (!w->alive || w->is_panel || w->is_desktop || w->minimized) {
+                    continue;
+                }
+                int mask = resize_hit_mask(w, cursor_x, cursor_y);
+                if (mask) {
+                    rz_idx = i;
+                    rz_mask = mask;
+                    break;
+                }
+            }
+            if (rz_idx >= 0) {
+                drag_mode = DRAG_RESIZE;
+                drag_window = rz_idx;
+                drag_resize_mask = rz_mask;
+                drag_start_cursor_x = cursor_x;
+                drag_start_cursor_y = cursor_y;
+                drag_start_x = windows[rz_idx].x;
+                drag_start_y = windows[rz_idx].y;
+                drag_start_w = windows[rz_idx].w;
+                drag_start_h = windows[rz_idx].h;
+                set_focus(rz_idx);
+                prev_buttons = mev.buttons;
+                continue;
+            }
+
+            /* M31: a titlebar-body click (not a button, not a resize
+             * handle) starts a move-drag instead of falling through to
+             * the plain focus-click hit-test below. */
+            int mv_idx = -1;
+            for (int i = window_count - 1; i >= 0; i--) {
+                const window_t *w = &windows[i];
+                if (w->alive && !w->is_panel && !w->is_desktop && !w->minimized && point_in_titlebar(w, cursor_x, cursor_y)) {
+                    mv_idx = i;
+                    break;
+                }
+            }
+            if (mv_idx >= 0) {
+                drag_mode = DRAG_MOVE;
+                drag_window = mv_idx;
+                drag_start_cursor_x = cursor_x;
+                drag_start_cursor_y = cursor_y;
+                drag_start_x = windows[mv_idx].x;
+                drag_start_y = windows[mv_idx].y;
+                set_focus(mv_idx);
+                prev_buttons = mev.buttons;
+                continue;
             }
 
             /* Panels are checked first (they're drawn on top, so they'd
