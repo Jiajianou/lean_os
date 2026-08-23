@@ -3,8 +3,8 @@
 ; enter_user_mode(entry, user_stack, arg_ptr, user_data_sel, user_code_sel):
 ; drops from ring 0 to ring 3 via `iretq` - the only instruction that can
 ; load a new CS/SS at a different privilege level in one step (same rule
-; that governed every mode transition back in stage2.asm and gdt_flush: CS
-; can't be loaded with `mov`, and a direct jump/call can't cross rings).
+; gdt_flush already runs into: CS can't be loaded with `mov`, and a direct
+; jump/call can't cross rings).
 ; Never returns to its caller - the only way back into kernel code for
 ; this task is a future interrupt/syscall, landing via isr_common_stub/
 ; syscall_common_stub's own iretq, using TSS.RSP0 as the entry stack

@@ -4,9 +4,9 @@
  * polling (no IRQ14 handling - PIO mode is inherently CPU-driven anyway,
  * and nothing here needs to overlap disk I/O with other work yet).
  * Assumes the boot disk itself is the primary master, which is what QEMU
- * gives a bare `-drive` on the default `pc` machine - the same drive
- * stage1/stage2 already read from via BIOS `INT 13h`, just addressed
- * directly by the kernel now instead of through firmware.
+ * gives a bare `-drive` on the default `pc` machine - the same drive the
+ * boot loader already read the kernel from via EFI_BLOCK_IO_PROTOCOL, just
+ * addressed directly by the kernel now instead of through firmware.
  */
 #pragma once
 

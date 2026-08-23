@@ -157,9 +157,9 @@ typedef struct {
     }
 
 /* ---- Block I/O (raw LBA disk reads - kernel.bin lives outside the ESP's
- * FAT filesystem entirely, at the same fixed LBA both boot paths agree on
- * (see kernel/boot/stage2.asm's KERNEL_START_LBA), so this is the only
- * protocol boot.c needs to fetch it - no filesystem driver required) ---- */
+ * FAT filesystem entirely, at boot.c's own fixed KERNEL_START_LBA, so this
+ * is the only protocol boot.c needs to fetch it - no filesystem driver
+ * required) ---- */
 
 typedef struct {
     UINT32 MediaId;
@@ -190,8 +190,9 @@ typedef struct {
         0x964e5b21, 0x6459, 0x11d2, { 0x8e, 0x39, 0x0, 0xa0, 0xc9, 0x69, 0x72, 0x3b }  \
     }
 
-/* ---- Graphics Output (the linear framebuffer - GOP is UEFI's
- * counterpart to stage2.asm's VBE mode set, M16) ---- */
+/* ---- Graphics Output (the linear framebuffer - GOP is UEFI's mode-set
+ * mechanism for it, the counterpart to the BIOS-era VBE calls M16
+ * originally used before M26 removed the BIOS boot path) ---- */
 
 /* Byte layout [0]=Blue [1]=Green [2]=Red [3]=Reserved - read as a
  * little-endian UINT32 that's Reserved<<24 | Red<<16 | Green<<8 | Blue,

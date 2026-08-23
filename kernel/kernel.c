@@ -200,11 +200,11 @@ static void quick_task(void *arg) {
 }
 
 /* e820_map: pointer to a dword entry count immediately followed by that
- * many e820_entry_t records — the layout stage2.asm builds at
- * E820_COUNT_ADDR and hands off in RDI.
- * fb_info: fb_boot_info_t describing the linear framebuffer stage2's
- * setup_vbe_mode set up (M16) - handed off in RSI, the System V ABI's
- * second integer argument register. */
+ * many e820_entry_t records — the layout the boot loader
+ * (kernel/boot/uefi/boot.c) builds and hands off in RDI.
+ * fb_info: fb_boot_info_t describing the linear framebuffer the boot
+ * loader's init_framebuffer set up (M16) - handed off in RSI, the System V
+ * ABI's second integer argument register. */
 void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
     klog_init();
     klog_puts("lean_os kernel: hello from C!\n\n");
@@ -276,10 +276,10 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
     kfree(test);
     klog_puts("[heap] kmalloc/kfree self-test passed.\n\n");
 
-    /* M16: bring up the linear framebuffer stage2's setup_vbe_mode set up
-     * and describe in RSI (fb_info, this function's second argument) -
-     * needs vmm live first, since fb_init maps the physical framebuffer
-     * region in. */
+    /* M16: bring up the linear framebuffer the boot loader's
+     * init_framebuffer set up and described in RSI (fb_info, this
+     * function's second argument) - needs vmm live first, since fb_init
+     * maps the physical framebuffer region in. */
     fb_init(fb_info);
 
     /* Self-test: clear to a background color, fill a smaller rectangle

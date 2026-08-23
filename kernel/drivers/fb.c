@@ -17,7 +17,7 @@ void fb_init(const fb_boot_info_t *info) {
         panic("fb_init: only 32bpp framebuffers are supported");
     }
     if (info->width == 0 || info->height == 0) {
-        panic("fb_init: stage2 handed off an empty/zeroed fb_boot_info_t - VBE setup failed silently");
+        panic("fb_init: boot loader handed off an empty/zeroed fb_boot_info_t - GOP setup failed silently");
     }
 
     fb_base = info->phys_addr;

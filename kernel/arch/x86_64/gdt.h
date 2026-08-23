@@ -1,8 +1,8 @@
 /* kernel/arch/x86_64/gdt.h
  *
- * Kernel-owned GDT + TSS. Replaces the flat 32-bit GDT stage2.asm built
- * just to get into protected/long mode - that one is scratch memory the
- * bootloader owned; this is the kernel's real, permanent descriptor table.
+ * Kernel-owned GDT + TSS. Replaces whatever GDT the boot loader (UEFI
+ * firmware) had installed - that one is firmware-owned and goes away with
+ * ExitBootServices; this is the kernel's real, permanent descriptor table.
  *
  * SMP (stretch goal): the TSS is what holds RSP0, the kernel stack the CPU
  * switches to on any ring3->ring0 transition - and RSP0 is inherently

@@ -1,15 +1,14 @@
 /* kernel/boot/uefi/efi.h
  *
- * M24 (UEFI boot path): hand-written UEFI base types, matching the layouts
- * the UEFI Specification mandates (verified field-for-field against the
- * public edk2 reference headers during development - the struct layouts
- * below are dictated by the spec's own ABI, not anyone's copyrightable
- * expression of it, the same sense in which kernel/mm/e820.h's
- * e820_entry_t matches the BIOS E820 ABI). No GNU-EFI, no edk2 headers,
- * nothing linked into the OS image - this is the freestanding boot-time
- * counterpart to kernel/boot/stage2.asm, just built as a PE32+ EFI
- * application instead of a flat real-mode binary (see efi_proto.h and
- * boot.c for what actually uses these).
+ * Hand-written UEFI base types, matching the layouts the UEFI Specification
+ * mandates (verified field-for-field against the public edk2 reference
+ * headers during development - the struct layouts below are dictated by
+ * the spec's own ABI, not anyone's copyrightable expression of it, the
+ * same sense in which kernel/mm/e820.h's e820_entry_t matches the
+ * conventional E820 ABI). No GNU-EFI, no edk2 headers, nothing linked into
+ * the OS image - the boot loader (boot.c) is built as a freestanding PE32+
+ * EFI application against just these headers (see efi_proto.h and boot.c
+ * for what actually uses these).
  *
  * Only the pieces boot.c needs are defined here - this is not a general
  * UEFI headers library.

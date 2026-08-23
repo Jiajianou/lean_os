@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Builds OVMF (the open-source UEFI firmware tianocore/edk2 ships) from
-# source, for tools/run-qemu-uefi.sh to boot the M24 UEFI path against.
-# Dev-time only, like every other tool this project's toolchain pulls in
-# (docs/toolchain.md) - OVMF plays the same role QEMU's plain BIOS already
-# does for the existing boot path: something standing in for real
-# hardware's own firmware, never anything the OS image itself ships or
-# links against.
+# source, for tools/run-qemu.sh and tools/qemu-serial-test.sh to boot
+# against (auto-invoked by both if build/ovmf/ isn't there yet). Dev-time
+# only, like every other tool this project's toolchain pulls in
+# (docs/toolchain.md) - OVMF stands in for real hardware's own firmware,
+# never anything the OS image itself ships or links against.
 #
 # Why build it instead of `brew install`: there is no OVMF formula in
 # homebrew-core, and the one third-party tap this machine had lying

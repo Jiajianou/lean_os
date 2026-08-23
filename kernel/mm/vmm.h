@@ -1,12 +1,12 @@
 /* kernel/mm/vmm.h
  *
- * Kernel-owned page tables. vmm_init() replaces stage2.asm's temporary
- * bootstrap identity map (fixed addresses 0x1000/0x2000/0x3000 - see
- * stage2.asm's header comment) with a fresh PML4 built from
- * pmm_alloc_frame() frames: the same "kernel takes ownership away from a
- * bootloader-owned scratch structure" pattern M4 already used for the GDT
- * (gdt.c). It rebuilds the identical 1 GiB identity map so nothing the
- * kernel is currently running out of moves.
+ * Kernel-owned page tables. vmm_init() replaces whatever paging the boot
+ * loader left CR3 pointing at (firmware-owned, not the kernel's own
+ * memory) with a fresh PML4 built from pmm_alloc_frame() frames: the same
+ * "kernel takes ownership away from a bootloader-owned scratch structure"
+ * pattern M4 already used for the GDT (gdt.c). It rebuilds the identical
+ * 1 GiB identity map so nothing the kernel is currently running out of
+ * moves.
  *
  * vmm_map_page/vmm_unmap_page give the rest of the kernel a real
  * map/unmap API for 4 KiB pages at virtual addresses outside that

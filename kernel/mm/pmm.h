@@ -1,8 +1,9 @@
 /* kernel/mm/pmm.h
  *
  * Physical frame allocator: a bitmap over PMM_TRACKED_MEMORY bytes of
- * physical memory, seeded from the E820 map stage2.asm collected (see
- * e820.h). One bit per 4 KiB frame; 1 = reserved/used, 0 = free.
+ * physical memory, seeded from the e820-format memory map the boot loader
+ * hands off (see e820.h). One bit per 4 KiB frame; 1 = reserved/used, 0 =
+ * free.
  *
  * PMM_TRACKED_MEMORY is capped at the 1 GiB vmm_init() identity-maps
  * (vmm.h/vmm.c) - a frame this allocator hands out has to be addressable

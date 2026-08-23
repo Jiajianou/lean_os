@@ -15,8 +15,8 @@ ground rules in [milestones.md](../milestones.md)).
 
 ## M24: the UEFI toolchain is a separate, parallel one
 
-Everything above builds the OS itself (ELF64 kernel/user binaries, flat
-BIOS boot sectors). `kernel/boot/uefi/boot.c` builds to a *PE32+* EFI
+Everything above builds the OS itself (ELF64 kernel/user binaries, the
+flat `mbr.bin`/`kernel.bin` blobs). `kernel/boot/uefi/boot.c` builds to a *PE32+* EFI
 application instead — a hard requirement of the UEFI spec, not a choice —
 so it needs its own compiler target (`clang -target x86_64-unknown-windows`)
 and its own linker (`lld-link`, not `x86_64-elf-ld`). See that file's own

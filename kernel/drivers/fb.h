@@ -1,24 +1,25 @@
 /* kernel/drivers/fb.h
  *
- * Linear framebuffer driver (M16). stage2.asm's new setup_vbe_mode sets a
- * VESA VBE graphics mode with a linear framebuffer before the protected/
- * long-mode transition and hands off a small fb_boot_info_t describing it
- * in RSI (alongside the existing E820 map in RDI - see kernel_main). This
+ * Linear framebuffer driver (M16). The boot loader (kernel/boot/uefi/boot.c's
+ * init_framebuffer, via the Graphics Output Protocol) sets a linear
+ * framebuffer graphics mode and hands off a small fb_boot_info_t describing
+ * it in RSI (alongside the e820 memory map in RDI - see kernel_main). This
  * driver maps that physical region into the kernel's address space and
  * gives the rest of the kernel pixel-level primitives to build on -
  * everything from M17's text console onward draws through this, nothing
  * touches the framebuffer memory directly.
  *
- * Pixel format: stage2 only ever requests 32-bit modes, always treated as
- * packed 0x00RRGGBB (XRGB8888) - the near-universal layout for VBE/Bochs
- * 32bpp direct-color modes, and the only one this driver supports.
+ * Pixel format: always treated as packed 0x00RRGGBB (XRGB8888) - the boot
+ * loader only ever selects GOP's PixelBlueGreenRedReserved8BitPerColor
+ * mode, which is the same 32-bit value read little-endian, and the only
+ * format this driver supports.
  */
 #pragma once
 
 #include <stdint.h>
 
-/* Matches exactly what stage2.asm's setup_vbe_mode writes to
- * FB_INFO_ADDR before jumping into the kernel. */
+/* Matches exactly what boot.c's init_framebuffer fills in before jumping
+ * into the kernel. */
 typedef struct __attribute__((packed)) {
     uint64_t phys_addr;
     uint32_t pitch;  /* bytes per scanline - not necessarily width * 4 */

@@ -8,9 +8,11 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## Ground rules / assumptions
 
-- **Architecture:** x86_64, legacy BIOS boot (not UEFI).
-- **Bootloader:** written entirely from scratch (MBR stage 1 → stage 2 →
-  long mode), no GRUB/Multiboot/Limine or any third-party boot code.
+- **Architecture:** x86_64, UEFI boot only (the original legacy-BIOS boot
+  path was removed in M26 - see below).
+- **Bootloader:** written entirely from scratch (`kernel/boot/uefi/boot.c`,
+  a hand-written PE32+ EFI application), no GRUB/Multiboot/Limine or any
+  third-party boot code.
 - **Language:** freestanding C for kernel/system_api/user_space, with x86_64
   assembly (NASM — decided in M0) for boot code, context switches, and other
   spots C can't reach. No libc, no newlib, no external libraries linked into
@@ -337,10 +339,33 @@ runtime dependency).
       instead of by instruction
 - [x] `docs/third-party-programs.md`: the end-to-end workflow
 
+## M26 — UEFI-only boot, BIOS path removed ✅
+
+- [x] Deleted `kernel/boot/stage1.asm` and `stage2.asm`;
+      `kernel/boot/uefi/boot.c` is now the only boot loader - it already
+      did the whole job itself (M24), nothing in the kernel proper needed
+      to change
+- [x] `kernel/boot/mbr.asm`: LBA 0 is now pure partition-table data (no
+      executable boot code) - UEFI firmware still needs it to find the ESP
+      (same legacy-MBR-with-a-0xEF-entry trick M24 introduced), nothing
+      ever executes this sector as code anymore
+- [x] Kernel blob moved from LBA 9 to LBA 1 (no more stage1+stage2 gap to
+      reserve); `boot.c`'s `KERNEL_START_LBA` updated to match
+- [x] `tools/run-qemu.sh` now builds (`make all`) and boots (via OVMF) in
+      one command, auto-building OVMF firmware on first run if
+      `build/ovmf/` is missing; `tools/run-qemu-uefi.sh` removed (merged
+      into `run-qemu.sh`); the `Makefile`'s `run-uefi` target removed
+      alongside it
+- [x] `tools/qemu-serial-test.sh` updated to boot via OVMF too (had been
+      implicitly BIOS-only, which would no longer boot at all)
+- [x] `docs/flow.md` rewritten to walk through the UEFI boot flow in place
+      of the removed BIOS stage1/stage2 deep-dive
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support
-- [x] UEFI boot path as an alternative to BIOS (M24, above)
+- [x] UEFI boot path as an alternative to BIOS (M24, above; BIOS itself
+      later removed in M26, leaving UEFI as the only path)
 - [x] Package/build tooling for third-party user programs (M25, above)
 - [ ] Networking stack + NIC driver
 - [ ] Port to real hardware (USB boot test)

@@ -69,8 +69,7 @@ USER_CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
                -mcmodel=large -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Werror \
                -Iuser_space/lib -Isystem_api/include -c
 
-STAGE1_BIN := $(BUILD)/stage1.bin
-STAGE2_BIN := $(BUILD)/stage2.bin
+MBR_BIN    := $(BUILD)/mbr.bin
 KERNEL_ELF := $(BUILD)/kernel.elf
 KERNEL_BIN := $(BUILD)/kernel.bin
 KERNEL_SECTORS_FILE := $(BUILD)/kernel.sectors
@@ -87,8 +86,8 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # init and shell in their own directories. Each becomes build/NAME.elf,
 # linked against USER_LIBOBJS, and all of them get embedded into the
 # kernel image together (kernel/proc/embed_programs.asm) - there's still
-# no filesystem driver *stage2* can use to load from disk, only the
-# kernel's own (M12), so this is still how anything gets onto the disk
+# no filesystem driver the *boot loader* can use to load from disk, only
+# the kernel's own (M12), so this is still how anything gets onto the disk
 # leanfs formats on first boot in the first place.
 USER_PROGRAMS := hello echo cat ls init shell memtest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
@@ -103,23 +102,15 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run run-uefi leanfs-put preseed clean
+.PHONY: all run leanfs-put preseed clean
 
 all: $(IMAGE)
 
 $(BUILD) $(KOBJ):
 	mkdir -p $@
 
-$(STAGE1_BIN): $(BOOT)/stage1.asm | $(BUILD)
-	$(AS) -f bin $< -o $@
-
-# stage2 needs to know how many sectors to read the kernel image from disk.
-# Depending on KERNEL_BIN (rather than KERNEL_SECTORS_FILE directly) is
-# deliberate: the sectors file is a side effect of that rule's recipe, not
-# a target Make knows how to build on its own, so this is what actually
-# guarantees it exists by the time the recipe below runs.
-$(STAGE2_BIN): $(BOOT)/stage2.asm $(KERNEL_BIN) | $(BUILD)
-	$(AS) -f bin -D KERNEL_SECTOR_COUNT=$$(cat $(KERNEL_SECTORS_FILE)) $< -o $@
+$(MBR_BIN): $(BOOT)/mbr.asm | $(BUILD)
+	$(AS) -f bin -D ESP_START_LBA=$(ESP_START_LBA) -D ESP_SECTOR_COUNT=$(ESP_SECTOR_COUNT) $< -o $@
 
 $(KOBJ)/%.o: kernel/%.asm | $(KOBJ)
 	@mkdir -p $(dir $@)
@@ -153,13 +144,13 @@ $(UOBJ)/%.o: user_space/shell/%.c | $(UOBJ)
 # needs every one of these .elf files to exist before nasm can assemble
 # it - an explicit extra prerequisite on top of the normal *.asm pattern
 # rule below, the same "side effect a generic rule wouldn't know to
-# guarantee" situation stage2.bin's kernel.sectors dependency is.
+# guarantee" situation $(UEFI_BOOT_OBJ)'s kernel.sectors dependency below is.
 $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(USER_LD)
 	$(LD) -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/$*.o
 
 # AP_TRAMPOLINE_BIN: the standalone 16-bit SMP AP bring-up blob (see
 # kernel/arch/x86_64/ap_trampoline.asm's header comment) - built like
-# stage1/stage2 (flat `-f bin`, no ELF, no linking), then incbin'd into the
+# mbr.bin (flat `-f bin`, no ELF, no linking), then incbin'd into the
 # kernel image by embed_ap_trampoline.o, the same "explicit extra
 # prerequisite the generic *.asm pattern rule wouldn't know to guarantee"
 # situation embed_programs.o's USER_PROGRAM_ELFS dependency is already in.
@@ -175,10 +166,10 @@ $(KOBJ)/proc/embed_programs.o: $(USER_PROGRAM_ELFS)
 $(KERNEL_ELF): $(KERNEL_OBJS) kernel/linker.ld
 	$(LD) -T kernel/linker.ld -o $@ $(KERNEL_OBJS)
 
-# BOOTX64.EFI needs KERNEL_SECTOR_COUNT for the same reason stage2.bin
-# does (see stage2.bin's own recipe comment above) - both loaders read
-# the kernel blob from the same fixed on-disk LBA range, so both need to
-# agree on exactly how many sectors that is.
+# BOOTX64.EFI needs KERNEL_SECTOR_COUNT to know how many sectors to read
+# the kernel blob back from disk - only known once the kernel is actually
+# built (see $(KERNEL_BIN)'s recipe below, which generates
+# $(KERNEL_SECTORS_FILE) as a side effect of computing it).
 $(UEFI_BOOT_OBJ): kernel/boot/uefi/boot.c kernel/boot/uefi/efi.h kernel/boot/uefi/efi_proto.h $(KERNEL_BIN) | $(BUILD)
 	$(UEFI_CC) -target $(UEFI_CC_TARGET) -ffreestanding -fshort-wchar -mno-red-zone \
 	           -fno-stack-protector -std=c11 -Wall -Wextra -Werror \
@@ -191,7 +182,7 @@ $(UEFI_BOOT_EFI): $(UEFI_BOOT_OBJ)
 
 # Pads kernel.bin up to a whole number of 512-byte sectors (so the image
 # layout is exact — no relying on how a short final sector reads off
-# disk) and records that sector count for stage2 to read the kernel back
+# disk) and records that sector count for boot.c to read the kernel back
 # with.
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
@@ -206,47 +197,43 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 # matching leanfs.c/leanfs.h's own layout constants exactly - if those
 # ever change, this has to move with them; M15 grew this from the
 # original 4105 to add indirect-block support and a much bigger data
-# region). The boot image (stage1+stage2+kernel.bin) has to stay well
-# clear of that, and the disk file itself has to actually be big enough
-# to hold the whole filesystem region, or QEMU has nothing there for the
-# ATA driver to read/write.
+# region). The boot image (mbr.bin+kernel.bin) has to stay well clear of
+# that, and the disk file itself has to actually be big enough to hold the
+# whole filesystem region, or QEMU has nothing there for the ATA driver to
+# read/write.
 FS_START_LBA     := 2048
 FS_TOTAL_SECTORS := 65560
 IMAGE_SECTORS    := 69632
 
-# M24: the EFI System Partition a UEFI firmware boots from - see
-# kernel/boot/stage1.asm's hybrid-MBR partition entry, which hardcodes
-# these same two numbers (ESP_START_LBA/ESP_SECTOR_COUNT there) and must
-# move with them if they ever change here. Sits in the same "boot blob
-# has to stay clear of this" gap FS_START_LBA already carves out below;
-# unlike leanfs, nothing here needs to persist rebuild to rebuild, so
-# every `make` reformats it from scratch alongside BOOTX64.EFI.
+# The EFI System Partition the UEFI firmware boots from - kernel/boot/mbr.asm's
+# partition entry hardcodes these same two numbers (passed in via `nasm -D`,
+# see $(MBR_BIN)'s recipe above) and must move with them if they ever change
+# here. Sits in the same "boot blob has to stay clear of this" gap
+# FS_START_LBA already carves out below; unlike leanfs, nothing here needs
+# to persist rebuild to rebuild, so every `make` reformats it from scratch
+# alongside BOOTX64.EFI.
 ESP_START_LBA    := 1024
 ESP_SECTOR_COUNT := 1024
 
-$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)
-	@boot_sectors=$$(( ($$(stat -f%z $(STAGE1_BIN)) + $$(stat -f%z $(STAGE2_BIN)) + $$(stat -f%z $(KERNEL_BIN))) / 512 )); \
+$(IMAGE): $(MBR_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)
+	@boot_sectors=$$(( ($$(stat -f%z $(MBR_BIN)) + $$(stat -f%z $(KERNEL_BIN))) / 512 )); \
 	if [ $$boot_sectors -ge $(ESP_START_LBA) ]; then \
-		echo "error: boot image ($$boot_sectors sectors) has grown into the ESP's start (LBA $(ESP_START_LBA)) - move ESP_START_LBA out further here and in stage1.asm" >&2; \
+		echo "error: boot image ($$boot_sectors sectors) has grown into the ESP's start (LBA $(ESP_START_LBA)) - move ESP_START_LBA out further here and in mbr.asm" >&2; \
 		exit 1; \
 	fi
-	cat $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) > $(IMAGE)
+	cat $(MBR_BIN) $(KERNEL_BIN) > $(IMAGE)
 	truncate -s $$(( $(IMAGE_SECTORS) * 512 )) $(IMAGE)
 	$(MFORMAT) -i $(IMAGE)@@$$(( $(ESP_START_LBA) * 512 )) -T $(ESP_SECTOR_COUNT)
 	$(MMD) -i $(IMAGE)@@$$(( $(ESP_START_LBA) * 512 )) ::EFI
 	$(MMD) -i $(IMAGE)@@$$(( $(ESP_START_LBA) * 512 )) ::EFI/BOOT
 	$(MCOPY) -i $(IMAGE)@@$$(( $(ESP_START_LBA) * 512 )) -o $(UEFI_BOOT_EFI) ::EFI/BOOT/BOOTX64.EFI
 
-run: all
+# tools/run-qemu.sh does its own `make all` (and builds OVMF firmware via
+# tools/build-ovmf.sh first if it isn't present yet), so `run` doesn't need
+# `all` as a prerequisite here - the script is the single source of truth
+# for "build then boot."
+run:
 	@./tools/run-qemu.sh
-
-# M24: boots the identical image via UEFI (OVMF) instead of BIOS. Needs
-# `tools/build-ovmf.sh` run once first - not a dependency of this target
-# since it builds firmware from source (minutes, not seconds) and has its
-# own toolchain preconditions (see its header comment) separate from the
-# rest of this Makefile.
-run-uefi: all
-	@./tools/run-qemu-uefi.sh
 
 $(LEANFS_PUT): tools/leanfs-put.c | $(BUILD)
 	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -o $@ $<

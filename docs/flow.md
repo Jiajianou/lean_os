@@ -21,229 +21,196 @@ to a section if you just need a refresher.
 
 ```mermaid
 flowchart TD
-    A[BIOS / QEMU firmware] -->|loads 512 bytes @ 0x7C00, jumps in 16-bit real mode| B[stage1.asm — MBR]
-    B -->|INT 13h LBA read: stage2 off disk| C[stage2.asm loaded @ 0x7E00]
-    B -->|far jump| C
-    C -->|"real mode: E820, load kernel.bin to scratch, enable A20"| D[still 16-bit real mode]
-    D -->|lgdt + set CR0.PE| E[32-bit protected mode]
-    E -->|build identity-mapped page tables, PAE, EFER.LME, CR0.PG| F[still 32-bit, now long mode]
-    F -->|far jump reloads CS with 64-bit selector| G[64-bit long mode]
-    G -->|rep movsb: copy kernel from scratch buf to 1 MiB| H[kernel.bin at final address]
-    G -->|jmp KERNEL_LOAD_ADDR, E820 ptr in RDI| I[entry.asm _start]
-    I -->|switch onto kernel-owned stack| J[kernel_main in kernel.c]
-    J --> K[gdt_init]
-    K --> L[idt_init]
-    L --> M[pic_remap]
-    M --> N["int3 self-test (full ISR round trip)"]
-    N --> O[parse + print E820 map]
-    O --> P[pmm_init: bitmap frame allocator seeded from E820]
-    P --> Q[vmm_init: kernel-owned page tables, 1 GiB identity map]
-    Q --> R[heap_init: kmalloc/kfree over a fresh virtual range]
-    R --> S["vmm + heap self-tests (map/write/read/unmap, kmalloc/kfree)"]
-    S --> T["halt (cli; hlt loop)"]
+    A[UEFI firmware] -->|reads mbr.asm's legacy MBR partition table, finds the ESP| B[loads BOOTX64.EFI as a PE32+ app]
+    B -->|efi_main runs, already in 64-bit long mode with firmware-owned paging| C[init_framebuffer: GOP mode select]
+    C -->|find/select a BGR8888 mode, SetMode| D[load_kernel: AllocatePages + Block I/O ReadBlocks]
+    D -->|read kernel.bin from fixed LBA straight to 0x100000| E[build_e820_and_exit_boot_services]
+    E -->|"GetMemoryMap/AllocatePool retry loop, translate to e820_entry_t[]"| F[ExitBootServices]
+    F -->|"raw asm: RDI=e820 ptr, RSI=fb_boot_info_t ptr, jmp KERNEL_LOAD_ADDR"| G[entry.asm _start]
+    G -->|switch onto kernel-owned stack| H[kernel_main in kernel.c]
+    H --> I[gdt_init]
+    I --> J[idt_init]
+    J --> K[pic_remap]
+    K --> L["int3 self-test (full ISR round trip)"]
+    L --> M[parse + print e820 map]
+    M --> N[pmm_init: bitmap frame allocator seeded from e820]
+    N --> O[vmm_init: kernel-owned page tables, 1 GiB identity map]
+    O --> P[heap_init: kmalloc/kfree over a fresh virtual range]
+    P --> Q["vmm + heap self-tests (map/write/read/unmap, kmalloc/kfree)"]
+    Q --> R["halt (cli; hlt loop)"]
 ```
 
 Everything below is one of the boxes in this diagram, expanded.
 
 ---
 
-## 2. Why two boot stages instead of one
+## 2. Why a UEFI application instead of a hand-rolled bootloader
 
-A BIOS boot sector (the MBR) is exactly **512 bytes**, and the last two
-of those are a fixed signature (`0xAA55`) — you get 510 bytes of code
-and data. That is nowhere near enough to write a protected-mode →
-long-mode transition, an E820 memory scan, and a disk loader capable of
-pulling in a kernel of arbitrary, growing size.
+Early on, `lean_os` booted via a from-scratch two-stage BIOS bootloader
+(a 512-byte MBR loading a larger real-mode-to-long-mode stage 2 - see
+M1/M2 in [milestones.md](../milestones.md)). M24 added a UEFI path
+alongside it, and M26 removed the BIOS path entirely, leaving UEFI as the
+only boot method. The reasoning: UEFI firmware already does, as spec'd
+services, everything the hand-written BIOS stages had to build from raw
+real-mode primitives - a memory map (`GetMemoryMap`), a linear framebuffer
+mode (Graphics Output Protocol), disk access (`EFI_BLOCK_IO_PROTOCOL`),
+and crucially, it hands control to `efi_main` **already in 64-bit long
+mode** with its own paging live. There's no A20 gate, no hand-built GDT,
+no protected-mode/long-mode transition to get right - all of that is the
+firmware's problem, not this project's.
 
-So the standard approach — and what `lean_os` does — is to split the
-job:
+What UEFI does *require* in exchange: the boot loader has to be a PE32+
+application (not a flat binary), built and linked with a different
+toolchain (`clang -target x86_64-unknown-windows` + `lld-link` - see
+[docs/toolchain.md](toolchain.md)), calling into firmware through function
+pointers off an `EFI_SYSTEM_TABLE` rather than software interrupts. The
+project still writes this from scratch, no GNU-EFI or edk2 headers linked
+in (`kernel/boot/uefi/efi.h`/`efi_proto.h`, [source](../kernel/boot/uefi/) hand-match the spec's own ABI) -
+same "no third-party boot code" ground rule as the original BIOS path, just
+built against a different, firmware-provided foundation.
 
-- **Stage 1** (`kernel/boot/stage1.asm`, [source](../kernel/boot/stage1.asm)): the 512-byte MBR itself. Its *only* job is
-  "prove the disk works, read a bigger stage 2 into memory, jump to it."
-- **Stage 2** (`kernel/boot/stage2.asm`, [source](../kernel/boot/stage2.asm)): not size-constrained (it's sized by
-  the Makefile, currently 4 KiB), so it can afford the real bulk of the
-  bootloader logic: memory map collection, A20, GDT, protected mode,
-  paging, long mode, and loading+jumping into the actual kernel.
-
-```mermaid
-flowchart LR
-    subgraph "512 bytes, BIOS-loaded"
-    S1[stage1.asm]
-    end
-    subgraph "unconstrained size, stage1-loaded"
-    S2[stage2.asm]
-    end
-    S1 -->|"INT 13h AH=42h extended read"| S2
-```
-
----
-
-## 3. Stage 1: the MBR
-
-```mermaid
-flowchart TD
-    Start["BIOS jumps here: 0x0000:0x7C00, 16-bit real mode, DL=boot drive"] --> Seg["Zero DS/ES/SS, set SP=0x7C00\n(stack grows down, away from our code)"]
-    Seg --> Msg1["Print 'booting...' via INT 10h teletype"]
-    Msg1 --> Load["load_stage2: build a Disk Address Packet,\nINT 13h AH=42h reads 8 sectors\nfrom LBA 1 to 0x0000:0x7E00"]
-    Load -->|CF set| Err["Print 'DISK READ ERROR', halt"]
-    Load -->|success| Msg2["Print 'jumping...'"]
-    Msg2 --> Jump["jmp 0x0000:0x7E00 — hands control to stage2"]
-```
-
-**Why `INT 13h` extended reads (LBA) instead of classic CHS reads?**
-Classic CHS addressing caps out at 63 sectors per track. Stage 2 is
-fine at 4 KiB, but it in turn needs to load a *kernel* binary that will
-only grow over time — CHS would silently become a ceiling on kernel
-size. LBA addressing has no such cap, so both stages use it
-consistently from day one rather than needing a rewrite later.
-
-**Why print anything at all?** Two bytes of `int 0x10` calls are cheap
-insurance: if stage1 never prints, you know the BIOS boot signature or
-disk geometry is wrong before you've written a single line of stage2.
-If it prints and then hangs, you know the bug is downstream. This is
-the whole debugging strategy for the parts of the OS that exist before
-any real diagnostics (VGA driver, panic handler) are available.
+The disk image still needs a legacy MBR at LBA 0 even with no BIOS left to
+read it: QEMU/OVMF's boot manager, finding no GPT, scans the legacy MBR
+partition table for an entry of type `0xEF` (EFI System Partition) and
+boots the FAT filesystem there. `kernel/boot/mbr.asm` ([source](../kernel/boot/mbr.asm))
+is exactly that partition table and nothing else - no boot code, since
+nothing ever executes this sector as code anymore.
 
 ---
 
-## 4. Stage 2: real mode → protected mode → long mode
-
-This is the densest part of the codebase. The **order of operations is
-dictated by hardware, not by the milestone checklist** — the comment
-at the top of `stage2.asm` calls this out explicitly. The rule that
-drives everything: **BIOS interrupts (`INT 13h`, `INT 15h`, `INT 10h`)
-only work in real mode.** The instant you flip `CR0.PE`, they're gone
-for good. So anything that needs the BIOS has to happen *first*.
+## 3. `efi_main`: firmware hands off, `boot.c` takes over
 
 ```mermaid
 flowchart TD
-    subgraph RM["16-bit real mode"]
-        direction TB
-        R1["Print status message"]
-        R2["collect_e820_map:\nINT 15h EAX=E820h loop\n-> stash count+entries at 0x9000"]
-        R3["load_kernel:\nINT 13h AH=42h, chunked reads\n-> scratch buffer at 0x10000"]
-        R4["enable_a20:\nfast A20 gate, port 0x92"]
-        R5["lgdt [gdt_descriptor]\nCR0.PE = 1"]
-        R1 --> R2 --> R3 --> R4 --> R5
-    end
-    subgraph PM["32-bit protected mode"]
-        direction TB
-        P1["Reload segment regs from flat GDT selectors\nESP = 0x7C00"]
-        P2["build_page_tables:\nidentity-map first 1 GiB\nPML4[0]->PDPT[0]->PD[0..511], 2 MiB pages"]
-        P3["enter_long_mode:\nCR4.PAE=1, CR3=PML4, EFER.LME=1, CR0.PG=1"]
-        P1 --> P2 --> P3
-    end
-    subgraph LM["64-bit long mode"]
-        direction TB
-        L1["Reload data segments"]
-        L2["rep movsb: copy kernel\nscratch(0x10000) -> 0x100000"]
-        L3["RDI = E820 map ptr\njmp 0x100000"]
-        L1 --> L2 --> L3
-    end
-    R5 -->|"far jump reloads CS\n(CS can't be set with mov)"| P1
-    P3 -->|"far jump to 64-bit code selector\n(the only way to reload CS into long mode)"| L1
+    Start["Firmware calls efi_main(ImageHandle, SystemTable)\nalready 64-bit long mode, firmware-owned paging"] --> FB["init_framebuffer:\nLocateProtocol(GOP), scan modes for\nPixelBlueGreenRedReserved8BitPerColor,\nprefer exact 1024x768, else first match, SetMode"]
+    FB -->|no GOP / no matching mode| FBErr["puts16 error message, halt (cli; hlt loop)"]
+    FB -->|success| LK["load_kernel:\nfind_whole_disk_block_io (first non-partition,\nmedia-present Block I/O handle),\nAllocatePages(AllocateAddress, 0x100000),\nReadBlocks at KERNEL_START_LBA"]
+    LK -->|no Block I/O / AllocatePages / ReadBlocks fails| LKErr["puts16 error message, halt"]
+    LK -->|success| E820["build_e820_and_exit_boot_services:\nGetMemoryMap/AllocatePool retry loop,\ntranslate descriptors to e820_entry_t[],\nExitBootServices(ImageHandle, map_key)"]
+    E820 -->|EFI_INVALID_PARAMETER| E820
+    E820 -->|success| Jump["raw asm: RDI = e820 ptr, RSI = &fb,\njmp KERNEL_LOAD_ADDR (0x100000)"]
 ```
 
-### 4.1 Why E820 has to come before anything else
+**Why the framebuffer is set up before the kernel is even loaded:** no
+particular ordering constraint here - `efi_main` just does the two
+firmware-service steps (graphics, then disk) before the one step that
+ends firmware services (`ExitBootServices`) for good, printing status via
+`puts16` along the way the same way stage1 used to print via `INT 10h`
+teletype: cheap insurance that shows exactly how far boot got before any
+real diagnostics (VGA/framebuffer console, panic handler) exist.
 
-`INT 15h, EAX=E820h` asks the BIOS "what memory exists and what's its
-type" (usable RAM, reserved, ACPI reclaimable, etc.) — this is the
-*only* reliable source for that information short of hand-detecting
-memory yourself. It's a BIOS call, so it must run while still in real
-mode, before `CR0.PE` is touched. Once M5's physical frame allocator
-exists, it will be seeded directly from this map — you can't hand out
-a physical page as free RAM if you don't know it's RAM.
+### 3.1 `init_framebuffer` — why BGR8888, and why "first match" is an acceptable fallback
 
-### 4.2 Why the kernel is loaded in two steps (scratch buffer, then copy)
+The Graphics Output Protocol enumerates modes via `QueryMode`, each
+reporting a `PixelFormat`. `fb.c` (M16) only understands one 32bpp
+packed layout, and `PixelBlueGreenRedReserved8BitPerColor` is the GOP
+mode whose byte layout (`[0]=Blue [1]=Green [2]=Red [3]=Reserved`), read
+as a little-endian `uint32`, is bit-for-bit the same value fb.c already
+treats as `0x00RRGGBB` - see `efi_proto.h`'s comment on that enum value.
+Among modes in that format, an exact 1024x768 match is preferred (a nice
+round default), but the *first* matching mode at all is taken if that
+exact resolution isn't offered - a working framebuffer at some resolution
+beats refusing to boot because the preferred one doesn't exist on this
+firmware. `fb_init` (kernel-side) reads whatever width/height/pitch
+actually got reported and adapts, so there's no hardcoded resolution
+assumption downstream.
 
-Real mode addressing is `segment:offset`, which tops out at 1 MiB
-(`0xFFFF:0xFFFF`). The kernel's *actual* home is 1 MiB
-(`KERNEL_LOAD_ADDR = 0x100000`, matching [`linker.ld`](../kernel/linker.ld)) — real mode
-literally cannot address that. So stage2:
+### 3.2 `load_kernel` — why raw Block I/O instead of reading BOOTX64.EFI's own filesystem
 
-1. Reads the kernel from disk into a real-mode-reachable **scratch
-   buffer** at `0x10000` while still in real mode (`load_kernel`).
-2. Later, once long mode is live and addressing is flat 64-bit,
-   `rep movsb`s it from the scratch buffer up to `0x100000`.
+`kernel.bin` deliberately lives **outside** the ESP's FAT filesystem, at
+a fixed LBA (`KERNEL_START_LBA`, right after the single MBR sector - see
+§5's build-pipeline section for exactly how that image is assembled).
+Reading it means going around the filesystem entirely: `find_whole_disk_block_io`
+locates the *whole-disk* `EFI_BLOCK_IO_PROTOCOL` handle (not the ESP
+partition's own child handle this application was loaded from -
+`!bio->Media->LogicalPartition` is the check), then `ReadBlocks` pulls
+`KERNEL_SECTOR_COUNT` sectors straight from that fixed LBA into memory
+reserved at exactly `0x100000` via `AllocatePages(AllocateAddress, ...)`.
+No FAT driver, no filename lookup - the same "kernel isn't reached
+through a filesystem, just a fixed disk offset" design the original BIOS
+stage2 used, kept because nothing about it needed to change: it's simpler
+than teaching this loader to parse FAT, and the Makefile already has to
+track `KERNEL_SECTOR_COUNT` precisely for other reasons (padding
+`kernel.bin` to a sector boundary).
 
-The scratch buffer is capped at 64 KiB (one real-mode segment) with a
-build-time `nasm %error` guard if `KERNEL_SECTOR_COUNT` ever exceeds
-that — a deliberate, documented ceiling rather than a silent
-truncation bug waiting to happen.
+### 3.3 `build_e820_and_exit_boot_services` — why this is the trickiest function in the file
 
-### 4.3 Why A20 needs to be enabled at all
+Two UEFI rules collide here. First: `GetMemoryMap` returns a `MapKey`
+that `ExitBootServices` must be called with, but that key is invalidated
+by *any* allocation or free that happens afterward - including the pool
+allocations this function itself needs to size its own scratch buffers.
+So the loop's rule is strict: the moment `AllocatePool`/`FreePool`/
+`GetMemoryMap` runs, `continue` back to the top and re-fetch a fresh map
+and key - nothing (not even a console print, since `ConOut`'s own driver
+is free to allocate) may run between the `GetMemoryMap` call that produces
+the `MapKey` actually passed to `ExitBootServices` and that call itself.
+Both scratch buffers (`map`, the raw UEFI descriptors, and `e820`, the
+translated output) are sized with `MAP_SLACK_DESCRIPTORS` of headroom so
+a *second* growth pass is unlikely, but the loop handles it correctly
+either way.
 
-On the original 8086, addresses wrapped at 1 MiB (20-bit address bus).
-IBM PC/AT motherboards added a gate on address line 20 to preserve that
-wraparound behavior for compatibility, and it defaults **off** at
-power-on. With A20 off, any address ≥ 1 MiB silently wraps to the
-low end of memory — which would corrupt the exact copy in §4.2. The
-fast A20 gate (port `0x92`) is the quick, QEMU-and-most-real-hardware
-method used here; keyboard-controller and BIOS fallbacks are noted as
-a stretch-goal hardening pass for wider real-hardware support.
+Second: `ExitBootServices` can itself return `EFI_INVALID_PARAMETER` if a
+registered notification callback perturbed the memory map as a side
+effect of the call - spec-anticipated, and why every real UEFI OS loader
+(this one included) just loops and re-fetches on that specific error
+rather than treating it as fatal.
 
-### 4.4 Why identity-mapped paging, and why 2 MiB pages
+Each surviving UEFI memory type is translated to a firmware-agnostic
+`E820_TYPE_USABLE` or `E820_TYPE_RESERVED` (`EfiLoaderCode`/`EfiLoaderData`/
+`EfiBootServicesCode`/`EfiBootServicesData`/`EfiConventionalMemory` count
+as usable; everything else reserved) - producing the exact same
+`{count, entries[]}` shape `kernel/mm/e820.h` already defines, which is
+what lets `kernel.c`/`pmm.c` stay completely unaware of which boot path
+produced it.
 
-Enabling long mode *requires* paging to be on — there's no "paging-off
-long mode." Since nothing about virtual memory management exists yet
-(that's M5), the simplest correct thing is an **identity map**:
-virtual address `X` maps to physical address `X`, for the first 1 GiB.
-That keeps every address stage2 and the early kernel touch (scratch
-buffer, kernel load address, VGA memory at `0xB8000`) valid without
-having to reason about a real address space yet.
+### 3.4 The final jump — why raw assembly, not a C call
 
-2 MiB "huge" pages are used instead of standard 4 KiB pages purely to
-keep the page tables small: one PML4 entry → one PDPT entry → 512 PD
-entries covers a full 1 GiB with three 4 KiB table pages total, versus
-the thousands of 4 KiB pages a fully 4-KiB-granular identity map of
-the same range would need. This gets revisited in M5 once real virtual
-memory management (fine-grained mapping, W^X, unmapping) matters.
-
-### 4.5 Why two far jumps, not `mov cs, ...`
-
-`CS` (the code segment register) can't be loaded with a plain `mov` —
-that's an x86 rule, not a choice made here. The only ways to reload it
-are a far jump/call/return or an interrupt return. Stage2 needs *two*
-mode transitions that each require a fresh `CS`:
-
-- Real mode → protected mode: `jmp CODE32_SEL:protected_mode_entry`
-- Protected mode → long mode: `jmp CODE64_SEL:long_mode_entry`
-
-(The kernel's own GDT setup in M4 hits this same rule again — see §6.1.)
+By the time `ExitBootServices` succeeds, **no firmware call is safe
+anymore** - `ConOut`, `BootServices`, all of it stops existing the instant
+that call returns. The jump into `kernel_main` is hand-written assembly,
+not a C function call, for a calling-convention reason: this entire file
+(including `efi_main` itself) is compiled `ms_abi`, the calling convention
+every UEFI firmware call requires, but the kernel image was built as an
+ordinary System V ELF64 (`kernel/linker.ld`) and knows nothing about
+`ms_abi`. The three-instruction stub explicitly loads `RDI`/`RSI` (System
+V's first and second integer-argument registers) and jumps to
+`KERNEL_LOAD_ADDR`, sidestepping the calling-convention mismatch
+entirely rather than trying to make one C function honor two ABIs at
+once.
 
 ---
 
-## 5. Kernel entry: from `_start` to `kernel_main`
+## 4. Kernel entry: from `_start` to `kernel_main`
 
 ```mermaid
 flowchart TD
-    A["stage2: jmp 0x100000\n(RDI = E820 map pointer)"] --> B["entry.asm: _start\n(byte 0 of the flat kernel.bin)"]
-    B --> C["mov rsp, kernel_stack_top\n(off the bootloader's scratch stack,\nonto a 16 KiB stack inside kernel.bin's own .bss)"]
-    C --> D["call kernel_main(e820_map)"]
+    A["boot.c: jmp 0x100000\n(RDI = e820 map pointer, RSI = &fb_boot_info_t)"] --> B["entry.asm: _start\n(byte 0 of the flat kernel.bin)"]
+    B --> C["mov rsp, kernel_stack_top\n(off the boot loader's stack,\nonto a 16 KiB stack inside kernel.bin's own .bss)"]
+    C --> D["call kernel_main(e820_map, fb_info)"]
     D --> E["kernel.c: kernel_main"]
 ```
 
-**Why switch stacks immediately?** Up to this point, execution has
-been running on whatever stack stage2 set up (`ESP = 0x7C00`) — memory
-that belongs to the *bootloader*, not the kernel. Once M5's physical
-frame allocator exists, it needs to know which pages are already
-spoken for so it doesn't hand them out as free RAM. A stack living
-inside the kernel's own linked image (`.bss`, reserved by `linker.ld`)
-is memory the allocator can see and account for; the bootloader's
-scratch stack is not. So the very first thing kernel code does is get
-off borrowed memory and onto its own.
+**Why switch stacks immediately?** Up to this point, execution has been
+running on whatever stack the boot loader set up (UEFI firmware's own, by
+the time `ExitBootServices` has run) — memory that belongs to the *boot
+loader*, not the kernel. Once M5's physical frame allocator exists, it
+needs to know which pages are already spoken for so it doesn't hand them
+out as free RAM. A stack living inside the kernel's own linked image
+(`.bss`, reserved by `linker.ld`) is memory the allocator can see and
+account for; the boot loader's stack is not. So the very first thing
+kernel code does is get off borrowed memory and onto its own.
 
 **Why does the kernel start at exactly 1 MiB?** `ENTRY(_start)` in
 [`linker.ld`](../kernel/linker.ld) places `.text.entry` (and therefore `_start`) at byte 0 of
 the linked, `objcopy`'d flat binary, and the SECTIONS block starts
 at `. = 0x100000`. That constant has to match `KERNEL_LOAD_ADDR` in
-stage2.asm exactly — it's the one address both the bootloader and the
+`boot.c` exactly — it's the one address both the boot loader and the
 kernel's own linker script have to agree on independently, which is
 why it's called out in comments in both files.
 
 ---
 
-## 6. `kernel_main`: CPU fundamentals (M4)
+## 5. `kernel_main`: CPU fundamentals (M4)
 
 ```mermaid
 sequenceDiagram
@@ -271,15 +238,15 @@ sequenceDiagram
     ISR->>ISR: vector == 3? print + dump regs, return
     ISR-->>CPU: RESTORE_REGS, add rsp 16, iretq
     CPU-->>KM: execution resumes right after int3
-    KM->>KM: parse + print E820 map, halt
+    KM->>KM: parse + print e820 map, halt
 ```
 
-### 6.1 `gdt_init` — why the kernel needs its own GDT
+### 5.1 `gdt_init` — why the kernel needs its own GDT
 
-Stage2 already built a GDT to get into protected/long mode (§4.5) —
-but that one is bootloader-owned scratch data sitting in low memory
-that M5's allocator will eventually want to reclaim. The kernel builds
-its **own** GDT ([`gdt.c`](../kernel/arch/x86_64/gdt.c)) living inside its own image, with:
+UEFI firmware already had *some* GDT installed to run `efi_main` in long
+mode — but that one is firmware-owned and stops being valid the instant
+`ExitBootServices` runs (§3.4), the same way everything else firmware-owned
+does. The kernel builds its **own** GDT ([`gdt.c`](../kernel/arch/x86_64/gdt.c)) living inside its own image, with:
 
 - A null descriptor (required by the architecture — selector 0 must
   fault if used).
@@ -290,22 +257,22 @@ its **own** GDT ([`gdt.c`](../kernel/arch/x86_64/gdt.c)) living inside its own i
   switching (that's a legacy 32-bit feature) — it's used for exactly
   one thing right now: the **IST** (Interrupt Stack Table) mechanism.
   `tss.ist1` points at a dedicated 4 KiB `double_fault_stack`, and the
-  IDT (§6.2) routes vector 8 (`#DF`, double fault) through IST1. That
+  IDT (§5.2) routes vector 8 (`#DF`, double fault) through IST1. That
   means a double fault caused by a *corrupt or overflowed kernel
   stack* still gets a known-good stack to push its exception frame
   onto — without IST1, that scenario is exactly how you get a silent
   **triple fault** (CPU can't push the frame → resets) instead of a
   diagnosable double-fault message.
 
-`gdt_flush` has to do a song and dance to reload `CS`: same rule as
-§4.5 (`mov cs` doesn't exist) applies here too, and a long-mode CPU
-*also* can't encode a 64-bit target for a direct far jump. The
-resolution (`gdt_asm.asm`) is the standard trick: push a far pointer
+`gdt_flush` has to do a song and dance to reload `CS`: `CS` can't be
+loaded with a plain `mov` (an x86 rule, not a choice made here), and a
+long-mode CPU *also* can't encode a 64-bit target for a direct far jump.
+The resolution (`gdt_asm.asm`) is the standard trick: push a far pointer
 (segment selector + return address) onto the stack, then `o64 retf` —
 a far *return* can pop a full 64-bit target, where a far *jump*
 can't.
 
-### 6.2 `idt_init` — why every one of the 256 vectors gets a gate
+### 5.2 `idt_init` — why every one of the 256 vectors gets a gate
 
 x86_64 reserves interrupt vectors 0–31 for CPU-defined exceptions
 (divide-by-zero, page fault, double fault, ...) and the remaining
@@ -322,9 +289,9 @@ OS dev, where bugs routinely manifest as stray faults.
 
 Each gate is an **interrupt gate** (`0x8E`: present, ring 0, 64-bit
 interrupt gate) pointing at a small per-vector **stub**, not directly
-at a C function — see §6.3 for why.
+at a C function — see §5.3 for why.
 
-### 6.3 Why every vector needs its own assembly stub (`isr_asm.asm`)
+### 5.3 Why every vector needs its own assembly stub (`isr_asm.asm`)
 
 Two things a CPU-taken interrupt does that C functions can't express:
 
@@ -354,10 +321,10 @@ comments on both sides because a mismatch here wouldn't be a compile
 error or an obvious crash, just silently wrong register values in
 every dump and potentially a corrupted return.
 
-### 6.4 `pic_remap` — why the PIC has to move before anything can use it
+### 5.4 `pic_remap` — why the PIC has to move before anything can use it
 
 The 8259 PIC's **power-on default** maps IRQ0–15 to interrupt vectors
-`0x08`–`0x0F`. Look back at §6.2: vector `0x08` is `#DF` (double
+`0x08`–`0x0F`. Look back at §5.2: vector `0x08` is `#DF` (double
 fault) and several others in that range are also CPU exceptions. Left
 unmapped, a hardware IRQ (say, the timer) would look *identical* to a
 CPU raising a double fault — completely ambiguous and undebuggable.
@@ -375,11 +342,11 @@ hit `irq_handler`'s generic "unhandled IRQ" path. `pic_set_mask` /
 one specific line as they come online, instead of turning everything
 on at once.
 
-### 6.5 The `int3` self-test — why prove it, not just trust it compiled
+### 5.5 The `int3` self-test — why prove it, not just trust it compiled
 
 `kernel_main` deliberately executes `__asm__("int3")` right after the
 three `_init` calls. `int3` (`#BP`, breakpoint) is the one exception
-vector in `isr_handler` (§6.3, [`isr.c`](../kernel/arch/x86_64/isr.c)) that's treated as *recoverable* —
+vector in `isr_handler` (§5.3, [`isr.c`](../kernel/arch/x86_64/isr.c)) that's treated as *recoverable* —
 print and `return` instead of `panic`. That makes it the safe choice
 for a smoke test that exercises the **entire** interrupt pipeline
 end-to-end: IDT gate lookup → correct stub → correct stack frame →
@@ -392,7 +359,7 @@ proves the code is well-formed; this proves it's *correct*.
 
 ---
 
-## 7. Memory management (M5)
+## 6. Memory management (M5)
 
 ```mermaid
 sequenceDiagram
@@ -403,7 +370,7 @@ sequenceDiagram
     participant CPU as CPU
 
     KM->>PMM: pmm_init(e820_map)
-    PMM->>PMM: reserve every frame, then free E820 type=1 ranges
+    PMM->>PMM: reserve every frame, then free e820 type=1 ranges
     PMM->>PMM: re-reserve <1 MiB and the kernel image
     KM->>VMM: vmm_init()
     VMM->>PMM: pmm_alloc_frame() x3 (PML4/PDPT/PD)
@@ -418,48 +385,49 @@ sequenceDiagram
     KM->>KM: write/read, kfree
 ```
 
-### 7.1 `pmm_init` — a bitmap seeded from E820, then locked down
+### 6.1 `pmm_init` — a bitmap seeded from e820, then locked down
 
-The E820 map (§4.1) says which physical ranges the BIOS reports as
-usable RAM — but "the BIOS says it's usable" and "the kernel can safely
-hand this out as a free frame" aren't the same claim. `pmm_init`
+The e820-format map (§3.3) says which physical ranges UEFI reported as
+usable RAM at boot — but "usable at boot" and "the kernel can safely hand
+this out as a free frame" aren't the same claim. `pmm_init`
 ([`pmm.c`](../kernel/mm/pmm.c)) starts every frame in its bitmap marked
-reserved, clears the bits for `type=1` E820 ranges, and then
-**unconditionally** re-reserves two things regardless of what E820 said:
+reserved, clears the bits for `type=1` (usable) ranges, and then
+**unconditionally** re-reserves two things regardless of what the map said:
 
-- Everything below 1 MiB — the real-mode IVT/BDA, the E820 map itself
-  (`0x9000`), stage2's bootstrap page tables (`0x1000`-`0x4000`), the
-  kernel's real-mode scratch load buffer (`0x10000`), and VGA text
-  memory (`0xB8000`) — see §4's memory-map comment in `stage2.asm`.
+- Everything below 1 MiB — the real-mode IVT/BDA and legacy VGA text
+  memory (`0xB8000`), architecture- and firmware-owned regardless of boot
+  path.
 - The kernel's own loaded image, `0x100000` through `__kernel_end`
   (`kernel/linker.ld`) — code, data, and `.bss` the kernel is currently
   running out of and storing state in.
 
 Handing out either as a "free" frame would mean some future allocation
-silently overwrites the kernel itself or the memory map it just read —
-exactly the kind of bug that's invisible until something much later
-mysteriously corrupts. Re-reserving explicitly, after the E820-driven
-free pass, means the order of those two steps can't matter: no E820
-quirk can un-reserve memory the kernel actually depends on.
+silently overwrites the kernel itself or memory still relied on for
+low-level state — exactly the kind of bug that's invisible until something
+much later mysteriously corrupts. Re-reserving explicitly, after the
+e820-driven free pass, means the order of those two steps can't matter: no
+quirk in what the firmware reported can un-reserve memory the kernel
+actually depends on.
 
 The bitmap only covers `PMM_TRACKED_MEMORY` (1 GiB) — the same 1 GiB
-`vmm_init` identity-maps (§7.2). A frame has to be addressable before
+`vmm_init` identity-maps (§6.2). A frame has to be addressable before
 it can be handed out (page tables are themselves built from
-pmm-allocated frames — see §7.2's `phys_to_table`), so there's no point
+pmm-allocated frames — see §6.2's `phys_to_table`), so there's no point
 tracking physical memory beyond what's already mapped 1:1. Extending
 past 1 GiB is future work for whoever needs more than that tracked.
 
-### 7.2 `vmm_init` — the kernel takes ownership of paging, same pattern as the GDT
+### 6.2 `vmm_init` — the kernel takes ownership of paging, same pattern as the GDT
 
-Stage2 already built page tables to get into long mode (§4.4) — fixed,
-bootloader-owned scratch structures at `0x1000`/`0x2000`/`0x3000`, just
-like the bootstrap GDT §6.1 replaced. `vmm_init` ([`vmm.c`](../kernel/mm/vmm.c)) does the
-same hand-off for paging: it builds a fresh PML4/PDPT/PD out of frames
-from `pmm_alloc_frame()`, rebuilds the *identical* 1 GiB, 2 MiB-page
-identity map stage2 built, then loads the new table into `CR3`. Because
-the new map covers exactly the same range the old one did, nothing the
-kernel is currently executing or storing (code, stack, the page tables
-being built) moves out from under it mid-switch.
+UEFI firmware already had page tables live to run `efi_main` in long mode
+(§3) — firmware-owned structures that stop being valid the instant
+`ExitBootServices` runs, the same way the firmware's GDT does (§5.1).
+`vmm_init` ([`vmm.c`](../kernel/mm/vmm.c)) does the equivalent hand-off for
+paging: it builds a fresh PML4/PDPT/PD out of frames from
+`pmm_alloc_frame()`, builds a 1 GiB, 2 MiB-page identity map (matching the
+range the kernel needs addressable — code, stack, the page tables being
+built themselves), then loads the new table into `CR3`. Because the new
+map covers the same range the kernel is currently executing and storing
+state in, nothing moves out from under it mid-switch.
 
 `vmm_map_page`/`vmm_unmap_page` are the real payoff: a standard 4-level
 page walk (`PML4` → `PDPT` → `PD` → `PT`) using 4 KiB pages, allocating
@@ -480,7 +448,7 @@ so I can edit it" dance. It stops being true the day physical memory
 tracking or kernel mappings need to extend past 1 GiB — flagged there
 for whoever does that work next.
 
-### 7.3 `heap_init`/`kmalloc`/`kfree` — deliberately *not* riding the identity map
+### 6.3 `heap_init`/`kmalloc`/`kfree` — deliberately *not* riding the identity map
 
 The kernel heap ([`heap.c`](../kernel/mm/heap.c)) starts at virtual
 address `PMM_TRACKED_MEMORY` (1 GiB) — the first address *above* the
@@ -490,7 +458,7 @@ already-present identity-mapped memory, and `vmm_map_page` would never
 actually be exercised by anything real. Starting the heap just past
 that boundary means every page it grows into is a genuine, freshly
 built mapping — physical address unrelated to virtual address, walked
-and allocated by §7.2's machinery.
+and allocated by §6.2's machinery.
 
 `kmalloc` is a first-fit search over a singly-linked free list of
 `block_header_t` nodes (size, free flag, next). Two structural
@@ -515,9 +483,9 @@ When no free block fits, `grow_heap` maps enough whole pages via
 heap never unmaps a page on `kfree` (address space isn't reclaimed),
 which is fine until something actually needs that memory back.
 
-### 7.4 Two more self-tests, same discipline as `int3`
+### 6.4 Two more self-tests, same discipline as `int3`
 
-`kernel_main` proves this pipeline the same way §6.5 proved the
+`kernel_main` proves this pipeline the same way §5.5 proved the
 interrupt pipeline — round-trip it for real, don't just trust a clean
 compile:
 
@@ -534,17 +502,16 @@ compile:
 
 Verified via headless QEMU screendump and a `-d int,cpu_reset` log
 showing exactly one interrupt for the whole boot (`v=03`, the
-pre-existing `int3` test from §6.5) — no page faults, general
+pre-existing `int3` test from §5.5) — no page faults, general
 protection faults, or double/triple faults from the new paging code or
 the `CR3` swap.
 
 ---
 
-## 8. Build pipeline: how source becomes `os-image.bin`
+## 7. Build pipeline: how source becomes `os-image.bin`
 
-Not runtime flow, but worth understanding since stage2 and the kernel
-have a real *build-time* dependency on each other (§4.2's sector
-count):
+Not runtime flow, but worth understanding since `boot.c` and the kernel
+have a real *build-time* dependency on each other (§3.2's sector count):
 
 ```mermaid
 flowchart TD
@@ -553,50 +520,51 @@ flowchart TD
     O1 -->|"x86_64-elf-ld -T kernel/linker.ld"| ELF["build/kernel.elf"]
     ELF -->|"objcopy -O binary"| BIN0["build/kernel.bin (raw)"]
     BIN0 -->|"pad to sector boundary,\nwrite sector count"| BIN["build/kernel.bin (final)\n+ build/kernel.sectors"]
-    S2SRC["kernel/boot/stage2.asm"] -->|"nasm -D KERNEL_SECTOR_COUNT=$(cat kernel.sectors)"| S2BIN["build/stage2.bin"]
-    BIN -.->|"dependency: stage2 needs the sector count\nbefore it can assemble"| S2SRC
-    S1SRC["kernel/boot/stage1.asm"] -->|"nasm -f bin"| S1BIN["build/stage1.bin"]
-    S1BIN --> IMG["cat stage1 + stage2 + kernel.bin\n= build/os-image.bin"]
-    S2BIN --> IMG
+    UEFISRC["kernel/boot/uefi/boot.c"] -->|"clang -target x86_64-unknown-windows\n-DKERNEL_SECTOR_COUNT=$(cat kernel.sectors)"| UEFIOBJ["build/uefi_boot.obj"]
+    BIN -.->|"dependency: boot.c needs the sector count\nbefore it can compile"| UEFISRC
+    UEFIOBJ -->|"lld-link /subsystem:efi_application"| EFI["build/BOOTX64.EFI"]
+    MBRSRC["kernel/boot/mbr.asm"] -->|"nasm -f bin -D ESP_START_LBA=... -D ESP_SECTOR_COUNT=..."| MBRBIN["build/mbr.bin"]
+    MBRBIN --> IMG["cat mbr.bin + kernel.bin\n= build/os-image.bin,\nthen mformat/mmd/mcopy BOOTX64.EFI\ninto the ESP at ESP_START_LBA"]
     BIN --> IMG
-    IMG -->|"tools/run-qemu.sh"| QEMU["qemu-system-x86_64"]
+    EFI --> IMG
+    IMG -->|"tools/run-qemu.sh"| QEMU["qemu-system-x86_64 + OVMF"]
 ```
 
-**Why does stage2 depend on the *built kernel binary*, not just its
-source?** Stage2's `load_kernel` (§4.2) needs to know how many disk
+**Why does `boot.c` depend on the *built kernel binary*, not just its
+source?** `boot.c`'s `load_kernel` (§3.2) needs to know how many disk
 sectors to read — a number that only exists once the kernel is
 compiled, linked, and `objcopy`'d to a flat binary. The Makefile
 captures that as a build-time constant
-(`nasm -D KERNEL_SECTOR_COUNT=...`) computed from the actual file
+(`-DKERNEL_SECTOR_COUNT=...`) computed from the actual file
 size, rather than a hand-maintained number that would silently go
 stale the moment the kernel grows. This is also why the Makefile rule
-for `stage2.bin` lists `$(KERNEL_BIN)` as a prerequisite — Make has to
-build the kernel *before* it can assemble stage2, even though nothing
-about stage2's *source code* changed.
+for `build/uefi_boot.obj` lists `$(KERNEL_BIN)` as a prerequisite — Make
+has to build the kernel *before* it can compile `boot.c`, even though
+nothing about `boot.c`'s *source code* changed.
 
-**Why `objcopy -O binary` instead of shipping the ELF?** The
-bootloader has no ELF parser (that's what M9's "minimal ELF64 loader"
-will add, for *user* programs) — it can only do a flat `rep movsb`
-copy to a fixed address. `objcopy` strips away ELF's section headers,
-program headers, and symbol tables, leaving just the raw bytes that
-belong at `linker.ld`'s `. = 0x100000`, in order, starting at offset 0
-— exactly what `entry.asm`'s "byte 0 is `_start`" assumption and
-stage2's flat copy both require.
+**Why `objcopy -O binary` instead of shipping the ELF?** The boot
+loader has no ELF parser (that's what M9's "minimal ELF64 loader"
+added, for *user* programs) — it can only read the kernel blob straight
+into memory at a fixed address via `EFI_BLOCK_IO_PROTOCOL`. `objcopy`
+strips away ELF's section headers, program headers, and symbol tables,
+leaving just the raw bytes that belong at `linker.ld`'s `. = 0x100000`,
+in order, starting at offset 0 — exactly what `entry.asm`'s "byte 0 is
+`_start`" assumption and `boot.c`'s raw `ReadBlocks` both require.
 
 ---
 
-## 9. Where this leaves off
+## 8. Where this leaves off
 
 By the end of M4, the kernel owned its own segmentation (GDT/TSS) and
 could safely take any CPU exception or hardware IRQ without undefined
-behavior (IDT/ISR/PIC) — but memory management was still just the
-bootstrap identity map stage2 built to get into long mode, with no way
+behavior (IDT/ISR/PIC) — but memory management was still just riding
+whatever paging the boot loader had live to reach long mode, with no way
 to track which physical frames were actually free or map anything new.
 M5 closes that gap: a physical frame allocator seeded from and
-cross-checked against the E820 map (§7.1), kernel-owned page tables
-with a real map/unmap API replacing stage2's bootstrap ones (§7.2), and
+cross-checked against the e820 map (§6.1), kernel-owned page tables
+with a real map/unmap API replacing the boot loader's own (§6.2), and
 a kernel heap built on top of that API rather than riding the identity
-map for free (§7.3) — each proven with its own self-test (§7.4) in the
+map for free (§6.3) — each proven with its own self-test (§6.4) in the
 same spirit as M4's `int3` round trip.
 
 That's where this walkthrough's scope ends — timer/serial/keyboard

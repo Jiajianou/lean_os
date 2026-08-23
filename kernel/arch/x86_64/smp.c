@@ -32,10 +32,7 @@ static volatile int initialized;
  * register-dump layout. AP_PARAMS_ADDR (0x7000) and AP_TRAMPOLINE_LOAD_ADDR
  * (0x8000) both sit well within the low 1 MiB pmm.c unconditionally
  * reserves and never hands out - see pmm.c's LOW_MEMORY_LIMIT - so nothing
- * else in the kernel will ever collide with this scratch space, even
- * though by the time this runs (deep into kernel_main) it happens to
- * physically overlap where stage1/stage2 used to live; neither is read
- * again after boot handoff, so overwriting them here is harmless.
+ * else in the kernel will ever collide with this scratch space.
  *
  *   offset  0  (8 bytes)  cr3          - physical address to load into CR3
  *   offset  8  (8 bytes)  stack_top    - this AP's private kernel stack (RSP)

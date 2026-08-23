@@ -4,7 +4,7 @@
 ; USER_PROGRAMS list) as byte blobs inside the kernel image, since
 ; there's no way to get them onto the disk filesystem (kernel/fs/
 ; leanfs.c) other than the kernel seeding them there itself on first
-; boot - stage2's bootloader has no filesystem driver of its own, and
+; boot - the boot loader has no filesystem driver of its own, and
 ; nothing outside this kernel has ever written to the disk. incbin's
 ; paths are relative to the Makefile's working directory (repo root),
 ; matching every other build-relative path in this project.

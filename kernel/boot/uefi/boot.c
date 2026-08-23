@@ -1,22 +1,19 @@
 /* kernel/boot/uefi/boot.c
  *
- * M24: UEFI counterpart to kernel/boot/stage1.asm + stage2.asm. Firmware
- * loads and runs this as a PE32+ EFI application (from the ESP the
- * top-level Makefile formats into the same disk image stage1's hybrid
- * MBR partition table points UEFI at - see stage1.asm's header comment).
- * Its whole job is identical to stage2's: collect a memory map, set up a
- * linear framebuffer, load the kernel binary, and jump into it with
- * exactly the handoff kernel_main() already expects - RDI a pointer to
- * the same {count, entries[]} e820 layout kernel/mm/e820.h documents,
- * RSI a kernel/drivers/fb.h fb_boot_info_t. Producing that same handoff
- * is what lets kernel.c/pmm.c/fb.c stay completely unaware which boot
- * path got them there - not one line of the kernel proper changed for
- * this milestone.
+ * The only boot loader (M26 removed the earlier from-scratch BIOS path -
+ * see milestones.md). Firmware loads and runs this as a PE32+ EFI
+ * application, from the ESP the top-level Makefile formats into the disk
+ * image (kernel/boot/mbr.asm's partition table is what points UEFI at it).
+ * Its whole job: collect a memory map, set up a linear framebuffer, load
+ * the kernel binary, and jump into it with exactly the handoff
+ * kernel_main() expects - RDI a pointer to the {count, entries[]} e820
+ * layout kernel/mm/e820.h documents, RSI a kernel/drivers/fb.h
+ * fb_boot_info_t. Producing that handoff is what lets kernel.c/pmm.c/fb.c
+ * stay completely unaware of how they got there.
  *
- * KERNEL_SECTOR_COUNT is supplied by the Makefile via -D, read from the
- * same build/kernel.sectors file stage2.asm's own build step consumes -
- * both loaders need to agree on it because both read the kernel from the
- * identical fixed LBA range (see KERNEL_START_LBA below).
+ * KERNEL_SECTOR_COUNT is supplied by the Makefile via -D, read from
+ * build/kernel.sectors (a side effect of the kernel.bin build step) since
+ * it's only known once the kernel is actually compiled and objcopy'd.
  */
 #include "efi.h"
 #include "efi_proto.h"
@@ -25,18 +22,18 @@
 #define KERNEL_SECTOR_COUNT 32 /* placeholder so editors/IDE tooling can parse this file standalone */
 #endif
 
-/* LBA 0 is this disk's MBR (stage1.bin), LBA 1..8 is stage2 - both
- * BIOS-only, meaningless to a UEFI boot, but the space is already spoken
- * for, so the kernel blob starts right after it either way. Must match
- * stage2.asm's KERNEL_START_LBA exactly. */
-#define KERNEL_START_LBA 9
-#define KERNEL_LOAD_ADDR 0x100000ULL /* matches kernel/linker.ld and stage2.asm's KERNEL_LOAD_ADDR */
+/* LBA 0 is the disk's MBR (kernel/boot/mbr.asm) - pure partition-table
+ * data, not executed by anything - so the kernel blob starts right after
+ * it, at LBA 1. Must match the top-level Makefile's image-assembly recipe
+ * exactly (mbr.bin, one sector, then kernel.bin). */
+#define KERNEL_START_LBA 1
+#define KERNEL_LOAD_ADDR 0x100000ULL /* matches kernel/linker.ld's load address */
 
 #define PAGE_SIZE 4096ULL
 
 /* ---- e820-format handoff buffer (kernel/mm/e820.h) ----
  * count (dword) + 4 bytes padding + that many e820_entry_t records,
- * exactly what stage2.asm lays out at E820_COUNT_ADDR/E820_ENTRIES_ADDR.
+ * exactly the layout build_e820_and_exit_boot_services below fills in.
  * Sized generously above whatever GetMemoryMap first reports needing -
  * see build_e820_map(). */
 typedef struct __attribute__((packed)) {
@@ -87,11 +84,10 @@ static void init_framebuffer(fb_boot_info_t *fb) {
         halt(u"lean_os uefi: no Graphics Output Protocol available\r\n");
     }
 
-    /* Prefer an exact 1024x768 match (what stage2's VBE path also
-     * requests) in the byte order fb.c expects; otherwise take the first
-     * mode in that byte order at all, whatever its resolution - a
-     * working framebuffer beats a preferred one that doesn't exist on
-     * this firmware. */
+    /* Prefer an exact 1024x768 match in the byte order fb.c expects;
+     * otherwise take the first mode in that byte order at all, whatever
+     * its resolution - a working framebuffer beats a preferred one that
+     * doesn't exist on this firmware. */
     INT32 best_exact = -1;
     INT32 best_any = -1;
     for (UINT32 m = 0; m < gop->Mode->MaxMode; m++) {
@@ -166,8 +162,8 @@ static void load_kernel(void) {
     }
 
     /* bio->Media->BlockSize is assumed 512 here, same as every LBA math
-     * elsewhere in this project (stage1/stage2's INT13h reads, leanfs) -
-     * true for every disk QEMU's IDE/AHCI emulation presents. */
+     * elsewhere in this project (leanfs, mbr.asm's partition entry) - true
+     * for every disk QEMU's IDE/AHCI emulation presents. */
     if (EFI_ERROR(bio->ReadBlocks(bio, bio->Media->MediaId, KERNEL_START_LBA, kernel_bytes,
                                    (void *)(UINTN)KERNEL_LOAD_ADDR))) {
         halt(u"lean_os uefi: ReadBlocks failed loading the kernel\r\n");

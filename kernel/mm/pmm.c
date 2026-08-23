@@ -11,10 +11,10 @@
 #define PMM_FRAME_COUNT (PMM_TRACKED_MEMORY / PAGE_SIZE)
 #define PMM_BITMAP_BYTES (PMM_FRAME_COUNT / 8)
 
-/* Below 1 MiB lives the real-mode IVT/BDA, the E820 map itself, stage2's
- * bootstrap page tables and kernel scratch buffer, and VGA text memory
- * (0xB8000) - see stage2.asm's header comment for the exact layout. None
- * of it is safe to hand out as a free frame, regardless of what E820 says. */
+/* Below 1 MiB lives the real-mode IVT/BDA and legacy VGA text memory
+ * (0xB8000) - firmware- and architecture-owned regardless of boot path.
+ * None of it is safe to hand out as a free frame, regardless of what the
+ * memory map says. */
 #define LOW_MEMORY_LIMIT 0x100000ULL
 
 /* Provided by linker.ld: end of the kernel's loaded image (.text through

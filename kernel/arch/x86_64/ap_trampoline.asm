@@ -2,32 +2,34 @@
 ;
 ; Standalone 16-bit real-mode AP bring-up blob - NOT linked into kernel.elf
 ; (see the Makefile: it's built on its own with `nasm -f bin`, the same way
-; kernel/boot/stage1.asm and stage2.asm are, then incbin'd into the kernel
-; image by kernel/proc/embed_ap_trampoline.asm, the same pattern
-; embed_programs.asm already uses for every user ELF binary).
+; kernel/boot/mbr.asm is, then incbin'd into the kernel image by
+; kernel/proc/embed_ap_trampoline.asm, the same pattern embed_programs.asm
+; already uses for every user ELF binary).
 ;
 ; kernel/arch/x86_64/smp.c copies these bytes to physical
 ; AP_TRAMPOLINE_LOAD_ADDR (0x8000) right before sending an AP its
 ; INIT-SIPI-SIPI sequence. A STARTUP IPI's vector operand IS the target
 ; physical address divided by 4 KiB, and the CPU begins executing there in
-; 16-bit real mode with CS:IP = (vector << 8):0000 - i.e. exactly the
-; "starts in real mode, has to walk itself up to long mode" situation
-; kernel/boot/stage2.asm already solved for the BSP, just without any BIOS
-; calls (an AP has no BIOS state of its own to call into - no A20 gate to
-; touch either, since the BSP already enabled it for the whole machine) and
-; reading its boot parameters from a fixed low-memory struct at
-; AP_PARAMS_ADDR (0x7000) that smp.c fills in fresh before every SIPI - see
-; smp.c's own header comment for the exact byte layout both sides agree on.
+; 16-bit real mode with CS:IP = (vector << 8):0000 - i.e. every AP starts in
+; real mode and has to walk itself up to long mode regardless of how the
+; BSP itself booted (an x86 architectural fact about STARTUP IPIs, not tied
+; to BIOS or UEFI). This blob is that walk: no BIOS calls needed (an AP has
+; no BIOS state of its own to call into - no A20 gate to touch either,
+; since the BSP already enabled it for the whole machine), just reading its
+; boot parameters from a fixed low-memory struct at AP_PARAMS_ADDR (0x7000)
+; that smp.c fills in fresh before every SIPI - see smp.c's own header
+; comment for the exact byte layout both sides agree on.
 ;
 ; This blob only needs its OWN transient 32/64-bit GDT to reach long mode -
-; the descriptor bytes below are copied verbatim from stage2.asm's own
-; proven gdt_code32/gdt_data32/gdt_code64 (same encoding, already proven
-; correct by every boot this kernel has ever done). The instant 64-bit mode
-; is reached, it switches straight to the kernel's REAL GDT (read out of
-; AP_PARAMS_ADDR, the exact same table/selectors every other CPU already
-; runs under - see gdt.c's gdt_get_table_ptr) and jumps to
-; kernel/arch/x86_64/ap_entry.asm's ap_entry_asm_stub, a normal linked
-; kernel symbol whose address smp.c also wrote into AP_PARAMS_ADDR.
+; the descriptor bytes below are a standard flat code32/data32/code64 GDT
+; (same encoding a from-scratch long-mode bootstrap always needs - null,
+; flat 32-bit code, flat 32-bit data, flat 64-bit code - proven correct by
+; every AP bring-up this kernel has done since M7's SMP support landed).
+; The instant 64-bit mode is reached, it switches straight to the kernel's
+; REAL GDT (read out of AP_PARAMS_ADDR, the exact same table/selectors
+; every other CPU already runs under - see gdt.c's gdt_get_table_ptr) and
+; jumps to kernel/arch/x86_64/ap_entry.asm's ap_entry_asm_stub, a normal
+; linked kernel symbol whose address smp.c also wrote into AP_PARAMS_ADDR.
 
 bits 16
 org 0x8000
@@ -113,8 +115,7 @@ ap_start64:
                                   ; for DS/ES/SS/FS/GS here, only the
                                   ; present/writable/DPL bits matter, and
                                   ; this descriptor already has the right
-                                  ; ones (see stage2.asm's long_mode_entry,
-                                  ; which does the exact same thing)
+                                  ; ones
     mov ds, ax
     mov es, ax
     mov ss, ax
