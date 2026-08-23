@@ -153,3 +153,8 @@ long sys_kbd_modifiers(void);
  * responsibility to size its buffer, same contract as sys_readfile). */
 long sys_clipboard_set(const void *buf, size_t len);
 long sys_clipboard_get(void *buf, size_t maxlen);
+
+/* M33: creates or overwrites a whole file by name (the write half of
+ * sys_readfile). Returns 0, or -1 on failure (name too long, no free
+ * inode, no free space, or len exceeds leanfs's max file size). */
+long sys_writefile(const char *name, const void *buf, size_t len);

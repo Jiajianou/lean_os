@@ -146,3 +146,16 @@ int wm_send_action(int32_t window_id, uint32_t action) {
     req.action = action;
     return sys_write(action_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
 }
+
+static int settings_fds[2] = {-1, -1};
+
+int wm_set_bg_color(uint32_t color) {
+    if (settings_fds[0] < 0) {
+        if (sys_pipe_open(WM_SETTINGS_PIPE, settings_fds) != 0) {
+            return -1;
+        }
+    }
+    wm_settings_request_t req;
+    req.bg_color = color;
+    return sys_write(settings_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
+}

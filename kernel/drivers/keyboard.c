@@ -16,6 +16,18 @@
 #define SCANCODE_LALT         0x38
 #define SCANCODE_RELEASE_BIT  0x80
 
+/* M33: the four arrow keys, and only the four arrow keys, out of the
+ * whole 0xE0-prefixed extended-scancode space (numpad Enter, right Ctrl/
+ * Alt, media keys, ... none of that is decoded - see this file's own
+ * header comment). Each arrives as two interrupts: 0xE0 itself, then the
+ * real code byte on the very next one - extended_prefix (below) is what
+ * ties those two together. */
+#define SCANCODE_EXTENDED_PREFIX 0xE0
+#define SCANCODE_EXT_UP           0x48
+#define SCANCODE_EXT_LEFT         0x4B
+#define SCANCODE_EXT_RIGHT        0x4D
+#define SCANCODE_EXT_DOWN         0x50
+
 /* Scancode set 1 make codes, index = scancode, 0 = no ASCII mapping
  * (modifiers, unmapped/extended keys). */
 static const char unshifted_table[0x3A] = {
@@ -44,6 +56,7 @@ static volatile uint32_t buf_tail; /* next slot to read */
 static volatile int shift_held;
 static volatile int ctrl_held; /* M32 */
 static volatile int alt_held;  /* M32 */
+static volatile int extended_prefix; /* M33: set by a bare 0xE0 byte, consumed by the very next one */
 
 static void buffer_push(char c) {
     uint32_t next = (buf_head + 1) % BUFFER_SIZE;
@@ -57,6 +70,36 @@ static void buffer_push(char c) {
 static void keyboard_irq(isr_regs_t *regs) {
     (void)regs;
     uint8_t scancode = inb(PS2_DATA_PORT);
+
+    if (scancode == SCANCODE_EXTENDED_PREFIX) {
+        extended_prefix = 1;
+        return;
+    }
+    if (extended_prefix) {
+        extended_prefix = 0;
+        uint8_t ext_code = scancode & (uint8_t)~SCANCODE_RELEASE_BIT;
+        int ext_released = (scancode & SCANCODE_RELEASE_BIT) != 0;
+        if (!ext_released) {
+            switch (ext_code) {
+                case SCANCODE_EXT_UP:
+                    buffer_push((char)KBD_KEY_UP);
+                    break;
+                case SCANCODE_EXT_DOWN:
+                    buffer_push((char)KBD_KEY_DOWN);
+                    break;
+                case SCANCODE_EXT_LEFT:
+                    buffer_push((char)KBD_KEY_LEFT);
+                    break;
+                case SCANCODE_EXT_RIGHT:
+                    buffer_push((char)KBD_KEY_RIGHT);
+                    break;
+                default:
+                    break; /* an extended key this driver doesn't decode - ignored, not buffered */
+            }
+        }
+        return;
+    }
+
     uint8_t code = scancode & (uint8_t)~SCANCODE_RELEASE_BIT;
     int released = (scancode & SCANCODE_RELEASE_BIT) != 0;
 
@@ -88,6 +131,7 @@ void keyboard_init(void) {
     shift_held = 0;
     ctrl_held = 0;
     alt_held = 0;
+    extended_prefix = 0;
     irq_register_handler(KEYBOARD_IRQ, keyboard_irq);
     pic_clear_mask(KEYBOARD_IRQ);
 }

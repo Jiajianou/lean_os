@@ -49,6 +49,9 @@ typedef struct {
 
 static const icon_def_t ICONS[] = {
     {"Terminal", "gui_terminal", ">_"},
+    {"Editor",   "text_editor",  "Ed"},
+    {"Files",    "file_manager", "[]"},
+    {"Settings", "settings",     "**"},
     {"Clock",    "gui_clock",    "()"},
     {"Paint",    "gui_paint",    "/\\"},
 };

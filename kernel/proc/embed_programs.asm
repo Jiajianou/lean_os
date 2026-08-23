@@ -103,3 +103,21 @@ global gui_terminal_elf_end
 gui_terminal_elf_start:
     incbin "build/gui_terminal.elf"
 gui_terminal_elf_end:
+
+global text_editor_elf_start
+global text_editor_elf_end
+text_editor_elf_start:
+    incbin "build/text_editor.elf"
+text_editor_elf_end:
+
+global file_manager_elf_start
+global file_manager_elf_end
+file_manager_elf_start:
+    incbin "build/file_manager.elf"
+file_manager_elf_end:
+
+global settings_elf_start
+global settings_elf_end
+settings_elf_start:
+    incbin "build/settings.elf"
+settings_elf_end:

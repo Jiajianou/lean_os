@@ -153,3 +153,14 @@ typedef struct {
     int32_t window_id;
     uint32_t action; /* wm_action_type_t */
 } wm_action_request_t;
+
+/* M33: the compositor's first genuinely global (not per-window) setting -
+ * the desktop background color, previously a compile-time constant in
+ * compositor.c. Same one-way "fire a request, no response expected"
+ * shape as an action request; user_space/bin/settings.c is the one
+ * client that ever sends one. */
+#define WM_SETTINGS_PIPE "wm_settings"
+
+typedef struct {
+    uint32_t bg_color;
+} wm_settings_request_t;

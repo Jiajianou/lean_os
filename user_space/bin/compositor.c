@@ -55,7 +55,7 @@
 #define MAX_WINDOWS          8
 #define TITLEBAR_H           20
 #define BORDER               2
-#define BG_COLOR             0x001A1A2Eu
+#define DEFAULT_BG_COLOR     0x001A1A2Eu
 #define BORDER_COLOR         0x00444466u
 #define TITLEBAR_COLOR       0x00335577u
 #define TITLEBAR_FOCUS_COLOR 0x004C99E6u
@@ -94,6 +94,7 @@ typedef struct {
 static window_t windows[MAX_WINDOWS];
 static int window_count;
 static int focused_window = -1; /* -1 = nothing focused yet */
+static uint32_t bg_color = DEFAULT_BG_COLOR; /* M33: settings.c's WM_SETTINGS_PIPE is the only way this ever changes at runtime */
 
 static wm_fb_info_t fb_info;
 static uint32_t *real_fb;       /* the live, scanned-out hardware framebuffer - write-only, touched only by present() */
@@ -285,7 +286,7 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
         return;
     }
 
-    fill_rect(0, 0, (int32_t)fb_info.width, (int32_t)fb_info.height, BG_COLOR);
+    fill_rect(0, 0, (int32_t)fb_info.width, (int32_t)fb_info.height, bg_color);
     /* Desktop windows first (a background layer under everything else -
      * the opposite end of the z-order from panels below), then ordinary
      * windows in creation order (no z-order raise on focus - a later
@@ -716,6 +717,22 @@ static void accept_pending_action(int action_read_fd) {
     apply_window_action(req.window_id, req.action);
 }
 
+/* M33: the compositor's first global (non-per-window) setting - see
+ * wm.h's own comment on WM_SETTINGS_PIPE. Same non-blocking poll-then-
+ * read shape as accept_pending_action, just with no window_id to
+ * validate. */
+static void accept_pending_settings(int settings_read_fd) {
+    if (sys_pipe_poll(settings_read_fd) < (long)sizeof(wm_settings_request_t)) {
+        return;
+    }
+    wm_settings_request_t req;
+    if (read_exact(settings_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
+        return;
+    }
+    bg_color = req.bg_color;
+    dirty = 1;
+}
+
 static void handle_mouse(void) {
     mouse_event_t mev;
     while (sys_mouse_read(&mev)) {
@@ -1017,8 +1034,9 @@ int main(void) {
     int query_fds[2];
     int query_resp_fds[2];
     int action_fds[2];
+    int settings_fds[2];
     if (sys_pipe_open(WM_QUERY_PIPE, query_fds) != 0 || sys_pipe_open(WM_QUERY_RESP_PIPE, query_resp_fds) != 0 ||
-        sys_pipe_open(WM_ACTION_PIPE, action_fds) != 0) {
+        sys_pipe_open(WM_ACTION_PIPE, action_fds) != 0 || sys_pipe_open(WM_SETTINGS_PIPE, settings_fds) != 0) {
         sys_exit(1);
     }
 
@@ -1042,6 +1060,7 @@ int main(void) {
         accept_pending_window(req_fds[0], resp_fds[1]);
         accept_pending_query(query_fds[0], query_resp_fds[1]);
         accept_pending_action(action_fds[0]);
+        accept_pending_settings(settings_fds[0]);
         reap_dead_clients();
         handle_mouse();
         handle_keyboard();

@@ -30,3 +30,19 @@ typedef struct {
 #define KBD_MOD_CTRL  1
 #define KBD_MOD_ALT   2
 #define KBD_MOD_SHIFT 4
+
+/* M33: arrow-key sentinels pushed into the same buffered-character stream
+ * SYS_kbd_read/SYS_read(fd=0) already deliver (kernel/drivers/keyboard.c
+ * decodes the 0xE0-prefixed extended scancodes for just these four keys -
+ * still no general extended-scancode support, see that file's own header
+ * comment). Values 1-4 are otherwise unreachable through this driver's
+ * lookup tables (there's no Ctrl-transforms-the-character behavior here -
+ * Ctrl is tracked separately, KBD_MOD_CTRL above - so this isn't the
+ * classic-terminal Ctrl+A==0x01 collision it would be on a real TTY),
+ * safe for user_space/bin/text_editor.c (M33) to treat as unambiguous
+ * cursor-movement keys without a client thinking it typed a control
+ * character. */
+#define KBD_KEY_UP    1
+#define KBD_KEY_DOWN  2
+#define KBD_KEY_LEFT  3
+#define KBD_KEY_RIGHT 4

@@ -51,5 +51,6 @@
 #define SYS_kbd_modifiers 26 /* () -> bitmask of KBD_MOD_CTRL/ALT/SHIFT (system_api/include/input.h) - live held/not-held state, not the buffered ASCII stream SYS_kbd_read/SYS_read already deliver. M32: lets a caller tell a plain keypress from a modifier chord (compositor.c's Alt+Tab, gui_terminal.c's Ctrl+C/V). */
 #define SYS_clipboard_set 27 /* (buf, len) -> 0. Replaces the single kernel-owned clipboard's contents (kernel/ipc/clipboard.h) - truncated to CLIPBOARD_MAX, not an error. */
 #define SYS_clipboard_get 28 /* (buf, maxlen) -> the clipboard's real length (may exceed maxlen, same "caller's responsibility to size its buffer" contract as SYS_readfile), or 0 if never set. */
+#define SYS_writefile 29 /* (name, buf, len) -> 0 or -1. M33: the missing write half of SYS_readfile - creates or overwrites a whole file by name (kernel/fs/vfs.h's vfs_write, already used internally since M12/M15 but never exposed to user space until text_editor.c needed to save one). Whole-file, no append/seek, same scope-trimming as SYS_readfile's own "no open/close/lseek yet" contract. */
 
-#define SYSCALL_COUNT 29
+#define SYSCALL_COUNT 30

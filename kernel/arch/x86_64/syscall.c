@@ -207,6 +207,19 @@ static long sys_readfile(uint64_t name_ptr, uint64_t buf, uint64_t maxlen, uint6
     return (long)vfs_read((const char *)name_ptr, (void *)buf, (size_t)maxlen);
 }
 
+/* M33: mirrors sys_readfile's shape exactly - see SYS_writefile's own doc
+ * comment (system_api/include/syscall.h) for why this hadn't been needed
+ * until now. */
+static long sys_writefile(uint64_t name_ptr, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (name_ptr == 0 || buf == 0) {
+        return -1;
+    }
+    return vfs_write((const char *)name_ptr, (const void *)buf, (size_t)len);
+}
+
 static long sys_listfiles(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
@@ -701,6 +714,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_kbd_modifiers] = sys_kbd_modifiers,
     [SYS_clipboard_set] = sys_clipboard_set,
     [SYS_clipboard_get] = sys_clipboard_get,
+    [SYS_writefile] = sys_writefile,
 };
 
 void syscall_handler(isr_regs_t *regs) {

@@ -50,7 +50,10 @@
     X(gui_paint)                     \
     X(desktop_shell)                 \
     X(desktop_icons)                 \
-    X(gui_terminal)
+    X(gui_terminal)                  \
+    X(text_editor)                   \
+    X(file_manager)                  \
+    X(settings)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -1078,6 +1081,80 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("M32 clipboard self-test: SYS_clipboard_get did not return what SYS_clipboard_set stored");
         }
         klog_puts("[clipboard] SYS_clipboard_set/get self-test passed.\n\n");
+    }
+
+    /* M33 self-test: SYS_writefile is the new syscall text_editor.c's
+     * save depends on - the missing write half of SYS_readfile
+     * (kernel/fs/vfs.c's vfs_write already existed and was already
+     * exercised internally, e.g. by the very seeding loop just above,
+     * just never reachable from user space through a syscall before this
+     * milestone). Round-trips real bytes through a real file the same
+     * way SYS_readfile's own earlier self-tests already prove reading
+     * does. */
+    {
+        const char content[] = "M33 SYS_writefile self-test content";
+        long wrc = do_syscall(SYS_writefile, (uint64_t)"m33test", (uint64_t)content, sizeof(content) - 1);
+        if (wrc != 0) {
+            panic("M33 self-test: SYS_writefile failed");
+        }
+        char readback[64];
+        long n = do_syscall(SYS_readfile, (uint64_t)"m33test", (uint64_t)readback, sizeof(readback));
+        int mismatch = (n != (long)(sizeof(content) - 1));
+        for (long i = 0; !mismatch && i < n; i++) {
+            if (readback[i] != content[i]) {
+                mismatch = 1;
+            }
+        }
+        if (mismatch) {
+            panic("M33 self-test: SYS_writefile/SYS_readfile round trip mismatch");
+        }
+        klog_puts("[vfs] SYS_writefile/SYS_readfile self-test passed.\n\n");
+    }
+
+    /* M33 self-test: settings.c's live desktop-background-color control,
+     * driven directly over WM_SETTINGS_PIPE the same way M30's self-test
+     * drives WM_ACTION_PIPE - no GUI client needed, the compositor alone
+     * already redraws the desktop background every frame regardless of
+     * whether anything is connected to it. */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image) {
+            panic("out of memory reading compositor back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0) {
+            panic("vfs_read: compositor missing - should exist, just seeded");
+        }
+        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(300);
+
+        int settings_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
+            panic("M33 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
+        }
+        wm_settings_request_t req;
+        req.bg_color = 0x00123456u; /* distinct from DEFAULT_BG_COLOR - a wrong pixel can't accidentally match */
+        do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(300);
+        /* Same (500, 500) "empty desktop" probe point M20-M30's own
+         * self-tests already use - nothing else is connected here to
+         * cover it. */
+        uint32_t got = fb_get_pixel(500, 500);
+
+        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        console_init();
+        klog_use_console();
+
+        if (got != req.bg_color) {
+            klog_puts("[settings] pixel check failed: desktop background did not change - expected 0x");
+            klog_put_hex32(req.bg_color);
+            klog_puts(" got 0x");
+            klog_put_hex32(got);
+            klog_putc('\n');
+            panic("M33 settings self-test: WM_SETTINGS_PIPE did not change the desktop background color");
+        }
+        klog_puts("[settings] WM_SETTINGS_PIPE background-color self-test passed.\n\n");
     }
 
     /* Stretch goal: SMP. Deliberately brought up *after* every M-numbered

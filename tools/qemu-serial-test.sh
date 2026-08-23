@@ -90,6 +90,8 @@ REQUIRED_MARKERS=(
   "[wm22] desktop shell (panel + taskbar query, no launcher) self-test passed"
   "[wm30] window chrome (maximize/restore/minimize/close via WM_ACTION_PIPE) self-test passed"
   "[clipboard] SYS_clipboard_set/get self-test passed."
+  "[vfs] SYS_writefile/SYS_readfile self-test passed."
+  "[settings] WM_SETTINGS_PIPE background-color self-test passed."
   "[smp] self-test passed."
   "[net] ICMP echo request/reply self-test passed"
   "[init] PID 1 spawned"

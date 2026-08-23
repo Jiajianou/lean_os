@@ -129,6 +129,10 @@ long sys_clipboard_get(void *buf, size_t maxlen) {
     return do_syscall(SYS_clipboard_get, (long)buf, (long)maxlen, 0);
 }
 
+long sys_writefile(const char *name, const void *buf, size_t len) {
+    return do_syscall(SYS_writefile, (long)name, (long)buf, (long)len);
+}
+
 long sys_task_alive(long pid) {
     return do_syscall(SYS_task_alive, pid, 0, 0);
 }

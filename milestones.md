@@ -459,6 +459,16 @@ teardown need to share one reclaim path, and that path needs to be solid
 before more UI leans on it - then M30+ builds out the window-manager UX and
 app baseline toward something worth calling a usable OS.
 
+M29 through M33 are now all done, save M28/M29's one shared manual step
+(actually booting a physical machine from USB - needs real hardware this
+environment doesn't have). Every window can be closed, minimized, maximized,
+dragged, and resized; the desktop has a real multi-icon grid, Alt-Tab, and
+clipboard; and there's a real text editor, file manager, and settings panel
+to use once you're in. What's still true: click/drag/keychord-*reaching* the
+right code (as opposed to the code itself being correct, which every
+kernel-side self-test above does verify) is manual/interactive-only,
+same boundary this project drew starting at M18's mouse driver.
+
 ## M29 — Robustness & foundational cleanup ✅ (except the one manual step)
 
 - [x] Client-crash cleanup: `SYS_task_alive` (`system_api/include/syscall.h`,
@@ -656,14 +666,50 @@ app baseline toward something worth calling a usable OS.
       the same boundary M18/M21/M22/M31 already drew for click- and
       key-driven behavior this headless build has no way to fabricate
 
-## M33 — Core usable-OS app baseline
+## M33 — Core usable-OS app baseline ✅
 
-- [ ] Text editor - there is currently no way to edit a file without a
-      host toolchain
-- [ ] GUI file manager - terminal + coreutils (`ls`/`cat`/`echo`) is the
-      only way to browse the filesystem today
-- [ ] Settings/control panel app - zero user-facing configuration surface
-      exists today
+- [x] Text editor (`user_space/bin/text_editor.c`): real multi-line,
+      cursor-addressable editing (Up/Down/Left/Right/Backspace/typing
+      all work anywhere in already-loaded text) built on a new kernel
+      capability this needed and didn't have - arrow-key decoding
+      (`kernel/drivers/keyboard.c` only ever decoded the plain scancode
+      block before this; the four arrow keys are the first 0xE0-prefixed
+      extended scancodes this driver understands) and a new
+      `SYS_writefile` syscall (`vfs_write` already existed and was
+      already used internally, just never reachable from user space -
+      the missing write half of `SYS_readfile`). One real, documented
+      simplification: Enter always appends a new line at the *end* of
+      the file rather than splitting the current line at the cursor
+      (that needs each line to be its own growable slot, not a fixed
+      `MAX_LINES` table of fixed-size buffers) - you can fix a typo
+      anywhere, new lines only ever get added at the bottom. Ctrl+S saves
+      to the filename the process was spawned with (`untitled` if none)
+- [x] GUI file manager (`user_space/bin/file_manager.c`): lists every
+      file via `SYS_listfiles` (leanfs is flat - this genuinely is the
+      whole namespace), Up/Down + Enter or a mouse double-click opens the
+      selection in `text_editor.c` (no per-file type metadata exists to
+      make a smarter guess from), refreshes every second so a file just
+      saved from a concurrently open editor shows up on its own
+- [x] Settings/control panel (`user_space/bin/settings.c`): two real,
+      live controls, not a static info readout - a desktop background
+      color picker (new `WM_SETTINGS_PIPE`/`wm_set_bg_color`, the
+      compositor's first global non-per-window setting - `BG_COLOR` in
+      `compositor.c` was a compile-time constant before this) and a
+      clipboard viewer + Clear button (M32's `SYS_clipboard_*`). Display
+      resolution and uptime are shown too, read live via `SYS_fb_info`/
+      `SYS_uptime_ms`, not hardcoded
+- [x] All three are reachable, not just present on disk: added as three
+      new `desktop_icons.c` grid entries (Editor/Files/Settings,
+      alongside the existing Terminal/Clock/Paint)
+- [x] Two new automated self-tests: `SYS_writefile`/`SYS_readfile` round-
+      trip real bytes through a real file (`[vfs]`), and `WM_SETTINGS_PIPE`
+      is driven directly (no GUI client needed) with a framebuffer pixel
+      check proving the desktop background genuinely changed (`[settings]`,
+      same shape as M30's own `WM_ACTION_PIPE` self-test). Whether real
+      typing/clicking in text_editor.c or file_manager.c's UI reaches the
+      right pixels is, like every other keyboard/mouse-driven behavior
+      since M18, left to manual/interactive verification - this headless
+      build has no way to fabricate real hardware input
 
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
