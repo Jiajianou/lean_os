@@ -1084,6 +1084,225 @@ That's what made "everywhere" one milestone instead of a per-app sweep.
       baseline with even spacing, where the old font ran them together
       into a single connected mass
 
+## Path to a Mac-like polished desktop (M40+)
+
+A reported bug started this arc: double-clicking the "Editor" or "Clock"
+desktop icons does nothing, while Terminal/Files/Settings/Paint all work.
+Investigation traced leanfs storage, `SYS_spawn`/`elf_load`, and
+`desktop_icons.c`'s own hit-test/layout math (hand-simulated at the real
+1024x768 boot resolution) and found no bug in any of those layers - both
+files are stored and spawned identically to the working icons, and the
+six icons' hit-rects don't overlap, wrap, or collide with the panel.
+That's a real, if uncomfortable, finding in its own right: it means this
+project's long-standing gap (every click/drag/double-click feature since
+M18 has only ever been proven by a self-test calling
+`apply_window_action()`/`WM_ACTION_PIPE` directly, never by a real mouse
+click at real pixel coordinates) has finally hidden a bug behind it
+instead of just a theoretical caveat. M40 closes that gap and uses it to
+actually find and fix this. M41 through M44 then push the desktop's UX
+and visuals toward the macOS shape already half-true today (M22's panel
+is already screen-*bottom*-docked, i.e. already dock-shaped) - a top
+menu bar, a real icon dock, a Spotlight-style launcher with window
+snapping, and a final visual-consistency pass.
+
+## M40 — Robustness pass + real interactive-input test harness ✅
+
+- [x] QEMU-monitor-driven input-injection harness: real
+      `sendkey`/`mouse_move`/`mouse_button` HMP commands against a booted
+      image, with results read back from real framebuffer pixels via
+      `screendump`. Landed as `tools/qemu-input-test.sh` (plus
+      `tools/qemu_input.py`, the engine, and `tools/qemu_input_suite.py`,
+      the tests) alongside the existing boot-marker check - run both
+      before every milestone from here on. Two things about QEMU had to
+      be learned rather than assumed, both documented where they bite:
+      the guest's mouse is *relative*, so `move_to` homes into the
+      top-left clamp and steps from there and then **verifies against the
+      pointer actually drawn on screen** (it has to - an unverified move
+      silently landed 100px short once and read as a guest bug); and
+      HMP's `mouse_button` help string ("1=L, 2=M, 4=R") is simply wrong
+      about which bit is the right button
+- [x] The Editor/Clock bug: reproduced, root-caused and fixed. It was
+      never about those two programs - it was **whichever two apps you
+      launched third and fourth**, which is why static reading of
+      `leanfs.c`/`proc.c`/`elf.c`/`desktop_icons.c` found nothing. Every
+      user process inherits its parent's whole fd table, and PID 1
+      descends from the kernel's boot task, which permanently held five
+      pipe fd-pairs its own self-tests (M14/M30/M33/M36/M38) had opened
+      and - there being no `SYS_close` - never released. Those ten fds
+      rode into `init` and then into the compositor, which starts with
+      12 of its 32 fd slots already spoken for; after its six protocol
+      pipes and the desktop+panel event pipes, exactly two remained.
+      App three onward got a failed `sys_pipe_open`, a `window_id` of -1,
+      and no window at all. Fixed at the root (`sched_reset_fds_to_std`,
+      called before `init` is spawned), with `MAX_FDS` 32 -> 64 so an
+      8-window compositor isn't a to-the-last-slot fit, and a compositor
+      that refuses a window now says so on its own stdout instead of
+      failing silently
+- [x] Four more real bugs the harness found or the audit uncovered along
+      the way, none of which any protocol-level self-test could have seen:
+      - **`.bss` was never zeroed.** `objcopy -O binary` drops NOBITS, so
+        the ~176 KiB of `.bss` past the end of `kernel.bin` was whatever
+        the firmware had left there; C's "statics start zeroed" guarantee
+        was being provided by luck. Growing `task_t` moved `tasks[]` into
+        a dirtier stretch and the next spawn panicked. `entry.asm` now
+        clears it
+      - **`process_spawn` published a task before initializing it.** The
+        heap/shm cursors were assigned *after* `task_spawn_in` returned,
+        with a comment arguing the gap was too short to matter. It
+        wasn't: the task is schedulable the instant the lock drops, and
+        gets a whole quantum - long enough to reach `malloc` with
+        `heap_brk` still zero and map a page at virtual address 0. They
+        are now arguments to `task_spawn_in`, set under the same lock
+        that makes the task READY
+      - **Right-clicks never reached the window under the pointer.**
+        Events go to the focused window, and only a *left* press ran the
+        focus hit-test - so M35's right-click desktop menu simply never
+        opened from a fresh desktop, because the panel holds focus after
+        boot. `focus_window_under_cursor` is now shared by both
+      - **Alt+Tab dropped its own modifier.** `SYS_kbd_modifiers` sampled
+        *live* key state, but every caller asks just after reading a
+        buffered character - a full compositor frame later, by which
+        point Alt can be released. The modifier bitmask is now captured
+        in the IRQ handler and travels with each character
+- [x] Double-click detection made latency-independent: `mouse_event_t`
+      and `wm_event_t` now carry a `time_ms` stamped by the PS/2
+      interrupt handler, and `desktop_icons.c` times the events instead
+      of its own two trips round the event loop. It was measuring
+      delivery latency, so a full-screen redraw between two clicks
+      stretched a real double-click past its own 500ms window - failing
+      more often the more windows were open, which is precisely what
+      "double-clicking that icon doesn't work" looks like from outside
+- [x] `SYS_spawn`'s failure paths audited end to end. The worst finding:
+      `elf_load` **panicked the kernel** on any malformed image, and
+      `SYS_spawn` has been able to hand it any file on disk since M13 -
+      so `sys_spawn("some_text_file", "")` from an ordinary user program
+      took the machine down. It also trusted every offset in the headers
+      (a truncated file could read past the image buffer; a crafted
+      `p_vaddr` could map a segment at a kernel address). It now
+      validates everything - and validates it all *before* allocating
+      anything, so a refused image costs no frames, no address space and
+      no task slot. Out-of-memory mid-load uses `pmm_try_alloc_frame`
+      rather than panicking, and a full task table is checked before an
+      address space is built rather than after
+- [x] Retroactive coverage for already-shipped interactive features:
+      titlebar close click (M30), titlebar drag-move (M31), Alt+Tab
+      (M32), right-click context menu (M35), single-vs-double click, and
+      all six desktop icons - the first real evidence for or against
+      everything deferred as "manual/interactive-only" since M18. Two of
+      those six were broken (Alt+Tab and the context menu) and had been
+      for several milestones
+- [x] Stress test: launch/close cycles through real clicks, asserting
+      M29's reclaim path holds and that the compositor never starts
+      refusing windows
+- [x] New boot self-tests for both root causes - the fd-table
+      inheritance invariant (checked before *and* after the reset, so it
+      fails loudly in both directions) and `SYS_spawn`'s failure paths,
+      the latter comparing task count and free-frame count across a
+      failed spawn so "returned -1" also has to mean "leaked nothing"
+- [x] Both regression scripts now run the disk with `snapshot=on`: they
+      take no write lock (so they can run concurrently, and alongside a
+      `make`), and every run is genuinely the from-scratch,
+      unformatted-disk boot `qemu-serial-test.sh`'s time budget is
+      written against. Before this, only the first run after a rebuild
+      was - every later one booted the disk the previous run had already
+      formatted, quietly skipping the format path it claims to cover
+- [x] Full `tools/qemu-serial-test.sh` pass (27/27 markers, zero
+      regressions) and `tools/qemu-input-test.sh` pass (7/7)
+
+## M41 — macOS-style top menu bar
+
+- [ ] New always-on-top, screen-*top*-docked panel mirroring
+      `desktop_shell.c`'s existing bottom dock (`compositor.c`'s
+      `is_panel` plumbing is already generic over "a panel," not
+      bottom-specific - this reuses it rather than inventing a second
+      mechanism), showing the focused app's name on the left
+- [ ] Promote M35's per-window File-menu convention from "drawn inside
+      each app's own window" to "shown in the shared top bar for
+      whichever app is focused" - a new query lets the top bar ask the
+      focused client what menu(s) it currently has, so
+      `text_editor.c`'s existing File menu becomes the top bar's menu
+      instead of a second copy living in two places
+- [ ] Move the system clock from the bottom dock's corner
+      (`desktop_shell.c`'s `CLOCK_AREA_W`) to the top bar's right edge -
+      the other half of the real "menu bar top, dock bottom" macOS
+      convention, and it frees that corner of the bottom dock for M42
+- [ ] Every place the compositor already clamps against
+      `connected_panel_height()` (window placement, maximize, drag
+      bounds - M22/M30/M31) needs the same clamp against the new top
+      bar's height too, not just the bottom one
+- [ ] Self-tests for the protocol-level behavior (menu query
+      round-trip, clock rendering, placement clamped below the new bar)
+      the same shape as M30/M33/M38's own; real click-reaches-the-
+      menu-item verification goes through M40's new harness
+
+## M42 — Dock-style taskbar
+
+- [ ] Convert `desktop_shell.c`'s taskbar slots from fixed-width
+      text-label rectangles to icon tiles, reusing `desktop_icons.c`'s
+      existing glyph-box art instead of inventing a second icon format
+      - closes the "you have to read the label" gap and, as a side
+      effect, makes a running app's dock tile and its desktop icon
+      visibly the same thing
+- [ ] Center the dock horizontally instead of left-aligning from the
+      panel's edge, growing/shrinking around the middle as apps open
+      and close, the way a real Dock does
+- [ ] Running-app indicator (a small dot/bar under a tile) replacing
+      today's three flat background colors
+      (`RUNNING_SLOT_BG`/`_FOCUS_BG`/`_MIN_BG`) - focused/minimized/
+      running-unfocused stay distinguishable but read as "one dock,
+      three states" rather than three different-colored buttons
+- [ ] Hover highlight on a dock tile - the compositor already tracks
+      live cursor position every tick for M38's resize-cursor shaping,
+      so this reuses that instead of adding new mouse-polling
+- [ ] Verified via `qemu-serial-test.sh` (no kernel changes expected)
+      plus M40's harness for the real hover/click behavior
+
+## M43 — Spotlight-style launcher + window snapping
+
+- [ ] Global launcher keychord (reusing M32's `keyboard_modifiers()`
+      infra already added for Alt-Tab) opens a centered search overlay
+      listing every file via `SYS_listfiles`, type-to-filter, Enter
+      spawns the top match, Escape dismisses - the type-to-launch
+      counterpart to double-clicking a desktop icon, and the first
+      place in this project a compositor-level (not per-client) modal
+      input grab is actually justified, unlike M35/M36's deliberate
+      client-side-only scope trims
+- [ ] Window edge-snapping: dragging a window's titlebar to the
+      screen's left/right edge resizes+repositions it to exactly the
+      left/right half (macOS/Aero-style tiling), reusing M31's existing
+      drag-and-clamp state machine rather than a new one
+- [ ] Snap preview: a translucent outline shown while dragging near an
+      edge, before release - the first real use of alpha-blended fills
+      beyond M38's fixed-ratio drop shadow, proving out how much cheap
+      integer-blend translucency this toolchain can afford before M44
+      leans on it further
+- [ ] Self-tests for the protocol-level snap math (given a drag-end
+      position, the resulting rect is exactly right/left half, clamped
+      correctly at small screen sizes); the launcher's keychord-opens-
+      overlay and real click-to-select-a-result behavior verified via
+      M40's harness
+
+## M44 — Desktop visual polish
+
+- [ ] Replace the flat `BG_COLOR` desktop background with a simple
+      integer-interpolated vertical gradient (no floating point - same
+      constraint M38/M39 already worked within) - the last remaining
+      "flat color, nothing else" surface now that M41-M43 have covered
+      the bars/dock/windows
+- [ ] Translucent dock and menu bar background, reusing M38's
+      `fill_rect_shadow` blend math and M43's snap-preview blend as the
+      two existing precedents rather than a third blend implementation
+- [ ] Consistent spacing/corner-treatment pass across dock tiles, menu
+      bar, window chrome, and dialogs now that all four exist - a real
+      design-consistency pass, not new functionality
+- [ ] Wallpaper option in `settings.c` alongside the existing bg/accent
+      color pickers - a small fixed set of built-in gradients/patterns
+      to choose from; no image file format exists in this project and
+      adding one is real, separate scope this milestone doesn't take on
+- [ ] Verified via `qemu-serial-test.sh` plus new pixel self-tests for
+      the gradient/translucency math, same shape as M38's shadow-blend
+      self-test
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support

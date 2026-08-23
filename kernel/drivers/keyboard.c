@@ -50,6 +50,12 @@ static const char shifted_table[0x3A] = {
 
 #define BUFFER_SIZE 256
 static char buffer[BUFFER_SIZE];
+/* M40: the modifier bitmask as it was at the instant each buffered
+ * character was typed, captured in the IRQ handler alongside the
+ * character itself. See keyboard_modifiers' own comment for what went
+ * wrong without it. */
+static uint8_t mods_buffer[BUFFER_SIZE];
+static volatile int last_read_mods;
 static volatile uint32_t buf_head; /* next slot to write */
 static volatile uint32_t buf_tail; /* next slot to read */
 
@@ -58,12 +64,27 @@ static volatile int ctrl_held; /* M32 */
 static volatile int alt_held;  /* M32 */
 static volatile int extended_prefix; /* M33: set by a bare 0xE0 byte, consumed by the very next one */
 
+static int current_modifiers(void) {
+    int mods = 0;
+    if (ctrl_held) {
+        mods |= KBD_MOD_CTRL;
+    }
+    if (alt_held) {
+        mods |= KBD_MOD_ALT;
+    }
+    if (shift_held) {
+        mods |= KBD_MOD_SHIFT;
+    }
+    return mods;
+}
+
 static void buffer_push(char c) {
     uint32_t next = (buf_head + 1) % BUFFER_SIZE;
     if (next == buf_tail) {
         return; /* full: drop the character rather than overwrite unread input */
     }
     buffer[buf_head] = c;
+    mods_buffer[buf_head] = (uint8_t)current_modifiers();
     buf_head = next;
 }
 
@@ -131,23 +152,14 @@ void keyboard_init(void) {
     shift_held = 0;
     ctrl_held = 0;
     alt_held = 0;
+    last_read_mods = 0;
     extended_prefix = 0;
     irq_register_handler(KEYBOARD_IRQ, keyboard_irq);
     pic_clear_mask(KEYBOARD_IRQ);
 }
 
 int keyboard_modifiers(void) {
-    int mods = 0;
-    if (ctrl_held) {
-        mods |= KBD_MOD_CTRL;
-    }
-    if (alt_held) {
-        mods |= KBD_MOD_ALT;
-    }
-    if (shift_held) {
-        mods |= KBD_MOD_SHIFT;
-    }
-    return mods;
+    return last_read_mods;
 }
 
 int keyboard_read(void) {
@@ -155,6 +167,7 @@ int keyboard_read(void) {
         return -1;
     }
     char c = buffer[buf_tail];
+    last_read_mods = (int)mods_buffer[buf_tail];
     buf_tail = (buf_tail + 1) % BUFFER_SIZE;
     return (int)(unsigned char)c;
 }

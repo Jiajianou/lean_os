@@ -150,6 +150,10 @@ void pmm_free_frame(uint64_t phys_addr) {
     spin_unlock(&pmm_lock);
 }
 
+uint64_t pmm_free_frame_count(void) {
+    return free_frames;
+}
+
 /* Scans from the very start of the bitmap rather than search_hint: unlike
  * pmm_alloc_frame's single-page case, a multi-frame *contiguous* run can
  * exist entirely below search_hint (freed single frames scattered there

@@ -155,7 +155,8 @@ void sched_init_ap(int cpu_id) {
     irq_restore(flags);
 }
 
-static task_t *task_spawn_common(uint64_t pml4_phys, void (*entry)(void *arg), void *arg) {
+static task_t *task_spawn_common(uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
+                                  uint64_t heap_start, uint64_t shm_base) {
     /* kmalloc takes its own lock (heap.c) - done before sched_lock so the
      * two are never nested in the reverse order anywhere in this kernel
      * (see heap.c's own note on lock ordering). */
@@ -194,6 +195,25 @@ static task_t *task_spawn_common(uint64_t pml4_phys, void (*entry)(void *arg), v
     t->pending_signal = 0;
     t->reaped = 0;
 
+    /* M40: set *here*, inside the same critical section that publishes
+     * this task as TASK_READY, not by the caller afterwards. proc.c used
+     * to fill these three in on the task_spawn_in return path, with a
+     * comment arguing the gap was too short to matter - it wasn't. The
+     * task is schedulable the instant the lock drops, and once it runs it
+     * gets a whole quantum, which is far more than enough to reach crt0,
+     * malloc and SYS_sbrk with heap_brk still zero: a mapping at virtual
+     * address 0 and an immediate panic. (Found the moment MAX_FDS grew,
+     * which lengthened the fd-copy loop just above and shifted the timing
+     * enough to make the race fire on every boot instead of never - see
+     * milestones.md's M40 section.) The window can't be closed by
+     * disabling interrupts around the caller's assignments either: on SMP
+     * another CPU's scheduler can claim a READY task regardless of this
+     * one's interrupt flag. Publishing a fully-initialized task is the
+     * only version of this that's actually correct. */
+    t->heap_brk = heap_start;
+    t->heap_mapped_end = heap_start;
+    t->shm_next_vaddr = shm_base;
+
     /* Fabricate a stack that looks exactly like a task that's already
      * mid-context_switch: context_switch's `ret` will pop
      * task_entry_trampoline as if it were resuming a call, the six pops
@@ -221,11 +241,16 @@ static task_t *task_spawn_common(uint64_t pml4_phys, void (*entry)(void *arg), v
 }
 
 task_t *task_spawn(void (*entry)(void *arg), void *arg) {
-    return task_spawn_common(vmm_kernel_pml4_phys(), entry, arg);
+    /* A plain kernel thread never reaches SYS_sbrk/SYS_shm_map (both are
+     * ring-3-only paths), so its user-VM cursors stay zero - the same
+     * "meaningless, left zeroed" contract task_t's own field comments
+     * already describe. */
+    return task_spawn_common(vmm_kernel_pml4_phys(), entry, arg, 0, 0);
 }
 
-task_t *task_spawn_in(uint64_t pml4_phys, void (*entry)(void *arg), void *arg) {
-    return task_spawn_common(pml4_phys, entry, arg);
+task_t *task_spawn_in(uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
+                       uint64_t heap_start, uint64_t shm_base) {
+    return task_spawn_common(pml4_phys, entry, arg, heap_start, shm_base);
 }
 
 /* Round-robin: scan forward from `from`, wrapping, for the next READY
@@ -332,4 +357,17 @@ task_t *sched_task_by_id(int id) {
 
 int sched_task_count(void) {
     return task_count;
+}
+
+int sched_has_free_task_slot(void) {
+    return task_count < MAX_TASKS;
+}
+
+void sched_reset_fds_to_std(task_t *t) {
+    for (int i = 0; i < MAX_FDS; i++) {
+        t->fds[i].type = FD_NONE;
+        t->fds[i].pipe = (struct pipe *)0;
+    }
+    t->fds[0].type = FD_STDIN;
+    t->fds[1].type = FD_STDOUT;
 }

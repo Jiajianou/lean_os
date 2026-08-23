@@ -188,8 +188,15 @@ int main(void) {
                     if (!point_in_icon(i, ev.x, ev.y)) {
                         continue;
                     }
-                    long now = sys_uptime_ms();
-                    pressed_until_ms = now + 150;
+                    /* M40: the event's own timestamp, not sys_uptime_ms()
+                     * here. This is the whole difference between timing
+                     * the user's two clicks and timing this process's two
+                     * trips round its event loop - and with a full-screen
+                     * compositor redraw in between, the latter routinely
+                     * exceeded DOUBLE_CLICK_MS and dropped the gesture.
+                     * See system_api/include/input.h's mouse_event_t. */
+                    long now = (long)ev.time_ms;
+                    pressed_until_ms = sys_uptime_ms() + 150;
                     pressed_icon = i;
                     if (last_click_icon == i && last_click_ms >= 0 && now - last_click_ms <= DOUBLE_CLICK_MS) {
                         sys_spawn(ICONS[i].program, "");

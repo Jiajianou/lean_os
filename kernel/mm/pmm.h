@@ -45,5 +45,12 @@ void pmm_free_frame(uint64_t phys_addr);
  * described by a single base address plus a length, not a scatter list.
  * Frees as a block via pmm_free_contiguous, not `count` separate
  * pmm_free_frame calls. */
+/* M40: how many 4 KiB frames are currently free. Exists for the boot
+ * self-tests: comparing this across an operation that is supposed to fail
+ * is what turns "the syscall returned -1" into "the syscall returned -1
+ * and didn't leak anything doing it", which is the actually interesting
+ * half of a failure-path audit. */
+uint64_t pmm_free_frame_count(void);
+
 uint64_t pmm_alloc_contiguous(uint64_t count);
 void pmm_free_contiguous(uint64_t phys_addr, uint64_t count);

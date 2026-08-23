@@ -81,6 +81,14 @@ typedef struct {
     int32_t x, y;
     uint8_t buttons;
     char ch;
+    /* M40: for a mouse event, input.h's mouse_event_t.time_ms carried
+     * straight through - when the PS/2 interrupt decoded this packet, not
+     * when the compositor forwarded it or when the client read it. A
+     * client timing a gesture (desktop_icons.c's double-click) has to use
+     * this rather than calling SYS_uptime_ms itself, or it ends up
+     * measuring its own scheduling latency. Zero for key/focus events,
+     * which nothing times. */
+    uint32_t time_ms;
 } wm_event_t;
 
 #define WM_EVENT_PIPE_PREFIX "wm_evt"

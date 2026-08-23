@@ -40,9 +40,39 @@ static void user_task_launcher(void *arg) {
 }
 
 task_t *process_spawn(const uint8_t *image, size_t image_size, const char *arg) {
-    uint64_t pml4_phys = vmm_create_address_space();
+    /* M40: checked up front, before anything is allocated. The
+     * task-table-full check further down still exists (it has to - it's
+     * the one that runs under sched_lock and is therefore the
+     * authoritative one), but reaching *only* that one meant a full table
+     * cost an address space and an argument frame per rejected spawn,
+     * neither of which this project has a path to reclaim. Failing here
+     * instead makes the common case of a full table genuinely free. */
+    if (!sched_has_free_task_slot()) {
+        return (task_t *)0;
+    }
 
+    /* M40: reject a bad image before an address space exists to abandon.
+     * elf_load used to `panic` on anything that wasn't a valid x86-64
+     * ET_EXEC, which SYS_spawn made reachable from user space as
+     * sys_spawn("any_non_program_file", "") - it now returns 0 instead
+     * (elf.h), and asking elf_validate first means the refusal costs
+     * nothing at all: no frames, no page tables, no task slot. Worth the
+     * extra pass over the program headers precisely because there is no
+     * vmm_destroy_address_space in this project to clean up after the
+     * other ordering. */
+    if (elf_validate(image, image_size) == 0) {
+        return (task_t *)0;
+    }
+
+    uint64_t pml4_phys = vmm_create_address_space();
     uint64_t entry = elf_load(pml4_phys, image, image_size);
+    if (entry == 0) {
+        /* Only reachable now by running out of physical memory partway
+         * through mapping (elf.c) - the frames and page tables built so
+         * far are leaked, the same tradeoff the task-table-full path
+         * below documents, and only on genuine exhaustion. */
+        return (task_t *)0;
+    }
 
     uint64_t stack_bottom = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
     for (uint64_t va = stack_bottom; va < USER_STACK_TOP; va += PAGE_SIZE) {
@@ -73,7 +103,8 @@ task_t *process_spawn(const uint8_t *image, size_t image_size, const char *arg) 
     args->user_stack_top = USER_STACK_TOP;
     args->arg_ptr = USER_ARG_ADDR;
 
-    task_t *t = task_spawn_in(pml4_phys, user_task_launcher, args);
+    task_t *t = task_spawn_in(pml4_phys, user_task_launcher, args,
+                               USER_HEAP_START, USER_SHM_BASE);
     if (!t) {
         /* Fixed MAX_TASKS table (sched.c) is full - task_spawn_in already
          * reports this cleanly (NULL, not a panic - unlike out-of-memory
@@ -89,15 +120,10 @@ task_t *process_spawn(const uint8_t *image, size_t image_size, const char *arg) 
         kfree(args);
         return (task_t *)0;
     }
-    /* M19: starting points for this process's own heap (SYS_sbrk) and
-     * shared-memory mapping (SYS_shm_map) regions. Safe to set after
-     * task_spawn_in returns even though the task is already READY and
-     * could in principle be preempted into - it can't reach a syscall
-     * that reads these fields until it actually runs user code, which
-     * takes far longer than the few instructions between here and this
-     * function returning. */
-    t->heap_brk = USER_HEAP_START;
-    t->heap_mapped_end = USER_HEAP_START;
-    t->shm_next_vaddr = USER_SHM_BASE;
+    /* M19's heap/shm starting points (USER_HEAP_START/USER_SHM_BASE) used
+     * to be assigned right here, after the task was already live. M40
+     * moved them into task_spawn_in's argument list instead - see its
+     * declaration in sched.h, and task_spawn_common for the race that
+     * made this a real panic rather than a theoretical one. */
     return t;
 }

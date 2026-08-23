@@ -4,14 +4,15 @@
 #include "lib/libk.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
-#include "panic.h"
-
-#define PAGE_SIZE 4096ULL
+#include "proc/proc.h" /* USER_IMAGE_BASE/USER_IMAGE_LIMIT - the window a segment must fit in */
 
 #define EI_MAG0 0
 #define EI_MAG1 1
 #define EI_MAG2 2
 #define EI_MAG3 3
+
+#define EI_CLASS  4
+#define ELFCLASS64 2
 
 #define ET_EXEC   2
 #define EM_X86_64 62
@@ -53,23 +54,95 @@ static uint64_t align_up(uint64_t x, uint64_t a) {
     return (x + a - 1) & ~(a - 1);
 }
 
-uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size) {
+/* One rejection reason, logged and turned into elf_load's 0 sentinel.
+ * Logged rather than silent because a refused spawn is otherwise
+ * indistinguishable from an app that started and immediately exited -
+ * the same "make the failure visible" reasoning behind the compositor's
+ * refuse_window (user_space/bin/compositor.c). KLOG_DEBUG, not an error:
+ * a user program spawning garbage is an ordinary, recoverable event. */
+static uint64_t reject(const char *why) {
+    klog_debug("[elf] rejected image: ");
+    klog_debug(why);
+    klog_debug("\n");
+    return 0;
+}
+
+uint64_t elf_validate(const uint8_t *image, size_t image_size) {
     if (image_size < sizeof(elf64_ehdr_t)) {
-        panic("elf_load: image smaller than an ELF header");
+        return reject("smaller than an ELF header");
     }
     const elf64_ehdr_t *eh = (const elf64_ehdr_t *)image;
     if (eh->e_ident[EI_MAG0] != 0x7F || eh->e_ident[EI_MAG1] != 'E' ||
         eh->e_ident[EI_MAG2] != 'L' || eh->e_ident[EI_MAG3] != 'F') {
-        panic("elf_load: bad magic - not an ELF file");
+        return reject("bad magic - not an ELF file");
+    }
+    if (eh->e_ident[EI_CLASS] != ELFCLASS64) {
+        return reject("not ELFCLASS64");
     }
     if (eh->e_type != ET_EXEC) {
-        panic("elf_load: only ET_EXEC (static, non-PIE) executables are supported");
+        return reject("not ET_EXEC (static, non-PIE) - the only type supported here");
     }
     if (eh->e_machine != EM_X86_64) {
-        panic("elf_load: not an x86_64 image");
+        return reject("not an x86_64 image");
+    }
+    if (eh->e_entry < USER_IMAGE_BASE || eh->e_entry >= USER_IMAGE_LIMIT) {
+        return reject("entry point outside the user image window");
+    }
+    if (eh->e_phnum != 0 && eh->e_phentsize != sizeof(elf64_phdr_t)) {
+        return reject("unexpected program-header entry size");
+    }
+    /* Overflow-safe bounds check on the program-header table itself:
+     * e_phoff and e_phnum both come straight out of the file, so
+     * `e_phoff + e_phnum * e_phentsize` computed naively could wrap and
+     * pass a comparison it should fail. Subtracting from image_size
+     * instead can't. */
+    uint64_t ph_bytes = (uint64_t)eh->e_phnum * sizeof(elf64_phdr_t);
+    if (eh->e_phoff > image_size || ph_bytes > (uint64_t)image_size - eh->e_phoff) {
+        return reject("program-header table runs past the end of the image");
     }
 
     const elf64_phdr_t *ph = (const elf64_phdr_t *)(image + eh->e_phoff);
+    for (uint16_t i = 0; i < eh->e_phnum; i++) {
+        if (ph[i].p_type != PT_LOAD) {
+            continue;
+        }
+        uint64_t vaddr = ph[i].p_vaddr;
+        uint64_t filesz = ph[i].p_filesz;
+        uint64_t memsz = ph[i].p_memsz;
+        uint64_t offset = ph[i].p_offset;
+
+        if (filesz > memsz) {
+            return reject("segment p_filesz exceeds p_memsz");
+        }
+        if (offset > image_size || filesz > (uint64_t)image_size - offset) {
+            return reject("segment file contents run past the end of the image");
+        }
+        if (vaddr < USER_IMAGE_BASE) {
+            return reject("segment loads below the user image window");
+        }
+        if (memsz > USER_IMAGE_LIMIT - vaddr) {
+            return reject("segment runs past the end of the user image window");
+        }
+    }
+
+    return eh->e_entry;
+}
+
+uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size) {
+    /* Validate the whole image before mapping any of it, so a rejected
+     * one never allocates a frame or leaves a half-populated address
+     * space behind (there is no unmap-and-free path to undo one with -
+     * see vmm.h). Callers that want the answer *before* committing to an
+     * address space at all call elf_validate directly; doing it again
+     * here costs one pass over a handful of program headers and means
+     * elf_load is never unsafe on its own. */
+    uint64_t entry = elf_validate(image, image_size);
+    if (entry == 0) {
+        return 0;
+    }
+    const elf64_ehdr_t *eh = (const elf64_ehdr_t *)image;
+    const elf64_phdr_t *ph = (const elf64_phdr_t *)(image + eh->e_phoff);
+
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
         if (ph[i].p_type != PT_LOAD) {
             continue;
@@ -84,7 +157,18 @@ uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size) {
         uint64_t seg_end = align_up(vaddr + memsz, PAGE_SIZE);
 
         for (uint64_t page_va = seg_start; page_va < seg_end; page_va += PAGE_SIZE) {
-            uint64_t phys = pmm_alloc_frame();
+            /* M40: pmm_try_alloc_frame, not pmm_alloc_frame - SYS_spawn is
+             * reachable from any user program, so one process asking for
+             * more physical memory than exists must not panic every other
+             * task's along with it (pmm.h spells out this same rule for
+             * SYS_sbrk and shm_create). Frames already mapped into this
+             * doomed address space are left behind rather than unwound:
+             * same tradeoff process_spawn's own task-table-full path
+             * documents, and only reachable on genuine exhaustion. */
+            uint64_t phys = pmm_try_alloc_frame();
+            if (phys == 0) {
+                return reject("out of physical memory mapping a segment");
+            }
             /* Frames pmm hands out always live inside the always-identity-
              * mapped first 1 GiB (pmm.h), so this raw physical write is
              * safe regardless of which CR3 is currently loaded. */

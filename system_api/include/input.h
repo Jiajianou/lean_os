@@ -17,15 +17,27 @@ typedef struct {
                  * up-positive Y by kernel/drivers/mouse.c) */
     int32_t dy;
     uint8_t buttons; /* bit0 = left, bit1 = right, bit2 = middle */
+    /* M40: SYS_uptime_ms as of the interrupt that decoded this packet,
+     * not as of whenever a reader gets around to it. Double-click
+     * detection (desktop_icons.c) used to time the *processing* of two
+     * clicks rather than the clicks themselves, so any delay between
+     * them - a full-screen compositor redraw is easily enough - stretched
+     * a genuine double-click past its own 500ms window and it silently
+     * did nothing. That failed more often the more windows were open,
+     * which is exactly what "double-clicking that icon doesn't work"
+     * looks like from the outside. Timestamping at the source makes the
+     * measurement independent of how busy everything downstream is. */
+    uint32_t time_ms;
 } mouse_event_t;
 
-/* M32: SYS_kbd_modifiers' bitmask - kernel/drivers/keyboard.h's live
- * (not buffered) held/not-held state, for a caller that needs to tell a
- * plain keypress from a modifier chord (compositor.c's Alt+Tab,
- * gui_terminal.c's Ctrl+C/V) since the decoded-ASCII stream
- * SYS_kbd_read/SYS_read already deliver can't distinguish them - 'c' is
- * 'c' whether or not Ctrl was held when it was typed. SHIFT is included
- * for completeness even though nothing currently needs it this way (the
+/* M32: SYS_kbd_modifiers' bitmask - which modifiers were held for the
+ * character SYS_kbd_read/SYS_read most recently returned (M40; see
+ * kernel/drivers/keyboard.h for why it isn't live state), for a caller
+ * that needs to tell a plain keypress from a modifier chord
+ * (compositor.c's Alt+Tab, gui_terminal.c's Ctrl+C/V) since the
+ * decoded-ASCII stream alone can't distinguish them - 'c' is 'c' whether
+ * or not Ctrl was held when it was typed. SHIFT is included for
+ * completeness even though nothing currently needs it this way (the
  * decoded ASCII character is already shift-applied). */
 #define KBD_MOD_CTRL  1
 #define KBD_MOD_ALT   2

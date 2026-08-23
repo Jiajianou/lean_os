@@ -685,6 +685,32 @@ static void reap_dead_clients(void) {
     }
 }
 
+/* M40: a refused connection used to be entirely silent - the client got
+ * window_id = -1, exited, and the only evidence anywhere was an app that
+ * "did nothing" when you launched it. That is precisely how the fd-table
+ * exhaustion M40 root-caused stayed invisible for several milestones
+ * (see milestones.md's M40 section). Every refusal now names its own
+ * reason on the compositor's stdout, which SYS_write routes to klog and
+ * so into tools/qemu-serial-test.sh's own capture - so the next time
+ * this happens it is one grep away instead of a bisect. */
+static void refuse_window(int resp_write_fd, const char *reason) {
+    wm_create_response_t resp;
+    resp.window_id = -1;
+    resp.shm_id = -1;
+    resp.width = 0;
+    resp.height = 0;
+    sys_write(resp_write_fd, &resp, sizeof(resp));
+
+    const char prefix[] = "[wm] window request refused: ";
+    sys_write(1, prefix, sizeof(prefix) - 1);
+    int len = 0;
+    while (reason[len]) {
+        len++;
+    }
+    sys_write(1, reason, (size_t)len);
+    sys_write(1, "\n", 1);
+}
+
 /* Non-blocking: only touches the request pipe (and does the one
  * necessarily-blocking-in-practice SYS_read, guaranteed immediate since
  * SYS_pipe_poll already confirmed a full request is buffered) when a
@@ -698,9 +724,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     long n = read_exact(req_read_fd, &req, sizeof(req));
     wm_create_response_t resp;
     if (n != (long)sizeof(req)) {
-        resp.window_id = -1;
-        resp.shm_id = -1;
-        sys_write(resp_write_fd, &resp, sizeof(resp));
+        refuse_window(resp_write_fd, "short/torn create request");
         return;
     }
 
@@ -720,9 +744,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     int reused_slot = (idx >= 0);
     if (idx < 0) {
         if (window_count >= MAX_WINDOWS) {
-            resp.window_id = -1;
-            resp.shm_id = -1;
-            sys_write(resp_write_fd, &resp, sizeof(resp));
+            refuse_window(resp_write_fd, "no free window slot (MAX_WINDOWS)");
             return;
         }
         idx = window_count;
@@ -742,9 +764,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     long shm_id = sys_shm_create((size_t)width * height * sizeof(uint32_t));
     long vaddr = shm_id < 0 ? -1 : sys_shm_map(shm_id);
     if (shm_id < 0 || vaddr < 0) {
-        resp.window_id = -1;
-        resp.shm_id = -1;
-        sys_write(resp_write_fd, &resp, sizeof(resp));
+        refuse_window(resp_write_fd, "SYS_shm_create/SYS_shm_map failed (MAX_SHM_SEGMENTS, or out of memory)");
         return;
     }
 
@@ -762,9 +782,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
         wm_event_pipe_name(idx, evt_name);
         int evt_fds[2];
         if (sys_pipe_open(evt_name, evt_fds) != 0) {
-            resp.window_id = -1;
-            resp.shm_id = -1;
-            sys_write(resp_write_fd, &resp, sizeof(resp));
+            refuse_window(resp_write_fd, "SYS_pipe_open for this window's event pipe failed (this process's MAX_FDS, or MAX_NAMED_PIPES)");
             return;
         }
         evt_write_fd = evt_fds[1];
@@ -960,6 +978,54 @@ static void accept_pending_settings(int settings_read_fd) {
     dirty = 1;
 }
 
+/* M40: the plain "which window did this click land on" hit-test, lifted
+ * out of handle_mouse's left-button branch so a right-button press can
+ * use the exact same one rather than a near-copy. Panels are checked
+ * first (they're drawn on top, so they'd visually win any overlap
+ * anyway), ordinary windows next, and the desktop background last at the
+ * very bottom of the z-order - so it only ever wins a click that landed
+ * on empty desktop. A minimized window can't be hit: there's nothing on
+ * screen to click. */
+/* M40: the plain "which window did this click land on" hit-test, lifted
+ * out of handle_mouse's left-button branch so a right-button press can
+ * reuse the exact same one rather than a near-copy of it. */
+static void focus_window_under_cursor(void) {
+    /* Panels are checked first (they're drawn on top, so they'd visually
+     * win any overlap anyway), ordinary windows next, and the desktop
+     * background last at the very bottom of the z-order - so it only ever
+     * wins a click that landed on empty desktop, nothing else on screen.
+     * A minimized window can't be hit: there's nothing there to click. */
+    int hit = -1;
+    for (int i = window_count - 1; i >= 0; i--) {
+        if (windows[i].alive && windows[i].is_panel && !windows[i].minimized &&
+            point_in_window(&windows[i], cursor_x, cursor_y)) {
+            hit = i;
+            break;
+        }
+    }
+    if (hit < 0) {
+        for (int i = window_count - 1; i >= 0; i--) {
+            if (windows[i].alive && !windows[i].is_panel && !windows[i].is_desktop && !windows[i].minimized &&
+                point_in_window(&windows[i], cursor_x, cursor_y)) {
+                hit = i;
+                break;
+            }
+        }
+    }
+    if (hit < 0) {
+        for (int i = window_count - 1; i >= 0; i--) {
+            if (windows[i].alive && windows[i].is_desktop && !windows[i].minimized &&
+                point_in_window(&windows[i], cursor_x, cursor_y)) {
+                hit = i;
+                break;
+            }
+        }
+    }
+    if (hit >= 0) {
+        set_focus(hit);
+    }
+}
+
 static void handle_mouse(void) {
     mouse_event_t mev;
     while (sys_mouse_read(&mev)) {
@@ -984,6 +1050,20 @@ static void handle_mouse(void) {
 
         int left_down_edge = (mev.buttons & 1) && !(prev_buttons & 1);
         int left_up_edge = !(mev.buttons & 1) && (prev_buttons & 1);
+        /* M40: a *right*-button press has to pick a window too, not just
+         * a left one. Events are routed to the focused window only (see
+         * the send_event block at the bottom of this loop), so before
+         * this, right-clicking anything that wasn't already focused sent
+         * the event to whatever was - which meant M35's
+         * right-click-on-the-desktop context menu simply never opened
+         * from a fresh desktop, because the panel holds focus after boot.
+         * Found by M40's input harness (tools/qemu-input-test.sh); no
+         * protocol-level self-test could have, since they all send events
+         * to a window they already named. Only the plain focus hit-test
+         * is shared - titlebar buttons, resize handles and move-drags
+         * stay deliberately left-button-only, the way they are
+         * everywhere else. */
+        int right_down_edge = (mev.buttons & 2) && !(prev_buttons & 2);
 
         /* M31: a drag in progress owns every event until release - no
          * hit-testing, no focus changes, no forwarding to the window's
@@ -1134,39 +1214,9 @@ static void handle_mouse(void) {
                 continue;
             }
 
-            /* Panels are checked first (they're drawn on top, so they'd
-             * visually win any overlap anyway) and a minimized window
-             * can't be clicked - there's nothing on screen to click. */
-            int hit = -1;
-            for (int i = window_count - 1; i >= 0; i--) {
-                if (windows[i].alive && windows[i].is_panel && !windows[i].minimized && point_in_window(&windows[i], cursor_x, cursor_y)) {
-                    hit = i;
-                    break;
-                }
-            }
-            if (hit < 0) {
-                for (int i = window_count - 1; i >= 0; i--) {
-                    if (windows[i].alive && !windows[i].is_panel && !windows[i].is_desktop && !windows[i].minimized &&
-                        point_in_window(&windows[i], cursor_x, cursor_y)) {
-                        hit = i;
-                        break;
-                    }
-                }
-            }
-            /* Desktop background checked last, at the very bottom of the
-             * z-order - only ever wins a click that landed on empty
-             * desktop, nothing else on screen. */
-            if (hit < 0) {
-                for (int i = window_count - 1; i >= 0; i--) {
-                    if (windows[i].alive && windows[i].is_desktop && !windows[i].minimized && point_in_window(&windows[i], cursor_x, cursor_y)) {
-                        hit = i;
-                        break;
-                    }
-                }
-            }
-            if (hit >= 0) {
-                set_focus(hit);
-            }
+            focus_window_under_cursor();
+        } else if (right_down_edge) {
+            focus_window_under_cursor();
         }
 
         if (focused_window >= 0) {
@@ -1176,6 +1226,7 @@ static void handle_mouse(void) {
             ev.x = cursor_x - win->x;
             ev.y = cursor_y - win->y;
             ev.buttons = mev.buttons;
+            ev.time_ms = mev.time_ms; /* M40: the driver's timestamp, forwarded untouched - see wm_event_t.time_ms */
             send_event(win, &ev);
             if (mev.buttons != prev_buttons) {
                 ev.type = WM_EVENT_MOUSE_BUTTON;

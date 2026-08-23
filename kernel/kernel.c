@@ -1636,6 +1636,99 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
      * so entry.asm's post-kernel_main `cli` (which would permanently
      * disable interrupts, freezing the scheduler for every other task)
      * is never reached. */
+    /* M40 self-test: SYS_spawn's failure paths, driven end to end from
+     * exactly where a user program would reach them. Before this
+     * milestone the middle case here didn't fail at all - it panicked the
+     * whole kernel, because elf_load treated "malformed image" as a
+     * kernel bug rather than as ordinary input (see elf.h). SYS_spawn has
+     * been able to hand elf_load any file on disk since M13, and there is
+     * a non-program file sitting right there on this very filesystem:
+     * "m33test", written by the SYS_writefile self-test above. So this
+     * spawns it.
+     *
+     * The check that makes this an audit rather than a smoke test is the
+     * resource comparison around it: task count and free-frame count must
+     * both come back exactly where they started. A failed spawn that
+     * leaves a task slot claimed, or leaks the address space / argument
+     * page it built before giving up, would pass a bare "returned -1"
+     * assertion and still be the bug this milestone is looking for. */
+    {
+        int tasks_before = sched_task_count();
+        uint64_t frames_before = pmm_free_frame_count();
+
+        long rc_missing = do_syscall(SYS_spawn, (uint64_t)"definitely_not_a_file", 0, 0);
+        if (rc_missing >= 0) {
+            panic("M40 SYS_spawn self-test: spawning a nonexistent file should fail");
+        }
+
+        long rc_not_elf = do_syscall(SYS_spawn, (uint64_t)"m33test", 0, 0);
+        if (rc_not_elf >= 0) {
+            panic("M40 SYS_spawn self-test: spawning a non-ELF file should fail, not succeed");
+        }
+
+        int tasks_after = sched_task_count();
+        uint64_t frames_after = pmm_free_frame_count();
+        if (tasks_after != tasks_before) {
+            klog_puts("[m40] failed spawns changed the task count: 0x");
+            klog_put_hex32((uint32_t)tasks_before);
+            klog_puts(" -> 0x");
+            klog_put_hex32((uint32_t)tasks_after);
+            klog_putc('\n');
+            panic("M40 SYS_spawn self-test: a failed spawn left a task behind");
+        }
+        if (frames_after != frames_before) {
+            klog_puts("[m40] failed spawns leaked physical frames: 0x");
+            klog_put_hex64(frames_before);
+            klog_puts(" free -> 0x");
+            klog_put_hex64(frames_after);
+            klog_putc('\n');
+            panic("M40 SYS_spawn self-test: a failed spawn leaked physical memory");
+        }
+
+        klog_puts("[m40] SYS_spawn failure-path self-test passed (missing file and "
+                   "non-ELF file both refused cleanly, no task or frame leaked).\n\n");
+    }
+
+    /* M40 self-test + fix: every self-test above that opened a pipe from
+     * task 0 (M14's SYS_pipe, and M30/M33/M36/M38's kernel-side
+     * SYS_pipe_open calls) still holds those fds - this project has no
+     * SYS_close. Because a spawned task inherits its parent's whole fd
+     * table and every user process descends from task 0, those leftovers
+     * were being charged against the compositor's own MAX_FDS budget,
+     * leaving it room for only two windows past the desktop background
+     * and the panel. See sched_reset_fds_to_std's own comment for the
+     * full chain, and milestones.md's M40 section for how the bug
+     * presented ("the Editor and Clock icons don't launch").
+     *
+     * The check runs before *and* after, so this is a real regression
+     * guard in both directions: it fails loudly if a future self-test
+     * stops leaking (in which case this whole step is dead code worth
+     * deleting) and equally loudly if the reset ever stops working. */
+    {
+        task_t *boot_task = sched_current();
+        int leaked = 0;
+        for (int i = 2; i < MAX_FDS; i++) {
+            if (boot_task->fds[i].type != FD_NONE) {
+                leaked++;
+            }
+        }
+        if (leaked == 0) {
+            panic("M40 fd-inheritance self-test: expected the boot self-tests above to have left fds open on task 0 - if that is genuinely no longer true, delete this check and sched_reset_fds_to_std with it");
+        }
+        sched_reset_fds_to_std(boot_task);
+        for (int i = 2; i < MAX_FDS; i++) {
+            if (boot_task->fds[i].type != FD_NONE) {
+                panic("M40 fd-inheritance self-test: sched_reset_fds_to_std left an fd behind");
+            }
+        }
+        if (boot_task->fds[0].type != FD_STDIN || boot_task->fds[1].type != FD_STDOUT) {
+            panic("M40 fd-inheritance self-test: sched_reset_fds_to_std did not leave stdin/stdout intact");
+        }
+        klog_puts("[m40] boot-task fd reset self-test passed (0x");
+        klog_put_hex32((uint32_t)leaked);
+        klog_puts(" leaked self-test fd(s) reclaimed before PID 1 inherits the table).\n\n");
+    }
+
     uint8_t *init_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
     if (!init_image) {
         panic("out of memory reading init back from disk");

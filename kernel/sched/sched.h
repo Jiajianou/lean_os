@@ -33,7 +33,21 @@ typedef enum {
     FD_PIPE_WRITE,
 } fd_type_t;
 
-#define MAX_FDS 32 /* M21: bumped from 8 - a compositor juggling several windows needs stdin/stdout plus a request/response pipe pair plus one event-pipe write end per connected client, well past 8 (same "bump the fixed cap when a real need arrives" precedent as MAX_TASKS's M13 8->64). */
+/* M21: bumped from 8 - a compositor juggling several windows needs
+ * stdin/stdout plus a request/response pipe pair plus one event-pipe
+ * write end per connected client, well past 8 (same "bump the fixed cap
+ * when a real need arrives" precedent as MAX_TASKS's M13 8->64).
+ *
+ * M40: bumped again, 32 -> 64, after 32 turned out to be an *exact* fit
+ * rather than headroom - and an exact fit that silently broke the
+ * desktop. The compositor needs 2 (stdin/stdout) + 12 (its six protocol
+ * pipes, two fd slots each) + 2 per connected window; at MAX_WINDOWS (8)
+ * that is precisely 30 of 32, leaving no room for anything at all being
+ * inherited from its parent - which is exactly what was happening (see
+ * sched_reset_fds_to_std). Nothing here should be load-bearing to the
+ * last slot: 64 leaves the same 8-window compositor half its table
+ * spare. */
+#define MAX_FDS 64
 
 typedef struct {
     fd_type_t type;
@@ -96,7 +110,24 @@ task_t *task_spawn(void (*entry)(void *arg), void *arg);
  * to drop to ring 3 into its own private address space - see
  * kernel/proc/proc.c's process_spawn, which is the actual entry point
  * user code should use; this is the lower-level primitive it's built on. */
-task_t *task_spawn_in(uint64_t pml4_phys, void (*entry)(void *arg), void *arg);
+/* M40: whether a task_spawn* call could succeed right now, without
+ * allocating anything to find out. Advisory - task_spawn_common re-checks
+ * under sched_lock, which is the authoritative one - but it lets
+ * process_spawn bail before building an address space it would have to
+ * abandon (there is no vmm_destroy_address_space to reclaim one with).
+ * Slots are never recycled, so this is genuinely "has this machine
+ * spawned MAX_TASKS tasks yet", not "are that many alive". */
+int sched_has_free_task_slot(void);
+
+/* M40: heap_start/shm_base are the new task's SYS_sbrk and SYS_shm_map
+ * starting cursors (proc.h's USER_HEAP_START/USER_SHM_BASE - the
+ * scheduler deliberately doesn't know those constants, it just stores
+ * what proc.c hands it). Passed in rather than assigned by the caller
+ * afterwards because this task becomes schedulable - on any CPU - the
+ * moment task_spawn_common's lock drops; see that function's own comment
+ * for the panic that came of getting this wrong. */
+task_t *task_spawn_in(uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
+                       uint64_t heap_start, uint64_t shm_base);
 
 /* Picks the next READY task (round-robin from the current one) and
  * context-switches to it if it isn't the current task. Safe to call
@@ -125,3 +156,27 @@ task_t *sched_task_by_id(int id);
  * find children without needing their own separate child-list
  * bookkeeping. */
 int sched_task_count(void);
+
+/* M40: drops every fd this task holds except stdin/stdout, restoring the
+ * table a freshly-spawned process would have started with.
+ *
+ * This exists for exactly one caller: kernel_main, right before it spawns
+ * PID 1. Boot-time self-tests (M14's SYS_pipe round trip, and M30/M33/
+ * M36/M38's kernel-side SYS_pipe_open calls onto WM_ACTION_PIPE /
+ * WM_SETTINGS_PIPE) open pipes from task 0 and never close them - there
+ * is no SYS_close in this project, deliberately (see pipe.h). Harmless
+ * on its own, except that a spawned task inherits its parent's *whole*
+ * fd table (task_spawn_common) and every user process descends from task
+ * 0, so those five leftover fd pairs rode all the way into the
+ * compositor and cost it ten of its own slots. With MAX_FDS at 32 that
+ * left room for exactly two windows past the desktop background and the
+ * panel: launching a third app from a desktop icon got a failed
+ * sys_pipe_open, a window_id of -1, and no window - the "double-clicking
+ * the Editor/Clock icons does nothing" bug M40 was opened on, which was
+ * never about those two programs at all (it was whichever two you
+ * launched third and fourth). See milestones.md's M40 section.
+ *
+ * Not a general-purpose close: nothing here reference-counts a pipe, so
+ * this only makes sense for a task that is about to stop using its fds
+ * entirely, which task 0 (the idle task from here on) is. */
+void sched_reset_fds_to_std(task_t *t);

@@ -15,6 +15,22 @@
 # meant to run before every milestone from here on, not just when
 # something looks wrong.
 #
+# M40: `snapshot=on` on the disk. Guest writes (leanfs formats the disk on
+# its first boot) go to a throwaway overlay instead of back into
+# build/os-image.bin, which fixes two things at once: this script no longer
+# takes a write lock on the image - so it can run alongside
+# tools/qemu-input-test.sh or a `make` - and every run is genuinely the
+# from-scratch, unformatted-disk boot SECONDS_TO_RUN's budget below is
+# written against. Before this, only the first run after a rebuild was;
+# every one after that booted the already-formatted disk the previous run
+# left behind, quietly skipping the format path it claims to cover.
+#
+# M40: this remains the *boot-time* check only. Everything a human has to
+# click to reach now has its own harness - tools/qemu-input-test.sh, which
+# injects real mouse/keyboard events and grades real framebuffer pixels.
+# Run both before every milestone; neither subsumes the other (see that
+# script's header for what this one structurally cannot see).
+#
 # Usage: tools/qemu-serial-test.sh [SECONDS] [-- extra qemu args, e.g. -monitor pipe:/tmp/mon for key injection]
 set -euo pipefail
 
@@ -53,7 +69,7 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
-  -drive format=raw,file="$IMAGE" -display none \
+  -drive format=raw,snapshot=on,file="$IMAGE" -display none \
   -netdev user,id=net0 -device rtl8139,netdev=net0 \
   -serial file:"$LOG" -monitor none ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} &
 QEMU_PID=$!
@@ -95,6 +111,8 @@ REQUIRED_MARKERS=(
   "[settings] WM_SETTINGS_PIPE background-color self-test passed."
   "[wm36] confirm_close opt-in (WM_EVENT_CLOSE_REQUEST via WM_ACTION_PIPE) self-test passed"
   "[wm38] drop shadow + WM_SETTINGS_PIPE accent-color self-test passed"
+  "[m40] boot-task fd reset self-test passed"
+  "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."
   "[net] ICMP echo request/reply self-test passed"
   "[init] PID 1 spawned"

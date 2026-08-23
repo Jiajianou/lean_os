@@ -3,6 +3,7 @@
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/isr.h"
 #include "arch/x86_64/pic.h"
+#include "drivers/pit.h" /* pit_get_ticks - timestamping each event at the source (M40) */
 
 #define PS2_DATA_PORT   0x60
 #define PS2_STATUS_PORT 0x64
@@ -130,6 +131,11 @@ static void mouse_irq(isr_regs_t *regs) {
     ev.dx = dx;
     ev.dy = -dy; /* wire protocol is up-positive; screen coordinates are down-positive */
     ev.buttons = status & 0x07;
+    /* M40: same value SYS_uptime_ms reports (pit.h's PIT_HZ is 100, so
+     * 10ms resolution), stamped here in the interrupt handler - see
+     * mouse_event_t.time_ms for why it has to be here and not at the
+     * reader. */
+    ev.time_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
     push_event(ev);
 }
 

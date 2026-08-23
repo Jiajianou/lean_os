@@ -28,6 +28,19 @@
 #define USER_SHM_BASE    0x0000008020000000ULL /* 512 GiB + 512 MiB - M19 */
 #define USER_FB_BASE     0x0000008040000000ULL /* 512 GiB + 1 GiB - M20, SYS_fb_map's fixed target address */
 
+/* M40: the window an ELF image's own PT_LOAD segments have to fit inside
+ * - from the load address user_space/lib/user.ld links every program at,
+ * up to (but not into) the stack this file places just above it. elf.c
+ * checks every segment against these before mapping anything, because
+ * until M40 it checked nothing at all: SYS_spawn will happily hand it any
+ * file on disk, and a p_vaddr pointing into the identity-mapped low
+ * memory would have mapped kernel pages into a user address space (or
+ * panicked the machine on a huge-page collision). Not a security boundary
+ * - nothing else in this project is either - but "a user program can take
+ * down the kernel by spawning a text file" is a bug at any threat model. */
+#define USER_IMAGE_BASE  0x0000008000000000ULL /* 512 GiB - matches user_space/lib/user.ld */
+#define USER_IMAGE_LIMIT (USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE)
+
 /* arg may be NULL (equivalent to an empty string) for a program that
  * doesn't take one. */
 task_t *process_spawn(const uint8_t *image, size_t image_size, const char *arg);

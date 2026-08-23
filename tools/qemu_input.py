@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""tools/qemu_input.py - M40's real interactive-input harness engine.
+
+Every click/drag/double-click feature this project has shipped since M18
+has only ever been proven by a self-test *calling the action directly*
+(`apply_window_action()` / a hand-written `WM_ACTION_PIPE` request).
+Nothing has ever driven a real mouse to a real pixel coordinate and
+pressed a real button, which is exactly the gap the M40 section of
+milestones.md opens on: a bug (double-clicking the Editor/Clock desktop
+icons doing nothing) that hid behind it for several milestones because
+no test could see it.
+
+This module closes that gap. It drives a booted `build/os-image.bin`
+through QEMU's own HMP monitor - `sendkey`, `mouse_move`, `mouse_button`
+- and reads results back out of real framebuffer pixels via `screendump`
+(a P6 PPM of exactly what the display device holds). No guest-side
+cooperation of any kind: the guest cannot tell these events from a
+human's, because at the PS/2 controller they *are* the same events.
+
+Deliberately a Python module rather than another bash script (the shape
+tools/qemu-serial-test.sh has): pixel readback means parsing a binary
+PPM and comparing 32-bit colors, and a monitor conversation means
+speaking to a Unix socket with timeouts - both things bash can only do
+badly. tools/qemu-input-test.sh is the thin `run the suite` wrapper that
+keeps this reachable the same way every other tool here is.
+
+Two facts about QEMU that shape the API below, both learned the hard way
+rather than assumed:
+
+  * The guest's mouse is a *relative* PS/2 device (kernel/drivers/
+    mouse.c), so `mouse_move` takes deltas, not absolute coordinates.
+    QEMU's ps2 model additionally clamps each packet's delta to +/-127
+    and carries the remainder over to the next one, so a single large
+    move silently arrives short. `move_to` therefore homes the pointer
+    into the top-left corner (both the kernel's cursor.c and the
+    compositor's own cursor_x/y clamp there, so over-shooting is the
+    reliable way to reach a known origin) and then steps to the target
+    in <= MAX_STEP chunks.
+
+  * A HMP monitor echoes every character back, plus readline escape
+    sequences. Nothing here parses that echo for meaning - commands are
+    fire-and-forget and results are read from pixels or the serial log,
+    which are the only two things that actually prove guest behavior.
+"""
+
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
+import time
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+IMAGE = os.path.join(REPO_ROOT, "build", "os-image.bin")
+OVMF_CODE = os.path.join(REPO_ROOT, "build", "ovmf", "OVMF_CODE.fd")
+OVMF_VARS = os.path.join(REPO_ROOT, "build", "ovmf", "OVMF_VARS.fd")
+
+# The "desktop is up and steady" marker, same literal-substring convention
+# tools/qemu-serial-test.sh's REQUIRED_MARKERS uses - a wording change in
+# kernel/kernel.c is a visible one-line diff here too.
+BOOT_MARKER = "[init] PID 1 spawned"
+
+# Per-`mouse_move` delta cap. QEMU's own ps2 packet clamp is 127; staying
+# under it means one command == one fully-delivered packet, so a caller
+# counting steps can reason about where the pointer ended up.
+MAX_STEP = 100
+
+# How far past the screen's own dimensions `home()` pushes. Anything
+# >= the display size works; the clamp does the rest.
+HOME_OVERSHOOT = 1200
+
+# The pointer the compositor draws (user_space/bin/compositor.c's
+# cursor_shape / CURSOR_COLOR / CURSOR_SIZE), as the list of pixels that
+# are actually part of the arrow. Used to locate the real pointer in a
+# screendump - see Machine.find_cursor.
+CURSOR_COLOR = 0xFFFFFF
+CURSOR_W = CURSOR_H = 8
+_CURSOR_ROWS = (
+    0b10000000,
+    0b11000000,
+    0b10100000,
+    0b10010000,
+    0b10001000,
+    0b10111000,
+    0b11000100,
+    0b10000100,
+)
+CURSOR_PIXELS = tuple((x, y)
+                      for y, bits in enumerate(_CURSOR_ROWS)
+                      for x in range(CURSOR_W)
+                      if bits & (0x80 >> x))
+
+
+class Ppm:
+    """A parsed P6 screendump. px(x, y) returns 0x00RRGGBB, the same
+    packed form every color constant in this project's user space is
+    written in (gfx.h), so a comparison here reads like the source it's
+    checking against."""
+
+    def __init__(self, path):
+        with open(path, "rb") as f:
+            data = f.read()
+        pos = 0
+
+        def token():
+            nonlocal pos
+            while data[pos:pos + 1].isspace():
+                pos += 1
+            start = pos
+            while pos < len(data) and not data[pos:pos + 1].isspace():
+                pos += 1
+            return data[start:pos]
+
+        magic = token()
+        if magic != b"P6":
+            raise ValueError("screendump was not a P6 PPM: %r" % magic)
+        self.width = int(token())
+        self.height = int(token())
+        maxval = int(token())
+        if maxval != 255:
+            raise ValueError("unexpected PPM maxval %d" % maxval)
+        pos += 1  # the single whitespace byte before the pixel data
+        self._pixels = data[pos:]
+
+    def px(self, x, y):
+        if not (0 <= x < self.width and 0 <= y < self.height):
+            raise IndexError("(%d, %d) outside %dx%d screendump"
+                             % (x, y, self.width, self.height))
+        off = (y * self.width + x) * 3
+        return (self._pixels[off] << 16) | (self._pixels[off + 1] << 8) | self._pixels[off + 2]
+
+    def count_color(self, color, x0, y0, w, h):
+        """How many pixels in the given rect are exactly `color`. Used
+        instead of single-point probes wherever the thing being checked
+        is "did a region change", which tolerates a one-pixel cursor
+        overlap that a single probe point would fail on."""
+        n = 0
+        for y in range(y0, y0 + h):
+            for x in range(x0, x0 + w):
+                if self.px(x, y) == color:
+                    n += 1
+        return n
+
+
+class Machine:
+    """One booted guest, driven through its HMP monitor."""
+
+    def __init__(self, extra_args=(), quiet=False):
+        if not os.path.exists(IMAGE):
+            raise RuntimeError("no image at %s - run 'make' first" % IMAGE)
+        if not os.path.exists(OVMF_CODE):
+            raise RuntimeError("no OVMF at build/ovmf - run tools/build-ovmf.sh")
+
+        # A short base dir on purpose: a Unix socket path has a hard
+        # ~104-byte limit, and this project's own scratch/temp paths can
+        # already exceed that on their own.
+        self._dir = tempfile.mkdtemp(prefix="leanos-input-", dir="/tmp")
+        self._mon_path = os.path.join(self._dir, "mon.sock")
+        self.log_path = os.path.join(self._dir, "serial.log")
+        self._quiet = quiet
+        vars_rt = os.path.join(self._dir, "OVMF_VARS.fd")
+        shutil.copyfile(OVMF_VARS, vars_rt)
+
+        self._proc = subprocess.Popen([
+            "qemu-system-x86_64",
+            "-drive", "if=pflash,format=raw,readonly=on,file=" + OVMF_CODE,
+            "-drive", "if=pflash,format=raw,file=" + vars_rt,
+            # snapshot=on: guest writes (leanfs formats the disk on its
+            # first boot, so this can't be a read-only device) land in a
+            # throwaway overlay and the real image is opened read-only.
+            # That means a run holds no write lock on build/os-image.bin -
+            # so `make`, tools/qemu-serial-test.sh and a second copy of
+            # this suite can all proceed while one is in flight - and
+            # every test starts from the same pristine, never-booted image
+            # rather than from whatever the previous one left on disk.
+            "-drive", "format=raw,snapshot=on,file=" + IMAGE,
+            "-display", "none",
+            # Same SLIRP NAT tools/run-qemu.sh explains: the boot self-test
+            # pings the gateway and panics with no NIC attached at all.
+            "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",
+            "-serial", "file:" + self.log_path,
+            "-monitor", "unix:" + self._mon_path + ",server,nowait",
+        ] + list(extra_args), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        self._sock = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                s = socket.socket(socket.AF_UNIX)
+                s.connect(self._mon_path)
+                self._sock = s
+                break
+            except OSError:
+                time.sleep(0.2)
+        if self._sock is None:
+            self.kill()
+            raise RuntimeError("QEMU monitor socket never appeared")
+        self._drain()
+
+        self._shot_seq = 0
+        # Mirrors the compositor's own starting cursor_x/y (fb center).
+        # Only ever a hint: home() re-establishes it for real.
+        self.cursor = None
+
+    # ---- monitor plumbing -------------------------------------------
+
+    def _drain(self):
+        """Non-blocking on purpose. The monitor echoes every keystroke
+        back plus readline escapes, and none of it means anything here
+        (results are read from pixels and the serial log) - but a
+        *blocking* drain would add its own timeout to every single
+        command, and input timing is load-bearing: desktop_icons.c's
+        DOUBLE_CLICK_MS is 500ms, so a harness that spends a quarter
+        second per monitor command can't produce a double-click the
+        guest would ever recognize as one. This is the difference
+        between the harness measuring the guest and the harness
+        measuring itself."""
+        self._sock.setblocking(False)
+        try:
+            while self._sock.recv(65536):
+                pass
+        except (BlockingIOError, socket.timeout):
+            pass
+        finally:
+            self._sock.setblocking(True)
+
+    def monitor(self, command, settle=0.0):
+        self._sock.sendall(command.encode() + b"\n")
+        self._drain()
+        if settle:
+            time.sleep(settle)
+
+    # ---- boot / logs -------------------------------------------------
+
+    def read_log(self):
+        try:
+            with open(self.log_path, "r", errors="replace") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def wait_for_marker(self, marker=BOOT_MARKER, timeout=90):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if marker in self.read_log():
+                return True
+            time.sleep(0.5)
+        return False
+
+    def boot_to_desktop(self, settle=4.0, timeout=90):
+        """Waits for init's handoff, then lets the compositor, the
+        desktop background and the panel all connect and paint their
+        first frame. `settle` is a real budget measured against the
+        boot this project actually does, not a magic number - every
+        pixel assertion downstream depends on the first frame being up."""
+        if not self.wait_for_marker(timeout=timeout):
+            raise RuntimeError("guest never reached %r - see %s"
+                               % (BOOT_MARKER, self.log_path))
+        time.sleep(settle)
+
+    # ---- input -------------------------------------------------------
+
+    def sendkey(self, keys, hold_ms=None):
+        """`keys` is QEMU's own key syntax, e.g. "a", "ret", "alt-tab"."""
+        if hold_ms is None:
+            self.monitor("sendkey %s" % keys)
+        else:
+            self.monitor("sendkey %s %d" % (keys, hold_ms))
+
+    def type_text(self, text):
+        for ch in text:
+            self.sendkey(_qemu_keyname(ch), None)
+            time.sleep(0.03)
+
+    def home(self):
+        """Pins the pointer at (0, 0) by over-shooting the top-left
+        clamp. The only way to get a known absolute position out of a
+        relative device - see this module's header."""
+        steps = (HOME_OVERSHOOT + MAX_STEP - 1) // MAX_STEP
+        for _ in range(steps):
+            self.monitor("mouse_move -%d -%d" % (MAX_STEP, MAX_STEP), settle=0.02)
+        time.sleep(0.15)
+        self.cursor = (0, 0)
+
+    def _step_by(self, dx, dy):
+        while dx or dy:
+            sx = max(-MAX_STEP, min(MAX_STEP, dx))
+            sy = max(-MAX_STEP, min(MAX_STEP, dy))
+            self.monitor("mouse_move %d %d" % (sx, sy), settle=0.02)
+            dx -= sx
+            dy -= sy
+
+    def find_cursor(self, shot, near, radius=48):
+        """Where the compositor is actually drawing the pointer, found by
+        matching its 8x8 arrow bitmap (compositor.c's cursor_shape) inside
+        a window around where we believe it to be. Returns (x, y) or None.
+
+        Only the arrow's own distinctive pixels are matched, never the
+        gaps - the gaps show whatever is underneath, so requiring them to
+        be non-white would make this fail over pale content."""
+        cx, cy = near
+        best = None
+        for oy in range(max(0, cy - radius), min(shot.height - CURSOR_H, cy + radius + 1)):
+            for ox in range(max(0, cx - radius), min(shot.width - CURSOR_W, cx + radius + 1)):
+                if all(shot.px(ox + px, oy + py) == CURSOR_COLOR
+                       for px, py in CURSOR_PIXELS):
+                    # Nearest match to the expected point wins, so a white
+                    # glyph elsewhere in the window can't outrank the real
+                    # pointer.
+                    d = abs(ox - cx) + abs(oy - cy)
+                    if best is None or d < best[0]:
+                        best = (d, ox, oy)
+        return None if best is None else (best[1], best[2])
+
+    def move_to(self, x, y, verify=True):
+        """Puts the pointer at exactly (x, y), then checks that it got
+        there and corrects if it didn't.
+
+        The checking is not belt-and-braces. The device is relative, the
+        emulated PS/2 controller coalesces and clamps deltas, and the
+        guest is a software compositor that can be mid-redraw when a
+        packet lands - so "I sent moves totalling (x, y)" is genuinely not
+        the same claim as "the pointer is at (x, y)". Skipping this
+        produced a real, confusing failure: a right-click meant for the
+        empty desktop landed 100px short, opened the context menu
+        somewhere else entirely, and read as a guest bug rather than a
+        harness one. A test suite that can't say where it clicked can't
+        blame the guest for what happened."""
+        if self.cursor != (0, 0):
+            self.home()
+        self._step_by(x, y)
+        time.sleep(0.15)
+        self.cursor = (x, y)
+        if not verify:
+            return
+        for _attempt in range(3):
+            found = self.find_cursor(self.screenshot(), (x, y))
+            if found == (x, y):
+                return
+            if found is None:
+                self.home()
+                self._step_by(x, y)
+            else:
+                self._step_by(x - found[0], y - found[1])
+            time.sleep(0.15)
+        raise RuntimeError("could not place the pointer at (%d, %d)" % (x, y))
+
+    # `help mouse_button` in the QEMU monitor describes this bitmask as
+    # "1=L, 2=M, 4=R". That help string is wrong - verified against the
+    # guest, not assumed: pressing 2 is what reaches kernel/drivers/mouse.c
+    # as the right button (packet status bit 1), and 4 as the middle one.
+    # QEMU's own MOUSE_EVENT_* constants are ordered L/R/M, and the help
+    # text simply doesn't match them. Named constants here so the one
+    # place that knows this is the only place that has to.
+    BTN_LEFT = 1
+    BTN_RIGHT = 2
+    BTN_MIDDLE = 4
+
+    def button(self, mask):
+        self.monitor("mouse_button %d" % mask, settle=0.03)
+
+    def click(self, x=None, y=None, mask=BTN_LEFT, hold=0.04):
+        if x is not None:
+            self.move_to(x, y)
+        self.button(mask)
+        time.sleep(hold)
+        self.button(0)
+        time.sleep(0.04)
+
+    def right_click(self, x=None, y=None):
+        self.click(x, y, mask=self.BTN_RIGHT)
+
+    def double_click(self, x=None, y=None, gap=0.05):
+        """Two presses at the same point, well inside desktop_icons.c's
+        own DOUBLE_CLICK_MS (500) window as the guest measures it. The
+        whole sequence has to fit in that budget in *guest* time, which
+        is why `monitor` refuses to block - see _drain."""
+        if x is not None:
+            self.move_to(x, y)
+        self.click()
+        time.sleep(gap)
+        self.click()
+
+    def drag(self, x0, y0, x1, y1, steps=8):  # noqa: C901
+        """Press at (x0,y0), move to (x1,y1) with the button held, release.
+        Stepped rather than one jump so the guest sees real intermediate
+        motion - a drag state machine that only ever gets press-then-
+        release-far-away isn't being tested at all."""
+        self.move_to(x0, y0)
+        self.button(1)
+        time.sleep(0.1)
+        for i in range(1, steps + 1):
+            nx = x0 + (x1 - x0) * i // steps
+            ny = y0 + (y1 - y0) * i // steps
+            self._step_by(nx - self.cursor[0], ny - self.cursor[1])
+            self.cursor = (nx, ny)
+            time.sleep(0.05)
+        time.sleep(0.15)
+        self.button(0)
+        time.sleep(0.25)
+
+    # ---- readback ----------------------------------------------------
+
+    def screenshot(self):
+        self._shot_seq += 1
+        path = os.path.join(self._dir, "shot%03d.ppm" % self._shot_seq)
+        self.monitor("screendump %s" % path, settle=0.0)
+        # screendump is asynchronous with respect to the monitor echo, so
+        # wait for the file to both exist and stop growing rather than
+        # guessing a fixed sleep.
+        deadline = time.time() + 10
+        last = -1
+        while time.time() < deadline:
+            if os.path.exists(path):
+                size = os.path.getsize(path)
+                if size > 0 and size == last:
+                    return Ppm(path)
+                last = size
+            time.sleep(0.1)
+        raise RuntimeError("screendump never produced %s" % path)
+
+    # ---- lifecycle ---------------------------------------------------
+
+    def kill(self):
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+        if self._proc is not None:
+            self._proc.kill()
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            self._proc = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.kill()
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+
+_SHIFTED = {
+    "_": "shift-minus", ":": "shift-semicolon", "?": "shift-slash",
+    "!": "shift-1", "@": "shift-2", "#": "shift-3", "$": "shift-4",
+    "%": "shift-5", "^": "shift-6", "&": "shift-7", "*": "shift-8",
+    "(": "shift-9", ")": "shift-0", "+": "shift-equal", "\"": "shift-apostrophe",
+}
+_NAMED = {
+    " ": "spc", ".": "dot", ",": "comma", "-": "minus", "=": "equal",
+    "/": "slash", ";": "semicolon", "'": "apostrophe", "\n": "ret",
+}
+
+
+def _qemu_keyname(ch):
+    if ch in _SHIFTED:
+        return _SHIFTED[ch]
+    if ch in _NAMED:
+        return _NAMED[ch]
+    if ch.isupper():
+        return "shift-" + ch.lower()
+    return ch
