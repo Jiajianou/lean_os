@@ -1157,6 +1157,101 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         klog_puts("[settings] WM_SETTINGS_PIPE background-color self-test passed.\n\n");
     }
 
+    /* M36 self-test: text_editor.c is the one client that opts into
+     * wm_create_request_t.confirm_close (via wm_connect_confirm_close),
+     * so a WM_ACTION_CLOSE sent to it should take the new
+     * WM_EVENT_CLOSE_REQUEST path instead of M30's unconditional
+     * SIGTERM - driven purely over WM_ACTION_PIPE, same shape as M30's
+     * own self-test, no simulated keyboard/mouse input needed. Spawned
+     * with no filename ("untitled", doesn't exist yet, starts empty and
+     * !dirty), so the client's own request_action() takes its immediate
+     * branch and calls sys_exit(1) right away - the dirty-and-prompts
+     * path needs a real keypress to ever get dirty in the first place,
+     * which (like every other keyboard/mouse-driven behavior since M18)
+     * is manual/interactive-only verification this headless test can't
+     * fabricate. What this *does* prove headlessly: the close reached
+     * the client as an event it could act on (a clean, app-chosen exit
+     * code) rather than being killed out from under it, and the window
+     * slot still ends up reclaimed either way. */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *editor_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !editor_image) {
+            panic("out of memory reading compositor/text_editor back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t editor_size = vfs_read("text_editor", editor_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || editor_size < 0) {
+            panic("vfs_read: compositor/text_editor missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+
+        task_t *editor_task = process_spawn(editor_image, (size_t)editor_size, "");
+        kfree(editor_image);
+        pit_sleep_ms(500); /* connects (window 0), draws its first frame */
+
+        int action_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+            panic("M36 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
+        }
+
+        /* Home position: idx 0's default placement (100,100) plus a
+         * (300,200) offset into text_editor's own content area - blank
+         * (no text drawn there for an empty "untitled" file), so this
+         * reads its own BG_COLOR before close and the compositor's
+         * desktop background after (the two are deliberately distinct
+         * colors - see wm30's own probe-point comment for why that
+         * matters: a wrong pixel can't accidentally match). */
+        const int32_t probe_x = 400, probe_y = 300;
+        const uint32_t editor_bg = 0x00141414u;
+        const uint32_t desktop_bg = 0x001A1A2Eu;
+
+        uint32_t before_close = fb_get_pixel((uint32_t)probe_x, (uint32_t)probe_y);
+
+        wm_action_request_t req;
+        req.window_id = 0;
+        req.action = WM_ACTION_CLOSE;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(400);
+        uint32_t after_close = fb_get_pixel((uint32_t)probe_x, (uint32_t)probe_y);
+        long editor_exit = do_syscall(SYS_wait, (uint64_t)editor_task->id, 0, 0);
+
+        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        console_init();
+        klog_use_console();
+
+        int all_ok = 1;
+        if (before_close != editor_bg) {
+            klog_puts("[wm36] pixel check failed: before close, probe point should show text_editor's own background - expected 0x");
+            klog_put_hex32(editor_bg);
+            klog_puts(" got 0x");
+            klog_put_hex32(before_close);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (after_close != desktop_bg) {
+            klog_puts("[wm36] pixel check failed: after close, window slot should be reclaimed (empty desktop) - expected 0x");
+            klog_put_hex32(desktop_bg);
+            klog_puts(" got 0x");
+            klog_put_hex32(after_close);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (editor_exit != 1) {
+            klog_puts("[wm36] WM_EVENT_CLOSE_REQUEST self-test: text_editor's exit code did not match its own sys_exit(1) - expected 0x1 got 0x");
+            klog_put_hex32((uint32_t)editor_exit);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M36 close-request self-test: WM_EVENT_CLOSE_REQUEST did not behave as expected");
+        }
+        klog_puts("[wm36] confirm_close opt-in (WM_EVENT_CLOSE_REQUEST via WM_ACTION_PIPE) self-test passed (3/3 checks matched).\n\n");
+    }
+
     /* Stretch goal: SMP. Deliberately brought up *after* every M-numbered
      * self-test above, not right after M7's scheduler one - several of
      * those (M20-M22's compositor/client tests especially) rely on

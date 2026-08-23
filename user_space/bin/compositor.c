@@ -88,6 +88,7 @@ typedef struct {
     uint8_t maximized; /* M30: WM_ACTION_MAXIMIZE/RESTORE toggle - see saved_x/y/w/h below */
     int32_t saved_x, saved_y, saved_w, saved_h; /* M30: pre-maximize geometry, restored by WM_ACTION_RESTORE - meaningless while !maximized */
     uint8_t alive; /* M29: 0 once this slot has been reclaimed (owning client died or closed) - excluded from redraw/hit-test/query, and eligible for accept_pending_window to hand to the next connecting client. Slots below window_count that are !alive are exactly the "holes" reap_dead_clients leaves behind. */
+    uint8_t confirm_close; /* M36: from wm_create_request_t.confirm_close - see its own comment. Changes what apply_window_action's WM_ACTION_CLOSE branch does, nothing else. */
     int32_t client_pid; /* M29: from wm_create_request_t.client_pid - who to watch via SYS_task_alive so a crash (not just an orderly close) still frees this slot. -1 for a slot that's never been assigned. */
     char title[WM_TITLE_MAX]; /* echoed straight from wm_create_request_t.title into wm_window_info_t.title on every query - see accept_pending_query */
 } window_t;
@@ -583,6 +584,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     win->minimized = 0;
     win->maximized = 0;
     win->alive = 1;
+    win->confirm_close = req.confirm_close;
     win->client_pid = req.client_pid;
     int ti = 0;
     for (; req.title[ti] && ti < WM_TITLE_MAX - 1; ti++) {
@@ -669,13 +671,26 @@ static void apply_window_action(int idx, uint32_t action) {
         }
         dirty = 1;
     } else if (action == WM_ACTION_CLOSE) {
-        /* Deliberately does not touch windows[idx] at all here - see this
-         * file's header comment and M29's reap_dead_clients, which will
-         * notice win->client_pid terminated (a nonzero exit code - signal
-         * deaths always are, system_api/include/signal.h) within one
-         * loop iteration and reclaim the slot then, the exact same path
-         * an actual crash goes through. */
-        sys_kill(win->client_pid, SIGTERM);
+        if (win->confirm_close) {
+            /* M36: opted in (wm_connect_confirm_close) - give the client
+             * a chance to decide instead of an unconditional SIGTERM. It
+             * stays running (and its window slot stays alive) until it
+             * calls SYS_exit on its own - reap_dead_clients (M29) picks
+             * that up like any other termination, whatever the exit
+             * code. If it never responds, its window simply never closes
+             * via this path - see confirm_close's own doc comment. */
+            wm_event_t ev = {0};
+            ev.type = WM_EVENT_CLOSE_REQUEST;
+            send_event(win, &ev);
+        } else {
+            /* Deliberately does not touch windows[idx] at all here - see
+             * this file's header comment and M29's reap_dead_clients,
+             * which will notice win->client_pid terminated (a nonzero
+             * exit code - signal deaths always are, system_api/include/
+             * signal.h) within one loop iteration and reclaim the slot
+             * then, the exact same path an actual crash goes through. */
+            sys_kill(win->client_pid, SIGTERM);
+        }
     } else if (action == WM_ACTION_MAXIMIZE) {
         if (!win->maximized) {
             win->saved_x = win->x;

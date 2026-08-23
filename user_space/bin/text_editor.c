@@ -28,6 +28,17 @@
  * this milestone's other new addition (system_api/include/syscall.h) -
  * the write half of SYS_readfile that had simply never been exposed to
  * user space before something needed to save a file back out.
+ *
+ * M35/M36 added a File menu (New/Save/Save As/Quit) and the two prompts
+ * "Save As" and "Quit"/titlebar-close needed once there was a real way to
+ * lose unsaved work: a filename input (there was previously no way to
+ * save under a different name at all) and a discard-confirm, both drawn
+ * as a small modal-to-this-window overlay rather than a new compositor-
+ * level popup surface - see milestones.md's M35/M36 entries for why. The
+ * titlebar close button reaching this editor's own confirm prompt instead
+ * of an unconditional SIGTERM needed one new opt-in protocol field
+ * (wm_create_request_t.confirm_close, system_api/include/wm.h) - every
+ * other GUI client in this project still closes the old way, unchanged.
  */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h"
@@ -62,8 +73,23 @@
 #define FILE_MENU_X 4
 #define FILE_MENU_ITEM_W 110
 #define FILE_MENU_ITEM_H (FONT_HEIGHT + 4)
-static const char *const FILE_MENU_ITEMS[] = {"Save", "Quit"};
+static const char *const FILE_MENU_ITEMS[] = {"New", "Save", "Save As", "Quit"};
 #define FILE_MENU_COUNT ((int)(sizeof(FILE_MENU_ITEMS) / sizeof(FILE_MENU_ITEMS[0])))
+
+/* M36: modal-to-this-window-only prompts (see this file's own note in
+ * redraw()/main() and milestones.md's M36 entry for why this stays
+ * client-side rather than a compositor-level modal). Both share one
+ * centered box; only PROMPT_SAVE_AS's contents accept typed input. */
+typedef enum { PROMPT_NONE = 0, PROMPT_SAVE_AS, PROMPT_CONFIRM_DISCARD } prompt_kind_t;
+typedef enum { PENDING_NONE = 0, PENDING_NEW, PENDING_QUIT } pending_action_t;
+
+#define PROMPT_W 360
+#define PROMPT_H 72
+#define PROMPT_BG       0x00202020u
+#define PROMPT_BORDER   0x00606060u
+#define PROMPT_TEXT     0x00E0E0E0u
+#define PROMPT_INPUT_BG 0x00101010u
+#define PROMPT_MAX_LEN  48
 
 static char lines[MAX_LINES][MAX_LINE_LEN];
 static int line_len[MAX_LINES];
@@ -76,6 +102,11 @@ static int menu_open; /* M35: File menu dropdown - toggled by clicking "File" in
 
 static char filename[64];
 static char status[COLS + 1];
+
+static prompt_kind_t prompt_kind;
+static pending_action_t pending_action; /* what to do once a PROMPT_CONFIRM_DISCARD is answered "yes" */
+static char prompt_buf[PROMPT_MAX_LEN + 1];
+static int prompt_len;
 
 static void load_file(const char *name) {
     static char file_buf[EDITOR_MAX_FILE];
@@ -213,11 +244,91 @@ static void handle_char(char ch) {
     clamp_cursor();
 }
 
-static void run_file_menu_item(int idx) {
-    if (idx == 0) { /* Save */
+static void reset_to_new_file(void) {
+    line_count = 1;
+    line_len[0] = 0;
+    cur_row = 0;
+    cur_col = 0;
+    scroll_top = 0;
+    memcpy(filename, "untitled", sizeof("untitled"));
+    dirty = 0;
+    status[0] = '\0';
+}
+
+/* M36: the exit code deliberately isn't 0 - M29's reap_dead_clients only
+ * ever reclaims a window slot on a *nonzero* SYS_exit (a clean exit(0) is
+ * treated as "still meant to be showing something," see wm_demo's own
+ * self-test) - so a plain sys_exit(0) here would leave a stale, unclosable
+ * window on screen despite the process actually being gone. Any nonzero
+ * code reclaims it identically (SYS_task_alive's own doc comment already
+ * lumps "any other non-zero SYS_exit" in with a real crash for exactly
+ * this reason) - 1 is just this app's own convention for "closed on
+ * purpose," not a magic value the kernel treats specially. */
+static void quit_now(void) {
+    sys_exit(1);
+}
+
+static void begin_save_as(void) {
+    prompt_kind = PROMPT_SAVE_AS;
+    prompt_len = 0;
+    for (; filename[prompt_len] && prompt_len < PROMPT_MAX_LEN; prompt_len++) {
+        prompt_buf[prompt_len] = filename[prompt_len];
+    }
+}
+
+static void confirm_save_as(void) {
+    prompt_buf[prompt_len] = '\0';
+    if (prompt_len > 0) {
+        int i = 0;
+        for (; prompt_buf[i] && i < (int)sizeof(filename) - 1; i++) {
+            filename[i] = prompt_buf[i];
+        }
+        filename[i] = '\0';
         save_file();
-    } else if (idx == 1) { /* Quit */
-        sys_exit(0);
+    }
+    prompt_kind = PROMPT_NONE;
+}
+
+/* Shared by the File menu's New/Quit items and WM_EVENT_CLOSE_REQUEST
+ * (the titlebar close button, once this window opted into confirm_close -
+ * see wm_connect_confirm_close) - same "one real path, not near-copies"
+ * shape as compositor.c's own apply_window_action. */
+static void request_action(pending_action_t action) {
+    if (!dirty) {
+        if (action == PENDING_NEW) {
+            reset_to_new_file();
+        } else {
+            quit_now();
+        }
+        return;
+    }
+    prompt_kind = PROMPT_CONFIRM_DISCARD;
+    pending_action = action;
+}
+
+static void confirm_discard(int discard) {
+    prompt_kind = PROMPT_NONE;
+    pending_action_t action = pending_action;
+    pending_action = PENDING_NONE;
+    if (!discard) {
+        return;
+    }
+    if (action == PENDING_NEW) {
+        reset_to_new_file();
+    } else if (action == PENDING_QUIT) {
+        quit_now();
+    }
+}
+
+static void run_file_menu_item(int idx) {
+    if (idx == 0) { /* New */
+        request_action(PENDING_NEW);
+    } else if (idx == 1) { /* Save */
+        save_file();
+    } else if (idx == 2) { /* Save As */
+        begin_save_as();
+    } else if (idx == 3) { /* Quit */
+        request_action(PENDING_QUIT);
     }
 }
 
@@ -254,6 +365,25 @@ static void redraw(wm_window_t *win) {
                       FILE_MENU_ITEMS, FILE_MENU_COUNT, -1,
                       MENU_BG, MENU_HOVER_BG, MENU_BORDER, MENU_TEXT);
     }
+
+    if (prompt_kind != PROMPT_NONE) {
+        int32_t x = (WIN_W - PROMPT_W) / 2;
+        int32_t y = (WIN_H - PROMPT_H) / 2;
+        gfx_fill_rect(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BG);
+        gfx_draw_rect(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BORDER);
+        if (prompt_kind == PROMPT_SAVE_AS) {
+            gfx_draw_text(&win->gfx, x + 8, y + 6, "Save as (Enter=save, click=cancel):", PROMPT_TEXT);
+            gfx_fill_rect(&win->gfx, x + 8, y + 26, PROMPT_W - 16, FONT_HEIGHT + 4, PROMPT_INPUT_BG);
+            char buf[PROMPT_MAX_LEN + 1];
+            memcpy(buf, prompt_buf, (size_t)prompt_len);
+            buf[prompt_len] = '\0';
+            gfx_draw_text(&win->gfx, x + 12, y + 28, buf, PROMPT_TEXT);
+            gfx_fill_rect(&win->gfx, x + 12 + prompt_len * FONT_WIDTH, y + 28, 2, FONT_HEIGHT, CURSOR_COLOR);
+        } else { /* PROMPT_CONFIRM_DISCARD */
+            gfx_draw_text(&win->gfx, x + 8, y + 6, "Discard unsaved changes?", PROMPT_TEXT);
+            gfx_draw_text(&win->gfx, x + 8, y + 30, "Y = discard      N / click = cancel", PROMPT_TEXT);
+        }
+    }
 }
 
 int main(const char *arg) {
@@ -272,7 +402,7 @@ int main(const char *arg) {
     status[0] = '\0';
 
     wm_window_t win;
-    if (wm_connect(WIN_W, WIN_H, "Editor", &win) != 0) {
+    if (wm_connect_confirm_close(WIN_W, WIN_H, "Editor", &win) != 0) {
         sys_exit(1);
     }
 
@@ -282,7 +412,42 @@ int main(const char *arg) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+            /* M36: an open prompt owns every event until answered - same
+             * "in-progress interaction takes over the input stream"
+             * shape as compositor.c's own drag state machine (M31), just
+             * scoped to this one window instead of the whole desktop. */
+            if (prompt_kind == PROMPT_SAVE_AS) {
+                if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+                    prompt_kind = PROMPT_NONE; /* click anywhere cancels */
+                } else if (ev.type == WM_EVENT_KEY) {
+                    if (ev.ch == '\n' || ev.ch == '\r') {
+                        confirm_save_as();
+                    } else if (ev.ch == '\b' || ev.ch == 0x7F) {
+                        if (prompt_len > 0) {
+                            prompt_len--;
+                        }
+                    } else if (ev.ch >= 0x20 && ev.ch < 0x7F && prompt_len < PROMPT_MAX_LEN) {
+                        prompt_buf[prompt_len++] = ev.ch;
+                    }
+                }
+                changed = 1;
+                continue;
+            }
+            if (prompt_kind == PROMPT_CONFIRM_DISCARD) {
+                if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+                    confirm_discard(0); /* click cancels, same as N */
+                } else if (ev.type == WM_EVENT_KEY && (ev.ch == 'y' || ev.ch == 'Y')) {
+                    confirm_discard(1);
+                } else if (ev.type == WM_EVENT_KEY && (ev.ch == 'n' || ev.ch == 'N')) {
+                    confirm_discard(0);
+                }
+                changed = 1;
+                continue;
+            }
+
+            if (ev.type == WM_EVENT_CLOSE_REQUEST) {
+                request_action(PENDING_QUIT);
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 /* M35: the "File" label toggles the dropdown; any other
                  * click while it's open either picks an item or - same
                  * as a real menu - just dismisses it, consumed either
@@ -297,7 +462,6 @@ int main(const char *arg) {
                         run_file_menu_item(idx);
                     }
                 }
-                changed = 1;
             } else if (ev.type == WM_EVENT_KEY) {
                 long mods = sys_kbd_modifiers();
                 if ((mods & KBD_MOD_CTRL) && (ev.ch == 's' || ev.ch == 'S')) {
@@ -306,8 +470,8 @@ int main(const char *arg) {
                     status[0] = '\0';
                     handle_char(ev.ch);
                 }
-                changed = 1;
             }
+            changed = 1;
         }
         if (changed) {
             redraw(&win);

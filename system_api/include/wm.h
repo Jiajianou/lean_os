@@ -47,6 +47,7 @@ typedef struct {
     uint8_t desktop; /* chrome-less, full-screen, always-on-*bottom* (the exact opposite z-order from panel) background window - see desktop_icons.c, the one client that ever sets this. Mutually exclusive with panel; nothing enforces that since only one client ever sets either flag. */
     char title[WM_TITLE_MAX];
     int32_t client_pid; /* M29: this client's own SYS_getpid() - lets the compositor notice (SYS_task_alive) when a connected client dies without an orderly disconnect, and reclaim its window slot. Not a security boundary (nothing stops a client lying about it), just bookkeeping - same trust level as everything else in this protocol. */
+    uint8_t confirm_close; /* M36: opt-in - 0 (every client before this milestone, via wmclient.h's wm_connect/wm_connect_panel/wm_connect_desktop, which all pass 0 explicitly) keeps M30's original WM_ACTION_CLOSE behavior (an immediate SIGTERM). 1 (only wm_connect_confirm_close, currently only text_editor.c) makes the compositor send WM_EVENT_CLOSE_REQUEST to this window's own event pipe instead and leave the process running - the client decides for itself when (or whether) to actually SYS_exit, e.g. after a confirm-discard prompt. A client that opts in but never handles the event, or never exits, simply never closes via this path - same "an app that doesn't implement it just doesn't respond to it" contract real window systems use for this exact event (X11's WM_DELETE_WINDOW is the closest precedent), not something this protocol tries to force. */
 } wm_create_request_t;
 
 typedef struct {
@@ -72,6 +73,7 @@ typedef enum {
     WM_EVENT_MOUSE_BUTTON = 3, /* same fields as MOUSE_MOVE, sent in addition to it whenever buttons actually changes */
     WM_EVENT_FOCUS = 4,        /* this window just became the focused one - no extra fields */
     WM_EVENT_UNFOCUS = 5,      /* this window just stopped being the focused one - no extra fields */
+    WM_EVENT_CLOSE_REQUEST = 6, /* M36: sent instead of an immediate SIGTERM when this window's own wm_create_request_t.confirm_close was set and a close was requested (a titlebar close button or an external WM_ACTION_CLOSE) - no extra fields. The client decides what to do next; see confirm_close's own comment above. */
 } wm_event_type_t;
 
 typedef struct {

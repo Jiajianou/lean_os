@@ -46,6 +46,14 @@ int wm_connect_panel(uint32_t height, wm_window_t *out);
  * Only user_space/bin/desktop_icons.c calls this. */
 int wm_connect_desktop(wm_window_t *out);
 
+/* M36: like wm_connect, but opts into wm_create_request_t.confirm_close -
+ * a titlebar close (or external WM_ACTION_CLOSE) delivers this window a
+ * WM_EVENT_CLOSE_REQUEST instead of an immediate SIGTERM, so the caller
+ * gets a chance to prompt before actually exiting (text_editor.c's
+ * unsaved-changes confirm dialog is the one client that needs this).
+ * Everything else about connecting is identical to wm_connect. */
+int wm_connect_confirm_close(uint32_t width, uint32_t height, const char *title, wm_window_t *out);
+
 /* M22: fills *out with a snapshot of every window the compositor
  * currently knows about (system_api/include/wm.h's wm_query_response_t).
  * Returns 0, or -1 on failure (no compositor listening). */

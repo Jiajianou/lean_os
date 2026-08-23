@@ -92,6 +92,7 @@ REQUIRED_MARKERS=(
   "[clipboard] SYS_clipboard_set/get self-test passed."
   "[vfs] SYS_writefile/SYS_readfile self-test passed."
   "[settings] WM_SETTINGS_PIPE background-color self-test passed."
+  "[wm36] confirm_close opt-in (WM_EVENT_CLOSE_REQUEST via WM_ACTION_PIPE) self-test passed"
   "[smp] self-test passed."
   "[net] ICMP echo request/reply self-test passed"
   "[init] PID 1 spawned"

@@ -802,17 +802,59 @@ into new subsystems.
       every mouse-driven behavior since M18, manual/interactive-only
       verification this headless build has no way to fabricate
 
-## M36 — Dialogs & the file save flow
+## M36 — Dialogs & the file save flow ✅
 
-- [ ] Modal dialog primitive in the UI toolkit (title + message +
-      OK/Cancel-style buttons, blocks input to every other window
-      while open - same "compositor-owned transient surface" shape
-      as M35's popup menu)
-- [ ] Save As filename prompt in `text_editor.c` - today Ctrl+S only
-      ever saves to the filename the process was spawned with
-      (`untitled` if none); M33 flagged this as an open limitation
-- [ ] Confirm-discard dialog on closing an editor window with unsaved
-      changes, using the same primitive
+- [x] Same scope trim as M35, for the same reason: no compositor-owned
+      modal surface. Both prompts below are a centered overlay drawn
+      into `text_editor.c`'s own window buffer that owns that window's
+      input stream until answered (mouse-click-anywhere or Y/N key) -
+      modal to this one app, not the whole desktop
+- [x] Save As prompt: File menu gained a third item (menu is now New/
+      Save/Save As/Quit) that opens a filename input box seeded with
+      the current filename; Enter saves under the typed name
+      (`sys_writefile`), a click anywhere cancels. Closes the gap M33
+      flagged - Ctrl+S could previously only ever save to the filename
+      the process was spawned with
+- [x] Confirm-discard dialog: "New" and "Quit" both route through one
+      shared `request_action()` that checks `dirty` first and only
+      prompts (`Y = discard, N/click = cancel`) when there
+      genuinely are unsaved changes to lose - a clean file goes
+      straight through with no interruption
+- [x] The titlebar close button needed a real protocol change to reach
+      this dialog at all: M30's `WM_ACTION_CLOSE` was an unconditional
+      SIGTERM with no way for a client to intervene. New opt-in field
+      `wm_create_request_t.confirm_close` (`system_api/include/wm.h`) -
+      0 for every existing client (`wm_connect`/`_panel`/`_desktop` all
+      pass it explicitly, so nothing about their behavior changes) - and
+      a new `wm_connect_confirm_close()` only `text_editor.c` calls.
+      When set, `compositor.c`'s `apply_window_action` sends
+      `WM_EVENT_CLOSE_REQUEST` to the window's own event pipe instead
+      of `sys_kill`, and leaves the client running until it exits on
+      its own - the same "app that doesn't implement it just doesn't
+      respond to this event" contract X11's `WM_DELETE_WINDOW` uses,
+      not a new way to force a close
+- [x] One deliberate, documented convention: a self-chosen close always
+      calls `sys_exit(1)`, not `sys_exit(0)` - M29's `reap_dead_clients`
+      only reclaims a window slot on a *nonzero* exit (a clean exit(0)
+      is treated as "meant to still be showing something," per
+      wm_demo's own self-test), so an exit(0) here would leave a
+      stale, unclosable window on screen despite the process actually
+      being gone
+- [x] New kernel-side self-test `[wm36]`: spawns compositor + a real
+      `text_editor` (untitled, unedited - so it takes the immediate,
+      not-dirty branch), sends `WM_ACTION_CLOSE` over `WM_ACTION_PIPE`
+      (same headless-protocol-driving shape as M30's own self-test),
+      and checks three things real framebuffer pixel reads plus
+      `SYS_wait` can prove without any simulated keyboard: the window
+      showed its own background before the close request, the slot was
+      genuinely reclaimed after, and the exit code was text_editor's
+      own `1` - not `128+SIGTERM` - proving the new event-based path
+      fired instead of the old direct kill. The dirty-and-prompts path
+      itself needs a real keypress to ever get dirty in the first
+      place - like every keyboard/mouse-driven behavior since M18,
+      that's manual/interactive-only verification this headless test
+      can't fabricate. Verified via `tools/qemu-serial-test.sh`:
+      23/23 required boot markers, no panic
 
 ## M37 — Text selection & scrollbars
 
