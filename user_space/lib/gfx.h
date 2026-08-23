@@ -31,3 +31,20 @@ void gfx_draw_rect(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, u
 void gfx_draw_line(gfx_ctx_t *ctx, int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint32_t color);
 void gfx_draw_char(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color);
 void gfx_draw_text(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t color);
+
+/* M34: pure geometry, no ctx needed - the same "is this point inside this
+ * rect" test compositor.c, settings.c, and desktop_icons.c each used to
+ * hand-roll their own (identical) copy of. Safe for compositor.c to adopt
+ * for hit-testing (this is O(1), not a per-pixel draw loop) even though
+ * compositor.c's own *drawing* stays on its own clip-rect-aware fill_rect
+ * for the partial-redraw performance reasons documented there - only the
+ * comparison logic was ever duplicated for no reason. */
+int gfx_point_in_rect(int32_t px, int32_t py, int32_t x, int32_t y, int32_t w, int32_t h);
+
+/* M34: a filled rect + 1px border + centered label - the shape every
+ * hand-rolled "button" in this codebase (settings.c's Clear button was
+ * the first) already drew by hand, one gfx_fill_rect/gfx_draw_text pair
+ * at a time with the label's x offset picked by eye. */
+void gfx_draw_button(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
+                      uint32_t bg_color, uint32_t border_color,
+                      const char *label, uint32_t label_color);

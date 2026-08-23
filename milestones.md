@@ -711,6 +711,103 @@ same boundary this project drew starting at M18's mouse driver.
       since M18, left to manual/interactive verification - this headless
       build has no way to fabricate real hardware input
 
+## Path to a polished desktop UI (M34+)
+
+M0-M33 built a genuinely usable desktop, but every app hand-rolls its own
+widgets straight out of `gfx.h`'s five primitives (pixel/rect/outline/
+line/text) - there is no menu of any kind anywhere in the codebase, no
+dialog/prompt primitive (`text_editor.c` can only ever save to the
+filename it was spawned with), no visible scrollbar (file_manager.c
+scrolls a list with no on-screen indicator), and no text selection
+outside of gui_terminal.c's own line buffer (M32 explicitly flagged
+this as a known gap - Ctrl+C copies "the current input line" for lack
+of anything to select instead). The single 8x16 bitmap font (M17) is
+also still the only font in the system, used unscaled and unstyled for
+every label, title, and button anywhere. This arc is about closing
+those specific, already-identified gaps rather than expanding scope
+into new subsystems.
+
+## M34 — Reusable widget primitives ✅
+
+- [x] `user_space/lib/gfx.{h,c}` gained `gfx_point_in_rect` (pure
+      geometry - no `gfx_ctx_t` needed) and `gfx_draw_button` (filled
+      rect + 1px border + centered label) - the two pieces that were
+      actually duplicated verbatim across this codebase, not a larger
+      speculative widget set added ahead of a real consumer (checkbox/
+      scrollbar widgets are added in M37/M38 alongside their first real
+      use, same "not written speculatively" principle wmclient.h's own
+      header comment already follows)
+- [x] Real dedup, not a parallel unused library: `settings.c`'s
+      hand-rolled `point_in_rect` and Clear-button
+      `gfx_fill_rect`+`gfx_draw_text` pair are gone, replaced by
+      `gfx_point_in_rect`/`gfx_draw_button`; `compositor.c`'s identical
+      `point_in_rect` is gone too, replaced the same way for its
+      titlebar-button hit test; `desktop_icons.c`'s `point_in_icon`
+      now expresses its box+label hit region as one `gfx_point_in_rect`
+      call instead of four hand-written comparisons
+- [x] Deliberately did *not* touch `compositor.c`'s own drawing
+      (`draw_titlebar_buttons` still calls this file's own clip-rect-
+      aware `fill_rect`, not `gfx_fill_rect`) - `gfx.c`'s primitives
+      only clip to a `gfx_ctx_t`'s own 0..width/height, with no idea
+      compositor.c's `clip_x0..clip_y1` partial-redraw rect (M20/M21's
+      whole reason a full-screen recomposite doesn't happen on every
+      mouse-move) even exists; routing button *drawing* through it
+      would silently undo that optimization on every cursor tick. Pure
+      hit-testing (`gfx_point_in_rect`) has no such cost - O(1)
+      comparisons, not a per-pixel loop - so it was safe to share as-is
+- [x] Verified via `tools/qemu-serial-test.sh`: 22/22 required boot
+      markers, no panic, zero behavior change to anything upstream of
+      this milestone
+
+## M35 — Menus (menu bars + context menus)
+
+- [ ] New WM protocol primitive for a transient popup surface owned
+      by the compositor (so it always draws above every window,
+      dismisses on click-outside or Esc) - the missing piece behind
+      both a per-window menu bar and a right-click context menu
+- [ ] File/Edit menu bar in `text_editor.c` (New/Open/Save/Save As,
+      at minimum) and `file_manager.c` (New file/Rename/Delete)
+- [ ] Right-click context menu on desktop icons
+      (`desktop_icons.c`, currently double-click-to-launch only) and
+      on the desktop background itself (New file, Refresh)
+
+## M36 — Dialogs & the file save flow
+
+- [ ] Modal dialog primitive in the UI toolkit (title + message +
+      OK/Cancel-style buttons, blocks input to every other window
+      while open - same "compositor-owned transient surface" shape
+      as M35's popup menu)
+- [ ] Save As filename prompt in `text_editor.c` - today Ctrl+S only
+      ever saves to the filename the process was spawned with
+      (`untitled` if none); M33 flagged this as an open limitation
+- [ ] Confirm-discard dialog on closing an editor window with unsaved
+      changes, using the same primitive
+
+## M37 — Text selection & scrollbars
+
+- [ ] Click-drag text selection with highlight rendering in
+      `gui_terminal.c` and `text_editor.c`, replacing M32's "copy the
+      whole current line" stand-in with a real selectable range wired
+      into `SYS_clipboard_set`
+- [ ] Visible scrollbar widget (from M34) wired into
+      `file_manager.c`'s file list and `gui_terminal.c`'s scrollback,
+      both of which today scroll with no on-screen indicator of
+      position or extent
+
+## M38 — Visual chrome polish
+
+- [ ] A second, bold/larger font variant (still a hand-authored
+      bitmap - no floating point exists anywhere in this toolchain
+      per `gfx.h`'s own build-flag note, so no vector/anti-aliased
+      rendering path) for window titles and menu headers, distinct
+      from the one 8x16 font used for everything today
+- [ ] Window drop shadow and edge-aware resize cursors (compositor.c
+      already hit-tests the 5px resize zones from M31; nothing changes
+      the cursor sprite to reflect it)
+- [ ] Theming beyond the single background-color picker settings.c
+      already has: an accent color used consistently for focused
+      titlebars/buttons across the widget layer from M34
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support

@@ -1,6 +1,7 @@
 #include "gfx.h"
 
 #include "font8x16.h"
+#include "str.h"
 
 void gfx_put_pixel(gfx_ctx_t *ctx, int32_t x, int32_t y, uint32_t color) {
     if (x < 0 || y < 0 || x >= ctx->width || y >= ctx->height) {
@@ -80,5 +81,22 @@ void gfx_draw_text(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t
         }
         gfx_draw_char(ctx, cx, y, *p, color);
         cx += FONT_WIDTH;
+    }
+}
+
+int gfx_point_in_rect(int32_t px, int32_t py, int32_t x, int32_t y, int32_t w, int32_t h) {
+    return px >= x && px < x + w && py >= y && py < y + h;
+}
+
+void gfx_draw_button(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
+                      uint32_t bg_color, uint32_t border_color,
+                      const char *label, uint32_t label_color) {
+    gfx_fill_rect(ctx, x, y, w, h, bg_color);
+    gfx_draw_rect(ctx, x, y, w, h, border_color);
+    if (label) {
+        int32_t label_w = (int32_t)strlen(label) * FONT_WIDTH;
+        int32_t label_x = x + (w - label_w) / 2;
+        int32_t label_y = y + (h - FONT_HEIGHT) / 2;
+        gfx_draw_text(ctx, label_x, label_y, label, label_color);
     }
 }

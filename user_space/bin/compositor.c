@@ -47,6 +47,7 @@
  * that's M31's job): it repositions to fill the screen minus any docked
  * panel, clamped to never exceed the window's own buffer dimensions.
  */
+#include "gfx.h" /* M34: gfx_point_in_rect - shared hit-test helper, see draw_titlebar_buttons' own note on why drawing itself stays on this file's own clip-aware fill_rect */
 #include "signal.h" /* system_api/include/signal.h - SIGTERM, M30's WM_ACTION_CLOSE */
 #include "str.h"
 #include "syscall_wrappers.h"
@@ -231,10 +232,12 @@ static void blit_window(const window_t *win) {
 
 /* M30: titlebar buttons live entirely inside the titlebar strip
  * (win->y - TITLEBAR_H .. win->y), so drawing and hit-testing them share
- * the exact same rects - see titlebar_button_rects/point_in_rect. */
-static int point_in_rect(int32_t px, int32_t py, int32_t x, int32_t y, int32_t w, int32_t h) {
-    return px >= x && px < x + w && py >= y && py < y + h;
-}
+ * the exact same rects - see titlebar_button_rects. M34: the hit-test
+ * itself (point_in_rect) moved to user_space/lib/gfx.c's gfx_point_in_rect -
+ * settings.c had an identical copy; this file's own drawing calls
+ * (fill_rect, below) stay put, since they're clip-rect-aware for the
+ * partial-redraw perf reasons documented above put_pixel/fill_rect, and
+ * gfx.c's own fill_rect has no idea that clip rect exists. */
 
 typedef enum { BTN_MINIMIZE = 0, BTN_MAXIMIZE = 1, BTN_CLOSE = 2, BTN_COUNT } titlebar_button_t;
 
@@ -831,7 +834,7 @@ static void handle_mouse(void) {
                 for (int b = 0; b < BTN_COUNT; b++) {
                     int32_t bx, by;
                     titlebar_button_rect(w, (titlebar_button_t)b, &bx, &by);
-                    if (point_in_rect(cursor_x, cursor_y, bx, by, BTN_SIZE, BTN_SIZE)) {
+                    if (gfx_point_in_rect(cursor_x, cursor_y, bx, by, BTN_SIZE, BTN_SIZE)) {
                         btn_hit_idx = i;
                         btn_hit = (titlebar_button_t)b;
                         break;

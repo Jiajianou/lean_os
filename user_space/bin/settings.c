@@ -62,10 +62,6 @@ static int format_uint(uint32_t v, char *buf) {
     return len;
 }
 
-static int point_in_rect(int32_t px, int32_t py, int32_t x, int32_t y, int32_t w, int32_t h) {
-    return px >= x && px < x + w && py >= y && py < y + h;
-}
-
 static void redraw(wm_window_t *win, int clear_hover) {
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
 
@@ -115,8 +111,8 @@ static void redraw(wm_window_t *win, int clear_hover) {
     }
     gfx_draw_text(&win->gfx, 10, 102, clip_buf, TEXT_COLOR);
 
-    gfx_fill_rect(&win->gfx, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H, clear_hover ? BTN_HOVER : BTN_COLOR);
-    gfx_draw_text(&win->gfx, CLEAR_BTN_X + 12, CLEAR_BTN_Y + 2, "Clear", TEXT_COLOR);
+    gfx_draw_button(&win->gfx, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H,
+                     clear_hover ? BTN_HOVER : BTN_COLOR, BORDER_COLOR, "Clear", TEXT_COLOR);
 
     gfx_draw_text(&win->gfx, 10, 130, "Desktop color", LABEL_COLOR);
     gfx_draw_line(&win->gfx, 10, 146, WIN_W - 10, 146, BORDER_COLOR);
@@ -142,19 +138,19 @@ int main(void) {
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_MOUSE_MOVE) {
-                int hover = point_in_rect(ev.x, ev.y, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H);
+                int hover = gfx_point_in_rect(ev.x, ev.y, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H);
                 if (hover != clear_hover) {
                     clear_hover = hover;
                     changed = 1;
                 }
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
-                if (point_in_rect(ev.x, ev.y, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H)) {
+                if (gfx_point_in_rect(ev.x, ev.y, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H)) {
                     sys_clipboard_set("", 0);
                     changed = 1;
                 }
                 for (int i = 0; i < SWATCH_COUNT; i++) {
                     int32_t x = 10 + i * (SWATCH_SIZE + SWATCH_GAP);
-                    if (point_in_rect(ev.x, ev.y, x, SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
+                    if (gfx_point_in_rect(ev.x, ev.y, x, SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
                         wm_set_bg_color(SWATCHES[i]);
                         break;
                     }

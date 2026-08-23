@@ -78,9 +78,14 @@ static void layout_icons(int32_t win_h) {
     }
 }
 
+/* M34: the box-plus-label hit region as one rect (gfx_point_in_rect,
+ * user_space/lib/gfx.c) instead of hand-rolled comparisons - top edge is
+ * pulled up by FONT_HEIGHT+4 and the height grown by twice that so the
+ * label drawn below the box (redraw_icon) is clickable too, not just the
+ * box itself. */
 static int point_in_icon(int i, int32_t x, int32_t y) {
-    return x >= icon_x[i] && x < icon_x[i] + ICON_SIZE &&
-           y >= icon_y[i] - FONT_HEIGHT - 4 && y < icon_y[i] + ICON_SIZE + FONT_HEIGHT + 4;
+    return gfx_point_in_rect(x, y, icon_x[i], icon_y[i] - FONT_HEIGHT - 4,
+                              ICON_SIZE, ICON_SIZE + 2 * (FONT_HEIGHT + 4));
 }
 
 static void redraw_icon(wm_window_t *self, int i, int pressed) {
