@@ -3,12 +3,20 @@
  * M33: the missing "user-facing configuration surface" - previously zero.
  * Two real, live controls rather than a static info panel that just
  * echoes read-only state back: a desktop background color picker (wm_
- * set_bg_color, wmclient.h - system_api/include/wm.h's new
+ * set_theme, wmclient.h - system_api/include/wm.h's new
  * WM_SETTINGS_PIPE, the compositor's first global, non-per-window
  * setting) and a clipboard viewer/clear button (M32's SYS_clipboard_*).
  * Display resolution and uptime are shown too, read-only, as a
  * lightweight "system info" strip - genuinely live (SYS_fb_info/
  * SYS_uptime_ms), not hardcoded.
+ *
+ * M38 adds a second swatch row: the focused-window titlebar accent color
+ * (compositor.c's second global setting, previously a compile-time
+ * TITLEBAR_FOCUS_COLOR constant). Both colors are always sent together
+ * (wm_set_theme takes both) - this process tracks its own current choice
+ * of each in current_bg/current_accent rather than only ever sending
+ * whichever one control just changed, so clicking one swatch row never
+ * resets the other back to its default.
  */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h"
@@ -16,7 +24,7 @@
 #include "wmclient.h"
 
 #define WIN_W 320
-#define WIN_H 220
+#define WIN_H 280
 
 #define BG_COLOR      0x00202430u
 #define TEXT_COLOR    0x00E0E0E0u
@@ -27,17 +35,34 @@
 
 #define SWATCH_SIZE 28
 #define SWATCH_GAP  8
-#define SWATCH_Y    150
+#define BG_SWATCH_Y     150
+#define ACCENT_SWATCH_Y 210
 
-static const uint32_t SWATCHES[] = {
-    0x001A1A2Eu, /* the original default */
+#define DEFAULT_BG_COLOR     0x001A1A2Eu /* mirrors compositor.c's own compile-time default - see this file's header comment */
+#define DEFAULT_ACCENT_COLOR 0x004C99E6u
+
+static const uint32_t BG_SWATCHES[] = {
+    DEFAULT_BG_COLOR, /* the original default */
     0x00203040u,
     0x00301A1Au,
     0x001A3020u,
     0x00302A1Au,
     0x00101018u,
 };
-#define SWATCH_COUNT ((int)(sizeof(SWATCHES) / sizeof(SWATCHES[0])))
+#define BG_SWATCH_COUNT ((int)(sizeof(BG_SWATCHES) / sizeof(BG_SWATCHES[0])))
+
+static const uint32_t ACCENT_SWATCHES[] = {
+    DEFAULT_ACCENT_COLOR, /* the original default */
+    0x00E67E22u, /* orange */
+    0x0027AE60u, /* green */
+    0x009B59B6u, /* purple */
+    0x00E74C3Cu, /* red */
+    0x00F1C40Fu, /* yellow */
+};
+#define ACCENT_SWATCH_COUNT ((int)(sizeof(ACCENT_SWATCHES) / sizeof(ACCENT_SWATCHES[0])))
+
+static uint32_t current_bg = DEFAULT_BG_COLOR;
+static uint32_t current_accent = DEFAULT_ACCENT_COLOR;
 
 #define CLEAR_BTN_X 220
 #define CLEAR_BTN_Y 100
@@ -116,10 +141,20 @@ static void redraw(wm_window_t *win, int clear_hover) {
 
     gfx_draw_text(&win->gfx, 10, 130, "Desktop color", LABEL_COLOR);
     gfx_draw_line(&win->gfx, 10, 146, WIN_W - 10, 146, BORDER_COLOR);
-    for (int i = 0; i < SWATCH_COUNT; i++) {
+    for (int i = 0; i < BG_SWATCH_COUNT; i++) {
         int32_t x = 10 + i * (SWATCH_SIZE + SWATCH_GAP);
-        gfx_fill_rect(&win->gfx, x, SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, SWATCHES[i]);
-        gfx_draw_rect(&win->gfx, x, SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, BORDER_COLOR);
+        gfx_fill_rect(&win->gfx, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, BG_SWATCHES[i]);
+        gfx_draw_rect(&win->gfx, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE,
+                      BG_SWATCHES[i] == current_bg ? TEXT_COLOR : BORDER_COLOR);
+    }
+
+    gfx_draw_text(&win->gfx, 10, 190, "Accent color", LABEL_COLOR);
+    gfx_draw_line(&win->gfx, 10, 206, WIN_W - 10, 206, BORDER_COLOR);
+    for (int i = 0; i < ACCENT_SWATCH_COUNT; i++) {
+        int32_t x = 10 + i * (SWATCH_SIZE + SWATCH_GAP);
+        gfx_fill_rect(&win->gfx, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, ACCENT_SWATCHES[i]);
+        gfx_draw_rect(&win->gfx, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE,
+                      ACCENT_SWATCHES[i] == current_accent ? TEXT_COLOR : BORDER_COLOR);
     }
 }
 
@@ -148,10 +183,21 @@ int main(void) {
                     sys_clipboard_set("", 0);
                     changed = 1;
                 }
-                for (int i = 0; i < SWATCH_COUNT; i++) {
+                for (int i = 0; i < BG_SWATCH_COUNT; i++) {
                     int32_t x = 10 + i * (SWATCH_SIZE + SWATCH_GAP);
-                    if (gfx_point_in_rect(ev.x, ev.y, x, SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
-                        wm_set_bg_color(SWATCHES[i]);
+                    if (gfx_point_in_rect(ev.x, ev.y, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
+                        current_bg = BG_SWATCHES[i];
+                        wm_set_theme(current_bg, current_accent);
+                        changed = 1;
+                        break;
+                    }
+                }
+                for (int i = 0; i < ACCENT_SWATCH_COUNT; i++) {
+                    int32_t x = 10 + i * (SWATCH_SIZE + SWATCH_GAP);
+                    if (gfx_point_in_rect(ev.x, ev.y, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
+                        current_accent = ACCENT_SWATCHES[i];
+                        wm_set_theme(current_bg, current_accent);
+                        changed = 1;
                         break;
                     }
                 }

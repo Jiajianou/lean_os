@@ -63,10 +63,11 @@ int wm_query_windows(wm_query_response_t *out);
  * wm_action_type_t). Returns 0, or -1 on failure. */
 int wm_send_action(int32_t window_id, uint32_t action);
 
-/* M33: sets the compositor's desktop background color (system_api/
- * include/wm.h's WM_SETTINGS_PIPE) - the compositor's first global,
- * non-per-window setting. Returns 0, or -1 on failure. */
-int wm_set_bg_color(uint32_t color);
+/* M33/M38: sets the compositor's desktop background and focused-titlebar
+ * accent colors together (system_api/include/wm.h's WM_SETTINGS_PIPE,
+ * wm_settings_request_t) - the compositor's only two global, non-per-
+ * window settings. Returns 0, or -1 on failure. */
+int wm_set_theme(uint32_t bg_color, uint32_t accent_color);
 
 /* Blocks until the compositor routes this window an event, then fills
  * *out. Returns 0 (never fails once connected - the event pipe only ever

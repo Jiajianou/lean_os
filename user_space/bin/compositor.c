@@ -47,6 +47,7 @@
  * that's M31's job): it repositions to fill the screen minus any docked
  * panel, clamped to never exceed the window's own buffer dimensions.
  */
+#include "font8x16.h" /* M38: window-title text in the titlebar - drawn through this file's own clip-aware put_pixel, not gfx_draw_text (see draw_text_clipped's own note) */
 #include "gfx.h" /* M34: gfx_point_in_rect - shared hit-test helper, see draw_titlebar_buttons' own note on why drawing itself stays on this file's own clip-aware fill_rect */
 #include "signal.h" /* system_api/include/signal.h - SIGTERM, M30's WM_ACTION_CLOSE */
 #include "str.h"
@@ -77,6 +78,30 @@
 #define BTN_MAXIMIZE_COLOR 0x0033AA55u
 #define BTN_MINIMIZE_COLOR 0x00888899u
 
+#define TITLE_COLOR 0x00F0F0F0u
+#define TITLE_MARGIN 6 /* gap between the titlebar's left edge and the title text */
+#define TITLE_BTN_GAP 6 /* gap kept clear between the title text and the leftmost button */
+
+/* M38: a drop shadow - offset down-right from each ordinary window's own
+ * outer (border-inclusive) rect, drawn *before* that window's own
+ * border/titlebar/content so only the bottom-right sliver the window
+ * itself doesn't cover ends up visible, the standard drop-shadow trick.
+ * Blended toward black (SHADOW_NUM/SHADOW_DEN opacity) rather than a flat
+ * fill - a solid rect would just look like a second, offset window. */
+#define SHADOW_OFFSET 6
+#define SHADOW_NUM 1
+#define SHADOW_DEN 3
+
+/* M31's resize-edge hit-test bitmask - moved up here (still used first by
+ * resize_hit_mask, far below) because M38's cursor-shape selection in
+ * redraw_rect needs these bit values earlier in the file than that
+ * function is defined. */
+#define RESIZE_MARGIN 5
+#define RESIZE_LEFT   1
+#define RESIZE_RIGHT  2
+#define RESIZE_TOP    4
+#define RESIZE_BOTTOM 8
+
 typedef struct {
     int32_t x, y, w, h; /* current on-screen content geometry */
     int32_t buf_w, buf_h; /* M30: the shm-backed pixel buffer's actual, fixed dimensions (set once at connect, never mutated) - w/h above can now shrink below this (WM_ACTION_MAXIMIZE clamps to it) but never exceed it; blit_window strides by buf_w, not w, so a cropped display never reads past what this window's buffer actually holds */
@@ -97,6 +122,7 @@ static window_t windows[MAX_WINDOWS];
 static int window_count;
 static int focused_window = -1; /* -1 = nothing focused yet */
 static uint32_t bg_color = DEFAULT_BG_COLOR; /* M33: settings.c's WM_SETTINGS_PIPE is the only way this ever changes at runtime */
+static uint32_t accent_color = TITLEBAR_FOCUS_COLOR; /* M38: settings.c's WM_SETTINGS_PIPE is the only way this ever changes at runtime, same as bg_color above */
 
 static wm_fb_info_t fb_info;
 static uint32_t *real_fb;       /* the live, scanned-out hardware framebuffer - write-only, touched only by present() */
@@ -161,6 +187,55 @@ static const uint8_t cursor_shape[CURSOR_SIZE] = {
     0b10000100,
 };
 
+/* M38: edge-aware resize cursors - compositor.c's resize_hit_mask (M31)
+ * already knows exactly which edge/corner the cursor is over; nothing
+ * before this milestone ever changed what the cursor itself *looked*
+ * like in response, so a resize handle was only ever discoverable by
+ * trial-and-drag. Same 8x8 one-bit-per-pixel shape as cursor_shape. */
+static const uint8_t cursor_shape_horizontal[CURSOR_SIZE] = { /* RESIZE_LEFT|RESIZE_RIGHT */
+    0b00011000,
+    0b00111100,
+    0b01100110,
+    0b11000011,
+    0b11000011,
+    0b01100110,
+    0b00111100,
+    0b00011000,
+};
+
+static const uint8_t cursor_shape_vertical[CURSOR_SIZE] = { /* RESIZE_TOP|RESIZE_BOTTOM */
+    0b00011000,
+    0b00111100,
+    0b01111110,
+    0b00011000,
+    0b00011000,
+    0b01111110,
+    0b00111100,
+    0b00011000,
+};
+
+static const uint8_t cursor_shape_diag_nw_se[CURSOR_SIZE] = { /* top-left <-> bottom-right corner */
+    0b11110000,
+    0b11000000,
+    0b10000000,
+    0b00000000,
+    0b00000000,
+    0b00000001,
+    0b00000011,
+    0b00001111,
+};
+
+static const uint8_t cursor_shape_diag_ne_sw[CURSOR_SIZE] = { /* top-right <-> bottom-left corner */
+    0b00001111,
+    0b00000011,
+    0b00000001,
+    0b00000000,
+    0b00000000,
+    0b10000000,
+    0b11000000,
+    0b11110000,
+};
+
 /* See user_space/lib/wmclient.c's identical helper for why a single
  * sys_read isn't safe for a multi-byte struct off a pipe - the same
  * partial-write-preemption race applies to this side of the request/
@@ -213,6 +288,27 @@ static void fill_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color
     }
 }
 
+/* M38: like fill_rect, but blends each pixel toward black instead of
+ * overwriting it - the drop-shadow fill. Reads back_buf (whatever the
+ * desktop-background fill above already wrote into this clip pass), so
+ * it has to run after that and before the window's own border/titlebar/
+ * content paint over it - see redraw_rect's z-order comment. */
+static void fill_rect_shadow(int32_t x, int32_t y, int32_t w, int32_t h) {
+    int32_t x0 = max_i32(x, clip_x0);
+    int32_t y0 = max_i32(y, clip_y0);
+    int32_t x1 = min_i32(x + w, clip_x1);
+    int32_t y1 = min_i32(y + h, clip_y1);
+    for (int32_t row = y0; row < y1; row++) {
+        for (int32_t col = x0; col < x1; col++) {
+            uint32_t existing = back_buf[(uint32_t)row * back_pitch_pixels + (uint32_t)col];
+            uint32_t r = ((existing >> 16) & 0xFF) * (SHADOW_DEN - SHADOW_NUM) / SHADOW_DEN;
+            uint32_t g = ((existing >> 8) & 0xFF) * (SHADOW_DEN - SHADOW_NUM) / SHADOW_DEN;
+            uint32_t b = (existing & 0xFF) * (SHADOW_DEN - SHADOW_NUM) / SHADOW_DEN;
+            put_pixel(col, row, (r << 16) | (g << 8) | b);
+        }
+    }
+}
+
 static void blit_window(const window_t *win) {
     int32_t x0 = max_i32(win->x, clip_x0);
     int32_t y0 = max_i32(win->y, clip_y0);
@@ -258,13 +354,85 @@ static void draw_titlebar_buttons(const window_t *win) {
     }
 }
 
-static void draw_cursor(void) {
+/* M38: window-title text, drawn through this file's own clip-aware
+ * put_pixel rather than gfx.h's gfx_draw_char/gfx_draw_text - the same
+ * reason gfx_point_in_rect (M34) was fine to share but fill_rect wasn't:
+ * gfx.c's primitives only clip to a ctx's own 0..width/height, with no
+ * idea this file's clip_x0..clip_y1 partial-redraw rect exists, and
+ * title text (drawn on every window, every full redraw) is exactly the
+ * kind of per-pixel work that rect exists to bound. bold synthesizes a
+ * second weight from the one 8x16 bitmap font this project has (no
+ * floating point anywhere in this toolchain - see gfx.h's own note - so
+ * "OR each row with itself shifted one pixel right" is the cheap,
+ * integer-only way to get a second weight out of one glyph table
+ * instead of hand-authoring a whole second one). */
+static void draw_char_clipped(int32_t x, int32_t y, char c, uint32_t color, int bold) {
+    uint8_t code = (uint8_t)c;
+    if (code >= 128) {
+        return;
+    }
+    const uint8_t *glyph = font8x16[code];
+    for (int32_t row = 0; row < FONT_HEIGHT; row++) {
+        uint8_t bits = glyph[row];
+        if (bold) {
+            bits = (uint8_t)(bits | (bits >> 1));
+        }
+        int32_t py = y + row;
+        if (py < clip_y0 || py >= clip_y1) {
+            continue;
+        }
+        for (int32_t col = 0; col < FONT_WIDTH; col++) {
+            int32_t px = x + col;
+            if (px < clip_x0 || px >= clip_x1) {
+                continue;
+            }
+            if (bits & (0x80 >> col)) {
+                put_pixel(px, py, color);
+            }
+        }
+    }
+}
+
+static void draw_text_clipped(int32_t x, int32_t y, const char *s, uint32_t color, int bold) {
+    int32_t cx = x;
+    for (const char *p = s; *p; p++) {
+        draw_char_clipped(cx, y, *p, color, bold);
+        cx += FONT_WIDTH;
+    }
+}
+
+/* Truncates win->title (already NUL-terminated, at most WM_TITLE_MAX-1
+ * chars) to however many whole glyphs fit before the leftmost titlebar
+ * button - a window shrunk below M31's MIN_WIN_W could otherwise draw
+ * title text straight through the close button. Writes into out (must be
+ * >= WM_TITLE_MAX bytes), doesn't touch win->title itself. */
+static void fit_title(const window_t *win, char *out) {
+    int32_t leftmost_btn_x;
+    int32_t unused_y;
+    titlebar_button_rect(win, (titlebar_button_t)(BTN_COUNT - 1), &leftmost_btn_x, &unused_y);
+    int32_t avail = leftmost_btn_x - TITLE_BTN_GAP - (win->x + TITLE_MARGIN);
+    int32_t max_chars = avail > 0 ? avail / FONT_WIDTH : 0;
+    int i = 0;
+    for (; win->title[i] && i < max_chars && i < WM_TITLE_MAX - 1; i++) {
+        out[i] = win->title[i];
+    }
+    out[i] = '\0';
+}
+
+/* M38: which resize-cursor shape (if any) belongs over the cursor's
+ * current position - defined further down, after resize_hit_mask and the
+ * drag state it needs (M31) actually exist in the file; forward-declared
+ * here so redraw_rect (needs it, but is defined earlier for the same
+ * z-order reasons draw_titlebar_buttons etc. already are) can call it. */
+static int hovered_resize_mask(void);
+
+static void draw_cursor(const uint8_t *shape) {
     int32_t x0 = max_i32(cursor_x, clip_x0);
     int32_t y0 = max_i32(cursor_y, clip_y0);
     int32_t x1 = min_i32(cursor_x + CURSOR_SIZE, clip_x1);
     int32_t y1 = min_i32(cursor_y + CURSOR_SIZE, clip_y1);
     for (int32_t row = y0; row < y1; row++) {
-        uint8_t bits = cursor_shape[row - cursor_y];
+        uint8_t bits = shape[row - cursor_y];
         for (int32_t col = x0; col < x1; col++) {
             if (bits & (0x80 >> (col - cursor_x))) {
                 put_pixel(col, row, CURSOR_COLOR);
@@ -309,10 +477,16 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
         if (!win->alive || win->is_panel || win->is_desktop || win->minimized) {
             continue;
         }
-        uint32_t titlebar_color = (i == focused_window) ? TITLEBAR_FOCUS_COLOR : TITLEBAR_COLOR;
+        uint32_t titlebar_color = (i == focused_window) ? accent_color : TITLEBAR_COLOR;
+        fill_rect_shadow(win->x - BORDER + SHADOW_OFFSET, win->y - TITLEBAR_H - BORDER + SHADOW_OFFSET,
+                          win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER);
         fill_rect(win->x - BORDER, win->y - TITLEBAR_H - BORDER,
                   win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER, BORDER_COLOR);
         fill_rect(win->x, win->y - TITLEBAR_H, win->w, TITLEBAR_H, titlebar_color);
+        char fitted_title[WM_TITLE_MAX];
+        fit_title(win, fitted_title);
+        draw_text_clipped(win->x + TITLE_MARGIN, win->y - TITLEBAR_H + (TITLEBAR_H - FONT_HEIGHT) / 2,
+                           fitted_title, TITLE_COLOR, 1 /* bold */);
         draw_titlebar_buttons(win);
         blit_window(win);
     }
@@ -321,7 +495,20 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
             blit_window(&windows[i]); /* no border/titlebar - a panel is its own chrome */
         }
     }
-    draw_cursor();
+    const uint8_t *cursor_shape_now = cursor_shape;
+    int rmask = hovered_resize_mask();
+    if ((rmask & (RESIZE_TOP | RESIZE_LEFT)) == (RESIZE_TOP | RESIZE_LEFT) ||
+        (rmask & (RESIZE_BOTTOM | RESIZE_RIGHT)) == (RESIZE_BOTTOM | RESIZE_RIGHT)) {
+        cursor_shape_now = cursor_shape_diag_nw_se;
+    } else if ((rmask & (RESIZE_TOP | RESIZE_RIGHT)) == (RESIZE_TOP | RESIZE_RIGHT) ||
+               (rmask & (RESIZE_BOTTOM | RESIZE_LEFT)) == (RESIZE_BOTTOM | RESIZE_LEFT)) {
+        cursor_shape_now = cursor_shape_diag_ne_sw;
+    } else if (rmask & (RESIZE_LEFT | RESIZE_RIGHT)) {
+        cursor_shape_now = cursor_shape_horizontal;
+    } else if (rmask & (RESIZE_TOP | RESIZE_BOTTOM)) {
+        cursor_shape_now = cursor_shape_vertical;
+    }
+    draw_cursor(cursor_shape_now);
     present();
 }
 
@@ -350,13 +537,10 @@ static int point_in_titlebar(const window_t *win, int32_t x, int32_t y) {
 
 /* M31: which edge(s) of win's *outer* (border-inclusive) rect (px, py) is
  * within RESIZE_MARGIN of - a bitmask so a corner can hit two at once
- * (diagonal resize). Zero means "not on a resize handle at all". */
-#define RESIZE_MARGIN 5
-#define RESIZE_LEFT   1
-#define RESIZE_RIGHT  2
-#define RESIZE_TOP    4
-#define RESIZE_BOTTOM 8
-
+ * (diagonal resize). Zero means "not on a resize handle at all". (The
+ * RESIZE_* bit values themselves are #defined up near BTN_SIZE/TITLE_COLOR -
+ * M38's cursor-shape selection in redraw_rect needs them earlier in the
+ * file than this function itself is defined.) */
 static int resize_hit_mask(const window_t *win, int32_t px, int32_t py) {
     int32_t x0 = win->x - BORDER;
     int32_t y0 = win->y - TITLEBAR_H - BORDER;
@@ -408,6 +592,29 @@ static int32_t drag_start_x, drag_start_y, drag_start_w, drag_start_h;
 #define MIN_WIN_W 60  /* "a sane minimum size" - M31's own wording; comfortably below every window this project ships (smallest is gui_clock's 200x90) */
 #define MIN_WIN_H 40
 #define MOVE_MIN_VISIBLE 40 /* at least this many px of a dragged window's titlebar must stay on-screen and above the panel - see the MOVE clamp below */
+
+/* M38: the mask draw_cursor's shape selection (redraw_rect) uses - a
+ * resize *in progress* keeps showing the shape for whichever edge/corner
+ * started it (drag_resize_mask), even if the cursor drifts outside that
+ * edge's own RESIZE_MARGIN mid-drag; otherwise, topmost-window-first hit
+ * test against every eligible window, same order and same "first match
+ * wins" shape as handle_mouse's own resize hit-test just below. */
+static int hovered_resize_mask(void) {
+    if (drag_mode == DRAG_RESIZE) {
+        return drag_resize_mask;
+    }
+    for (int i = window_count - 1; i >= 0; i--) {
+        const window_t *w = &windows[i];
+        if (!w->alive || w->is_panel || w->is_desktop || w->minimized) {
+            continue;
+        }
+        int mask = resize_hit_mask(w, cursor_x, cursor_y);
+        if (mask) {
+            return mask;
+        }
+    }
+    return 0;
+}
 
 static void send_event(const window_t *win, const wm_event_t *ev) {
     sys_write(win->evt_write_fd, ev, sizeof(*ev));
@@ -735,7 +942,7 @@ static void accept_pending_action(int action_read_fd) {
     apply_window_action(req.window_id, req.action);
 }
 
-/* M33: the compositor's first global (non-per-window) setting - see
+/* M33/M38: the compositor's two global (non-per-window) settings - see
  * wm.h's own comment on WM_SETTINGS_PIPE. Same non-blocking poll-then-
  * read shape as accept_pending_action, just with no window_id to
  * validate. */
@@ -748,6 +955,7 @@ static void accept_pending_settings(int settings_read_fd) {
         return;
     }
     bg_color = req.bg_color;
+    accent_color = req.accent_color;
     dirty = 1;
 }
 

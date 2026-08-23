@@ -1135,6 +1135,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         }
         wm_settings_request_t req;
         req.bg_color = 0x00123456u; /* distinct from DEFAULT_BG_COLOR - a wrong pixel can't accidentally match */
+        req.accent_color = 0; /* M38 added this field; this self-test only checks bg_color's effect */
         do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&req, sizeof(req));
         pit_sleep_ms(300);
         /* Same (500, 500) "empty desktop" probe point M20-M30's own
@@ -1250,6 +1251,94 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("M36 close-request self-test: WM_EVENT_CLOSE_REQUEST did not behave as expected");
         }
         klog_puts("[wm36] confirm_close opt-in (WM_EVENT_CLOSE_REQUEST via WM_ACTION_PIPE) self-test passed (3/3 checks matched).\n\n");
+    }
+
+    /* M38 self-test: two of the four visual-polish additions are real
+     * framebuffer pixel effects, not just mouse-hover cosmetics (the
+     * bold titlebar-text glyphs and the edge-aware resize cursors are,
+     * like every other font/pointer-shape detail since M17/M18, left to
+     * manual/interactive verification - there's no single pixel that
+     * headlessly distinguishes "bold" from "regular" or proves a cursor
+     * sprite changed without a real mouse to hover it with):
+     *
+     *   1. The drop shadow (compositor.c's fill_rect_shadow) - a real
+     *      alpha-style blend, not a flat color, so this checks the exact
+     *      blended value a probe point just past gui_clock's own outer
+     *      border (x:304, clear of the window's own [98,302) extent
+     *      entirely, so nothing later overwrites it) should hold against
+     *      the fresh compositor's own default background.
+     *   2. WM_SETTINGS_PIPE's new accent_color field - same "drive it
+     *      directly, no GUI client needed" shape as M33's own settings
+     *      self-test, just reading a titlebar pixel instead of a desktop
+     *      one. Probe point (200, 88) sits inside gui_clock's titlebar
+     *      strip but clear of both the "Clock" title text (ends ~x:146)
+     *      and the leftmost titlebar button (starts ~x:246), so it can
+     *      only ever read the flat titlebar fill underneath either. */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *clock_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !clock_image) {
+            panic("out of memory reading compositor/gui_clock back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t clock_size = vfs_read("gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || clock_size < 0) {
+            panic("vfs_read: compositor/gui_clock missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+
+        task_t *clock_task = process_spawn(clock_image, (size_t)clock_size, "");
+        kfree(clock_image);
+        pit_sleep_ms(500); /* connects (window 0, auto-focused), draws its first frame */
+
+        /* Shadow: blend(desktop_bg, black, 1/3) - fill_rect_shadow's own
+         * SHADOW_NUM/SHADOW_DEN - computed against the same 0x001A1A2E
+         * default every earlier self-test's own "desktop_bg" constant
+         * already assumes (a fresh compositor instance, nothing in
+         * settings.c reachable to have changed it yet). */
+        uint32_t shadow_pixel = fb_get_pixel(304, 150);
+        uint32_t expected_shadow = 0x0011111Eu;
+
+        int settings_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
+            panic("M38 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
+        }
+        wm_settings_request_t req;
+        req.bg_color = 0x001A1A2Eu; /* unchanged - keeps the shadow probe above valid if this ever re-read it */
+        req.accent_color = 0x00AA5500u; /* distinct from both TITLEBAR_COLOR and the old TITLEBAR_FOCUS_COLOR default - a wrong pixel can't accidentally match either */
+        do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(300);
+        uint32_t titlebar_pixel = fb_get_pixel(200, 88);
+
+        do_syscall(SYS_kill, (uint64_t)clock_task->id, SIGKILL, 0);
+        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        console_init();
+        klog_use_console();
+
+        int all_ok = 1;
+        if (shadow_pixel != expected_shadow) {
+            klog_puts("[wm38] pixel check failed: drop-shadow blend did not match - expected 0x");
+            klog_put_hex32(expected_shadow);
+            klog_puts(" got 0x");
+            klog_put_hex32(shadow_pixel);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (titlebar_pixel != req.accent_color) {
+            klog_puts("[wm38] pixel check failed: focused titlebar did not pick up the new accent color - expected 0x");
+            klog_put_hex32(req.accent_color);
+            klog_puts(" got 0x");
+            klog_put_hex32(titlebar_pixel);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M38 visual-polish self-test: drop shadow and/or accent color did not behave as expected");
+        }
+        klog_puts("[wm38] drop shadow + WM_SETTINGS_PIPE accent-color self-test passed (2/2 checks matched).\n\n");
     }
 
     /* Stretch goal: SMP. Deliberately brought up *after* every M-numbered

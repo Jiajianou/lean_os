@@ -727,6 +727,24 @@ every label, title, and button anywhere. This arc is about closing
 those specific, already-identified gaps rather than expanding scope
 into new subsystems.
 
+M34 through M38 are now all done. Every gap named above is closed: a
+shared widget layer (buttons, menus, a scrollbar) backs settings.c,
+file_manager.c, desktop_icons.c, and text_editor.c instead of each
+hand-rolling its own; text_editor.c has a real File menu, a Save As
+prompt, and a confirm-discard dialog on both its own Quit item and the
+titlebar close button (a new opt-in, backward-compatible WM protocol
+field); text_editor.c and gui_terminal.c both support real click-drag
+text selection wired into the clipboard; and the compositor now draws
+window titles at all (a gap only found while scoping M38, not one this
+arc set out looking for), plus a drop shadow, edge-aware resize
+cursors, and a second (accent) theme color. Two deliberate, documented
+scope trims recur throughout: no compositor-owned modal/popup surface
+(M35's menus and M36's dialogs are drawn client-side, inside the
+owning app's own window, not overlaying the whole desktop), and
+gui_terminal.c's output view still has no real scrollback buffer to
+put a scrollbar on (M37) - both real, separate features this arc
+didn't also take on.
+
 ## M34 — Reusable widget primitives ✅
 
 - [x] `user_space/lib/gfx.{h,c}` gained `gfx_point_in_rect` (pure
@@ -895,19 +913,67 @@ into new subsystems.
       every mouse-driven behavior since M18, manual/interactive-only
       verification this headless build can't fabricate
 
-## M38 — Visual chrome polish
+## M38 — Visual chrome polish ✅
 
-- [ ] A second, bold/larger font variant (still a hand-authored
-      bitmap - no floating point exists anywhere in this toolchain
-      per `gfx.h`'s own build-flag note, so no vector/anti-aliased
-      rendering path) for window titles and menu headers, distinct
-      from the one 8x16 font used for everything today
-- [ ] Window drop shadow and edge-aware resize cursors (compositor.c
-      already hit-tests the 5px resize zones from M31; nothing changes
-      the cursor sprite to reflect it)
-- [ ] Theming beyond the single background-color picker settings.c
-      already has: an accent color used consistently for focused
-      titlebars/buttons across the widget layer from M34
+- [x] Window titles, drawn on the titlebar for the first time ever -
+      a real, pre-existing gap found while scoping this milestone:
+      `wm_create_request_t.title` has been tracked per-window and
+      echoed through `wm_query_windows` since M22, but `compositor.c`
+      itself never actually painted it anywhere before this; a
+      titlebar was a flat colored strip plus three buttons and nothing
+      else. Drawn bold - a faux weight synthesized from the one 8x16
+      bitmap font this project has (`bits | (bits >> 1)` per glyph
+      row; no floating point exists anywhere in this toolchain per
+      `gfx.h`'s own build-flag note, so there's no vector/anti-aliased
+      path to a real second weight, only this kind of cheap integer
+      trick) via a new clip-rect-aware `draw_text_clipped` - same
+      reason `gfx_draw_button` couldn't be reused for titlebar buttons
+      back in M34, now applying to titlebar text too. `fit_title`
+      truncates to whatever fits before the leftmost button, so a
+      window shrunk near M31's `MIN_WIN_W` can't draw a title straight
+      through the close button
+- [x] Window drop shadow (`fill_rect_shadow`) - blends toward black
+      (1/3 opacity, plain integer math) rather than a flat offset
+      rect, which would just look like a second window. Drawn before
+      each window's own border/titlebar/content, offset down-right, so
+      only the sliver the window itself doesn't cover ends up visible
+- [x] Edge-aware resize cursors: four new hand-authored 8x8 sprites
+      (horizontal/vertical/both diagonals) alongside the existing
+      arrow - `hovered_resize_mask()` reuses M31's own
+      `resize_hit_mask` (or the in-progress `drag_resize_mask`, so the
+      shape doesn't flicker back to the arrow mid-drag if the cursor
+      drifts outside the exact edge margin) to pick which one
+      `draw_cursor` shows, every redraw
+- [x] Accent color theming: `wm_settings_request_t` gained
+      `accent_color` (the compositor's second global setting, replacing
+      the compile-time `TITLEBAR_FOCUS_COLOR` constant a focused
+      titlebar always used before this) alongside the existing
+      `bg_color` - `wmclient.h`'s `wm_set_bg_color` became
+      `wm_set_theme(bg, accent)` (settings.c was and still is its only
+      caller, so no back-compat shim needed). `settings.c` gained a
+      second swatch row and tracks its own current choice of both
+      colors so picking one never resets the other back to default.
+      Scoped to the titlebar only, not "buttons" as first drafted -
+      the titlebar close/maximize/minimize colors are a semantic
+      convention (red/green/gray), not decoration, and there's no
+      live way for an arbitrary client (menus, etc.) to read the
+      compositor's current theme back out to recolor itself with -
+      that's a real, separate query-protocol addition this milestone
+      doesn't also take on
+- [x] New kernel-side self-test `[wm38]`: two of the four additions
+      above are real framebuffer pixel effects checkable headlessly -
+      a probe point just past gui_clock's own outer border against
+      the exact expected shadow-blend value, and a titlebar pixel
+      confirming a `WM_SETTINGS_PIPE` request with a new `accent_color`
+      actually repainted the focused titlebar (same "drive it
+      directly, no GUI client needed" shape as M33's own settings
+      self-test). The bold glyphs and the resize-cursor sprites are,
+      like every font/pointer-shape detail since M17/M18, left to
+      manual/interactive verification - no single pixel headlessly
+      distinguishes "bold" from "regular," and there's no way to
+      fabricate a real mouse hovering a resize edge. Verified via
+      `tools/qemu-serial-test.sh`: 24/24 required boot markers, no
+      panic
 
 ## Stretch goals (unordered, orthogonal to the desktop path)
 

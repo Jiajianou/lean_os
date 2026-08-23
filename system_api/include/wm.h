@@ -165,4 +165,5 @@ typedef struct {
 
 typedef struct {
     uint32_t bg_color;
+    uint32_t accent_color; /* M38: the focused-window titlebar color - compositor.c's second global setting, previously TITLEBAR_FOCUS_COLOR, a compile-time constant. settings.c is still the only client that ever sends this request, so (unlike wm_create_request_t's confirm_close) there's no back-compat concern about adding a field here - the one writer and the one reader change together. */
 } wm_settings_request_t;
