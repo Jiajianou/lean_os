@@ -17,14 +17,24 @@
  * of each in current_bg/current_accent rather than only ever sending
  * whichever one control just changed, so clicking one swatch row never
  * resets the other back to its default.
+ *
+ * M44 adds a third control, the wallpaper style (user_space/lib/
+ * wallpaper.h), and one correctness fix that matters more than it looks:
+ * this window now *queries* the compositor for the current settings at
+ * startup (wm_query_settings) instead of assuming the three defaults. It
+ * had been assuming since M33, which meant closing Settings and
+ * reopening it showed the wrong swatch as selected, and - worse - the
+ * next click would send those wrong assumed values back for the two
+ * controls you hadn't touched.
  */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h"
 #include "syscall_wrappers.h"
+#include "wallpaper.h"
 #include "wmclient.h"
 
 #define WIN_W 320
-#define WIN_H 280
+#define WIN_H 340
 
 #define BG_COLOR      0x00202430u
 #define TEXT_COLOR    0x00E0E0E0u
@@ -37,6 +47,14 @@
 #define SWATCH_GAP  8
 #define BG_SWATCH_Y     150
 #define ACCENT_SWATCH_Y 210
+
+/* M44: the wallpaper picker - one labeled button per style. Four of them
+ * across WIN_W with the same 10px margin every other row here uses. */
+#define WALL_BTN_Y  270
+#define WALL_BTN_W  68 /* four of these plus their gaps land exactly inside the GFX_PAD margins */
+#define WALL_BTN_H  22
+#define WALL_BTN_GAP 6
+#define WALL_BTN_X(i) (GFX_PAD + (i) * (WALL_BTN_W + WALL_BTN_GAP))
 
 #define DEFAULT_BG_COLOR     0x001A1A2Eu /* mirrors compositor.c's own compile-time default - see this file's header comment */
 #define DEFAULT_ACCENT_COLOR 0x004C99E6u
@@ -63,8 +81,9 @@ static const uint32_t ACCENT_SWATCHES[] = {
 
 static uint32_t current_bg = DEFAULT_BG_COLOR;
 static uint32_t current_accent = DEFAULT_ACCENT_COLOR;
+static uint32_t current_wallpaper = WALLPAPER_GRADIENT; /* mirrors compositor.c's own default */
 
-#define CLEAR_BTN_X 220
+#define CLEAR_BTN_X (WIN_W - GFX_PAD - CLEAR_BTN_W) /* M44: right-aligned to the same inset every other row uses, rather than a hand-placed 220 */
 #define CLEAR_BTN_Y 100
 #define CLEAR_BTN_W 80
 #define CLEAR_BTN_H 20
@@ -90,8 +109,8 @@ static int format_uint(uint32_t v, char *buf) {
 static void redraw(wm_window_t *win, int clear_hover) {
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
 
-    gfx_draw_text(&win->gfx, 10, 10, "System", LABEL_COLOR);
-    gfx_draw_line(&win->gfx, 10, 26, WIN_W - 10, 26, BORDER_COLOR);
+    gfx_draw_text(&win->gfx, GFX_PAD, 10, "System", LABEL_COLOR);
+    gfx_draw_line(&win->gfx, GFX_PAD, 26, WIN_W - GFX_PAD, 26, BORDER_COLOR);
 
     wm_fb_info_t fb_info;
     char line[64];
@@ -105,7 +124,7 @@ static void redraw(wm_window_t *win, int clear_hover) {
         line[i++] = 'x';
         i += format_uint(fb_info.height, line + i);
         line[i] = '\0';
-        gfx_draw_text(&win->gfx, 10, 36, line, TEXT_COLOR);
+        gfx_draw_text(&win->gfx, GFX_PAD, 36, line, TEXT_COLOR);
     }
 
     {
@@ -117,11 +136,11 @@ static void redraw(wm_window_t *win, int clear_hover) {
         i += format_uint((uint32_t)(sys_uptime_ms() / 1000), line + i);
         line[i++] = 's';
         line[i] = '\0';
-        gfx_draw_text(&win->gfx, 10, 52, line, TEXT_COLOR);
+        gfx_draw_text(&win->gfx, GFX_PAD, 52, line, TEXT_COLOR);
     }
 
-    gfx_draw_text(&win->gfx, 10, 76, "Clipboard", LABEL_COLOR);
-    gfx_draw_line(&win->gfx, 10, 92, WIN_W - 10, 92, BORDER_COLOR);
+    gfx_draw_text(&win->gfx, GFX_PAD, 76, "Clipboard", LABEL_COLOR);
+    gfx_draw_line(&win->gfx, GFX_PAD, 92, WIN_W - GFX_PAD, 92, BORDER_COLOR);
 
     char clip_buf[40];
     long clip_len = sys_clipboard_get(clip_buf, sizeof(clip_buf) - 1);
@@ -134,27 +153,45 @@ static void redraw(wm_window_t *win, int clear_hover) {
         }
         clip_buf[clip_len] = '\0';
     }
-    gfx_draw_text(&win->gfx, 10, 102, clip_buf, TEXT_COLOR);
+    gfx_draw_text(&win->gfx, GFX_PAD, 102, clip_buf, TEXT_COLOR);
 
     gfx_draw_button(&win->gfx, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H,
                      clear_hover ? BTN_HOVER : BTN_COLOR, BORDER_COLOR, "Clear", TEXT_COLOR);
 
-    gfx_draw_text(&win->gfx, 10, 130, "Desktop color", LABEL_COLOR);
-    gfx_draw_line(&win->gfx, 10, 146, WIN_W - 10, 146, BORDER_COLOR);
+    gfx_draw_text(&win->gfx, GFX_PAD, 130, "Desktop color", LABEL_COLOR);
+    gfx_draw_line(&win->gfx, GFX_PAD, 146, WIN_W - GFX_PAD, 146, BORDER_COLOR);
     for (int i = 0; i < BG_SWATCH_COUNT; i++) {
-        int32_t x = 10 + i * (SWATCH_SIZE + SWATCH_GAP);
-        gfx_fill_rect(&win->gfx, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, BG_SWATCHES[i]);
-        gfx_draw_rect(&win->gfx, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE,
-                      BG_SWATCHES[i] == current_bg ? TEXT_COLOR : BORDER_COLOR);
+        int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
+        gfx_fill_rect_rounded(&win->gfx, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, BG_SWATCHES[i]);
+        gfx_draw_rect_rounded(&win->gfx, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE,
+                              BG_SWATCHES[i] == current_bg ? TEXT_COLOR : BORDER_COLOR);
     }
 
-    gfx_draw_text(&win->gfx, 10, 190, "Accent color", LABEL_COLOR);
-    gfx_draw_line(&win->gfx, 10, 206, WIN_W - 10, 206, BORDER_COLOR);
+    gfx_draw_text(&win->gfx, GFX_PAD, 190, "Accent color", LABEL_COLOR);
+    gfx_draw_line(&win->gfx, GFX_PAD, 206, WIN_W - GFX_PAD, 206, BORDER_COLOR);
     for (int i = 0; i < ACCENT_SWATCH_COUNT; i++) {
-        int32_t x = 10 + i * (SWATCH_SIZE + SWATCH_GAP);
-        gfx_fill_rect(&win->gfx, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, ACCENT_SWATCHES[i]);
-        gfx_draw_rect(&win->gfx, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE,
-                      ACCENT_SWATCHES[i] == current_accent ? TEXT_COLOR : BORDER_COLOR);
+        int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
+        gfx_fill_rect_rounded(&win->gfx, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, ACCENT_SWATCHES[i]);
+        gfx_draw_rect_rounded(&win->gfx, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE,
+                              ACCENT_SWATCHES[i] == current_accent ? TEXT_COLOR : BORDER_COLOR);
+    }
+
+    /* M44: the wallpaper row. Each button shows the style's own ramp
+     * behind its name rather than a flat button color - a two-word label
+     * ("Deep", "Grid") says much less about what you are picking than
+     * eight pixels of the actual thing does, and wallpaper_fill draws a
+     * 70x22 preview exactly the way it draws a 1024x768 desktop. */
+    gfx_draw_text(&win->gfx, GFX_PAD, 250, "Wallpaper", LABEL_COLOR);
+    gfx_draw_line(&win->gfx, GFX_PAD, 266, WIN_W - GFX_PAD, 266, BORDER_COLOR);
+    for (int i = 0; i < WALLPAPER_COUNT; i++) {
+        int32_t x = WALL_BTN_X(i);
+        wallpaper_fill(&win->gfx, x, WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H, i, current_bg);
+        gfx_draw_rect_rounded(&win->gfx, x, WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H,
+                              (uint32_t)i == current_wallpaper ? TEXT_COLOR : BORDER_COLOR);
+        const char *name = wallpaper_name(i);
+        int32_t label_w = (int32_t)strlen(name) * FONT_WIDTH;
+        gfx_draw_text(&win->gfx, x + (WALL_BTN_W - label_w) / 2,
+                      WALL_BTN_Y + (WALL_BTN_H - FONT_HEIGHT) / 2, name, TEXT_COLOR);
     }
 }
 
@@ -162,6 +199,17 @@ int main(void) {
     wm_window_t win;
     if (wm_connect(WIN_W, WIN_H, "Settings", &win) != 0) {
         sys_exit(1);
+    }
+
+    /* M44: open showing what is actually set, not what the defaults are -
+     * see this file's header comment on what assuming cost. */
+    {
+        wm_settings_request_t settings;
+        if (wm_query_settings(&settings) == 0) {
+            current_bg = settings.bg_color;
+            current_accent = settings.accent_color;
+            current_wallpaper = settings.wallpaper;
+        }
     }
 
     int clear_hover = 0;
@@ -184,19 +232,27 @@ int main(void) {
                     changed = 1;
                 }
                 for (int i = 0; i < BG_SWATCH_COUNT; i++) {
-                    int32_t x = 10 + i * (SWATCH_SIZE + SWATCH_GAP);
+                    int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
                     if (gfx_point_in_rect(ev.x, ev.y, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
                         current_bg = BG_SWATCHES[i];
-                        wm_set_theme(current_bg, current_accent);
+                        wm_set_theme(current_bg, current_accent, current_wallpaper);
                         changed = 1;
                         break;
                     }
                 }
                 for (int i = 0; i < ACCENT_SWATCH_COUNT; i++) {
-                    int32_t x = 10 + i * (SWATCH_SIZE + SWATCH_GAP);
+                    int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
                     if (gfx_point_in_rect(ev.x, ev.y, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
                         current_accent = ACCENT_SWATCHES[i];
-                        wm_set_theme(current_bg, current_accent);
+                        wm_set_theme(current_bg, current_accent, current_wallpaper);
+                        changed = 1;
+                        break;
+                    }
+                }
+                for (int i = 0; i < WALLPAPER_COUNT; i++) {
+                    if (gfx_point_in_rect(ev.x, ev.y, WALL_BTN_X(i), WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H)) {
+                        current_wallpaper = (uint32_t)i;
+                        wm_set_theme(current_bg, current_accent, current_wallpaper);
                         changed = 1;
                         break;
                     }

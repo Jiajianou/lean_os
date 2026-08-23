@@ -1043,7 +1043,19 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
          * Running slot 0 is gui_clock's window (id 1, the only non-panel
          * window, focused), at local (84,4) 96x24 - M42 moved the running
          * buttons right of the new Start button, which is what the 80px
-         * shift in the probes below is. Its label is
+         * shift in the probes below is, and M44 moved its label 4px
+         * further in again (desktop_shell.c's LABEL_PAD, widened to clear
+         * the rounded corners).
+         *
+         * M44 also made the taskbar translucent, so none of the colors
+         * below are the panel's own any more: every one is
+         * TRANSLUCENT_NUM/DEN of what desktop_shell.c painted mixed with
+         * what was already composited underneath, which in this self-test
+         * (no desktop background client) is the compositor's own
+         * DEFAULT_BG_COLOR 0x1A1A2E. The focused slot's 0x2E4A63 becomes
+         * (0x1A*1 + 0x2E*3)/4, (0x1A + 0x4A*3)/4, (0x2E + 0x63*3)/4 =
+         * 0x293E55; white glyph ink becomes 0xC5C5CA; the panel's own
+         * 0x181828 becomes 0x181829. Its label is
          * gui_clock's own title, "Clock" - glyph math below is for 'C'
          * (M39's font8x16.c row 5: 0xC0 = 11000000, the left stem - so
          * column 0 is ink and the bowl's interior at column 3 isn't.
@@ -1055,10 +1067,10 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
          * milestones.md's M22 entry for the glyph-bitmap method this
          * follows, same one M21's own pixel checks already proved out. */
         static const struct { uint32_t x, y; uint32_t expected; const char *what; } checks[] = {
-            {124, 742, 0x002E4A63u, "running slot 0 background (focused)"},
-            {86,  749, 0x00FFFFFFu, "running slot 0 'C' glyph - on pixel (left stem)"},
-            {89,  749, 0x002E4A63u, "running slot 0 'C' glyph - off pixel (bowl interior)"},
-            {500, 738, 0x00181828u, "panel background (margin strip above the slot row, y=2 - never overdrawn by any slot regardless of window count)"},
+            {124, 742, 0x00293E55u, "running slot 0 background (focused)"},
+            {90,  749, 0x00C5C5CAu, "running slot 0 'C' glyph - on pixel (left stem)"},
+            {93,  749, 0x00293E55u, "running slot 0 'C' glyph - off pixel (bowl interior)"},
+            {500, 738, 0x00181829u, "panel background (margin strip above the slot row, y=2 - never overdrawn by any slot regardless of window count)"},
             {500, 500, 0x001A1A2Eu, "desktop background color, above the panel"},
         };
         uint32_t got[sizeof(checks) / sizeof(checks[0])];
@@ -1723,16 +1735,22 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
          *              past its 2x2 tile glyph (local x 12..24) and its
          *              "Start" label (local x 28..68), and above the
          *              label's own rows - so it can only read flat fill.
-         *   (124, 752) the middle of running-app button 0, which starts
-         *              at local x 84 (START_X + START_W + 8) rather than
-         *              at the panel's left edge as it did before M42.
+         *   (168, 752) inside running-app button 0 (local x 84..180,
+         *              START_X + START_W + 8 rather than the panel's left
+         *              edge as it was before M42), right of its label.
          *   (932, 750) the tray's separator line, at local x
          *              width - TRAY_W(92) - i.e. the tray really is
-         *              right-aligned rather than drawn at a fixed x. */
+         *              right-aligned rather than drawn at a fixed x.
+         *
+         * M44 made the taskbar translucent, so every expected value below
+         * that comes from desktop_shell.c is TRANSLUCENT_NUM/DEN of it
+         * mixed with what is underneath - here the compositor's own
+         * DEFAULT_BG_COLOR, this self-test running no desktop background
+         * client. See the [wm22] check above for the worked arithmetic. */
         uint32_t panel_bg_px = fb_get_pixel(512, 738);
         uint32_t above_panel_px = fb_get_pixel(512, 700);
         uint32_t start_btn_px = fb_get_pixel(71, 742);
-        uint32_t running_slot_px = fb_get_pixel(124, 752);
+        uint32_t running_slot_px = fb_get_pixel(168, 752);
         uint32_t tray_sep_px = fb_get_pixel(932, 750);
 
         int action_fds[2];
@@ -1778,14 +1796,14 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
          * draws it - desktop_shell.c for the panel's own colors,
          * compositor.c for everything it draws itself. */
         static const struct { const char *what; uint32_t expected; } names[] = {
-            {"taskbar background, docked at the screen's bottom edge (desktop_shell.c PANEL_BG)", 0x00181828u},
+            {"taskbar background, docked at the screen's bottom edge (desktop_shell.c PANEL_BG, translucent)", 0x00181829u},
             {"desktop background above the taskbar (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
-            {"Start button fill at the taskbar's left edge (desktop_shell.c START_BG)", 0x00243447u},
-            {"running-app button 0, drawn focused, right of the Start button (desktop_shell.c RUNNING_SLOT_FOCUS_BG)", 0x002E4A63u},
-            {"system tray separator, right-aligned (desktop_shell.c TRAY_SEP_COLOR)", 0x00303C4Eu},
+            {"Start button fill at the taskbar's left edge (desktop_shell.c START_BG, translucent)", 0x00212D40u},
+            {"running-app button 0, drawn focused, right of the Start button (desktop_shell.c RUNNING_SLOT_FOCUS_BG, translucent)", 0x00293E55u},
+            {"system tray separator, right-aligned (desktop_shell.c TRAY_SEP_COLOR, translucent)", 0x002A3346u},
             {"a maximized window's titlebar starting at the top of the screen (compositor.c TITLEBAR_FOCUS_COLOR)", 0x004C99E6u},
-            {"the taskbar staying on top of a maximized window (desktop_shell.c PANEL_BG)", 0x00181828u},
-            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG)", 0x001C2233u},
+            {"the taskbar staying on top of a maximized window (desktop_shell.c PANEL_BG, translucent)", 0x00181829u},
+            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG, translucent)", 0x001B2032u},
             {"the launcher overlay gone again after a second toggle (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
         };
         const uint32_t got[] = {
@@ -1913,8 +1931,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             {"the left half staying empty while a window is snapped right (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
             {"a left-snapped window's titlebar filling the screen's left half (compositor.c TITLEBAR_FOCUS_COLOR)", 0x004C99E6u},
             {"the right half staying empty while a window is snapped left (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
-            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG)", 0x001C2233u},
-            {"the launcher's first result drawn selected (compositor.c LAUNCHER_SEL_BG)", 0x00335577u},
+            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG, translucent)", 0x001B2032u},
+            {"the launcher's first result drawn selected (compositor.c LAUNCHER_SEL_BG, drawn opaquely over the blended overlay)", 0x00335577u},
             {"the launcher overlay gone again after a second toggle (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
         };
         const uint32_t got[] = {
@@ -1939,6 +1957,143 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         }
         klog_puts("[m43] window snapping (left/right half, buffer-clamped) and the "
                    "launcher overlay self-test passed (7/7 checks matched).\n\n");
+    }
+
+    /* M44 self-test: the wallpaper gradient and the taskbar's
+     * translucency, the two pieces of pixel math that milestone added -
+     * same shape as M38's shadow-blend check, which is the precedent for
+     * "assert the arithmetic, not just that something got drawn".
+     *
+     * This is the first self-test that runs a real desktop_icons.c, and
+     * it has to: M44 moved the desktop background out of the compositor
+     * (whose own fill has been invisible behind that full-screen window
+     * since M32) and into the wallpaper the desktop client paints. So the
+     * gradient can only be checked with the client that draws it running,
+     * and the translucency can only be checked *over* it - blending
+     * against a flat fill would pass just as happily if the blend were
+     * reading the wrong buffer.
+     *
+     * Expected values, all derived from wallpaper.h's WALLPAPER_GRADIENT
+     * (155%% of the base color at the top row, 60%% at the bottom,
+     * straight-line integer interpolation between) over the compositor's
+     * DEFAULT_BG_COLOR 0x1A1A2E on a 768-row display:
+     *
+     *   top    = (26,26,46) * 155/100 = (40,40,71) = 0x282847
+     *   bottom = (26,26,46) *  60/100 = (15,15,27) = 0x0F0F1B
+     *   row r  = top + (bottom - top) * r / 767, per channel
+     *   row 100 -> 0x252542   row 600 -> 0x151525   row 738 -> 0x10101D
+     *
+     * and the taskbar's own 0x181828 blended 3/4 over that row-738 color
+     * gives 0x161625. That last one is the check with real teeth: it is
+     * the only value here that would still come out "reasonable" if the
+     * blend were mixing against the wrong thing.
+     */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *icons_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *shell_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !icons_image || !shell_image) {
+            panic("out of memory reading compositor/desktop_icons/desktop_shell back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t icons_size = vfs_read("desktop_icons", icons_image, LEANFS_MAX_FILE_SIZE);
+        int64_t shell_size = vfs_read("desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || icons_size < 0 || shell_size < 0) {
+            panic("vfs_read: compositor/desktop_icons/desktop_shell missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+        task_t *icons_task = process_spawn(icons_image, (size_t)icons_size, "");
+        kfree(icons_image);
+        pit_sleep_ms(500);
+        task_t *shell_task = process_spawn(shell_image, (size_t)shell_size, "");
+        kfree(shell_image);
+        pit_sleep_ms(700);
+
+        /* x=600 is clear of the icon column (which is one column at
+         * x:[32, 80) on this display) at every y probed here. */
+        uint32_t grad_high = fb_get_pixel(600, 100);
+        uint32_t grad_low = fb_get_pixel(600, 600);
+        uint32_t taskbar_over_grad = fb_get_pixel(500, 738);
+
+        /* Switch to WALLPAPER_FLAT and watch the ramp go away - which is
+         * what proves the wallpaper setting reaches the client that
+         * paints it, rather than the gradient simply being what
+         * desktop_icons.c always draws. */
+        int settings_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
+            panic("M44 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
+        }
+        wm_settings_request_t set_req;
+        set_req.bg_color = 0x001A1A2Eu;
+        set_req.accent_color = 0x004C99E6u;
+        set_req.wallpaper = 0; /* WALLPAPER_FLAT */
+        do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&set_req, sizeof(set_req));
+        pit_sleep_ms(900); /* desktop_icons.c polls the setting every THEME_POLL_MS (500) */
+        uint32_t flat_high = fb_get_pixel(600, 100);
+        uint32_t flat_low = fb_get_pixel(600, 600);
+
+        /* And the read side of the same setting (M44's WM_SETTINGS_QUERY_
+         * PIPE). desktop_icons.c is polling this same pair twice a
+         * second, so drain the response pipe first - what comes back
+         * below has to be the answer to this question. */
+        int sq_fds[2];
+        int sqr_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_PIPE, (uint64_t)sq_fds, 0) != 0 ||
+            do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_RESP_PIPE, (uint64_t)sqr_fds, 0) != 0) {
+            panic("M44 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_QUERY_*) failed");
+        }
+        do_syscall(SYS_pipe_reset, (uint64_t)sqr_fds[0], 0, 0);
+        uint8_t ping = 1;
+        do_syscall(SYS_write, (uint64_t)sq_fds[1], (uint64_t)&ping, sizeof(ping));
+        pit_sleep_ms(300);
+        wm_settings_request_t queried;
+        k_memset(&queried, 0, sizeof(queried));
+        long settings_read = do_syscall(SYS_read, (uint64_t)sqr_fds[0], (uint64_t)&queried, sizeof(queried));
+
+        selftest_reap(shell_task);
+        selftest_reap(icons_task);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        static const struct { const char *what; uint32_t expected; } names[] = {
+            {"the wallpaper gradient near the top of the desktop (155% of 0x1A1A2E, ramped to row 100)", 0x00252542u},
+            {"the wallpaper gradient near the bottom of the desktop (ramped to row 600)", 0x00151525u},
+            {"the translucent taskbar blended over the gradient row underneath it, not over a flat fill", 0x00161625u},
+            {"the desktop after switching to WALLPAPER_FLAT - top", 0x001A1A2Eu},
+            {"the desktop after switching to WALLPAPER_FLAT - bottom, the same color as the top", 0x001A1A2Eu},
+        };
+        const uint32_t got[] = {grad_high, grad_low, taskbar_over_grad, flat_high, flat_low};
+        int all_ok = 1;
+        for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
+            if (got[i] != names[i].expected) {
+                klog_puts("[m44] pixel check failed: ");
+                klog_puts(names[i].what);
+                klog_puts(" - expected 0x");
+                klog_put_hex32(names[i].expected);
+                klog_puts(" got 0x");
+                klog_put_hex32(got[i]);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        if (settings_read != (long)sizeof(queried) || queried.wallpaper != 0 ||
+            queried.bg_color != 0x001A1A2Eu || queried.accent_color != 0x004C99E6u) {
+            klog_puts("[m44] the settings query did not round-trip what was just set (wallpaper 0x");
+            klog_put_hex32(queried.wallpaper);
+            klog_puts(", bg 0x");
+            klog_put_hex32(queried.bg_color);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M44 wallpaper/translucency self-test: the desktop did not look as computed");
+        }
+        klog_puts("[m44] wallpaper gradient, taskbar translucency over it, and the "
+                   "settings query round trip self-test passed (6/6 checks matched).\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

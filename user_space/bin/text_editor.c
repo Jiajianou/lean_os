@@ -465,19 +465,23 @@ static void redraw(wm_window_t *win) {
     if (prompt_kind != PROMPT_NONE) {
         int32_t x = (WIN_W - PROMPT_W) / 2;
         int32_t y = (WIN_H - PROMPT_H) / 2;
-        gfx_fill_rect(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BG);
-        gfx_draw_rect(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BORDER);
+        /* M44: same corner radius as every other rounded surface on this
+         * desktop (gfx.h's GFX_CORNER_R) - a dialog was the last flat-
+         * cornered box left once the taskbar, the launcher and the icons
+         * were done. */
+        gfx_fill_rect_rounded(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BG);
+        gfx_draw_rect_rounded(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BORDER);
         if (prompt_kind == PROMPT_SAVE_AS) {
-            gfx_draw_text(&win->gfx, x + 8, y + 6, "Save as (Enter=save, click=cancel):", PROMPT_TEXT);
-            gfx_fill_rect(&win->gfx, x + 8, y + 26, PROMPT_W - 16, FONT_HEIGHT + 4, PROMPT_INPUT_BG);
+            gfx_draw_text(&win->gfx, x + GFX_PAD, y + 8, "Save as (Enter=save, click=cancel):", PROMPT_TEXT);
+            gfx_fill_rect_rounded(&win->gfx, x + GFX_PAD, y + 28, PROMPT_W - 2 * GFX_PAD, FONT_HEIGHT + 4, PROMPT_INPUT_BG);
             char buf[PROMPT_MAX_LEN + 1];
             memcpy(buf, prompt_buf, (size_t)prompt_len);
             buf[prompt_len] = '\0';
-            gfx_draw_text(&win->gfx, x + 12, y + 28, buf, PROMPT_TEXT);
-            gfx_fill_rect(&win->gfx, x + 12 + prompt_len * FONT_WIDTH, y + 28, 2, FONT_HEIGHT, CURSOR_COLOR);
+            gfx_draw_text(&win->gfx, x + GFX_PAD + 4, y + 30, buf, PROMPT_TEXT);
+            gfx_fill_rect(&win->gfx, x + GFX_PAD + 4 + prompt_len * FONT_WIDTH, y + 30, 2, FONT_HEIGHT, CURSOR_COLOR);
         } else { /* PROMPT_CONFIRM_DISCARD */
-            gfx_draw_text(&win->gfx, x + 8, y + 6, "Discard unsaved changes?", PROMPT_TEXT);
-            gfx_draw_text(&win->gfx, x + 8, y + 30, "Y = discard      N / click = cancel", PROMPT_TEXT);
+            gfx_draw_text(&win->gfx, x + GFX_PAD, y + 8, "Discard unsaved changes?", PROMPT_TEXT);
+            gfx_draw_text(&win->gfx, x + GFX_PAD, y + 32, "Y = discard      N / click = cancel", PROMPT_TEXT);
         }
     }
 }

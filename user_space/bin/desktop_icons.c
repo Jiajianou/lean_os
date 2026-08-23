@@ -12,6 +12,17 @@
  * different (and, for exactly one program, more familiar) way to reach
  * the same sys_spawn call.
  *
+ * M44: this window's background is no longer a flat constant of its own.
+ * It paints whichever wallpaper style is currently chosen
+ * (user_space/lib/wallpaper.h) over whichever background color is
+ * currently chosen - both read from the compositor, which holds them
+ * (system_api/include/wm.h's wm_settings_request_t) and which settings.c
+ * writes. That also fixes something that had been quietly broken since
+ * M32: settings.c's "Desktop color" picker changed the *compositor's*
+ * background, which this full-screen window has covered completely ever
+ * since it existed, so the control had had no visible effect on a real
+ * desktop for eleven milestones.
+ *
  * M32: ICONS[] below is the whole "multiple icons" story - a real
  * top-to-bottom, wrap-to-a-new-column grid (layout_icons) laid out once
  * at connect time from the window's own actual height (never hardcoded),
@@ -26,9 +37,9 @@
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h" /* strlen - ICONS[].label is data-driven now, not a compile-time sizeof() */
 #include "syscall_wrappers.h"
+#include "wallpaper.h" /* M44 - see refresh_theme */
 #include "wmclient.h"
 
-#define BG_COLOR       0x00203040u
 #define ICON_BOX_COLOR 0x004C99E6u
 #define ICON_HOVER_COLOR 0x006CB9FFu
 #define ICON_GLYPH_COLOR 0x000A1420u
@@ -61,6 +72,32 @@ static const char *const CTX_MENU_PROGRAMS[] = {"gui_terminal", "settings"};
 
 static int ctx_menu_open;
 static int32_t ctx_menu_x, ctx_menu_y;
+
+/* M44: the desktop's own copy of the two settings it paints with, kept in
+ * step by polling the compositor. Polled rather than pushed because the
+ * settings channel is one-way by design (settings.c fires and forgets),
+ * and because a redraw this size is not something to do on a timer
+ * anyway - refresh_theme only reports a change when there actually is
+ * one. The defaults here match the compositor's own, so the very first
+ * frame - drawn before any reply has arrived - is already right. */
+#define DEFAULT_BG_COLOR 0x001A1A2Eu
+#define THEME_POLL_MS 500
+
+static uint32_t theme_bg = DEFAULT_BG_COLOR;
+static int theme_wallpaper = WALLPAPER_GRADIENT;
+
+static int refresh_theme(void) {
+    wm_settings_request_t settings;
+    if (wm_query_settings(&settings) != 0) {
+        return 0;
+    }
+    if (settings.bg_color == theme_bg && (int)settings.wallpaper == theme_wallpaper) {
+        return 0;
+    }
+    theme_bg = settings.bg_color;
+    theme_wallpaper = (int)settings.wallpaper;
+    return 1;
+}
 
 typedef struct {
     const char *label;
@@ -111,7 +148,7 @@ static int point_in_icon(int i, int32_t x, int32_t y) {
 
 static void redraw_icon(wm_window_t *self, int i, int pressed) {
     uint32_t box_color = pressed ? ICON_HOVER_COLOR : ICON_BOX_COLOR;
-    gfx_fill_rect(&self->gfx, icon_x[i], icon_y[i], ICON_SIZE, ICON_SIZE, box_color);
+    gfx_fill_rect_rounded(&self->gfx, icon_x[i], icon_y[i], ICON_SIZE, ICON_SIZE, box_color);
 
     /* A tiny glyph inside the icon box: a dark "screen" rect with a
      * short mark on top, entirely gfx primitives (no separate icon-image
@@ -125,7 +162,8 @@ static void redraw_icon(wm_window_t *self, int i, int pressed) {
 }
 
 static void redraw(wm_window_t *self, int pressed_icon) {
-    gfx_fill_rect(&self->gfx, 0, 0, (int32_t)self->width, (int32_t)self->height, BG_COLOR);
+    wallpaper_fill(&self->gfx, 0, 0, (int32_t)self->width, (int32_t)self->height,
+                    theme_wallpaper, theme_bg);
     for (int i = 0; i < ICON_COUNT; i++) {
         redraw_icon(self, i, i == pressed_icon);
     }
@@ -143,7 +181,9 @@ int main(void) {
     }
 
     layout_icons((int32_t)win.height);
+    refresh_theme();
 
+    long next_theme_poll = 0;
     int last_click_icon = -1;
     long last_click_ms = -1;
     long pressed_until_ms = 0;
@@ -213,6 +253,12 @@ int main(void) {
         }
 
         long now = sys_uptime_ms();
+        if (now >= next_theme_poll) {
+            next_theme_poll = now + THEME_POLL_MS;
+            if (refresh_theme()) {
+                changed = 1;
+            }
+        }
         int pressed = now < pressed_until_ms ? pressed_icon : -1;
         static int was_pressed_icon = -1;
         if (changed || pressed != was_pressed_icon) {

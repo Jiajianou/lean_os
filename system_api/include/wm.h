@@ -60,6 +60,7 @@ typedef struct {
     uint32_t width;  /* ignored if panel or desktop != 0 - both always span the full display width, the compositor's own call */
     uint32_t height; /* ignored if desktop != 0 - a desktop window is always the full display, both dimensions */
     uint8_t panel; /* M22: 0 for a normal window, WM_PANEL_BOTTOM for a chrome-less, always-on-top, bottom-docked panel. See wm.h's M22 comment below and desktop_shell.c, the only client that ever sets this */
+    uint8_t translucent; /* M44: blend this window's pixels over what is already composited underneath instead of blitting them opaquely (compositor.c's blit_window). Opt-in and currently only the taskbar, which wm_connect_panel sets it for - a translucent *ordinary* window would let you read one app's text through another's, which is a different feature from a bar you can see the desktop through. Costs the memcpy fast path for whatever sets it, which is why it isn't simply on for everything. */
     uint8_t desktop; /* chrome-less, full-screen, always-on-*bottom* (the exact opposite z-order from panel) background window - see desktop_icons.c, the one client that ever sets this. Mutually exclusive with panel; nothing enforces that since only one client ever sets either flag. */
     char title[WM_TITLE_MAX];
     int32_t client_pid; /* M29: this client's own SYS_getpid() - lets the compositor notice (SYS_task_alive) when a connected client dies without an orderly disconnect, and reclaim its window slot. Not a security boundary (nothing stops a client lying about it), just bookkeeping - same trust level as everything else in this protocol. */
@@ -204,10 +205,23 @@ typedef struct {
  * the desktop background color, previously a compile-time constant in
  * compositor.c. Same one-way "fire a request, no response expected"
  * shape as an action request; user_space/bin/settings.c is the one
- * client that ever sends one. */
-#define WM_SETTINGS_PIPE "wm_settings"
+ * client that ever sends one.
+ *
+ * M44 adds the read side. Until this milestone the compositor was the
+ * only thing that ever needed to *know* the theme, so one-way was
+ * enough; now desktop_icons.c paints the wallpaper (it owns the
+ * full-screen desktop window, so the compositor's own background fill
+ * has been invisible behind it since M32) and has to be told what was
+ * picked, and settings.c wants to open showing the real current choice
+ * rather than assuming the defaults. Same request/response-over-two-
+ * named-pipes shape as WM_QUERY_PIPE: any single byte in, one whole
+ * wm_settings_request_t back. */
+#define WM_SETTINGS_PIPE            "wm_settings"
+#define WM_SETTINGS_QUERY_PIPE      "wm_set_query"
+#define WM_SETTINGS_QUERY_RESP_PIPE "wm_set_qresp"
 
 typedef struct {
     uint32_t bg_color;
     uint32_t accent_color; /* M38: the focused-window titlebar color - compositor.c's second global setting, previously TITLEBAR_FOCUS_COLOR, a compile-time constant. settings.c is still the only client that ever sends this request, so (unlike wm_create_request_t's confirm_close) there's no back-compat concern about adding a field here - the one writer and the one reader change together. */
+    uint32_t wallpaper;    /* M44: which wallpaper style (user_space/lib/wallpaper.h's WALLPAPER_*) the desktop paints. The compositor stores and relays it and nothing more - it never draws a wallpaper and has no idea what any style looks like, the same relay-only role it had for the menu protocol in M41. */
 } wm_settings_request_t;

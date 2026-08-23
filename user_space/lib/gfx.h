@@ -74,3 +74,34 @@ int gfx_menu_hit_test(int32_t px, int32_t py, int32_t x, int32_t y, int32_t item
 void gfx_draw_scrollbar(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
                          int32_t total_items, int32_t visible_items, int32_t scroll_top,
                          uint32_t track_color, uint32_t thumb_color);
+
+/* M44: one corner radius for every rounded surface on this desktop -
+ * taskbar buttons, the launcher overlay and its selection, the editor's
+ * dialogs - so "rounded" means the same thing everywhere instead of each
+ * caller picking a number by eye. Small on purpose: at 8x16 glyphs and
+ * 20-24px controls, anything larger eats the corners of the content.
+ *
+ * gfx_corner_inset is how much narrower row `row_from_edge` (0 is the
+ * outermost row, valid up to GFX_CORNER_R-1) is at each end. It is
+ * exported rather than kept private because compositor.c draws its own
+ * rounded rects - it has to, its primitives are clip-rect-aware and
+ * gfx.c's aren't (see gfx_point_in_rect's note) - and the two must round
+ * identically or the launcher would not match the taskbar. */
+#define GFX_CORNER_R 4
+int32_t gfx_corner_inset(int32_t row_from_edge);
+
+/* M44: and one inset from a panel or dialog's edge to its content, for
+ * the same reason - the launcher, the editor's prompts and the settings
+ * window each had their own number (12, 8 and 10) picked independently,
+ * which is exactly the sort of thing nobody notices individually and
+ * everybody notices together. Deliberately *not* used by desktop_shell.c:
+ * a bar packed with buttons is a denser surface than a dialog, and its
+ * own 4/8 margins are a considered choice rather than an oversight. */
+#define GFX_PAD 12
+
+/* A filled rect with GFX_CORNER_R-rounded corners. Falls back to a plain
+ * fill when the rect is too small to round without eating itself. */
+void gfx_fill_rect_rounded(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);
+
+/* The 1px outline companion, same corners. */
+void gfx_draw_rect_rounded(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);

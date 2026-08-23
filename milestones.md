@@ -1433,26 +1433,72 @@ git history was never touched by it, since none of it was committed.
 - [x] Full `tools/qemu-serial-test.sh` pass (29/29) and
       `tools/qemu-input-test.sh` pass (15/15)
 
-## M44 — Desktop visual polish
+## M44 — Desktop visual polish ✅
 
-- [ ] Replace the flat `BG_COLOR` desktop background with a simple
-      integer-interpolated vertical gradient (no floating point - same
-      constraint M38/M39 already worked within) - the last remaining
-      "flat color, nothing else" surface now that M42/M43 have covered
-      the taskbar/launcher/windows
-- [ ] Translucent taskbar and launcher-overlay background, reusing M38's
-      `fill_rect_shadow` blend math and M43's snap-preview blend as the
-      two existing precedents rather than a third blend implementation
-- [ ] Consistent spacing/corner-treatment pass across taskbar buttons,
-      the launcher overlay, window chrome, and dialogs now that all four
-      exist - a real design-consistency pass, not new functionality
-- [ ] Wallpaper option in `settings.c` alongside the existing bg/accent
-      color pickers - a small fixed set of built-in gradients/patterns
-      to choose from; no image file format exists in this project and
+- [x] The flat desktop background is now an integer-interpolated vertical
+      gradient (`user_space/lib/wallpaper.c` - no floating point, same
+      constraint M38/M39 worked within: each style is a pair of
+      percentages applied to the chosen background color, and every row
+      is one straight-line interpolation between the two). Deriving both
+      ends from the *picked* color is what makes the new picker compose
+      with the old one instead of superseding it
+- [x] **The background color picker had been doing nothing for eleven
+      milestones.** `settings.c` set the *compositor's* background, and
+      desktop_icons.c's full-screen window has covered that completely
+      since M32 - so the control was live, correct, and invisible. Found
+      while deciding where the gradient belonged. The desktop client now
+      paints the background from the compositor's settings, which fixes
+      the old control and gives the new one somewhere to live
+- [x] That needed the read side of a channel that had only ever been
+      write-only: `WM_SETTINGS_QUERY_PIPE`/`_RESP`, same
+      request/response-over-two-named-pipes shape as M22's window query.
+      desktop_icons.c polls it; settings.c calls it once at startup, which
+      fixes a second, quieter bug - it had been *assuming* the three
+      defaults since M33, so reopening it showed the wrong swatch
+      selected and its next click sent those assumed values back for the
+      controls you hadn't touched
+- [x] Translucent taskbar and launcher overlay, both through M43's
+      `fill_rect_blend` (itself M38's shadow blend, generalized) rather
+      than a third blend implementation. The taskbar needed one protocol
+      field (`wm_create_request_t.translucent`) and a blended path in
+      `blit_window`; it is opt-in because it costs that window the
+      memcpy fast path, and because a translucent *ordinary* window would
+      just mean reading one app's text through another's
+- [x] Consistent corner and spacing pass: one radius (`gfx.h`'s
+      `GFX_CORNER_R`) and one dialog inset (`GFX_PAD`) shared across
+      taskbar buttons, desktop icons, the launcher and its search field
+      and selection, the settings swatches and wallpaper buttons, the
+      editor's dialogs, and window titlebars. The rounding *table* is
+      shared too (`gfx_corner_inset`) rather than copied, because
+      compositor.c has to draw its own clip-aware version and two tables
+      would eventually disagree. Window frames get rounded **tops only**:
+      the content area is a straight memcpy of the client's buffer, so a
+      rounded bottom corner would just show that client's square pixels
+      poking through the curve
+- [x] Wallpaper option in `settings.c` - four built-in styles (Flat,
+      Gradient, Deep, Grid), each button previewing its own ramp behind
+      its name, since eight pixels of the real thing says more than the
+      word "Deep" does. No image file format exists in this project and
       adding one is real, separate scope this milestone doesn't take on
-- [ ] Verified via `qemu-serial-test.sh` plus new pixel self-tests for
-      the gradient/translucency math, same shape as M38's shadow-blend
-      self-test
+- [x] A real bug in the new rounding, caught by a pixel self-test rather
+      than by eye: the first `gfx_draw_rect_rounded` drew a *full-width*
+      line on any row where the corner inset changed, which turned the
+      top two rows of every taskbar button into a solid bar of border
+      color. The fix computes, per row, how far the outline has to reach
+      horizontally to close the gap its more-inset neighbour leaves
+- [x] New boot self-test (`[m44]`, 6/6 checks), the first to run a real
+      `desktop_icons.c`: the gradient at two rows (hand-derived from the
+      style's own percentages, not read back and blessed), the taskbar's
+      translucency **over that gradient** - the one check here that would
+      still look reasonable if the blend were reading the wrong buffer -
+      switching to `WALLPAPER_FLAT` and watching the ramp go away, and
+      the settings query round-tripping what was just set
+- [x] `tools/qemu_input_suite.py` learned the same two pieces of math
+      (`desktop_px`, `panel_px`), computed rather than tabulated, so
+      "is this bare desktop" is a question about the row as well as the
+      pixel and a change to either ratio fails with both numbers named
+- [x] Full `tools/qemu-serial-test.sh` pass (30/30) and
+      `tools/qemu-input-test.sh` pass (15/15)
 
 ## Stretch goals (unordered, orthogonal to the desktop path)
 

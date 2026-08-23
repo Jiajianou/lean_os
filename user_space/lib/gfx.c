@@ -146,3 +146,80 @@ void gfx_draw_scrollbar(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t
     int32_t thumb_y = y + (h - thumb_h) * scroll_top / max_top;
     gfx_fill_rect(ctx, x, thumb_y, w, thumb_h, thumb_color);
 }
+
+/* {2, 1, 0, 0} is the integer circle of radius GFX_CORNER_R evaluated at
+ * half-pixel centers: a pixel is in the corner if (2dx+1)^2 + (2dy+1)^2
+ * <= (2r)^2, with everything doubled to stay integer. A table rather
+ * than a runtime square root - four numbers are easier to check by eye
+ * than the code that would generate them, and the radius is a design
+ * constant, not a parameter. */
+static const int32_t CORNER_INSET[GFX_CORNER_R] = {2, 1, 0, 0};
+
+int32_t gfx_corner_inset(int32_t row_from_edge) {
+    if (row_from_edge < 0 || row_from_edge >= GFX_CORNER_R) {
+        return 0;
+    }
+    return CORNER_INSET[row_from_edge];
+}
+
+/* How much row `row` of an h-tall rect is inset - nonzero only within
+ * GFX_CORNER_R of either end, and measured from whichever end is
+ * nearer. */
+static int32_t row_inset(int32_t row, int32_t h) {
+    if (row < GFX_CORNER_R) {
+        return gfx_corner_inset(row);
+    }
+    if (row >= h - GFX_CORNER_R) {
+        return gfx_corner_inset(h - 1 - row);
+    }
+    return 0;
+}
+
+void gfx_fill_rect_rounded(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
+    if (w < 2 * GFX_CORNER_R || h < 2 * GFX_CORNER_R) {
+        gfx_fill_rect(ctx, x, y, w, h, color);
+        return;
+    }
+    for (int32_t row = 0; row < h; row++) {
+        int32_t inset = row_inset(row, h);
+        gfx_fill_rect(ctx, x + inset, y + row, w - 2 * inset, 1, color);
+    }
+}
+
+/* How wide a horizontal run this row's outline needs at each end: enough
+ * to close the gap left by whichever vertical neighbour is further inset
+ * than this row is, so the corner reads as a continuous edge instead of a
+ * ladder of disconnected dots. A row with no neighbour above or below
+ * (the top and bottom rows) reaches the full width and so draws a solid
+ * span; every ordinary middle row reaches nothing and draws a single
+ * pixel per side.
+ *
+ * Getting this wrong is not subtle-looking, but it *is* subtle to spot in
+ * a screenshot: the first version drew the whole span on any row where
+ * the inset changed, which turned the top two rows of every taskbar
+ * button into a solid bar of border color. A pixel self-test probing the
+ * button's fill caught it. */
+static int32_t outline_run(int32_t row, int32_t w, int32_t h) {
+    int32_t inset = row_inset(row, h);
+    int32_t above = (row == 0) ? w : row_inset(row - 1, h);
+    int32_t below = (row == h - 1) ? w : row_inset(row + 1, h);
+    int32_t reach = above > below ? above : below;
+    if (reach > w - inset) {
+        reach = w - inset;
+    }
+    int32_t run = reach - inset;
+    return run < 1 ? 1 : run;
+}
+
+void gfx_draw_rect_rounded(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
+    if (w < 2 * GFX_CORNER_R || h < 2 * GFX_CORNER_R) {
+        gfx_draw_rect(ctx, x, y, w, h, color);
+        return;
+    }
+    for (int32_t row = 0; row < h; row++) {
+        int32_t inset = row_inset(row, h);
+        int32_t run = outline_run(row, w, h);
+        gfx_fill_rect(ctx, x + inset, y + row, run, 1, color);
+        gfx_fill_rect(ctx, x + w - inset - run, y + row, run, 1, color);
+    }
+}

@@ -128,6 +128,17 @@
 #define SNAP_PREVIEW_NUM 1
 #define SNAP_PREVIEW_DEN 4
 
+/* M44: how much of a translucent window's own pixels survive the blend
+ * with what is already composited under it. 3/4 is deliberately subtle -
+ * the taskbar has to stay readable as a bar with text and buttons on it,
+ * so this is "you can tell the desktop is behind it", not "you can see
+ * through it". The launcher overlay uses its own, slightly more opaque
+ * ratio: it holds a text field you type into. */
+#define TRANSLUCENT_NUM 3
+#define TRANSLUCENT_DEN 4
+#define LAUNCHER_OPACITY_NUM 4
+#define LAUNCHER_OPACITY_DEN 5
+
 /* M42/M43: the launcher overlay - compositor-owned rather than a client
  * window, which is the one place in this project a compositor-level
  * surface is actually justified: it has to appear over everything,
@@ -146,7 +157,7 @@
  * something any client should be able to see or swallow. */
 #define LAUNCHER_W 480
 #define LAUNCHER_H 320
-#define LAUNCHER_PAD      12
+#define LAUNCHER_PAD      GFX_PAD /* M44: the shared dialog inset, not a number of its own - see gfx.h */
 #define LAUNCHER_INPUT_H  (FONT_HEIGHT + 8)
 #define LAUNCHER_ROW_H    20
 #define LAUNCHER_LIST_Y   (LAUNCHER_PAD + LAUNCHER_INPUT_H + 10)
@@ -180,6 +191,7 @@ typedef struct {
     uint32_t *pixels;
     int evt_write_fd; /* write end of this window's own event pipe - see wm_event_pipe_name */
     uint8_t is_panel;  /* M22: chrome-less, always-on-top, bottom-docked - see wm_create_request_t.panel */
+    uint8_t translucent; /* M44: blend rather than blit - see wm_create_request_t.translucent */
     uint8_t is_desktop; /* chrome-less, full-screen, always-on-*bottom* - see wm_create_request_t.desktop */
     uint8_t minimized; /* M22: hidden from redraw() and from click hit-testing, but the client process keeps running (WM_ACTION_TOGGLE_MINIMIZE) */
     uint8_t maximized; /* M30: WM_ACTION_MAXIMIZE/RESTORE toggle - see saved_x/y/w/h below */
@@ -195,6 +207,12 @@ static int window_count;
 static int focused_window = -1; /* -1 = nothing focused yet */
 static uint32_t bg_color = DEFAULT_BG_COLOR; /* M33: settings.c's WM_SETTINGS_PIPE is the only way this ever changes at runtime */
 static uint32_t accent_color = TITLEBAR_FOCUS_COLOR; /* M38: settings.c's WM_SETTINGS_PIPE is the only way this ever changes at runtime, same as bg_color above */
+/* M44: which wallpaper style the desktop paints. Stored and relayed, never
+ * interpreted - this process has no idea what any style looks like (see
+ * wm_settings_request_t.wallpaper and user_space/lib/wallpaper.h).
+ * Defaults to the gradient rather than to flat, because a desktop that
+ * only looks polished after you visit Settings isn't polished. */
+static uint32_t wallpaper_id = 1; /* WALLPAPER_GRADIENT */
 
 static wm_fb_info_t fb_info;
 static uint32_t *real_fb;       /* the live, scanned-out hardware framebuffer - write-only, touched only by present() */
@@ -438,6 +456,27 @@ static void blit_window(const window_t *win) {
     if (x1 <= x0) {
         return;
     }
+    /* M44: a translucent window (only the taskbar - see
+     * wm_create_request_t.translucent) is blended against whatever is
+     * already composited underneath instead of overwriting it. Same
+     * fixed-ratio integer math as the shadow and the snap preview, just
+     * with a per-pixel source instead of one color - which is exactly
+     * what costs it the memcpy below, and why it is opt-in. */
+    if (win->translucent) {
+        for (int32_t row = y0; row < y1; row++) {
+            const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y) * (uint32_t)win->buf_w;
+            uint32_t *dst = back_buf + (uint32_t)row * back_pitch_pixels;
+            for (int32_t col = x0; col < x1; col++) {
+                uint32_t src = src_row[col - win->x];
+                uint32_t under = dst[col];
+                uint32_t r = (((under >> 16) & 0xFF) * (TRANSLUCENT_DEN - TRANSLUCENT_NUM) + ((src >> 16) & 0xFF) * TRANSLUCENT_NUM) / TRANSLUCENT_DEN;
+                uint32_t g = (((under >> 8) & 0xFF) * (TRANSLUCENT_DEN - TRANSLUCENT_NUM) + ((src >> 8) & 0xFF) * TRANSLUCENT_NUM) / TRANSLUCENT_DEN;
+                uint32_t b = ((under & 0xFF) * (TRANSLUCENT_DEN - TRANSLUCENT_NUM) + (src & 0xFF) * TRANSLUCENT_NUM) / TRANSLUCENT_DEN;
+                dst[col] = (r << 16) | (g << 8) | b;
+            }
+        }
+        return;
+    }
     size_t row_bytes = (size_t)(x1 - x0) * sizeof(uint32_t);
     for (int32_t row = y0; row < y1; row++) {
         /* buf_w, not w - M30 lets w shrink below buf_w (WM_ACTION_MAXIMIZE
@@ -582,6 +621,86 @@ static void stroke_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t col
     fill_rect(x + w - 1, y, 1, h, color);
 }
 
+/* M44: the same corner shape gfx.c's rounded rects draw, through this
+ * file's clip-aware fill_rect. The inset table itself is shared
+ * (gfx_corner_inset) rather than copied - the launcher and the taskbar
+ * have to round identically or the desktop reads as two designs. */
+static int32_t rounded_row_inset(int32_t row, int32_t h) {
+    if (row < GFX_CORNER_R) {
+        return gfx_corner_inset(row);
+    }
+    if (row >= h - GFX_CORNER_R) {
+        return gfx_corner_inset(h - 1 - row);
+    }
+    return 0;
+}
+
+static void fill_rect_rounded(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
+    if (w < 2 * GFX_CORNER_R || h < 2 * GFX_CORNER_R) {
+        fill_rect(x, y, w, h, color);
+        return;
+    }
+    for (int32_t row = 0; row < h; row++) {
+        int32_t inset = rounded_row_inset(row, h);
+        fill_rect(x + inset, y + row, w - 2 * inset, 1, color);
+    }
+}
+
+static void fill_rect_rounded_blend(int32_t x, int32_t y, int32_t w, int32_t h,
+                                     uint32_t color, uint32_t num, uint32_t den) {
+    if (w < 2 * GFX_CORNER_R || h < 2 * GFX_CORNER_R) {
+        fill_rect_blend(x, y, w, h, color, num, den);
+        return;
+    }
+    for (int32_t row = 0; row < h; row++) {
+        int32_t inset = rounded_row_inset(row, h);
+        fill_rect_blend(x + inset, y + row, w - 2 * inset, 1, color, num, den);
+    }
+}
+
+/* A filled rect whose *top* corners are rounded and whose bottom ones are
+ * square - see the window-frame call site for why a window can only have
+ * the top half of the treatment. */
+static void draw_frame_top_rounded(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
+    if (w < 2 * GFX_CORNER_R || h < GFX_CORNER_R) {
+        fill_rect(x, y, w, h, color);
+        return;
+    }
+    for (int32_t row = 0; row < GFX_CORNER_R; row++) {
+        int32_t inset = gfx_corner_inset(row);
+        fill_rect(x + inset, y + row, w - 2 * inset, 1, color);
+    }
+    fill_rect(x, y + GFX_CORNER_R, w, h - GFX_CORNER_R, color);
+}
+
+/* The horizontal run each row of a rounded outline needs at either end -
+ * the same rule (and the same reason for it) as gfx.c's outline_run; see
+ * that function's comment. */
+static int32_t rounded_outline_run(int32_t row, int32_t w, int32_t h) {
+    int32_t inset = rounded_row_inset(row, h);
+    int32_t above = (row == 0) ? w : rounded_row_inset(row - 1, h);
+    int32_t below = (row == h - 1) ? w : rounded_row_inset(row + 1, h);
+    int32_t reach = above > below ? above : below;
+    if (reach > w - inset) {
+        reach = w - inset;
+    }
+    int32_t run = reach - inset;
+    return run < 1 ? 1 : run;
+}
+
+static void stroke_rect_rounded(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
+    if (w < 2 * GFX_CORNER_R || h < 2 * GFX_CORNER_R) {
+        stroke_rect(x, y, w, h, color);
+        return;
+    }
+    for (int32_t row = 0; row < h; row++) {
+        int32_t inset = rounded_row_inset(row, h);
+        int32_t run = rounded_outline_run(row, w, h);
+        fill_rect(x + inset, y + row, run, 1, color);
+        fill_rect(x + w - inset - run, y + row, run, 1, color);
+    }
+}
+
 /* Where the launcher overlay sits: horizontally centered, and a third of
  * the way down rather than dead center - the conventional placement for a
  * search box you type into, and it keeps the results list clear of the
@@ -602,8 +721,12 @@ static int32_t launcher_row_y(int32_t launcher_y, int i) {
 static void draw_launcher(void) {
     int32_t x, y;
     launcher_rect(&x, &y);
-    fill_rect(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BG);
-    stroke_rect(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BORDER);
+    /* M44: rounded and slightly translucent - enough to show that the
+     * desktop is still behind it, not enough to make the text field you
+     * type into hard to read. */
+    fill_rect_rounded_blend(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BG,
+                             LAUNCHER_OPACITY_NUM, LAUNCHER_OPACITY_DEN);
+    stroke_rect_rounded(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BORDER);
 
     /* The search field. An empty query shows a hint rather than nothing,
      * since an empty box with a caret in it says less about what to do
@@ -611,8 +734,8 @@ static void draw_launcher(void) {
     int32_t input_x = x + LAUNCHER_PAD;
     int32_t input_y = y + LAUNCHER_PAD;
     int32_t input_w = LAUNCHER_W - 2 * LAUNCHER_PAD;
-    fill_rect(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_INPUT_BG);
-    stroke_rect(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_BORDER);
+    fill_rect_rounded(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_INPUT_BG);
+    stroke_rect_rounded(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_BORDER);
     int32_t text_y = input_y + (LAUNCHER_INPUT_H - FONT_HEIGHT) / 2;
     if (launcher_query_len > 0) {
         draw_text_clipped(input_x + 6, text_y, launcher_query, LAUNCHER_TEXT, 0);
@@ -632,7 +755,7 @@ static void draw_launcher(void) {
         }
         int32_t ry = launcher_row_y(y, i);
         if (m == launcher_selected) {
-            fill_rect(x + LAUNCHER_PAD / 2, ry, LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H, LAUNCHER_SEL_BG);
+            fill_rect_rounded(x + LAUNCHER_PAD / 2, ry, LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H, LAUNCHER_SEL_BG);
         }
         draw_text_clipped(x + LAUNCHER_PAD, ry + 2, launcher_entries[launcher_matches[m]],
                            m == launcher_selected ? LAUNCHER_TEXT : LAUNCHER_ROW_FG,
@@ -679,9 +802,16 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
         uint32_t titlebar_color = (i == focused_window) ? accent_color : TITLEBAR_COLOR;
         fill_rect_shadow(win->x - BORDER + SHADOW_OFFSET, win->y - TITLEBAR_H - BORDER + SHADOW_OFFSET,
                           win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER);
-        fill_rect(win->x - BORDER, win->y - TITLEBAR_H - BORDER,
-                  win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER, BORDER_COLOR);
-        fill_rect(win->x, win->y - TITLEBAR_H, win->w, TITLEBAR_H, titlebar_color);
+        /* M44: the frame's *top* corners are rounded, its bottom ones are
+         * not. Only the top is safe to round without alpha: the content
+         * area is a straight memcpy of the client's own buffer (see
+         * blit_window), so a rounded bottom corner would just show that
+         * client's square pixels poking through the curve. Rounding the
+         * titlebar to match keeps the two curves concentric rather than
+         * leaving a square bar inside a curved border. */
+        draw_frame_top_rounded(win->x - BORDER, win->y - TITLEBAR_H - BORDER,
+                                win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER, BORDER_COLOR);
+        draw_frame_top_rounded(win->x, win->y - TITLEBAR_H, win->w, TITLEBAR_H, titlebar_color);
         char fitted_title[WM_TITLE_MAX];
         fit_title(win, fitted_title);
         draw_text_clipped(win->x + TITLE_MARGIN, win->y - TITLEBAR_H + (TITLEBAR_H - FONT_HEIGHT) / 2,
@@ -1082,6 +1212,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     win->buf_h = (int32_t)height;
     win->pixels = (uint32_t *)vaddr;
     win->evt_write_fd = evt_write_fd;
+    win->translucent = req.translucent;
     win->is_desktop = req.desktop;
     win->minimized = 0;
     win->maximized = 0;
@@ -1454,7 +1585,27 @@ static void accept_pending_settings(int settings_read_fd) {
     }
     bg_color = req.bg_color;
     accent_color = req.accent_color;
+    wallpaper_id = req.wallpaper;
     dirty = 1;
+}
+
+/* M44: the read side of the same three settings - see wm.h's own note on
+ * why a one-way channel stopped being enough once the desktop, not the
+ * compositor, became the thing that paints the background. Same
+ * poll-then-read-then-reply shape as accept_pending_query. */
+static void accept_pending_settings_query(int query_read_fd, int query_resp_write_fd) {
+    if (sys_pipe_poll(query_read_fd) < 1) {
+        return;
+    }
+    uint8_t ping;
+    if (read_exact(query_read_fd, &ping, sizeof(ping)) != (long)sizeof(ping)) {
+        return;
+    }
+    wm_settings_request_t resp;
+    resp.bg_color = bg_color;
+    resp.accent_color = accent_color;
+    resp.wallpaper = wallpaper_id;
+    sys_write(query_resp_write_fd, &resp, sizeof(resp));
 }
 
 /* M40: the plain "which window is under the cursor" hit-test, lifted out
@@ -1899,8 +2050,12 @@ int main(void) {
     int query_resp_fds[2];
     int action_fds[2];
     int settings_fds[2];
+    int settings_query_fds[2];
+    int settings_query_resp_fds[2];
     if (sys_pipe_open(WM_QUERY_PIPE, query_fds) != 0 || sys_pipe_open(WM_QUERY_RESP_PIPE, query_resp_fds) != 0 ||
-        sys_pipe_open(WM_ACTION_PIPE, action_fds) != 0 || sys_pipe_open(WM_SETTINGS_PIPE, settings_fds) != 0) {
+        sys_pipe_open(WM_ACTION_PIPE, action_fds) != 0 || sys_pipe_open(WM_SETTINGS_PIPE, settings_fds) != 0 ||
+        sys_pipe_open(WM_SETTINGS_QUERY_PIPE, settings_query_fds) != 0 ||
+        sys_pipe_open(WM_SETTINGS_QUERY_RESP_PIPE, settings_query_resp_fds) != 0) {
         sys_exit(1);
     }
     /* Every message this process (or any client) prints to stdout goes
@@ -1924,6 +2079,7 @@ int main(void) {
         accept_pending_query(query_fds[0], query_resp_fds[1]);
         accept_pending_action(action_fds[0]);
         accept_pending_settings(settings_fds[0]);
+        accept_pending_settings_query(settings_query_fds[0], settings_query_resp_fds[1]);
         reap_dead_clients();
         handle_mouse();
         handle_keyboard();

@@ -27,7 +27,7 @@ static long read_exact(int fd, void *buf, size_t len) {
     return (long)got;
 }
 
-static int connect_common(uint32_t width, uint32_t height, uint8_t panel, uint8_t desktop, uint8_t confirm_close, const char *title, wm_window_t *out) {
+static int connect_common(uint32_t width, uint32_t height, uint8_t panel, uint8_t translucent, uint8_t desktop, uint8_t confirm_close, const char *title, wm_window_t *out) {
     int req_fds[2];
     int resp_fds[2];
     if (sys_pipe_open(WM_REQUEST_PIPE, req_fds) != 0 || sys_pipe_open(WM_RESPONSE_PIPE, resp_fds) != 0) {
@@ -38,6 +38,7 @@ static int connect_common(uint32_t width, uint32_t height, uint8_t panel, uint8_
     req.width = width;
     req.height = height;
     req.panel = panel;
+    req.translucent = translucent;
     req.desktop = desktop;
     req.confirm_close = confirm_close;
     req.client_pid = (int32_t)sys_getpid();
@@ -78,19 +79,22 @@ static int connect_common(uint32_t width, uint32_t height, uint8_t panel, uint8_
 }
 
 int wm_connect(uint32_t width, uint32_t height, const char *title, wm_window_t *out) {
-    return connect_common(width, height, WM_PANEL_NONE, 0, 0, title, out);
+    return connect_common(width, height, WM_PANEL_NONE, 0, 0, 0, title, out);
 }
 
 int wm_connect_panel(uint32_t height, wm_window_t *out) {
-    return connect_common(0, height, WM_PANEL_BOTTOM, 0, 0, "", out);
+    /* M44: the taskbar is the one translucent surface in this system - see
+     * wm_create_request_t.translucent for why that isn't simply on for
+     * everything. */
+    return connect_common(0, height, WM_PANEL_BOTTOM, 1, 0, 0, "", out);
 }
 
 int wm_connect_desktop(wm_window_t *out) {
-    return connect_common(0, 0, WM_PANEL_NONE, 1, 0, "", out);
+    return connect_common(0, 0, WM_PANEL_NONE, 0, 1, 0, "", out);
 }
 
 int wm_connect_confirm_close(uint32_t width, uint32_t height, const char *title, wm_window_t *out) {
-    return connect_common(width, height, WM_PANEL_NONE, 0, 1, title, out);
+    return connect_common(width, height, WM_PANEL_NONE, 0, 0, 1, title, out);
 }
 
 int wm_wait_event(wm_window_t *win, wm_event_t *out) {
@@ -160,8 +164,10 @@ int wm_toggle_launcher(void) {
 }
 
 static int settings_fds[2] = {-1, -1};
+static int settings_query_fds[2] = {-1, -1};
+static int settings_query_resp_fds[2] = {-1, -1};
 
-int wm_set_theme(uint32_t bg_color, uint32_t accent_color) {
+int wm_set_theme(uint32_t bg_color, uint32_t accent_color, uint32_t wallpaper) {
     if (settings_fds[0] < 0) {
         if (sys_pipe_open(WM_SETTINGS_PIPE, settings_fds) != 0) {
             return -1;
@@ -170,5 +176,20 @@ int wm_set_theme(uint32_t bg_color, uint32_t accent_color) {
     wm_settings_request_t req;
     req.bg_color = bg_color;
     req.accent_color = accent_color;
+    req.wallpaper = wallpaper;
     return sys_write(settings_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
+}
+
+int wm_query_settings(wm_settings_request_t *out) {
+    if (settings_query_fds[0] < 0) {
+        if (sys_pipe_open(WM_SETTINGS_QUERY_PIPE, settings_query_fds) != 0 ||
+            sys_pipe_open(WM_SETTINGS_QUERY_RESP_PIPE, settings_query_resp_fds) != 0) {
+            return -1;
+        }
+    }
+    uint8_t ping = 1;
+    if (sys_write(settings_query_fds[1], &ping, sizeof(ping)) != (long)sizeof(ping)) {
+        return -1;
+    }
+    return read_exact(settings_query_resp_fds[0], out, sizeof(*out)) == (long)sizeof(*out) ? 0 : -1;
 }

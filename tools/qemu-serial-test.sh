@@ -123,6 +123,7 @@ REQUIRED_MARKERS=(
   "[wm38] drop shadow + WM_SETTINGS_PIPE accent-color self-test passed"
   "[m42] bottom taskbar (Start button, running-app button, tray, maximize clamp, launcher toggle) self-test passed"
   "[m43] window snapping (left/right half, buffer-clamped) and the launcher overlay self-test passed"
+  "[m44] wallpaper gradient, taskbar translucency over it, and the settings query round trip self-test passed"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

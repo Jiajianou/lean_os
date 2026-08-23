@@ -69,11 +69,21 @@ int wm_send_action(int32_t window_id, uint32_t action);
  * is the only caller. */
 int wm_toggle_launcher(void);
 
-/* M33/M38: sets the compositor's desktop background and focused-titlebar
- * accent colors together (system_api/include/wm.h's WM_SETTINGS_PIPE,
- * wm_settings_request_t) - the compositor's only two global, non-per-
- * window settings. Returns 0, or -1 on failure. */
-int wm_set_theme(uint32_t bg_color, uint32_t accent_color);
+/* M33/M38/M44: sets the compositor's three global, non-per-window
+ * settings together (system_api/include/wm.h's WM_SETTINGS_PIPE,
+ * wm_settings_request_t) - background color, focused-titlebar accent, and
+ * which wallpaper style the desktop paints. All three at once because a
+ * caller that sent only the one control it just touched would reset the
+ * other two to whatever it happened to believe they were; settings.c
+ * queries first (wm_query_settings) so what it sends back is the real
+ * current state with one field changed. Returns 0, or -1 on failure. */
+int wm_set_theme(uint32_t bg_color, uint32_t accent_color, uint32_t wallpaper);
+
+/* M44: the read side of the same three settings. desktop_icons.c polls it
+ * (it paints the wallpaper, so it has to be told which one) and
+ * settings.c calls it once at startup so its own controls open showing
+ * the real current choice. Returns 0, or -1 on failure. */
+int wm_query_settings(wm_settings_request_t *out);
 
 /* Blocks until the compositor routes this window an event, then fills
  * *out. Returns 0 (never fails once connected - the event pipe only ever

@@ -53,10 +53,76 @@ ICONS = [
     ("Paint", "gui_paint", 506),
 ]
 
-DESKTOP_BG = 0x203040        # desktop_icons.c BG_COLOR
 ICON_BOX = 0x4C99E6          # desktop_icons.c ICON_BOX_COLOR
 CTX_MENU_BG = 0x243040       # desktop_icons.c CTX_MENU_BG
 EMPTY_DESKTOP = (500, 500)   # far from every icon and every cascaded window
+
+# M44: the desktop is a wallpaper gradient rather than a flat color, so
+# "is this bare desktop" is now a question about the row as well as the
+# pixel. user_space/lib/wallpaper.c's WALLPAPER_GRADIENT over the
+# compositor's DEFAULT_BG_COLOR, which is what a freshly booted desktop
+# shows - mirrored here the same way every other geometry constant in this
+# file is, and computed rather than tabulated so a change to the ramp
+# shows up as a mismatch naming both numbers.
+SCREEN_H = 768
+WALLPAPER_BASE = 0x1A1A2E    # compositor.c DEFAULT_BG_COLOR
+WALLPAPER_TOP_PCT = 155      # wallpaper.c STYLES[WALLPAPER_GRADIENT]
+WALLPAPER_BOTTOM_PCT = 60
+
+
+def _scale(color, pct):
+    out = 0
+    for shift in (16, 8, 0):
+        out |= min(255, ((color >> shift) & 0xFF) * pct // 100) << shift
+    return out
+
+
+def _trunc_div(a, b):
+    """C's integer division, which truncates toward zero - Python's // does
+    not, and the gradient ramps downward so the operands really are
+    negative."""
+    q = abs(a) // abs(b)
+    return q if (a < 0) == (b < 0) else -q
+
+
+def desktop_px(y, base=WALLPAPER_BASE):
+    """The wallpaper's color at row y - what "bare desktop" means now."""
+    top = _scale(base, WALLPAPER_TOP_PCT)
+    bottom = _scale(base, WALLPAPER_BOTTOM_PCT)
+    out = 0
+    for shift in (16, 8, 0):
+        a = (top >> shift) & 0xFF
+        b = (bottom >> shift) & 0xFF
+        out |= (a + _trunc_div((b - a) * y, SCREEN_H - 1)) << shift
+    return out
+
+
+DESKTOP_BG = desktop_px(EMPTY_DESKTOP[1])
+
+# M44: the taskbar and the launcher overlay are both blended over whatever
+# is composited underneath them, which in every test here is the wallpaper.
+TRANSLUCENT_NUM, TRANSLUCENT_DEN = 3, 4          # compositor.c, for a translucent window
+LAUNCHER_OPACITY_NUM, LAUNCHER_OPACITY_DEN = 4, 5
+
+
+def blend(under, over, num, den):
+    """compositor.c's fill_rect_blend, in Python - integer, same rounding.
+    Recomputed here rather than tabulated as hex literals so a change to a
+    ratio shows up as a mismatch naming both numbers, not as an
+    unexplained wrong color."""
+    out = 0
+    for shift in (16, 8, 0):
+        u = (under >> shift) & 0xFF
+        o = (over >> shift) & 0xFF
+        out |= ((u * (den - num) + o * num) // den) << shift
+    return out
+
+
+def panel_px(raw, y):
+    """A taskbar color as it actually reaches the screen: M44 made the bar
+    translucent, so what desktop_shell.c painted is mixed with the
+    wallpaper row underneath it."""
+    return blend(desktop_px(y), raw, TRANSLUCENT_NUM, TRANSLUCENT_DEN)
 
 # text_editor.c: its File menu is drawn in the editor's own window again
 # (M42 - M41 had it in a shared top bar), one FONT_HEIGHT row at the top,
@@ -75,24 +141,44 @@ EDITOR_MENU_X = 4            # FILE_MENU_X
 # rule), so a button can never be covered by the very windows it is
 # reporting - which a probe placed on the desktop absolutely can be, by
 # the next window in the cascade.
-PANEL_BG = 0x181828
-SLOT_BG = 0x263447           # RUNNING_SLOT_BG - running, unfocused
-SLOT_HOVER_BG = 0x365070     # RUNNING_SLOT_HOVER_BG - cursor over it
-SLOT_FOCUS_BG = 0x2E4A63     # RUNNING_SLOT_FOCUS_BG
-SLOT_MIN_BG = 0x352A20       # RUNNING_SLOT_MIN_BG - minimized
+FONT_H = 16
+PANEL_TOP = SCREEN_H - 32
+BTN_Y = 4
+BTN_H = 24
+SLOT_W = 96
+SLOT_GAP = 4
+START_X = 4
+START_W = 72
+SLOTS_X = START_X + START_W + 8
+TRAY_W = 92
+
+# Every button in the bar is read at one of two rows, so the blend is
+# resolved once here rather than at each call site.
+PANEL_PROBE_Y = PANEL_TOP + 2       # the margin strip above the button row
+BTN_PROBE_Y = PANEL_TOP + BTN_Y + 12  # the middle of any button
+
+PANEL_BG = panel_px(0x181828, PANEL_PROBE_Y)
+SLOT_BG = panel_px(0x263447, BTN_PROBE_Y)        # RUNNING_SLOT_BG - running, unfocused
+SLOT_HOVER_BG = panel_px(0x365070, BTN_PROBE_Y)  # RUNNING_SLOT_HOVER_BG - cursor over it
+SLOT_FOCUS_BG = panel_px(0x2E4A63, BTN_PROBE_Y)  # RUNNING_SLOT_FOCUS_BG
+SLOT_MIN_BG = panel_px(0x352A20, BTN_PROBE_Y)    # RUNNING_SLOT_MIN_BG - minimized
 SLOT_COLORS = (SLOT_BG, SLOT_HOVER_BG, SLOT_FOCUS_BG, SLOT_MIN_BG)
 
-START_BG = 0x243447          # START_BG - Start button at rest
-START_HOVER_BG = 0x365070    # START_HOVER_BG
-START_PRESS_BG = 0x4C99E6    # START_PRESS_BG - the click flash
+START_PROBE = (71, PANEL_TOP + 6)   # inside the Start button's fill, past its glyph and label
+START_CLICK = (40, PANEL_TOP + BTN_Y + BTN_H // 2)
+START_BG = panel_px(0x243447, START_PROBE[1])        # at rest
+START_HOVER_BG = panel_px(0x365070, START_PROBE[1])
+START_PRESS_BG = panel_px(0x4C99E6, START_PROBE[1])  # the click flash
 START_COLORS = (START_BG, START_HOVER_BG, START_PRESS_BG)
-TRAY_SEP = 0x303C4E          # TRAY_SEP_COLOR
+
+TRAY_SEP_PROBE = (1024 - TRAY_W, PANEL_TOP + 14)
+TRAY_SEP = panel_px(0x303C4E, TRAY_SEP_PROBE[1])     # TRAY_SEP_COLOR
 
 # compositor.c's launcher overlay (M42's surface, M43's contents): 480x320,
 # horizontally centered and a third of the way down, with a search field
 # LAUNCHER_PAD in from the top and the result rows LAUNCHER_LIST_Y below
 # that, LAUNCHER_ROW_H apart.
-LAUNCHER_BG = 0x1C2233       # LAUNCHER_BG
+LAUNCHER_BG_RAW = 0x1C2233   # LAUNCHER_BG, before M44's translucency
 LAUNCHER_SEL_BG = 0x335577   # LAUNCHER_SEL_BG - the selected result's fill
 LAUNCHER_W, LAUNCHER_H = 480, 320
 LAUNCHER_X = (1024 - LAUNCHER_W) // 2
@@ -103,48 +189,18 @@ LAUNCHER_ROW_H = 20
 # tests, so it reads flat overlay background - and far right of any
 # filename text.
 LAUNCHER_PROBE = (LAUNCHER_X + 428, LAUNCHER_Y + LAUNCHER_LIST_Y + 5 * LAUNCHER_ROW_H + 10)
+LAUNCHER_BG = blend(desktop_px(LAUNCHER_PROBE[1]), LAUNCHER_BG_RAW,
+                    LAUNCHER_OPACITY_NUM, LAUNCHER_OPACITY_DEN)
 
 # compositor.c's snap preview: SNAP_PREVIEW_NUM/DEN of the accent color
 # blended over whatever is already composited underneath.
 ACCENT = 0x4C99E6            # TITLEBAR_FOCUS_COLOR, and the preview's color
 SNAP_PREVIEW_NUM, SNAP_PREVIEW_DEN = 1, 4
 
-
-def blend(under, over, num=SNAP_PREVIEW_NUM, den=SNAP_PREVIEW_DEN):
-    """compositor.c's fill_rect_blend, in Python - integer, same rounding.
-    Recomputed here rather than hardcoded as a hex literal so a change to
-    the ratio shows up as a mismatch naming both numbers, not as an
-    unexplained wrong color."""
-    out = 0
-    for shift in (16, 8, 0):
-        u = (under >> shift) & 0xFF
-        o = (over >> shift) & 0xFF
-        out |= ((u * (den - num) + o * num) // den) << shift
-    return out
-
-
 def launcher_row_probe(i):
     """Inside result row i's selection fill, right of every filename this
     filesystem has."""
     return (LAUNCHER_X + 428, LAUNCHER_Y + LAUNCHER_LIST_Y + i * LAUNCHER_ROW_H + 10)
-
-FONT_H = 16
-PANEL_TOP = 768 - 32
-BTN_Y = 4
-BTN_H = 24
-SLOT_W = 96
-SLOT_GAP = 4
-START_X = 4
-START_W = 72
-SLOTS_X = START_X + START_W + 8
-TRAY_W = 92
-TRAY_SEP_PROBE = (1024 - TRAY_W, PANEL_TOP + 14)
-
-# Inside the Start button's fill, past its 2x2 tile glyph (local x 12..24)
-# and its "Start" label (local x 28..68), above the label's own rows.
-START_PROBE = (71, PANEL_TOP + 6)
-START_CLICK = (40, PANEL_TOP + BTN_Y + BTN_H // 2)
-
 
 def slot_probe(i):
     """Where to *read* running-app button i's fill - inside it, clear of
@@ -253,7 +309,8 @@ def desktop_is_painted(shot):
     nowhere at all."""
     return (shot.px(*EMPTY_DESKTOP) == DESKTOP_BG and
             shot.px(76, 76) == ICON_BOX and
-            shot.px(512, PANEL_TOP + 2) == PANEL_BG and
+            shot.px(512, PANEL_PROBE_Y) == PANEL_BG and
+            shot.px(*TRAY_SEP_PROBE) == TRAY_SEP and
             shot.px(*START_PROBE) in START_COLORS)
 
 
@@ -371,13 +428,13 @@ def test_titlebar_drag_moves_window(m):
     m.double_click(ICON_X, ICONS[4][2])  # Clock
     before = wait_for_windows(m, 1)
     x, y = app_origin(FIRST_APP_IDX)
-    check(before.px(x + 4, y - 8) != DESKTOP_BG,
+    check(before.px(x + 4, y - 8) != desktop_px(y - 8),
           "Clock did not appear at the expected cascade position")
 
     m.drag(x + 100, y - 8, x + 300, y + 120)
-    after = wait_for(m, lambda s: s.px(x + 4, y - 8) == DESKTOP_BG,
+    after = wait_for(m, lambda s: s.px(x + 4, y - 8) == desktop_px(y - 8),
                      "window still at its original position after a titlebar drag")
-    check(after.px(x + 204, y + 120) != DESKTOP_BG,
+    check(after.px(x + 204, y + 120) != desktop_px(y + 120),
           "window did not appear at the drag destination")
 
 
@@ -469,7 +526,7 @@ def test_start_button_opens_launcher(m):
     wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG,
              "clicking Start did not open the launcher overlay")
     m.click()
-    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == DESKTOP_BG,
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == desktop_px(LAUNCHER_PROBE[1]),
              "clicking Start again did not close the launcher overlay")
 
 
@@ -593,7 +650,7 @@ def test_launcher_escape_dismisses(m):
     wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG,
              "Ctrl+Space did not open the launcher")
     m.sendkey("esc")
-    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == DESKTOP_BG,
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == desktop_px(LAUNCHER_PROBE[1]),
              "Escape did not dismiss the launcher")
     check(count_app_windows(m.screenshot()) == 0,
           "dismissing the launcher with Escape launched something")
@@ -622,14 +679,15 @@ def test_snap_drag_to_edge(m):
     # x:[512, 716), y:[0, 112). (600, 60) is inside it and nowhere near
     # the dragged window, which is clamped to the far right at y ~ 410.
     shot = m.screenshot()
-    check(shot.px(600, 60) == blend(DESKTOP_BG, ACCENT),
+    expected = blend(desktop_px(60), ACCENT, SNAP_PREVIEW_NUM, SNAP_PREVIEW_DEN)
+    check(shot.px(600, 60) == expected,
           "no snap preview while dragging into the right edge (got 0x%06X at (600,60), "
-          "expected 0x%06X)" % (shot.px(600, 60), blend(DESKTOP_BG, ACCENT)))
+          "expected 0x%06X)" % (shot.px(600, 60), expected))
 
     m.release()
     shot = wait_for(m, lambda s: s.px(600, 12) == ACCENT,
                     "releasing at the right edge did not snap the window to the right half")
-    check(shot.px(200, 12) == DESKTOP_BG,
+    check(shot.px(200, 12) == desktop_px(12),
           "the snapped window is not confined to the right half")
 
 

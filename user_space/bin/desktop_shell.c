@@ -60,7 +60,8 @@
 #define SLOT_H            BTN_H
 #define SLOT_GAP          4
 #define SLOTS_X           (START_X + START_W + 8)
-#define LABEL_MAX         11 /* (SLOT_W - 2px left pad - 2px right pad) / 8px per glyph, rounded down */
+#define LABEL_PAD         6  /* M44: was 2 - rounded corners need the label held further off the edge, and 6 lines it up with the Start button's own glyph inset */
+#define LABEL_MAX         10 /* (SLOT_W - LABEL_PAD either side) / 8px per glyph, rounded down */
 #define MAX_RUNNING_SLOTS  WM_MAX_ROUTABLE_WINDOWS
 
 /* System tray, right-aligned: a separator, a couple of status indicators,
@@ -199,8 +200,8 @@ static void draw_start_button(wm_window_t *self, int pressed) {
     uint32_t bg = pressed ? START_PRESS_BG
                           : (hovered == HOVER_START ? START_HOVER_BG : START_BG);
     uint32_t glyph = pressed ? START_PRESS_GLYPH_FG : START_GLYPH_FG;
-    gfx_fill_rect(&self->gfx, START_X, BTN_Y, START_W, BTN_H, bg);
-    gfx_draw_rect(&self->gfx, START_X, BTN_Y, START_W, BTN_H, SLOT_BORDER_COLOR);
+    gfx_fill_rect_rounded(&self->gfx, START_X, BTN_Y, START_W, BTN_H, bg);
+    gfx_draw_rect_rounded(&self->gfx, START_X, BTN_Y, START_W, BTN_H, SLOT_BORDER_COLOR);
 
     int32_t gy = BTN_Y + (BTN_H - (2 * START_TILE + START_TILE_GAP)) / 2;
     for (int row = 0; row < 2; row++) {
@@ -248,9 +249,9 @@ static void redraw(wm_window_t *self) {
                                       : (slot->focused ? RUNNING_SLOT_FOCUS_BG
                                                        : (i == hovered ? RUNNING_SLOT_HOVER_BG : RUNNING_SLOT_BG));
         uint32_t border = slot->focused ? RUNNING_SLOT_FOCUS_BORDER : SLOT_BORDER_COLOR;
-        gfx_fill_rect(&self->gfx, slot->x, BTN_Y, slot->w, SLOT_H, bg);
-        gfx_draw_rect(&self->gfx, slot->x, BTN_Y, slot->w, SLOT_H, border);
-        gfx_draw_text(&self->gfx, slot->x + 2, BTN_Y + 4, slot->name, LABEL_COLOR);
+        gfx_fill_rect_rounded(&self->gfx, slot->x, BTN_Y, slot->w, SLOT_H, bg);
+        gfx_draw_rect_rounded(&self->gfx, slot->x, BTN_Y, slot->w, SLOT_H, border);
+        gfx_draw_text(&self->gfx, slot->x + LABEL_PAD, BTN_Y + 4, slot->name, LABEL_COLOR);
     }
 
     draw_tray(self);
