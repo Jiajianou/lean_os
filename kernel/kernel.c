@@ -1054,6 +1054,32 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         klog_puts("[wm30] window chrome (maximize/restore/minimize/close via WM_ACTION_PIPE) self-test passed (6/6 checks matched).\n\n");
     }
 
+    /* M32 self-test: the clipboard syscalls (SYS_clipboard_set/get) round-
+     * trip real bytes through the exact same path gui_terminal.c's
+     * Ctrl+C/V uses - no process spawning needed, both are plain
+     * syscalls callable straight from kernel context, the same shape as
+     * M14's own SYS_pipe self-test above. What this can't prove
+     * headlessly is Ctrl+C/V (or Alt+Tab, compositor.c's other M32
+     * addition) actually reaching a client from a real key chord - the
+     * same manual/interactive boundary M18/M21/M22/M31 already drew for
+     * every other modifier- or click-driven behavior in this project. */
+    {
+        const char msg[] = "clipboard round trip";
+        do_syscall(SYS_clipboard_set, (uint64_t)msg, sizeof(msg) - 1, 0);
+        char readback[64];
+        long n = do_syscall(SYS_clipboard_get, (uint64_t)readback, sizeof(readback), 0);
+        int mismatch = (n != (long)(sizeof(msg) - 1));
+        for (long i = 0; !mismatch && i < n; i++) {
+            if (readback[i] != msg[i]) {
+                mismatch = 1;
+            }
+        }
+        if (mismatch) {
+            panic("M32 clipboard self-test: SYS_clipboard_get did not return what SYS_clipboard_set stored");
+        }
+        klog_puts("[clipboard] SYS_clipboard_set/get self-test passed.\n\n");
+    }
+
     /* Stretch goal: SMP. Deliberately brought up *after* every M-numbered
      * self-test above, not right after M7's scheduler one - several of
      * those (M20-M22's compositor/client tests especially) rely on

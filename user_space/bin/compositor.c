@@ -942,9 +942,42 @@ static void handle_mouse(void) {
     }
 }
 
+/* M32: cycles focus forward through every alive ordinary (non-panel,
+ * non-desktop) window, un-minimizing the target the same way a titlebar/
+ * panel WM_ACTION_FOCUS click already does - reuses apply_window_action
+ * rather than duplicating its focus/un-minimize logic. `focused_window`
+ * may be -1 (nothing focused) going in; `(start + step) % window_count`
+ * still lands correctly on 0 for step 1 in that case. A no-op (focuses
+ * itself back) if there's only one eligible window - harmless, set_focus
+ * already no-ops on a same-window call. */
+static void alt_tab_cycle(void) {
+    if (window_count == 0) {
+        return;
+    }
+    for (int step = 1; step <= window_count; step++) {
+        int idx = (focused_window + step) % window_count;
+        if (idx < 0) {
+            idx += window_count;
+        }
+        if (windows[idx].alive && !windows[idx].is_panel && !windows[idx].is_desktop) {
+            apply_window_action(idx, WM_ACTION_FOCUS);
+            return;
+        }
+    }
+}
+
 static void handle_keyboard(void) {
     char ch;
     while (sys_kbd_read(&ch)) {
+        /* M32: Alt+Tab is intercepted here, before ever reaching a
+         * client - a real WM shortcut, not something any app's own input
+         * handling should see (or could even tell apart from a plain Tab
+         * keypress on its own - see SYS_kbd_modifiers' doc comment). A
+         * plain Tab (Alt not held) still forwards exactly as before. */
+        if (ch == '\t' && (sys_kbd_modifiers() & KBD_MOD_ALT)) {
+            alt_tab_cycle();
+            continue;
+        }
         if (focused_window >= 0) {
             wm_event_t ev = {0};
             ev.type = WM_EVENT_KEY;

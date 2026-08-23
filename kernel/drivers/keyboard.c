@@ -5,12 +5,15 @@
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/isr.h"
 #include "arch/x86_64/pic.h"
+#include "input.h" /* system_api/include/input.h - KBD_MOD_* bits, M32 */
 
 #define PS2_DATA_PORT 0x60
 #define KEYBOARD_IRQ  1
 
 #define SCANCODE_LSHIFT       0x2A
 #define SCANCODE_RSHIFT       0x36
+#define SCANCODE_LCTRL        0x1D /* M32 - see keyboard_modifiers */
+#define SCANCODE_LALT         0x38
 #define SCANCODE_RELEASE_BIT  0x80
 
 /* Scancode set 1 make codes, index = scancode, 0 = no ASCII mapping
@@ -39,6 +42,8 @@ static volatile uint32_t buf_head; /* next slot to write */
 static volatile uint32_t buf_tail; /* next slot to read */
 
 static volatile int shift_held;
+static volatile int ctrl_held; /* M32 */
+static volatile int alt_held;  /* M32 */
 
 static void buffer_push(char c) {
     uint32_t next = (buf_head + 1) % BUFFER_SIZE;
@@ -59,6 +64,14 @@ static void keyboard_irq(isr_regs_t *regs) {
         shift_held = !released;
         return;
     }
+    if (code == SCANCODE_LCTRL) {
+        ctrl_held = !released;
+        return;
+    }
+    if (code == SCANCODE_LALT) {
+        alt_held = !released;
+        return;
+    }
     if (released || code >= sizeof(unshifted_table)) {
         return;
     }
@@ -73,8 +86,24 @@ void keyboard_init(void) {
     buf_head = 0;
     buf_tail = 0;
     shift_held = 0;
+    ctrl_held = 0;
+    alt_held = 0;
     irq_register_handler(KEYBOARD_IRQ, keyboard_irq);
     pic_clear_mask(KEYBOARD_IRQ);
+}
+
+int keyboard_modifiers(void) {
+    int mods = 0;
+    if (ctrl_held) {
+        mods |= KBD_MOD_CTRL;
+    }
+    if (alt_held) {
+        mods |= KBD_MOD_ALT;
+    }
+    if (shift_held) {
+        mods |= KBD_MOD_SHIFT;
+    }
+    return mods;
 }
 
 int keyboard_read(void) {

@@ -9,6 +9,7 @@
 #include "drivers/pit.h"
 #include "fs/leanfs.h"
 #include "fs/vfs.h"
+#include "ipc/clipboard.h"
 #include "ipc/pipe.h"
 #include "ipc/shm.h"
 #include "mm/heap.h"
@@ -634,6 +635,42 @@ static long sys_pipe_reset(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, u
     return 0;
 }
 
+/* M32: see SYS_kbd_modifiers' own doc comment (system_api/include/
+ * syscall.h) - a live peek, not a buffered/consumed read, so it takes no
+ * arguments and every caller sees the current physical state. */
+static long sys_kbd_modifiers(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    return keyboard_modifiers();
+}
+
+static long sys_clipboard_set(uint64_t buf, uint64_t len, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (buf == 0) {
+        return -1;
+    }
+    clipboard_set((const void *)buf, (size_t)len);
+    return 0;
+}
+
+static long sys_clipboard_get(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (buf == 0) {
+        return -1;
+    }
+    return (long)clipboard_get((void *)buf, (size_t)maxlen);
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -661,6 +698,9 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_yield] = sys_yield,
     [SYS_task_alive] = sys_task_alive,
     [SYS_pipe_reset] = sys_pipe_reset,
+    [SYS_kbd_modifiers] = sys_kbd_modifiers,
+    [SYS_clipboard_set] = sys_clipboard_set,
+    [SYS_clipboard_get] = sys_clipboard_get,
 };
 
 void syscall_handler(isr_regs_t *regs) {

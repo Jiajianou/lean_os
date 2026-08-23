@@ -207,7 +207,35 @@ int main(void) {
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_KEY && running_pid < 0) {
-                handle_key(ev.ch);
+                /* M32: Ctrl+C/V is checked before ordinary line-editing -
+                 * the decoded character alone ('c'/'v') can't tell a
+                 * chord from a plain keypress, so SYS_kbd_modifiers'
+                 * *current* held state is what actually distinguishes
+                 * them (see its own doc comment for why that's "good
+                 * enough" rather than exact: modifier and character
+                 * arrive as two separate reads of two separate pieces of
+                 * live/buffered state, not one atomic event, but Ctrl is
+                 * physically held for the whole chord in practice). Copy
+                 * targets the current input line (there's no text
+                 * selection UI to copy *from* instead); paste inserts at
+                 * the end of it, silently dropping whatever wouldn't fit -
+                 * same truncation behavior ordinary typing already has. */
+                long mods = sys_kbd_modifiers();
+                if ((mods & KBD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
+                    sys_clipboard_set(line_buf, (size_t)line_len);
+                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'v' || ev.ch == 'V')) {
+                    char paste_buf[LINE_MAX];
+                    long n = sys_clipboard_get(paste_buf, sizeof(paste_buf));
+                    if (n > (long)sizeof(paste_buf)) {
+                        n = (long)sizeof(paste_buf);
+                    }
+                    for (long i = 0; i < n && line_len < LINE_MAX - 1; i++) {
+                        line_buf[line_len++] = paste_buf[i];
+                        putc_term(paste_buf[i]);
+                    }
+                } else {
+                    handle_key(ev.ch);
+                }
                 changed = 1;
             }
         }

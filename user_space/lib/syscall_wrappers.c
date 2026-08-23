@@ -117,6 +117,18 @@ long sys_yield(void) {
     return do_syscall(SYS_yield, 0, 0, 0);
 }
 
+long sys_kbd_modifiers(void) {
+    return do_syscall(SYS_kbd_modifiers, 0, 0, 0);
+}
+
+long sys_clipboard_set(const void *buf, size_t len) {
+    return do_syscall(SYS_clipboard_set, (long)buf, (long)len, 0);
+}
+
+long sys_clipboard_get(void *buf, size_t maxlen) {
+    return do_syscall(SYS_clipboard_get, (long)buf, (long)maxlen, 0);
+}
+
 long sys_task_alive(long pid) {
     return do_syscall(SYS_task_alive, pid, 0, 0);
 }

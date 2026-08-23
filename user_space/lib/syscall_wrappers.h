@@ -139,3 +139,17 @@ long sys_task_alive(long pid);
  * undelivered bytes can't be misdelivered. fd must be either end of a
  * pipe. Returns 0, or -1 if fd isn't a pipe fd. */
 long sys_pipe_reset(int fd);
+
+/* M32: live held/not-held Ctrl/Alt/Shift state (system_api/include/
+ * input.h's KBD_MOD_* bits) - not the buffered ASCII stream SYS_kbd_read/
+ * SYS_read already deliver, which can't distinguish a plain 'c' from a
+ * Ctrl+C chord. */
+long sys_kbd_modifiers(void);
+
+/* M32: the single kernel-owned global clipboard (kernel/ipc/clipboard.h).
+ * sys_clipboard_set replaces its contents (truncated to CLIPBOARD_MAX,
+ * not an error); sys_clipboard_get copies up to maxlen bytes into buf and
+ * returns the clipboard's real length (may exceed maxlen - caller's
+ * responsibility to size its buffer, same contract as sys_readfile). */
+long sys_clipboard_set(const void *buf, size_t len);
+long sys_clipboard_get(void *buf, size_t maxlen);

@@ -616,12 +616,45 @@ app baseline toward something worth calling a usable OS.
       still passes with zero behavior change to anything upstream of
       this.
 
-## M32 — Desktop & input polish
+## M32 — Desktop & input polish ✅
 
-- [ ] Multiple desktop icons with real grid layout (today: exactly one
-      hardcoded Terminal icon in `user_space/bin/desktop_icons.c`)
-- [ ] Alt-tab window switching over the existing focus-routing infra
-- [ ] Copy/paste between the terminal and other apps (none exists today)
+- [x] Multiple desktop icons with a real grid layout: `ICONS[]`
+      (`user_space/bin/desktop_icons.c`) now lists Terminal/Clock/Paint,
+      laid out top-to-bottom-then-wrap-to-a-new-column by `layout_icons`
+      from the window's own actual height (never hardcoded) - leaves
+      `PANEL_MARGIN` clear at the bottom so a last-row icon can never end
+      up drawn underneath (and unreachable behind) desktop_shell.c's
+      always-on-top panel. Double-click detection is now per-icon
+      (`last_click_icon`) instead of assuming there's only one
+- [x] Alt-Tab window switching (`alt_tab_cycle`, `compositor.c`):
+      intercepted in `handle_keyboard` before any client ever sees it,
+      cycling forward through every alive ordinary window and reusing
+      `apply_window_action(..., WM_ACTION_FOCUS)` - the same M30 focus/
+      un-minimize logic a titlebar or panel click already drives, not a
+      third copy of it. Needed real Ctrl/Alt tracking that didn't exist
+      in this kernel at all before this milestone (`kernel/drivers/
+      keyboard.c` only ever tracked Shift internally) - new
+      `keyboard_modifiers()` plus a `SYS_kbd_modifiers` syscall expose it
+      as a live bitmask (`system_api/include/input.h`'s `KBD_MOD_*`),
+      since the buffered ASCII stream alone can't tell a plain Tab from
+      Alt+Tab
+- [x] Copy/paste: a new single kernel-owned global clipboard
+      (`kernel/ipc/clipboard.h/.c`, `SYS_clipboard_set`/`SYS_clipboard_get`)
+      - same "one flat global, no per-process scoping" simplicity
+      `kernel/ipc/shm.h` already uses for shm ids. `gui_terminal.c` wires
+      Ctrl+C to copy the current input line (there's no text-selection UI
+      to copy *from* instead) and Ctrl+V to paste at the end of it -
+      works both within one terminal and between two independently
+      spawned terminal windows, proving the clipboard is genuinely
+      cross-process and not per-window state
+- [x] New kernel-side self-test (`[clipboard]`): round-trips real bytes
+      through `SYS_clipboard_set`/`SYS_clipboard_get` directly from
+      kernel context, no process spawning needed - same shape as M14's
+      own `SYS_pipe` self-test. Whether a real Alt+Tab or Ctrl+C/V key
+      chord actually reaches this logic from real keyboard hardware is,
+      like M31's drag/resize, left to manual/interactive verification -
+      the same boundary M18/M21/M22/M31 already drew for click- and
+      key-driven behavior this headless build has no way to fabricate
 
 ## M33 — Core usable-OS app baseline
 
