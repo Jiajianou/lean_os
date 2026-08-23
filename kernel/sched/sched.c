@@ -320,6 +320,13 @@ void schedule(void) {
     irq_restore(flags);
 }
 
+void sched_deliver_pending_signal(void) {
+    task_t *t = current_task[smp_current_cpu()];
+    if (t->pending_signal == SIGKILL || t->pending_signal == SIGTERM) {
+        deliver_pending_signal_and_exit(t); /* noreturn */
+    }
+}
+
 void task_exit_with_code(int code) {
     task_t *t = current_task[smp_current_cpu()];
     /* Reclaims whatever shm segments this task created (kernel/ipc/

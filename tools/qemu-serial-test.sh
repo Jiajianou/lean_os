@@ -114,7 +114,7 @@ REQUIRED_MARKERS=(
   "[settings] WM_SETTINGS_PIPE background-color self-test passed."
   "[wm36] confirm_close opt-in (WM_EVENT_CLOSE_REQUEST via WM_ACTION_PIPE) self-test passed"
   "[wm38] drop shadow + WM_SETTINGS_PIPE accent-color self-test passed"
-  "[m41] top menu bar (top-docked panel, menu query round-trip, menu command reaching its client) self-test passed"
+  "[m42] bottom taskbar (Start button, running-app button, tray, maximize clamp, launcher toggle) self-test passed"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

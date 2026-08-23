@@ -75,6 +75,10 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
                 if (n > 0) {
                     break;
                 }
+                /* M42: a shell parked on an empty keyboard buffer is past
+                 * this handler's own signal check and gets no timer tick
+                 * while it's current - see sched_deliver_pending_signal. */
+                sched_deliver_pending_signal();
                 schedule();
                 continue;
             }
@@ -180,6 +184,7 @@ static long sys_wait(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, ui
             if (!any_children) {
                 return -1;
             }
+            sched_deliver_pending_signal();
             schedule();
         }
     }
@@ -189,6 +194,7 @@ static long sys_wait(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, ui
         return -1;
     }
     while (t->state != TASK_TERMINATED) {
+        sched_deliver_pending_signal();
         schedule();
     }
     t->reaped = 1;

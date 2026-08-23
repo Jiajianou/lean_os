@@ -27,7 +27,7 @@ static long read_exact(int fd, void *buf, size_t len) {
     return (long)got;
 }
 
-static int connect_common(uint32_t width, uint32_t height, uint8_t panel, uint32_t panel_dock_h, uint8_t desktop, uint8_t confirm_close, const char *title, wm_window_t *out) {
+static int connect_common(uint32_t width, uint32_t height, uint8_t panel, uint8_t desktop, uint8_t confirm_close, const char *title, wm_window_t *out) {
     int req_fds[2];
     int resp_fds[2];
     if (sys_pipe_open(WM_REQUEST_PIPE, req_fds) != 0 || sys_pipe_open(WM_RESPONSE_PIPE, resp_fds) != 0) {
@@ -38,7 +38,6 @@ static int connect_common(uint32_t width, uint32_t height, uint8_t panel, uint32
     req.width = width;
     req.height = height;
     req.panel = panel;
-    req.panel_dock_h = panel_dock_h;
     req.desktop = desktop;
     req.confirm_close = confirm_close;
     req.client_pid = (int32_t)sys_getpid();
@@ -79,23 +78,19 @@ static int connect_common(uint32_t width, uint32_t height, uint8_t panel, uint32
 }
 
 int wm_connect(uint32_t width, uint32_t height, const char *title, wm_window_t *out) {
-    return connect_common(width, height, WM_PANEL_NONE, 0, 0, 0, title, out);
+    return connect_common(width, height, WM_PANEL_NONE, 0, 0, title, out);
 }
 
 int wm_connect_panel(uint32_t height, wm_window_t *out) {
-    return connect_common(0, height, WM_PANEL_BOTTOM, 0, 0, 0, "", out);
+    return connect_common(0, height, WM_PANEL_BOTTOM, 0, 0, "", out);
 }
 
 int wm_connect_desktop(wm_window_t *out) {
-    return connect_common(0, 0, WM_PANEL_NONE, 0, 1, 0, "", out);
-}
-
-int wm_connect_panel_top(uint32_t height, uint32_t dock_height, wm_window_t *out) {
-    return connect_common(0, height, WM_PANEL_TOP, dock_height, 0, 0, "", out);
+    return connect_common(0, 0, WM_PANEL_NONE, 1, 0, "", out);
 }
 
 int wm_connect_confirm_close(uint32_t width, uint32_t height, const char *title, wm_window_t *out) {
-    return connect_common(width, height, WM_PANEL_NONE, 0, 0, 1, title, out);
+    return connect_common(width, height, WM_PANEL_NONE, 0, 1, title, out);
 }
 
 int wm_wait_event(wm_window_t *win, wm_event_t *out) {
@@ -145,8 +140,7 @@ int wm_query_windows(wm_query_response_t *out) {
     return read_exact(query_resp_fds[0], out, sizeof(*out)) == (long)sizeof(*out) ? 0 : -1;
 }
 
-static int send_action(int32_t window_id, uint32_t action,
-                        int32_t ox, int32_t ow, int32_t oh) {
+int wm_send_action(int32_t window_id, uint32_t action) {
     if (action_fds[0] < 0) {
         if (sys_pipe_open(WM_ACTION_PIPE, action_fds) != 0) {
             return -1;
@@ -155,68 +149,14 @@ static int send_action(int32_t window_id, uint32_t action,
     wm_action_request_t req;
     req.window_id = window_id;
     req.action = action;
-    req.overhang_x = ox;
-    req.overhang_w = ow;
-    req.overhang_h = oh;
     return sys_write(action_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
 }
 
-int wm_send_action(int32_t window_id, uint32_t action) {
-    return send_action(window_id, action, 0, 0, 0);
-}
-
-int wm_set_panel_overhang(int32_t window_id, int32_t x, int32_t w, int32_t h) {
-    return send_action(window_id, WM_ACTION_SET_PANEL_OVERHANG, x, w, h);
-}
-
-/* M41: the menu-bar channels, opened lazily and kept for the process's
- * lifetime for the same reason query_fds/action_fds above are - see their
- * comment. A client that never declares a menu never opens any of these. */
-static int menu_fds[2] = {-1, -1};
-static int menu_query_fds[2] = {-1, -1};
-static int menu_query_resp_fds[2] = {-1, -1};
-static int menu_cmd_fds[2] = {-1, -1};
-
-int wm_declare_menus(const wm_window_t *win, const wm_menu_set_t *menus) {
-    if (menu_fds[0] < 0) {
-        if (sys_pipe_open(WM_MENU_PIPE, menu_fds) != 0) {
-            return -1;
-        }
-    }
-    /* window_id is filled in here rather than trusted from the caller:
-     * a client already knows its own, and copying it from wm_window_t is
-     * one less thing an app can get wrong in a way that would show up as
-     * someone else's menus on the bar. */
-    wm_menu_set_t set = *menus;
-    set.window_id = win->window_id;
-    return sys_write(menu_fds[1], &set, sizeof(set)) == (long)sizeof(set) ? 0 : -1;
-}
-
-int wm_query_focused_menus(wm_menu_set_t *out) {
-    if (menu_query_fds[0] < 0) {
-        if (sys_pipe_open(WM_MENU_QUERY_PIPE, menu_query_fds) != 0 ||
-            sys_pipe_open(WM_MENU_QUERY_RESP_PIPE, menu_query_resp_fds) != 0) {
-            return -1;
-        }
-    }
-    uint8_t ping = 1;
-    if (sys_write(menu_query_fds[1], &ping, sizeof(ping)) != (long)sizeof(ping)) {
-        return -1;
-    }
-    return read_exact(menu_query_resp_fds[0], out, sizeof(*out)) == (long)sizeof(*out) ? 0 : -1;
-}
-
-int wm_send_menu_command(int32_t window_id, int32_t menu_index, int32_t item_index) {
-    if (menu_cmd_fds[0] < 0) {
-        if (sys_pipe_open(WM_MENU_CMD_PIPE, menu_cmd_fds) != 0) {
-            return -1;
-        }
-    }
-    wm_menu_command_t cmd;
-    cmd.window_id = window_id;
-    cmd.menu_index = menu_index;
-    cmd.item_index = item_index;
-    return sys_write(menu_cmd_fds[1], &cmd, sizeof(cmd)) == (long)sizeof(cmd) ? 0 : -1;
+int wm_toggle_launcher(void) {
+    /* -1 rather than a real id: this action never looks at one (see
+     * WM_ACTION_TOGGLE_LAUNCHER), and passing the caller's own window
+     * would read like it acts on that window. */
+    return wm_send_action(-1, WM_ACTION_TOGGLE_LAUNCHER);
 }
 
 static int settings_fds[2] = {-1, -1};

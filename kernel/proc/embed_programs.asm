@@ -92,12 +92,6 @@ desktop_shell_elf_start:
     incbin "build/desktop_shell.elf"
 desktop_shell_elf_end:
 
-global menu_bar_elf_start
-global menu_bar_elf_end
-menu_bar_elf_start:
-    incbin "build/menu_bar.elf"
-menu_bar_elf_end:
-
 global desktop_icons_elf_start
 global desktop_icons_elf_end
 desktop_icons_elf_start:

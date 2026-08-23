@@ -58,40 +58,74 @@ ICON_BOX = 0x4C99E6          # desktop_icons.c ICON_BOX_COLOR
 CTX_MENU_BG = 0x243040       # desktop_icons.c CTX_MENU_BG
 EMPTY_DESKTOP = (500, 500)   # far from every icon and every cascaded window
 
-# menu_bar.c (M41): a 24px top-docked bar - app name left, the focused
-# app's menus next to it, clock right. Its dropdown hangs below the bar as
-# a compositor-blitted "overhang" rect, MENU_ITEM_W wide.
-MENU_BAR_H = 24
-MENU_BAR_BG = 0x1E2233       # BAR_BG
-MENU_DROP_BG = 0x243040      # DROP_BG
-MENU_ITEM_W = 132
-MENU_ITEM_H = 20             # FONT_HEIGHT + 4
-BAR_PROBE = (600, 8)         # inside the bar, clear of the app name and the clock
+# text_editor.c: its File menu is drawn in the editor's own window again
+# (M42 - M41 had it in a shared top bar), one FONT_HEIGHT row at the top,
+# with the dropdown hanging below the "File" label inside the same window.
+EDITOR_MENU_ROW_H = 16       # FONT_HEIGHT
+EDITOR_MENU_BG = 0x242424    # MENU_BG - both the menu row and the dropdown
+EDITOR_MENU_ITEM_W = 110     # FILE_MENU_ITEM_W
+EDITOR_MENU_ITEM_H = 20      # FILE_MENU_ITEM_H = FONT_HEIGHT + 4
+EDITOR_MENU_X = 4            # FILE_MENU_X
 
-# desktop_shell.c: PANEL_HEIGHT 32 at the screen bottom, taskbar slots
-# SLOT_W 96 wide with SLOT_MARGIN 4 between them, SLOT_H 24 tall starting
-# SLOT_MARGIN down from the panel's top edge. Reading the taskbar rather
-# than hunting for window pixels on the desktop is deliberate: the panel
-# is always topmost (compositor.c's z-order rule), so a slot can never be
-# covered by the very windows it's reporting - which a probe placed on the
-# desktop absolutely can be, by the next window in the cascade.
+# desktop_shell.c (M42): PANEL_HEIGHT 32 at the screen bottom, holding a
+# Start button, then the running-app buttons, then the tray - every one of
+# them BTN_H 24 tall starting BTN_Y 4 down from the panel's top edge.
+# Reading the taskbar rather than hunting for window pixels on the desktop
+# is deliberate: the panel is always topmost (compositor.c's z-order
+# rule), so a button can never be covered by the very windows it is
+# reporting - which a probe placed on the desktop absolutely can be, by
+# the next window in the cascade.
 PANEL_BG = 0x181828
 SLOT_BG = 0x263447           # RUNNING_SLOT_BG - running, unfocused
+SLOT_HOVER_BG = 0x365070     # RUNNING_SLOT_HOVER_BG - cursor over it
 SLOT_FOCUS_BG = 0x2E4A63     # RUNNING_SLOT_FOCUS_BG
 SLOT_MIN_BG = 0x352A20       # RUNNING_SLOT_MIN_BG - minimized
-SLOT_COLORS = (SLOT_BG, SLOT_FOCUS_BG, SLOT_MIN_BG)
+SLOT_COLORS = (SLOT_BG, SLOT_HOVER_BG, SLOT_FOCUS_BG, SLOT_MIN_BG)
+
+START_BG = 0x243447          # START_BG - Start button at rest
+START_HOVER_BG = 0x365070    # START_HOVER_BG
+START_PRESS_BG = 0x4C99E6    # START_PRESS_BG - the click flash
+START_COLORS = (START_BG, START_HOVER_BG, START_PRESS_BG)
+TRAY_SEP = 0x303C4E          # TRAY_SEP_COLOR
+
+LAUNCHER_BG = 0x1C2233       # compositor.c LAUNCHER_BG
+LAUNCHER_PROBE = (512, 309)  # inside the centered overlay, clear of its title text
 
 FONT_H = 16
 PANEL_TOP = 768 - 32
-SLOT_MARGIN = 4
+BTN_Y = 4
+BTN_H = 24
 SLOT_W = 96
+SLOT_GAP = 4
+START_X = 4
+START_W = 72
+SLOTS_X = START_X + START_W + 8
+TRAY_W = 92
+TRAY_SEP_PROBE = (1024 - TRAY_W, PANEL_TOP + 14)
+
+# Inside the Start button's fill, past its 2x2 tile glyph (local x 12..24)
+# and its "Start" label (local x 28..68), above the label's own rows.
+START_PROBE = (71, PANEL_TOP + 6)
+START_CLICK = (40, PANEL_TOP + BTN_Y + BTN_H // 2)
 
 
 def slot_probe(i):
-    """Center of taskbar slot i - inside the slot's fill, clear of its
-    1px border and of the label text drawn near its left edge."""
-    return (SLOT_MARGIN + i * (SLOT_W + SLOT_MARGIN) + SLOT_W - 8,
-            PANEL_TOP + SLOT_MARGIN + 12)
+    """Where to *read* running-app button i's fill - inside it, clear of
+    its 1px border and of the label text drawn near its left edge."""
+    return (SLOTS_X + i * (SLOT_W + SLOT_GAP) + SLOT_W - 8,
+            PANEL_TOP + BTN_Y + 12)
+
+
+def slot_click(i):
+    """Where to *click* running-app button i. Deliberately not
+    slot_probe(i): the compositor draws the 8x8 pointer with its hotspot
+    at the cursor position, so a click lands the pointer's own white
+    pixels on top of exactly the point that was clicked - and every
+    reading here works by sampling that button's fill color. Clicking one
+    place and reading another, 16px apart in x, is what keeps "is this
+    button focused" a question about the button rather than about the
+    pointer parked on it."""
+    return (SLOTS_X + i * (SLOT_W + SLOT_GAP) + SLOT_W - 24, PANEL_TOP + BTN_Y)
 
 
 # compositor.c titlebar geometry: TITLEBAR_H 20, BTN_SIZE 14, BTN_GAP 4,
@@ -116,24 +150,16 @@ CLOCK_W = 200  # gui_clock.c WIN_W
 
 
 # compositor.c: an ordinary window is placed at (100 + idx*40, 100 + idx*40).
-# init spawns the desktop background, then the top menu bar, then the
-# bottom dock, so those take slots 0-2 and the first app launched lands at
-# slot 3.
-FIRST_APP_IDX = 3
+# init spawns the desktop background, then the bottom taskbar, so those
+# take slots 0-1 and the first app launched lands at slot 2. (It was 3
+# until M42 deleted the top menu bar - a shift this file has to track by
+# hand, which is why every geometry constant here names the source it
+# mirrors.)
+FIRST_APP_IDX = 2
 
 
 def app_origin(slot):
     return (100 + slot * 40, 100 + slot * 40)
-
-
-def menu_title_center(app_name, index=0):
-    """Where menu `index`'s clickable box sits in the top bar, mirroring
-    menu_bar.c's layout_menu_titles: titles start 24px past the focused
-    app's name and each is its label plus TITLE_PAD either side. Only the
-    single-menu case (every app in this project) is modelled."""
-    font_w, pad = 8, 10
-    x = 10 + len(app_name) * font_w + 24
-    return (x + pad + 2 * font_w, MENU_BAR_H // 2)
 
 
 class Failure(Exception):
@@ -181,8 +207,8 @@ def save_failure_shot(machine, name):
 
 
 def desktop_is_painted(shot):
-    """The desktop background, its first icon, the bottom dock and (M41)
-    the top menu bar all actually on screen - i.e. every one of the boot
+    """The desktop background, its first icon, the taskbar and the Start
+    button in it all actually on screen - i.e. every one of the boot
     clients has connected *and* drawn its first frame. Waiting for this
     instead of a fixed sleep is what makes "click something immediately
     after boot" reliable: the serial log's [init] marker fires well before
@@ -191,7 +217,7 @@ def desktop_is_painted(shot):
     return (shot.px(*EMPTY_DESKTOP) == DESKTOP_BG and
             shot.px(76, 76) == ICON_BOX and
             shot.px(512, PANEL_TOP + 2) == PANEL_BG and
-            shot.px(*BAR_PROBE) == MENU_BAR_BG)
+            shot.px(*START_PROBE) in START_COLORS)
 
 
 def boot(machine, timeout=90):
@@ -231,14 +257,6 @@ def wait_for(machine, predicate, what, timeout=12.0):
 def wait_for_windows(machine, n, timeout=12.0):
     return wait_for(machine, lambda s: count_app_windows(s) == n,
                     "expected %d app window(s)" % n, timeout)
-
-
-def bar_name_pixels(shot):
-    """A cheap fingerprint of whatever text the top bar is currently
-    drawing on its left: how many pixels in the app-name area are the
-    bar's own background. Comparing this across an action says "the label
-    changed" without this file needing its own copy of the font."""
-    return shot.count_color(MENU_BAR_BG, 8, 4, 140, FONT_H)
 
 
 def focused_slot(shot):
@@ -390,58 +408,102 @@ def test_launch_close_stress(m):
           "windows: %s" % (rounds, refused))
 
 
-def test_menu_bar_shows_focused_app(m):
-    """M41: the top bar names whichever app is focused. Reads the bar the
-    way a person does - the app name is drawn there and nowhere else, so
-    "did the bar follow focus" is a question about pixels changing in that
-    strip, checked by opening two apps in turn."""
-    boot(m)
-    before = m.screenshot()
-    check(before.px(*BAR_PROBE) == MENU_BAR_BG,
-          "the top menu bar is not painted at all")
-    empty_name = bar_name_pixels(before)
+def test_start_button_opens_launcher(m):
+    """M42's Start button, end to end through a real click: hovering it
+    lights it, clicking it opens the compositor-owned launcher overlay,
+    and clicking it again closes it.
 
+    The action itself (WM_ACTION_TOGGLE_LAUNCHER down WM_ACTION_PIPE) has
+    a boot-time self-test of its own (kernel.c's [m42]); what only this
+    can show is that a click at the pixel a person would aim at reaches
+    it - and, just as importantly, that it reaches the panel *at all*,
+    since M42 stopped a click on a panel from focusing it and routes
+    events to it by hover instead."""
+    boot(m)
+    check(m.screenshot().px(*START_PROBE) == START_BG,
+          "the Start button is not drawn at rest")
+
+    m.move_to(*START_CLICK)
+    wait_for(m, lambda s: s.px(*START_PROBE) in (START_HOVER_BG, START_PRESS_BG),
+             "hovering the Start button did not highlight it - a panel should "
+             "receive WM_EVENT_MOUSE_MOVE even though it never holds focus")
+
+    m.click()
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG,
+             "clicking Start did not open the launcher overlay")
+    m.click()
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == DESKTOP_BG,
+             "clicking Start again did not close the launcher overlay")
+
+
+def test_taskbar_click_keeps_app_focused(m):
+    """M42's panel-focus rule, which is what makes the taskbar behave like
+    Windows': clicking the Start button must not deactivate the app you
+    were using. Before this the panel won the focus hit-test like any
+    other window, so every taskbar click silently unfocused whatever was
+    in front - which is also why M35's right-click desktop menu was
+    unreachable from a fresh boot until M40 worked around it."""
+    boot(m)
     m.double_click(ICON_X, ICONS[4][2])  # Clock
     wait_for_windows(m, 1)
-    with_clock = wait_for(m, lambda s: bar_name_pixels(s) != empty_name,
-                          "the menu bar did not change when an app took focus")
+    check(focused_slot(m.screenshot()) == 0, "the Clock did not take focus when it opened")
 
-    m.double_click(ICON_X, ICONS[5][2])  # Paint
+    m.click(*START_CLICK)
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG,
+             "clicking Start did not open the launcher overlay")
+    check(focused_slot(m.screenshot()) == 0,
+          "clicking the taskbar took focus away from the running app")
+    m.click(*START_CLICK)  # leave the desktop as we found it
+
+
+def test_taskbar_button_focus_and_minimize(m):
+    """M22's one-click-does-both running-app button, reached by a real
+    click for the first time. Its self-test drives WM_ACTION_FOCUS/
+    TOGGLE_MINIMIZE down WM_ACTION_PIPE, which never touches the hit-test
+    that turns a cursor position into either - and M42 moved every button
+    in this row right of the new Start button, which is exactly the kind
+    of shift only a real click can catch."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock
+    wait_for_windows(m, 1)
+    m.double_click(ICON_X, ICONS[5][2])  # Paint - takes focus off the Clock
     wait_for_windows(m, 2)
-    wait_for(m, lambda s: bar_name_pixels(s) != bar_name_pixels(with_clock),
-             "the menu bar still shows the previous app after focus moved")
+    check(focused_slot(m.screenshot()) == 1, "Paint did not take focus when it opened")
+
+    # Clicking an unfocused button focuses it...
+    m.click(*slot_click(0))
+    wait_for(m, lambda s: focused_slot(s) == 0,
+             "clicking the Clock's taskbar button did not focus it")
+    # ...and clicking the focused one minimizes it.
+    m.click(*slot_click(0))
+    wait_for(m, lambda s: s.px(*slot_probe(0)) == SLOT_MIN_BG,
+             "clicking the focused app's taskbar button did not minimize it")
 
 
-def test_menu_bar_dropdown_runs_a_command(m):
-    """M41's whole point, end to end through real clicks: the Editor's own
-    File menu, drawn by a different process in the shared bar, opened by
-    clicking its title there, and picking Quit closing the app.
-
-    The protocol round trip has its own boot-time self-test (kernel.c's
-    [m41]); what only this can show is that the labels are where a person
-    would click and that clicking them lands on the right item."""
+def test_editor_in_window_file_menu(m):
+    """M42 put text_editor's File menu back inside the editor's own window
+    (M35's original shape) after M41 had moved it to a shared top bar.
+    Same end-to-end claim M41's own test made, just against the window
+    that owns the menu: clicking "File" opens the dropdown, and picking
+    Quit closes the app."""
     boot(m)
     m.double_click(ICON_X, ICONS[1][2])  # Editor
     wait_for_windows(m, 1)
 
-    title = menu_title_center("Editor")
-    m.click(*title)
-    shot = wait_for(m,
-                    lambda s: s.count_color(MENU_DROP_BG, title[0] - 20, MENU_BAR_H + 2,
-                                             MENU_ITEM_W, MENU_ITEM_H) > 200,
-                    "clicking File in the top bar did not open its dropdown")
-    # The dropdown must not paint a full-width band across the bar's row -
-    # it is an overhang rect exactly MENU_ITEM_W wide (see
-    # WM_ACTION_SET_PANEL_OVERHANG). The desktop has to still be visible
-    # well to its right.
-    check(shot.px(900, MENU_BAR_H + 20) == DESKTOP_BG,
-          "the open dropdown painted over the desktop outside its own rect")
+    x, y = app_origin(FIRST_APP_IDX)
+    m.click(x + EDITOR_MENU_X + 12, y + EDITOR_MENU_ROW_H // 2)
+    wait_for(m,
+             lambda s: s.count_color(EDITOR_MENU_BG, x + EDITOR_MENU_X,
+                                      y + EDITOR_MENU_ROW_H + 2,
+                                      EDITOR_MENU_ITEM_W, EDITOR_MENU_ITEM_H) > 200,
+             "clicking File in the editor's own menu row did not open its dropdown")
 
     # File > Quit is item 3; text_editor exits cleanly on it for an
     # unmodified buffer.
-    m.click(title[0], MENU_BAR_H + 3 * MENU_ITEM_H + MENU_ITEM_H // 2)
+    m.click(x + EDITOR_MENU_X + EDITOR_MENU_ITEM_W // 2,
+            y + EDITOR_MENU_ROW_H + 3 * EDITOR_MENU_ITEM_H + EDITOR_MENU_ITEM_H // 2)
     wait_for(m, lambda s: count_app_windows(s) == 0,
-             "picking File > Quit in the top bar did not close the Editor")
+             "picking File > Quit did not close the Editor")
 
 
 TESTS = [
@@ -451,8 +513,10 @@ TESTS = [
     ("titlebar_drag_moves_window", test_titlebar_drag_moves_window),
     ("alt_tab_cycles_focus", test_alt_tab_cycles_focus),
     ("desktop_context_menu", test_desktop_context_menu),
-    ("menu_bar_shows_focused_app", test_menu_bar_shows_focused_app),
-    ("menu_bar_dropdown_runs_a_command", test_menu_bar_dropdown_runs_a_command),
+    ("start_button_opens_launcher", test_start_button_opens_launcher),
+    ("taskbar_click_keeps_app_focused", test_taskbar_click_keeps_app_focused),
+    ("taskbar_button_focus_and_minimize", test_taskbar_button_focus_and_minimize),
+    ("editor_in_window_file_menu", test_editor_in_window_file_menu),
     ("launch_close_stress", test_launch_close_stress),
 ]
 

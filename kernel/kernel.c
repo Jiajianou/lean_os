@@ -50,7 +50,6 @@
     X(gui_clock)                     \
     X(gui_paint)                     \
     X(desktop_shell)                 \
-    X(menu_bar)                      \
     X(desktop_icons)                 \
     X(gui_terminal)                  \
     X(text_editor)                   \
@@ -88,6 +87,28 @@ static long do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
                       : "a"(num), "D"(a1), "S"(a2), "d"(a3)
                       : "rcx", "r8", "r9", "memory");
     return (long)ret;
+}
+
+/* Tears down a task a self-test spawned, and waits for it to really be
+ * gone rather than only for the signal to have been posted.
+ *
+ * The waiting is the point. A SIGKILL is noticed at the target's next
+ * syscall or scheduler tick (kernel/sched/sched.c), and only then does
+ * task_exit_with_code run shm_free_by_owner - which, for a compositor,
+ * hands back every window's pixel buffer plus its own full-screen back
+ * buffer, several megabytes of frames. Left unwaited, that return lands
+ * at an arbitrary later moment inside whatever self-test happens to be
+ * running by then, and the one that measures free frames across an
+ * operation (M40's SYS_spawn failure-path audit) reads it as that
+ * operation having leaked. That is not hypothetical: it showed up as an
+ * intermittent panic in a test with nothing to do with the change being
+ * made, which is the worst possible form for it to take.
+ *
+ * M42: every self-test that spawns a compositor or a client now goes
+ * through here instead of firing a bare SYS_kill and moving on. */
+static void selftest_reap(task_t *t) {
+    do_syscall(SYS_kill, (uint64_t)t->id, SIGKILL, 0);
+    do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
 }
 
 /* Self-test task body for M7: prints a few lines with a CPU-bound spin
@@ -839,7 +860,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
          * and the console restored *before* evaluating/printing results,
          * for the same "no console output while the frame under test is
          * still live" reason. */
-        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        selftest_reap(comp_task);
         console_init();
         klog_use_console();
 
@@ -951,9 +972,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             got[i] = fb_get_pixel(checks[i].x, checks[i].y);
         }
 
-        do_syscall(SYS_kill, (uint64_t)paint_task->id, SIGKILL, 0);
-        do_syscall(SYS_kill, (uint64_t)clock_task->id, SIGKILL, 0);
-        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        selftest_reap(paint_task);
+        selftest_reap(clock_task);
+        selftest_reap(comp_task);
         console_init();
         klog_use_console();
 
@@ -1020,8 +1041,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
 
         /* Panel docks at the bottom: y = 768 - PANEL_HEIGHT(32) = 736.
          * Running slot 0 is gui_clock's window (id 1, the only non-panel
-         * window, focused), left-aligned at local (4,4) 96x24 - the
-         * taskbar's only row now that the launcher is gone. Its label is
+         * window, focused), at local (84,4) 96x24 - M42 moved the running
+         * buttons right of the new Start button, which is what the 80px
+         * shift in the probes below is. Its label is
          * gui_clock's own title, "Clock" - glyph math below is for 'C'
          * (M39's font8x16.c row 5: 0xC0 = 11000000, the left stem - so
          * column 0 is ink and the bowl's interior at column 3 isn't.
@@ -1033,9 +1055,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
          * milestones.md's M22 entry for the glyph-bitmap method this
          * follows, same one M21's own pixel checks already proved out. */
         static const struct { uint32_t x, y; uint32_t expected; const char *what; } checks[] = {
-            {44, 742, 0x002E4A63u, "running slot 0 background (focused)"},
-            {6,  749, 0x00FFFFFFu, "running slot 0 'C' glyph - on pixel (left stem)"},
-            {9,  749, 0x002E4A63u, "running slot 0 'C' glyph - off pixel (bowl interior)"},
+            {124, 742, 0x002E4A63u, "running slot 0 background (focused)"},
+            {86,  749, 0x00FFFFFFu, "running slot 0 'C' glyph - on pixel (left stem)"},
+            {89,  749, 0x002E4A63u, "running slot 0 'C' glyph - off pixel (bowl interior)"},
             {500, 738, 0x00181828u, "panel background (margin strip above the slot row, y=2 - never overdrawn by any slot regardless of window count)"},
             {500, 500, 0x001A1A2Eu, "desktop background color, above the panel"},
         };
@@ -1044,9 +1066,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             got[i] = fb_get_pixel(checks[i].x, checks[i].y);
         }
 
-        do_syscall(SYS_kill, (uint64_t)clock_task->id, SIGKILL, 0);
-        do_syscall(SYS_kill, (uint64_t)shell_task->id, SIGKILL, 0);
-        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        selftest_reap(clock_task);
+        selftest_reap(shell_task);
+        selftest_reap(comp_task);
         console_init();
         klog_use_console();
 
@@ -1163,7 +1185,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         uint32_t after_close = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
         long clock_exit = do_syscall(SYS_wait, (uint64_t)clock_task->id, 0, 0);
 
-        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        selftest_reap(comp_task);
         console_init();
         klog_use_console();
 
@@ -1308,7 +1330,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
          * cover it. */
         uint32_t got = fb_get_pixel(500, 500);
 
-        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        selftest_reap(comp_task);
         console_init();
         klog_use_console();
 
@@ -1385,7 +1407,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         uint32_t after_close = fb_get_pixel((uint32_t)probe_x, (uint32_t)probe_y);
         long editor_exit = do_syscall(SYS_wait, (uint64_t)editor_task->id, 0, 0);
 
-        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        selftest_reap(comp_task);
         console_init();
         klog_use_console();
 
@@ -1478,8 +1500,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         pit_sleep_ms(300);
         uint32_t titlebar_pixel = fb_get_pixel(200, 88);
 
-        do_syscall(SYS_kill, (uint64_t)clock_task->id, SIGKILL, 0);
-        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        selftest_reap(clock_task);
+        selftest_reap(comp_task);
         console_init();
         klog_use_console();
 
@@ -1561,18 +1583,14 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         }
 
         /* Reap exactly the 4 probe tasks by pid, not SYS_wait(-1) - by
-         * this point in boot, task 0 has plenty of *other* unreaped
-         * children too (M20-M22's compositor/client processes, killed via
-         * SIGKILL rather than let exit normally, since a real WM isn't
-         * expected to exit on its own - see those self-tests' own
-         * comments). SYS_wait(-1) would happily reap those too, but only
-         * once each one's pending SIGKILL actually gets noticed - which
-         * needs it to be scheduled again at all, something nothing has
-         * done since the moment it was killed. That's fine for boot to
-         * leave lazily unresolved (nothing ever depended on it, before or
-         * after SMP), but this self-test only ever cared about its own 4
-         * probes, so waiting on their specific pids is both correct and a
-         * lot less to get through. */
+         * this point in boot, task 0 is the parent of every self-test
+         * client above too, and SYS_wait(-1) would happily reap whichever
+         * of those it reached first instead of the probes this test
+         * actually cares about. (Those are all reaped by their own tests
+         * now - see selftest_reap - so there is nothing left outstanding
+         * for it to catch; waiting on specific pids is still the correct
+         * thing to write, since "whatever finishes first" was never what
+         * this meant.) */
         for (int i = 0; i < 4; i++) {
             do_syscall(SYS_wait, (uint64_t)probe_tasks[i]->id, 0, 0);
         }
@@ -1637,184 +1655,161 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
      * so entry.asm's post-kernel_main `cli` (which would permanently
      * disable interrupts, freezing the scheduler for every other task)
      * is never reached. */
-    /* M41 self-test: the shared top menu bar, end to end at the protocol
-     * level - a real menu_bar.c panel and a real text_editor.c client,
+    /* M42 self-test: the bottom taskbar, end to end at the protocol
+     * level - a real desktop_shell.c panel and a real gui_clock.c client,
      * with this self-test standing in for the *user* rather than for
-     * either of them. Three separate claims, checked with pixels and a
-     * protocol round trip:
+     * either of them. M41's [m41] test (a top-docked menu bar and its
+     * three-pipe menu protocol) is what this replaces: both the bar and
+     * the protocol were deleted this milestone, so the test that only
+     * described them went with them rather than being left passing
+     * against something that no longer exists.
      *
-     *   1. The bar really is docked at the screen's top edge, and the
-     *      editor's own window really was placed clear of it. Before
-     *      M41 nothing docked to the top at all, and the cascade
-     *      placement started at y=100 unconditionally.
-     *   2. The menu query round-trips: asking the compositor what the
-     *      focused window's menus are comes back with the File menu
-     *      text_editor.c declared, with its four items - which is the
-     *      one genuinely new protocol this milestone adds.
-     *   3. A menu command reaches the owning client and *does something*
-     *      - here "Quit" (item 3), which text_editor's own
-     *      run_file_menu_item turns into the same clean sys_exit(1) M36's
-     *      self-test already established for an unmodified buffer. That
-     *      it exits with its own code, rather than being killed, is what
-     *      proves the pick arrived as an event the app acted on.
+     * Four claims, checked with pixels and one protocol round trip:
      *
-     * Whether a *click at the right pixel* opens the dropdown goes
-     * through M40's input harness (tools/qemu-input-test.sh), which is
-     * exactly the split that milestone's whole point was to make
-     * possible. */
+     *   1. The bar is docked at the screen's *bottom* edge again and is
+     *      laid out left to right the Windows way - a Start button first,
+     *      then the running-app buttons (shifted right to make room for
+     *      it, which is exactly the kind of layout change a pixel probe
+     *      catches and a protocol test cannot), then the tray at the far
+     *      right.
+     *   2. A running window really does get a button, drawn focused,
+     *      carrying that app's own title - the M22 query protocol still
+     *      doing its job through the relayout.
+     *   3. Maximize still clears the bar and only the bar. M41 had every
+     *      clamp reading a *top* panel's height too; with that gone,
+     *      content_top_limit is a constant again, and a maximized window
+     *      whose titlebar started one bar-height too low would look
+     *      perfectly fine on screen while being wrong.
+     *   4. WM_ACTION_TOGGLE_LAUNCHER - the one action in the protocol
+     *      that acts on the compositor rather than on a window - really
+     *      shows and hides the compositor-owned launcher surface. This is
+     *      what the Start button sends; that a *click* on the Start
+     *      button sends it goes through M40's input harness
+     *      (tools/qemu-input-test.sh), which is exactly the split that
+     *      milestone's whole point was to make possible.
+     */
     {
         uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *bar_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *editor_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !bar_image || !editor_image) {
-            panic("out of memory reading compositor/menu_bar/text_editor back from disk");
+        uint8_t *shell_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *clock_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !shell_image || !clock_image) {
+            panic("out of memory reading compositor/desktop_shell/gui_clock back from disk");
         }
         int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t bar_size = vfs_read("menu_bar", bar_image, LEANFS_MAX_FILE_SIZE);
-        int64_t editor_size = vfs_read("text_editor", editor_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || bar_size < 0 || editor_size < 0) {
-            panic("vfs_read: compositor/menu_bar/text_editor missing - should exist, just seeded");
+        int64_t shell_size = vfs_read("desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
+        int64_t clock_size = vfs_read("gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || shell_size < 0 || clock_size < 0) {
+            panic("vfs_read: compositor/desktop_shell/gui_clock missing - should exist, just seeded");
         }
 
         task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(200);
 
-        task_t *bar_task = process_spawn(bar_image, (size_t)bar_size, "");
-        kfree(bar_image);
-        pit_sleep_ms(400); /* connects as window 0 (the top panel), draws its first frame */
+        task_t *shell_task = process_spawn(shell_image, (size_t)shell_size, "");
+        kfree(shell_image);
+        pit_sleep_ms(500); /* connects as window 0 (the panel), draws its first frame */
 
-        task_t *editor_task = process_spawn(editor_image, (size_t)editor_size, "");
-        kfree(editor_image);
-        pit_sleep_ms(700); /* connects as window 1, declares its File menu, draws */
+        task_t *clock_task = process_spawn(clock_image, (size_t)clock_size, "");
+        kfree(clock_image);
+        pit_sleep_ms(1000); /* connects as window 1 (focused); the taskbar's next periodic query picks it up */
 
-        /* (1) Pixels. menu_bar.c's BAR_BG fills the whole strip; (600, 8)
-         * is inside it and clear of both the app name on the left and the
-         * clock on the right, so it can only ever read the flat bar fill.
-         * (600, 40) is just below the bar's 24px docked height, where the
-         * compositor's own desktop background must show through.
+        /* The panel docks at the bottom: y = 768 - PANEL_HEIGHT(32) = 736,
+         * and every button in it sits at local y 4..28 (BTN_Y/BTN_H).
+         * Absolute coordinates below are panel-local plus that (0, 736)
+         * origin, the same convention M22's own checks use.
          *
-         * The clamp itself is checked by maximizing: content_top_limit
-         * puts a maximized window's content at 24 + TITLEBAR_H(20) +
-         * BORDER(2) = 46, so its titlebar occupies y:[26, 46) and its
-         * outer border starts at exactly 24 - the bar's bottom edge,
-         * touching it and not a pixel higher. Probing at y=30 for that
-         * titlebar and at y=8 for the bar *after* maximizing checks both
-         * halves at once: the window grew to fill everything below the
-         * bar, and the bar is still on top of it. Before M41 a maximized
-         * window started at y=22 and would have covered the strip
-         * outright. */
-        const uint32_t bar_bg = 0x001E2233u; /* menu_bar.c BAR_BG */
-        uint32_t bar_pixel = fb_get_pixel(600, 8);
-        uint32_t below_bar_pixel = fb_get_pixel(600, 40);
+         *   (71, 742)  inside the Start button's fill (local x 4..76),
+         *              past its 2x2 tile glyph (local x 12..24) and its
+         *              "Start" label (local x 28..68), and above the
+         *              label's own rows - so it can only read flat fill.
+         *   (124, 752) the middle of running-app button 0, which starts
+         *              at local x 84 (START_X + START_W + 8) rather than
+         *              at the panel's left edge as it did before M42.
+         *   (932, 750) the tray's separator line, at local x
+         *              width - TRAY_W(92) - i.e. the tray really is
+         *              right-aligned rather than drawn at a fixed x. */
+        uint32_t panel_bg_px = fb_get_pixel(512, 738);
+        uint32_t above_panel_px = fb_get_pixel(512, 700);
+        uint32_t start_btn_px = fb_get_pixel(71, 742);
+        uint32_t running_slot_px = fb_get_pixel(124, 752);
+        uint32_t tray_sep_px = fb_get_pixel(932, 750);
 
         int action_fds[2];
         if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
-            panic("M41 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
+            panic("M42 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
-        wm_action_request_t max_req;
-        k_memset(&max_req, 0, sizeof(max_req));
-        max_req.window_id = 1; /* the editor - the bar took window 0 */
-        max_req.action = WM_ACTION_MAXIMIZE;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&max_req, sizeof(max_req));
+        wm_action_request_t req;
+        k_memset(&req, 0, sizeof(req));
+        req.window_id = 1; /* the clock - the panel took window 0 */
+        req.action = WM_ACTION_MAXIMIZE;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
         pit_sleep_ms(400);
-        /* x=300: inside the maximized window's titlebar, past the
-         * "Editor" title text (which ends around x:58) and well left of
-         * the three titlebar buttons, which sit at the right edge of its
-         * 640-wide buffer around x:590-640. */
-        uint32_t maximized_titlebar = fb_get_pixel(300, 30);
-        uint32_t bar_over_maximized = fb_get_pixel(600, 8);
+        /* content_top_limit is TITLEBAR_H(20) + BORDER(2) = 22 now that no
+         * top-docked bar exists any more, so a maximized window's content
+         * starts at y=22 and its titlebar occupies y:[2, 22). x=100 is
+         * inside that titlebar (gui_clock's buffer is 200 wide, and
+         * maximize never grows a window past its own buffer), past the
+         * "Clock" title text and well left of the three buttons. */
+        uint32_t maximized_titlebar = fb_get_pixel(100, 12);
+        uint32_t panel_over_maximized = fb_get_pixel(512, 738);
 
-        /* (2) The menu query, driven straight off WM_MENU_QUERY_PIPE the
-         * same way M30/M33/M36 drive their own protocol pipes. */
-        int mq_fds[2];
-        int mqr_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_MENU_QUERY_PIPE, (uint64_t)mq_fds, 0) != 0 ||
-            do_syscall(SYS_pipe_open, (uint64_t)WM_MENU_QUERY_RESP_PIPE, (uint64_t)mqr_fds, 0) != 0) {
-            panic("M41 self-test: kernel-side SYS_pipe_open(WM_MENU_QUERY_*) failed");
-        }
-        /* The bar polls this same pair every 300ms, so a reply meant for
-         * it could already be sitting in the response pipe - drain it, so
-         * what gets read below is the answer to *this* question. */
-        do_syscall(SYS_pipe_reset, (uint64_t)mqr_fds[0], 0, 0);
-        uint8_t ping = 1;
-        do_syscall(SYS_write, (uint64_t)mq_fds[1], (uint64_t)&ping, sizeof(ping));
-        pit_sleep_ms(300);
-        wm_menu_set_t menus;
-        k_memset(&menus, 0, sizeof(menus));
-        long menu_read = do_syscall(SYS_read, (uint64_t)mqr_fds[0], (uint64_t)&menus, sizeof(menus));
+        /* The launcher: no window_id at all (see WM_ACTION_TOGGLE_LAUNCHER),
+         * and the overlay is centered horizontally and a third of the way
+         * down, so (512, 309) is inside it and clear of its own title
+         * text - and is bare desktop background when it's closed. */
+        k_memset(&req, 0, sizeof(req));
+        req.window_id = -1;
+        req.action = WM_ACTION_TOGGLE_LAUNCHER;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(400);
+        uint32_t launcher_open_px = fb_get_pixel(512, 309);
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(400);
+        uint32_t launcher_closed_px = fb_get_pixel(512, 309);
 
-        /* (3) Pick File > Quit and let the editor act on it. */
-        int cmd_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_MENU_CMD_PIPE, (uint64_t)cmd_fds, 0) != 0) {
-            panic("M41 self-test: kernel-side SYS_pipe_open(WM_MENU_CMD_PIPE) failed");
-        }
-        wm_menu_command_t cmd;
-        cmd.window_id = menus.window_id;
-        cmd.menu_index = 0;
-        cmd.item_index = 3; /* "Quit" - text_editor.c's FILE_MENU_ITEMS[3] */
-        do_syscall(SYS_write, (uint64_t)cmd_fds[1], (uint64_t)&cmd, sizeof(cmd));
-        pit_sleep_ms(500);
-        long editor_exit = do_syscall(SYS_wait, (uint64_t)editor_task->id, 0, 0);
-
-        do_syscall(SYS_kill, (uint64_t)bar_task->id, SIGKILL, 0);
-        do_syscall(SYS_wait, (uint64_t)bar_task->id, 0, 0);
-        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        selftest_reap(clock_task);
+        selftest_reap(shell_task);
+        selftest_reap(comp_task);
         console_init();
         klog_use_console();
 
+        /* Every expected value mirrors the constant in the file that
+         * draws it - desktop_shell.c for the panel's own colors,
+         * compositor.c for everything it draws itself. */
+        static const struct { const char *what; uint32_t expected; } names[] = {
+            {"taskbar background, docked at the screen's bottom edge (desktop_shell.c PANEL_BG)", 0x00181828u},
+            {"desktop background above the taskbar (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
+            {"Start button fill at the taskbar's left edge (desktop_shell.c START_BG)", 0x00243447u},
+            {"running-app button 0, drawn focused, right of the Start button (desktop_shell.c RUNNING_SLOT_FOCUS_BG)", 0x002E4A63u},
+            {"system tray separator, right-aligned (desktop_shell.c TRAY_SEP_COLOR)", 0x00303C4Eu},
+            {"a maximized window's titlebar starting at the top of the screen (compositor.c TITLEBAR_FOCUS_COLOR)", 0x004C99E6u},
+            {"the taskbar staying on top of a maximized window (desktop_shell.c PANEL_BG)", 0x00181828u},
+            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG)", 0x001C2233u},
+            {"the launcher overlay gone again after a second toggle (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
+        };
+        const uint32_t got[] = {
+            panel_bg_px, above_panel_px, start_btn_px, running_slot_px, tray_sep_px,
+            maximized_titlebar, panel_over_maximized, launcher_open_px, launcher_closed_px,
+        };
         int all_ok = 1;
-        if (bar_pixel != bar_bg) {
-            klog_puts("[m41] pixel check failed: the top menu bar should fill the screen's top strip - expected 0x");
-            klog_put_hex32(bar_bg);
-            klog_puts(" got 0x");
-            klog_put_hex32(bar_pixel);
-            klog_putc('\n');
-            all_ok = 0;
-        }
-        if (below_bar_pixel == bar_bg) {
-            klog_puts("[m41] pixel check failed: the menu bar is taller than its 24px docked height\n");
-            all_ok = 0;
-        }
-        if (maximized_titlebar != 0x004C99E6u) {
-            klog_puts("[m41] pixel check failed: a maximized window's titlebar should start immediately below the 24px menu bar - expected the focused-titlebar accent 0x004C99E6 at (300, 30), got 0x");
-            klog_put_hex32(maximized_titlebar);
-            klog_putc('\n');
-            all_ok = 0;
-        }
-        if (bar_over_maximized != bar_bg) {
-            klog_puts("[m41] pixel check failed: the menu bar must stay on top of a maximized window - expected 0x");
-            klog_put_hex32(bar_bg);
-            klog_puts(" got 0x");
-            klog_put_hex32(bar_over_maximized);
-            klog_putc('\n');
-            all_ok = 0;
-        }
-        if (menu_read != (long)sizeof(menus)) {
-            klog_puts("[m41] menu query returned the wrong number of bytes\n");
-            all_ok = 0;
-        } else if (menus.window_id < 0 || menus.menu_count != 1 ||
-                   k_strcmp(menus.menus[0].title, "File") != 0 ||
-                   menus.menus[0].item_count != 4 ||
-                   k_strcmp(menus.menus[0].items[3], "Quit") != 0) {
-            klog_puts("[m41] menu query did not round-trip text_editor's declared File menu (count 0x");
-            klog_put_hex32((uint32_t)menus.menu_count);
-            klog_puts(", window 0x");
-            klog_put_hex32((uint32_t)menus.window_id);
-            klog_puts(")\n");
-            all_ok = 0;
-        }
-        if (editor_exit != 1) {
-            klog_puts("[m41] File > Quit did not reach text_editor as a WM_EVENT_MENU_COMMAND it acted on - expected its own sys_exit(1), got 0x");
-            klog_put_hex32((uint32_t)editor_exit);
-            klog_putc('\n');
-            all_ok = 0;
+        for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
+            if (got[i] != names[i].expected) {
+                klog_puts("[m42] pixel check failed: ");
+                klog_puts(names[i].what);
+                klog_puts(" - expected 0x");
+                klog_put_hex32(names[i].expected);
+                klog_puts(" got 0x");
+                klog_put_hex32(got[i]);
+                klog_putc('\n');
+                all_ok = 0;
+            }
         }
         if (!all_ok) {
-            panic("M41 menu-bar self-test: the shared top bar did not behave as expected");
+            panic("M42 taskbar self-test: the bottom taskbar did not behave as expected");
         }
-        klog_puts("[m41] top menu bar (top-docked panel, menu query round-trip, "
-                   "menu command reaching its client) self-test passed (6/6 checks matched).\n\n");
+        klog_puts("[m42] bottom taskbar (Start button, running-app button, tray, "
+                   "maximize clamp, launcher toggle) self-test passed (9/9 checks matched).\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

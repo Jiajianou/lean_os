@@ -59,14 +59,3 @@ int strcmp(const char *a, const char *b) {
     }
     return (unsigned char)*a - (unsigned char)*b;
 }
-
-void strlcpy(char *dst, const char *src, size_t n) {
-    if (n == 0) {
-        return;
-    }
-    size_t i = 0;
-    for (; i + 1 < n && src[i]; i++) {
-        dst[i] = src[i];
-    }
-    dst[i] = '\0';
-}

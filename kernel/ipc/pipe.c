@@ -35,11 +35,13 @@ void pipe_reset(pipe_t *p) {
 
 /* M21: bumped from 8 - wm_req/wm_resp plus one event pipe per connected
  * window (system_api/include/wm.h's wm_event_pipe_name) outgrew the old
- * cap. M41: 24 -> 32, since the shared menu bar's protocol adds four more
- * well-known names (WM_MENU_*) on top of the six the window/query/action/
- * settings channels already use, leaving only two spare above the eight
- * per-window event pipes. Same "bump the fixed cap when a real need
- * arrives" precedent as MAX_TASKS and MAX_FDS. */
+ * cap. M41: 24 -> 32, for the shared menu bar's four extra well-known
+ * names on top of the six the window/query/action/settings channels
+ * already use. M42 deleted that bar and its four names, but left the cap
+ * where it is: 12 per-window event pipes (WM_MAX_ROUTABLE_WINDOWS) plus
+ * six well-known ones is 18, and headroom above that is exactly what the
+ * previous exact-fit caps taught (see M40). Same "bump the fixed cap when
+ * a real need arrives" precedent as MAX_TASKS and MAX_FDS. */
 #define MAX_NAMED_PIPES     32
 #define NAMED_PIPE_NAME_LEN 16
 
@@ -78,6 +80,10 @@ long pipe_write(pipe_t *p, const void *buf, size_t len) {
             return written > 0 ? (long)written : -1;
         }
         if (p->count == PIPE_BUF_SIZE) {
+            /* M42: a task parked here is past syscall_handler's own signal
+             * check and gets no timer tick while it's current - see
+             * sched_deliver_pending_signal. Without this it is unkillable. */
+            sched_deliver_pending_signal();
             schedule();
             continue;
         }
@@ -97,6 +103,7 @@ long pipe_read(pipe_t *p, void *buf, size_t maxlen) {
             if (p->write_closed) {
                 return (long)n;
             }
+            sched_deliver_pending_signal(); /* see pipe_write's note above */
             schedule();
             continue;
         }

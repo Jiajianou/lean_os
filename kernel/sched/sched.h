@@ -138,6 +138,27 @@ void schedule(void);
  * never returns. Called automatically when a task's entry function
  * returns (with code 0); tasks may also call task_exit_with_code
  * directly (SYS_exit does) to exit early with a real status. */
+/* M42: terminates the calling task *now* if it has a fatal signal
+ * pending, and returns otherwise.
+ *
+ * sys_kill's contract (kernel/arch/x86_64/syscall.c) is that a signal is
+ * noticed "at the target's next syscall entry or scheduler tick". Both
+ * checkpoints miss the same case, and it is not a rare one: a task
+ * blocked *inside* a syscall - pipe_read with nothing buffered, SYS_read
+ * on the console with no keystrokes, SYS_wait on a child - is already
+ * past the syscall-entry check, and is spinning on schedule() from inside
+ * an interrupt gate with IF clear, so no timer tick ever fires while it
+ * is the current task either. Such a task could not be killed at all: the
+ * signal sat pending forever and SYS_wait on it never returned. Found by
+ * making the boot self-tests actually wait for what they kill (M42), at
+ * which point the first client that blocks on its event pipe rather than
+ * polling it - gui_paint.c - hung the whole boot.
+ *
+ * So every blocking loop in a syscall calls this alongside its
+ * schedule(). Not noreturn: it returns normally in the overwhelmingly
+ * common case of no signal pending. */
+void sched_deliver_pending_signal(void);
+
 void task_exit(void) __attribute__((noreturn));
 void task_exit_with_code(int code) __attribute__((noreturn));
 

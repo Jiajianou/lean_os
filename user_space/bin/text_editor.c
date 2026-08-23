@@ -29,7 +29,9 @@
  * the write half of SYS_readfile that had simply never been exposed to
  * user space before something needed to save a file back out.
  *
- * M35/M36 added a File menu (New/Save/Save As/Quit) and the two prompts
+ * M35/M36 added a File menu (New/Save/Save As/Quit) - drawn in this
+ * window's own top row (M41 briefly moved it to a shared screen-top bar;
+ * M42 brought it back, see MENU_ROWS below) - and the two prompts
  * "Save As" and "Quit"/titlebar-close needed once there was a real way to
  * lose unsaved work: a filename input (there was previously no way to
  * save under a different name at all) and a discard-confirm, both drawn
@@ -64,19 +66,24 @@
 #define MAX_LINES    600 /* 600 * 80 = 48000 bytes of line storage - comfortably within a user process's SYS_sbrk-backed heap */
 #define EDITOR_MAX_FILE 16384
 #define STATUS_ROWS 1
-/* M41: this window no longer draws a menu row of its own. M35 put a
- * "File" label and its dropdown inside this window because there was
- * nowhere else to put them; there is now - the shared top bar
- * (menu_bar.c) shows whichever app is focused. Keeping both would be
- * exactly the "second copy living in two places" this milestone existed
- * to remove, so the row is gone and the reclaimed height goes back to
- * the text. What's left here is the *definition* of the menu (FILE_MENU
- * below, declared once at startup) and the handling of a pick coming
- * back as WM_EVENT_MENU_COMMAND - this app still owns both ends; only
- * the drawing moved. */
-#define TEXT_ROWS (ROWS - STATUS_ROWS)
-#define CONTENT_Y0 0
+/* M35: one row reserved for the File menu bar, on top of the existing
+ * status row at the bottom - see redraw()/menu_open below.
+ *
+ * M41 moved this row out to a shared, screen-top menu bar that drew the
+ * labels for whichever app was focused, over a three-pipe protocol.
+ * M42 brought it back: this project follows the Windows convention, where
+ * an app's menus live in its own window. That makes the whole
+ * cross-process round trip unnecessary - the menu is drawn by the process
+ * that owns it, hit-tested by the same gfx_draw_menu/gfx_menu_hit_test
+ * pair desktop_icons.c's context menu uses, and "what does Save As mean"
+ * never has to leave this file. */
+#define MENU_ROWS 1
+#define TEXT_ROWS (ROWS - STATUS_ROWS - MENU_ROWS)
+#define CONTENT_Y0 (MENU_ROWS * FONT_HEIGHT)
 
+#define FILE_MENU_X 4
+#define FILE_MENU_ITEM_W 110
+#define FILE_MENU_ITEM_H (FONT_HEIGHT + 4)
 static const char *const FILE_MENU_ITEMS[] = {"New", "Save", "Save As", "Quit"};
 #define FILE_MENU_COUNT ((int)(sizeof(FILE_MENU_ITEMS) / sizeof(FILE_MENU_ITEMS[0])))
 
@@ -102,6 +109,7 @@ static int line_count = 1;
 static int cur_row, cur_col;
 static int scroll_top; /* index of the first line[] drawn in the text viewport */
 static int dirty; /* unsaved changes since the last Ctrl+S */
+static int menu_open; /* M35: File menu dropdown - toggled by clicking "File" in the menu row */
 
 static char filename[64];
 static char status[COLS + 1];
@@ -422,6 +430,9 @@ static void redraw(wm_window_t *win) {
         }
     }
 
+    gfx_fill_rect(&win->gfx, 0, 0, WIN_W, CONTENT_Y0, MENU_BG);
+    gfx_draw_text(&win->gfx, FILE_MENU_X, 2, "File", MENU_TEXT);
+
     for (int r = 0; r < TEXT_ROWS; r++) {
         int src = scroll_top + r;
         if (src >= line_count) {
@@ -439,6 +450,17 @@ static void redraw(wm_window_t *win) {
     int status_y = CONTENT_Y0 + TEXT_ROWS * FONT_HEIGHT;
     gfx_fill_rect(&win->gfx, 0, status_y, WIN_W, FONT_HEIGHT, STATUS_BG);
     gfx_draw_text(&win->gfx, 4, status_y, status[0] ? status : "Ctrl+S to save", STATUS_COLOR);
+
+    /* Dropdown drawn last so it overlays whatever content is underneath -
+     * this app owns its whole window buffer, there's no compositor-level
+     * popup surface to draw it into instead (see M35's milestones.md
+     * note on that scope trim, and M42's on why the menu came back here
+     * rather than staying in a shared bar). */
+    if (menu_open) {
+        gfx_draw_menu(&win->gfx, FILE_MENU_X, CONTENT_Y0, FILE_MENU_ITEM_W, FILE_MENU_ITEM_H,
+                      FILE_MENU_ITEMS, FILE_MENU_COUNT, -1,
+                      MENU_BG, MENU_HOVER_BG, MENU_BORDER, MENU_TEXT);
+    }
 
     if (prompt_kind != PROMPT_NONE) {
         int32_t x = (WIN_W - PROMPT_W) / 2;
@@ -478,22 +500,6 @@ int main(const char *arg) {
     wm_window_t win;
     if (wm_connect_confirm_close(WIN_W, WIN_H, "Editor", &win) != 0) {
         sys_exit(1);
-    }
-
-    /* M41: hand the shared top bar this app's menu, once. The bar draws
-     * the labels; picking one comes back as WM_EVENT_MENU_COMMAND below
-     * and runs through the exact same run_file_menu_item this window's
-     * own dropdown used to call. */
-    {
-        wm_menu_set_t declared;
-        memset(&declared, 0, sizeof(declared));
-        declared.menu_count = 1;
-        strlcpy(declared.menus[0].title, "File", WM_MENU_TITLE_MAX);
-        declared.menus[0].item_count = FILE_MENU_COUNT;
-        for (int i = 0; i < FILE_MENU_COUNT; i++) {
-            strlcpy(declared.menus[0].items[i], FILE_MENU_ITEMS[i], WM_MENU_ITEM_MAX);
-        }
-        wm_declare_menus(&win, &declared);
     }
 
     redraw(&win);
@@ -537,23 +543,26 @@ int main(const char *arg) {
 
             if (ev.type == WM_EVENT_CLOSE_REQUEST) {
                 request_action(PENDING_QUIT);
-            } else if (ev.type == WM_EVENT_MENU_COMMAND) {
-                /* M41: a pick from the shared top bar, arriving as
-                 * (menu index, item index) into the set declared at
-                 * startup - see wm.h's WM_EVENT_MENU_COMMAND. Only one
-                 * menu is declared, so ev.x is always 0; ev.y indexes
-                 * FILE_MENU_ITEMS, and runs through the exact same
-                 * function this window's own dropdown used to call. */
-                if (ev.x == 0) {
-                    run_file_menu_item(ev.y);
-                }
             } else if (ev.type == WM_EVENT_MOUSE_MOVE && sel_dragging) {
                 pixel_to_grid(ev.x, ev.y, &sel_end_row, &sel_end_col);
                 cur_row = sel_end_row;
                 cur_col = sel_end_col;
                 clamp_cursor();
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
-                if (ev.y >= CONTENT_Y0 && ev.y < CONTENT_Y0 + TEXT_ROWS * FONT_HEIGHT) {
+                /* M35: the "File" label toggles the dropdown; any other
+                 * click while it's open either picks an item or - same
+                 * as a real menu - just dismisses it, consumed either
+                 * way so it never also reaches handle_char/save_file. */
+                if (gfx_point_in_rect(ev.x, ev.y, 0, 0, FILE_MENU_X + 4 * FONT_WIDTH + 8, CONTENT_Y0)) {
+                    menu_open = !menu_open;
+                } else if (menu_open) {
+                    int idx = gfx_menu_hit_test(ev.x, ev.y, FILE_MENU_X, CONTENT_Y0,
+                                                 FILE_MENU_ITEM_W, FILE_MENU_ITEM_H, FILE_MENU_COUNT);
+                    menu_open = 0;
+                    if (idx >= 0) {
+                        run_file_menu_item(idx);
+                    }
+                } else if (ev.y >= CONTENT_Y0 && ev.y < CONTENT_Y0 + TEXT_ROWS * FONT_HEIGHT) {
                     /* M37: a plain click (no drag) just moves the cursor
                      * there, same as a real editor - sel_active only
                      * turns on at button-up if the drag actually covered

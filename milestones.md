@@ -1084,7 +1084,7 @@ That's what made "everywhere" one milestone instead of a per-app sweep.
       baseline with even spacing, where the old font ran them together
       into a single connected mass
 
-## Path to a Mac-like polished desktop (M40+)
+## Path to a polished Windows/macOS hybrid desktop (M40+)
 
 A reported bug started this arc: double-clicking the "Editor" or "Clock"
 desktop icons does nothing, while Terminal/Files/Settings/Paint all work.
@@ -1100,10 +1100,24 @@ M18 has only ever been proven by a self-test calling
 click at real pixel coordinates) has finally hidden a bug behind it
 instead of just a theoretical caveat. M40 closes that gap and uses it to
 actually find and fix this. M41 through M44 then push the desktop's UX
-and visuals toward the macOS shape already half-true today (M22's panel
-is already screen-*bottom*-docked, i.e. already dock-shaped) - a top
-menu bar, a real icon dock, a Spotlight-style launcher with window
-snapping, and a final visual-consistency pass.
+and visuals further.
+
+M41 shipped a macOS-style top menu bar. Direct design feedback after M41
+landed retargeted the rest of this arc: this project is a deliberate
+Windows/macOS hybrid, not a macOS clone. An early, uncommitted M42
+attempt at a macOS-style Dock (icon tiles, centered, growing/shrinking
+around the middle as apps open and close) was built far enough to prove
+out and then discarded before ever landing, once it became clear that
+wasn't the wanted direction - see M42's own entry for exactly what was
+kept from that attempt and what wasn't. M42 as redefined moves the bar
+back to the *bottom* and makes it behave like a Windows taskbar (a
+Start/launcher button, running-app buttons, a system tray) instead of a
+Dock, and moves each app's own File/Edit menu back to being drawn
+in-window (Windows convention, and M35's original shape) rather than
+living in a shared top bar. M43 adds a Spotlight-style launcher - opened
+from the taskbar's Start button or a global keychord - and window
+edge-snapping. M44 remains a final visual-consistency pass across
+whatever M41-M43 actually shipped.
 
 ## M40 — Robustness pass + real interactive-input test harness ✅
 
@@ -1275,66 +1289,136 @@ snapping, and a final visual-consistency pass.
 - [x] Full `tools/qemu-serial-test.sh` pass (28/28) and
       `tools/qemu-input-test.sh` pass (9/9)
 
-## M42 — Dock-style taskbar
+## M42 — Windows-style bottom taskbar (redesigned; replaces M41's top bar) ✅
 
-- [ ] Convert `desktop_shell.c`'s taskbar slots from fixed-width
-      text-label rectangles to icon tiles, reusing `desktop_icons.c`'s
-      existing glyph-box art instead of inventing a second icon format
-      - closes the "you have to read the label" gap and, as a side
-      effect, makes a running app's dock tile and its desktop icon
-      visibly the same thing
-- [ ] Center the dock horizontally instead of left-aligning from the
-      panel's edge, growing/shrinking around the middle as apps open
-      and close, the way a real Dock does
-- [ ] Running-app indicator (a small dot/bar under a tile) replacing
-      today's three flat background colors
-      (`RUNNING_SLOT_BG`/`_FOCUS_BG`/`_MIN_BG`) - focused/minimized/
-      running-unfocused stay distinguishable but read as "one dock,
-      three states" rather than three different-colored buttons
-- [ ] Hover highlight on a dock tile - the compositor already tracks
-      live cursor position every tick for M38's resize-cursor shaping,
-      so this reuses that instead of adding new mouse-polling
-- [ ] Verified via `qemu-serial-test.sh` (no kernel changes expected)
-      plus M40's harness for the real hover/click behavior
+Originally scoped as a macOS-style Dock (icon tiles, centered, growing/
+shrinking around the middle). Direct design feedback redirected this
+mid-flight: no macOS dock, and the bar itself moves from top (M41) back
+to the bottom and behaves like a Windows taskbar - this OS is a
+deliberate Windows/macOS hybrid, not a clone of either. The Dock attempt
+got far enough to be real, uncommitted work (`user_space/lib/appicons.c`/
+`.h`, a dock-shaped rewrite of `desktop_shell.c`, matching
+`compositor.c`/`kernel.c`/test changes) before being discarded outright -
+git history was never touched by it, since none of it was committed.
+
+- [x] `menu_bar.c` (M41) is deleted. `desktop_shell.c` is the single
+      system bar again, bottom-docked via the pre-M41 `wm_connect_panel`,
+      laid out left to right: a Start button (a 2x2 tile glyph plus the
+      word, since this project has no icon-image format), running-app
+      buttons (labeled rectangles - the pre-M41 shape, not icon tiles)
+      shifted right to clear it, and a right-aligned system tray +
+      clock. `format_clock` came back here with the clock rather than
+      being left behind as a second copy - it has never existed in two
+      places at once
+- [x] Each app's own menu (`text_editor.c`'s File menu) is drawn
+      in-window again - M35's original shape, `gfx_draw_menu`/
+      `gfx_menu_hit_test` called directly, no cross-process round trip.
+      That closes out M41's whole `WM_MENU_PIPE` protocol (the four
+      pipes, the compositor's per-window declared-menu registry,
+      `WM_EVENT_MENU_COMMAND`, `wm_declare_menus`/`wm_query_focused_menus`/
+      `wm_send_menu_command`, and `str.h`'s `strlcpy`, which had no other
+      caller left) - about 250 lines removed across five files
+- [x] `wm.h` simplified back toward its pre-M41 shape: `WM_PANEL_TOP`
+      removed (a single `WM_PANEL_BOTTOM` again), `panel_dock_h`/
+      `WM_ACTION_SET_PANEL_OVERHANG` and its three payload fields
+      removed, `wm_window_info_t.panel_edge` removed. In the compositor
+      that took `connected_panel_height`'s edge parameter with it
+      (`content_top_limit` is a constant again), collapsed
+      `blit_window_rect` back into `blit_window` (the overhang was its
+      only other caller), and dropped `apply_window_action`'s
+      now-unused request pointer
+- [x] Kept from the discarded Dock WIP: `compositor.c`'s panel-hover-
+      routing fix - a panel no longer takes focus (neither on a click nor
+      at connect time), and mouse events route to whichever panel the
+      cursor is over rather than only to the focused window, so the bar
+      can hover-highlight its buttons and receive clicks while never
+      being focused. The cursor *leaving* a panel sends it one last move
+      event, or the button it was over would stay lit forever
+- [x] A new `WM_ACTION_TOGGLE_LAUNCHER` (same `WM_ACTION_PIPE` every
+      other compositor-owned action already uses, but the first one with
+      no `window_id` - handled before the window validation the rest go
+      through) is what the Start button sends. M42 owns the toggle and
+      the compositor-drawn overlay surface it shows; M43 fills that
+      surface with the search field and results
+- [x] **Two real bugs found by making the tests stricter, neither about
+      this milestone:**
+      - **A task blocked inside a syscall could not be killed at all.**
+        `sys_kill` promises delivery "at the next syscall entry or
+        scheduler tick"; a task parked in `pipe_read`, `SYS_read` on the
+        console, or `SYS_wait` is already past the first and, spinning on
+        `schedule()` from inside an interrupt gate with IF clear, never
+        gets the second while it is the current task. The signal sat
+        pending forever. New `sched_deliver_pending_signal()`, called
+        from all four blocking loops. Found the moment the self-tests
+        started actually *waiting* for what they killed - the first
+        client that blocks on its event pipe instead of polling it
+        (`gui_paint.c`) hung the whole boot
+      - **The self-tests' own teardown was racing M40's leak audit.** A
+        SIGKILLed compositor hands back every window's shm segment plus
+        its full-screen back buffer when it finally exits, which - left
+        unwaited - landed at an arbitrary later moment, sometimes inside
+        M40's free-frame comparison, which then panicked the kernel for a
+        leak that never happened. All eight teardowns go through one
+        `selftest_reap` (kill *and* wait) now
+- [x] Rewritten boot self-test (`[m42]`, 9/9 checks) replacing M41's:
+      the bar is bottom-docked, the Start button is drawn at its left
+      edge, a running app's button is drawn focused at its new offset,
+      the tray is right-aligned, a maximized window's titlebar starts at
+      the top of the screen with the bar still on top of it, and
+      `WM_ACTION_TOGGLE_LAUNCHER` both shows and hides the overlay.
+      M22's own taskbar probes moved with the running-app row
+- [x] Four new interactive tests through M40's harness, replacing M41's
+      two: hovering the Start button lights it and clicking it toggles
+      the launcher (which is also the only proof a panel receives input
+      at all now that it never holds focus), clicking the taskbar leaves
+      the running app focused, a running-app button focuses then
+      minimizes its window, and the editor's in-window File menu opens
+      and runs File > Quit
+- [x] Full `tools/qemu-serial-test.sh` pass (28/28, run three times for
+      the intermittent panic above) and `tools/qemu-input-test.sh` pass
+      (11/11)
 
 ## M43 — Spotlight-style launcher + window snapping
 
-- [ ] Global launcher keychord (reusing M32's `keyboard_modifiers()`
-      infra already added for Alt-Tab) opens a centered search overlay
-      listing every file via `SYS_listfiles`, type-to-filter, Enter
-      spawns the top match, Escape dismisses - the type-to-launch
-      counterpart to double-clicking a desktop icon, and the first
-      place in this project a compositor-level (not per-client) modal
-      input grab is actually justified, unlike M35/M36's deliberate
-      client-side-only scope trims
+- [ ] Global launcher keychord (Ctrl+Space, reusing M32's
+      `keyboard_modifiers()` infra already added for Alt-Tab) *or* a
+      click on M42's taskbar Start button both open the same centered
+      search overlay - compositor-owned (the one place in this project a
+      compositor-level, not per-client, modal input grab is actually
+      justified, unlike M35/M36/M42's deliberate client-side-only menu
+      scope trims), listing every file via `SYS_listfiles`, type-to-
+      filter (substring match), Enter spawns the top/selected match,
+      Escape dismisses - the type-to-launch counterpart to double-
+      clicking a desktop icon
 - [ ] Window edge-snapping: dragging a window's titlebar to the
       screen's left/right edge resizes+repositions it to exactly the
       left/right half (macOS/Aero-style tiling), reusing M31's existing
-      drag-and-clamp state machine rather than a new one
+      drag-and-clamp state machine and the same "never exceed the
+      window's own buffer" clamp `WM_ACTION_MAXIMIZE` already follows
 - [ ] Snap preview: a translucent outline shown while dragging near an
-      edge, before release - the first real use of alpha-blended fills
-      beyond M38's fixed-ratio drop shadow, proving out how much cheap
-      integer-blend translucency this toolchain can afford before M44
-      leans on it further
+      edge, before release - reuses M38's fixed-ratio `fill_rect_shadow`
+      blend math rather than a second blend implementation, proving out
+      how much cheap integer-blend translucency this toolchain can
+      afford before M44 leans on it further
 - [ ] Self-tests for the protocol-level snap math (given a drag-end
       position, the resulting rect is exactly right/left half, clamped
-      correctly at small screen sizes); the launcher's keychord-opens-
-      overlay and real click-to-select-a-result behavior verified via
-      M40's harness
+      correctly at small screen sizes); the launcher's keychord/Start-
+      button-opens-overlay, type-to-filter, and real click-to-select-a-
+      result behavior verified via M40's harness
 
 ## M44 — Desktop visual polish
 
 - [ ] Replace the flat `BG_COLOR` desktop background with a simple
       integer-interpolated vertical gradient (no floating point - same
       constraint M38/M39 already worked within) - the last remaining
-      "flat color, nothing else" surface now that M41-M43 have covered
-      the bars/dock/windows
-- [ ] Translucent dock and menu bar background, reusing M38's
+      "flat color, nothing else" surface now that M42/M43 have covered
+      the taskbar/launcher/windows
+- [ ] Translucent taskbar and launcher-overlay background, reusing M38's
       `fill_rect_shadow` blend math and M43's snap-preview blend as the
       two existing precedents rather than a third blend implementation
-- [ ] Consistent spacing/corner-treatment pass across dock tiles, menu
-      bar, window chrome, and dialogs now that all four exist - a real
-      design-consistency pass, not new functionality
+- [ ] Consistent spacing/corner-treatment pass across taskbar buttons,
+      the launcher overlay, window chrome, and dialogs now that all four
+      exist - a real design-consistency pass, not new functionality
 - [ ] Wallpaper option in `settings.c` alongside the existing bg/accent
       color pickers - a small fixed set of built-in gradients/patterns
       to choose from; no image file format exists in this project and
