@@ -105,9 +105,9 @@ uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size) {
         }
     }
 
-    klog_puts("[elf] loaded, entry = 0x");
-    klog_put_hex64(eh->e_entry);
-    klog_putc('\n');
+    klog_debug("[elf] loaded, entry = 0x");
+    klog_log_hex64(KLOG_DEBUG, eh->e_entry);
+    klog_debug("\n");
 
     return eh->e_entry;
 }

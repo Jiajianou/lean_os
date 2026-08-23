@@ -40,7 +40,11 @@ void klog_use_console(void) {
  * a critical section it already holds" reason. */
 static spinlock_t klog_lock;
 
-void klog_putc(char c) {
+/* also_console decides whether this byte reaches the screen; serial always
+ * gets it either way (nothing klog emits is ever lost from serial capture,
+ * per the header's fan-out guarantee). klog_putc and the leveled path in
+ * klog_log_putc below both fall through to this. */
+static void klog_emit(char c, int also_console) {
     /* cli has to happen *before* taking the lock, not after: an interrupt
      * landing on this CPU in the gap between them, whose handler also
      * calls klog_puts (a fault reported by isr_handler, say), would try to
@@ -49,14 +53,20 @@ void klog_putc(char c) {
      * note on why. */
     uint64_t flags = irq_save_disable();
     spin_lock(&klog_lock);
-    if (use_console) {
-        console_putc(c);
-    } else {
-        vga_putc(c);
+    if (also_console) {
+        if (use_console) {
+            console_putc(c);
+        } else {
+            vga_putc(c);
+        }
     }
     serial_putc(c);
     spin_unlock(&klog_lock);
     irq_restore(flags);
+}
+
+void klog_putc(char c) {
+    klog_emit(c, 1);
 }
 
 void klog_puts(const char *s) {
@@ -78,5 +88,33 @@ void klog_put_hex32(uint32_t value) {
 void klog_put_hex64(uint64_t value) {
     for (int shift = 60; shift >= 0; shift -= 4) {
         klog_putc(hex_digit((value >> shift) & 0xF));
+    }
+}
+
+static klog_level_t current_level = KLOG_INFO;
+
+void klog_set_level(klog_level_t level) {
+    current_level = level;
+}
+
+static void klog_log_putc(klog_level_t level, char c) {
+    klog_emit(c, level >= current_level);
+}
+
+void klog_log(klog_level_t level, const char *s) {
+    while (*s) {
+        klog_log_putc(level, *s++);
+    }
+}
+
+void klog_log_hex32(klog_level_t level, uint32_t value) {
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        klog_log_putc(level, hex_digit((value >> shift) & 0xF));
+    }
+}
+
+void klog_log_hex64(klog_level_t level, uint64_t value) {
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        klog_log_putc(level, hex_digit((value >> shift) & 0xF));
     }
 }
