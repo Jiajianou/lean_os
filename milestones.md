@@ -545,21 +545,41 @@ app baseline toward something worth calling a usable OS.
       that has to happen outside this environment; everything the runbook
       (`docs/real-hardware.md`) needs from the software side is done
 
-## M30 — Window chrome: close / minimize / maximize
+## M30 — Window chrome: close / minimize / maximize ✅
 
-- [ ] Titlebar close/minimize/maximize hit-boxes, drawn by the compositor
-      alongside the existing focus-color titlebar logic
-      (`user_space/bin/compositor.c`)
-- [ ] `system_api/include/wm.h` protocol: `WM_ACTION_CLOSE` (kills the
-      owning process and reclaims the slot via M29's cleanup path),
-      `WM_ACTION_MAXIMIZE`/`WM_ACTION_RESTORE` (toggle between a saved
-      rect and full-screen-minus-panel)
-- [ ] Wire the existing panel-click-to-minimize toggle (M22) to the new
-      titlebar button too, so both paths drive the same state
-- [ ] `wm_send_action()` extended in `user_space/lib/wmclient.c`; the
-      existing demo apps (gui_clock, gui_paint, gui_terminal) get real
-      close/minimize/maximize buttons for free since they all route
-      through the same compositor chrome
+- [x] Titlebar close/minimize/maximize hit-boxes: three flat-colored
+      14x14 squares, right-aligned in the titlebar (`draw_titlebar_buttons`/
+      `titlebar_button_rect`, `user_space/bin/compositor.c`), hit-tested in
+      `handle_mouse` before the existing focus/hit-test logic so a button
+      click never also falls through to a focus-changing click on
+      whatever's underneath
+- [x] `system_api/include/wm.h` protocol: `WM_ACTION_CLOSE` (SIGTERMs the
+      owning client; the process's own termination is what reclaims the
+      slot, via M29's `reap_dead_clients` - the literal "closed and
+      crashed share one path" M29's intro promised, not a second copy),
+      `WM_ACTION_MAXIMIZE`/`WM_ACTION_RESTORE` (saves/restores x/y/w/h;
+      maximize targets full-screen-minus-panel but clamps to the
+      window's own shm-backed buffer size - there's no resize protocol
+      yet, M31's job, so this repositions rather than ever reading past
+      what a window's buffer actually holds)
+- [x] `apply_window_action()` is the single function both a titlebar
+      click and an external `WM_ACTION_PIPE` request (`accept_pending_action`)
+      call - the existing panel click-to-minimize (M22) and the new
+      titlebar minimize button drive the exact same code, not two copies
+- [x] `wm_send_action()` needed no signature change (already generic over
+      any `wm_action_type_t`) - what "free" close/minimize/maximize
+      buttons actually required was the compositor drawing/handling its
+      own chrome, not any client-side code; gui_clock/gui_paint/
+      gui_terminal are unmodified and get all three
+- [x] New kernel-side self-test (`kernel/kernel.c`, `[wm30]`): drives a
+      real running gui_clock purely over `WM_ACTION_PIPE` (maximize,
+      restore, minimize, un-minimize, close) and confirms each step via
+      real framebuffer pixel reads plus `SYS_wait` catching the closed
+      client's SIGTERM exit code - 6/6 checks passed. What this doesn't
+      (and can't, headlessly) prove is a real mouse click landing on a
+      button's exact pixels; that's manual/interactive verification, the
+      same category M21's own self-test already deferred focus-follows-
+      click to
 
 ## M31 — Window dragging & resizing
 

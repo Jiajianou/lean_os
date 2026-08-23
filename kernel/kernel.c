@@ -27,6 +27,7 @@
 #include "sched/sched.h"
 #include "signal.h"  /* system_api/include/signal.h */
 #include "syscall.h" /* system_api/include/syscall.h */
+#include "wm.h"      /* system_api/include/wm.h - M30 self-test speaks WM_ACTION_PIPE directly */
 
 /* Embedded by kernel/proc/embed_programs.asm - every user program this
  * project ships, built against user_space/lib by the Makefile and
@@ -899,6 +900,158 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         }
         klog_puts("[wm22] desktop shell (panel + taskbar query, no launcher) self-test passed "
                   "(5/5 pixel checks matched).\n\n");
+    }
+
+    /* M30 self-test: a real gui_clock window, driven purely through the
+     * WM_ACTION_PIPE protocol (system_api/include/wm.h) - no simulated
+     * mouse hardware involved, so this proves apply_window_action's
+     * maximize/restore/minimize/close state machine itself is correct,
+     * the same logic a real titlebar-button click drives (compositor.c's
+     * handle_mouse calls the exact same function). Whether a click at the
+     * *right pixel coordinates* actually reaches that function is left to
+     * manual/interactive verification, same as focus-follows-click and
+     * gui_paint strokes already are (M21's own self-test comment) - real
+     * mouse input needs real hardware-shaped events this headless
+     * self-test has no way to fabricate.
+     *
+     * gui_clock (not wm_demo) is the target: wm_demo draws once and
+     * exits on purpose (M29's self-test already consumes it fully via
+     * SYS_wait above), so a *running* client is needed to still be there
+     * once this block starts sending it action requests. Alone in its
+     * own fresh compositor instance, gui_clock is window_id 0 - no panel
+     * connects here, so WM_ACTION_MAXIMIZE's available area is simply
+     * the whole screen (BORDER/TITLEBAR_H insets only). */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *clock_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !clock_image) {
+            panic("out of memory reading compositor/gui_clock back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t clock_size = vfs_read("gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || clock_size < 0) {
+            panic("vfs_read: compositor/gui_clock missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+
+        task_t *clock_task = process_spawn(clock_image, (size_t)clock_size, "");
+        kfree(clock_image);
+        pit_sleep_ms(500); /* connects (window 0), draws its first frame */
+
+        int action_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+            panic("M30 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
+        }
+
+        /* "Home" position: idx 0's default placement (accept_pending_window's
+         * `100 + idx*40`) puts gui_clock's 200x90 content at x:[100,300),
+         * y:[100,190) - (250,170) sits in its plain-background lower-right
+         * corner, well clear of the "CLOCK"/"uptime: ..." text gui_clock
+         * draws near the top (see gui_clock.c). "Away" position: once
+         * maximized, content moves to x:[2,202), y:[22,112) (BORDER/
+         * TITLEBAR_H insets, clamped to its own 200x90 buffer - it's far
+         * smaller than the screen, so nothing else about its size
+         * changes) - (250,170) then falls outside the window entirely, so
+         * it reads the compositor's own desktop background instead of
+         * whatever gui_clock draws there. The two colors are deliberately
+         * distinguishable (0x00122438 vs 0x001A1A2E) so a wrong pixel
+         * can't accidentally match the wrong expectation. */
+        const int32_t home_x = 250, home_y = 170;
+        const uint32_t clock_bg = 0x00122438u;
+        const uint32_t desktop_bg = 0x001A1A2Eu;
+
+        wm_action_request_t req;
+        req.window_id = 0;
+
+        req.action = WM_ACTION_MAXIMIZE;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(300);
+        uint32_t after_maximize = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
+
+        req.action = WM_ACTION_RESTORE;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(300);
+        uint32_t after_restore = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
+
+        req.action = WM_ACTION_TOGGLE_MINIMIZE;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(300);
+        uint32_t after_minimize = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
+
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req)); /* toggle back */
+        pit_sleep_ms(300);
+        uint32_t after_unminimize = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
+
+        req.action = WM_ACTION_CLOSE;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        /* Signal delivery isn't instantaneous (checked at the target's
+         * next syscall/tick - signal.h), and M29's reap_dead_clients only
+         * runs once per compositor loop iteration after that - 300ms is
+         * comfortably many iterations either way. */
+        pit_sleep_ms(300);
+        uint32_t after_close = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
+        long clock_exit = do_syscall(SYS_wait, (uint64_t)clock_task->id, 0, 0);
+
+        do_syscall(SYS_kill, (uint64_t)comp_task->id, SIGKILL, 0);
+        console_init();
+        klog_use_console();
+
+        int all_ok = 1;
+        if (after_maximize != desktop_bg) {
+            klog_puts("[wm30] pixel check failed: after WM_ACTION_MAXIMIZE, home position should be empty desktop - expected 0x");
+            klog_put_hex32(desktop_bg);
+            klog_puts(" got 0x");
+            klog_put_hex32(after_maximize);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (after_restore != clock_bg) {
+            klog_puts("[wm30] pixel check failed: after WM_ACTION_RESTORE, home position should show the window again - expected 0x");
+            klog_put_hex32(clock_bg);
+            klog_puts(" got 0x");
+            klog_put_hex32(after_restore);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (after_minimize != desktop_bg) {
+            klog_puts("[wm30] pixel check failed: after WM_ACTION_TOGGLE_MINIMIZE, home position should be empty desktop - expected 0x");
+            klog_put_hex32(desktop_bg);
+            klog_puts(" got 0x");
+            klog_put_hex32(after_minimize);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (after_unminimize != clock_bg) {
+            klog_puts("[wm30] pixel check failed: after toggling minimize back off, home position should show the window again - expected 0x");
+            klog_put_hex32(clock_bg);
+            klog_puts(" got 0x");
+            klog_put_hex32(after_unminimize);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (after_close != desktop_bg) {
+            klog_puts("[wm30] pixel check failed: after WM_ACTION_CLOSE, home position should be empty desktop (window slot reclaimed) - expected 0x");
+            klog_put_hex32(desktop_bg);
+            klog_puts(" got 0x");
+            klog_put_hex32(after_close);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (clock_exit != 128 + SIGTERM) {
+            klog_puts("[wm30] WM_ACTION_CLOSE self-test: gui_clock's exit code did not match a SIGTERM death - expected 0x");
+            klog_put_hex32((uint32_t)(128 + SIGTERM));
+            klog_puts(" got 0x");
+            klog_put_hex32((uint32_t)clock_exit);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M30 window chrome self-test: maximize/restore/minimize/close did not behave as expected");
+        }
+        klog_puts("[wm30] window chrome (maximize/restore/minimize/close via WM_ACTION_PIPE) self-test passed (6/6 checks matched).\n\n");
     }
 
     /* Stretch goal: SMP. Deliberately brought up *after* every M-numbered

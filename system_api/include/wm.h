@@ -121,6 +121,7 @@ typedef struct {
     int32_t x, y, w, h; /* on-screen content geometry - same fields compositor.c already tracks per window */
     uint8_t focused;
     uint8_t minimized;
+    uint8_t maximized; /* M30: mirrors compositor.c's window_t.maximized - lets a caller (a future titlebar/panel indicator) reflect current state without guessing */
     uint8_t is_panel; /* lets a panel client filter itself (and any other panel) out of what it lists as a "running app" */
     uint8_t is_desktop; /* same idea as is_panel - the desktop background is never a "running app" either */
     char title[WM_TITLE_MAX]; /* echo of wm_create_request_t.title - may be empty */
@@ -131,9 +132,21 @@ typedef struct {
     wm_window_info_t windows[WM_MAX_ROUTABLE_WINDOWS];
 } wm_query_response_t;
 
+/* M30: titlebar close/minimize/maximize buttons are drawn and hit-tested
+ * entirely inside compositor.c's own mouse handling (user_space/bin/
+ * compositor.c) - a click there calls the same apply_window_action every
+ * external WM_ACTION_PIPE request goes through, not a separate code path,
+ * so nothing about wm_send_action's shape needed to change for this: an
+ * ordinary client (gui_clock, gui_paint, gui_terminal) needs zero code of
+ * its own to get real close/minimize/maximize, and an external caller
+ * (desktop_shell, or anything else that already knows a window_id from
+ * wm_query_windows) can drive the exact same three actions itself. */
 typedef enum {
     WM_ACTION_FOCUS = 1,            /* un-minimizes if needed, then focuses window_id */
     WM_ACTION_TOGGLE_MINIMIZE = 2,  /* hides/shows window_id without touching its process; clears focus if it was focused */
+    WM_ACTION_CLOSE = 3,            /* SIGTERMs window_id's owning client (system_api/include/signal.h) - the process's own termination is what actually frees the window slot, via M29's SYS_task_alive-driven reap_dead_clients, the same reclaim path a real crash goes through. Not instantaneous (signal delivery isn't - see signal.h) but visibly so: the window stops responding immediately, and disappears within one compositor loop iteration. */
+    WM_ACTION_MAXIMIZE = 4,         /* saves window_id's current x/y/w/h and grows it to fill the screen minus any docked panel - clamped to never exceed its own shm-backed pixel buffer (there's no resize protocol yet - M31 - so a window smaller than the available area is repositioned to fill as much of it as its buffer actually holds, never stretched past what it allocated). No-op if already maximized. */
+    WM_ACTION_RESTORE = 5,          /* undoes WM_ACTION_MAXIMIZE - restores the saved x/y/w/h. No-op if not maximized. */
 } wm_action_type_t;
 
 typedef struct {

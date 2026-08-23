@@ -24,7 +24,7 @@ set -euo pipefail
 # timings this was measured against. Bump if a future milestone adds
 # enough boot-time work to push past it; this is a real budget, not a
 # magic number to leave stale.
-SECONDS_TO_RUN="${1:-20}"
+SECONDS_TO_RUN="${1:-24}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -88,6 +88,7 @@ REQUIRED_MARKERS=(
   "[wm] compositor + client self-test passed"
   "[wm21] multi-window compositor + focus-routing self-test passed"
   "[wm22] desktop shell (panel + taskbar query, no launcher) self-test passed"
+  "[wm30] window chrome (maximize/restore/minimize/close via WM_ACTION_PIPE) self-test passed"
   "[smp] self-test passed."
   "[net] ICMP echo request/reply self-test passed"
   "[init] PID 1 spawned"

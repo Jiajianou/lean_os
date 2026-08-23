@@ -31,7 +31,23 @@
  * every ordinary window and panel, and only ever wins a click hit-test
  * that nothing else on screen claimed - the background layer a desktop
  * icon gets drawn on and double-clicked through gaps in other windows.
+ *
+ * M30 adds real titlebar chrome: three small hit-testable buttons drawn
+ * in every ordinary window's titlebar (close/maximize/minimize, right-
+ * aligned - see draw_titlebar_buttons/BTN_SIZE below), handled by
+ * apply_window_action - the same function accept_pending_action already
+ * calls for an external WM_ACTION_PIPE request, so a titlebar click and
+ * a panel's own click-to-minimize (M22) drive the exact literal same
+ * code path instead of two parallel ones that could drift. Close doesn't
+ * touch the window slot directly - it SIGTERMs the owning client and lets
+ * M29's reap_dead_clients notice it died and reclaim the slot, exactly
+ * the "closed and crashed share one reclaim path" M29's own intro
+ * promised. Maximize/restore is deliberately NOT a real resize (there's
+ * no protocol yet for a client to grow its own shm-backed pixel buffer -
+ * that's M31's job): it repositions to fill the screen minus any docked
+ * panel, clamped to never exceed the window's own buffer dimensions.
  */
+#include "signal.h" /* system_api/include/signal.h - SIGTERM, M30's WM_ACTION_CLOSE */
 #include "str.h"
 #include "syscall_wrappers.h"
 #include "wm.h"
@@ -47,14 +63,30 @@
 #define CURSOR_SIZE          8
 #define REDRAW_INTERVAL_MS   100 /* fallback cadence for changes the compositor has no way to notice itself - a client (M21's clock demo) redrawing its own window's pixels with no input involved at all. Input-driven changes no longer wait on this - see `dirty`, below. */
 
+/* M30: titlebar buttons, right-aligned, close nearest the edge (the
+ * conventional rightmost slot) - minimize/maximize/close, left to right.
+ * BTN_SIZE fits comfortably inside TITLEBAR_H (20) with 3px of vertical
+ * padding on each side; every window this project ships is at least
+ * 200px wide (see gui_clock.c/gui_paint.c/gui_terminal.c's own WIN_W),
+ * well past the ~54px these three buttons plus margins need. */
+#define BTN_SIZE   14
+#define BTN_GAP    4
+#define BTN_MARGIN 4
+#define BTN_CLOSE_COLOR    0x00CC3333u
+#define BTN_MAXIMIZE_COLOR 0x0033AA55u
+#define BTN_MINIMIZE_COLOR 0x00888899u
+
 typedef struct {
-    int32_t x, y, w, h;
+    int32_t x, y, w, h; /* current on-screen content geometry */
+    int32_t buf_w, buf_h; /* M30: the shm-backed pixel buffer's actual, fixed dimensions (set once at connect, never mutated) - w/h above can now shrink below this (WM_ACTION_MAXIMIZE clamps to it) but never exceed it; blit_window strides by buf_w, not w, so a cropped display never reads past what this window's buffer actually holds */
     uint32_t *pixels;
     int evt_write_fd; /* write end of this window's own event pipe - see wm_event_pipe_name */
     uint8_t is_panel;  /* M22: chrome-less, always-on-top, screen-bottom-docked - see wm_create_request_t.panel */
     uint8_t is_desktop; /* chrome-less, full-screen, always-on-*bottom* - see wm_create_request_t.desktop */
     uint8_t minimized; /* M22: hidden from redraw() and from click hit-testing, but the client process keeps running (WM_ACTION_TOGGLE_MINIMIZE) */
-    uint8_t alive; /* M29: 0 once this slot has been reclaimed (owning client died or - M30 - closed) - excluded from redraw/hit-test/query, and eligible for accept_pending_window to hand to the next connecting client. Slots below window_count that are !alive are exactly the "holes" reap_dead_clients leaves behind. */
+    uint8_t maximized; /* M30: WM_ACTION_MAXIMIZE/RESTORE toggle - see saved_x/y/w/h below */
+    int32_t saved_x, saved_y, saved_w, saved_h; /* M30: pre-maximize geometry, restored by WM_ACTION_RESTORE - meaningless while !maximized */
+    uint8_t alive; /* M29: 0 once this slot has been reclaimed (owning client died or closed) - excluded from redraw/hit-test/query, and eligible for accept_pending_window to hand to the next connecting client. Slots below window_count that are !alive are exactly the "holes" reap_dead_clients leaves behind. */
     int32_t client_pid; /* M29: from wm_create_request_t.client_pid - who to watch via SYS_task_alive so a crash (not just an orderly close) still frees this slot. -1 for a slot that's never been assigned. */
     char title[WM_TITLE_MAX]; /* echoed straight from wm_create_request_t.title into wm_window_info_t.title on every query - see accept_pending_query */
 } window_t;
@@ -184,10 +216,40 @@ static void blit_window(const window_t *win) {
     int32_t x1 = min_i32(win->x + win->w, clip_x1);
     int32_t y1 = min_i32(win->y + win->h, clip_y1);
     for (int32_t row = y0; row < y1; row++) {
-        const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y) * (uint32_t)win->w;
+        /* buf_w, not w - M30 lets w shrink below buf_w (WM_ACTION_MAXIMIZE
+         * clamping), but the underlying pixel buffer's real row stride
+         * never changes, so indexing by anything else would read the
+         * wrong bytes (or, once w > buf_w could ever happen, off the end
+         * of it entirely - see window_t's own comment on buf_w). */
+        const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y) * (uint32_t)win->buf_w;
         for (int32_t col = x0; col < x1; col++) {
             put_pixel(col, row, src_row[col - win->x]);
         }
+    }
+}
+
+/* M30: titlebar buttons live entirely inside the titlebar strip
+ * (win->y - TITLEBAR_H .. win->y), so drawing and hit-testing them share
+ * the exact same rects - see titlebar_button_rects/point_in_rect. */
+static int point_in_rect(int32_t px, int32_t py, int32_t x, int32_t y, int32_t w, int32_t h) {
+    return px >= x && px < x + w && py >= y && py < y + h;
+}
+
+typedef enum { BTN_MINIMIZE = 0, BTN_MAXIMIZE = 1, BTN_CLOSE = 2, BTN_COUNT } titlebar_button_t;
+
+static void titlebar_button_rect(const window_t *win, titlebar_button_t btn, int32_t *out_x, int32_t *out_y) {
+    int32_t by = win->y - TITLEBAR_H + (TITLEBAR_H - BTN_SIZE) / 2;
+    int32_t bx = win->x + win->w - BTN_MARGIN - BTN_SIZE - (int32_t)btn * (BTN_SIZE + BTN_GAP);
+    *out_x = bx;
+    *out_y = by;
+}
+
+static void draw_titlebar_buttons(const window_t *win) {
+    static const uint32_t colors[BTN_COUNT] = {BTN_MINIMIZE_COLOR, BTN_MAXIMIZE_COLOR, BTN_CLOSE_COLOR};
+    for (int b = 0; b < BTN_COUNT; b++) {
+        int32_t bx, by;
+        titlebar_button_rect(win, (titlebar_button_t)b, &bx, &by);
+        fill_rect(bx, by, BTN_SIZE, BTN_SIZE, colors[b]);
     }
 }
 
@@ -246,6 +308,7 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
         fill_rect(win->x - BORDER, win->y - TITLEBAR_H - BORDER,
                   win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER, BORDER_COLOR);
         fill_rect(win->x, win->y - TITLEBAR_H, win->w, TITLEBAR_H, titlebar_color);
+        draw_titlebar_buttons(win);
         blit_window(win);
     }
     for (int i = 0; i < window_count; i++) {
@@ -437,11 +500,14 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     }
     win->w = (int32_t)width;
     win->h = (int32_t)height;
+    win->buf_w = (int32_t)width;  /* M30: fixed for this connection's whole lifetime - see window_t's own comment */
+    win->buf_h = (int32_t)height;
     win->pixels = (uint32_t *)vaddr;
     win->evt_write_fd = evt_write_fd;
     win->is_panel = req.panel;
     win->is_desktop = req.desktop;
     win->minimized = 0;
+    win->maximized = 0;
     win->alive = 1;
     win->client_pid = req.client_pid;
     int ti = 0;
@@ -487,12 +553,83 @@ static void accept_pending_query(int query_read_fd, int query_resp_write_fd) {
         resp.windows[out].h = win->h;
         resp.windows[out].focused = (i == focused_window);
         resp.windows[out].minimized = win->minimized;
+        resp.windows[out].maximized = win->maximized;
         resp.windows[out].is_panel = win->is_panel;
         resp.windows[out].is_desktop = win->is_desktop;
         memcpy(resp.windows[out].title, win->title, WM_TITLE_MAX);
         resp.count++;
     }
     sys_write(query_resp_write_fd, &resp, sizeof(resp));
+}
+
+/* M30: the height of whichever panel is currently connected (there's at
+ * most one in practice - desktop_shell.c is the only client that ever
+ * asks for one - but nothing enforces that, so this just uses whichever
+ * is found first), or 0 if none is - how much of the screen's bottom
+ * edge WM_ACTION_MAXIMIZE has to leave clear. */
+static int32_t connected_panel_height(void) {
+    for (int i = 0; i < window_count; i++) {
+        if (windows[i].alive && windows[i].is_panel) {
+            return windows[i].h;
+        }
+    }
+    return 0;
+}
+
+/* M30: the single place every window-state-changing action funnels
+ * through - a titlebar button click (handle_mouse, below) and an
+ * external WM_ACTION_PIPE request (accept_pending_action) both call this
+ * directly, so "click the panel's minimize toggle" and "click the
+ * titlebar's minimize button" (M22 and M30's own bullet asking for
+ * exactly this) drive the literal same code, not two copies that could
+ * drift apart. */
+static void apply_window_action(int idx, uint32_t action) {
+    window_t *win = &windows[idx];
+    if (action == WM_ACTION_FOCUS) {
+        win->minimized = 0;
+        set_focus(idx);
+    } else if (action == WM_ACTION_TOGGLE_MINIMIZE) {
+        win->minimized = !win->minimized;
+        if (win->minimized && focused_window == idx) {
+            set_focus(-1);
+        }
+        dirty = 1;
+    } else if (action == WM_ACTION_CLOSE) {
+        /* Deliberately does not touch windows[idx] at all here - see this
+         * file's header comment and M29's reap_dead_clients, which will
+         * notice win->client_pid terminated (a nonzero exit code - signal
+         * deaths always are, system_api/include/signal.h) within one
+         * loop iteration and reclaim the slot then, the exact same path
+         * an actual crash goes through. */
+        sys_kill(win->client_pid, SIGTERM);
+    } else if (action == WM_ACTION_MAXIMIZE) {
+        if (!win->maximized) {
+            win->saved_x = win->x;
+            win->saved_y = win->y;
+            win->saved_w = win->w;
+            win->saved_h = win->h;
+            int32_t avail_w = (int32_t)fb_info.width - 2 * BORDER;
+            int32_t avail_h = (int32_t)fb_info.height - TITLEBAR_H - 2 * BORDER - connected_panel_height();
+            win->x = BORDER;
+            win->y = TITLEBAR_H + BORDER;
+            /* Clamped to buf_w/buf_h - see window_t's own comment on why
+             * this can only ever shrink a window that's bigger than the
+             * available area, never grow one past what its buffer holds. */
+            win->w = min_i32(win->buf_w, avail_w);
+            win->h = min_i32(win->buf_h, avail_h);
+            win->maximized = 1;
+            dirty = 1;
+        }
+    } else if (action == WM_ACTION_RESTORE) {
+        if (win->maximized) {
+            win->x = win->saved_x;
+            win->y = win->saved_y;
+            win->w = win->saved_w;
+            win->h = win->saved_h;
+            win->maximized = 0;
+            dirty = 1;
+        }
+    }
 }
 
 static void accept_pending_action(int action_read_fd) {
@@ -506,17 +643,7 @@ static void accept_pending_action(int action_read_fd) {
     if (req.window_id < 0 || req.window_id >= window_count || !windows[req.window_id].alive) {
         return;
     }
-    window_t *win = &windows[req.window_id];
-    if (req.action == WM_ACTION_FOCUS) {
-        win->minimized = 0;
-        set_focus(req.window_id);
-    } else if (req.action == WM_ACTION_TOGGLE_MINIMIZE) {
-        win->minimized = !win->minimized;
-        if (win->minimized && focused_window == req.window_id) {
-            set_focus(-1);
-        }
-        dirty = 1;
-    }
+    apply_window_action(req.window_id, req.action);
 }
 
 static void handle_mouse(void) {
@@ -543,6 +670,42 @@ static void handle_mouse(void) {
 
         int left_down_edge = (mev.buttons & 1) && !(prev_buttons & 1);
         if (left_down_edge) {
+            /* M30: titlebar buttons take priority over every other hit-
+             * test below - checked topmost-window-first, same order and
+             * same "first match wins" limitation as the ordinary-window
+             * hit-test just below it (occlusion-unaware - see that
+             * loop's own comment; a real fix is z-order work, out of
+             * scope here). Panels/desktop have no titlebar, so they're
+             * never candidates. */
+            int btn_hit_idx = -1;
+            titlebar_button_t btn_hit = BTN_CLOSE;
+            for (int i = window_count - 1; i >= 0 && btn_hit_idx < 0; i--) {
+                const window_t *w = &windows[i];
+                if (!w->alive || w->is_panel || w->is_desktop || w->minimized) {
+                    continue;
+                }
+                for (int b = 0; b < BTN_COUNT; b++) {
+                    int32_t bx, by;
+                    titlebar_button_rect(w, (titlebar_button_t)b, &bx, &by);
+                    if (point_in_rect(cursor_x, cursor_y, bx, by, BTN_SIZE, BTN_SIZE)) {
+                        btn_hit_idx = i;
+                        btn_hit = (titlebar_button_t)b;
+                        break;
+                    }
+                }
+            }
+            if (btn_hit_idx >= 0) {
+                if (btn_hit == BTN_CLOSE) {
+                    apply_window_action(btn_hit_idx, WM_ACTION_CLOSE);
+                } else if (btn_hit == BTN_MINIMIZE) {
+                    apply_window_action(btn_hit_idx, WM_ACTION_TOGGLE_MINIMIZE);
+                } else {
+                    apply_window_action(btn_hit_idx, windows[btn_hit_idx].maximized ? WM_ACTION_RESTORE : WM_ACTION_MAXIMIZE);
+                }
+                prev_buttons = mev.buttons;
+                continue; /* consumed by chrome - not also a focus-changing click on whatever's under it */
+            }
+
             /* Panels are checked first (they're drawn on top, so they'd
              * visually win any overlap anyway) and a minimized window
              * can't be clicked - there's nothing on screen to click. */
