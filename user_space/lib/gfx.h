@@ -48,3 +48,18 @@ int gfx_point_in_rect(int32_t px, int32_t py, int32_t x, int32_t y, int32_t w, i
 void gfx_draw_button(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
                       uint32_t bg_color, uint32_t border_color,
                       const char *label, uint32_t label_color);
+
+/* M35: a vertical stack of `count` gfx_draw_button-drawn rows, each
+ * item_w x item_h, top-left at (x, y) - the dropdown/context-menu shape
+ * both text_editor.c's File menu and desktop_icons.c's right-click menu
+ * need. hover_index (or -1 for none) draws that one row in hover_bg
+ * instead of bg. Two real, simultaneous consumers landing in the same
+ * milestone is what earns this its own helper rather than each caller
+ * looping over gfx_draw_button by hand. */
+void gfx_draw_menu(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t item_w, int32_t item_h,
+                    const char *const *items, int count, int hover_index,
+                    uint32_t bg_color, uint32_t hover_bg_color, uint32_t border_color, uint32_t text_color);
+
+/* Which item index (0..count-1) contains (px, py), or -1 if none - the
+ * hit-test companion to gfx_draw_menu, same rect math. */
+int gfx_menu_hit_test(int32_t px, int32_t py, int32_t x, int32_t y, int32_t item_w, int32_t item_h, int count);

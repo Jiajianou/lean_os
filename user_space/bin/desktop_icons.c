@@ -41,6 +41,27 @@
 #define PANEL_MARGIN 40  /* clears desktop_shell.c's PANEL_HEIGHT(32) with room to spare - see this file's header comment on why an icon must never end up under it */
 #define DOUBLE_CLICK_MS 500
 
+/* M35: right-click-on-empty-desktop context menu - the standard "quick
+ * launch" convention a right-click on a real desktop background gives
+ * you, using the same gfx_draw_menu/gfx_menu_hit_test pair text_editor.c's
+ * File menu uses (system_api/include/input.h's mouse_event_t.buttons
+ * bit1, already decoded end-to-end since M18 - kernel/drivers/mouse.c,
+ * compositor.c's own event forwarding - nothing new needed to reach it,
+ * just the first client that ever reads it). */
+#define CTX_MENU_ITEM_W 120
+#define CTX_MENU_ITEM_H (FONT_HEIGHT + 4)
+#define CTX_MENU_BG     0x00243040u
+#define CTX_MENU_HOVER  0x003A5A80u
+#define CTX_MENU_BORDER 0x00506070u
+#define CTX_MENU_TEXT   0x00FFFFFFu
+
+static const char *const CTX_MENU_ITEMS[] = {"Terminal", "Settings"};
+static const char *const CTX_MENU_PROGRAMS[] = {"gui_terminal", "settings"};
+#define CTX_MENU_COUNT ((int)(sizeof(CTX_MENU_ITEMS) / sizeof(CTX_MENU_ITEMS[0])))
+
+static int ctx_menu_open;
+static int32_t ctx_menu_x, ctx_menu_y;
+
 typedef struct {
     const char *label;
     const char *program;
@@ -108,6 +129,11 @@ static void redraw(wm_window_t *self, int pressed_icon) {
     for (int i = 0; i < ICON_COUNT; i++) {
         redraw_icon(self, i, i == pressed_icon);
     }
+    if (ctx_menu_open) {
+        gfx_draw_menu(&self->gfx, ctx_menu_x, ctx_menu_y, CTX_MENU_ITEM_W, CTX_MENU_ITEM_H,
+                      CTX_MENU_ITEMS, CTX_MENU_COUNT, -1,
+                      CTX_MENU_BG, CTX_MENU_HOVER, CTX_MENU_BORDER, CTX_MENU_TEXT);
+    }
 }
 
 int main(void) {
@@ -129,7 +155,35 @@ int main(void) {
         wm_event_t ev;
         int changed = 0;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+            if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
+                /* Right-click always (re)opens the menu at the new click
+                 * point, clamped so it can't be drawn partly off the
+                 * desktop window's own edge. */
+                ctx_menu_open = 1;
+                ctx_menu_x = ev.x;
+                ctx_menu_y = ev.y;
+                int32_t max_x = (int32_t)win.width - CTX_MENU_ITEM_W;
+                int32_t max_y = (int32_t)win.height - CTX_MENU_ITEM_H * CTX_MENU_COUNT;
+                if (ctx_menu_x > max_x) {
+                    ctx_menu_x = max_x;
+                }
+                if (ctx_menu_y > max_y) {
+                    ctx_menu_y = max_y;
+                }
+                changed = 1;
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ctx_menu_open) {
+                /* A left-click while the menu is open is consumed by it -
+                 * either picks an item or just dismisses, same as
+                 * text_editor.c's File menu - never also falls through to
+                 * an icon double-click underneath it. */
+                int idx = gfx_menu_hit_test(ev.x, ev.y, ctx_menu_x, ctx_menu_y,
+                                             CTX_MENU_ITEM_W, CTX_MENU_ITEM_H, CTX_MENU_COUNT);
+                ctx_menu_open = 0;
+                if (idx >= 0) {
+                    sys_spawn(CTX_MENU_PROGRAMS[idx], "");
+                }
+                changed = 1;
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 for (int i = 0; i < ICON_COUNT; i++) {
                     if (!point_in_icon(i, ev.x, ev.y)) {
                         continue;

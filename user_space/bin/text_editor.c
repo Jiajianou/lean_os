@@ -44,12 +44,26 @@
 #define CURSOR_COLOR  0x00E0E0E0u
 #define STATUS_BG     0x00303030u
 #define STATUS_COLOR  0x00FFFF88u
+#define MENU_BG       0x00242424u
+#define MENU_HOVER_BG 0x003A5A80u
+#define MENU_BORDER   0x00484848u
+#define MENU_TEXT     0x00E0E0E0u
 
 #define MAX_LINE_LEN (COLS)
 #define MAX_LINES    600 /* 600 * 80 = 48000 bytes of line storage - comfortably within a user process's SYS_sbrk-backed heap */
 #define EDITOR_MAX_FILE 16384
 #define STATUS_ROWS 1
-#define TEXT_ROWS (ROWS - STATUS_ROWS)
+/* M35: one row reserved for the File menu bar, on top of the existing
+ * status row at the bottom - see redraw()/menu_open below. */
+#define MENU_ROWS 1
+#define TEXT_ROWS (ROWS - STATUS_ROWS - MENU_ROWS)
+#define CONTENT_Y0 (MENU_ROWS * FONT_HEIGHT)
+
+#define FILE_MENU_X 4
+#define FILE_MENU_ITEM_W 110
+#define FILE_MENU_ITEM_H (FONT_HEIGHT + 4)
+static const char *const FILE_MENU_ITEMS[] = {"Save", "Quit"};
+#define FILE_MENU_COUNT ((int)(sizeof(FILE_MENU_ITEMS) / sizeof(FILE_MENU_ITEMS[0])))
 
 static char lines[MAX_LINES][MAX_LINE_LEN];
 static int line_len[MAX_LINES];
@@ -58,6 +72,7 @@ static int line_count = 1;
 static int cur_row, cur_col;
 static int scroll_top; /* index of the first line[] drawn in the text viewport */
 static int dirty; /* unsaved changes since the last Ctrl+S */
+static int menu_open; /* M35: File menu dropdown - toggled by clicking "File" in the menu bar */
 
 static char filename[64];
 static char status[COLS + 1];
@@ -198,8 +213,20 @@ static void handle_char(char ch) {
     clamp_cursor();
 }
 
+static void run_file_menu_item(int idx) {
+    if (idx == 0) { /* Save */
+        save_file();
+    } else if (idx == 1) { /* Quit */
+        sys_exit(0);
+    }
+}
+
 static void redraw(wm_window_t *win) {
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
+
+    gfx_fill_rect(&win->gfx, 0, 0, WIN_W, CONTENT_Y0, MENU_BG);
+    gfx_draw_text(&win->gfx, FILE_MENU_X, 2, "File", MENU_TEXT);
+
     for (int r = 0; r < TEXT_ROWS; r++) {
         int src = scroll_top + r;
         if (src >= line_count) {
@@ -208,14 +235,25 @@ static void redraw(wm_window_t *win) {
         char row_buf[MAX_LINE_LEN + 1];
         memcpy(row_buf, lines[src], (size_t)line_len[src]);
         row_buf[line_len[src]] = '\0';
-        gfx_draw_text(&win->gfx, 0, r * FONT_HEIGHT, row_buf, TEXT_COLOR);
+        gfx_draw_text(&win->gfx, 0, CONTENT_Y0 + r * FONT_HEIGHT, row_buf, TEXT_COLOR);
     }
-    gfx_fill_rect(&win->gfx, (cur_col) * FONT_WIDTH, (cur_row - scroll_top) * FONT_HEIGHT + FONT_HEIGHT - 2,
+    gfx_fill_rect(&win->gfx, (cur_col) * FONT_WIDTH,
+                  CONTENT_Y0 + (cur_row - scroll_top) * FONT_HEIGHT + FONT_HEIGHT - 2,
                   FONT_WIDTH, 2, CURSOR_COLOR);
 
-    int status_y = TEXT_ROWS * FONT_HEIGHT;
+    int status_y = CONTENT_Y0 + TEXT_ROWS * FONT_HEIGHT;
     gfx_fill_rect(&win->gfx, 0, status_y, WIN_W, FONT_HEIGHT, STATUS_BG);
     gfx_draw_text(&win->gfx, 4, status_y, status[0] ? status : "Ctrl+S to save", STATUS_COLOR);
+
+    /* Dropdown drawn last so it overlays whatever content is underneath -
+     * this app owns its whole window buffer, there's no compositor-level
+     * popup surface to draw it into instead (see M35's milestones.md
+     * note on that scope trim). */
+    if (menu_open) {
+        gfx_draw_menu(&win->gfx, FILE_MENU_X, CONTENT_Y0, FILE_MENU_ITEM_W, FILE_MENU_ITEM_H,
+                      FILE_MENU_ITEMS, FILE_MENU_COUNT, -1,
+                      MENU_BG, MENU_HOVER_BG, MENU_BORDER, MENU_TEXT);
+    }
 }
 
 int main(const char *arg) {
@@ -244,17 +282,32 @@ int main(const char *arg) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type != WM_EVENT_KEY) {
-                continue;
+            if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+                /* M35: the "File" label toggles the dropdown; any other
+                 * click while it's open either picks an item or - same
+                 * as a real menu - just dismisses it, consumed either
+                 * way so it never also reaches handle_char/save_file. */
+                if (gfx_point_in_rect(ev.x, ev.y, 0, 0, FILE_MENU_X + 4 * FONT_WIDTH + 8, CONTENT_Y0)) {
+                    menu_open = !menu_open;
+                } else if (menu_open) {
+                    int idx = gfx_menu_hit_test(ev.x, ev.y, FILE_MENU_X, CONTENT_Y0,
+                                                 FILE_MENU_ITEM_W, FILE_MENU_ITEM_H, FILE_MENU_COUNT);
+                    menu_open = 0;
+                    if (idx >= 0) {
+                        run_file_menu_item(idx);
+                    }
+                }
+                changed = 1;
+            } else if (ev.type == WM_EVENT_KEY) {
+                long mods = sys_kbd_modifiers();
+                if ((mods & KBD_MOD_CTRL) && (ev.ch == 's' || ev.ch == 'S')) {
+                    save_file();
+                } else {
+                    status[0] = '\0';
+                    handle_char(ev.ch);
+                }
+                changed = 1;
             }
-            long mods = sys_kbd_modifiers();
-            if ((mods & KBD_MOD_CTRL) && (ev.ch == 's' || ev.ch == 'S')) {
-                save_file();
-            } else {
-                status[0] = '\0';
-                handle_char(ev.ch);
-            }
-            changed = 1;
         }
         if (changed) {
             redraw(&win);

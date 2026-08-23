@@ -100,3 +100,20 @@ void gfx_draw_button(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
         gfx_draw_text(ctx, label_x, label_y, label, label_color);
     }
 }
+
+void gfx_draw_menu(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t item_w, int32_t item_h,
+                    const char *const *items, int count, int hover_index,
+                    uint32_t bg_color, uint32_t hover_bg_color, uint32_t border_color, uint32_t text_color) {
+    for (int i = 0; i < count; i++) {
+        gfx_draw_button(ctx, x, y + i * item_h, item_w, item_h,
+                         i == hover_index ? hover_bg_color : bg_color, border_color,
+                         items[i], text_color);
+    }
+}
+
+int gfx_menu_hit_test(int32_t px, int32_t py, int32_t x, int32_t y, int32_t item_w, int32_t item_h, int count) {
+    if (!gfx_point_in_rect(px, py, x, y, item_w, item_h * count)) {
+        return -1;
+    }
+    return (py - y) / item_h;
+}

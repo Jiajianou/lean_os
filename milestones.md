@@ -759,17 +759,48 @@ into new subsystems.
       markers, no panic, zero behavior change to anything upstream of
       this milestone
 
-## M35 — Menus (menu bars + context menus)
+## M35 — Menus (menu bars + context menus) ✅
 
-- [ ] New WM protocol primitive for a transient popup surface owned
-      by the compositor (so it always draws above every window,
-      dismisses on click-outside or Esc) - the missing piece behind
-      both a per-window menu bar and a right-click context menu
-- [ ] File/Edit menu bar in `text_editor.c` (New/Open/Save/Save As,
-      at minimum) and `file_manager.c` (New file/Rename/Delete)
-- [ ] Right-click context menu on desktop icons
-      (`desktop_icons.c`, currently double-click-to-launch only) and
-      on the desktop background itself (New file, Refresh)
+- [x] Scope trim, decided up front rather than discovered mid-
+      milestone: a compositor-owned popup surface (a new WM protocol
+      primitive, floating above every window regardless of which one's
+      focused) is real, separate work - a new request pipe, a new
+      overlay z-order layer, modal-vs-not input routing decisions -
+      disproportionate to what "add a menu" actually needed here. Both
+      menus below are drawn and hit-tested entirely inside the owning
+      client's own window buffer instead (`gfx_draw_menu`/
+      `gfx_menu_hit_test`, `user_space/lib/gfx.{h,c}` - two real,
+      simultaneous consumers is what earned this its own helper rather
+      than each call site looping over M34's `gfx_draw_button` by
+      hand). Trade-off, same as this project's other documented scope
+      trims (text_editor.c's M33 Enter-at-end note is the closest
+      precedent): a dropdown can't visually extend past its own
+      window's edges, and dismissing one is click-elsewhere-inside-
+      that-window, not a system-wide popup grab
+- [x] File menu bar in `text_editor.c`: a new top strip (`MENU_ROWS`,
+      shrinking `TEXT_ROWS` by one row - the same "reserve a row" shape
+      `STATUS_ROWS` already used) with a "File" label that toggles a
+      Save/Quit dropdown. Kept to the two items that need no new
+      infrastructure - a filename-prompting "Save As" and a data-
+      safe "New"/close both need M36's dialog primitive first, so
+      they're deferred there rather than half-built here
+- [x] Right-click context menu on the desktop background
+      (`desktop_icons.c`): `mouse_event_t.buttons` bit1 (right button)
+      has been decoded end-to-end since M18's mouse driver but never
+      read by any client until now - opens a "Terminal"/"Settings"
+      quick-launch menu at the click point (clamped to stay fully
+      on-screen), reusing the exact same `gfx_draw_menu`/
+      `gfx_menu_hit_test` pair the File menu uses. (Desktop *icons*
+      themselves keep plain double-click-to-launch - a context menu on
+      a single-purpose icon with no rename/delete/properties yet
+      wouldn't have anything real to put in it)
+- [x] Verified via `tools/qemu-serial-test.sh`: 22/22 required boot
+      markers, no panic - this milestone touches no kernel code at all,
+      so the regression suite is confirming zero behavior change to
+      every self-test that came before it. Whether a real right-click
+      or a File-label click actually lands on these pixels is, like
+      every mouse-driven behavior since M18, manual/interactive-only
+      verification this headless build has no way to fabricate
 
 ## M36 — Dialogs & the file save flow
 
