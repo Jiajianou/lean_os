@@ -31,12 +31,14 @@ typedef struct __attribute__((packed)) {
 /* Every physical address this file dereferences - the RSDP search range,
  * and every table the RSDT/XSDT points at - is expected to fall inside the
  * 1 GiB vmm.c always identity-maps (the same assumption pmm/vmm already
- * document: on QEMU's default machine, and every real machine this project
- * has been tested on, ACPI tables live well under that). A table pointer
- * outside it would mean reading unmapped memory as if it were valid -
- * treated as a hard failure (diagnosable panic), not silently misread,
- * matching every other "this shouldn't happen given how this kernel is
- * used" case elsewhere in the kernel. */
+ * document). True on QEMU's default machine, but M29: NOT something a
+ * real machine's firmware owes this kernel - ACPI tables commonly live in
+ * high reserved memory well above 1 GiB on real hardware, and this was
+ * the one ACPI outcome that still panicked instead of degrading, exactly
+ * the "assumes present, panics if not" pattern M27 already flagged and
+ * fixed for RTL8139/PS2 - see table_at, below, which is where this
+ * actually got softened once M28's real-hardware boot made it a real
+ * risk rather than a hypothetical one. */
 #define ACPI_IDENTITY_LIMIT 0x40000000ULL
 
 static int sig_eq(const void *a, const char *b, int len) {
@@ -72,9 +74,18 @@ static const acpi_rsdp_t *find_rsdp(void) {
     return (const acpi_rsdp_t *)0;
 }
 
+/* M29: returns NULL (not a panic) for a table address outside the
+ * identity-mapped range - real firmware placing ACPI tables in high
+ * reserved memory is a legitimate, expected outcome on real hardware,
+ * not kernel/hardware misbehavior. Every caller already has a
+ * "couldn't find what I needed, fall back to single-core" path for
+ * every other ACPI-absent case (find_rsdp returning NULL, a signature
+ * mismatch, no MADT) - this makes an out-of-range table pointer just
+ * another instance of that same path instead of the one outcome that
+ * used to take the whole kernel down. */
 static const acpi_sdt_header_t *table_at(uint64_t phys) {
     if (phys == 0 || phys >= ACPI_IDENTITY_LIMIT) {
-        panic("acpi: table address outside the identity-mapped range - see acpi.c's header comment");
+        return (const acpi_sdt_header_t *)0;
     }
     return (const acpi_sdt_header_t *)(uintptr_t)phys;
 }
@@ -88,6 +99,10 @@ int acpi_find_madt(acpi_madt_info_t *out) {
 
     int use_xsdt = rsdp->revision >= 2 && rsdp->xsdt_address != 0;
     const acpi_sdt_header_t *root = table_at(use_xsdt ? rsdp->xsdt_address : (uint64_t)rsdp->rsdt_address);
+    if (!root) {
+        klog_puts("[acpi] root table (RSDT/XSDT) outside the identity-mapped range - continuing single-core.\n");
+        return 0;
+    }
     if (!sig_eq(root->signature, use_xsdt ? "XSDT" : "RSDT", 4)) {
         klog_puts("[acpi] root table signature mismatch - continuing single-core.\n");
         return 0;
@@ -102,7 +117,7 @@ int acpi_find_madt(acpi_madt_info_t *out) {
         uint64_t table_phys = use_xsdt ? *(const uint64_t *)(entries + i * 8)
                                         : (uint64_t) * (const uint32_t *)(entries + i * 4);
         const acpi_sdt_header_t *hdr = table_at(table_phys);
-        if (sig_eq(hdr->signature, "APIC", 4)) {
+        if (hdr && sig_eq(hdr->signature, "APIC", 4)) {
             madt = hdr;
             break;
         }

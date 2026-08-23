@@ -448,6 +448,143 @@ manual step has actually been run and reported back.
       comes up and boot self-tests run to completion (network/PS2 caveats
       in the runbook notwithstanding).
 
+## Path to a usable OS (M29+)
+
+Everything through M28 proves the stack end-to-end (boot → kernel → user
+space → GUI apps → network) but the desktop itself is still a demo: windows
+can be focused and minimized but not closed, dragged, or resized, there's
+one hardcoded desktop icon, and there's no app you'd actually use day to
+day. M29 is a robustness/cleanup pass first - closable windows and process
+teardown need to share one reclaim path, and that path needs to be solid
+before more UI leans on it - then M30+ builds out the window-manager UX and
+app baseline toward something worth calling a usable OS.
+
+## M29 — Robustness & foundational cleanup ✅ (except the one manual step)
+
+- [x] Client-crash cleanup: `SYS_task_alive` (`system_api/include/syscall.h`,
+      non-reaping, distinguishes a clean `SYS_exit(0)` from a nonzero/
+      signal death) + `SYS_pipe_reset` (recycles a dead window's event
+      pipe for the next connection without misdelivering stale events) are
+      new syscalls; `compositor.c`'s `reap_dead_clients`/`reclaim_window`
+      poll every connected client once per main-loop iteration and free
+      its window slot - for real, for reuse - the instant it dies
+      *unexpectedly*. Caught a real regression via testing: M20's wm_demo
+      self-test draws one frame and exits(0) *on purpose*, which an
+      earlier version of this reclaimed immediately, wiping the frame
+      before the kernel's own pixel-check could run - the crashed-vs-
+      clean-exit distinction above exists specifically because of that.
+      Deliberately does not free the shm segment behind a reclaimed
+      window (no SYS_shm_free exists, and freeing it out from under this
+      process's own still-live vmm mapping would alias physical memory
+      to whatever's allocated next - worse than the leak); MAX_WINDOWS/
+      MAX_SHM_SEGMENTS' existing headroom absorbs it, and a slot that's
+      out of segments simply fails cleanly instead of corrupting anything
+- [x] Fixed-size table audit: task table, fd table, named-pipe table, shm
+      segment table, and the compositor's own window-slot table all
+      already failed cleanly (return -1/NULL) at their syscall/request
+      boundary before this milestone touched anything - verified by
+      reading every allocator, not assumed. PCI/NIC rings (rtl8139.c)
+      aren't reachable from user space at all yet (no raw-socket syscall
+      exists), so there's no unprivileged path to audit there today
+- [x] OOM handling: `pmm_try_alloc_frame` (`kernel/mm/pmm.c`) is a new
+      non-panicking sibling to `pmm_alloc_frame` - `SYS_sbrk` and
+      `shm_create` (the only two allocation paths a user program's own
+      request size can drive to genuine physical exhaustion) now use it
+      and fail the syscall (-1) instead of panicking the whole kernel;
+      `sbrk` leaves whatever it already mapped in place (still valid,
+      just more than this one call needed), `shm_create` unwinds exactly
+      what it allocated. `kmalloc`/`pmm_alloc_frame` elsewhere still
+      panic on purpose - every other call site is kernel-internal
+      bookkeeping with no per-caller failure path of its own to hand
+      "out of memory" back through, the same category as `pmm_init`
+      finding no usable memory at all
+- [x] leanfs error-path audit: full-disk and racing-a-crash-mid-write
+      (partial block allocation) were already rolled back/failed cleanly.
+      Found and fixed a real one while reading the load path: on-disk
+      superblock fields (`data_blocks`, `inode_table_sectors`,
+      `bitmap_sectors`) were trusted unchecked and directly size fixed
+      buffers (`leanfs_init`'s stack-allocated inode-table read, the
+      static bitmap array) - a corrupted field would have overrun them.
+      Now validated against their compile-time-expected values at load
+      (any mismatch reformats, the same recovery path a bad magic already
+      used) and a new `block_valid` bounds-checks every block number
+      pulled from an inode's `direct[]`/`indirect` fields or an indirect
+      table before it reaches `bitmap_clear` or an ATA read - a corrupted
+      inode now fails the read/skips the block instead of walking off the
+      bitmap array or reading an arbitrary disk LBA
+- [x] `tools/qemu-serial-test.sh` is now a real pass/fail regression
+      harness: boots for `SECONDS` (default bumped 2 -> 20, enough to
+      carry a from-scratch boot through every self-test into the M22/M23
+      desktop handoff), then greps the capture for `*** KERNEL PANIC:`
+      and 18 required per-self-test "passed"/"verified" boot markers
+      (one per milestone from M4 through M27's own self-test, plus the
+      M13 init handoff as the final "reached steady state" checkpoint),
+      printing exactly what's missing and exiting nonzero on any failure
+      - closes the actual gap behind `docs/real-hardware.md`'s
+      pre-existing claim that this script already "grades automatically"
+- [x] Sweep of every `panic()` call site under `kernel/drivers/`,
+      `kernel/mm/`, `kernel/fs/`, `kernel/ipc/`, `kernel/net/`,
+      `kernel/acpi/`, and `kernel/arch/`: found and fixed one real
+      "assumes present, panics if not" gap directly relevant to M28's
+      still-open real-hardware step - `kernel/acpi/acpi.c`'s `table_at`
+      panicked if any ACPI table (RSDT/XSDT/MADT) sat above the 1 GiB
+      identity-mapped region, which real firmware placing tables in high
+      reserved memory (never an issue on QEMU, routine on real hardware)
+      would have hit at boot, on real hardware, with no way to recover -
+      exactly the class of bug M27's own notes flagged for RTL8139/PS2.
+      Now returns NULL and every caller falls back to "continuing
+      single-core," the same degraded-but-booting outcome ACPI already
+      had for a missing RSDP or MADT. Every other panic reviewed is
+      either kernel-internal bookkeeping with no user-reachable trigger
+      (pmm/heap double-free checks, vmm invariant checks) or a
+      genuinely-required-hardware path (ATA disk, framebuffer) where
+      "absent" isn't a real outcome to degrade into
+- [ ] Close out M28's one remaining checkbox: the actual manual USB-boot-
+      on-real-hardware step - needs a physical x86_64 UEFI machine and a
+      USB drive, so it's still the one item in this milestone (and M28's)
+      that has to happen outside this environment; everything the runbook
+      (`docs/real-hardware.md`) needs from the software side is done
+
+## M30 — Window chrome: close / minimize / maximize
+
+- [ ] Titlebar close/minimize/maximize hit-boxes, drawn by the compositor
+      alongside the existing focus-color titlebar logic
+      (`user_space/bin/compositor.c`)
+- [ ] `system_api/include/wm.h` protocol: `WM_ACTION_CLOSE` (kills the
+      owning process and reclaims the slot via M29's cleanup path),
+      `WM_ACTION_MAXIMIZE`/`WM_ACTION_RESTORE` (toggle between a saved
+      rect and full-screen-minus-panel)
+- [ ] Wire the existing panel-click-to-minimize toggle (M22) to the new
+      titlebar button too, so both paths drive the same state
+- [ ] `wm_send_action()` extended in `user_space/lib/wmclient.c`; the
+      existing demo apps (gui_clock, gui_paint, gui_terminal) get real
+      close/minimize/maximize buttons for free since they all route
+      through the same compositor chrome
+
+## M31 — Window dragging & resizing
+
+- [ ] Mouse-down-on-titlebar + drag = move window - compositor.c has no
+      drag/move state machine at all today, this is genuinely new
+- [ ] Resize via edge/corner hit-test + drag, with a sane minimum size
+- [ ] Bounds clamping so a window can't be dragged fully off-screen or
+      behind the panel unreachably
+
+## M32 — Desktop & input polish
+
+- [ ] Multiple desktop icons with real grid layout (today: exactly one
+      hardcoded Terminal icon in `user_space/bin/desktop_icons.c`)
+- [ ] Alt-tab window switching over the existing focus-routing infra
+- [ ] Copy/paste between the terminal and other apps (none exists today)
+
+## M33 — Core usable-OS app baseline
+
+- [ ] Text editor - there is currently no way to edit a file without a
+      host toolchain
+- [ ] GUI file manager - terminal + coreutils (`ls`/`cat`/`echo`) is the
+      only way to browse the filesystem today
+- [ ] Settings/control panel app - zero user-facing configuration surface
+      exists today
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support

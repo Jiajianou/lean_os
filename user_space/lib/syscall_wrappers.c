@@ -116,3 +116,11 @@ long sys_wait_nb(long pid) {
 long sys_yield(void) {
     return do_syscall(SYS_yield, 0, 0, 0);
 }
+
+long sys_task_alive(long pid) {
+    return do_syscall(SYS_task_alive, pid, 0, 0);
+}
+
+long sys_pipe_reset(int fd) {
+    return do_syscall(SYS_pipe_reset, fd, 0, 0);
+}

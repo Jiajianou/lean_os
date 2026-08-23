@@ -78,7 +78,23 @@ void leanfs_init(void) {
     ata_read_sectors(LEANFS_START_LBA, 1, buf);
     k_memcpy(&sb, buf, sizeof(sb));
 
-    if (sb.magic != LEANFS_MAGIC) {
+    /* M29: every field checked here sizes a fixed-size buffer somewhere
+     * downstream (data_blocks -> the static `bitmap` array every
+     * alloc_block/bitmap_test loop trusts as its own bound;
+     * inode_table_sectors/bitmap_sectors -> exactly how many sectors
+     * leanfs_init itself is about to read into table_buf/bitmap below) -
+     * this format has only ever had one version (leanfs.h's own header
+     * comment), so any mismatch here means a corrupted superblock, not a
+     * different-but-valid layout to accommodate. Treating it the same as
+     * a bad magic - reformat, the one recovery path this driver already
+     * has and already exercises on a blank disk - is what keeps a
+     * corrupted on-disk field from turning into an out-of-bounds
+     * array write/stack overread instead of just losing whatever was on
+     * this disk to begin with. */
+    if (sb.magic != LEANFS_MAGIC ||
+        sb.data_blocks != LEANFS_DATA_BLOCKS ||
+        sb.inode_table_sectors != INODE_TABLE_SECTORS ||
+        sb.bitmap_sectors != BITMAP_SECTORS) {
         format();
     } else {
         uint8_t table_buf[INODE_TABLE_SECTORS * LEANFS_BLOCK_SIZE];
@@ -125,6 +141,18 @@ static void bitmap_clear(uint32_t bit) {
     bitmap[bit / 8] &= (uint8_t)~(1u << (bit % 8));
 }
 
+/* M29: every block number this driver ever acts on either came straight
+ * out of alloc_block (always < sb.data_blocks by construction) or off
+ * disk (an inode's direct[]/indirect fields, or an indirect table's
+ * entries) - the latter is trusted nowhere else, so a single bit flip
+ * there would otherwise walk bitmap_clear/ata_read_sectors off the end
+ * of the fixed-size `bitmap` array or into an arbitrary disk LBA. Used
+ * by free_inode_blocks and leanfs_read before touching any on-disk block
+ * number. */
+static int block_valid(uint32_t block) {
+    return block < sb.data_blocks;
+}
+
 static int alloc_block(void) {
     for (uint32_t i = 0; i < sb.data_blocks; i++) {
         if (!bitmap_test(i)) {
@@ -165,16 +193,24 @@ static void free_inode_blocks(leanfs_inode_t *inode) {
     int have_indirect = 0;
     for (uint32_t b = 0; b < nblocks; b++) {
         if (b < LEANFS_DIRECT_BLOCKS) {
-            bitmap_clear(inode->direct[b]);
+            if (block_valid(inode->direct[b])) {
+                bitmap_clear(inode->direct[b]);
+            }
         } else {
             if (!have_indirect) {
+                if (!block_valid(inode->indirect)) {
+                    break; /* corrupted inode - nothing past here is trustworthy either */
+                }
                 ata_read_sectors(sb.data_lba + inode->indirect, 1, (uint8_t *)indirect_table);
                 have_indirect = 1;
             }
-            bitmap_clear(indirect_table[b - LEANFS_DIRECT_BLOCKS]);
+            uint32_t block = indirect_table[b - LEANFS_DIRECT_BLOCKS];
+            if (block_valid(block)) {
+                bitmap_clear(block);
+            }
         }
     }
-    if (nblocks > LEANFS_DIRECT_BLOCKS) {
+    if (nblocks > LEANFS_DIRECT_BLOCKS && block_valid(inode->indirect)) {
         bitmap_clear(inode->indirect);
     }
 }
@@ -197,10 +233,16 @@ int64_t leanfs_read(const char *name, void *buf, size_t maxlen) {
             block = inode->direct[b];
         } else {
             if (!have_indirect) {
+                if (!block_valid(inode->indirect)) {
+                    return -1; /* corrupted inode - fail the read rather than trust an out-of-range LBA */
+                }
                 ata_read_sectors(sb.data_lba + inode->indirect, 1, (uint8_t *)indirect_table);
                 have_indirect = 1;
             }
             block = indirect_table[b - LEANFS_DIRECT_BLOCKS];
+        }
+        if (!block_valid(block)) {
+            return -1; /* corrupted inode - see block_valid's own comment */
         }
         ata_read_sectors(sb.data_lba + block, 1, block_buf);
         size_t chunk = to_copy - copied;

@@ -6,8 +6,8 @@
  * already use, not a new inconsistency introduced here.
  *
  * Ownership is tracked with plain open/closed flags, not a refcount -
- * see fd_close in kernel/arch/x86_64/syscall.c for why that's the right
- * level of simplicity for how many fds can currently point at one pipe.
+ * this project has no SYS_close (see syscall_wrappers.h's own note) to
+ * ever need one for.
  */
 #pragma once
 
@@ -37,6 +37,13 @@ pipe_t *pipe_create(void);
 pipe_t *pipe_named(const char *name);
 void pipe_close_read(pipe_t *p);
 void pipe_close_write(pipe_t *p);
+
+/* M29: drops every byte currently buffered and clears both closed flags -
+ * for a named pipe being handed to a brand-new owner (SYS_pipe_reset) that
+ * must not see whatever its predecessor left queued. Nothing else about
+ * the pipe_t (its identity/address) changes, so every fd anyone already
+ * has open on it keeps working, just against an emptied buffer. */
+void pipe_reset(pipe_t *p);
 
 /* Blocks while the buffer is full, unless the read end has already
  * closed (returns -1 immediately, or however many bytes got written

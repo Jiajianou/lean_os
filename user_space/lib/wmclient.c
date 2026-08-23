@@ -39,6 +39,7 @@ static int connect_common(uint32_t width, uint32_t height, uint8_t panel, uint8_
     req.height = height;
     req.panel = panel;
     req.desktop = desktop;
+    req.client_pid = (int32_t)sys_getpid();
     int i = 0;
     for (; title && title[i] && i < WM_TITLE_MAX - 1; i++) {
         req.title[i] = title[i];

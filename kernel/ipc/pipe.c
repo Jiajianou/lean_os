@@ -25,6 +25,14 @@ void pipe_close_write(pipe_t *p) {
     p->write_closed = 1;
 }
 
+void pipe_reset(pipe_t *p) {
+    p->head = 0;
+    p->tail = 0;
+    p->count = 0;
+    p->read_closed = 0;
+    p->write_closed = 0;
+}
+
 #define MAX_NAMED_PIPES     24 /* M21: bumped from 8 - wm_req/wm_resp plus one event pipe per connected window (system_api/include/wm.h's wm_event_pipe_name) can now outgrow the old cap. */
 #define NAMED_PIPE_NAME_LEN 16
 

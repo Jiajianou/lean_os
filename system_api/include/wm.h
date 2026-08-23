@@ -46,6 +46,7 @@ typedef struct {
     uint8_t panel; /* M22: 0 for a normal window, 1 for a chrome-less, always-on-top, screen-bottom-docked panel - see wm.h's M22 comment below and desktop_shell.c, the one client that ever sets this */
     uint8_t desktop; /* chrome-less, full-screen, always-on-*bottom* (the exact opposite z-order from panel) background window - see desktop_icons.c, the one client that ever sets this. Mutually exclusive with panel; nothing enforces that since only one client ever sets either flag. */
     char title[WM_TITLE_MAX];
+    int32_t client_pid; /* M29: this client's own SYS_getpid() - lets the compositor notice (SYS_task_alive) when a connected client dies without an orderly disconnect, and reclaim its window slot. Not a security boundary (nothing stops a client lying about it), just bookkeeping - same trust level as everything else in this protocol. */
 } wm_create_request_t;
 
 typedef struct {

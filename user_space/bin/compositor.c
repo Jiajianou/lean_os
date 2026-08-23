@@ -54,6 +54,8 @@ typedef struct {
     uint8_t is_panel;  /* M22: chrome-less, always-on-top, screen-bottom-docked - see wm_create_request_t.panel */
     uint8_t is_desktop; /* chrome-less, full-screen, always-on-*bottom* - see wm_create_request_t.desktop */
     uint8_t minimized; /* M22: hidden from redraw() and from click hit-testing, but the client process keeps running (WM_ACTION_TOGGLE_MINIMIZE) */
+    uint8_t alive; /* M29: 0 once this slot has been reclaimed (owning client died or - M30 - closed) - excluded from redraw/hit-test/query, and eligible for accept_pending_window to hand to the next connecting client. Slots below window_count that are !alive are exactly the "holes" reap_dead_clients leaves behind. */
+    int32_t client_pid; /* M29: from wm_create_request_t.client_pid - who to watch via SYS_task_alive so a crash (not just an orderly close) still frees this slot. -1 for a slot that's never been assigned. */
     char title[WM_TITLE_MAX]; /* echoed straight from wm_create_request_t.title into wm_window_info_t.title on every query - see accept_pending_query */
 } window_t;
 
@@ -231,13 +233,13 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
      * one piece of z-ordering this compositor does enforce, since a
      * taskbar that could be occluded wouldn't be much of a taskbar. */
     for (int i = 0; i < window_count; i++) {
-        if (windows[i].is_desktop) {
+        if (windows[i].alive && windows[i].is_desktop) {
             blit_window(&windows[i]); /* no border/titlebar - a desktop background is its own chrome, same as a panel */
         }
     }
     for (int i = 0; i < window_count; i++) {
         const window_t *win = &windows[i];
-        if (win->is_panel || win->is_desktop || win->minimized) {
+        if (!win->alive || win->is_panel || win->is_desktop || win->minimized) {
             continue;
         }
         uint32_t titlebar_color = (i == focused_window) ? TITLEBAR_FOCUS_COLOR : TITLEBAR_COLOR;
@@ -247,7 +249,7 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
         blit_window(win);
     }
     for (int i = 0; i < window_count; i++) {
-        if (windows[i].is_panel) {
+        if (windows[i].alive && windows[i].is_panel) {
             blit_window(&windows[i]); /* no border/titlebar - a panel is its own chrome */
         }
     }
@@ -291,6 +293,52 @@ static void set_focus(int idx) {
     dirty = 1;
 }
 
+/* M29: shared teardown for a window slot, however it stops being valid -
+ * a client crashing (reap_dead_clients, below) today, an explicit close
+ * (M30's WM_ACTION_CLOSE) later. Clears focus if this was the focused
+ * window, hides it from redraw/hit-testing (the `alive` checks throughout
+ * this file), and leaves the slot free for accept_pending_window to hand
+ * to the next connecting client. Deliberately does NOT free the shm
+ * segment backing win->pixels (there's no SYS_shm_free, and freeing it
+ * out from under this process's own still-present vmm mapping without
+ * unmapping first would alias live physical memory to whatever gets
+ * allocated next - a worse bug than the leak) or the event pipe (kept
+ * alive and reset in place by accept_pending_window when the slot is
+ * reused, instead of torn down) - see MAX_SHM_SEGMENTS/MAX_WINDOWS'
+ * headroom, sized with exactly this in mind. */
+static void reclaim_window(int idx) {
+    window_t *win = &windows[idx];
+    if (!win->alive) {
+        return;
+    }
+    win->alive = 0;
+    win->minimized = 0;
+    win->client_pid = -1;
+    if (focused_window == idx) {
+        set_focus(-1);
+    }
+    dirty = 1;
+}
+
+/* M29: the crash half of the shared reclaim path - polls every live
+ * window's owning client (SYS_task_alive, non-reaping so it doesn't
+ * disturb whatever the client's real parent - the shell, desktop_shell's
+ * launcher - later does with SYS_wait) once per main-loop iteration, and
+ * reclaims only the ones that died *unexpectedly* (a nonzero exit code -
+ * SYS_task_alive returns 0). A client that ran to completion and called
+ * SYS_exit(0) on purpose (return 2, not 0) keeps its window - M20's
+ * wm_demo self-test is exactly this: draws one static frame, exits
+ * cleanly, and the window it drew is still what the rest of that
+ * self-test verifies against. Cheap: window_count is at most MAX_WINDOWS
+ * (8), same headroom accept_pending_query already leans on. */
+static void reap_dead_clients(void) {
+    for (int i = 0; i < window_count; i++) {
+        if (windows[i].alive && sys_task_alive(windows[i].client_pid) == 0) {
+            reclaim_window(i);
+        }
+    }
+}
+
 /* Non-blocking: only touches the request pipe (and does the one
  * necessarily-blocking-in-practice SYS_read, guaranteed immediate since
  * SYS_pipe_poll already confirmed a full request is buffered) when a
@@ -303,11 +351,35 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     wm_create_request_t req;
     long n = read_exact(req_read_fd, &req, sizeof(req));
     wm_create_response_t resp;
-    if (n != (long)sizeof(req) || window_count >= MAX_WINDOWS) {
+    if (n != (long)sizeof(req)) {
         resp.window_id = -1;
         resp.shm_id = -1;
         sys_write(resp_write_fd, &resp, sizeof(resp));
         return;
+    }
+
+    /* M29: prefer a reclaimed (!alive) slot below window_count over
+     * growing past it - a crashed-and-reconnected client shouldn't
+     * permanently cost a slot out of the fixed MAX_WINDOWS table. Only
+     * once every existing slot is genuinely live does this fall back to
+     * appending a brand-new one, still bounded by MAX_WINDOWS exactly as
+     * before. */
+    int idx = -1;
+    for (int i = 0; i < window_count; i++) {
+        if (!windows[i].alive) {
+            idx = i;
+            break;
+        }
+    }
+    int reused_slot = (idx >= 0);
+    if (idx < 0) {
+        if (window_count >= MAX_WINDOWS) {
+            resp.window_id = -1;
+            resp.shm_id = -1;
+            sys_write(resp_write_fd, &resp, sizeof(resp));
+            return;
+        }
+        idx = window_count;
     }
 
     /* A panel's width, or a desktop background's width and height, are
@@ -317,6 +389,10 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     uint32_t width = (req.panel || req.desktop) ? fb_info.width : req.width;
     uint32_t height = req.desktop ? fb_info.height : req.height;
 
+    /* Always a fresh segment, even when reusing a slot - see
+     * reclaim_window's comment for why the previous occupant's segment
+     * is deliberately left leaked rather than freed out from under this
+     * process's own mapping of it. */
     long shm_id = sys_shm_create((size_t)width * height * sizeof(uint32_t));
     long vaddr = shm_id < 0 ? -1 : sys_shm_map(shm_id);
     if (shm_id < 0 || vaddr < 0) {
@@ -326,15 +402,26 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
         return;
     }
 
-    int idx = window_count;
-    char evt_name[8];
-    wm_event_pipe_name(idx, evt_name);
-    int evt_fds[2];
-    if (sys_pipe_open(evt_name, evt_fds) != 0) {
-        resp.window_id = -1;
-        resp.shm_id = -1;
-        sys_write(resp_write_fd, &resp, sizeof(resp));
-        return;
+    int evt_write_fd;
+    if (reused_slot) {
+        /* Same underlying named pipe (pipe_named looks it up by name,
+         * unchanged since this slot's previous occupant) - reset it in
+         * place rather than opening it again, which would just leak
+         * another fd-table slot in this already-long-lived process for
+         * no benefit (see SYS_pipe_reset's own doc comment). */
+        evt_write_fd = windows[idx].evt_write_fd;
+        sys_pipe_reset(evt_write_fd);
+    } else {
+        char evt_name[8];
+        wm_event_pipe_name(idx, evt_name);
+        int evt_fds[2];
+        if (sys_pipe_open(evt_name, evt_fds) != 0) {
+            resp.window_id = -1;
+            resp.shm_id = -1;
+            sys_write(resp_write_fd, &resp, sizeof(resp));
+            return;
+        }
+        evt_write_fd = evt_fds[1];
     }
 
     window_t *win = &windows[idx];
@@ -351,10 +438,12 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     win->w = (int32_t)width;
     win->h = (int32_t)height;
     win->pixels = (uint32_t *)vaddr;
-    win->evt_write_fd = evt_fds[1];
+    win->evt_write_fd = evt_write_fd;
     win->is_panel = req.panel;
     win->is_desktop = req.desktop;
     win->minimized = 0;
+    win->alive = 1;
+    win->client_pid = req.client_pid;
     int ti = 0;
     for (; req.title[ti] && ti < WM_TITLE_MAX - 1; ti++) {
         win->title[ti] = req.title[ti];
@@ -365,7 +454,9 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     resp.shm_id = (int32_t)shm_id;
     resp.width = width;
     resp.height = height;
-    window_count++;
+    if (!reused_slot) {
+        window_count++;
+    }
     sys_write(resp_write_fd, &resp, sizeof(resp));
     set_focus(idx);
 }
@@ -382,19 +473,24 @@ static void accept_pending_query(int query_read_fd, int query_resp_write_fd) {
     sys_read(query_read_fd, &ping, sizeof(ping));
 
     wm_query_response_t resp;
-    resp.count = window_count;
+    resp.count = 0;
     for (int i = 0; i < window_count; i++) {
         const window_t *win = &windows[i];
-        resp.windows[i].window_id = i;
-        resp.windows[i].x = win->x;
-        resp.windows[i].y = win->y;
-        resp.windows[i].w = win->w;
-        resp.windows[i].h = win->h;
-        resp.windows[i].focused = (i == focused_window);
-        resp.windows[i].minimized = win->minimized;
-        resp.windows[i].is_panel = win->is_panel;
-        resp.windows[i].is_desktop = win->is_desktop;
-        memcpy(resp.windows[i].title, win->title, WM_TITLE_MAX);
+        if (!win->alive) { /* M29: a reclaimed slot is gone, not a "running app" - skip it */
+            continue;
+        }
+        int out = resp.count;
+        resp.windows[out].window_id = i;
+        resp.windows[out].x = win->x;
+        resp.windows[out].y = win->y;
+        resp.windows[out].w = win->w;
+        resp.windows[out].h = win->h;
+        resp.windows[out].focused = (i == focused_window);
+        resp.windows[out].minimized = win->minimized;
+        resp.windows[out].is_panel = win->is_panel;
+        resp.windows[out].is_desktop = win->is_desktop;
+        memcpy(resp.windows[out].title, win->title, WM_TITLE_MAX);
+        resp.count++;
     }
     sys_write(query_resp_write_fd, &resp, sizeof(resp));
 }
@@ -407,7 +503,7 @@ static void accept_pending_action(int action_read_fd) {
     if (read_exact(action_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
         return;
     }
-    if (req.window_id < 0 || req.window_id >= window_count) {
+    if (req.window_id < 0 || req.window_id >= window_count || !windows[req.window_id].alive) {
         return;
     }
     window_t *win = &windows[req.window_id];
@@ -452,14 +548,14 @@ static void handle_mouse(void) {
              * can't be clicked - there's nothing on screen to click. */
             int hit = -1;
             for (int i = window_count - 1; i >= 0; i--) {
-                if (windows[i].is_panel && !windows[i].minimized && point_in_window(&windows[i], cursor_x, cursor_y)) {
+                if (windows[i].alive && windows[i].is_panel && !windows[i].minimized && point_in_window(&windows[i], cursor_x, cursor_y)) {
                     hit = i;
                     break;
                 }
             }
             if (hit < 0) {
                 for (int i = window_count - 1; i >= 0; i--) {
-                    if (!windows[i].is_panel && !windows[i].is_desktop && !windows[i].minimized &&
+                    if (windows[i].alive && !windows[i].is_panel && !windows[i].is_desktop && !windows[i].minimized &&
                         point_in_window(&windows[i], cursor_x, cursor_y)) {
                         hit = i;
                         break;
@@ -471,7 +567,7 @@ static void handle_mouse(void) {
              * desktop, nothing else on screen. */
             if (hit < 0) {
                 for (int i = window_count - 1; i >= 0; i--) {
-                    if (windows[i].is_desktop && !windows[i].minimized && point_in_window(&windows[i], cursor_x, cursor_y)) {
+                    if (windows[i].alive && windows[i].is_desktop && !windows[i].minimized && point_in_window(&windows[i], cursor_x, cursor_y)) {
                         hit = i;
                         break;
                     }
@@ -566,6 +662,7 @@ int main(void) {
         accept_pending_window(req_fds[0], resp_fds[1]);
         accept_pending_query(query_fds[0], query_resp_fds[1]);
         accept_pending_action(action_fds[0]);
+        reap_dead_clients();
         handle_mouse();
         handle_keyboard();
 

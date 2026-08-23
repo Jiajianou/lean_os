@@ -321,8 +321,20 @@ static long sys_sbrk(uint64_t increment_u, uint64_t a2, uint64_t a3, uint64_t a4
     if (new_brk > USER_HEAP_LIMIT || new_brk < old_brk /* overflow */) {
         return -1;
     }
+    /* M29: pmm_try_alloc_frame, not pmm_alloc_frame - a user process
+     * growing its own heap past whatever physical memory remains must
+     * fail *this* syscall, not panic every other task on the system along
+     * with it. Whatever got mapped before the shortfall stays mapped
+     * (heap_mapped_end only ever advances, same as every other path
+     * through this heap - see proc.h's own note on the invariant
+     * heap_brk <= heap_mapped_end) - safe to leave as-is since it's
+     * genuinely-owned, valid memory, just more than this one request
+     * needed; the caller sees a clean failure and can retry smaller. */
     while (cur->heap_mapped_end < new_brk) {
-        uint64_t phys = pmm_alloc_frame();
+        uint64_t phys = pmm_try_alloc_frame();
+        if (phys == 0) {
+            return -1;
+        }
         vmm_map_page_in(cur->pml4_phys, cur->heap_mapped_end, phys, VMM_FLAG_WRITABLE | VMM_FLAG_USER);
         cur->heap_mapped_end += PAGE_SIZE;
     }
@@ -582,6 +594,46 @@ static long sys_yield(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64
     return 0;
 }
 
+/* M29: non-reaping liveness peek - see SYS_task_alive's doc comment
+ * (system_api/include/syscall.h) for why this has to be a separate call
+ * from SYS_wait_nb rather than just "call that and ignore the exit code":
+ * SYS_wait_nb sets `reaped` on a terminated task, which is only correct
+ * for that task's actual parent. */
+static long sys_task_alive(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *t = sched_task_by_id((int)pid);
+    if (!t) {
+        return -1;
+    }
+    if (t->state != TASK_TERMINATED) {
+        return 1;
+    }
+    return t->exit_code == 0 ? 2 : 0;
+}
+
+/* M29: see pipe_reset's own comment (kernel/ipc/pipe.h) - resets whichever
+ * pipe `fd` names, identical bounds/type check to sys_pipe_poll's. */
+static long sys_pipe_reset(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (fd >= MAX_FDS) {
+        return -1;
+    }
+    fd_slot_t *slot = &sched_current()->fds[fd];
+    if (slot->type != FD_PIPE_READ && slot->type != FD_PIPE_WRITE) {
+        return -1;
+    }
+    pipe_reset(slot->pipe);
+    return 0;
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -607,6 +659,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_dup2] = sys_dup2,
     [SYS_wait_nb] = sys_wait_nb,
     [SYS_yield] = sys_yield,
+    [SYS_task_alive] = sys_task_alive,
+    [SYS_pipe_reset] = sys_pipe_reset,
 };
 
 void syscall_handler(isr_regs_t *regs) {

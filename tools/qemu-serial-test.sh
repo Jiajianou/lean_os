@@ -1,14 +1,30 @@
 #!/usr/bin/env bash
 # Boots build/os-image.bin headlessly via OVMF (M26: UEFI-only, BIOS boot
 # path removed), captures COM1 (see kernel/drivers/serial.c) to a file for
-# SECONDS, then prints it and exits. Used to verify kernel behavior from
-# the command line without a screendump/monitor dance - every klog_*
-# message (drivers/klog.h) reaches this capture.
+# SECONDS, then grades the capture as a real pass/fail regression check -
+# every klog_* message (drivers/klog.h) reaches this capture, including
+# every boot-time self-test's own "X self-test passed" line.
+#
+# M29: this used to just dump the log and exit 0 unconditionally, leaving
+# "did anything actually break" a read-the-log-and-eyeball-it job for a
+# human - fine when this was the only milestone or two deep, not once
+# growing UX/app complexity means a regression in, say, M14's pipe
+# self-test could scroll by unnoticed under a screenful of M22 GUI output.
+# Now it fails loudly (nonzero exit, a summary of exactly what's missing)
+# if the kernel panicked or any REQUIRED_MARKERS entry never showed up -
+# meant to run before every milestone from here on, not just when
+# something looks wrong.
 #
 # Usage: tools/qemu-serial-test.sh [SECONDS] [-- extra qemu args, e.g. -monitor pipe:/tmp/mon for key injection]
 set -euo pipefail
 
-SECONDS_TO_RUN="${1:-2}"
+# 20s: empirically enough to carry a from-scratch (unformatted-disk) boot
+# through every self-test below and into the M22/M23 desktop handoff (the
+# last REQUIRED_MARKERS entry) - see the M29 progress notes for the actual
+# timings this was measured against. Bump if a future milestone adds
+# enough boot-time work to push past it; this is a real budget, not a
+# magic number to leave stale.
+SECONDS_TO_RUN="${1:-20}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -48,4 +64,61 @@ kill "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
 
 cat "$LOG"
+
+# M29: every boot-time self-test's own "passed"/"verified" klog line -
+# kept as literal substrings of kernel/kernel.c's own klog_puts calls
+# (not regexes) so a wording tweak there is a visible one-line diff here
+# too, rather than a silently-still-passing check that stopped meaning
+# what its neighbors say it means. Order matches boot order. The last
+# entry (init handoff) isn't itself a self-test - it's the "boot actually
+# reached steady state" checkpoint everything above is a prerequisite for.
+REQUIRED_MARKERS=(
+  "[vmm] map/unmap self-test passed."
+  "[heap] kmalloc/kfree self-test passed."
+  "[fb] framebuffer clear/fill/readback self-test passed."
+  "[sched] back on the main task - preemption round trip verified."
+  "[syscall] SYS_exit self-test task ran and terminated."
+  "[pipe] kernel-level producer/consumer self-test passed."
+  "[pipe] SYS_pipe/SYS_write/SYS_read self-test passed."
+  "[signal] SIGTERM self-test passed"
+  "[wait] SYS_wait(-1) self-test passed"
+  "[pgid] SYS_getpgid self-test passed"
+  "[fs] leanfs indirect-block self-test passed"
+  "[memtest] user-space malloc/free and cross-process shm self-tests passed."
+  "[wm] compositor + client self-test passed"
+  "[wm21] multi-window compositor + focus-routing self-test passed"
+  "[wm22] desktop shell (panel + taskbar query, no launcher) self-test passed"
+  "[smp] self-test passed."
+  "[net] ICMP echo request/reply self-test passed"
+  "[init] PID 1 spawned"
+)
+
+pass=1
+
+if grep -qF "*** KERNEL PANIC:" "$LOG"; then
+  pass=0
+  echo "FAIL: kernel panicked - $(grep -F '*** KERNEL PANIC:' "$LOG" | head -1)"
+fi
+
+missing=()
+for marker in "${REQUIRED_MARKERS[@]}"; do
+  if ! grep -qF "$marker" "$LOG"; then
+    missing+=("$marker")
+  fi
+done
+
+if [ "${#missing[@]}" -gt 0 ]; then
+  pass=0
+  echo "FAIL: ${#missing[@]}/${#REQUIRED_MARKERS[@]} required boot markers never appeared (log capture ended too early, or a real regression - try a longer SECONDS first):"
+  for marker in "${missing[@]}"; do
+    echo "  - $marker"
+  done
+fi
+
 rm -f "$LOG" "$OVMF_VARS_RUNTIME"
+
+if [ "$pass" -eq 1 ]; then
+  echo "PASS: ${#REQUIRED_MARKERS[@]}/${#REQUIRED_MARKERS[@]} required boot markers found, no kernel panic."
+  exit 0
+fi
+exit 1

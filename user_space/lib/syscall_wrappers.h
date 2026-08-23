@@ -121,3 +121,21 @@ long sys_wait_nb(long pid);
  * nothing until the next PIT tick preempts it. See SYS_yield's comment
  * in system_api/include/syscall.h. */
 long sys_yield(void);
+
+/* M29: non-reaping liveness check - 1 if pid is still READY/RUNNING, 2 if
+ * it exited on purpose (SYS_exit(0) - an ordinary completion, not a
+ * crash), 0 if it terminated with a nonzero exit code (signal death or
+ * any other SYS_exit - treated as "crashed"), -1 if pid never named a
+ * task. Unlike sys_wait_nb, safe to call on a task you didn't spawn
+ * (doesn't touch its `reaped` flag) - for a caller (the compositor) that
+ * merely wants to notice a connected client died *unexpectedly*, not
+ * reap it as a child or tear down a window that finished drawing and
+ * exited cleanly on its own terms. */
+long sys_task_alive(long pid);
+
+/* M29: clears a named pipe's buffered bytes and closed flags back to
+ * empty, in place - for reclaiming a pipe (e.g. a crashed GUI client's
+ * event pipe) for reuse by whatever connects next, so leftover
+ * undelivered bytes can't be misdelivered. fd must be either end of a
+ * pipe. Returns 0, or -1 if fd isn't a pipe fd. */
+long sys_pipe_reset(int fd);

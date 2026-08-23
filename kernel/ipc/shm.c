@@ -42,8 +42,23 @@ int shm_create(size_t size, int owner_task_id) {
         return -1;
     }
 
+    /* M29: pmm_try_alloc_frame, not pmm_alloc_frame - a shm segment's size
+     * is caller-controlled (SYS_shm_create's `size` argument), so a large
+     * enough request from a user process could exhaust physical memory
+     * mid-loop; that has to fail this call, not panic the whole kernel.
+     * Frees whatever this call itself allocated before the shortfall
+     * (there's no earlier owner to leave anything usefully mapped for,
+     * unlike SYS_sbrk growing an already-live heap) so a failed
+     * shm_create never leaks partial state into the segment table. */
     for (uint64_t i = 0; i < page_count; i++) {
-        uint64_t phys = pmm_alloc_frame();
+        uint64_t phys = pmm_try_alloc_frame();
+        if (phys == 0) {
+            for (uint64_t j = 0; j < i; j++) {
+                pmm_free_frame(frames[j]);
+            }
+            kfree(frames);
+            return -1;
+        }
         k_memset((void *)phys, 0, PAGE_SIZE);
         frames[i] = phys;
     }

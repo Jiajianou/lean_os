@@ -27,9 +27,15 @@ int main(void) {
         sys_exit(1);
     }
 
+    /* M29: zeroed first (panel/desktop/title were already implicitly
+     * relying on this - only width/height were ever set here - and the
+     * new client_pid field would otherwise carry uninitialized stack
+     * garbage into the compositor's SYS_task_alive liveness tracking). */
     wm_create_request_t req;
+    memset(&req, 0, sizeof(req));
     req.width = WIN_W;
     req.height = WIN_H;
+    req.client_pid = (int32_t)sys_getpid();
     if (sys_write(req_fds[1], &req, sizeof(req)) != (long)sizeof(req)) {
         sys_exit(1);
     }

@@ -113,7 +113,7 @@ void pmm_init(const uint32_t *e820_map) {
     klog_puts(" frames free (tracking the first 1 GiB only)\n");
 }
 
-uint64_t pmm_alloc_frame(void) {
+uint64_t pmm_try_alloc_frame(void) {
     spin_lock(&pmm_lock);
     for (uint64_t f = search_hint; f < total_frames; f++) {
         if (!bitmap_test(f)) {
@@ -124,7 +124,16 @@ uint64_t pmm_alloc_frame(void) {
             return f * PAGE_SIZE;
         }
     }
-    panic("pmm_alloc_frame: out of physical memory");
+    spin_unlock(&pmm_lock);
+    return 0;
+}
+
+uint64_t pmm_alloc_frame(void) {
+    uint64_t phys = pmm_try_alloc_frame();
+    if (phys == 0) {
+        panic("pmm_alloc_frame: out of physical memory");
+    }
+    return phys;
 }
 
 void pmm_free_frame(uint64_t phys_addr) {
