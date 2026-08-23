@@ -10,10 +10,22 @@ void gfx_put_pixel(gfx_ctx_t *ctx, int32_t x, int32_t y, uint32_t color) {
     ctx->pixels[y * ctx->width + x] = color;
 }
 
+/* Clipped once, then written a row at a time - not gfx_put_pixel per
+ * pixel, which re-did four bounds comparisons and a multiply for every
+ * one of them. That mattered: desktop_icons.c fills a whole 1024x768
+ * window on every redraw, and desktop_shell.c a full-width bar several
+ * times a second, so this is the single hottest primitive in user space.
+ * A w or h of zero (or negative) still draws nothing - x1 <= x0 or
+ * y1 <= y0 simply skips both loops, same as the old bounds check did. */
 void gfx_fill_rect(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
-    for (int32_t row = 0; row < h; row++) {
-        for (int32_t col = 0; col < w; col++) {
-            gfx_put_pixel(ctx, x + col, y + row, color);
+    int32_t x0 = x < 0 ? 0 : x;
+    int32_t y0 = y < 0 ? 0 : y;
+    int32_t x1 = x + w > ctx->width ? ctx->width : x + w;
+    int32_t y1 = y + h > ctx->height ? ctx->height : y + h;
+    for (int32_t row = y0; row < y1; row++) {
+        uint32_t *dst = ctx->pixels + row * ctx->width;
+        for (int32_t col = x0; col < x1; col++) {
+            dst[col] = color;
         }
     }
 }

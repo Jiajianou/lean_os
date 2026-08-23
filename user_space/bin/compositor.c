@@ -377,9 +377,16 @@ static void fill_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color
     int32_t y0 = max_i32(y, clip_y0);
     int32_t x1 = min_i32(x + w, clip_x1);
     int32_t y1 = min_i32(y + h, clip_y1);
+    /* Row base hoisted out of the inner loop rather than going through
+     * put_pixel, which recomputes row * pitch + col for every pixel. The
+     * bounds are already clipped above, so there is nothing else
+     * put_pixel would add here - it stays for the scattered single-pixel
+     * callers (draw_char_clipped, draw_cursor) where it's the right
+     * shape. */
     for (int32_t row = y0; row < y1; row++) {
+        uint32_t *dst = back_buf + (uint32_t)row * back_pitch_pixels;
         for (int32_t col = x0; col < x1; col++) {
-            put_pixel(col, row, color);
+            dst[col] = color;
         }
     }
 }
@@ -428,6 +435,10 @@ static void blit_window(const window_t *win) {
     int32_t y0 = max_i32(win->y, clip_y0);
     int32_t x1 = min_i32(win->x + win->w, clip_x1);
     int32_t y1 = min_i32(win->y + win->h, clip_y1);
+    if (x1 <= x0) {
+        return;
+    }
+    size_t row_bytes = (size_t)(x1 - x0) * sizeof(uint32_t);
     for (int32_t row = y0; row < y1; row++) {
         /* buf_w, not w - M30 lets w shrink below buf_w (WM_ACTION_MAXIMIZE
          * clamping), but the underlying pixel buffer's real row stride
@@ -435,9 +446,14 @@ static void blit_window(const window_t *win) {
          * wrong bytes (or, once w > buf_w could ever happen, off the end
          * of it entirely - see window_t's own comment on buf_w). */
         const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y) * (uint32_t)win->buf_w;
-        for (int32_t col = x0; col < x1; col++) {
-            put_pixel(col, row, src_row[col - win->x]);
-        }
+        /* One memcpy per row instead of a per-pixel put_pixel loop. This
+         * is the hottest loop in the system - every window, every full
+         * redraw, and the desktop background alone is a whole screen of
+         * pixels - and the clip rect has already reduced it to a
+         * contiguous run in both buffers, which is exactly what memcpy
+         * wants. Nothing about *what* gets copied changed. */
+        memcpy(back_buf + (uint32_t)row * back_pitch_pixels + (uint32_t)x0,
+               src_row + (x0 - win->x), row_bytes);
     }
 }
 
