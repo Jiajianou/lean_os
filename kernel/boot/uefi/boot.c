@@ -123,22 +123,97 @@ static void init_framebuffer(fb_boot_info_t *fb) {
     fb->bpp = 32;
 }
 
-/* ---- Block I/O: locate the whole physical disk (not the ESP partition
- * child handle this app was itself loaded from) and read the kernel
- * blob's fixed LBA range - see kernel/drivers/ata.h's own "assumes the
- * boot disk is the primary master" comment for why "just take the first
- * non-partition BlockIo handle" is an acceptable simplification for this
- * project (a single QEMU IDE disk, never more than one physical drive). ---- */
-static EFI_BLOCK_IO_PROTOCOL *find_whole_disk_block_io(void) {
+/* ---- Block I/O: locate the whole physical disk this app was itself
+ * loaded from (not the ESP partition child handle LoadedImage->
+ * DeviceHandle actually is) and read the kernel blob's fixed LBA range
+ * from it. Identified by UEFI device path, not "the first non-partition
+ * BlockIo handle" (which happens to work under QEMU only because a QEMU
+ * VM only ever has the one disk this project attaches - a real machine
+ * with an internal drive *and* the USB stick this is meant to boot from
+ * would make that guess a coin flip). A device path is a length-prefixed
+ * node list terminated by an End-Entire-Device-Path node; the ESP
+ * partition's path is the whole disk's own path plus one trailing
+ * partition node, so chopping that last node off the path we were loaded
+ * from gives an exact byte-for-byte prefix every *other* handle on the
+ * same physical disk shares - unique to the disk itself only when a
+ * candidate's path is *exactly* that prefix and nothing more (the whole
+ * disk handle has no partition node of its own to chop). ---- */
+static UINT16 device_path_node_length(const EFI_DEVICE_PATH_PROTOCOL *node) {
+    return (UINT16)(node->Length[0] | ((UINT16)node->Length[1] << 8));
+}
+
+static int device_path_is_end(const EFI_DEVICE_PATH_PROTOCOL *node) {
+    return node->Type == EFI_DEVICE_PATH_TYPE_END && node->SubType == EFI_DEVICE_PATH_SUBTYPE_END_ENTIRE;
+}
+
+/* Byte offset of the last real node before the End node - i.e. the length
+ * of "everything except the final node", which for an ESP's device path
+ * is exactly the disk's own device path length. */
+static UINTN device_path_size_without_last_node(const EFI_DEVICE_PATH_PROTOCOL *path) {
+    UINTN offset = 0;
+    UINTN last_node_offset = 0;
+    const EFI_DEVICE_PATH_PROTOCOL *node = path;
+    while (!device_path_is_end(node)) {
+        last_node_offset = offset;
+        UINT16 len = device_path_node_length(node);
+        offset += len;
+        node = (const EFI_DEVICE_PATH_PROTOCOL *)((const UINT8 *)node + len);
+    }
+    return last_node_offset;
+}
+
+static int bytes_equal(const void *a, const void *b, UINTN n) {
+    const UINT8 *pa = (const UINT8 *)a;
+    const UINT8 *pb = (const UINT8 *)b;
+    for (UINTN i = 0; i < n; i++) {
+        if (pa[i] != pb[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static EFI_BLOCK_IO_PROTOCOL *find_whole_disk_block_io(EFI_HANDLE image_handle) {
+    EFI_BOOT_SERVICES *bs = gST->BootServices;
+    EFI_GUID loaded_image_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    EFI_GUID device_path_guid = EFI_DEVICE_PATH_PROTOCOL_GUID;
     EFI_GUID blockio_guid = EFI_BLOCK_IO_PROTOCOL_GUID;
+
+    EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
+    if (EFI_ERROR(bs->HandleProtocol(image_handle, &loaded_image_guid, (void **)&loaded_image)) || !loaded_image) {
+        return NULL;
+    }
+    EFI_DEVICE_PATH_PROTOCOL *our_path = NULL;
+    if (EFI_ERROR(bs->HandleProtocol(loaded_image->DeviceHandle, &device_path_guid, (void **)&our_path)) || !our_path) {
+        return NULL;
+    }
+    UINTN disk_path_len = device_path_size_without_last_node(our_path);
+
     UINTN count = 0;
     EFI_HANDLE *handles = NULL;
-    if (EFI_ERROR(gST->BootServices->LocateHandleBuffer(ByProtocol, &blockio_guid, NULL, &count, &handles))) {
+    if (EFI_ERROR(bs->LocateHandleBuffer(ByProtocol, &blockio_guid, NULL, &count, &handles))) {
         return NULL;
     }
     for (UINTN i = 0; i < count; i++) {
+        EFI_DEVICE_PATH_PROTOCOL *candidate_path = NULL;
+        if (EFI_ERROR(bs->HandleProtocol(handles[i], &device_path_guid, (void **)&candidate_path)) || !candidate_path) {
+            continue;
+        }
+        /* A match is "candidate's device path is exactly our disk prefix,
+         * then immediately terminated" - i.e. an End node sits right at
+         * offset disk_path_len, and everything before that is identical
+         * to our own path's prefix. Not "candidate's total length equals
+         * disk_path_len": disk_path_len itself deliberately excludes any
+         * End node (it's a byte count of real nodes only), so comparing
+         * it against a *terminated* path's total length would never
+         * match anything, correct disk included. */
+        const EFI_DEVICE_PATH_PROTOCOL *candidate_end =
+            (const EFI_DEVICE_PATH_PROTOCOL *)((const UINT8 *)candidate_path + disk_path_len);
+        if (!device_path_is_end(candidate_end) || !bytes_equal(candidate_path, our_path, disk_path_len)) {
+            continue;
+        }
         EFI_BLOCK_IO_PROTOCOL *bio = NULL;
-        if (EFI_ERROR(gST->BootServices->HandleProtocol(handles[i], &blockio_guid, (void **)&bio)) || !bio) {
+        if (EFI_ERROR(bs->HandleProtocol(handles[i], &blockio_guid, (void **)&bio)) || !bio) {
             continue;
         }
         if (!bio->Media->LogicalPartition && bio->Media->MediaPresent) {
@@ -148,8 +223,8 @@ static EFI_BLOCK_IO_PROTOCOL *find_whole_disk_block_io(void) {
     return NULL;
 }
 
-static void load_kernel(void) {
-    EFI_BLOCK_IO_PROTOCOL *bio = find_whole_disk_block_io();
+static void load_kernel(EFI_HANDLE image_handle) {
+    EFI_BLOCK_IO_PROTOCOL *bio = find_whole_disk_block_io(image_handle);
     if (!bio) {
         halt(u"lean_os uefi: no whole-disk Block I/O protocol found\r\n");
     }
@@ -270,7 +345,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     init_framebuffer(&fb);
 
     puts16(u"lean_os uefi: framebuffer ready, loading kernel...\r\n");
-    load_kernel();
+    load_kernel(ImageHandle);
 
     puts16(u"lean_os uefi: exiting boot services, jumping to kernel...\r\n");
     e820_map_t *e820 = build_e820_and_exit_boot_services(ImageHandle);

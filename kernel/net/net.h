@@ -26,9 +26,14 @@
 #define NET_SUBNET_MASK 0xFFFFFF00u /* /24 */
 
 /* Brings the NIC up (rtl8139_init) and logs the resulting configuration.
- * Panics if no NIC is found - see rtl8139_init's own comment on why that
- * matches every other driver in this kernel. */
-void net_init(void);
+ * Returns 1 if a NIC was found, 0 otherwise - see rtl8139_init's own
+ * comment on why "not present" isn't a panic here the way it is for
+ * every other driver in this kernel. Callers that only care about
+ * hardware actually present (the boot self-test) should skip anything
+ * depending on the network entirely when this returns 0, the same
+ * "installed but untested this boot" degradation kernel.c's keyboard/
+ * mouse self-tests already use for present-but-unexercised hardware. */
+int net_init(void);
 
 const uint8_t *net_local_mac(void);
 static inline uint32_t net_local_ip(void) { return NET_LOCAL_IP; }

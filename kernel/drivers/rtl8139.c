@@ -126,10 +126,10 @@ static void rtl8139_reset(void) {
     panic("rtl8139: reset did not complete");
 }
 
-void rtl8139_init(void) {
+int rtl8139_init(void) {
     pci_device_t dev;
     if (!pci_find_device(RTL8139_VENDOR_ID, RTL8139_DEVICE_ID, &dev)) {
-        panic("rtl8139: no RTL8139 NIC found on the PCI bus");
+        return 0;
     }
     pci_enable_device(&dev);
     io_base = pci_bar0_io_base(&dev);
@@ -178,6 +178,7 @@ void rtl8139_init(void) {
     }
     klog_put_hex64(mac_packed);
     klog_putc('\n');
+    return 1;
 }
 
 const uint8_t *rtl8139_mac(void) {

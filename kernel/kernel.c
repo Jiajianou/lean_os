@@ -974,26 +974,33 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         klog_puts("[smp] self-test passed.\n\n");
     }
 
-    /* Stretch goal: networking. rtl8139_init() (via net_init) panics if no
-     * NIC is attached at all, same as every other driver's init in this
-     * kernel - but tools/run-qemu.sh and tools/qemu-serial-test.sh always
-     * attach one (`-netdev user -device rtl8139`) precisely so this is
-     * true of every boot, not just an opt-in one.
-     *
-     * Self-test: a real ICMP echo request/reply round trip against QEMU's
-     * usermode-networking gateway (10.0.2.2, net.h's NET_GATEWAY_IP) -
-     * exercises the whole stack end to end (NIC TX/RX, ARP resolution via
-     * ip_send's neighbor lookup, ICMP request/reply matching) against a
-     * real peer, not a kernel-side loopback stand-in, the same "prove it
-     * against something real" discipline as M20's compositor self-test
-     * spawning an actual client process instead of asserting compositor.c
-     * internals directly. Chosen over pinging an arbitrary Internet host
-     * because SLIRP (QEMU's usermode net backend) always answers ARP/ICMP
-     * for its own gateway address itself - no dependency on this
-     * environment actually having outbound internet access. */
-    {
-        net_init();
-
+    /* Stretch goal: networking. net_init() (rtl8139_init underneath)
+     * returns 0 rather than panicking if no RTL8139 NIC is attached -
+     * unlike every hardware-assumed-present driver elsewhere in this
+     * kernel, an RTL8139 specifically is a legacy chip real machines
+     * (the whole point of the separate "port to real hardware" stretch
+     * goal, docs/real-hardware.md) essentially never actually have, so
+     * treating its absence as fatal would make this self-test block
+     * every real-hardware boot outright. Degrades the same way the
+     * keyboard/mouse self-tests above already do for present-but-
+     * unexercised hardware: log it, skip what depends on it, keep
+     * booting - tools/run-qemu.sh and tools/qemu-serial-test.sh both
+     * attach one (`-netdev user -device rtl8139`) precisely so this
+     * kernel's own QEMU-based development loop still exercises the real
+     * path every time. */
+    if (net_init()) {
+        /* Self-test: a real ICMP echo request/reply round trip against
+         * QEMU's usermode-networking gateway (10.0.2.2, net.h's
+         * NET_GATEWAY_IP) - exercises the whole stack end to end (NIC
+         * TX/RX, ARP resolution via ip_send's neighbor lookup, ICMP
+         * request/reply matching) against a real peer, not a kernel-side
+         * loopback stand-in, the same "prove it against something real"
+         * discipline as M20's compositor self-test spawning an actual
+         * client process instead of asserting compositor.c internals
+         * directly. Chosen over pinging an arbitrary Internet host
+         * because SLIRP (QEMU's usermode net backend) always answers
+         * ARP/ICMP for its own gateway address itself - no dependency on
+         * this environment actually having outbound internet access. */
         uint8_t ping_payload[4] = {0xDE, 0xAD, 0xBE, 0xEF};
         uint16_t ping_id = 0x1EA5;
         uint16_t ping_seq = 1;
@@ -1014,6 +1021,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         klog_puts("[net] ICMP echo request/reply self-test passed (ping to gateway 0x");
         klog_put_hex32(NET_GATEWAY_IP);
         klog_puts(" round-tripped).\n\n");
+    } else {
+        klog_puts("[net] no RTL8139 NIC found - networking untested this boot "
+                   "(expected on real hardware; see docs/real-hardware.md).\n\n");
     }
 
     /* M13: hand off to init (PID 1), which spawns the shell - this is

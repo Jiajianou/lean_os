@@ -398,6 +398,55 @@ runtime dependency).
       PCI IRQ routing, ARP resolution, and ICMP matching all work against
       a real peer (SLIRP), not a kernel-side loopback stand-in. Verified
       passing twice in a row via `tools/qemu-serial-test.sh`.
+- [x] `rtl8139_init`/`net_init` return 0 rather than panicking when no NIC
+      is attached - the one driver in this kernel where "not present" had
+      to become a real, non-fatal outcome rather than every other
+      driver's "assume it's there" panic: an RTL8139 is a legacy chip
+      real machines (the separate "port to real hardware" stretch goal,
+      below) essentially never have, so a hard panic here would have
+      blocked every real-hardware boot at this exact self-test. Degrades
+      the same way the keyboard/mouse self-tests already do for present-
+      but-unexercised hardware. Verified both ways: boots and pings the
+      gateway with a NIC attached, boots cleanly through to init with none.
+
+## M28 — Port to real hardware (USB boot test) [~]
+
+Preparation and tooling are done and verified as far as anything without
+a physical machine and USB port can go; the actual boot-on-real-hardware
+step is a manual one - see [docs/real-hardware.md](docs/real-hardware.md)
+for the full runbook. Leaving this `[~]` rather than `[x]` until that
+manual step has actually been run and reported back.
+
+- [x] Fixed a real bug this stretch goal's own premise would have hit
+      immediately: `kernel/boot/uefi/boot.c`'s `find_whole_disk_block_io`
+      picked "the first non-partition Block I/O handle" - correct by
+      accident under QEMU (exactly one disk ever attached) but a coin
+      flip on any real machine with more than one drive (an internal SSD
+      plus the USB stick this is meant to boot from). Rewrote it to walk
+      UEFI device paths instead: get the handle this app was actually
+      loaded from (`EFI_LOADED_IMAGE_PROTOCOL.DeviceHandle`), find its
+      device path, and match the *disk* by finding another handle whose
+      path is exactly that path's prefix (everything but the trailing
+      partition node) - the standard technique real UEFI OS loaders use,
+      newly added `EFI_DEVICE_PATH_PROTOCOL` support in `efi_proto.h` to
+      make possible. Verified in QEMU by attaching a second, decoy disk
+      and confirming the kernel still boots from the real one - the exact
+      scenario the old code would have gotten wrong, made reproducible
+      without needing real multi-disk hardware to catch it.
+- [x] `tools/write-usb.sh`: writes `build/os-image.bin` onto a real USB
+      drive (macOS via `diskutil`/raw `dd`, Linux via `lsblk`/`dd`),
+      refusing obviously-wrong targets (the system disk, non-removable
+      media) and requiring a typed confirmation of the exact device path
+      before doing anything destructive.
+- [x] `docs/real-hardware.md`: the full runbook - firmware settings
+      needed (Secure Boot off, UEFI not CSM/Legacy boot mode), what
+      normal boot output looks like, and which self-tests are *expected*
+      to report "not found" on real hardware rather than indicating a
+      real failure.
+- [ ] The actual manual step: write the image to a drive, boot a real
+      x86_64 UEFI machine from it, and confirm the framebuffer console
+      comes up and boot self-tests run to completion (network/PS2 caveats
+      in the runbook notwithstanding).
 
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
@@ -406,6 +455,7 @@ runtime dependency).
       later removed in M26, leaving UEFI as the only path)
 - [x] Package/build tooling for third-party user programs (M25, above)
 - [x] Networking stack + NIC driver (M27, above)
-- [ ] Port to real hardware (USB boot test)
+- [~] Port to real hardware (USB boot test) - prep/tooling/runbook done
+      (M28, above); the manual boot-on-real-hardware step itself isn't yet
 
 ---

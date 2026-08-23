@@ -156,6 +156,29 @@ typedef struct {
         0x5B1B31A1, 0x9562, 0x11d2, { 0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }   \
     }
 
+/* ---- Device Path: what find_whole_disk_block_io (boot.c) walks to tell
+ * "the physical disk this app was loaded from" apart from every *other*
+ * disk a real machine might have attached (an internal SSD alongside the
+ * USB stick this actually boots from, say) - QEMU only ever gives this
+ * kernel one disk to be confused between, so that distinction was free to
+ * skip until the real-hardware stretch goal made it a real possibility.
+ * Only the generic node header is modeled - boot.c only ever needs to
+ * walk length-prefixed nodes and find the terminator, never interpret a
+ * specific node's type-specific payload. */
+typedef struct __attribute__((packed)) {
+    UINT8 Type;
+    UINT8 SubType;
+    UINT8 Length[2]; /* little-endian total node length, including this header */
+} EFI_DEVICE_PATH_PROTOCOL;
+
+#define EFI_DEVICE_PATH_TYPE_END          0x7F
+#define EFI_DEVICE_PATH_SUBTYPE_END_ENTIRE 0xFF
+
+#define EFI_DEVICE_PATH_PROTOCOL_GUID                                                  \
+    (EFI_GUID) {                                                                        \
+        0x09576e91, 0x6d3f, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }   \
+    }
+
 /* ---- Block I/O (raw LBA disk reads - kernel.bin lives outside the ESP's
  * FAT filesystem entirely, at boot.c's own fixed KERNEL_START_LBA, so this
  * is the only protocol boot.c needs to fetch it - no filesystem driver

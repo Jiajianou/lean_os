@@ -14,12 +14,17 @@
 #include <stdint.h>
 
 /* Finds the NIC via PCI (pci.h), resets it, allocates its DMA buffers,
- * and brings RX/TX up. Panics if no RTL8139 is attached - matches every
- * other driver's init in this kernel (ata_read_sectors et al assume their
- * hardware exists rather than probing and degrading). Received frames
- * are handed to eth_receive (kernel/net/ethernet.h) directly from the
- * IRQ handler. */
-void rtl8139_init(void);
+ * and brings RX/TX up. Returns 1 if a NIC was found and initialized, 0 if
+ * none is attached at all - unlike every other driver in this kernel
+ * (ata_read_sectors et al panic if their hardware is missing), because
+ * RTL8139 specifically is a legacy chip real machines - the whole point
+ * of the "port to real hardware" stretch goal this exists alongside -
+ * essentially never actually have, unlike PS/2 or a PC-standard PIT.
+ * Only a real fault on hardware that *is* present (a reset that never
+ * completes, a stuck TX descriptor) still panics, same as every other
+ * driver - see rtl8139_reset/rtl8139_send. Received frames are handed to
+ * eth_receive (kernel/net/ethernet.h) directly from the IRQ handler. */
+int rtl8139_init(void);
 
 /* This NIC's burned-in MAC address (IDR0-5), read once at init. */
 const uint8_t *rtl8139_mac(void);
