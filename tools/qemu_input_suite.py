@@ -88,8 +88,45 @@ START_PRESS_BG = 0x4C99E6    # START_PRESS_BG - the click flash
 START_COLORS = (START_BG, START_HOVER_BG, START_PRESS_BG)
 TRAY_SEP = 0x303C4E          # TRAY_SEP_COLOR
 
-LAUNCHER_BG = 0x1C2233       # compositor.c LAUNCHER_BG
-LAUNCHER_PROBE = (512, 309)  # inside the centered overlay, clear of its title text
+# compositor.c's launcher overlay (M42's surface, M43's contents): 480x320,
+# horizontally centered and a third of the way down, with a search field
+# LAUNCHER_PAD in from the top and the result rows LAUNCHER_LIST_Y below
+# that, LAUNCHER_ROW_H apart.
+LAUNCHER_BG = 0x1C2233       # LAUNCHER_BG
+LAUNCHER_SEL_BG = 0x335577   # LAUNCHER_SEL_BG - the selected result's fill
+LAUNCHER_W, LAUNCHER_H = 480, 320
+LAUNCHER_X = (1024 - LAUNCHER_W) // 2
+LAUNCHER_Y = (768 - LAUNCHER_H) // 3
+LAUNCHER_LIST_Y = 46         # LAUNCHER_PAD(12) + LAUNCHER_INPUT_H(24) + 10
+LAUNCHER_ROW_H = 20
+# Inside the overlay, on row 5 - which is never the selected one in these
+# tests, so it reads flat overlay background - and far right of any
+# filename text.
+LAUNCHER_PROBE = (LAUNCHER_X + 428, LAUNCHER_Y + LAUNCHER_LIST_Y + 5 * LAUNCHER_ROW_H + 10)
+
+# compositor.c's snap preview: SNAP_PREVIEW_NUM/DEN of the accent color
+# blended over whatever is already composited underneath.
+ACCENT = 0x4C99E6            # TITLEBAR_FOCUS_COLOR, and the preview's color
+SNAP_PREVIEW_NUM, SNAP_PREVIEW_DEN = 1, 4
+
+
+def blend(under, over, num=SNAP_PREVIEW_NUM, den=SNAP_PREVIEW_DEN):
+    """compositor.c's fill_rect_blend, in Python - integer, same rounding.
+    Recomputed here rather than hardcoded as a hex literal so a change to
+    the ratio shows up as a mismatch naming both numbers, not as an
+    unexplained wrong color."""
+    out = 0
+    for shift in (16, 8, 0):
+        u = (under >> shift) & 0xFF
+        o = (over >> shift) & 0xFF
+        out |= ((u * (den - num) + o * num) // den) << shift
+    return out
+
+
+def launcher_row_probe(i):
+    """Inside result row i's selection fill, right of every filename this
+    filesystem has."""
+    return (LAUNCHER_X + 428, LAUNCHER_Y + LAUNCHER_LIST_Y + i * LAUNCHER_ROW_H + 10)
 
 FONT_H = 16
 PANEL_TOP = 768 - 32
@@ -506,6 +543,96 @@ def test_editor_in_window_file_menu(m):
              "picking File > Quit did not close the Editor")
 
 
+def test_launcher_keychord_types_and_launches(m):
+    """M43's launcher, end to end from the keyboard: Ctrl+Space opens it
+    over everything, typing narrows the list, and Enter spawns the top
+    match. The chord is intercepted in the compositor next to M32's
+    Alt+Tab and for the same reason - it must not be something a focused
+    client can see or swallow, which is only true if it works with an app
+    focused, so this opens one first."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock, so something holds focus
+    wait_for_windows(m, 1)
+
+    m.sendkey("ctrl-spc")
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG,
+             "Ctrl+Space did not open the launcher")
+    check(m.screenshot().px(*launcher_row_probe(0)) == LAUNCHER_SEL_BG,
+          "the launcher's first result is not drawn selected")
+
+    m.type_text("gui_pai")  # gui_paint, and nothing else on disk
+    m.sendkey("ret")
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) != LAUNCHER_BG,
+             "Enter did not dismiss the launcher")
+    wait_for_windows(m, 2)
+
+
+def test_launcher_click_launches_a_result(m):
+    """The pointer half of the same thing: opened from the Start button,
+    filtered by typing, then a real click on the result row rather than
+    Enter. Filtering first is what makes the click meaningful - row 0 of
+    an unfiltered list is a coreutil that opens no window at all, so
+    clicking it would prove nothing either way."""
+    boot(m)
+    m.click(*START_CLICK)
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG,
+             "the Start button did not open the launcher")
+
+    m.type_text("gui_clo")  # gui_clock, and nothing else on disk
+    m.click(*launcher_row_probe(0))
+    wait_for_windows(m, 1)
+
+
+def test_launcher_escape_dismisses(m):
+    """Escape closes it and launches nothing. The launcher takes the
+    keyboard away from the focused window for as long as it is up, so
+    "there is always a way out that doesn't run something" is a real
+    requirement, not a nicety."""
+    boot(m)
+    m.sendkey("ctrl-spc")
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG,
+             "Ctrl+Space did not open the launcher")
+    m.sendkey("esc")
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == DESKTOP_BG,
+             "Escape did not dismiss the launcher")
+    check(count_app_windows(m.screenshot()) == 0,
+          "dismissing the launcher with Escape launched something")
+
+
+def test_snap_drag_to_edge(m):
+    """M43's edge snapping, as the gesture rather than as the action: hold
+    the titlebar, shove the pointer into the right edge, and check both
+    that the preview appears *before* release and that releasing puts the
+    window in exactly the right half.
+
+    The snap math itself has a boot-time self-test (kernel.c's [m43]),
+    driven through WM_ACTION_SNAP_RIGHT - the same function this gesture
+    calls. What only this can show is that the drag recognizes the edge at
+    all, and that what the preview promises is what release delivers."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock: 200x90, narrower than half the screen
+    wait_for_windows(m, 1)
+
+    x, y = app_origin(FIRST_APP_IDX)
+    m.press(x + 100, y - TITLEBAR_H // 2)
+    m.move_held(1020, 400)
+
+    # The preview covers the outer (border- and titlebar-inclusive) rect
+    # the window will land in: content 200x90 at (514, 22), so
+    # x:[512, 716), y:[0, 112). (600, 60) is inside it and nowhere near
+    # the dragged window, which is clamped to the far right at y ~ 410.
+    shot = m.screenshot()
+    check(shot.px(600, 60) == blend(DESKTOP_BG, ACCENT),
+          "no snap preview while dragging into the right edge (got 0x%06X at (600,60), "
+          "expected 0x%06X)" % (shot.px(600, 60), blend(DESKTOP_BG, ACCENT)))
+
+    m.release()
+    shot = wait_for(m, lambda s: s.px(600, 12) == ACCENT,
+                    "releasing at the right edge did not snap the window to the right half")
+    check(shot.px(200, 12) == DESKTOP_BG,
+          "the snapped window is not confined to the right half")
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -517,6 +644,10 @@ TESTS = [
     ("taskbar_click_keeps_app_focused", test_taskbar_click_keeps_app_focused),
     ("taskbar_button_focus_and_minimize", test_taskbar_button_focus_and_minimize),
     ("editor_in_window_file_menu", test_editor_in_window_file_menu),
+    ("launcher_keychord_types_and_launches", test_launcher_keychord_types_and_launches),
+    ("launcher_click_launches_a_result", test_launcher_click_launches_a_result),
+    ("launcher_escape_dismisses", test_launcher_escape_dismisses),
+    ("snap_drag_to_edge", test_snap_drag_to_edge),
     ("launch_close_stress", test_launch_close_stress),
 ]
 

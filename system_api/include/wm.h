@@ -191,6 +191,8 @@ typedef enum {
     WM_ACTION_MAXIMIZE = 4,         /* saves window_id's current x/y/w/h and grows it to fill the screen minus any docked panel - clamped to never exceed its own shm-backed pixel buffer (there's no resize protocol yet - M31 - so a window smaller than the available area is repositioned to fill as much of it as its buffer actually holds, never stretched past what it allocated). No-op if already maximized. */
     WM_ACTION_RESTORE = 5,          /* undoes WM_ACTION_MAXIMIZE - restores the saved x/y/w/h. No-op if not maximized. */
     WM_ACTION_TOGGLE_LAUNCHER = 6,  /* M42: shows/hides the compositor-owned launcher overlay (M43). The one action here with no window_id at all - it acts on the compositor itself, not on a window, so accept_pending_action handles it before the window_id validation every other action goes through, and wmclient.h's wm_toggle_launcher passes -1. desktop_shell.c's Start button is what sends it; M43's Ctrl+Space keychord reaches the exact same toggle from inside the compositor. */
+    WM_ACTION_SNAP_LEFT = 7,        /* M43: resizes and repositions window_id to exactly the left half of the content area (the screen minus the taskbar and minus the room a titlebar needs), clamped to its own buffer the same way WM_ACTION_MAXIMIZE is - see that action's note on why a window smaller than the target area is repositioned rather than stretched. Dragging a window's titlebar into the screen's left edge is what normally sends this, but it is an ordinary action on the pipe like every other one here, so the drag and an external caller drive literally the same code. */
+    WM_ACTION_SNAP_RIGHT = 8,       /* M43: the mirror image of WM_ACTION_SNAP_LEFT - the right half. */
 } wm_action_type_t;
 
 typedef struct {

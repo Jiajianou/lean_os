@@ -38,10 +38,20 @@
  * it isn't one), and mouse events are routed to whichever panel the
  * cursor is over rather than only to the focused window - which is what
  * lets the taskbar hover-highlight its buttons and receive clicks while
- * never holding focus. M42 also adds the launcher overlay: a surface this
- * process draws itself rather than a client window, because it has to be
- * able to appear over everything including the panel that opened it (see
- * draw_launcher).
+ * never holding focus. M42 also adds the launcher overlay, filled in by
+ * M43: a surface this process draws itself rather than a client window,
+ * because it has to appear over everything including the panel that
+ * opened it and to take the keyboard while it is up (see LAUNCHER_W's
+ * comment for why that is the one case in this project worth a
+ * compositor-owned surface).
+ *
+ * M43 also adds edge snapping - dragging a titlebar into the screen's
+ * left or right edge resizes and repositions the window to that half on
+ * release, with a translucent preview of exactly where it will land shown
+ * while the pointer is still in the edge zone. Both the gesture and an
+ * external WM_ACTION_SNAP_LEFT/RIGHT go through the same
+ * apply_window_action, and the preview and the result both come from the
+ * one snap_rect, so none of the three can drift apart.
  *
  * M30 adds real titlebar chrome: three small hit-testable buttons drawn
  * in every ordinary window's titlebar (close/maximize/minimize, right-
@@ -110,19 +120,49 @@
 #define SHADOW_NUM 1
 #define SHADOW_DEN 3
 
-/* M42: the launcher overlay - compositor-owned rather than a client
+/* M43: the snap preview's translucency, same fixed-ratio integer blend as
+ * the shadow above (fill_rect_blend) - just mixed toward the accent color
+ * instead of toward black. Weaker than the shadow's 1/3: this sits on top
+ * of whatever is already on screen and has to read as a hint of where the
+ * window will land, not as the window having landed there already. */
+#define SNAP_PREVIEW_NUM 1
+#define SNAP_PREVIEW_DEN 4
+
+/* M42/M43: the launcher overlay - compositor-owned rather than a client
  * window, which is the one place in this project a compositor-level
- * surface is actually justified (see milestones.md's M43 entry): it has
- * to be able to appear over everything, including the panel that opened
- * it, without being a window the panel could then focus or minimize.
- * WM_ACTION_TOGGLE_LAUNCHER is the only thing that opens or closes it.
- * M42 owns the surface and the toggle; M43 fills it with the search
- * field and the file list. */
+ * surface is actually justified: it has to appear over everything,
+ * including the panel that opened it, without being a window that panel
+ * could then focus or minimize, and it has to take the keyboard away
+ * from whatever is focused for as long as it is up. Every menu since M35
+ * has deliberately stayed client-side to avoid exactly this; a
+ * type-to-launch box is the case that genuinely needs it.
+ *
+ * M42 built the surface and the toggle. M43 fills it in: every file on
+ * disk (SYS_listfiles - leanfs is flat, so that is the whole namespace),
+ * substring-filtered as you type, Enter spawning the selected one.
+ * Opened by WM_ACTION_TOGGLE_LAUNCHER (desktop_shell.c's Start button)
+ * or Ctrl+Space, which is handled in handle_keyboard right next to
+ * M32's Alt+Tab and for the same reason: a window-manager chord is not
+ * something any client should be able to see or swallow. */
 #define LAUNCHER_W 480
 #define LAUNCHER_H 320
-#define LAUNCHER_BG     0x001C2233u
-#define LAUNCHER_BORDER 0x004C99E6u
-#define LAUNCHER_TITLE_FG 0x00FFFFFFu
+#define LAUNCHER_PAD      12
+#define LAUNCHER_INPUT_H  (FONT_HEIGHT + 8)
+#define LAUNCHER_ROW_H    20
+#define LAUNCHER_LIST_Y   (LAUNCHER_PAD + LAUNCHER_INPUT_H + 10)
+#define LAUNCHER_ROWS     12 /* LAUNCHER_LIST_Y + 12*20 + LAUNCHER_PAD fits inside LAUNCHER_H with room to spare */
+#define LAUNCHER_MAX_ENTRIES 48   /* file_manager.c's own MAX_FILES, for the same flat namespace */
+#define LAUNCHER_NAME_MAX 32      /* leanfs's real cap is 27 + NUL (kernel/fs/leanfs.h, not visible to user_space builds) - same constant file_manager.c keeps for the same reason */
+#define LAUNCHER_QUERY_MAX 24
+#define LAUNCHER_LIST_BUF 2048
+
+#define LAUNCHER_BG      0x001C2233u
+#define LAUNCHER_BORDER  0x004C99E6u
+#define LAUNCHER_INPUT_BG 0x00101820u
+#define LAUNCHER_TEXT    0x00FFFFFFu
+#define LAUNCHER_HINT    0x006C8098u
+#define LAUNCHER_SEL_BG  0x00335577u
+#define LAUNCHER_ROW_FG  0x00C8D4E4u
 
 /* M31's resize-edge hit-test bitmask - moved up here (still used first by
  * resize_hit_mask, far below) because M38's cursor-shape selection in
@@ -188,7 +228,29 @@ static int32_t last_drawn_cursor_x, last_drawn_cursor_y; /* cursor position as o
  * of any single redraw, for a change that only ever touches an 8x8
  * pixel box. */
 static int dirty = 1; /* starts dirty: draw the first frame */
-static int launcher_open; /* M42: WM_ACTION_TOGGLE_LAUNCHER - see LAUNCHER_W above */
+/* M42/M43: the launcher's whole state - see LAUNCHER_W's own comment.
+ * `entries` is every file on disk as of the last time it was opened (not
+ * kept live: a list that changed under the cursor while you were typing
+ * would be worse than a slightly stale one, and opening it is exactly
+ * when re-reading is free). `matches` indexes into it. */
+static int launcher_open;
+static char launcher_entries[LAUNCHER_MAX_ENTRIES][LAUNCHER_NAME_MAX];
+static int launcher_entry_count;
+static int launcher_matches[LAUNCHER_MAX_ENTRIES];
+static int launcher_match_count;
+static int launcher_selected; /* index into launcher_matches, not into launcher_entries */
+static int launcher_scroll;   /* first match drawn - see launcher_clamp_scroll */
+static char launcher_query[LAUNCHER_QUERY_MAX];
+static int launcher_query_len;
+
+/* M43: the snap preview's rect, in the same outer (border- and
+ * titlebar-inclusive) coordinates a window's own frame is drawn in.
+ * Computed by handle_mouse whenever the drag's snap target changes and
+ * only read here, rather than recomputed per frame: redraw_rect runs for
+ * every cursor-sized partial redraw too, and the drag state it would
+ * otherwise have to reach forward into is declared much further down. */
+static int snap_preview_active;
+static int32_t snap_preview_x, snap_preview_y, snap_preview_w, snap_preview_h;
 
 /* Every draw call below (fill_rect/blit_window/draw_cursor, all via
  * put_pixel) is clipped to this rect, and present() only ever copies
@@ -327,20 +389,35 @@ static void fill_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color
  * desktop-background fill above already wrote into this clip pass), so
  * it has to run after that and before the window's own border/titlebar/
  * content paint over it - see redraw_rect's z-order comment. */
-static void fill_rect_shadow(int32_t x, int32_t y, int32_t w, int32_t h) {
+/* M43: M38's shadow blend, generalized to blend toward any color rather
+ * than only toward black - the snap preview needs a translucent *accent*
+ * rect, and a second blend loop that differed only in what it was mixing
+ * with would be the kind of near-copy this file has avoided everywhere
+ * else. Still fixed-ratio integer math, still no floating point (see the
+ * Makefile's -mgeneral-regs-only note). Reads the pixel already composited
+ * into back_buf, so it blends against whatever is genuinely underneath. */
+static void fill_rect_blend(int32_t x, int32_t y, int32_t w, int32_t h,
+                             uint32_t color, uint32_t num, uint32_t den) {
     int32_t x0 = max_i32(x, clip_x0);
     int32_t y0 = max_i32(y, clip_y0);
     int32_t x1 = min_i32(x + w, clip_x1);
     int32_t y1 = min_i32(y + h, clip_y1);
+    uint32_t sr = (color >> 16) & 0xFF;
+    uint32_t sg = (color >> 8) & 0xFF;
+    uint32_t sb = color & 0xFF;
     for (int32_t row = y0; row < y1; row++) {
         for (int32_t col = x0; col < x1; col++) {
             uint32_t existing = back_buf[(uint32_t)row * back_pitch_pixels + (uint32_t)col];
-            uint32_t r = ((existing >> 16) & 0xFF) * (SHADOW_DEN - SHADOW_NUM) / SHADOW_DEN;
-            uint32_t g = ((existing >> 8) & 0xFF) * (SHADOW_DEN - SHADOW_NUM) / SHADOW_DEN;
-            uint32_t b = (existing & 0xFF) * (SHADOW_DEN - SHADOW_NUM) / SHADOW_DEN;
+            uint32_t r = (((existing >> 16) & 0xFF) * (den - num) + sr * num) / den;
+            uint32_t g = (((existing >> 8) & 0xFF) * (den - num) + sg * num) / den;
+            uint32_t b = ((existing & 0xFF) * (den - num) + sb * num) / den;
             put_pixel(col, row, (r << 16) | (g << 8) | b);
         }
     }
+}
+
+static void fill_rect_shadow(int32_t x, int32_t y, int32_t w, int32_t h) {
+    fill_rect_blend(x, y, w, h, 0x00000000u, SHADOW_NUM, SHADOW_DEN);
 }
 
 /* M42: the sub-rect variant M41's panel-overhang blit needed went away
@@ -498,12 +575,53 @@ static void launcher_rect(int32_t *out_x, int32_t *out_y) {
     *out_y = ((int32_t)fb_info.height - LAUNCHER_H) / 3;
 }
 
+/* The y of match row `i` (0-based from the top of the *visible* list),
+ * in absolute screen coordinates. Shared by the drawing below and the
+ * click hit-test (launcher_click), so the two can't disagree about where
+ * a row is - the same reason titlebar_button_rect exists. */
+static int32_t launcher_row_y(int32_t launcher_y, int i) {
+    return launcher_y + LAUNCHER_LIST_Y + i * LAUNCHER_ROW_H;
+}
+
 static void draw_launcher(void) {
     int32_t x, y;
     launcher_rect(&x, &y);
     fill_rect(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BG);
     stroke_rect(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BORDER);
-    draw_text_clipped(x + 16, y + 14, "Launcher", LAUNCHER_TITLE_FG, 1 /* bold */);
+
+    /* The search field. An empty query shows a hint rather than nothing,
+     * since an empty box with a caret in it says less about what to do
+     * with it than three words do. */
+    int32_t input_x = x + LAUNCHER_PAD;
+    int32_t input_y = y + LAUNCHER_PAD;
+    int32_t input_w = LAUNCHER_W - 2 * LAUNCHER_PAD;
+    fill_rect(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_INPUT_BG);
+    stroke_rect(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_BORDER);
+    int32_t text_y = input_y + (LAUNCHER_INPUT_H - FONT_HEIGHT) / 2;
+    if (launcher_query_len > 0) {
+        draw_text_clipped(input_x + 6, text_y, launcher_query, LAUNCHER_TEXT, 0);
+    } else {
+        draw_text_clipped(input_x + 6, text_y, "Type to search", LAUNCHER_HINT, 0);
+    }
+    fill_rect(input_x + 6 + launcher_query_len * FONT_WIDTH, text_y, 2, FONT_HEIGHT, LAUNCHER_TEXT);
+
+    if (launcher_match_count == 0) {
+        draw_text_clipped(x + LAUNCHER_PAD, launcher_row_y(y, 0) + 2, "No matches", LAUNCHER_HINT, 0);
+        return;
+    }
+    for (int i = 0; i < LAUNCHER_ROWS; i++) {
+        int m = launcher_scroll + i;
+        if (m >= launcher_match_count) {
+            break;
+        }
+        int32_t ry = launcher_row_y(y, i);
+        if (m == launcher_selected) {
+            fill_rect(x + LAUNCHER_PAD / 2, ry, LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H, LAUNCHER_SEL_BG);
+        }
+        draw_text_clipped(x + LAUNCHER_PAD, ry + 2, launcher_entries[launcher_matches[m]],
+                           m == launcher_selected ? LAUNCHER_TEXT : LAUNCHER_ROW_FG,
+                           m == launcher_selected);
+    }
 }
 
 /* Recomposites and re-presents only [x0,x1) x [y0,y1) (clamped to the
@@ -554,6 +672,14 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
                            fitted_title, TITLE_COLOR, 1 /* bold */);
         draw_titlebar_buttons(win);
         blit_window(win);
+    }
+    /* M43: the snap preview, above every ordinary window (it is about
+     * where one is going, so it has to be visible over the one being
+     * dragged) but below the panels, which stay topmost as always. */
+    if (snap_preview_active) {
+        fill_rect_blend(snap_preview_x, snap_preview_y, snap_preview_w, snap_preview_h,
+                         accent_color, SNAP_PREVIEW_NUM, SNAP_PREVIEW_DEN);
+        stroke_rect(snap_preview_x, snap_preview_y, snap_preview_w, snap_preview_h, accent_color);
     }
     for (int i = 0; i < window_count; i++) {
         if (windows[i].alive && windows[i].is_panel) {
@@ -661,6 +787,18 @@ static int32_t drag_start_x, drag_start_y, drag_start_w, drag_start_h;
 #define MIN_WIN_W 60  /* "a sane minimum size" - M31's own wording; comfortably below every window this project ships (smallest is gui_clock's 200x90) */
 #define MIN_WIN_H 40
 #define MOVE_MIN_VISIBLE 40 /* at least this many px of a dragged window's titlebar must stay on-screen and above the panel - see the MOVE clamp below */
+
+/* M43: how close to a screen edge the *cursor* has to get during a
+ * move-drag before releasing there snaps the window to that half. The
+ * cursor rather than the window's own edge, deliberately: the window is
+ * clamped so MOVE_MIN_VISIBLE px of it always stay on screen, so its edge
+ * can never actually reach x=0 - but the pointer can, and "shove the
+ * pointer into the edge" is the gesture every desktop that has this uses. */
+#define SNAP_EDGE_MARGIN 8
+#define SNAP_NONE  0
+#define SNAP_LEFT  1
+#define SNAP_RIGHT 2
+static int drag_snap_hint = SNAP_NONE; /* which half a release right now would snap to; only meaningful while drag_mode == DRAG_MOVE */
 
 /* M38: the mask draw_cursor's shape selection (redraw_rect) uses - a
  * resize *in progress* keeps showing the shape for whichever edge/corner
@@ -781,6 +919,28 @@ static int32_t content_top_limit(void) {
 
 static int32_t content_bottom_limit(void) {
     return (int32_t)fb_info.height - connected_panel_height();
+}
+
+/* M43: exactly where WM_ACTION_SNAP_LEFT/RIGHT will put `win` - the one
+ * definition of that geometry, used both by the action itself and by the
+ * drag preview, so what you see before releasing is what you get after.
+ *
+ * Same clamp discipline as WM_ACTION_MAXIMIZE, and for the same reason:
+ * there is still no protocol for a client to grow its own shm-backed
+ * buffer (M31's drag only ever shrinks a window within the one it
+ * allocated), so a window whose buffer is narrower than half the screen
+ * is placed at that half's edge rather than stretched past what it can
+ * actually paint. The MIN_WIN_* floors are what keep this sane on a
+ * display too small to have two usable halves - a half-width that came
+ * out negative would otherwise clamp every window to nothing. */
+static void snap_rect(const window_t *win, uint32_t action,
+                       int32_t *out_x, int32_t *out_y, int32_t *out_w, int32_t *out_h) {
+    int32_t half_w = max_i32((int32_t)fb_info.width / 2 - 2 * BORDER, MIN_WIN_W);
+    int32_t avail_h = max_i32(content_bottom_limit() - content_top_limit() - BORDER, MIN_WIN_H);
+    *out_w = min_i32(win->buf_w, half_w);
+    *out_h = min_i32(win->buf_h, avail_h);
+    *out_x = (action == WM_ACTION_SNAP_LEFT) ? BORDER : (int32_t)fb_info.width / 2 + BORDER;
+    *out_y = content_top_limit();
 }
 
 /* M40: a refused connection used to be entirely silent - the client got
@@ -1030,6 +1190,14 @@ static void apply_window_action(int idx, uint32_t action) {
             win->maximized = 1;
             dirty = 1;
         }
+    } else if (action == WM_ACTION_SNAP_LEFT || action == WM_ACTION_SNAP_RIGHT) {
+        /* M43: a snapped window is not a maximized one - clearing the
+         * flag keeps WM_ACTION_RESTORE (and the titlebar's maximize
+         * button, which reads it) from claiming it can put back geometry
+         * that this just replaced. */
+        snap_rect(win, action, &win->x, &win->y, &win->w, &win->h);
+        win->maximized = 0;
+        dirty = 1;
     } else if (action == WM_ACTION_RESTORE) {
         if (win->maximized) {
             win->x = win->saved_x;
@@ -1038,6 +1206,199 @@ static void apply_window_action(int idx, uint32_t action) {
             win->h = win->saved_h;
             win->maximized = 0;
             dirty = 1;
+        }
+    }
+}
+
+/* M43: the launcher's logic. Everything it needs is already here - the
+ * whole flat filesystem via SYS_listfiles, SYS_spawn to launch, and the
+ * keyboard, which this process already owns (handle_keyboard routes every
+ * keystroke). No new syscall and no new protocol channel: the only thing
+ * that crosses a process boundary is the one WM_ACTION_TOGGLE_LAUNCHER
+ * the Start button sends. */
+
+static char lower_char(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+/* Case-insensitive substring match, and substring rather than prefix on
+ * purpose: this filesystem's names are things like "gui_terminal" and
+ * "text_editor", where the word you actually think of ("terminal",
+ * "editor") is in the middle. An empty query matches everything. */
+static int launcher_name_matches(const char *name, const char *query) {
+    if (!query[0]) {
+        return 1;
+    }
+    for (int i = 0; name[i]; i++) {
+        int j = 0;
+        while (query[j] && lower_char(name[i + j]) == lower_char(query[j])) {
+            j++;
+        }
+        if (!query[j]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Keeps the selected row on screen, and the list scrolled no further than
+ * it has content for. */
+static void launcher_clamp_scroll(void) {
+    if (launcher_selected < 0) {
+        launcher_selected = 0;
+    }
+    if (launcher_selected >= launcher_match_count) {
+        launcher_selected = launcher_match_count - 1;
+    }
+    if (launcher_selected < launcher_scroll) {
+        launcher_scroll = launcher_selected;
+    }
+    if (launcher_selected >= launcher_scroll + LAUNCHER_ROWS) {
+        launcher_scroll = launcher_selected - LAUNCHER_ROWS + 1;
+    }
+    if (launcher_scroll < 0) {
+        launcher_scroll = 0;
+    }
+}
+
+static void launcher_apply_filter(void) {
+    launcher_match_count = 0;
+    for (int i = 0; i < launcher_entry_count; i++) {
+        if (launcher_name_matches(launcher_entries[i], launcher_query)) {
+            launcher_matches[launcher_match_count++] = i;
+        }
+    }
+    /* Typing always re-aims at the top match: the whole point of the box
+     * is that narrowing the query converges on what you meant, and
+     * keeping a stale selection index would fight that. */
+    launcher_selected = 0;
+    launcher_scroll = 0;
+}
+
+/* Re-reads the whole namespace. Only on open - see launcher_entries'
+ * own comment on why this isn't kept live. */
+static void launcher_reload(void) {
+    static char buf[LAUNCHER_LIST_BUF];
+    launcher_entry_count = 0;
+    long n = sys_listfiles(buf, sizeof(buf));
+    if (n <= 0) {
+        return;
+    }
+    if (n > (long)sizeof(buf)) {
+        n = (long)sizeof(buf);
+    }
+    int col = 0;
+    for (long i = 0; i < n && launcher_entry_count < LAUNCHER_MAX_ENTRIES; i++) {
+        if (buf[i] == '\n') {
+            launcher_entries[launcher_entry_count][col] = '\0';
+            launcher_entry_count++;
+            col = 0;
+        } else if (col < LAUNCHER_NAME_MAX - 1) {
+            launcher_entries[launcher_entry_count][col++] = buf[i];
+        }
+    }
+}
+
+static void launcher_set_open(int open) {
+    launcher_open = open;
+    if (open) {
+        launcher_query[0] = '\0';
+        launcher_query_len = 0;
+        launcher_reload();
+        launcher_apply_filter();
+    }
+    dirty = 1;
+}
+
+static void launcher_launch_selected(void) {
+    if (launcher_selected >= 0 && launcher_selected < launcher_match_count) {
+        /* Whatever it is. SYS_spawn refuses anything that isn't a valid
+         * ELF image without taking the kernel down (M40's audit), so
+         * launching a data file simply does nothing - which is the right
+         * behavior for a list that is honestly "every file on disk"
+         * rather than a curated set of applications this project has no
+         * metadata to build. */
+        sys_spawn(launcher_entries[launcher_matches[launcher_selected]], "");
+    }
+    launcher_set_open(0);
+}
+
+/* Every keystroke while the launcher is up belongs to it - the one place
+ * in this project where the compositor takes the keyboard away from the
+ * focused window, and the reason a compositor-owned surface was justified
+ * here at all (see LAUNCHER_W's comment). Escape and Enter both close it,
+ * so it can never be left holding input with no way out. */
+static void launcher_key(char ch) {
+    if (ch == 27) { /* Escape */
+        launcher_set_open(0);
+        return;
+    }
+    if (ch == '\n' || ch == '\r') {
+        launcher_launch_selected();
+        return;
+    }
+    if (ch == (char)KBD_KEY_UP) {
+        launcher_selected--;
+    } else if (ch == (char)KBD_KEY_DOWN) {
+        launcher_selected++;
+    } else if (ch == '\b' || ch == 0x7F) {
+        if (launcher_query_len > 0) {
+            launcher_query[--launcher_query_len] = '\0';
+            launcher_apply_filter();
+        }
+    } else if (ch >= 0x20 && ch < 0x7F && launcher_query_len < LAUNCHER_QUERY_MAX - 1) {
+        launcher_query[launcher_query_len++] = ch;
+        launcher_query[launcher_query_len] = '\0';
+        launcher_apply_filter();
+    }
+    launcher_clamp_scroll();
+    dirty = 1;
+}
+
+/* A left-click while the launcher is up: on a result row it launches it,
+ * anywhere else it dismisses - the same "an open menu owns the next
+ * click outright" rule every menu in this project already follows
+ * (text_editor.c's File menu, desktop_icons.c's context menu). Returns 1
+ * either way, since the click is consumed and must not also reach a
+ * window underneath. */
+static int launcher_click(int32_t px, int32_t py) {
+    int32_t lx, ly;
+    launcher_rect(&lx, &ly);
+    if (!gfx_point_in_rect(px, py, lx, ly, LAUNCHER_W, LAUNCHER_H)) {
+        launcher_set_open(0);
+        return 1;
+    }
+    for (int i = 0; i < LAUNCHER_ROWS; i++) {
+        if (launcher_scroll + i >= launcher_match_count) {
+            break;
+        }
+        if (gfx_point_in_rect(px, py, lx + LAUNCHER_PAD / 2, launcher_row_y(ly, i),
+                               LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H)) {
+            launcher_selected = launcher_scroll + i;
+            launcher_launch_selected();
+            return 1;
+        }
+    }
+    return 1; /* inside the overlay but not on a row - swallowed, nothing else */
+}
+
+/* Hovering a row selects it, so a click and the keyboard's Enter always
+ * act on the same thing. Only repaints when the answer changes: this runs
+ * on every mouse-move event. */
+static void launcher_hover(int32_t px, int32_t py) {
+    int32_t lx, ly;
+    launcher_rect(&lx, &ly);
+    for (int i = 0; i < LAUNCHER_ROWS; i++) {
+        if (launcher_scroll + i >= launcher_match_count) {
+            break;
+        }
+        if (gfx_point_in_rect(px, py, lx + LAUNCHER_PAD / 2, launcher_row_y(ly, i),
+                               LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H)) {
+            if (launcher_selected != launcher_scroll + i) {
+                launcher_selected = launcher_scroll + i;
+                dirty = 1;
+            }
+            return;
         }
     }
 }
@@ -1054,8 +1415,7 @@ static void accept_pending_action(int action_read_fd) {
      * before (and instead of) the window_id validation every other one
      * goes through - see WM_ACTION_TOGGLE_LAUNCHER. */
     if (req.action == WM_ACTION_TOGGLE_LAUNCHER) {
-        launcher_open = !launcher_open;
-        dirty = 1;
+        launcher_set_open(!launcher_open);
         return;
     }
     if (req.window_id < 0 || req.window_id >= window_count || !windows[req.window_id].alive) {
@@ -1177,6 +1537,23 @@ static void handle_mouse(void) {
          * everywhere else. */
         int right_down_edge = (mev.buttons & 2) && !(prev_buttons & 2);
 
+        /* M43: an open launcher owns the pointer the same way it owns the
+         * keyboard - it is drawn over everything, so a click that fell
+         * through to a window underneath it would land somewhere the user
+         * cannot even see. Checked before the drag state machine, which
+         * cannot be running anyway while the launcher is up (opening it
+         * takes a click on the taskbar or a keychord, neither of which
+         * can happen mid-drag). */
+        if (launcher_open) {
+            if (left_down_edge) {
+                launcher_click(cursor_x, cursor_y);
+            } else if (!(mev.buttons & 1)) {
+                launcher_hover(cursor_x, cursor_y);
+            }
+            prev_buttons = mev.buttons;
+            continue;
+        }
+
         /* M31: a drag in progress owns every event until release - no
          * hit-testing, no focus changes, no forwarding to the window's
          * own content, just updating its geometry. drag_window's own
@@ -1185,8 +1562,24 @@ static void handle_mouse(void) {
          * owning client crashes while being dragged. */
         if (drag_mode != DRAG_NONE) {
             if (left_up_edge || !windows[drag_window].alive) {
+                /* M43: releasing inside an edge zone is what commits a
+                 * snap - through the very same apply_window_action an
+                 * external WM_ACTION_SNAP_LEFT/RIGHT goes through, so the
+                 * gesture and the protocol can't drift apart (the same
+                 * arrangement M30's titlebar buttons already have). */
+                if (left_up_edge && drag_mode == DRAG_MOVE && drag_snap_hint != SNAP_NONE &&
+                    windows[drag_window].alive) {
+                    apply_window_action(drag_window, drag_snap_hint == SNAP_LEFT
+                                                          ? WM_ACTION_SNAP_LEFT
+                                                          : WM_ACTION_SNAP_RIGHT);
+                }
                 drag_mode = DRAG_NONE;
                 drag_window = -1;
+                drag_snap_hint = SNAP_NONE;
+                if (snap_preview_active) {
+                    snap_preview_active = 0;
+                    dirty = 1;
+                }
             } else if (mev.buttons & 1) {
                 window_t *win = &windows[drag_window];
                 int32_t dx = cursor_x - drag_start_cursor_x;
@@ -1198,6 +1591,28 @@ static void handle_mouse(void) {
                     int32_t max_y = content_bottom_limit(); /* titlebar bottom can't dip below the dock's top edge */
                     win->x = clamp_i32(drag_start_x + dx, min_x, max_x);
                     win->y = clamp_i32(drag_start_y + dy, min_y, max_y);
+                    /* M43: which half releasing here would snap to, and
+                     * the preview rect for it - recomputed only when the
+                     * answer changes, since this runs per mouse event. */
+                    int hint = SNAP_NONE;
+                    if (cursor_x <= SNAP_EDGE_MARGIN) {
+                        hint = SNAP_LEFT;
+                    } else if (cursor_x >= (int32_t)fb_info.width - 1 - SNAP_EDGE_MARGIN) {
+                        hint = SNAP_RIGHT;
+                    }
+                    if (hint != drag_snap_hint) {
+                        drag_snap_hint = hint;
+                        snap_preview_active = (hint != SNAP_NONE);
+                        if (snap_preview_active) {
+                            int32_t sx, sy, sw, sh;
+                            snap_rect(win, hint == SNAP_LEFT ? WM_ACTION_SNAP_LEFT : WM_ACTION_SNAP_RIGHT,
+                                       &sx, &sy, &sw, &sh);
+                            snap_preview_x = sx - BORDER;
+                            snap_preview_y = sy - TITLEBAR_H - BORDER;
+                            snap_preview_w = sw + 2 * BORDER;
+                            snap_preview_h = sh + TITLEBAR_H + 2 * BORDER;
+                        }
+                    }
                 } else { /* DRAG_RESIZE */
                     int32_t new_x = drag_start_x, new_y = drag_start_y;
                     int32_t new_w = drag_start_w, new_h = drag_start_h;
@@ -1408,9 +1823,24 @@ static void handle_keyboard(void) {
          * client - a real WM shortcut, not something any app's own input
          * handling should see (or could even tell apart from a plain Tab
          * keypress on its own - see SYS_kbd_modifiers' doc comment). A
-         * plain Tab (Alt not held) still forwards exactly as before. */
-        if (ch == '\t' && (sys_kbd_modifiers() & KBD_MOD_ALT)) {
+         * plain Tab (Alt not held) still forwards exactly as before.
+         *
+         * M43: Ctrl+Space is the second such chord, and is checked before
+         * the launcher's own key handling below so it toggles the
+         * launcher shut as well as open. */
+        long mods = sys_kbd_modifiers();
+        if (ch == '\t' && (mods & KBD_MOD_ALT)) {
             alt_tab_cycle();
+            continue;
+        }
+        if (ch == ' ' && (mods & KBD_MOD_CTRL)) {
+            launcher_set_open(!launcher_open);
+            continue;
+        }
+        /* M43: while it is up, the launcher has the keyboard outright -
+         * see launcher_key. */
+        if (launcher_open) {
+            launcher_key(ch);
             continue;
         }
         if (focused_window >= 0) {

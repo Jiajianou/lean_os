@@ -1812,6 +1812,135 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
                    "maximize clamp, launcher toggle) self-test passed (9/9 checks matched).\n\n");
     }
 
+    /* M43 self-test: window snapping and the launcher overlay, both
+     * driven the way a self-test can drive them - snapping through the
+     * two new WM_ACTION_PIPE verbs (which is literally the same code a
+     * titlebar drag into a screen edge runs, by construction: the drag
+     * calls apply_window_action rather than reimplementing the geometry),
+     * and the launcher through WM_ACTION_TOGGLE_LAUNCHER.
+     *
+     * text_editor rather than gui_clock as the subject, because its
+     * buffer (640x384) is bigger than half this display in one dimension
+     * and smaller in the other - so one snapped rect exercises both sides
+     * of snap_rect's clamp at once: the width comes out as exactly half
+     * the screen, and the height as the window's own buffer rather than
+     * the full available height. A window small enough to be clamped in
+     * both directions would have proved much less.
+     *
+     * What this can't reach is the gesture and the typing: whether a drag
+     * into the edge actually produces the snap, whether the preview shows
+     * up before release, and whether Ctrl+Space and type-to-filter work.
+     * Those go through M40's input harness (tools/qemu-input-test.sh),
+     * the same split every milestone since has used.
+     */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *shell_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *editor_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !shell_image || !editor_image) {
+            panic("out of memory reading compositor/desktop_shell/text_editor back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t shell_size = vfs_read("desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
+        int64_t editor_size = vfs_read("text_editor", editor_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || shell_size < 0 || editor_size < 0) {
+            panic("vfs_read: compositor/desktop_shell/text_editor missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+        task_t *shell_task = process_spawn(shell_image, (size_t)shell_size, "");
+        kfree(shell_image);
+        pit_sleep_ms(400); /* connects as window 0, the taskbar */
+        task_t *editor_task = process_spawn(editor_image, (size_t)editor_size, "");
+        kfree(editor_image);
+        pit_sleep_ms(700); /* connects as window 1, focused, and draws */
+
+        int action_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+            panic("M43 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
+        }
+        wm_action_request_t req;
+        k_memset(&req, 0, sizeof(req));
+        req.window_id = 1;
+
+        /* Right half: x = 1024/2 + BORDER(2) = 514, width
+         * min(buf_w 640, 1024/2 - 2*BORDER = 508) = 508, so content spans
+         * x:[514, 1022) and the titlebar y:[2, 22) above it. (700, 12) is
+         * inside that titlebar, past the "Editor" text and well left of
+         * the three buttons; (200, 12) is where the *left* half's
+         * titlebar would be, and must be bare desktop. */
+        req.action = WM_ACTION_SNAP_RIGHT;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(400);
+        uint32_t right_titlebar = fb_get_pixel(700, 12);
+        uint32_t right_left_half = fb_get_pixel(200, 12);
+
+        req.action = WM_ACTION_SNAP_LEFT;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(400);
+        uint32_t left_titlebar = fb_get_pixel(200, 12);
+        uint32_t left_right_half = fb_get_pixel(700, 12);
+
+        /* The launcher overlay sits at x:[272, 752), y:[149, 469), and
+         * its first result row at y:[195, 215) - LAUNCHER_LIST_Y(46) into
+         * it. (700, 205) is inside that row's selection fill and far right
+         * of any filename text; (700, 309) is plain overlay background
+         * (row 5, which isn't the selected one) and bare desktop once the
+         * overlay is gone, since the editor is snapped to the left half by
+         * then. An empty query matches every file on disk, so there is
+         * always a first row to be selected. */
+        k_memset(&req, 0, sizeof(req));
+        req.window_id = -1;
+        req.action = WM_ACTION_TOGGLE_LAUNCHER;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(400);
+        uint32_t launcher_bg = fb_get_pixel(700, 309);
+        uint32_t launcher_selected_row = fb_get_pixel(700, 205);
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(400);
+        uint32_t launcher_closed = fb_get_pixel(700, 309);
+
+        selftest_reap(editor_task);
+        selftest_reap(shell_task);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        static const struct { const char *what; uint32_t expected; } names[] = {
+            {"a right-snapped window's titlebar filling the screen's right half (compositor.c TITLEBAR_FOCUS_COLOR)", 0x004C99E6u},
+            {"the left half staying empty while a window is snapped right (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
+            {"a left-snapped window's titlebar filling the screen's left half (compositor.c TITLEBAR_FOCUS_COLOR)", 0x004C99E6u},
+            {"the right half staying empty while a window is snapped left (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
+            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG)", 0x001C2233u},
+            {"the launcher's first result drawn selected (compositor.c LAUNCHER_SEL_BG)", 0x00335577u},
+            {"the launcher overlay gone again after a second toggle (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
+        };
+        const uint32_t got[] = {
+            right_titlebar, right_left_half, left_titlebar, left_right_half,
+            launcher_bg, launcher_selected_row, launcher_closed,
+        };
+        int all_ok = 1;
+        for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
+            if (got[i] != names[i].expected) {
+                klog_puts("[m43] pixel check failed: ");
+                klog_puts(names[i].what);
+                klog_puts(" - expected 0x");
+                klog_put_hex32(names[i].expected);
+                klog_puts(" got 0x");
+                klog_put_hex32(got[i]);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        if (!all_ok) {
+            panic("M43 snap/launcher self-test: the compositor did not behave as expected");
+        }
+        klog_puts("[m43] window snapping (left/right half, buffer-clamped) and the "
+                   "launcher overlay self-test passed (7/7 checks matched).\n\n");
+    }
+
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
      * exactly where a user program would reach them. Before this
      * milestone the middle case here didn't fail at all - it panicked the

@@ -381,23 +381,41 @@ class Machine:
         time.sleep(gap)
         self.click()
 
-    def drag(self, x0, y0, x1, y1, steps=8):  # noqa: C901
-        """Press at (x0,y0), move to (x1,y1) with the button held, release.
-        Stepped rather than one jump so the guest sees real intermediate
-        motion - a drag state machine that only ever gets press-then-
-        release-far-away isn't being tested at all."""
-        self.move_to(x0, y0)
-        self.button(1)
+    def press(self, x=None, y=None, mask=BTN_LEFT):
+        """Button down, and stay down. Pair with move_held/release for a
+        drag a test needs to look at *mid*-gesture (M43's snap preview) -
+        drag() below is the whole gesture in one call for the common case
+        where only the end state matters."""
+        if x is not None:
+            self.move_to(x, y)
+        self.button(mask)
         time.sleep(0.1)
+
+    def move_held(self, x, y, steps=8):
+        """Steps the pointer to (x, y) without move_to's verification.
+        Deliberately unverified: verification re-homes the pointer against
+        the top-left clamp, which mid-drag would drag the window there
+        with it. Stepped rather than one jump so the guest sees real
+        intermediate motion - a drag state machine that only ever gets
+        press-then-release-far-away isn't being tested at all."""
+        x0, y0 = self.cursor
         for i in range(1, steps + 1):
-            nx = x0 + (x1 - x0) * i // steps
-            ny = y0 + (y1 - y0) * i // steps
+            nx = x0 + (x - x0) * i // steps
+            ny = y0 + (y - y0) * i // steps
             self._step_by(nx - self.cursor[0], ny - self.cursor[1])
             self.cursor = (nx, ny)
             time.sleep(0.05)
         time.sleep(0.15)
+
+    def release(self):
         self.button(0)
         time.sleep(0.25)
+
+    def drag(self, x0, y0, x1, y1, steps=8):
+        """Press at (x0,y0), move to (x1,y1) with the button held, release."""
+        self.press(x0, y0)
+        self.move_held(x1, y1, steps=steps)
+        self.release()
 
     # ---- readback ----------------------------------------------------
 

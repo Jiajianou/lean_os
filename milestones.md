@@ -1378,33 +1378,60 @@ git history was never touched by it, since none of it was committed.
       the intermittent panic above) and `tools/qemu-input-test.sh` pass
       (11/11)
 
-## M43 — Spotlight-style launcher + window snapping
+## M43 — Spotlight-style launcher + window snapping ✅
 
-- [ ] Global launcher keychord (Ctrl+Space, reusing M32's
+- [x] Global launcher keychord (Ctrl+Space, reusing M32's
       `keyboard_modifiers()` infra already added for Alt-Tab) *or* a
       click on M42's taskbar Start button both open the same centered
-      search overlay - compositor-owned (the one place in this project a
-      compositor-level, not per-client, modal input grab is actually
+      search overlay - compositor-owned, the one place in this project a
+      compositor-level (not per-client) modal input grab is actually
       justified, unlike M35/M36/M42's deliberate client-side-only menu
-      scope trims), listing every file via `SYS_listfiles`, type-to-
-      filter (substring match), Enter spawns the top/selected match,
-      Escape dismisses - the type-to-launch counterpart to double-
-      clicking a desktop icon
-- [ ] Window edge-snapping: dragging a window's titlebar to the
-      screen's left/right edge resizes+repositions it to exactly the
-      left/right half (macOS/Aero-style tiling), reusing M31's existing
-      drag-and-clamp state machine and the same "never exceed the
-      window's own buffer" clamp `WM_ACTION_MAXIMIZE` already follows
-- [ ] Snap preview: a translucent outline shown while dragging near an
-      edge, before release - reuses M38's fixed-ratio `fill_rect_shadow`
-      blend math rather than a second blend implementation, proving out
-      how much cheap integer-blend translucency this toolchain can
-      afford before M44 leans on it further
-- [ ] Self-tests for the protocol-level snap math (given a drag-end
-      position, the resulting rect is exactly right/left half, clamped
-      correctly at small screen sizes); the launcher's keychord/Start-
-      button-opens-overlay, type-to-filter, and real click-to-select-a-
-      result behavior verified via M40's harness
+      scope trims. It lists every file via `SYS_listfiles` (leanfs is
+      flat, so that is the whole namespace), type-to-filter by
+      case-insensitive *substring* rather than prefix (the word you think
+      of - "terminal", "editor" - is in the middle of `gui_terminal` and
+      `text_editor`), Enter or a click on a row spawns the selection,
+      Escape dismisses without launching. Hovering a row selects it, so
+      the pointer and the keyboard always act on the same thing
+- [x] Window edge-snapping: dragging a window's titlebar until the
+      *cursor* reaches the screen's left/right edge and releasing there
+      resizes+repositions it to exactly that half. The cursor rather than
+      the window's own edge, deliberately - M31's drag clamp keeps
+      `MOVE_MIN_VISIBLE` px of the window on screen, so its edge can
+      never actually reach x=0, but the pointer can. Same
+      "never exceed the window's own buffer" clamp `WM_ACTION_MAXIMIZE`
+      already follows, plus `MIN_WIN_*` floors so a display too small for
+      two usable halves doesn't clamp windows to nothing
+- [x] Two new protocol actions (`WM_ACTION_SNAP_LEFT`/`RIGHT`) rather
+      than gesture-only handling, following M30's precedent exactly: the
+      drag calls the same `apply_window_action` an external caller
+      reaches, so the gesture and the protocol cannot drift, and the snap
+      geometry becomes something a boot-time self-test can drive
+- [x] Snap preview: a translucent outline of exactly where the window
+      will land, shown while the cursor is in an edge zone and before
+      release. M38's `fill_rect_shadow` was generalized into
+      `fill_rect_blend` (blend toward any color, not only toward black)
+      rather than a second blend loop that differed only in what it mixed
+      with - the shadow is now a one-line call into it. Preview and
+      result both come from the one `snap_rect`, so what you see before
+      releasing is what you get after
+- [x] New boot self-test (`[m43]`, 7/7 checks): both snap actions with
+      `text_editor` as the subject, whose 640x384 buffer is wider than
+      half this display and shorter than the full height, so one snapped
+      rect exercises both sides of the clamp at once; plus the launcher
+      overlay opening, drawing its first result selected, and closing
+- [x] Four new interactive tests through M40's harness: Ctrl+Space with
+      an app focused (the chord must not be swallowable by a client),
+      type-to-filter and Enter; the Start button, type-to-filter and a
+      real click on a result row; Escape dismissing without launching
+      anything; and the snap gesture, checked *mid-drag* for the preview
+      and after release for the result. That last one needed the harness
+      to grow `press`/`move_held`/`release` - `drag()` is now those three
+      in a row, and `move_held` skips `move_to`'s position verification
+      because verifying re-homes the pointer against the top-left clamp,
+      which mid-drag would drag the window there with it
+- [x] Full `tools/qemu-serial-test.sh` pass (29/29) and
+      `tools/qemu-input-test.sh` pass (15/15)
 
 ## M44 — Desktop visual polish
 

@@ -43,6 +43,13 @@ set -euo pipefail
 # self-test's own compositor now opening four more pipes) between them
 # did - 32s was measured failing and 34s passing, so 40 leaves real
 # headroom rather than sitting one slow boot away from a false failure.
+#
+# M42/M43 both added a self-test and the boot got *faster*: 30s now passes
+# comfortably. M42's selftest_reap is why - every self-test now waits for
+# the clients it kills instead of leaving them to be noticed some
+# arbitrary number of scheduler quanta later, and a killed compositor that
+# keeps getting scheduled is not free. The budget stays at 40 anyway; the
+# headroom is the point.
 SECONDS_TO_RUN="${1:-40}"
 shift || true
 EXTRA_ARGS=("$@")
@@ -115,6 +122,7 @@ REQUIRED_MARKERS=(
   "[wm36] confirm_close opt-in (WM_EVENT_CLOSE_REQUEST via WM_ACTION_PIPE) self-test passed"
   "[wm38] drop shadow + WM_SETTINGS_PIPE accent-color self-test passed"
   "[m42] bottom taskbar (Start button, running-app button, tray, maximize clamp, launcher toggle) self-test passed"
+  "[m43] window snapping (left/right half, buffer-clamped) and the launcher overlay self-test passed"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."
