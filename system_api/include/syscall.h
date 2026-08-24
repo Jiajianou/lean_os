@@ -28,7 +28,7 @@
 #define SYS_wait       4 /* (pid) -> exit code. Polls + cooperatively yields (schedule()) rather than a real blocking wait queue - M14 is where "more complete wait semantics" is scoped to land. */
 #define SYS_read       5 /* (fd, buf, len) -> bytes read. Only fd=0 (stdin/keyboard) is wired up; blocks (yields) until at least one byte is available. */
 #define SYS_readfile   6 /* (name, buf, maxlen) -> bytes copied or -1. Whole-file read by name - no open/close/fd-table/lseek yet, matching M13's "a couple of coreutils" scope rather than a full VFS API nothing needs yet. */
-#define SYS_listfiles  7 /* (buf, maxlen) -> bytes written or -1. Newline-separated filenames - leanfs is flat (no directories), so this is the entire namespace. */
+#define SYS_listdir    7 /* (path, buf, maxlen) -> bytes written or -1. Newline-separated names of everything in the directory at `path`, with a '/' appended to each one that is itself a directory so a caller can tell the two apart without a second call. M53: this *was* SYS_listfiles(buf, maxlen), which took no path because leanfs was flat and "the entire namespace" was the only answer it could give. Same number, new signature - one repo, every caller converted in the same commit, and leaving a second call that only ever means "/" would just be a way for the two to drift. */
 #define SYS_kill       8 /* (pid, sig) -> 0 or -1. Only SIGKILL/SIGTERM (signal.h) are recognized; delivery isn't truly asynchronous - it's checked at the next syscall entry or scheduler tick, which is enough for the two signals this project supports (both just terminate). */
 #define SYS_pipe       9 /* (fds_out[2]) -> 0 or -1. Installs a read fd and a write fd into the caller's own descriptor table; a child spawned afterward inherits both (SYS_spawn copies the whole fd table). */
 #define SYS_getpgid   10 /* (pid) -> pgid or -1. Read-only - nothing needs to *change* a process's group yet (no job control), so there's no setpgid. */
@@ -61,4 +61,6 @@
 
 #define SYS_shm_free 33 /* (id, vaddr) -> 0 or -1. M50: the missing counterpart to SYS_shm_create/SYS_shm_map, without which every window this OS ever composited permanently consumed one of MAX_SHM_SEGMENTS's 32 slots - so roughly thirty window opens exhausted the table for the life of the machine, and the thirty-first silently got no window. Unmaps `id`'s pages from the caller's own address space starting at `vaddr` (which the caller got from SYS_shm_map and is the only one that knows - nothing here tracks who mapped what) and then frees the frames, in that order, so the frames can never be handed to somebody else while this process still has them mapped. Only the segment's creator may free it. */
 
-#define SYSCALL_COUNT 34
+#define SYS_mkdir 34 /* (path) -> 0 or -1. M53: creates one directory whose parent already exists. Deliberately not recursive ("mkdir -p" is a shell convenience, not a kernel one) and deliberately an error rather than a no-op when the path is already taken, so "I made this" and "this was already here" cannot be confused by a caller that cares. */
+
+#define SYSCALL_COUNT 35

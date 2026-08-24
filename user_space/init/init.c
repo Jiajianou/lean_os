@@ -12,13 +12,14 @@
  * M41 added a fourth client here, a top-docked menu bar; M42 deleted it
  * again in favor of a single bottom taskbar, so this is back to three.
  */
+#include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
 #include "signal.h" /* system_api/include/signal.h - SIGKILL */
 #include "syscall_wrappers.h"
 
 int main(const char *arg) {
     (void)arg;
     for (;;) {
-        long comp_pid = sys_spawn("compositor", "");
+        long comp_pid = sys_spawn(PATH_BIN_DIR "compositor", "");
         if (comp_pid < 0) {
             /* Nothing to do if the compositor binary itself is missing -
              * there's no console to report to beyond what SYS_write
@@ -28,7 +29,7 @@ int main(const char *arg) {
             sys_exit(1);
         }
 
-        long icons_pid = sys_spawn("desktop_icons", "");
+        long icons_pid = sys_spawn(PATH_BIN_DIR "desktop_icons", "");
         if (icons_pid < 0) {
             const char msg[] = "init: could not spawn desktop_icons\n";
             sys_write(1, msg, sizeof(msg) - 1);
@@ -37,7 +38,7 @@ int main(const char *arg) {
             sys_exit(1);
         }
 
-        long shell_pid = sys_spawn("desktop_shell", "");
+        long shell_pid = sys_spawn(PATH_BIN_DIR "desktop_shell", "");
         if (shell_pid < 0) {
             const char msg[] = "init: could not spawn desktop_shell\n";
             sys_write(1, msg, sizeof(msg) - 1);

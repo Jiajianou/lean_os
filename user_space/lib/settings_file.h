@@ -17,9 +17,13 @@
  */
 #pragma once
 
+#include "paths.h" /* system_api/include/paths.h - PATH_SETTINGS, M53 */
 #include "wm.h" /* system_api/include/wm.h - wm_settings_request_t, the same three fields the live protocol carries */
 
-#define SETTINGS_FILE_NAME "settings.conf"
+/* M53: /etc/settings.conf. It sat at the top level next to the
+ * compositor until then, because a flat filesystem had nowhere else to
+ * put it - and that is exactly why the launcher used to offer to run it. */
+#define SETTINGS_FILE_NAME PATH_SETTINGS
 
 /* Reads and parses SETTINGS_FILE_NAME into *out. Returns 1 if every one
  * of the three keys was present and parsed; returns 0 - with *out left

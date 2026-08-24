@@ -6,6 +6,11 @@
  * implementation (leanfs.c), so this is a thin, honest pass-through
  * rather than a driver table or vtable dispatch mechanism that would be
  * pure speculative generality for a single-filesystem kernel.
+ *
+ * M53: every call takes an absolute path ("/bin/ls") rather than a bare
+ * name. The shape is unchanged - this is a resolver in front of the same
+ * whole-file read/write, not a new API - which is why vfs_read and
+ * vfs_write still take and return exactly what they did.
  */
 #pragma once
 
@@ -13,10 +18,12 @@
 #include <stdint.h>
 
 void vfs_init(void);
-int64_t vfs_read(const char *name, void *buf, size_t maxlen);
-int vfs_write(const char *name, const void *buf, size_t len);
-int vfs_exists(const char *name);
-size_t vfs_list(char *buf, size_t maxlen);
+int64_t vfs_read(const char *path, void *buf, size_t maxlen);
+int vfs_write(const char *path, const void *buf, size_t len);
+int vfs_exists(const char *path);
+int vfs_is_dir(const char *path);
+int vfs_mkdir(const char *path);
+size_t vfs_list(const char *path, char *buf, size_t maxlen);
 
 /* M47: the flush the shutdown path (kernel/power/power.c) calls before
  * cutting power.

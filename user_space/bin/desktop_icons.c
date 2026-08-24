@@ -34,6 +34,7 @@
  * press/hover redraw) is the same per-icon logic the single hardcoded
  * icon already had, just indexed now instead of hardcoded to one.
  */
+#include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h" /* strlen - ICONS[].label is data-driven now, not a compile-time sizeof() */
 #include "spawn_error.h" /* system_api/include/spawn_error.h - M48 */
@@ -68,7 +69,8 @@
 #define CTX_MENU_TEXT   0x00FFFFFFu
 
 static const char *const CTX_MENU_ITEMS[] = {"Terminal", "Settings"};
-static const char *const CTX_MENU_PROGRAMS[] = {"gui_terminal", "settings"};
+/* M53: absolute paths, same as ICONS above - a bare name stopped being a location. */
+static const char *const CTX_MENU_PROGRAMS[] = {PATH_BIN_DIR "gui_terminal", PATH_BIN_DIR "settings"};
 #define CTX_MENU_COUNT ((int)(sizeof(CTX_MENU_ITEMS) / sizeof(CTX_MENU_ITEMS[0])))
 
 static int ctx_menu_open;
@@ -119,14 +121,19 @@ typedef struct {
     const char *glyph; /* 2-3 chars drawn inside the icon box - this project has no separate icon-image format, see redraw_icon */
 } icon_def_t;
 
+/* M53: absolute paths. Every icon named a bare program before, which
+ * worked only because the namespace was flat enough for a name to be a
+ * location - it is not any more, and an icon that resolved by luck is an
+ * icon that stops working the moment somebody creates a file with the
+ * same name somewhere else. */
 static const icon_def_t ICONS[] = {
-    {"Terminal", "gui_terminal", ">_"},
-    {"Editor",   "text_editor",  "Ed"},
-    {"Files",    "file_manager", "[]"},
-    {"Settings", "settings",     "**"},
-    {"Clock",    "gui_clock",    "()"},
-    {"Paint",    "gui_paint",    "/\\"},
-    {"Tasks",    "task_manager", "T:"},
+    {"Terminal", PATH_BIN_DIR "gui_terminal", ">_"},
+    {"Editor",   PATH_BIN_DIR "text_editor",  "Ed"},
+    {"Files",    PATH_BIN_DIR "file_manager", "[]"},
+    {"Settings", PATH_BIN_DIR "settings",     "**"},
+    {"Clock",    PATH_BIN_DIR "gui_clock",    "()"},
+    {"Paint",    PATH_BIN_DIR "gui_paint",    "/\\"},
+    {"Tasks",    PATH_BIN_DIR "task_manager", "T:"},
 };
 #define ICON_COUNT ((int)(sizeof(ICONS) / sizeof(ICONS[0])))
 
@@ -219,7 +226,7 @@ int main(void) {
                  * spawn here. */
                 char dropped[WM_DRAG_PAYLOAD_MAX];
                 if (wm_drag_payload(dropped, sizeof(dropped)) == 0 && dropped[0]) {
-                    long rc = sys_spawn("text_editor", dropped);
+                    long rc = sys_spawn(PATH_BIN_DIR "text_editor", dropped);
                     if (rc < 0) {
                         wm_notify(WM_NOTIFY_ERROR, dropped, spawn_error_message(rc));
                     }

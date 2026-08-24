@@ -42,6 +42,7 @@
  * (wm_create_request_t.confirm_close, system_api/include/wm.h) - every
  * other GUI client in this project still closes the old way, unchanged.
  */
+#include "paths.h" /* system_api/include/paths.h - M53: /home is where a new document goes */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h"
 #include "syscall_wrappers.h"
@@ -115,7 +116,10 @@ static int scroll_top; /* index of the first line[] drawn in the text viewport *
 static int dirty; /* unsaved changes since the last Ctrl+S */
 static int menu_open; /* M35: File menu dropdown - toggled by clicking "File" in the menu row */
 
-static char filename[64];
+/* M53: a path, not a name - PATH_MAX_LEN so it can hold anything the
+ * resolver will accept. It was 64 when a filename was at most 28
+ * characters and there was nowhere for it to live but the root. */
+static char filename[PATH_MAX_LEN];
 /* M49: the file a pending PENDING_DROP will open once the discard prompt
  * is answered. Its own buffer rather than filename's, so declining the
  * prompt leaves the current file's name untouched. */
@@ -503,7 +507,9 @@ int main(const char *arg) {
     }
     filename[i] = '\0';
     if (filename[0] == '\0') {
-        memcpy(filename, "untitled", sizeof("untitled"));
+        /* M53: a new document belongs in /home, which is where the file
+         * manager opens and where a person would look for it. */
+        memcpy(filename, PATH_HOME_DIR "untitled", sizeof(PATH_HOME_DIR "untitled"));
     }
 
     line_len[0] = 0;

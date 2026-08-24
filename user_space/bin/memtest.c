@@ -18,6 +18,7 @@
  * really there - proof this is genuine cross-process shared memory, not
  * a per-process illusion.
  */
+#include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
 #include "malloc.h"
 #include "str.h"
 #include "syscall_wrappers.h"
@@ -131,7 +132,7 @@ static int run_as_creator(void) {
 
     char id_str[24];
     itoa_dec(id, id_str);
-    long child_pid = sys_spawn("memtest", id_str);
+    long child_pid = sys_spawn(PATH_BIN_DIR "memtest", id_str);
     if (child_pid < 0) {
         fail("sys_spawn(memtest, <id>) failed");
     }

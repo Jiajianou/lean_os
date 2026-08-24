@@ -1,9 +1,20 @@
 /* user_space/bin/file_manager.c
  *
  * M33: the missing "browse the filesystem" GUI piece - until now the
- * only way was `ls` inside a terminal. leanfs (kernel/fs/leanfs.h) is
- * flat (no directories), so this is genuinely the entire namespace in
- * one list, not a tree - SYS_listfiles already returns exactly that.
+ * only way was `ls` inside a terminal.
+ *
+ * M53 makes it a browser rather than a list. leanfs was flat until that
+ * milestone, so this window showed the entire namespace at once - this
+ * OS's own executables sitting next to your text files - because
+ * SYS_listfiles had no other answer to give. It now opens on /home, has
+ * a path bar, enters a directory on double-click or Enter, and leaves
+ * one through a ".." row. This is the app that most obviously wanted it.
+ *
+ * ".." is a caller-side string operation on the path this window already
+ * holds, not something the filesystem resolves - leanfs deliberately
+ * stores no parent link and refuses ".." in a path (see leanfs.c's
+ * resolve()), so doing it here is being honest about where the knowledge
+ * actually lives rather than teaching the resolver to climb.
  *
  * Selection works two ways, both ending at the same place
  * (open_selected): Up/Down arrow keys move the selection and Enter opens
@@ -17,6 +28,7 @@
  * Refreshes its listing every REFRESH_MS so a file saved from a
  * concurrently open text_editor.c shows up without needing to relaunch.
  */
+#include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h"
 #include "spawn_error.h" /* system_api/include/spawn_error.h - M48 */
@@ -53,10 +65,44 @@
 #define DOUBLE_CLICK_MS 500
 
 static char names[MAX_FILES][MAX_NAME_LEN];
+/* M53: whether names[i] is a directory. SYS_listdir marks one with a
+ * trailing '/', which this strips on the way in - so the marker is a
+ * flag here rather than part of the name, and nothing downstream has to
+ * remember to trim it before building a path. */
+static uint8_t is_dir[MAX_FILES];
 static int file_count;
 static int selected = -1;
 static int scroll_top;
 static const char *status_text = "";
+
+/* M53: which directory this window is showing. There is no working
+ * directory in this OS, so this is the app's own state and every path it
+ * hands a syscall is built absolute from it. */
+static char cwd[PATH_MAX_LEN] = PATH_HOME;
+
+/* cwd + '/' + name, into out (PATH_MAX_LEN bytes). Returns 0, or -1 if
+ * it would not fit - refused rather than truncated, since a truncated
+ * path names a different file. */
+static int path_in_cwd(const char *name, char *out) {
+    int n = 0;
+    for (const char *s = cwd; *s; s++) {
+        if (n >= PATH_MAX_LEN - 2) {
+            return -1;
+        }
+        out[n++] = *s;
+    }
+    if (n == 0 || out[n - 1] != '/') {
+        out[n++] = '/';
+    }
+    for (const char *s = name; *s; s++) {
+        if (n >= PATH_MAX_LEN - 1) {
+            return -1;
+        }
+        out[n++] = *s;
+    }
+    out[n] = '\0';
+    return 0;
+}
 
 /* M49: drag state. A press on a row arms it; the drag only actually
  * begins once the pointer has moved DRAG_THRESHOLD away, so a click and a
@@ -69,23 +115,41 @@ static int dragging;
 
 static void refresh_list(void) {
     static char buf[LIST_BUF_SIZE];
-    long n = sys_listfiles(buf, sizeof(buf));
     file_count = 0;
-    if (n <= 0) {
-        return;
+
+    /* M53: ".." first, and always at row 0, so leaving a directory is in
+     * the same place every time rather than wherever it happened to sort.
+     * Not present in the root, which has nowhere to go. */
+    if (!(cwd[0] == '/' && cwd[1] == '\0')) {
+        names[0][0] = '.';
+        names[0][1] = '.';
+        names[0][2] = '\0';
+        is_dir[0] = 1;
+        file_count = 1;
     }
-    if (n > (long)sizeof(buf)) {
-        n = (long)sizeof(buf);
-    }
-    int col = 0;
-    for (long i = 0; i < n && file_count < MAX_FILES; i++) {
-        char c = buf[i];
-        if (c == '\n') {
-            names[file_count][col] = '\0';
-            file_count++;
-            col = 0;
-        } else if (col < MAX_NAME_LEN - 1) {
-            names[file_count][col++] = c;
+
+    long n = sys_listdir(cwd, buf, sizeof(buf));
+    if (n > 0) {
+        if (n > (long)sizeof(buf)) {
+            n = (long)sizeof(buf);
+        }
+        int col = 0;
+        for (long i = 0; i < n && file_count < MAX_FILES; i++) {
+            char c = buf[i];
+            if (c == '\n') {
+                /* A trailing '/' is SYS_listdir saying "this one is a
+                 * directory" - taken off the name and kept as a flag. */
+                int dir = (col > 0 && names[file_count][col - 1] == '/');
+                if (dir) {
+                    col--;
+                }
+                names[file_count][col] = '\0';
+                is_dir[file_count] = (uint8_t)dir;
+                file_count++;
+                col = 0;
+            } else if (col < MAX_NAME_LEN - 1) {
+                names[file_count][col++] = c;
+            }
         }
     }
     if (selected >= file_count) {
@@ -105,20 +169,76 @@ static void clamp_scroll(void) {
     }
 }
 
+/* M53: drops the last component of cwd. Purely textual - see this
+ * file's header on why that is the honest place for it. */
+static void go_up(void) {
+    int n = 0;
+    while (cwd[n]) {
+        n++;
+    }
+    while (n > 0 && cwd[n - 1] != '/') {
+        n--;
+    }
+    if (n > 1) {
+        n--; /* drop the separator too, unless it is the root's own */
+    }
+    cwd[n ? n : 1] = '\0';
+    cwd[0] = '/';
+}
+
 static void open_selected(void) {
     if (selected < 0 || selected >= file_count) {
         return;
     }
+    if (is_dir[selected]) {
+        /* M53: entering a directory, not launching anything. */
+        if (names[selected][0] == '.' && names[selected][1] == '.') {
+            go_up();
+        } else {
+            char next[PATH_MAX_LEN];
+            if (path_in_cwd(names[selected], next) != 0) {
+                status_text = "Path too long.";
+                return;
+            }
+            for (int i = 0; i < PATH_MAX_LEN; i++) {
+                cwd[i] = next[i];
+            }
+        }
+        selected = -1;
+        scroll_top = 0;
+        status_text = "";
+        refresh_list();
+        return;
+    }
+    char full[PATH_MAX_LEN];
+    if (path_in_cwd(names[selected], full) != 0) {
+        status_text = "Path too long.";
+        return;
+    }
     /* M48: this used to throw the result away, so a file that couldn't be
      * opened looked exactly like a double-click that didn't register. */
-    long rc = sys_spawn("text_editor", names[selected]);
+    long rc = sys_spawn(PATH_BIN_DIR "text_editor", full);
     status_text = rc < 0 ? spawn_error_message(rc) : "";
 }
 
 static void redraw(wm_window_t *win) {
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
     gfx_fill_rect(&win->gfx, 0, 0, LIST_W, HEADER_H, HEADER_COLOR);
-    gfx_draw_text(&win->gfx, 6, 4, "Files", LABEL_COLOR);
+    /* M53: the path bar. Right-aligned when it is too long for the
+     * header, so the part you are actually in stays visible - the tail of
+     * a path says where you are, the head only says how you got there. */
+    {
+        int32_t max_chars = (LIST_W - 12) / FONT_WIDTH;
+        const char *shown = cwd;
+        int len = 0;
+        while (cwd[len]) {
+            len++;
+        }
+        if (len > max_chars) {
+            shown = cwd + (len - max_chars);
+        }
+        gfx_draw_text(&win->gfx, 6, 4, shown, LABEL_COLOR);
+    }
 
     for (int row = 0; row < ROWS_VISIBLE; row++) {
         int i = scroll_top + row;
@@ -191,7 +311,16 @@ int main(void) {
                     }
                     if (dx + dy >= DRAG_THRESHOLD) {
                         dragging = 1;
-                        wm_drag_begin(names[drag_armed_row]);
+                        /* M53: the payload is a full path now - whatever
+                         * receives the drop has no idea which directory
+                         * this window is showing, and a bare name only
+                         * ever resolved because the namespace was flat. */
+                        {
+                            char full[PATH_MAX_LEN];
+                            if (path_in_cwd(names[drag_armed_row], full) == 0) {
+                                wm_drag_begin(full);
+                            }
+                        }
                         status_text = "";
                         changed = 1;
                     }

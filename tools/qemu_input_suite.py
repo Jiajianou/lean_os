@@ -325,6 +325,45 @@ FM_HEADER_H = 24
 FM_ROW_H = 20   # FONT_HEIGHT + 4
 FM_LIST_W = FM_W - 8  # minus SCROLLBAR_W
 
+# M53: the window opens on /home and row 0 is always "..", so the first
+# real file is row 1. Named rather than written as 1 at three call sites,
+# because "which row is the first file" is exactly the kind of off-by-one
+# a layout change makes wrong silently.
+FM_LABEL_COLOR = 0x90A0C0  # file_manager.c LABEL_COLOR - the path bar's text
+FM_TEXT_COLOR = 0xD8D8D8   # file_manager.c TEXT_COLOR - a listed name
+FM_STATUS_H = 20           # STATUS_H: FONT_HEIGHT + 4
+FM_ROWS_VISIBLE = (FM_H - FM_HEADER_H - FM_STATUS_H) // FM_ROW_H
+
+# M53: every directory but the root gets a ".." row at index 0, so the
+# first real entry is row 1 - *except* in "/", which has nowhere to go up
+# to and therefore lists its own contents from row 0. That asymmetry is
+# deliberate (an inert ".." in the root would be a row that does nothing)
+# and is exactly the kind of off-by-one worth naming rather than writing
+# as a literal at each call site.
+FM_UP_ROW = 0
+FM_FIRST_FILE_ROW = 1
+FM_ROOT_FIRST_ROW = 0
+
+
+def fm_row_point(x, y, row):
+    """A point inside file-manager row `row`, left of the scrollbar and
+    right of nothing - the label starts at x+6, so this is on the row's
+    fill or its text, either of which is what a click wants."""
+    return (x + 60, y + FM_HEADER_H + row * FM_ROW_H + FM_ROW_H // 2)
+
+
+def fm_rows_with_text(shot, x, y):
+    """How many list rows have anything drawn in them. Counting rows
+    rather than reading names is what keeps these tests independent of
+    what happens to be on disk, while still telling a directory holding
+    two things apart from one holding two dozen."""
+    n = 0
+    for row in range(FM_ROWS_VISIBLE):
+        top = y + FM_HEADER_H + row * FM_ROW_H
+        if shot.count_color(FM_TEXT_COLOR, x + 6, top, FM_LIST_W - 12, FM_ROW_H) > 0:
+            n += 1
+    return n
+
 # M49: compositor.c's drag label, which follows the cursor during a
 # client-initiated drag.
 DRAG_LABEL_BG = 0x335577
@@ -1182,35 +1221,44 @@ def test_settings_persist_across_a_reboot(m):
                   "rather than the saved Flat wallpaper")
 
 
-def test_missing_program_raises_a_toast(m):
-    """M48, and M40's exact symptom finally given a voice: a desktop icon
-    whose program isn't on disk used to do *nothing at all* - which is
-    what let an fd-table exhaustion bug hide for four milestones.
+def test_launcher_does_not_offer_data_files(m):
+    """M53, and the retirement of what this test used to check.
 
-    The icon is real and its program is deliberately not: the test
-    removes nothing (there is no unlink in this OS) and instead uses the
-    launcher to spawn a name that was never a program. That reaches the
-    same failure through the same SYS_spawn, and the launcher is one of
-    the two places M48 gave a voice to."""
+    It used to type "m33test" - an ordinary text file the boot self-tests
+    leave on disk - into the launcher and require M48's "That file is not
+    a program." toast, because a flat filesystem left the launcher
+    listing every file there was. The launcher lists /bin now, so a data
+    file is not something it can offer to run at all: the right assertion
+    is that there is *no result and no toast*, which is a better outcome
+    than a good error message about a thing that should never have been
+    offered.
+
+    /home/readme.txt is the file to try: real, seeded on every fresh
+    disk, and visible in the file manager one window away - which is
+    exactly the confusion the old behavior caused."""
     boot(m)
     m.sendkey("ctrl-spc")
     wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
              "Ctrl+Space did not open the launcher")
+    check(m.screenshot().px(*launcher_row_probe(0)) == LAUNCHER_SEL_BG,
+          "the launcher's first result is not drawn selected before typing")
 
-    # "m33test" is an ordinary text file the boot self-tests leave on
-    # disk, so it is genuinely in the launcher's list and genuinely not a
-    # program - SPAWN_ERR_BAD_IMAGE rather than a name that matches
-    # nothing at all.
-    m.type_text("m33test")
+    m.type_text("readme")
+    # No results means row 0 is no longer drawn with the selection fill -
+    # there is nothing to select.
+    wait_for(m, lambda s: s.px(*launcher_row_probe(0)) != LAUNCHER_SEL_BG,
+             "the launcher still offered a result for a file that is not a program")
+
     m.sendkey("ret")
-
-    probe = toast_stripe_probe(0)
-    wait_for(m, lambda s: s.px(*probe) == TOAST_ERROR_C,
-             "launching a non-program raised no toast - the failure is still silent")
-
-    # And it goes away on its own, without anyone touching it.
-    wait_for(m, lambda s: s.px(*probe) != TOAST_ERROR_C,
-             "the toast never expired on its own deadline", timeout=12.0)
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) != LAUNCHER_BG,
+             "Enter did not dismiss the launcher")
+    # Nothing to poll toward: the assertion is that nothing happened.
+    time.sleep(4.0)
+    shot = m.screenshot()
+    check(count_app_windows(shot) == 0,
+          "Enter on an empty launcher opened %d window(s)" % count_app_windows(shot))
+    check(shot.px(*toast_stripe_probe(0)) != TOAST_ERROR_C,
+          "a toast was raised for a file the launcher should never have offered")
 
 
 def test_clicking_a_toast_dismisses_it(m):
@@ -1219,14 +1267,18 @@ def test_clicking_a_toast_dismisses_it(m):
     because a toast lands in the top-right corner, exactly where a
     maximized window's close button is."""
     boot(m)
+    # M53: the toast this used to raise - "that file is not a program",
+    # from launching a data file - cannot happen any more, because the
+    # launcher only lists /bin. The crash toast M52 gave a real source is
+    # what a toast is for now, so that is what this dismisses.
     m.sendkey("ctrl-spc")
     wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
              "Ctrl+Space did not open the launcher")
-    m.type_text("m33test")
+    m.type_text("wm_faulter")
     m.sendkey("ret")
 
     probe = toast_stripe_probe(0)
-    wait_for(m, lambda s: s.px(*probe) == TOAST_ERROR_C, "no toast was raised")
+    wait_for(m, lambda s: s.px(*probe) == TOAST_ERROR_C, "no toast was raised", timeout=15.0)
 
     m.click(*toast_click_point(0))
     # Dismissed well inside its own 4s deadline, so this can only be the
@@ -1255,6 +1307,16 @@ def test_wheel_scrolls_the_file_list_one_row_per_detent(m):
     x, y = app_origin(FIRST_APP_IDX)
     list_x = x + 6
     row0_y = y + FM_HEADER_H
+
+    # M53: the window opens on /home, which is deliberately short. /bin is
+    # where a list long enough to scroll lives, so this navigates there
+    # first - up to "/" through the ".." row, then into "bin", which is
+    # the root's own row 0 (the root has no ".." to push it down).
+    m.double_click(*fm_row_point(x, y, FM_UP_ROW))
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) > 0, "the file manager showed nothing after going up")
+    m.double_click(*fm_row_point(x, y, FM_ROOT_FIRST_ROW))
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) >= FM_ROWS_VISIBLE,
+             "entering /bin did not fill the list - there is nothing here long enough to scroll")
 
     def row_pixels(shot, row):
         top = row0_y + row * FM_ROW_H
@@ -1339,7 +1401,9 @@ def test_drag_a_file_onto_the_desktop_opens_it(m):
     # Press on the first row, then drag well clear of the window onto
     # empty desktop. The press alone only selects; the drag begins once
     # the pointer has moved past file_manager.c's own DRAG_THRESHOLD.
-    m.press(x + 60, y + FM_HEADER_H + FM_ROW_H // 2)
+    # M53: row 0 is the ".." entry now, so the first real file is row 1 -
+    # dragging a directory would be a different (and meaningless) gesture.
+    m.press(*fm_row_point(x, y, FM_FIRST_FILE_ROW))
     m.move_held(700, 500)
 
     shot = m.screenshot()
@@ -1527,6 +1591,44 @@ def test_a_crashing_program_only_takes_itself_down(m):
     wait_for_windows(m, 1, timeout=15.0)
 
 
+def test_file_manager_navigates_directories(m):
+    """M53's file manager, driven as a person would.
+
+    The window opens on /home rather than on the whole namespace, and the
+    two things that were impossible before this milestone are entering a
+    directory and leaving one.
+
+    Asserted by *how many rows have anything in them* rather than by
+    reading names: /home holds ".." and one seeded readme, while /bin
+    holds every program this OS ships and fills the window. That is a
+    content-independent way to say "these are different directories, and
+    the deeper one is the one that should be full" without depending on a
+    font's shape or on what happens to be on disk."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[2][2])  # Files
+    wait_for_windows(m, 1)
+    x, y = app_origin(FIRST_APP_IDX)
+
+    home_rows = fm_rows_with_text(m.screenshot(), x, y)
+    check(0 < home_rows < FM_ROWS_VISIBLE,
+          "/home did not open as a short list (%d rows)" % home_rows)
+
+    # Up to "/", then into "bin" - the root's own row 0, since the root
+    # has no ".." row to push its contents down.
+    m.double_click(*fm_row_point(x, y, FM_UP_ROW))
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) > 0,
+             "double-clicking .. left the file manager showing nothing")
+    m.double_click(*fm_row_point(x, y, FM_ROOT_FIRST_ROW))
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) >= FM_ROWS_VISIBLE,
+             "double-clicking /bin did not enter a directory full of programs")
+
+    # And back out. /bin's ".." leads to "/", which lists four
+    # directories and nothing else - so the list must go short again.
+    m.double_click(*fm_row_point(x, y, FM_UP_ROW))
+    wait_for(m, lambda s: 0 < fm_rows_with_text(s, x, y) < FM_ROWS_VISIBLE,
+             "double-clicking .. did not leave /bin")
+
+
 def test_soak_desktop_stays_usable(m):
     """M50's soak: leave the desktop up with everything that ticks on a
     timer running, then require the machine to still work.
@@ -1600,7 +1702,7 @@ TESTS = [
     ("shutdown_confirm_can_be_cancelled", test_shutdown_confirm_can_be_cancelled),
     ("shutdown_powers_off_the_machine", test_shutdown_powers_off_the_machine),
     ("settings_persist_across_a_reboot", test_settings_persist_across_a_reboot),
-    ("missing_program_raises_a_toast", test_missing_program_raises_a_toast),
+    ("launcher_does_not_offer_data_files", test_launcher_does_not_offer_data_files),
     ("clicking_a_toast_dismisses_it", test_clicking_a_toast_dismisses_it),
     ("wheel_scrolls_the_file_list_one_row_per_detent", test_wheel_scrolls_the_file_list_one_row_per_detent),
     ("alt_f4_closes_the_focused_window", test_alt_f4_closes_the_focused_window),
@@ -1610,6 +1712,7 @@ TESTS = [
     ("overlap_click_reaches_the_front_window", test_overlap_click_reaches_the_front_window),
     ("alt_tab_visits_windows_in_use_order", test_alt_tab_visits_windows_in_use_order),
     ("a_crashing_program_only_takes_itself_down", test_a_crashing_program_only_takes_itself_down),
+    ("file_manager_navigates_directories", test_file_manager_navigates_directories),
     ("soak_desktop_stays_usable", test_soak_desktop_stays_usable),
     ("launch_close_stress", test_launch_close_stress),
 ]

@@ -26,6 +26,7 @@
 #include "net/icmp.h"
 #include "net/net.h"
 #include "panic.h"
+#include "paths.h"   /* system_api/include/paths.h - M53's filesystem layout, shared with user space */
 #include "proc.h"      /* system_api/include/proc.h - task_info_t, M45's SYS_taskinfo self-test. Resolves to the system_api header, not kernel/proc/proc.h - see syscall.c's own note on the search order. */
 #include "power/power.h"
 #include "proc/proc.h"
@@ -150,21 +151,21 @@ static const char SELFTEST_SETTINGS_CONF[] =
     "wallpaper=0x00000001\n"; /* WALLPAPER_GRADIENT, its wallpaper_id default */
 
 static void selftest_settings_install_defaults(void) {
-    saved_user_settings_len = vfs_read("settings.conf", saved_user_settings, sizeof(saved_user_settings));
+    saved_user_settings_len = vfs_read(PATH_SETTINGS, saved_user_settings, sizeof(saved_user_settings));
     if (saved_user_settings_len > (int64_t)sizeof(saved_user_settings)) {
         saved_user_settings_len = -1; /* bigger than anything settings_file_save writes - not ours to preserve */
     }
-    vfs_write("settings.conf", SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
+    vfs_write(PATH_SETTINGS, SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
 }
 
 static void selftest_settings_restore(void) {
     if (saved_user_settings_len >= 0) {
-        vfs_write("settings.conf", saved_user_settings, (size_t)saved_user_settings_len);
+        vfs_write(PATH_SETTINGS, saved_user_settings, (size_t)saved_user_settings_len);
     } else {
         /* There wasn't one. Writing the defaults is behaviorally the same
          * as leaving no file (settings_file_load falls back to exactly
          * these), and this kernel has no unlink to do the other thing. */
-        vfs_write("settings.conf", SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
+        vfs_write(PATH_SETTINGS, SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
     }
 }
 
@@ -776,19 +777,56 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * init spawn just below) reads back from disk like any other file
      * would be, which is the point. */
     vfs_init();
+    /* M53: the layout, created before anything is written into it. Each
+     * one is idempotent-by-check rather than by vfs_mkdir returning 0 for
+     * an existing path - see leanfs.h on why "already there" is an error
+     * there rather than a no-op. */
+    {
+        static const char *const LAYOUT[] = {PATH_BIN, PATH_HOME, PATH_ETC, PATH_TMP};
+        for (size_t i = 0; i < sizeof(LAYOUT) / sizeof(LAYOUT[0]); i++) {
+            if (!vfs_exists(LAYOUT[i]) && vfs_mkdir(LAYOUT[i]) != 0) {
+                panic("vfs_mkdir: failed to create the filesystem layout");
+            }
+        }
+    }
     for (size_t i = 0; i < EMBEDDED_PROGRAM_COUNT; i++) {
         const embedded_program_t *p = &embedded_programs[i];
-        if (!vfs_exists(p->name)) {
+        char path[PATH_MAX_LEN];
+        if (path_join(path, PATH_BIN_DIR, p->name) != 0) {
+            panic("a program name is too long to live in /bin");
+        }
+        if (!vfs_exists(path)) {
             klog_puts("[fs] seeding disk with '");
-            klog_puts(p->name);
+            klog_puts(path);
             klog_puts("' (first boot only)...\n");
             size_t size = (size_t)(p->end - p->start);
-            if (vfs_write(p->name, p->start, size) != 0) {
+            if (vfs_write(path, p->start, size) != 0) {
                 panic("vfs_write: failed to seed a program onto disk");
             }
         }
     }
-    klog_puts("[fs] all user programs present on disk.\n\n");
+    klog_puts("[fs] all user programs present in " PATH_BIN ".\n\n");
+
+    /* M53: one file in /home on a fresh disk. Not decoration - before
+     * this milestone the file manager opened on a namespace that always
+     * had two dozen things in it, and now it opens on a directory that
+     * would otherwise be empty on a machine's first boot, which reads as
+     * "this is broken" rather than "this is new". It also gives the
+     * interactive suite a real file to drag, which is a smaller reason
+     * but a real one. */
+    if (!vfs_exists(PATH_HOME_DIR "readme.txt")) {
+        static const char welcome[] =
+            "Welcome to lean_os.\n"
+            "\n"
+            "This is /home - your files live here.\n"
+            "Programs live in /bin, settings in /etc.\n"
+            "\n"
+            "Double-click a name in Files to open it,\n"
+            "or .. to go up a directory.\n";
+        if (vfs_write(PATH_HOME_DIR "readme.txt", welcome, sizeof(welcome) - 1) != 0) {
+            panic("vfs_write: failed to seed " PATH_HOME_DIR "readme.txt");
+        }
+    }
 
     /* M15 self-test: every file up to now (the seeded programs) fits in
      * leanfs's direct blocks alone (<= 8 KiB), which would never exercise
@@ -806,11 +844,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         for (size_t i = 0; i < fstest_len; i++) {
             fstest_buf[i] = (uint8_t)(i * 31 + 7);
         }
-        if (vfs_write("fstest", fstest_buf, fstest_len) != 0) {
+        if (vfs_write(PATH_TMP_DIR "fstest", fstest_buf, fstest_len) != 0) {
             panic("leanfs indirect-block self-test: vfs_write failed");
         }
         k_memset(fstest_readback, 0, fstest_len);
-        int64_t fstest_size = vfs_read("fstest", fstest_readback, fstest_len);
+        int64_t fstest_size = vfs_read(PATH_TMP_DIR "fstest", fstest_readback, fstest_len);
         if (fstest_size != (int64_t)fstest_len) {
             panic("leanfs indirect-block self-test: size mismatch on readback");
         }
@@ -837,7 +875,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!memtest_image) {
             panic("out of memory reading memtest back from disk");
         }
-        int64_t memtest_size = vfs_read("memtest", memtest_image, LEANFS_MAX_FILE_SIZE);
+        int64_t memtest_size = vfs_read("/bin/memtest", memtest_image, LEANFS_MAX_FILE_SIZE);
         if (memtest_size < 0) {
             panic("vfs_read(\"memtest\") failed - should exist, just seeded");
         }
@@ -873,8 +911,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !demo_image) {
             panic("out of memory reading compositor/wm_demo back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t demo_size = vfs_read("wm_demo", demo_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t demo_size = vfs_read("/bin/wm_demo", demo_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || demo_size < 0) {
             panic("vfs_read: compositor/wm_demo missing - should exist, just seeded");
         }
@@ -973,9 +1011,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !clock_image || !paint_image) {
             panic("out of memory reading compositor/gui_clock/gui_paint back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
-        int64_t paint_size = vfs_read("gui_paint", paint_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
+        int64_t paint_size = vfs_read("/bin/gui_paint", paint_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || clock_size < 0 || paint_size < 0) {
             panic("vfs_read: compositor/gui_clock/gui_paint missing - should exist, just seeded");
         }
@@ -1089,9 +1127,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !shell_image || !clock_image) {
             panic("out of memory reading compositor/desktop_shell/gui_clock back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t shell_size = vfs_read("desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t shell_size = vfs_read("/bin/desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
+        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || shell_size < 0 || clock_size < 0) {
             panic("vfs_read: compositor/desktop_shell/gui_clock missing - should exist, just seeded");
         }
@@ -1198,8 +1236,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !clock_image) {
             panic("out of memory reading compositor/gui_clock back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || clock_size < 0) {
             panic("vfs_read: compositor/gui_clock missing - should exist, just seeded");
         }
@@ -1361,12 +1399,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * does. */
     {
         const char content[] = "M33 SYS_writefile self-test content";
-        long wrc = do_syscall(SYS_writefile, (uint64_t)"m33test", (uint64_t)content, sizeof(content) - 1);
+        long wrc = do_syscall(SYS_writefile, (uint64_t)(PATH_TMP_DIR "m33test"), (uint64_t)content, sizeof(content) - 1);
         if (wrc != 0) {
             panic("M33 self-test: SYS_writefile failed");
         }
         char readback[64];
-        long n = do_syscall(SYS_readfile, (uint64_t)"m33test", (uint64_t)readback, sizeof(readback));
+        long n = do_syscall(SYS_readfile, (uint64_t)(PATH_TMP_DIR "m33test"), (uint64_t)readback, sizeof(readback));
         int mismatch = (n != (long)(sizeof(content) - 1));
         for (long i = 0; !mismatch && i < n; i++) {
             if (readback[i] != content[i]) {
@@ -1389,7 +1427,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image) {
             panic("out of memory reading compositor back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0) {
             panic("vfs_read: compositor missing - should exist, just seeded");
         }
@@ -1448,8 +1486,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !editor_image) {
             panic("out of memory reading compositor/text_editor back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t editor_size = vfs_read("text_editor", editor_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t editor_size = vfs_read("/bin/text_editor", editor_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || editor_size < 0) {
             panic("vfs_read: compositor/text_editor missing - should exist, just seeded");
         }
@@ -1548,8 +1586,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !clock_image) {
             panic("out of memory reading compositor/gui_clock back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || clock_size < 0) {
             panic("vfs_read: compositor/gui_clock missing - should exist, just seeded");
         }
@@ -1797,9 +1835,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !shell_image || !clock_image) {
             panic("out of memory reading compositor/desktop_shell/gui_clock back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t shell_size = vfs_read("desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t shell_size = vfs_read("/bin/desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
+        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || shell_size < 0 || clock_size < 0) {
             panic("vfs_read: compositor/desktop_shell/gui_clock missing - should exist, just seeded");
         }
@@ -1948,9 +1986,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !shell_image || !editor_image) {
             panic("out of memory reading compositor/desktop_shell/text_editor back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t shell_size = vfs_read("desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
-        int64_t editor_size = vfs_read("text_editor", editor_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t shell_size = vfs_read("/bin/desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
+        int64_t editor_size = vfs_read("/bin/text_editor", editor_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || shell_size < 0 || editor_size < 0) {
             panic("vfs_read: compositor/desktop_shell/text_editor missing - should exist, just seeded");
         }
@@ -2085,9 +2123,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !icons_image || !shell_image) {
             panic("out of memory reading compositor/desktop_icons/desktop_shell back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t icons_size = vfs_read("desktop_icons", icons_image, LEANFS_MAX_FILE_SIZE);
-        int64_t shell_size = vfs_read("desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t icons_size = vfs_read("/bin/desktop_icons", icons_image, LEANFS_MAX_FILE_SIZE);
+        int64_t shell_size = vfs_read("/bin/desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || icons_size < 0 || shell_size < 0) {
             panic("vfs_read: compositor/desktop_icons/desktop_shell missing - should exist, just seeded");
         }
@@ -2226,8 +2264,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !stub_image) {
             panic("out of memory reading compositor/wm_stubborn back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t stub_size = vfs_read("wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t stub_size = vfs_read("/bin/wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || stub_size < 0) {
             panic("vfs_read: compositor/wm_stubborn missing - should exist, just seeded");
         }
@@ -2404,9 +2442,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !clock_image || !stub_image) {
             panic("out of memory reading compositor/gui_clock/wm_stubborn back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
-        int64_t stub_size = vfs_read("wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
+        int64_t stub_size = vfs_read("/bin/wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || clock_size < 0 || stub_size < 0) {
             panic("vfs_read: compositor/gui_clock/wm_stubborn missing - should exist, just seeded");
         }
@@ -2551,7 +2589,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * defaults with the user's own file held aside - see
          * selftest_settings_install_defaults. */
         static const char saved_conf[] = "bg=0x00203040\naccent=0x00aa5500\nwallpaper=0x00000000\n";
-        if (do_syscall(SYS_writefile, (uint64_t)"settings.conf", (uint64_t)saved_conf, sizeof(saved_conf) - 1) != 0) {
+        if (do_syscall(SYS_writefile, (uint64_t)PATH_SETTINGS, (uint64_t)saved_conf, sizeof(saved_conf) - 1) != 0) {
             panic("M47 self-test: could not write settings.conf");
         }
 
@@ -2560,8 +2598,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !icons_image) {
             panic("out of memory reading compositor/desktop_icons back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t icons_size = vfs_read("desktop_icons", icons_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t icons_size = vfs_read("/bin/desktop_icons", icons_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || icons_size < 0) {
             panic("vfs_read: compositor/desktop_icons missing - should exist, just seeded");
         }
@@ -2579,7 +2617,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * settings_file_load is all-or-nothing (see its own comment), so
          * every one of these on its own is enough to fall back. */
         static const char broken_conf[] = "this is not a settings file\nbg=nonsense\nwallpaper=1\n";
-        if (do_syscall(SYS_writefile, (uint64_t)"settings.conf", (uint64_t)broken_conf, sizeof(broken_conf) - 1) != 0) {
+        if (do_syscall(SYS_writefile, (uint64_t)PATH_SETTINGS, (uint64_t)broken_conf, sizeof(broken_conf) - 1) != 0) {
             panic("M47 self-test: could not overwrite settings.conf with a corrupted one");
         }
 
@@ -2691,17 +2729,17 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image) {
             panic("out of memory reading compositor back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 64) {
             panic("vfs_read: compositor missing or absurdly small - should exist, just seeded");
         }
-        if (vfs_write("m48trunc", comp_image, 64) != 0) {
+        if (vfs_write(PATH_TMP_DIR "m48trunc", comp_image, 64) != 0) {
             panic("M48 self-test: could not write the truncated-ELF fixture");
         }
 
         long rc_missing = do_syscall(SYS_spawn, (uint64_t)"definitely_not_a_file", 0, 0);
-        long rc_text = do_syscall(SYS_spawn, (uint64_t)"m33test", 0, 0);
-        long rc_trunc = do_syscall(SYS_spawn, (uint64_t)"m48trunc", 0, 0);
+        long rc_text = do_syscall(SYS_spawn, (uint64_t)(PATH_TMP_DIR "m33test"), 0, 0);
+        long rc_trunc = do_syscall(SYS_spawn, (uint64_t)(PATH_TMP_DIR "m48trunc"), 0, 0);
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -2868,7 +2906,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image) {
             panic("out of memory reading compositor back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0) {
             panic("vfs_read: compositor missing - should exist, just seeded");
         }
@@ -2882,7 +2920,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         }
         wm_drag_request_t drag;
         k_memset(&drag, 0, sizeof(drag));
-        k_strlcpy(drag.payload, "m33test", sizeof(drag.payload));
+        k_strlcpy(drag.payload, PATH_TMP_DIR "m33test", sizeof(drag.payload));
         do_syscall(SYS_write, (uint64_t)drag_fds[1], (uint64_t)&drag, sizeof(drag));
         pit_sleep_ms(300);
 
@@ -3012,8 +3050,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !stub_image) {
             panic("out of memory reading compositor/wm_stubborn back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t stub_size = vfs_read("wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t stub_size = vfs_read("/bin/wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || stub_size < 0) {
             panic("vfs_read: compositor/wm_stubborn missing - should exist, just seeded");
         }
@@ -3074,7 +3112,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!last_image) {
             panic("out of memory reading wm_stubborn back from disk");
         }
-        int64_t last_size = vfs_read("wm_stubborn", last_image, LEANFS_MAX_FILE_SIZE);
+        int64_t last_size = vfs_read("/bin/wm_stubborn", last_image, LEANFS_MAX_FILE_SIZE);
         task_t *last_task = last_size < 0 ? (task_t *)0
                                           : process_spawn("wm_stubborn", last_image, (size_t)last_size, "");
         kfree(last_image);
@@ -3178,6 +3216,200 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "garbage-argument syscalls all refused self-test passed (13/13 checks).\n\n");
     }
 
+    /* M53 self-test: directories, path resolution, and the layout.
+     *
+     * The load-bearing checks are the ones a *prefix convention* would
+     * pass and a real directory would not: a name that exists in two
+     * directories at once resolving to two different files, and a
+     * directory outgrowing a single block and still listing everything.
+     * With 16 records per 512-byte block, filling one takes 17 entries,
+     * which is what the loop below writes.
+     *
+     * The path-refusal rows are the other half. leanfs deliberately
+     * stores no "." or ".." and has no parent link, so a resolver that
+     * accepted them would have to synthesize them - which is the
+     * near-correct shortcut that turns into an escape from the root. Each
+     * of those must be a clean -1, not a fault and not a silent success.
+     */
+    {
+        int all_ok = 1;
+
+        /* The layout the kernel seeded, above. */
+        static const char *const LAYOUT[] = {PATH_BIN, PATH_HOME, PATH_ETC, PATH_TMP};
+        for (size_t i = 0; i < sizeof(LAYOUT) / sizeof(LAYOUT[0]); i++) {
+            if (!vfs_is_dir(LAYOUT[i])) {
+                klog_puts("[m53] ");
+                klog_puts(LAYOUT[i]);
+                klog_puts(" is missing or is not a directory\n");
+                all_ok = 0;
+            }
+        }
+
+        /* /bin holds exactly the programs USER_PROGRAMS names - every one
+         * present, and nothing that is not a program in it. The second
+         * half is what makes the launcher's list trustworthy. */
+        static char list_buf[4096];
+        size_t list_len = vfs_list(PATH_BIN, list_buf, sizeof(list_buf));
+        int found = 0;
+        for (size_t i = 0; i < EMBEDDED_PROGRAM_COUNT; i++) {
+            char path[PATH_MAX_LEN];
+            path_join(path, PATH_BIN_DIR, embedded_programs[i].name);
+            if (vfs_exists(path)) {
+                found++;
+            } else {
+                klog_puts("[m53] ");
+                klog_puts(path);
+                klog_puts(" was not seeded\n");
+                all_ok = 0;
+            }
+        }
+        int listed = 0;
+        for (size_t i = 0; i < list_len; i++) {
+            if (list_buf[i] == '\n') {
+                listed++;
+            }
+        }
+        if (listed != (int)EMBEDDED_PROGRAM_COUNT) {
+            klog_puts("[m53] ");
+            klog_puts(PATH_BIN);
+            klog_puts(" lists 0x");
+            klog_put_hex32((uint32_t)listed);
+            klog_puts(" entries but this build ships 0x");
+            klog_put_hex32((uint32_t)EMBEDDED_PROGRAM_COUNT);
+            klog_puts(" programs - something that is not a program is in it\n");
+            all_ok = 0;
+        }
+
+        /* A directory created, entered, filled past one block, listed,
+         * and read back by path. */
+        static const char *const DEEP = PATH_TMP_DIR "m53dir";
+        if (!vfs_exists(DEEP) && vfs_mkdir(DEEP) != 0) {
+            klog_puts("[m53] vfs_mkdir failed on a fresh path under " PATH_TMP "\n");
+            all_ok = 0;
+        }
+        if (!vfs_is_dir(DEEP)) {
+            klog_puts("[m53] the directory just created does not read back as one\n");
+            all_ok = 0;
+        }
+        /* 17 files: one more than the 16 records a block holds, so the
+         * directory has to grow a second one. */
+        const int DEEP_FILES = 17;
+        for (int i = 0; i < DEEP_FILES; i++) {
+            char path[PATH_MAX_LEN];
+            char name[8];
+            name[0] = 'f';
+            name[1] = (char)('0' + i / 10);
+            name[2] = (char)('0' + i % 10);
+            name[3] = '\0';
+            path_join(path, PATH_TMP_DIR "m53dir/", name);
+            char body[16];
+            k_memset(body, 0, sizeof(body));
+            body[0] = (char)('A' + i);
+            if (vfs_write(path, body, sizeof(body)) != 0) {
+                klog_puts("[m53] writing file 0x");
+                klog_put_hex32((uint32_t)i);
+                klog_puts(" into a directory past its first block failed\n");
+                all_ok = 0;
+                break;
+            }
+        }
+        size_t deep_len = vfs_list(DEEP, list_buf, sizeof(list_buf));
+        int deep_listed = 0;
+        for (size_t i = 0; i < deep_len; i++) {
+            if (list_buf[i] == '\n') {
+                deep_listed++;
+            }
+        }
+        if (deep_listed != DEEP_FILES) {
+            klog_puts("[m53] a directory holding 0x");
+            klog_put_hex32((uint32_t)DEEP_FILES);
+            klog_puts(" files listed 0x");
+            klog_put_hex32((uint32_t)deep_listed);
+            klog_puts(" of them - it did not grow past one block correctly\n");
+            all_ok = 0;
+        }
+        {
+            char body[16];
+            k_memset(body, 0, sizeof(body));
+            int64_t n = vfs_read(PATH_TMP_DIR "m53dir/f16", body, sizeof(body));
+            if (n != 16 || body[0] != (char)('A' + 16)) {
+                klog_puts("[m53] the 17th file in that directory did not read back by path (0x");
+                klog_put_hex32((uint32_t)n);
+                klog_puts(" bytes, first byte 0x");
+                klog_put_hex32((uint32_t)(uint8_t)body[0]);
+                klog_puts(")\n");
+                all_ok = 0;
+            }
+        }
+
+        /* The same name in two directories is two different files -
+         * which a prefix convention cannot do and is therefore the
+         * cleanest single statement of "these are real directories". */
+        static const char a_body[] = "in-tmp";
+        static const char b_body[] = "in-home";
+        if (vfs_write(PATH_TMP_DIR "m53same", a_body, sizeof(a_body)) != 0 ||
+            vfs_write(PATH_ETC_DIR "m53same", b_body, sizeof(b_body)) != 0) {
+            klog_puts("[m53] could not create the same name in two directories\n");
+            all_ok = 0;
+        } else {
+            char got_a[16], got_b[16];
+            k_memset(got_a, 0, sizeof(got_a));
+            k_memset(got_b, 0, sizeof(got_b));
+            vfs_read(PATH_TMP_DIR "m53same", got_a, sizeof(got_a));
+            vfs_read(PATH_ETC_DIR "m53same", got_b, sizeof(got_b));
+            if (k_strcmp(got_a, a_body) != 0 || k_strcmp(got_b, b_body) != 0) {
+                klog_puts("[m53] the same name in two directories resolved to one file: '");
+                klog_puts(got_a);
+                klog_puts("' and '");
+                klog_puts(got_b);
+                klog_puts("'\n");
+                all_ok = 0;
+            }
+        }
+
+        /* Malformed and escaping paths, each of which must be a clean
+         * refusal. Run as a table so adding a rule without adding a row
+         * is visible. */
+        static const struct { const char *what; const char *path; } BAD_PATHS[] = {
+            {"a relative path, which has nothing to be relative to", "bin/ls"},
+            {"an empty component", "//bin"},
+            {"a trailing slash", PATH_BIN_DIR},
+            {"a '.' component", "/./bin"},
+            {"a '..' component, the escape this format refuses to synthesize", "/bin/../etc"},
+            {"a '..' climbing out of the root", "/.."},
+            {"walking through a regular file as if it were a directory", PATH_BIN_DIR "ls/nope"},
+            {"a component longer than a name may be", "/bin/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        };
+        for (size_t i = 0; i < sizeof(BAD_PATHS) / sizeof(BAD_PATHS[0]); i++) {
+            char scratch[16];
+            if (vfs_exists(BAD_PATHS[i].path) || vfs_read(BAD_PATHS[i].path, scratch, sizeof(scratch)) >= 0) {
+                klog_puts("[m53] path check failed: ");
+                klog_puts(BAD_PATHS[i].what);
+                klog_puts(" was accepted ('");
+                klog_puts(BAD_PATHS[i].path);
+                klog_puts("')\n");
+                all_ok = 0;
+            }
+        }
+
+        /* And the one thing the launcher's own behavior now rests on:
+         * a data file is not in /bin. */
+        if (vfs_exists(PATH_BIN_DIR "settings.conf") || !vfs_exists(PATH_SETTINGS)) {
+            klog_puts("[m53] settings.conf is not where the layout says it is\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M53 directory self-test: the namespace is not a tree");
+        }
+        klog_puts("[m53] directories created, entered, grown past one block, listed and read "
+                   "back by path; the same name in two directories staying two files; eight "
+                   "malformed or escaping paths refused; and " PATH_BIN " holding exactly the "
+                   "programs this build ships self-test passed (");
+        klog_put_hex32((uint32_t)found);
+        klog_puts(" programs seeded).\n\n");
+    }
+
     /* M51 self-test: the z-order, stated as the two things that were
      * wrong before it existed.
      *
@@ -3225,8 +3457,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !z_image) {
             panic("out of memory reading compositor/wm_zorder back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t z_size = vfs_read("wm_zorder", z_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t z_size = vfs_read("/bin/wm_zorder", z_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || z_size < 0) {
             panic("vfs_read: compositor/wm_zorder missing - should exist, just seeded");
         }
@@ -3386,8 +3618,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!comp_image || !fault_image) {
             panic("out of memory reading compositor/wm_faulter back from disk");
         }
-        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t fault_size = vfs_read("wm_faulter", fault_image, LEANFS_MAX_FILE_SIZE);
+        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t fault_size = vfs_read("/bin/wm_faulter", fault_image, LEANFS_MAX_FILE_SIZE);
         if (comp_size < 0 || fault_size < 0) {
             panic("vfs_read: compositor/wm_faulter missing - should exist, just seeded");
         }
@@ -3502,7 +3734,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!bad_image) {
             panic("out of memory reading badptr back from disk");
         }
-        int64_t bad_size = vfs_read("badptr", bad_image, LEANFS_MAX_FILE_SIZE);
+        int64_t bad_size = vfs_read("/bin/badptr", bad_image, LEANFS_MAX_FILE_SIZE);
         if (bad_size < 0) {
             panic("vfs_read: badptr missing - should exist, just seeded");
         }
@@ -3550,7 +3782,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M40 SYS_spawn self-test: spawning a nonexistent file should fail");
         }
 
-        long rc_not_elf = do_syscall(SYS_spawn, (uint64_t)"m33test", 0, 0);
+        long rc_not_elf = do_syscall(SYS_spawn, (uint64_t)(PATH_TMP_DIR "m33test"), 0, 0);
         if (rc_not_elf >= 0) {
             panic("M40 SYS_spawn self-test: spawning a non-ELF file should fail, not succeed");
         }
@@ -3645,7 +3877,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     if (!init_image) {
         panic("out of memory reading init back from disk");
     }
-    int64_t init_size = vfs_read("init", init_image, LEANFS_MAX_FILE_SIZE);
+    int64_t init_size = vfs_read("/bin/init", init_image, LEANFS_MAX_FILE_SIZE);
     if (init_size < 0) {
         panic("vfs_read(\"init\") failed - should exist, just seeded");
     }

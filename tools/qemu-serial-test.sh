@@ -153,6 +153,7 @@ REQUIRED_MARKERS=(
   "[m50] 24 shm create/free cycles frame-neutral, a double free refused, 16"
   "[m51] z-order raise-on-click, occlusion-correct hit-testing (the overlap"
   "[m52] a ring-3 null dereference killing only its own task (exit 139), its"
+  "[m53] directories created, entered, grown past one block, listed and read"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

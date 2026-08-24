@@ -2530,45 +2530,134 @@ itself.
       desktop", since a hung guest would keep showing its last frame
 - [x] Full regression: 38/38 serial markers and 36/36 interactive tests
 
-## M53 — Directories in leanfs, and a namespace that isn't a junk drawer
+## M53 — Directories in leanfs, and a namespace that isn't a junk drawer ✅
 
-The filesystem is flat, and it shows up in three apps at once: the file
-manager lists this OS's own executables next to your text files, the
-launcher offers to "launch" `settings.conf`, and `SYS_listfiles` is
-documented as "the entire namespace" because it has no choice. The boot
-self-tests' own fixtures (`m33test`, `m48trunc`, `fstest`) sit in the
+The filesystem was flat, and it showed up in three apps at once: the file
+manager listed this OS's own executables next to your text files, the
+launcher offered to "launch" `settings.conf`, and `SYS_listfiles` was
+documented as "the entire namespace" because it had no choice. The boot
+self-tests' own fixtures (`m33test`, `m48trunc`, `fstest`) sat in the
 same list.
 
-- [ ] Directory inodes in `leanfs.c`: a directory is a file whose
-      contents are name/inode records, which is the smallest change that
-      is still a real directory rather than a prefix convention. The
-      indirect-block support M15 added is what makes a directory able to
-      outgrow one block
-- [ ] Path resolution (`/bin/ls`), and every existing whole-file call
-      taking a path instead of a name. `vfs_read`/`vfs_write` keep their
-      shape - this is a resolver in front of them, not a new API
-- [ ] `SYS_mkdir`, and `SYS_listfiles` becoming `SYS_listdir(path, ...)`.
-      The old call keeps working against `/` for exactly as long as it
-      takes to convert the three callers
-- [ ] A layout worth having: `/bin` for programs, `/home` for user files,
-      `/etc` for `settings.conf`. The kernel's first-boot seeding writes
-      programs into `/bin`, and the self-test fixtures go somewhere that
-      is not `/home`
-- [ ] The launcher lists `/bin` and stops offering data files as
-      programs - which also retires M48's "That file is not a program."
+- [x] Directory inodes in `leanfs.c`: a directory is a file whose
+      contents are `leanfs_dirent_t` name/inode records - the smallest
+      change that is a real directory rather than a prefix convention,
+      and one that reuses every block-allocation path a file already had.
+      `inode_read_data`/`inode_write_data` were lifted out of
+      `leanfs_read`/`leanfs_write` for exactly that reuse, which is what
+      makes "a directory is a file whose contents are records" true of
+      the code and not only of the header comment
+- [x] **Inodes carry no name at all any more.** A name lives in exactly
+      one place, its parent directory's records - which makes "two
+      disagreeing answers to what this file is called" structurally
+      impossible rather than merely unlikely. The `used` flag became a
+      `type`, so a free inode and a file and a directory are one field
+- [x] A record is 32 bytes exactly, checked by `_Static_assert`, so 16
+      fit in a block and none ever straddles one. That is what lets every
+      directory operation be a whole-block read/modify/write rather than
+      needing byte-level addressing this driver does not have
+- [x] Path resolution (`/bin/ls`), and every whole-file call taking a
+      path. `vfs_read`/`vfs_write` keep their shape exactly - this is a
+      resolver in front of them, not a new API
+- [x] **No `.` or `..` in the resolver**, deliberately. Neither is stored
+      on disk and this format has no parent link, so honoring them would
+      mean either inventing a link or rewriting the path textually -
+      which is the near-correct shortcut that turns into an escape from
+      the root. The file manager's own `..` is a caller-side string
+      operation on a path it already holds, which is honest about being
+      exactly that
+- [x] `SYS_mkdir` (34), and `SYS_listfiles` *becoming*
+      `SYS_listdir(path, buf, maxlen)` on the same number (7). One repo,
+      every caller converted in the same commit - leaving a second call
+      that only ever meant `/` would just have been a way for the two to
+      drift. A listed name that is itself a directory comes back with a
+      `/` appended, so a caller knows what entering it would mean without
+      a second call
+- [x] `LEANFS_MAX_INODES` 32 -> 96, and it took a count to see why: this
+      project ships 24 programs, which with four directories, the
+      self-test fixtures and `settings.conf` came to *exactly 32*. That
+      is the fourth exactly-sized cap in this project's history (M40,
+      M48, M50), and the first one caught before it shipped
+- [x] **A stack overflow found on the way**, not caused by this
+      milestone. `save_inodes` and `leanfs_init` declared the whole inode
+      table as a local - 3584 bytes of an 8 KiB kernel task stack, which
+      a 15-sector table would have taken to 7680. Both are static
+      scratch now; leanfs has no concurrency of its own, so one shared
+      buffer is safer as well as smaller
+- [x] A layout worth having: `/bin` for programs, `/home` for user
+      files, `/etc` for `settings.conf`, `/tmp` for the self-test
+      fixtures - which is the whole requirement for them, "somewhere that
+      is not /home". `system_api/include/paths.h` is the one place both
+      halves of the system agree on it
+- [x] `/home/readme.txt`, seeded on a fresh disk. Not decoration: the
+      file manager used to open on a namespace that always had two dozen
+      things in it, and now opens on a directory that would otherwise be
+      empty on first boot - which reads as "broken", not as "new"
+- [x] The launcher lists `/bin` and skips anything that is itself a
+      directory, so a data file is no longer something it can offer to
+      run *at all*. That retires M48's "That file is not a program."
       toast for the common case, leaving it for the genuinely broken one
-- [ ] The file manager gets navigation: a path bar, double-click to
-      enter, `..` to leave. This is the app that most obviously wanted it
-- [ ] Absolute paths in `SYS_spawn`, so the shell, the launcher and every
-      desktop icon name `/bin/name` rather than relying on a single flat
-      namespace to be unambiguous
-- [ ] New boot self-test (`[m53]`): a directory created, entered, filled
-      past one block, listed, and read back by path; a path that escapes
-      the root refused; and the seeded `/bin` containing exactly the
-      programs `USER_PROGRAMS` names
-- [ ] New interactive test: the file manager navigating into `/bin` and
-      back, and the launcher no longer listing a file the file manager
-      shows in `/home`
+- [x] The file manager gets navigation: a path bar (right-aligned when
+      the path outgrows the header, since the tail says where you are and
+      the head only says how you got there), double-click to enter, and a
+      `..` row pinned to index 0 so leaving is always in the same place.
+      The root has no `..` row - an inert one would be a row that does
+      nothing - which is an asymmetry the interactive tests name rather
+      than encode as a literal
+- [x] Absolute paths in `SYS_spawn` everywhere: init, every desktop icon,
+      the launcher, the file manager's "open in the editor". The shell
+      and `gui_terminal` get the smallest thing that deserves to be called
+      a search path - a command with no `/` in it is looked up in `/bin`,
+      anything with one is taken as the path it plainly is
+- [x] `SYS_spawn` passes the **basename** to `process_spawn` as the
+      task's display name. A task-manager row reading
+      `/bin/desktop_icons` says nothing `desktop_icons` doesn't, spends
+      six of `TASK_NAME_MAX`'s 24 characters saying where every program
+      on this system lives, and would break every self-test that asks the
+      scheduler what a task is called. The path is what gets loaded; the
+      name is what gets shown
+- [x] The superblock magic is bumped with the layout, so the reformat
+      path M29 already had does double duty as the format migration -
+      there is no in-place upgrade from a flat filesystem with no root
+      directory, and the kernel re-seeds everything it ships anyway
+- [x] New boot self-test (`[m53]`): the layout present; `/bin` holding
+      exactly the programs this build ships and nothing else; a directory
+      created, filled past one block (17 records where 16 fit), listed
+      and read back by path; **the same name in two directories staying
+      two different files**, which a prefix convention cannot do and is
+      the cleanest single statement of "these are real directories"; and
+      eight malformed or escaping paths refused as a table - a relative
+      path, an empty component, a trailing slash, `.`, `..`, `..` out of
+      the root, walking *through* a regular file, and a component longer
+      than a name may be
+- [x] New interactive test (`file_manager_navigates_directories`), and
+      two existing ones rewritten around the new layout. All three assert
+      on *how many rows have anything in them* rather than on names -
+      content-independent, and enough to tell a directory holding two
+      things from one holding two dozen
+- [x] `missing_program_raises_a_toast` became
+      `launcher_does_not_offer_data_files`: it used to type a data file's
+      name into the launcher and require an error toast, and the right
+      assertion now is that there is **no result and no toast**, which is
+      a better outcome than a good error message about something that
+      should never have been offered.
+      `clicking_a_toast_dismisses_it` sources its toast from M52's
+      faulting client instead - a real crash rather than a synthetic
+      failure
+- [x] One harness change this milestone paid for the hard way:
+      `tools/qemu-serial-test.sh` and `tools/qemu_input.py` both take
+      `LEANOS_IMAGE`. A `make` rewrites `build/os-image.bin` under any
+      guest still reading it, which silently invalidated a 35-minute
+      suite run mid-flight. Snapshot the image, export the variable, and
+      a long check and ongoing development stop fighting over one file
+- [x] **A bug the interactive suite caught and no boot test could.**
+      `desktop_icons.c` has two tables of program names - the icon grid
+      and the right-click menu - and only the first was converted to
+      `/bin` paths. Nothing about the boot self-tests touches the desktop
+      context menu, so 39/39 markers passed with "Open Terminal" silently
+      launching nothing. Exactly the class of failure M40's harness was
+      built for, six milestones later
+- [x] Full regression: 39/39 serial markers and 37/37 interactive tests
 
 ## M54 — Reclaiming what dies: address spaces, task slots, real uptime
 

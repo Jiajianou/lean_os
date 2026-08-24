@@ -53,8 +53,12 @@ long sys_readfile(const char *name, void *buf, size_t maxlen) {
     return do_syscall(SYS_readfile, (long)name, (long)buf, (long)maxlen);
 }
 
-long sys_listfiles(void *buf, size_t maxlen) {
-    return do_syscall(SYS_listfiles, (long)buf, (long)maxlen, 0);
+long sys_listdir(const char *path, void *buf, size_t maxlen) {
+    return do_syscall(SYS_listdir, (long)path, (long)buf, (long)maxlen);
+}
+
+long sys_mkdir(const char *path) {
+    return do_syscall(SYS_mkdir, (long)path, 0, 0);
 }
 
 long sys_kill(long pid, int sig) {

@@ -80,6 +80,7 @@
  * at the bottom, ordinary windows, panels always on top - survive as
  * bands within that array rather than as three separate loops.
  */
+#include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
 #include "font8x16.h" /* M38: window-title text in the titlebar - drawn through this file's own clip-aware put_pixel, not gfx_draw_text (see draw_text_clipped's own note) */
 #include "gfx.h" /* M34: gfx_point_in_rect - shared hit-test helper, see draw_titlebar_buttons' own note on why drawing itself stays on this file's own clip-aware fill_rect */
 #include "power_mode.h" /* system_api/include/power_mode.h - POWER_OFF/POWER_REBOOT, M47's launcher Power controls */
@@ -188,9 +189,13 @@
  * has deliberately stayed client-side to avoid exactly this; a
  * type-to-launch box is the case that genuinely needs it.
  *
- * M42 built the surface and the toggle. M43 fills it in: every file on
- * disk (SYS_listfiles - leanfs is flat, so that is the whole namespace),
+ * M42 built the surface and the toggle. M43 fills it in:
  * substring-filtered as you type, Enter spawning the selected one.
+ * M53 narrows what it lists from "every file on disk" - which is what a
+ * flat filesystem forced, and the reason it used to offer to run
+ * settings.conf - to the contents of /bin. A launcher that can only
+ * offer programs is also what retires M48's "That file is not a program."
+ * toast for the common case, leaving it for the genuinely broken one.
  * Opened by WM_ACTION_TOGGLE_LAUNCHER (desktop_shell.c's Start button)
  * or Ctrl+Space, which is handled in handle_keyboard right next to
  * M32's Alt+Tab and for the same reason: a window-manager chord is not
@@ -2289,8 +2294,8 @@ static void wmenu_click(int32_t px, int32_t py) {
     }
 }
 
-/* M43: the launcher's logic. Everything it needs is already here - the
- * whole flat filesystem via SYS_listfiles, SYS_spawn to launch, and the
+/* M43: the launcher's logic. Everything it needs is already here -
+ * /bin's contents via SYS_listdir (M53), SYS_spawn to launch, and the
  * keyboard, which this process already owns (handle_keyboard routes every
  * keystroke). No new syscall and no new protocol channel: the only thing
  * that crosses a process boundary is the one WM_ACTION_TOGGLE_LAUNCHER
@@ -2354,12 +2359,17 @@ static void launcher_apply_filter(void) {
     launcher_scroll = 0;
 }
 
-/* Re-reads the whole namespace. Only on open - see launcher_entries'
- * own comment on why this isn't kept live. */
+/* Re-reads /bin. Only on open - see launcher_entries' own comment on why
+ * this isn't kept live.
+ *
+ * M53: a name ending in '/' is a subdirectory (SYS_listdir marks them)
+ * and is skipped rather than listed. /bin has none today; skipping them
+ * is what keeps that from becoming a launchable entry the moment one
+ * appears. */
 static void launcher_reload(void) {
     static char buf[LAUNCHER_LIST_BUF];
     launcher_entry_count = 0;
-    long n = sys_listfiles(buf, sizeof(buf));
+    long n = sys_listdir(PATH_BIN, buf, sizeof(buf));
     if (n <= 0) {
         return;
     }
@@ -2369,6 +2379,10 @@ static void launcher_reload(void) {
     int col = 0;
     for (long i = 0; i < n && launcher_entry_count < LAUNCHER_MAX_ENTRIES; i++) {
         if (buf[i] == '\n') {
+            if (col > 0 && launcher_entries[launcher_entry_count][col - 1] == '/') {
+                col = 0;
+                continue; /* a directory, not something to launch */
+            }
             launcher_entries[launcher_entry_count][col] = '\0';
             launcher_entry_count++;
             col = 0;
@@ -2393,15 +2407,19 @@ static void launcher_set_open(int open) {
 
 static void launcher_launch_selected(void) {
     if (launcher_selected >= 0 && launcher_selected < launcher_match_count) {
-        /* Whatever it is. SYS_spawn refuses anything that isn't a valid
-         * ELF image without taking the kernel down (M40's audit) - and
-         * since M48 it says *which* refusal, so launching a data file
-         * from a list that is honestly "every file on disk" now explains
-         * itself instead of silently doing nothing. */
+        /* M53: the list is /bin, so the name has to be turned back into
+         * a path before it can be spawned. M48's error message stays -
+         * a /bin entry can still fail to load (a truncated image, a full
+         * task table), and that is now the only reason it ever will. */
         const char *name = launcher_entries[launcher_matches[launcher_selected]];
-        long rc = sys_spawn(name, "");
-        if (rc < 0) {
-            toast_post(WM_NOTIFY_ERROR, name, spawn_error_message(rc));
+        char path[PATH_MAX_LEN];
+        if (path_join(path, PATH_BIN_DIR, name) != 0) {
+            toast_post(WM_NOTIFY_ERROR, name, "Name too long to launch.");
+        } else {
+            long rc = sys_spawn(path, "");
+            if (rc < 0) {
+                toast_post(WM_NOTIFY_ERROR, name, spawn_error_message(rc));
+            }
         }
     }
     launcher_set_open(0);
@@ -3167,7 +3185,7 @@ static void run_shortcut(int id) {
         /* An ordinary program on disk, so this is one spawn and nothing
          * else - and it says so if the spawn fails, like every other
          * launch path since M48. */
-        long rc = sys_spawn("task_manager", "");
+        long rc = sys_spawn(PATH_BIN_DIR "task_manager", "");
         if (rc < 0) {
             toast_post(WM_NOTIFY_ERROR, "Task manager", spawn_error_message(rc));
         }

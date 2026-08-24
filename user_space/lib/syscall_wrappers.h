@@ -46,7 +46,14 @@ long sys_read(int fd, void *buf, size_t len);
 long sys_readfile(const char *name, void *buf, size_t maxlen);
 
 /* Newline-separated filenames into buf. Returns bytes written, or -1. */
-long sys_listfiles(void *buf, size_t maxlen);
+/* M53: was sys_listfiles(buf, maxlen). Lists one directory; every name
+ * that is itself a directory comes back with a '/' appended, so a caller
+ * knows what entering it would mean without a second call. Returns bytes
+ * written, or -1 if `path` is not a directory. */
+long sys_listdir(const char *path, void *buf, size_t maxlen);
+
+/* M53: creates one directory whose parent already exists. */
+long sys_mkdir(const char *path);
 
 /* Only SIGKILL/SIGTERM (system_api/include/signal.h) are recognized.
  * Returns 0, or -1 if pid doesn't name a live task. */

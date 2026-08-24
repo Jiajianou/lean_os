@@ -7,6 +7,7 @@
  * is the simplest thing that gives it to us without one.
  */
 #include "str.h"
+#include "paths.h" /* system_api/include/paths.h - M53: /bin is this shell's whole search path */
 #include "syscall_wrappers.h"
 
 #define LINE_MAX 128
@@ -66,7 +67,30 @@ int main(const char *arg) {
             prog_arg = space + 1;
         }
 
-        long pid = sys_spawn(line, prog_arg);
+        /* M53: a command with no '/' in it is looked up in /bin - the
+         * smallest thing that deserves to be called a search path, and
+         * the one this OS needs now that a bare name is no longer a
+         * location. Anything containing a '/' is taken as the path it
+         * plainly is, so "/tmp/m33test" still reaches exactly that. */
+        char resolved[PATH_MAX_LEN];
+        const char *target = line;
+        int has_slash = 0;
+        for (const char *c = line; *c; c++) {
+            if (*c == '/') {
+                has_slash = 1;
+            }
+        }
+        if (!has_slash) {
+            if (path_join(resolved, PATH_BIN_DIR, line) != 0) {
+                sys_write(1, line, strlen(line));
+                const char toolong[] = ": name too long\n";
+                sys_write(1, toolong, sizeof(toolong) - 1);
+                continue;
+            }
+            target = resolved;
+        }
+
+        long pid = sys_spawn(target, prog_arg);
         if (pid < 0) {
             sys_write(1, line, strlen(line));
             const char msg[] = ": command not found\n";

@@ -7,20 +7,28 @@ void vfs_init(void) {
     leanfs_init();
 }
 
-int64_t vfs_read(const char *name, void *buf, size_t maxlen) {
-    return leanfs_read(name, buf, maxlen);
+int64_t vfs_read(const char *path, void *buf, size_t maxlen) {
+    return leanfs_read(path, buf, maxlen);
 }
 
-int vfs_write(const char *name, const void *buf, size_t len) {
-    return leanfs_write(name, buf, len);
+int vfs_write(const char *path, const void *buf, size_t len) {
+    return leanfs_write(path, buf, len);
 }
 
-int vfs_exists(const char *name) {
-    return leanfs_exists(name);
+int vfs_exists(const char *path) {
+    return leanfs_exists(path);
 }
 
-size_t vfs_list(char *buf, size_t maxlen) {
-    return leanfs_list(buf, maxlen);
+int vfs_is_dir(const char *path) {
+    return leanfs_is_dir(path);
+}
+
+int vfs_mkdir(const char *path) {
+    return leanfs_mkdir(path);
+}
+
+size_t vfs_list(const char *path, char *buf, size_t maxlen) {
+    return leanfs_list(path, buf, maxlen);
 }
 
 void vfs_sync(void) {

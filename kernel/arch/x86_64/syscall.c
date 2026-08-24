@@ -262,7 +262,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
      * different file. SPAWN_ERR_NOT_FOUND is the honest answer for a path
      * this kernel cannot read at all, which is what an unmapped pointer
      * amounts to. */
-    char path[LEANFS_MAX_NAME + 1];
+    char path[LEANFS_MAX_PATH];
     if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
         return SPAWN_ERR_NOT_FOUND;
     }
@@ -313,9 +313,22 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
     /* process_spawn's elf_load synchronously copies every byte it needs
      * into fresh physical frames before returning, so freeing this
      * buffer right away is safe - nothing keeps pointing at it. */
-    /* M45: `path` is what this process gets listed as - the only
-     * human-readable identity anything at this layer has for it. */
-    task_t *t = process_spawn(path, image, (size_t)size, arg);
+    /* M45: the name is what this process gets listed as - the only
+     * human-readable identity anything at this layer has for it.
+     *
+     * M53: the *basename*, not the whole path. A task manager row
+     * reading "/bin/desktop_icons" says nothing "desktop_icons" doesn't,
+     * spends six of TASK_NAME_MAX's 24 characters saying where every
+     * program on this system lives, and would break every self-test that
+     * asks the scheduler what a task is called. The path is what gets
+     * loaded; the name is what gets shown. */
+    const char *name = path;
+    for (const char *c = path; *c; c++) {
+        if (*c == '/') {
+            name = c + 1;
+        }
+    }
+    task_t *t = process_spawn(name, image, (size_t)size, arg);
     kfree(image);
     kfree(arg);
     if (!t) {
@@ -385,12 +398,12 @@ static long sys_readfile(uint64_t name_ptr, uint64_t buf, uint64_t maxlen, uint6
     (void)a4;
     (void)a5;
     (void)a6;
-    char name[LEANFS_MAX_NAME + 1];
-    if (copy_str_from_user(name, name_ptr, sizeof(name)) != 0 ||
+    char path[LEANFS_MAX_PATH];
+    if (copy_str_from_user(path, name_ptr, sizeof(path)) != 0 ||
         !user_range_ok(buf, maxlen, 1)) {
         return -1;
     }
-    return (long)vfs_read(name, (void *)buf, (size_t)maxlen);
+    return (long)vfs_read(path, (void *)buf, (size_t)maxlen);
 }
 
 /* M33: mirrors sys_readfile's shape exactly - see SYS_writefile's own doc
@@ -400,23 +413,46 @@ static long sys_writefile(uint64_t name_ptr, uint64_t buf, uint64_t len, uint64_
     (void)a4;
     (void)a5;
     (void)a6;
-    char name[LEANFS_MAX_NAME + 1];
-    if (copy_str_from_user(name, name_ptr, sizeof(name)) != 0 ||
+    char path[LEANFS_MAX_PATH];
+    if (copy_str_from_user(path, name_ptr, sizeof(path)) != 0 ||
         !user_range_ok(buf, len, 0)) {
         return -1;
     }
-    return vfs_write(name, (const void *)buf, (size_t)len);
+    return vfs_write(path, (const void *)buf, (size_t)len);
 }
 
-static long sys_listfiles(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+/* M53: takes a path now. It used to be SYS_listfiles(buf, maxlen), which
+ * had no path to take because leanfs was flat and "every file there is"
+ * was the only answer available - the reason the launcher offered to run
+ * settings.conf and the file manager listed this OS's own executables
+ * next to your text files. */
+static long sys_listdir(uint64_t path_ptr, uint64_t buf, uint64_t maxlen, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    char path[LEANFS_MAX_PATH];
+    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0 ||
+        !user_range_ok(buf, maxlen, 1)) {
+        return -1;
+    }
+    if (!vfs_is_dir(path)) {
+        return -1; /* an ordinary file, or nothing at all - either way not something with contents to list */
+    }
+    return (long)vfs_list(path, (char *)buf, (size_t)maxlen);
+}
+
+/* M53: one directory, whose parent must already exist. */
+static long sys_mkdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
-    if (!user_range_ok(buf, maxlen, 1)) {
+    char path[LEANFS_MAX_PATH];
+    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
         return -1;
     }
-    return (long)vfs_list((char *)buf, (size_t)maxlen);
+    return vfs_mkdir(path);
 }
 
 /* Only SIGKILL/SIGTERM are recognized ("basic set", M14) and both have
@@ -1061,7 +1097,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_wait] = sys_wait,
     [SYS_read] = sys_read,
     [SYS_readfile] = sys_readfile,
-    [SYS_listfiles] = sys_listfiles,
+    [SYS_listdir] = sys_listdir,
     [SYS_kill] = sys_kill,
     [SYS_pipe] = sys_pipe,
     [SYS_getpgid] = sys_getpgid,
@@ -1088,6 +1124,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_shutdown] = sys_shutdown,
     [SYS_close] = sys_close,
     [SYS_shm_free] = sys_shm_free,
+    [SYS_mkdir] = sys_mkdir,
 };
 
 void syscall_handler(isr_regs_t *regs) {

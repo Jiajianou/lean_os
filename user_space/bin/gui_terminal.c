@@ -27,6 +27,7 @@
  * 1 KiB buffer fills, so a real SYS_wait here (which never reads the
  * pipe) would deadlock the moment a command's output exceeded that.
  */
+#include "paths.h" /* system_api/include/paths.h - M53: /bin is this terminal's search path too */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h"
 #include "syscall_wrappers.h"
@@ -231,8 +232,29 @@ static void run_line(void) {
         prog_arg = space + 1;
     }
 
+    /* M53: same /bin lookup the text shell does, and for the same reason -
+     * see user_space/shell/shell.c. Anything with a '/' in it is taken as
+     * the path it is. */
+    char resolved[PATH_MAX_LEN];
+    const char *target = line_buf;
+    int has_slash = 0;
+    for (const char *c = line_buf; *c; c++) {
+        if (*c == '/') {
+            has_slash = 1;
+        }
+    }
+    if (!has_slash) {
+        if (path_join(resolved, PATH_BIN_DIR, line_buf) != 0) {
+            print_str_term(line_buf);
+            print_str_term(": name too long\n");
+            start_prompt();
+            return;
+        }
+        target = resolved;
+    }
+
     sys_dup2(write_fd, 1);
-    long pid = sys_spawn(line_buf, prog_arg);
+    long pid = sys_spawn(target, prog_arg);
     if (pid < 0) {
         print_str_term(line_buf);
         print_str_term(": command not found\n");
