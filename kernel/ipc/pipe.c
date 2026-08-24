@@ -43,7 +43,6 @@ void pipe_reset(pipe_t *p) {
  * previous exact-fit caps taught (see M40). Same "bump the fixed cap when
  * a real need arrives" precedent as MAX_TASKS and MAX_FDS. */
 #define MAX_NAMED_PIPES     32
-#define NAMED_PIPE_NAME_LEN 16
 
 typedef struct {
     char name[NAMED_PIPE_NAME_LEN];

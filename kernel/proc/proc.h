@@ -28,6 +28,18 @@
 #define USER_SHM_BASE    0x0000008020000000ULL /* 512 GiB + 512 MiB - M19 */
 #define USER_FB_BASE     0x0000008040000000ULL /* 512 GiB + 1 GiB - M20, SYS_fb_map's fixed target address */
 
+/* M52: the whole private region, which is exactly what PML4 entry 1
+ * covers - [512 GiB, 1 TiB). Every constant above lives inside it, and
+ * nothing a process may legitimately hand the kernel a pointer to lives
+ * outside it: PML4[0] is the shared kernel map (the identity map and the
+ * kernel heap), so an address below this base is by definition either a
+ * kernel address or a null-ish one, and either way not the caller's to
+ * name. syscall.c's copy_from_user/copy_to_user check this first and the
+ * page tables second - the range test is what makes "a kernel address"
+ * and "one byte before the user region" errors rather than reads. */
+#define USER_REGION_BASE  0x0000008000000000ULL
+#define USER_REGION_LIMIT 0x0000010000000000ULL
+
 /* M40: the window an ELF image's own PT_LOAD segments have to fit inside
  * - from the load address user_space/lib/user.ld links every program at,
  * up to (but not into) the stack this file places just above it. elf.c

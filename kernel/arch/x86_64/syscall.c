@@ -32,14 +32,142 @@
 typedef long (*syscall_fn_t)(uint64_t a1, uint64_t a2, uint64_t a3,
                               uint64_t a4, uint64_t a5, uint64_t a6);
 
-/* buf is trusted as-is for now; validating that a ring-3 pointer is
- * actually mapped and owned by the caller is left for whenever a
- * genuinely untrusted program needs to run here. */
+/* ---- M52: user pointers ----------------------------------------------
+ *
+ * sys_write's comment here used to read "buf is trusted as-is for now;
+ * validating that a ring-3 pointer is actually mapped and owned by the
+ * caller is left for whenever a genuinely untrusted program needs to run
+ * here", and had said so since M8. The threat-model argument was always
+ * right and was also beside the point: the programs this OS runs are its
+ * own, and the bug this prevents is a *buggy* app taking the machine down
+ * instead of only itself.
+ *
+ * Two rules, applied by every syscall below that is handed an address:
+ *
+ *  1. the range lies inside the caller's own private region (proc.h's
+ *     USER_REGION_BASE/LIMIT, i.e. PML4[1]), and
+ *  2. every page of it is actually present and user-accessible in the
+ *     caller's own address space (vmm_user_range_ok).
+ *
+ * Failing either is -1, never a fault. Together they turn the whole
+ * garbage-argument matrix - null, a kernel address, one byte before the
+ * user region, one byte past the end of a mapped page, and a length that
+ * overflows the range - into ordinary error returns.
+ *
+ * Three shapes, for three genuinely different cases:
+ *
+ *  - a *fixed-size* payload the kernel produces (a struct, an fd pair,
+ *    one character) goes out through copy_to_user, so the caller's
+ *    address is touched in exactly one place and the producing code
+ *    never sees it at all.
+ *  - a NUL-terminated *string* the caller supplies (a path, a pipe name)
+ *    comes in through copy_str_from_user, which validates page by page
+ *    as it goes - "how long is it" being precisely the question that
+ *    cannot be answered before reading it.
+ *  - a *bulk* buffer whose length the caller chooses (a write, a file
+ *    read, the clipboard) is range-checked with user_range_ok and then
+ *    used in place. There is no bounded bounce buffer for an arbitrary
+ *    length, and allocating one per call would turn every large write
+ *    into an allocation that can fail.
+ *
+ * There is deliberately no copy_from_user counterpart to copy_to_user:
+ * no syscall in this project takes a fixed-size struct *from* the caller
+ * (the window-manager protocol carries its structs over pipes, not
+ * arguments), so it would be a primitive with no user - which this
+ * project has refused to write before, for the reasons kernel/ipc/pipe.h
+ * gives about pipe_named. The day one is needed it is four lines, and
+ * the rule it enforces is already written down here.
+ *
+ * In-place use is safe here for a reason worth stating rather than
+ * assuming: the only way a mapping in the private region can go away is
+ * SYS_shm_free, and a process has exactly one thread of control - so
+ * while it is blocked inside a syscall there is nobody who could unmap
+ * the buffer it just passed. Another *process* cannot touch it: that is
+ * what PML4[1] being private means. The day this project grows threads
+ * within a process, this comment is the thing that stops being true. */
+static int user_range_ok(uint64_t addr, uint64_t len, int need_write) {
+    /* Null is refused from *any* ring, before the kernel-thread exemption
+     * below. Address 0 is inside the identity map, so a kernel-thread
+     * caller passing it would not fault - it would quietly scribble on
+     * physical page 0 - and M50's own "SYS_taskinfo with a null buffer"
+     * row is precisely that case asserted from kernel_main. Nobody, at
+     * any privilege level, means address 0 when they pass a buffer. */
+    if (addr == 0) {
+        return 0;
+    }
+    /* A kernel thread calling a syscall directly is passing kernel
+     * pointers, which is what it is supposed to do - the boot self-tests
+     * in kernel.c have driven SYS_pipe_open, SYS_writefile and SYS_write
+     * this way since M13. There is nothing to protect the kernel from
+     * here: this check exists because a *ring-3* pointer is untrusted,
+     * and a task sharing the kernel's own address space is by definition
+     * not one. Told apart by which PML4 it runs on, which is exactly the
+     * distinction (process_spawn gives a task a private one; task_spawn
+     * does not).
+     *
+     * The consequence for testing is worth stating: a garbage-argument
+     * matrix run from kernel_main would prove nothing, because every row
+     * would take this early return. M52's matrix therefore runs from a
+     * real user program - user_space/bin/badptr.c - and the [m52]
+     * self-test only spawns it and grades its exit code. */
+    if (sched_current()->pml4_phys == vmm_kernel_pml4_phys()) {
+        return 1;
+    }
+    if (len == 0) {
+        return 1; /* nothing to touch; a null one was already refused above */
+    }
+    if (addr < USER_REGION_BASE || addr >= USER_REGION_LIMIT) {
+        return 0;
+    }
+    uint64_t end = addr + len;
+    if (end < addr || end > USER_REGION_LIMIT) {
+        return 0; /* wrapped, or ran off the top of the private region */
+    }
+    return vmm_user_range_ok(sched_current()->pml4_phys, addr, len, need_write);
+}
+
+static int copy_to_user(uint64_t dst, const void *src, uint64_t len) {
+    if (!user_range_ok(dst, len, 1)) {
+        return -1;
+    }
+    const uint8_t *s = (const uint8_t *)src;
+    uint8_t *d = (uint8_t *)dst;
+    for (uint64_t i = 0; i < len; i++) {
+        d[i] = s[i];
+    }
+    return 0;
+}
+
+/* A NUL-terminated string whose length nobody knows yet - a path, a pipe
+ * name. Validated a page at a time as the copy crosses into each one,
+ * because "how long is it" is precisely the question that cannot be
+ * answered before reading it. Refuses (rather than truncating) a string
+ * that reaches `max` without a NUL: a silently truncated path is a
+ * different file, which is a worse failure than not opening one. */
+static int copy_str_from_user(char *dst, uint64_t src, uint64_t max) {
+    uint64_t checked_to = 0; /* one past the last address validated so far */
+    for (uint64_t i = 0; i < max; i++) {
+        uint64_t at = src + i;
+        if (at >= checked_to) {
+            uint64_t page = at & ~(PAGE_SIZE - 1);
+            if (!user_range_ok(page, PAGE_SIZE, 0)) {
+                return -1;
+            }
+            checked_to = page + PAGE_SIZE;
+        }
+        dst[i] = *(const char *)at;
+        if (dst[i] == '\0') {
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
     (void)a6;
-    if (buf == 0 || fd >= MAX_FDS) {
+    if (fd >= MAX_FDS || !user_range_ok(buf, len, 0)) {
         return -1;
     }
     fd_slot_t *slot = &sched_current()->fds[fd];
@@ -66,7 +194,7 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
     (void)a4;
     (void)a5;
     (void)a6;
-    if (buf == 0 || fd >= MAX_FDS) {
+    if (fd >= MAX_FDS || !user_range_ok(buf, len, 1)) {
         return -1;
     }
     fd_slot_t *slot = &sched_current()->fds[fd];
@@ -128,19 +256,39 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
     (void)a4;
     (void)a5;
     (void)a6;
-    if (path_ptr == 0) {
+    /* M52: both strings are copied in before anything is done with them.
+     * A path longer than leanfs can name is refused rather than
+     * truncated - see copy_str_from_user - since a truncated path names a
+     * different file. SPAWN_ERR_NOT_FOUND is the honest answer for a path
+     * this kernel cannot read at all, which is what an unmapped pointer
+     * amounts to. */
+    char path[LEANFS_MAX_NAME + 1];
+    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
         return SPAWN_ERR_NOT_FOUND;
     }
-    const char *path = (const char *)path_ptr;
-    const char *arg = arg_ptr ? (const char *)arg_ptr : "";
+    /* The argument gets a heap buffer rather than a stack one because it
+     * is a whole page: process_spawn copies it into a PAGE_SIZE frame it
+     * maps at USER_ARG_ADDR, and shortening it here would silently
+     * shorten what a program can be launched with. */
+    char *arg = (char *)kmalloc(PAGE_SIZE);
+    if (!arg) {
+        return SPAWN_ERR_NO_MEMORY;
+    }
+    arg[0] = '\0';
+    if (arg_ptr && copy_str_from_user(arg, arg_ptr, PAGE_SIZE) != 0) {
+        kfree(arg);
+        return SPAWN_ERR_NOT_FOUND;
+    }
 
     uint8_t *image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
     if (!image) {
+        kfree(arg);
         return SPAWN_ERR_NO_MEMORY;
     }
     int64_t size = vfs_read(path, image, LEANFS_MAX_FILE_SIZE);
     if (size < 0) {
         kfree(image);
+        kfree(arg);
         return SPAWN_ERR_NOT_FOUND;
     }
 
@@ -153,10 +301,12 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
      * save. */
     if (!elf_validate(image, (size_t)size)) {
         kfree(image);
+        kfree(arg);
         return SPAWN_ERR_BAD_IMAGE;
     }
     if (!sched_has_free_task_slot()) {
         kfree(image);
+        kfree(arg);
         return SPAWN_ERR_NO_TASK_SLOT;
     }
 
@@ -167,6 +317,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
      * human-readable identity anything at this layer has for it. */
     task_t *t = process_spawn(path, image, (size_t)size, arg);
     kfree(image);
+    kfree(arg);
     if (!t) {
         /* Everything else was checked above, so the only ways left to
          * fail are running out of frames while mapping the image or out
@@ -234,10 +385,12 @@ static long sys_readfile(uint64_t name_ptr, uint64_t buf, uint64_t maxlen, uint6
     (void)a4;
     (void)a5;
     (void)a6;
-    if (name_ptr == 0 || buf == 0) {
+    char name[LEANFS_MAX_NAME + 1];
+    if (copy_str_from_user(name, name_ptr, sizeof(name)) != 0 ||
+        !user_range_ok(buf, maxlen, 1)) {
         return -1;
     }
-    return (long)vfs_read((const char *)name_ptr, (void *)buf, (size_t)maxlen);
+    return (long)vfs_read(name, (void *)buf, (size_t)maxlen);
 }
 
 /* M33: mirrors sys_readfile's shape exactly - see SYS_writefile's own doc
@@ -247,10 +400,12 @@ static long sys_writefile(uint64_t name_ptr, uint64_t buf, uint64_t len, uint64_
     (void)a4;
     (void)a5;
     (void)a6;
-    if (name_ptr == 0 || buf == 0) {
+    char name[LEANFS_MAX_NAME + 1];
+    if (copy_str_from_user(name, name_ptr, sizeof(name)) != 0 ||
+        !user_range_ok(buf, len, 0)) {
         return -1;
     }
-    return vfs_write((const char *)name_ptr, (const void *)buf, (size_t)len);
+    return vfs_write(name, (const void *)buf, (size_t)len);
 }
 
 static long sys_listfiles(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -258,7 +413,7 @@ static long sys_listfiles(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64_t a
     (void)a4;
     (void)a5;
     (void)a6;
-    if (buf == 0) {
+    if (!user_range_ok(buf, maxlen, 1)) {
         return -1;
     }
     return (long)vfs_list((char *)buf, (size_t)maxlen);
@@ -296,7 +451,12 @@ static long sys_pipe(uint64_t fds_out_ptr, uint64_t a2, uint64_t a3, uint64_t a4
     (void)a4;
     (void)a5;
     (void)a6;
-    if (fds_out_ptr == 0) {
+    /* M52: checked before anything is allocated, not after. A pipe
+     * created and two fd slots claimed for a caller whose output pointer
+     * then turns out to be garbage would be a leak caused by the error
+     * path itself. */
+    int out[2];
+    if (!user_range_ok(fds_out_ptr, sizeof(out), 1)) {
         return -1;
     }
     task_t *self = sched_current();
@@ -324,10 +484,9 @@ static long sys_pipe(uint64_t fds_out_ptr, uint64_t a2, uint64_t a3, uint64_t a4
     self->fds[write_fd].type = FD_PIPE_WRITE;
     self->fds[write_fd].pipe = p;
 
-    int *out = (int *)fds_out_ptr;
     out[0] = read_fd;
     out[1] = write_fd;
-    return 0;
+    return copy_to_user(fds_out_ptr, out, sizeof(out));
 }
 
 /* Read-only: nothing needs to *change* a process's group yet (no job
@@ -450,6 +609,17 @@ static long sys_shm_free(uint64_t id, uint64_t vaddr, uint64_t a3, uint64_t a4, 
         if ((vaddr & (PAGE_SIZE - 1)) != 0) {
             return -1; /* not something SYS_shm_map ever returned */
         }
+        /* M52: nor is anything outside the caller's own private region.
+         * Without this an address in PML4[0] would have been unmapped
+         * from the *shared kernel* map - vmm_unmap_page_in walks whatever
+         * hierarchy the address indexes into, and PML4[0] is the same
+         * subtree in every address space. That is a user-triggerable way
+         * to take the machine down, which is precisely what this
+         * milestone is about. */
+        uint64_t last = vaddr + (uint64_t)pages * PAGE_SIZE;
+        if (vaddr < USER_REGION_BASE || last > USER_REGION_LIMIT || last < vaddr) {
+            return -1;
+        }
         uint64_t pml4 = sched_current()->pml4_phys;
         for (int64_t i = 0; i < pages; i++) {
             /* Return value ignored on purpose: a page that wasn't mapped
@@ -469,15 +639,12 @@ static long sys_fb_info(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
     (void)a4;
     (void)a5;
     (void)a6;
-    if (out_ptr == 0) {
-        return -1;
-    }
-    wm_fb_info_t *out = (wm_fb_info_t *)out_ptr;
-    out->width = fb_width();
-    out->height = fb_height();
-    out->pitch = fb_pitch_bytes();
-    out->bpp = 32;
-    return 0;
+    wm_fb_info_t out;
+    out.width = fb_width();
+    out.height = fb_height();
+    out.pitch = fb_pitch_bytes();
+    out.bpp = 32;
+    return copy_to_user(out_ptr, &out, sizeof(out));
 }
 
 /* Maps the real linear framebuffer into the caller's address space at a
@@ -513,10 +680,17 @@ static long sys_mouse_read(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t 
     (void)a4;
     (void)a5;
     (void)a6;
-    if (out_ptr == 0) {
+    /* The range is checked before the read, so a garbage pointer cannot
+     * consume an event and then fail to deliver it - which would lose
+     * that event for good, the queue being the only copy. */
+    mouse_event_t ev;
+    if (!user_range_ok(out_ptr, sizeof(ev), 1)) {
         return -1;
     }
-    return mouse_read((mouse_event_t *)out_ptr);
+    if (!mouse_read(&ev)) {
+        return 0;
+    }
+    return copy_to_user(out_ptr, &ev, sizeof(ev)) == 0 ? 1 : -1;
 }
 
 /* Like sys_pipe, but installs a *named* pipe (pipe_named) instead of a
@@ -529,7 +703,15 @@ static long sys_pipe_open(uint64_t name_ptr, uint64_t fds_out_ptr, uint64_t a3, 
     (void)a4;
     (void)a5;
     (void)a6;
-    if (name_ptr == 0 || fds_out_ptr == 0) {
+    /* Both arguments checked before any state is touched, same reason
+     * sys_pipe does. A name too long to be a named pipe is refused rather
+     * than truncated: a truncated name is a *different* pipe, and this is
+     * a rendezvous mechanism where that means connecting two programs
+     * that never meant to talk. */
+    char name[NAMED_PIPE_NAME_LEN];
+    int out[2];
+    if (copy_str_from_user(name, name_ptr, sizeof(name)) != 0 ||
+        !user_range_ok(fds_out_ptr, sizeof(out), 1)) {
         return -1;
     }
     task_t *self = sched_current();
@@ -548,7 +730,7 @@ static long sys_pipe_open(uint64_t name_ptr, uint64_t fds_out_ptr, uint64_t a3, 
         return -1;
     }
 
-    pipe_t *p = pipe_named((const char *)name_ptr);
+    pipe_t *p = pipe_named(name);
     if (!p) {
         return -1;
     }
@@ -557,10 +739,9 @@ static long sys_pipe_open(uint64_t name_ptr, uint64_t fds_out_ptr, uint64_t a3, 
     self->fds[write_fd].type = FD_PIPE_WRITE;
     self->fds[write_fd].pipe = p;
 
-    int *out = (int *)fds_out_ptr;
     out[0] = read_fd;
     out[1] = write_fd;
-    return 0;
+    return copy_to_user(fds_out_ptr, out, sizeof(out));
 }
 
 /* M21: the raw-event counterpart to sys_read's fd=0 line-blocking
@@ -573,15 +754,17 @@ static long sys_kbd_read(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4
     (void)a4;
     (void)a5;
     (void)a6;
-    if (out_ptr == 0) {
+    /* Checked before the read, for the same reason sys_mouse_read is:
+     * the keyboard queue is the only copy of that character. */
+    if (!user_range_ok(out_ptr, sizeof(char), 1)) {
         return -1;
     }
     int c = keyboard_read();
     if (c == -1) {
         return 0;
     }
-    *(char *)out_ptr = (char)c;
-    return 1;
+    char ch = (char)c;
+    return copy_to_user(out_ptr, &ch, sizeof(ch)) == 0 ? 1 : -1;
 }
 
 /* M21: a non-consuming peek at how many bytes a pipe read fd has ready -
@@ -788,7 +971,15 @@ static long sys_taskinfo(uint64_t buf, uint64_t max_entries, uint64_t a3, uint64
     (void)a4;
     (void)a5;
     (void)a6;
-    if (buf == 0 || max_entries == 0 || max_entries > 4096) {
+    /* M52: the cap is TASK_INFO_MAX rather than a hand-picked 4096.
+     * There has never been anything for entries past the task table to
+     * hold, and "a number comfortably larger than the real one" is the
+     * exact shape of near-duplicate cap this project has shipped three
+     * bugs behind. An out-of-range count is an error return, never a
+     * silent clamp: a caller that asked for more than exists has a bug,
+     * and quietly answering a different question hides it. */
+    if (max_entries == 0 || max_entries > TASK_INFO_MAX ||
+        !user_range_ok(buf, max_entries * sizeof(task_info_t), 1)) {
         return -1;
     }
     task_info_t *out = (task_info_t *)buf;
@@ -829,7 +1020,7 @@ static long sys_clipboard_set(uint64_t buf, uint64_t len, uint64_t a3, uint64_t 
     (void)a4;
     (void)a5;
     (void)a6;
-    if (buf == 0) {
+    if (!user_range_ok(buf, len, 0)) {
         return -1;
     }
     clipboard_set((const void *)buf, (size_t)len);
@@ -841,7 +1032,7 @@ static long sys_clipboard_get(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64
     (void)a4;
     (void)a5;
     (void)a6;
-    if (buf == 0) {
+    if (!user_range_ok(buf, maxlen, 1)) {
         return -1;
     }
     return (long)clipboard_get((void *)buf, (size_t)maxlen);

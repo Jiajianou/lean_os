@@ -46,6 +46,23 @@ void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t 
  * difference. */
 int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt);
 
+/* M52: is every page of [virt, virt + len) present, user-accessible and
+ * (if need_write) writable in the address space rooted at pml4_phys?
+ *
+ * This is the primitive `copy_from_user`/`copy_to_user` are built on, and
+ * therefore the thing that finally makes a bad pointer from a user
+ * program an error return rather than a kernel fault. It answers the
+ * question the hardware would answer by faulting, by doing the same walk
+ * the hardware does - PRESENT and U/S required at *every* level, which is
+ * how x86 paging itself computes access rights, so a page whose leaf
+ * entry looks fine under a kernel-only PDPT is correctly refused.
+ *
+ * len == 0 is true for any address (there is nothing to touch). A range
+ * that wraps past the top of the address space is false rather than
+ * being wrapped around, which is the "a length that overflows the range"
+ * case in M52's garbage-argument matrix. */
+int vmm_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_write);
+
 /* Allocates a fresh PML4 with PML4[0] shared with the kernel's (so ring 0
  * code - interrupt/syscall handlers - keeps working no matter which
  * process's CR3 is loaded) and everything else zeroed, ready for

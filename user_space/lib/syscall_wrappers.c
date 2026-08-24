@@ -16,6 +16,10 @@ static long do_syscall(long num, long a1, long a2, long a3) {
     return ret;
 }
 
+long sys_raw(long num, long a1, long a2, long a3) {
+    return do_syscall(num, a1, a2, a3);
+}
+
 long sys_write(int fd, const void *buf, size_t len) {
     return do_syscall(SYS_write, fd, (long)buf, (long)len);
 }

@@ -1488,6 +1488,45 @@ def test_alt_tab_visits_windows_in_use_order(m):
              "Shift+Alt+Tab did not wrap to the window used longest ago")
 
 
+def test_a_crashing_program_only_takes_itself_down(m):
+    """M52's headline claim, from the side a person actually sees it.
+
+    Before this milestone isr.c panicked on every fault regardless of
+    ring, so a null dereference anywhere in user space stopped the whole
+    machine - by a distance the largest source of "you have to reset it"
+    this project has had. Now it kills one process, the compositor
+    notices the death it did not ask for, and M48's crash toast finally
+    has something real to report rather than only ever firing for a
+    failed spawn.
+
+    The proof that the machine survived is deliberately not "the
+    screenshot still looks like a desktop" - a hung guest would keep
+    showing the last frame it painted. It is that a *new* program
+    launched afterwards opens a window, which needs the compositor, the
+    taskbar, the scheduler and the filesystem all still working."""
+    boot(m)
+    m.sendkey("ctrl-spc")
+    wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
+             "Ctrl+Space did not open the launcher")
+    m.type_text("wm_faulter")
+    m.sendkey("ret")
+
+    # It connects, paints, and only then dereferences null - see
+    # user_space/bin/wm_faulter.c's ALIVE_MS. Waiting for its window
+    # first is what makes the crash a crash of something that was alive.
+    wait_for_windows(m, 1)
+
+    probe = toast_stripe_probe(0)
+    wait_for(m, lambda s: s.px(*probe) == TOAST_ERROR_C,
+             "a client that faulted raised no crash toast", timeout=15.0)
+    wait_for(m, lambda s: count_app_windows(s) == 0,
+             "the faulting client's window was never reclaimed")
+
+    # The real assertion: the machine is still a working desktop.
+    m.double_click(ICON_X, ICONS[4][2])  # Clock
+    wait_for_windows(m, 1, timeout=15.0)
+
+
 def test_soak_desktop_stays_usable(m):
     """M50's soak: leave the desktop up with everything that ticks on a
     timer running, then require the machine to still work.
@@ -1570,6 +1609,7 @@ TESTS = [
     ("clicking_a_window_raises_it", test_clicking_a_window_raises_it),
     ("overlap_click_reaches_the_front_window", test_overlap_click_reaches_the_front_window),
     ("alt_tab_visits_windows_in_use_order", test_alt_tab_visits_windows_in_use_order),
+    ("a_crashing_program_only_takes_itself_down", test_a_crashing_program_only_takes_itself_down),
     ("soak_desktop_stays_usable", test_soak_desktop_stays_usable),
     ("launch_close_stress", test_launch_close_stress),
 ]

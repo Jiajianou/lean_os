@@ -3,6 +3,8 @@
 #include "drivers/klog.h"
 #include "panic.h"
 #include "pic.h"
+#include "sched/sched.h" /* M52 - task_exit_with_code/sched_current, so a ring-3 fault kills one task instead of the machine */
+#include "signal.h"      /* system_api/include/signal.h - SIGSEGV, the exit code a killed-for-faulting task gets */
 
 #define PAGE_FAULT_VECTOR 14
 #define BREAKPOINT_VECTOR 3
@@ -50,14 +52,54 @@ static void dump_regs(isr_regs_t *r) {
 }
 
 /* isr_handler: dispatch for CPU exceptions (vectors 0-31). Breakpoints are
- * the one recoverable case - everything else is treated as fatal, since
- * this kernel has no fault-recovery story yet (no page-fault-driven
- * demand paging, no per-process fault isolation). */
+ * the one recoverable case.
+ *
+ * M52 splits the rest by *ring*, which is the whole milestone in one
+ * branch. Until now every fault panicked, so any wild pointer in any user
+ * program stopped the machine - by a distance the largest source of "you
+ * have to reset it" this project has had. A fault in ring 3 is a bug in
+ * one program and now kills only that program, with a distinguishable
+ * exit code (128 + SIGSEGV = 139) so everything that already watches for
+ * a client dying - M29's reap_dead_clients, M48's crash toast, SYS_wait -
+ * treats it exactly like any other unexpected death, which is what it is.
+ * A fault in ring 0 still panics, loudly: that is a kernel bug, and
+ * quietly killing whatever task happened to be current would hide it.
+ *
+ * Every fatal exception is handled this way, not only #PF. A
+ * divide-by-zero, an invalid opcode and a #GP from ring 3 are the same
+ * kind of event - a program that did something impossible - and there is
+ * nothing to be gained by leaving three of them able to stop the machine
+ * while the fourth cannot. They share one exit code because this project
+ * has no per-signal handling to tell them apart with; the log line names
+ * which it was. */
 void isr_handler(isr_regs_t *r) {
     if (r->vector == BREAKPOINT_VECTOR) {
         klog_puts("[isr] breakpoint (int3) hit - resuming\n");
         dump_regs(r);
         return;
+    }
+
+    /* The low two bits of the saved CS are the privilege level the fault
+     * came from - 3 for user code, 0 for the kernel. This is the real
+     * question ("whose bug is this?"), and it is one the interrupt frame
+     * has always carried. */
+    if ((r->cs & 3) == 3) {
+        task_t *t = sched_current();
+        klog_puts("\n[isr] ring-3 fault: ");
+        klog_puts(exception_name(r->vector));
+        klog_puts(" in task ");
+        klog_puts(t && t->name[0] ? t->name : "(unnamed)");
+        klog_puts(" pid 0x");
+        klog_put_hex32((uint32_t)(t ? t->id : -1));
+        klog_puts(" - terminating it, not the machine\n");
+        dump_regs(r);
+        /* noreturn: a TERMINATED task is never scheduled again, so the
+         * interrupt frame this was called from is simply abandoned along
+         * with the rest of that task's kernel stack. Exactly what the
+         * SIGKILL/SIGTERM path already does from inside IRQ0's handler
+         * (sched.c's deliver_pending_signal_and_exit), which is why this
+         * is safe from interrupt context at all. */
+        task_exit_with_code(128 + SIGSEGV);
     }
 
     klog_puts("\n*** UNHANDLED CPU EXCEPTION: ");

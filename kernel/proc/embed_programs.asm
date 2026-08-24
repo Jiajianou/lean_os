@@ -140,6 +140,18 @@ wm_zorder_elf_start:
     incbin "build/wm_zorder.elf"
 wm_zorder_elf_end:
 
+global wm_faulter_elf_start
+global wm_faulter_elf_end
+wm_faulter_elf_start:
+    incbin "build/wm_faulter.elf"
+wm_faulter_elf_end:
+
+global badptr_elf_start
+global badptr_elf_end
+badptr_elf_start:
+    incbin "build/badptr.elf"
+badptr_elf_end:
+
 global shutdown_elf_start
 global shutdown_elf_end
 shutdown_elf_start:

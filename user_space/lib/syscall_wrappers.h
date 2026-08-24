@@ -17,6 +17,15 @@
 #include "proc.h"  /* system_api/include/proc.h - task_info_t, M45 */
 #include "wm.h"    /* system_api/include/wm.h - wm_fb_info_t */
 
+/* M52: the raw ABI, with no typed wrapper in the way. Exists for one
+ * caller - user_space/bin/badptr.c, which runs this milestone's
+ * garbage-argument matrix and therefore has to pass arguments no typed
+ * signature would let it express (a `void *` that is really 0xFFFF...,
+ * a length of ~0). Nothing else should use it: the typed wrappers below
+ * are the interface, and reaching past them in an ordinary program is
+ * how an ABI change stops being a compile error. */
+long sys_raw(long num, long a1, long a2, long a3);
+
 long sys_write(int fd, const void *buf, size_t len);
 void sys_exit(int code) __attribute__((noreturn));
 long sys_getpid(void);

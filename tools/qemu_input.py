@@ -51,7 +51,12 @@ import tempfile
 import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMAGE = os.path.join(REPO_ROOT, "build", "os-image.bin")
+# The image to boot. Overridable so a long suite run can be pointed at a
+# *frozen copy* while development carries on in the same tree - a `make`
+# rewrites build/os-image.bin under any guest still reading it, which
+# silently invalidates every test that has not started yet. Snapshot the
+# image, export LEANOS_IMAGE, and the two are independent.
+IMAGE = os.environ.get("LEANOS_IMAGE") or os.path.join(REPO_ROOT, "build", "os-image.bin")
 OVMF_CODE = os.path.join(REPO_ROOT, "build", "ovmf", "OVMF_CODE.fd")
 OVMF_VARS = os.path.join(REPO_ROOT, "build", "ovmf", "OVMF_VARS.fd")
 

@@ -64,6 +64,8 @@
     X(task_manager)                \
     X(wm_stubborn)                 \
     X(wm_zorder)                   \
+    X(wm_faulter)                  \
+    X(badptr)                      \
     X(shutdown)                    \
     X(reboot)
 
@@ -3348,6 +3350,178 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         }
         klog_puts("[m51] z-order raise-on-click, occlusion-correct hit-testing (the overlap "
                    "click reaching exactly the front window) and wm_window_info_t.z_index "
+                   "self-test passed (7/7 checks).\n\n");
+    }
+
+    /* M52 self-test: a user program that dereferences a null pointer
+     * dies alone, and every syscall that takes a pointer refuses every
+     * shape of bad one.
+     *
+     * The first half is the whole milestone in one assertion, and the
+     * assertion is that *this code keeps running*. Before M52, isr.c
+     * panicked on every fault regardless of ring, so any wild pointer in
+     * any user program stopped the machine - by a distance the largest
+     * source of "you have to reset it" this project has had. There is no
+     * pixel to read for "the kernel did not die"; reaching the checks
+     * below at all is the proof, and the serial harness's own
+     * "no kernel panic" grade is the other half of it.
+     *
+     * user_space/bin/wm_faulter.c connects and paints before it faults,
+     * deliberately. A process that crashes before owning anything would
+     * only prove the fault handler runs; one that crashes holding a
+     * window, an shm segment and an event pipe proves everything
+     * downstream still works - M29's reap_dead_clients noticing, the
+     * window slot coming back, the segment's frames coming back. It is
+     * 200x120 and connects first, so its window content is x:[100,300)
+     * y:[100,220) and (150, 150) is inside it.
+     *
+     * The second half is the garbage-argument matrix, which runs as
+     * user_space/bin/badptr.c rather than as a block here - see that
+     * file's header for why it structurally cannot live in the kernel:
+     * syscall.c's user_range_ok exempts kernel threads, so every row run
+     * from here would take that early return and prove nothing. */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *fault_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !fault_image) {
+            panic("out of memory reading compositor/wm_faulter back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t fault_size = vfs_read("wm_faulter", fault_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || fault_size < 0) {
+            panic("vfs_read: compositor/wm_faulter missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(300);
+
+        uint64_t frames_before = pmm_free_frame_count();
+        task_t *victim = process_spawn("wm_faulter", fault_image, (size_t)fault_size, "");
+        kfree(fault_image);
+        pit_sleep_ms(500); /* connects and paints, comfortably inside its own ALIVE_MS before it faults */
+
+        uint32_t painted = fb_get_pixel(150, 150);
+        int alive_before_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
+        uint64_t frames_with_victim = pmm_free_frame_count();
+
+        /* Past its ALIVE_MS, plus room for the compositor's own reap loop
+         * to notice and repaint. If the machine were going to stop, this
+         * is where it would have. */
+        pit_sleep_ms(1400);
+
+        int alive_after_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
+        long victim_exit = do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0);
+        uint32_t after_fault = fb_get_pixel(150, 150);
+        uint64_t frames_after = pmm_free_frame_count();
+
+        /* SYS_shm_free's own range check, which is not behind
+         * user_range_ok and therefore *is* testable from here. Without it
+         * a vaddr in PML4[0] would have been unmapped from the shared
+         * kernel map - the same subtree every address space uses - which
+         * is a user-triggerable way to take the machine down and exactly
+         * what this milestone exists to close. */
+        long seg = do_syscall(SYS_shm_create, 4096, 0, 0);
+        long free_kernel_addr = do_syscall(SYS_shm_free, (uint64_t)seg, 0x100000ULL, 0);
+        long free_unaligned = do_syscall(SYS_shm_free, (uint64_t)seg, USER_SHM_BASE + 1, 0);
+        long free_ok = do_syscall(SYS_shm_free, (uint64_t)seg, 0, 0);
+
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        int all_ok = 1;
+        if (painted != 0x0020C0A0u) {
+            klog_puts("[m52] the faulting client never got a window on screen, so what follows would not have been a crash - expected 0x0020C0A0 got 0x");
+            klog_put_hex32(painted);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (alive_before_fault != 1) {
+            klog_puts("[m52] the faulting client was not running before it faulted (SYS_task_alive 0x");
+            klog_put_hex32((uint32_t)alive_before_fault);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+        if (alive_after_fault != 0) {
+            klog_puts("[m52] a null dereference in ring 3 did not terminate the offending task (SYS_task_alive 0x");
+            klog_put_hex32((uint32_t)alive_after_fault);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+        if (victim_exit != 128 + SIGSEGV) {
+            klog_puts("[m52] a faulting task's exit code is not distinguishable as a fault - expected 0x");
+            klog_put_hex32((uint32_t)(128 + SIGSEGV));
+            klog_puts(" got 0x");
+            klog_put_hex32((uint32_t)victim_exit);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (after_fault != 0x001A1A2Eu) {
+            klog_puts("[m52] the dead client's window was not reclaimed - expected the desktop background 0x001A1A2E at (150,150), got 0x");
+            klog_put_hex32(after_fault);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        /* The segment wm_faulter creates for itself is 64 KiB, 16 frames -
+         * the window's own pixel buffer belongs to the compositor, so
+         * without that this process would own nothing reclaimable. Its
+         * address space and stack are deliberately not reclaimed (there
+         * is no vmm_destroy_address_space yet - that is M54), so this is
+         * a "did the *crash* path run shm_free_by_owner" check, measured
+         * the way M45 measured the SIGKILL one: against the state with
+         * the victim running, not against the state before it existed. */
+        if (frames_after < frames_with_victim + 16) {
+            klog_puts("[m52] a crashed client's shm segment was not handed back: 0x");
+            klog_put_hex64(frames_before);
+            klog_puts(" free before it started, 0x");
+            klog_put_hex64(frames_with_victim);
+            klog_puts(" with it running, 0x");
+            klog_put_hex64(frames_after);
+            klog_puts(" after it faulted and was reaped\n");
+            all_ok = 0;
+        }
+        if (seg < 0 || free_kernel_addr == 0 || free_unaligned == 0 || free_ok != 0) {
+            klog_puts("[m52] SYS_shm_free's vaddr bounds are wrong: id 0x");
+            klog_put_hex32((uint32_t)seg);
+            klog_puts(", kernel address returned 0x");
+            klog_put_hex32((uint32_t)free_kernel_addr);
+            klog_puts(", unaligned returned 0x");
+            klog_put_hex32((uint32_t)free_unaligned);
+            klog_puts(", the legitimate free returned 0x");
+            klog_put_hex32((uint32_t)free_ok);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+
+        /* The matrix. badptr exits with the number of rows that were
+         * wrongly accepted, and prints each one to its stdout - which is
+         * this klog, so a failure names itself in the same log this
+         * message is in. */
+        uint8_t *bad_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!bad_image) {
+            panic("out of memory reading badptr back from disk");
+        }
+        int64_t bad_size = vfs_read("badptr", bad_image, LEANFS_MAX_FILE_SIZE);
+        if (bad_size < 0) {
+            panic("vfs_read: badptr missing - should exist, just seeded");
+        }
+        task_t *bad_task = process_spawn("badptr", bad_image, (size_t)bad_size, "");
+        kfree(bad_image);
+        long bad_exit = do_syscall(SYS_wait, (uint64_t)bad_task->id, 0, 0);
+        if (bad_exit != 0) {
+            klog_puts("[m52] the garbage-argument matrix accepted 0x");
+            klog_put_hex32((uint32_t)bad_exit);
+            klog_puts(" argument(s) it should have refused - see the [badptr] lines above\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M52 kernel-hardening self-test: a user program can still take the kernel with it");
+        }
+        klog_puts("[m52] a ring-3 null dereference killing only its own task (exit 139), its "
+                   "window and segment reclaimed, SYS_shm_free refusing a kernel address, and "
+                   "every pointer-taking syscall refusing every shape of bad pointer "
                    "self-test passed (7/7 checks).\n\n");
     }
 

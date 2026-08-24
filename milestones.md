@@ -2400,50 +2400,135 @@ than merely absent: a click can land on a window nobody can see.
       is the same "assert on a guest-side state signal, not on elapsed
       time" pattern M45 and M48 each had to learn
 
-## M52 — Kernel hardening: validated user pointers, no user-triggerable panic
+## M52 — Kernel hardening: validated user pointers, no user-triggerable panic ✅
 
 `sys_write`'s comment - "buf is trusted as-is for now; validating that a
 ring-3 pointer is actually mapped and owned by the caller is left for
-whenever a genuinely untrusted program needs to run here" - has been true
+whenever a genuinely untrusted program needs to run here" - had been true
 for forty-four milestones. The threat model argument was always right and
-is also beside the point: the programs this OS runs are *its own*, and
-the bug this prevents is a buggy app taking the machine down rather than
+is also beside the point: the programs this OS runs are *its own*, and the
+bug this prevents is a buggy app taking the machine down rather than
 itself.
 
-- [ ] `copy_from_user` / `copy_to_user` in the syscall layer: check the
-      address range lies inside the caller's own PML4[1] region
-      (`proc.h`'s constants already define exactly what that is) and is
-      actually mapped, then copy. Return -1 rather than faulting. Every
-      syscall that today casts a `uint64_t` argument straight to a
-      pointer goes through them
-- [ ] The audit is the milestone, not the primitive. Thirty-one syscalls
-      dereference at least one user pointer; each one gets converted and
-      each one gets a deliberate garbage-argument test, in the shape M50
-      established for the five it covered. Null, kernel addresses, an
-      address one byte before the user region, an address one byte past
-      the end of a mapped page, and a length that overflows the range
-- [ ] A page-fault handler that kills the offending task instead of
-      panicking. Today `isr.c` panics on #PF, so *any* wild pointer in
-      any user program stops the machine - the single largest source of
-      "you have to reset it" this project has. A fault in ring 3
-      terminates that task with a distinguishable exit code; a fault in
-      ring 0 still panics, because that is a kernel bug and should be
-      loud
-- [ ] M48's crash toast finally has something real to report: a client
-      that faults now dies the same way a SIGKILLed one does, and the
-      compositor already announces exactly that
-- [ ] `SYS_shm_map`'s id, `SYS_pipe_*`'s fd numbers, `SYS_taskinfo`'s
-      count and every other bounds check re-derived from the same rule -
-      an out-of-range argument is an error return, never a panic and
-      never a silent clamp
-- [ ] New boot self-test (`[m52]`): a deliberately faulting user program
-      (`user_space/bin/wm_faulter.c`, in the same self-test-only role
-      `wm_stubborn.c` holds) that dereferences a null pointer, spawned
-      and required to die *alone* - the machine still running afterwards
-      is the assertion, and the frame/task accounting around it is the
-      M40-shaped audit
-- [ ] Every syscall's garbage-argument matrix run as a table rather than
-      as prose, so adding a syscall without adding a row is visible
+- [x] `vmm_user_range_ok(pml4, virt, len, need_write)` in `vmm.c` - the
+      primitive everything else here is built on. It answers the question
+      the hardware would answer by faulting, by doing the same walk the
+      hardware does: PRESENT and U/S required at *every* level, which is
+      how x86 paging computes access rights, so a leaf entry that looks
+      fine under a kernel-only PDPT is correctly refused. Huge pages are
+      refused outright (nothing a user process owns is one), and a length
+      that wraps the address space is false rather than wrapped
+- [x] `user_range_ok` in the syscall layer applies two rules: the range
+      lies inside the caller's own private region (`USER_REGION_BASE`/
+      `USER_REGION_LIMIT`, new in `proc.h` and exactly what PML4[1]
+      covers) and every page of it is present and user-accessible.
+      Failing either is `-1`, never a fault
+- [x] Three shapes, for three genuinely different cases, rather than one
+      primitive pretending they are alike: `copy_to_user` for a
+      fixed-size payload the kernel produces, `copy_str_from_user` for a
+      NUL-terminated string whose length nobody knows until it is read
+      (validated page by page as the copy crosses into each one), and a
+      plain range check plus in-place use for a bulk buffer whose length
+      the caller chooses. There is no bounded bounce buffer for an
+      arbitrary length, and allocating one per call would turn every
+      large write into an allocation that can fail
+- [x] In-place use is safe here for a reason worth writing down rather
+      than assuming: the only way a mapping in the private region can go
+      away is `SYS_shm_free`, and a process has exactly one thread of
+      control - so while it is blocked inside a syscall there is nobody
+      who could unmap the buffer it just passed. The day this project
+      grows threads within a process, that comment is what stops being
+      true
+- [x] **No `copy_from_user`**, deliberately, and this is a correction to
+      the plan above. No syscall in this project takes a fixed-size
+      struct *from* the caller - the window-manager protocol carries its
+      structs over pipes, not arguments - so it would have been a
+      primitive with no user, which this project has refused to write
+      before for the reasons `pipe.h` gives about `pipe_named`. It is
+      four lines the day one is needed, and the rule it would enforce is
+      already written down
+- [x] The audit, and the real number: **fourteen** syscalls dereference
+      at least one pointer the caller chose, not the thirty-one the plan
+      above guessed. `SYS_write`, `SYS_read`, `SYS_spawn` (two strings),
+      `SYS_readfile`, `SYS_writefile`, `SYS_listfiles`, `SYS_pipe`,
+      `SYS_fb_info`, `SYS_mouse_read`, `SYS_pipe_open`, `SYS_kbd_read`,
+      `SYS_taskinfo`, `SYS_clipboard_set`, `SYS_clipboard_get`. The rest
+      take numbers, or *return* addresses without taking any
+      (`SYS_fb_map`, `SYS_shm_map`, `SYS_sbrk`)
+- [x] Truncation is refused, not performed. A path longer than
+      `LEANFS_MAX_NAME` or a pipe name longer than `NAMED_PIPE_NAME_LEN`
+      is an error: a truncated path names a *different file*, and a
+      truncated pipe name is a rendezvous with a program that never meant
+      to talk to you. `NAMED_PIPE_NAME_LEN` moved from `pipe.c` into
+      `pipe.h` so the buffer and the cap are one definition rather than
+      the near-duplicate cap this project has shipped three bugs behind
+- [x] `SYS_shm_free`'s `vaddr` had a real hole and it is closed: any
+      address was accepted, so one in PML4[0] would have unmapped a page
+      from the *shared kernel map* - the same subtree every address space
+      uses. That is a user-triggerable way to take the machine down, and
+      it is one of the [m52] checks
+- [x] `SYS_taskinfo`'s count cap is `TASK_INFO_MAX` rather than a
+      hand-picked 4096, and an out-of-range count is an error return,
+      never a silent clamp: a caller that asked for more than exists has
+      a bug, and quietly answering a different question hides it
+- [x] Null is refused from *any* ring, before the kernel-thread
+      exemption. Address 0 is inside the identity map, so a kernel caller
+      passing it would not fault - it would quietly scribble on physical
+      page 0 - and M50's own "SYS_taskinfo with a null buffer" row is
+      exactly that case asserted from `kernel_main`
+- [x] **A kernel thread is exempt, by design, and this shaped the
+      testing.** A task sharing the kernel's address space is passing
+      kernel pointers, which is what it is supposed to do - the boot
+      self-tests have driven `SYS_pipe_open` and `SYS_writefile` that way
+      since M13. Told apart by which PML4 it runs on. The consequence:
+      a garbage-argument matrix run from `kernel_main` would prove
+      nothing, because every row would take that early return
+- [x] `isr.c` splits fatal exceptions by *ring*, which is the whole
+      milestone in one branch. A fault in ring 3 terminates that task
+      with exit code `128 + SIGSEGV` (139), logged with the task's name
+      and pid; a fault in ring 0 still panics, because that is a kernel
+      bug and should be loud. Safe from interrupt context for the same
+      reason the SIGKILL path already is - it is the identical
+      `task_exit_with_code` call from inside a handler
+- [x] Every fatal exception, not only `#PF`. A divide-by-zero, an invalid
+      opcode and a `#GP` from ring 3 are the same kind of event and there
+      was nothing to gain from leaving three of them able to stop the
+      machine while the fourth could not
+- [x] M48's crash toast finally has something real to report: a client
+      that faults dies exactly the way a SIGKILLed one does, and the
+      compositor already announces precisely that
+- [x] `user_space/bin/wm_faulter.c` - a program that dereferences null on
+      purpose, in the same self-test-only role `wm_stubborn.c` holds. It
+      connects, paints, and creates a 64 KiB segment of its own *before*
+      faulting: a process that crashes owning nothing would only prove
+      the fault handler runs, while one that crashes holding a window, a
+      segment and an event pipe proves the whole reclaim chain still
+      works
+- [x] `user_space/bin/badptr.c` - the garbage-argument matrix as a table,
+      and a **user program** rather than a block in `kernel.c`, for the
+      exemption reason above. Fourteen rows crossed with six shapes of
+      bad pointer: null, a kernel address, one byte below the private
+      region, an unmapped address inside it, a mapped byte whose range
+      straddles into an unmapped page, and a valid pointer with a length
+      that overflows. It derives all six from ring 3 - the region base is
+      its own load address with the low 39 bits (one PML4 entry) masked
+      off - rather than restating kernel constants a user program has no
+      business knowing. Exit code is the number wrongly accepted, so
+      adding a syscall without adding a row is a visible omission
+- [x] New boot self-test (`[m52]`), 7/7: the faulter's window painted,
+      then gone; the task terminated with 139; its segment's frames back;
+      `SYS_shm_free` refusing a kernel address and an unaligned one while
+      still accepting the legitimate free; and the matrix reporting 0
+      accepted. The assertion that this code *keeps running* is the one
+      that matters, and the serial harness's own "no kernel panic" grade
+      is the other half of it
+- [x] New interactive test
+      (`a_crashing_program_only_takes_itself_down`): launch the faulter
+      from the launcher, watch the crash toast appear and its window get
+      reclaimed, and then **launch something else and require it to
+      open** - deliberately not "the screenshot still looks like a
+      desktop", since a hung guest would keep showing its last frame
+- [x] Full regression: 38/38 serial markers and 36/36 interactive tests
 
 ## M53 — Directories in leanfs, and a namespace that isn't a junk drawer
 

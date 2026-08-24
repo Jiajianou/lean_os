@@ -71,7 +71,11 @@ SECONDS_TO_RUN="${1:-96}"
 shift || true
 EXTRA_ARGS=("$@")
 
-IMAGE="build/os-image.bin"
+# Overridable for the same reason tools/qemu_input.py's IMAGE is: a
+# `make` in this tree rewrites build/os-image.bin under a guest that is
+# still reading it. Snapshot the image and export LEANOS_IMAGE to run a
+# long check against a frozen one.
+IMAGE="${LEANOS_IMAGE:-build/os-image.bin}"
 OVMF_CODE="build/ovmf/OVMF_CODE.fd"
 OVMF_VARS_TEMPLATE="build/ovmf/OVMF_VARS.fd"
 OVMF_VARS_RUNTIME="$(mktemp -t qemu-serial-ovmf-vars-XXXXXX.fd)"
@@ -148,6 +152,7 @@ REQUIRED_MARKERS=(
   "[m49] the shared shortcut table resolving every chord (and refusing every"
   "[m50] 24 shm create/free cycles frame-neutral, a double free refused, 16"
   "[m51] z-order raise-on-click, occlusion-correct hit-testing (the overlap"
+  "[m52] a ring-3 null dereference killing only its own task (exit 139), its"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

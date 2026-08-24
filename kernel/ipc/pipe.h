@@ -34,6 +34,13 @@ pipe_t *pipe_create(void);
  * exact same one. Fixed small table (8 names) - this project has no
  * dynamic multi-service discovery need beyond M20's own window-creation
  * protocol yet. Returns NULL if the table is full. */
+/* M52: moved here from pipe.c, where it had been private. syscall.c has
+ * to size the kernel-side buffer it copies a SYS_pipe_open name into, and
+ * a second hand-picked number that merely happened to be large enough is
+ * exactly the near-duplicate cap this project has shipped bugs behind
+ * three times (M40, M41, M50). One definition, both users. */
+#define NAMED_PIPE_NAME_LEN 16
+
 pipe_t *pipe_named(const char *name);
 void pipe_close_read(pipe_t *p);
 void pipe_close_write(pipe_t *p);

@@ -178,6 +178,51 @@ void vmm_unmap_page(uint64_t virt) {
     spin_unlock(&vmm_lock);
 }
 
+int vmm_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_write) {
+    if (len == 0) {
+        return 1;
+    }
+    uint64_t end = virt + len;
+    if (end < virt) {
+        return 0; /* the length wrapped the address space - never a real range */
+    }
+    uint64_t need = PTE_PRESENT | PTE_USER | (need_write ? PTE_WRITABLE : 0);
+
+    spin_lock(&vmm_lock);
+    uint64_t *pml4 = phys_to_table(pml4_phys);
+    for (uint64_t page = virt & ~(PAGE_SIZE - 1); page < end; page += PAGE_SIZE) {
+        /* Deliberately not table_walk: that helper masks the entry down
+         * to its address and hands back the next table, which is exactly
+         * the flag information this check exists to look at. The walk is
+         * the same shape; what differs is that every level's flags are
+         * required rather than assumed. */
+        uint64_t e = pml4[PML4_INDEX(page)];
+        if ((e & need) != need) {
+            spin_unlock(&vmm_lock);
+            return 0;
+        }
+        uint64_t *pdpt = phys_to_table(e & PTE_ADDR_MASK);
+        e = pdpt[PDPT_INDEX(page)];
+        if ((e & need) != need || (e & PTE_HUGE)) {
+            spin_unlock(&vmm_lock);
+            return 0; /* a 1 GiB page is never something a user process owns here */
+        }
+        uint64_t *pd = phys_to_table(e & PTE_ADDR_MASK);
+        e = pd[PD_INDEX(page)];
+        if ((e & need) != need || (e & PTE_HUGE)) {
+            spin_unlock(&vmm_lock);
+            return 0; /* likewise 2 MiB - the identity map's huge pages are kernel-only and live under PML4[0] */
+        }
+        uint64_t *pt = phys_to_table(e & PTE_ADDR_MASK);
+        if ((pt[PT_INDEX(page)] & need) != need) {
+            spin_unlock(&vmm_lock);
+            return 0;
+        }
+    }
+    spin_unlock(&vmm_lock);
+    return 1;
+}
+
 uint64_t vmm_create_address_space(void) {
     spin_lock(&vmm_lock);
     uint64_t new_phys = alloc_table();
