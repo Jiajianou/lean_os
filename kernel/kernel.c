@@ -63,6 +63,7 @@
     X(settings)                    \
     X(task_manager)                \
     X(wm_stubborn)                 \
+    X(wm_zorder)                   \
     X(shutdown)                    \
     X(reboot)
 
@@ -3173,6 +3174,181 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts("[m50] 24 shm create/free cycles frame-neutral, a double free refused, "
                    "16 kill-storm rounds returning every window slot and segment, and 9 "
                    "garbage-argument syscalls all refused self-test passed (13/13 checks).\n\n");
+    }
+
+    /* M51 self-test: the z-order, stated as the two things that were
+     * wrong before it existed.
+     *
+     * Both are about two *overlapping* windows, which is the case this
+     * compositor had never handled: paint order was connection order, so
+     * the window in front was whichever client connected last and nothing
+     * could change that; and every hit-test walked windows[] backwards
+     * taking the first region match rather than the topmost visible
+     * window, so a click in the overlap went to whichever of the two had
+     * the higher slot index - which could be the one underneath.
+     *
+     * This is the first boot self-test in this project to deliver a real
+     * mouse click. Everything mouse-driven before it was left to
+     * tools/qemu-input-test.sh, because the kernel had no way to move a
+     * pointer; M51 adds mouse_inject (kernel/drivers/mouse.h) for exactly
+     * this, and it matters here because a z-order that only ever gets
+     * poked through WM_ACTION_PIPE would leave the actual bug - the
+     * hit-test - untested.
+     *
+     * Geometry, all from compositor.c's own constants. Two wm_zorder
+     * clients, 300x200 each, land on the cascade at (100, 100) and
+     * (140, 140):
+     *
+     *   A content x:[100,400) y:[100,300), frame x:[98,402) y:[78,302)
+     *   B content x:[140,440) y:[140,340), frame x:[138,442) y:[118,342)
+     *
+     * so they overlap over x:[140,400) y:[140,300). (200, 250) is inside
+     * both and is where "which one is in front" is read.
+     *
+     * Each client lights one 10x10 tick per press it is routed, laid out
+     * right-to-left from its own bottom-right corner (see wm_zorder.c) -
+     * the one part of the *lower* window that the upper one never covers,
+     * so both clients' tick rows stay readable whichever is in front:
+     *
+     *   A's ticks at (388..398, 288..298) and (374..384, 288..298)
+     *   B's first tick at (428..438, 328..338)
+     *
+     * (120, 250) is inside A only - left of B's frame and its resize
+     * halo, clear of A's own edges. (300, 200) is inside both. The 8x8
+     * cursor parks where it last clicked, so neither click point is
+     * within 8px of any pixel read afterwards. */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *z_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !z_image) {
+            panic("out of memory reading compositor/wm_zorder back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t z_size = vfs_read("wm_zorder", z_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || z_size < 0) {
+            panic("vfs_read: compositor/wm_zorder missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+
+        task_t *a_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zA 00A02020");
+        pit_sleep_ms(500);
+        task_t *b_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zB 002060C0");
+        kfree(z_image);
+        pit_sleep_ms(500);
+
+        /* B connected second, so it is in front to begin with - which was
+         * true before this milestone too, and is the baseline the raise
+         * below has to change. */
+        uint32_t overlap_before = fb_get_pixel(200, 250);
+
+        /* A real click, at a point that is inside A and outside B. Each
+         * click is three injected events: a pin to the top-left corner (a
+         * delta large enough to saturate the compositor's own clamp,
+         * which is what makes this absolute rather than relative to
+         * wherever the pointer happens to be), a move to the target, then
+         * press and release. */
+        mouse_inject(-4096, -4096, 0, 0);
+        mouse_inject(120, 250, 0, 0);
+        pit_sleep_ms(120);
+        mouse_inject(0, 0, 1, 0);
+        pit_sleep_ms(120);
+        mouse_inject(0, 0, 0, 0);
+        pit_sleep_ms(300);
+
+        uint32_t overlap_after_raise = fb_get_pixel(200, 250);
+        uint32_t a_tick1 = fb_get_pixel(393, 293);
+        uint32_t b_tick1 = fb_get_pixel(433, 333);
+
+        /* The occlusion bug, stated as a test: a click in the region both
+         * windows cover has to reach exactly the one in front. */
+        mouse_inject(-4096, -4096, 0, 0);
+        mouse_inject(300, 200, 0, 0);
+        pit_sleep_ms(120);
+        mouse_inject(0, 0, 1, 0);
+        pit_sleep_ms(120);
+        mouse_inject(0, 0, 0, 0);
+        pit_sleep_ms(300);
+
+        uint32_t a_tick2 = fb_get_pixel(379, 293);
+        uint32_t b_tick_still = fb_get_pixel(433, 333);
+
+        /* And the protocol half: wm_window_info_t.z_index, which is how a
+         * shell learns which window is frontmost without the query
+         * reordering the buttons it draws. A's rank must now be above B's
+         * - the same fact the overlap pixel just showed, read through the
+         * interface desktop_shell.c actually uses. */
+        int query_fds[2], query_resp_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_QUERY_PIPE, (uint64_t)query_fds, 0) != 0 ||
+            do_syscall(SYS_pipe_open, (uint64_t)WM_QUERY_RESP_PIPE, (uint64_t)query_resp_fds, 0) != 0) {
+            panic("M51 self-test: kernel-side SYS_pipe_open(WM_QUERY_PIPE) failed");
+        }
+        uint8_t ping = 1;
+        do_syscall(SYS_write, (uint64_t)query_fds[1], (uint64_t)&ping, sizeof(ping));
+        pit_sleep_ms(300);
+        wm_query_response_t *q = (wm_query_response_t *)kmalloc(sizeof(wm_query_response_t));
+        if (!q) {
+            panic("out of memory for the M51 query response");
+        }
+        k_memset(q, 0, sizeof(*q));
+        do_syscall(SYS_read, (uint64_t)query_resp_fds[0], (uint64_t)q, sizeof(*q));
+        int32_t a_z = -1, b_z = -1;
+        for (int32_t i = 0; i < q->count && i < WM_MAX_ROUTABLE_WINDOWS; i++) {
+            if (k_strcmp(q->windows[i].title, "zA") == 0) {
+                a_z = q->windows[i].z_index;
+            } else if (k_strcmp(q->windows[i].title, "zB") == 0) {
+                b_z = q->windows[i].z_index;
+            }
+        }
+        int32_t reported = q->count;
+        kfree(q);
+
+        selftest_reap(a_task);
+        selftest_reap(b_task);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        int all_ok = 1;
+        static const struct { const char *what; uint32_t expected; } checks_meta[] = {
+            {"the overlap before anything was clicked - the second client to connect starts in front", 0x002060C0u},
+            {"the overlap after clicking the window behind - it has to come forward, which is the whole milestone", 0x00A02020u},
+            {"the clicked window's first tick - it received the press that raised it, rather than having it eaten", 0x00F0E000u},
+            {"the other window's first tick - it must be unlit, since it was not the window clicked", 0x002060C0u},
+            {"the raised window's second tick - a click in the overlap goes to the window in front", 0x00F0E000u},
+            {"the other window's first tick again - the overlap click reached exactly one window", 0x002060C0u},
+        };
+        const uint32_t got[] = {overlap_before, overlap_after_raise, a_tick1, b_tick1, a_tick2, b_tick_still};
+        for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
+            if (got[i] != checks_meta[i].expected) {
+                klog_puts("[m51] pixel check failed: ");
+                klog_puts(checks_meta[i].what);
+                klog_puts(" - expected 0x");
+                klog_put_hex32(checks_meta[i].expected);
+                klog_puts(" got 0x");
+                klog_put_hex32(got[i]);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        if (a_z < 0 || b_z < 0 || a_z <= b_z) {
+            klog_puts("[m51] wm_window_info_t.z_index did not report the raised window as frontmost: zA 0x");
+            klog_put_hex32((uint32_t)a_z);
+            klog_puts(", zB 0x");
+            klog_put_hex32((uint32_t)b_z);
+            klog_puts(", of 0x");
+            klog_put_hex32((uint32_t)reported);
+            klog_puts(" window(s) reported\n");
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M51 z-order self-test: overlapping windows did not behave as specified");
+        }
+        klog_puts("[m51] z-order raise-on-click, occlusion-correct hit-testing (the overlap "
+                   "click reaching exactly the front window) and wm_window_info_t.z_index "
+                   "self-test passed (7/7 checks).\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

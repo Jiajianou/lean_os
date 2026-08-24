@@ -222,6 +222,16 @@ void mouse_init(void) {
     pic_clear_mask(MOUSE_IRQ);
 }
 
+void mouse_inject(int32_t dx, int32_t dy, uint8_t buttons, int32_t wheel) {
+    mouse_event_t ev;
+    ev.dx = dx;
+    ev.dy = dy; /* already in screen coordinates - the caller is not a wire protocol, so there is nothing to flip */
+    ev.buttons = buttons & 0x07u;
+    ev.time_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+    ev.wheel = wheel;
+    push_event(ev);
+}
+
 int mouse_read(mouse_event_t *ev) {
     if (buf_tail == buf_head) {
         return 0;

@@ -147,6 +147,7 @@ REQUIRED_MARKERS=(
   "[m48] toast raised, still up mid-life, gone by its own deadline, and each"
   "[m49] the shared shortcut table resolving every chord (and refusing every"
   "[m50] 24 shm create/free cycles frame-neutral, a double free refused, 16"
+  "[m51] z-order raise-on-click, occlusion-correct hit-testing (the overlap"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

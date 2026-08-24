@@ -185,6 +185,17 @@ typedef struct {
     uint8_t maximized; /* M30: mirrors compositor.c's window_t.maximized - lets a caller (a future titlebar/panel indicator) reflect current state without guessing */
     uint8_t is_panel; /* lets a panel client filter itself (and any other panel) out of what it lists as a "running app" */
     uint8_t is_desktop; /* same idea as is_panel - the desktop background is never a "running app" either */
+    /* M51: where this window sits in the compositor's z-order, 0 for the
+     * bottom-most and increasing upward - so a shell can say which window
+     * is frontmost *without* reordering the list it draws. That split is
+     * the whole reason this is a field rather than the query simply
+     * returning windows in z-order: a taskbar button that moved every
+     * time you focused something is a button you can't build muscle
+     * memory for, so desktop_shell.c keeps its buttons in window_id order
+     * (stable for a window's whole life) and reads frontmost-ness from
+     * here. Windows the query skips (dead slots) leave no gap: this is a
+     * dense rank over what the response actually contains. */
+    int32_t z_index;
     char title[WM_TITLE_MAX]; /* echo of wm_create_request_t.title - may be empty */
 } wm_window_info_t;
 

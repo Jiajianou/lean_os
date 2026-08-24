@@ -2292,7 +2292,7 @@ than in the stretch list where it started. M55 is the supervision this
 session has needed since init learned to watch exactly one of its three
 children. M56 is depth in the apps people actually spend time in.
 
-## M51 — Z-order: raising, occlusion-correct hit-testing, focus that means something
+## M51 — Z-order: raising, occlusion-correct hit-testing, focus that means something ✅
 
 The compositor's own header comment has described this as a
 "simplification" since M20 and every hit-test in the file repeats the
@@ -2300,54 +2300,105 @@ apology. It is the largest remaining behavioral difference between this
 and a real window manager, and unlike most of them it is *wrong* rather
 than merely absent: a click can land on a window nobody can see.
 
-- [ ] An explicit z-order - an array of window indices, topmost last -
-      rather than paint order being `windows[]`'s own order. Everything
-      that walks windows for painting, hit-testing, or event routing
-      walks that instead. The three z-order *classes* this project
-      already has (desktop background at the bottom, ordinary windows,
-      panels always on top) become a property of where a window is
-      inserted rather than three separate loops in `redraw_rect`
-- [ ] Raise on focus: `apply_window_action`'s `WM_ACTION_FOCUS` moves
-      the window to the top of the ordinary-window band. That is one
-      place, and it is already the funnel every focus path goes through -
-      a titlebar click, a taskbar button, Alt+Tab, and an external
-      `WM_ACTION_PIPE` request all arrive there, so all four get raising
-      for free and none of them can drift
-- [ ] Hit-testing walks the z-order top-down and stops at the first
-      window whose rect contains the point - which is the actual fix.
-      `window_under_cursor`, `titlebar_button_at`, `resize_hit_mask`'s
-      caller and the move-drag hit-test are four copies of the same
-      backwards loop today; they become one helper that takes a filter
-- [ ] A window that is raised must not steal a click it was raised *by*.
-      The press that raises is the press the window then receives - which
-      is what every desktop does and is easy to get wrong in the
-      direction of eating it
-- [ ] Alt+Tab cycles in z-order (most-recently-used), not in slot order.
-      `alt_tab_cycle` walks `windows[]` by index today, so on a desktop
-      with four windows open it visits them in the order they were
-      launched regardless of what you have been using
-- [ ] The taskbar's running-app order stays *stable* rather than
-      following z-order, deliberately: a button that moves every time you
-      focus something is a button you can't build muscle memory for.
-      `wm_window_info_t` grows a `z_index` so the shell can show
-      "frontmost" without reordering, which is the Windows behavior and
-      the right one
-- [ ] Shadows get correct once z-order exists, and are currently wrong in
-      a way nobody has noticed: `fill_rect_shadow` draws each window's
-      shadow immediately before that window, so a later-painted window
-      correctly covers it - but a window *above* an occluded one still
-      has its shadow drawn over by whatever comes next in slot order.
-      Painting strictly back-to-front fixes it without new code
-- [ ] New boot self-test (`[m51]`): two deliberately overlapping windows,
-      the lower one clicked, and then three assertions that only a real
-      z-order satisfies - it paints *over* the other, it received the
-      click, and the one that was on top did not. Plus a click on the
-      overlap region delivered to exactly one window, which is the
-      occlusion bug stated as a test
-- [ ] New interactive tests: two overlapping windows raised by clicking
-      each in turn; a click in the overlap region reaching the front
-      window's content and not the back one's; Alt+Tab visiting them in
-      use order
+- [x] An explicit z-order (`zorder`/`z_count` in `compositor.c`) - an
+      array of window indices, topmost last - rather than paint order
+      being `windows[]`'s own order. Everything that walks windows for
+      painting, hit-testing or event routing walks that instead. The
+      three z-order *classes* this project already had (desktop
+      background at the bottom, ordinary windows, panels always on top)
+      are bands within that array: it is kept sorted by band, insertion
+      goes to the top of the inserting window's own band, and a raise can
+      only ever move a window within its band. A window's band is fixed
+      at connect time, so nothing but a bug in that one block can break
+      the invariant
+- [x] Raise on focus - but in `set_focus`, **not** in
+      `apply_window_action`'s `WM_ACTION_FOCUS` branch, which is where
+      this milestone's plan put it and where it turned out to be wrong.
+      That branch is the funnel for a taskbar button, Alt+Tab and an
+      external `WM_ACTION_PIPE` request; a plain click on a window's
+      body (`focus_window_under_cursor`), a titlebar move-drag and a
+      resize-edge grab all call `set_focus` directly. Putting the raise
+      in the action branch left exactly the three gestures a person uses
+      most not raising anything - which is what the new boot self-test
+      caught on its first run, before any of this reached a human
+- [x] The raise sits *above* `set_focus`'s "already focused, nothing to
+      do" early return: a window can be focused and still not be topmost
+      (something else was raised while it kept focus), and clicking it
+      must then still bring it forward
+- [x] Hit-testing walks the z-order top-down and the first window whose
+      painted frame contains the point is the only one allowed to answer.
+      Five near-copies of the same backwards loop - the window pick, the
+      titlebar-button pick, the resize-edge pick twice (click and cursor
+      shape) and the move-drag titlebar pick - are one `z_hit_test` that
+      takes a class mask and a region. `HIT_RESIZE` is the one documented
+      exception: a resize handle reaches `RESIZE_MARGIN` pixels *outside*
+      its own frame, so a window's grab halo is checked before that window
+      is asked whether it occludes the point, which keeps a top window's
+      halo winning over a lower window's frame
+- [x] A window that is raised does not steal the click it was raised
+      *by*. The raise happens during the press's own focus change and
+      event routing then goes to the (now front) focused window, so the
+      press that raises is the press the window receives
+- [x] Alt+Tab cycles in z-order. Since focus raises, that order *is* the
+      most-recently-used order: Alt+Tab steps one window back down it,
+      Shift+Alt+Tab one forward, both wrapping past panels and the
+      desktop background. Tapping Alt+Tab repeatedly therefore swaps the
+      front two rather than touring every window, which is what a
+      tap-without-holding does on Windows too and is the honest
+      consequence of raising on focus
+- [x] The taskbar's running-app order stays *stable* - by window id, for
+      a window's whole life. `wm_window_info_t` grew a `z_index` so the
+      shell can show frontmost-ness without reordering, and
+      `desktop_shell.c` draws the frontmost non-minimized app's button
+      with a half-lit accent border. The case that makes the field worth
+      having is the one where focus and frontmost differ: minimizing the
+      focused window leaves nothing focused at all, and the bar can still
+      say which of the rest is in front
+- [x] Shadows are correct now, and were wrong in a way nobody had
+      noticed. `fill_rect_shadow` draws each window's shadow immediately
+      before that window, so whatever is painted after covers it - which
+      is only correct if "after" means "in front of". Painting strictly
+      back-to-front fixes it with no new code
+- [x] New boot self-test (`[m51]`), 7/7 checks - and the first boot-time
+      test in this project to deliver a **real mouse click**. Everything
+      mouse-driven before it was left to `tools/qemu-input-test.sh`,
+      because the kernel had no way to move a pointer; `mouse_inject`
+      (`kernel/drivers/mouse.h`) pushes a synthetic event onto the same
+      ring the IRQ handler feeds, so a reader cannot tell it from a real
+      packet. Deliberately not a syscall - a user program that could
+      forge input could click any other program's window
+- [x] `user_space/bin/wm_zorder.c`, the self-test-only client the above
+      needs: a flat fill color on argv (so one pixel in the overlap says
+      which of two windows is in front) and a row of click "ticks" in its
+      own bottom-right corner, one per press it is routed. The
+      bottom-right corner is the one part of the *lower* of two cascaded
+      windows the upper never covers, which is what lets the test assert
+      one window received a click *and that the other did not*
+- [x] The checks: two 300x200 windows on the cascade at (100,100) and
+      (140,140); the second in front to begin with; a click inside the
+      first only, after which the overlap pixel must be the first
+      window's, its tick must be lit and the other's must not; then a
+      click in the region both cover, which must reach exactly the front
+      one. Plus `wm_window_info_t.z_index` reporting the raised window as
+      frontmost through the same query `desktop_shell.c` uses
+- [x] Three new interactive tests: `clicking_a_window_raises_it` (both
+      directions, so it is an order rather than a one-time swap),
+      `overlap_click_reaches_the_front_window`, and
+      `alt_tab_visits_windows_in_use_order`. They read the *compositor's
+      own border color* down each window's edge column rather than
+      whatever an app happens to draw - Files' right border and Tasks'
+      left border each fall inside the other window, so each is visible
+      exactly when its own window is in front, giving a positive answer
+      in both directions instead of one probe that only says "something
+      changed"
+- [x] One test-harness lesson, worth recording because it will recur:
+      the raise and the taskbar's focus accent must be asserted in **one
+      predicate**, not one after the other. The compositor reorders and
+      repaints immediately while the taskbar only learns about the new
+      focus on its next poll, so a shot taken the instant the window
+      moved forward can legitimately still show the old button lit. This
+      is the same "assert on a guest-side state signal, not on elapsed
+      time" pattern M45 and M48 each had to learn
 
 ## M52 — Kernel hardening: validated user pointers, no user-triggerable panic
 

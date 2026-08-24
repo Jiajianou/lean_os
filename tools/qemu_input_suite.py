@@ -307,6 +307,15 @@ def titlebar_button_center(win_x, win_y, win_w, button):
 
 CLOCK_W = 200  # gui_clock.c WIN_W
 
+# M51: compositor.c's window frame - BORDER 2, filled with BORDER_COLOR
+# and then blitted over, so exactly two columns of it survive down each
+# side of a window. Reading one of those columns is how the z-order tests
+# below ask "which of these two overlapping windows is in front": the
+# answer is a compositor constant either way round, rather than whatever
+# an app happens to draw at that pixel.
+BORDER = 2
+BORDER_COLOR = 0x444466
+
 # settings.c's wallpaper row.
 WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H = 270, 68, 22
 
@@ -1342,6 +1351,143 @@ def test_drag_a_file_onto_the_desktop_opens_it(m):
              "dropping a file on the desktop did not open it in the editor")
 
 
+# ---------------------------------------------------------------------
+# M51: overlapping windows. Everything below needs two windows that
+# really cover each other, which is why they use Files (280x360 at the
+# slot-2 cascade position, so x:[180,460) y:[180,540)) and Tasks (420x360
+# at slot 3, x:[220,640) y:[220,580)) rather than the small Clock every
+# other test here reaches for.
+#
+# Files' *right* border column and Tasks' *left* border column both fall
+# inside the other window, so each is visible exactly when its own window
+# is in front - two probes that answer "which one is on top" positively in
+# both directions instead of one probe that only says "something changed".
+# ---------------------------------------------------------------------
+
+FILES_ORIGIN = app_origin(FIRST_APP_IDX)
+TASKS_ORIGIN = app_origin(FIRST_APP_IDX + 1)
+# Taskbar slots are numbered over *apps* only - the panel and the desktop
+# background are filtered out of the running list - so the first app
+# launched is slot 0 even though its window is the third the compositor
+# holds and therefore lands on the FIRST_APP_IDX cascade position. Two
+# different numbering schemes for the same two windows, which is worth
+# naming rather than writing 0 and 1 inline.
+FILES_SLOT = 0
+TASKS_SLOT = 1
+# Files' right border, at a row well below both windows' rounded top
+# corners and clear of any cursor parked on a titlebar.
+FILES_IN_FRONT_PROBE = (FILES_ORIGIN[0] + FM_W, 400)
+# Tasks' left border, in the same row.
+TASKS_IN_FRONT_PROBE = (TASKS_ORIGIN[0] - BORDER, 400)
+# Titlebar-body click points: each one is on its own window's titlebar and
+# outside the *other* window's frame entirely, so which window a click
+# there reaches is not itself the thing under test.
+FILES_TITLEBAR_CLICK = (FILES_ORIGIN[0] + 20, FILES_ORIGIN[1] - TITLEBAR_H // 2)
+TASKS_TITLEBAR_CLICK = (FILES_ORIGIN[0] + FM_W + 60, TASKS_ORIGIN[1] - TITLEBAR_H // 2)
+# Inside both windows' content, and well away from both probe rows.
+OVERLAP_CLICK = (400, 480)
+
+
+def open_overlapping_pair(m):
+    """Files then Tasks, so Tasks (launched last, and therefore focused)
+    starts in front. Returns nothing - the two probes above are how every
+    caller reads the result."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[2][2])   # Files
+    wait_for_windows(m, 1)
+    m.double_click(ICON_X, ICONS[6][2])   # Tasks
+    wait_for_windows(m, 2)
+    wait_for(m, lambda s: s.px(*TASKS_IN_FRONT_PROBE) == BORDER_COLOR,
+             "the second window launched did not start in front of the first")
+
+
+def test_clicking_a_window_raises_it(m):
+    """M51's headline: clicking a window you can see brings it forward.
+    Before this milestone the compositor painted in creation order, so the
+    window in front was permanently whichever client connected last and a
+    click could only ever change a titlebar color."""
+    open_overlapping_pair(m)
+
+    # The raise and the focus accent are asserted in one predicate rather
+    # than one after the other: the compositor reorders and repaints
+    # immediately, while the taskbar only learns about the new focus on
+    # its next poll of the query protocol - so a shot taken the instant
+    # the window moved forward can legitimately still show the old
+    # button lit, and asserting on it would be a race, not a check.
+    m.click(*FILES_TITLEBAR_CLICK)
+    shot = wait_for(m, lambda s: (s.px(*FILES_IN_FRONT_PROBE) == BORDER_COLOR and
+                                  focused_slot(s) == FILES_SLOT),
+                    "clicking the covered window's titlebar did not raise and focus it")
+    check(shot.px(*TASKS_IN_FRONT_PROBE) != BORDER_COLOR,
+          "the window that was raised did not cover the one that had been in front")
+
+    # And back the other way, which is what says this is an order rather
+    # than a one-time swap.
+    m.click(*TASKS_TITLEBAR_CLICK)
+    shot = wait_for(m, lambda s: (s.px(*TASKS_IN_FRONT_PROBE) == BORDER_COLOR and
+                                  focused_slot(s) == TASKS_SLOT),
+                    "clicking the other window's titlebar did not raise and focus it back")
+    check(shot.px(*FILES_IN_FRONT_PROBE) != BORDER_COLOR,
+          "both windows claim to be in front after the second raise")
+
+
+def test_overlap_click_reaches_the_front_window(m):
+    """The occlusion bug, as a click. With Files raised over Tasks, a
+    press in the region both cover has to reach Files. Before M51 every
+    hit-test walked windows[] backwards and took the first *match*, so it
+    would have reached Tasks - a window that at that pixel is not visible
+    at all."""
+    open_overlapping_pair(m)
+    m.click(*FILES_TITLEBAR_CLICK)
+    wait_for(m, lambda s: s.px(*FILES_IN_FRONT_PROBE) == BORDER_COLOR,
+             "the covered window did not raise, so there is no occlusion to test")
+
+    m.click(*OVERLAP_CLICK)
+    # Nothing to poll toward if the click is correctly a no-op for focus
+    # (it lands on the already-focused window), so this waits out a focus
+    # change that must not happen and then reads the result.
+    time.sleep(2.0)
+    shot = m.screenshot()
+    check(focused_slot(shot) == FILES_SLOT,
+          "a click in the overlap region focused slot %d - the window behind, "
+          "which is not visible at that pixel" % focused_slot(shot))
+    check(shot.px(*FILES_IN_FRONT_PROBE) == BORDER_COLOR,
+          "the front window stopped being in front after being clicked")
+
+
+def test_alt_tab_visits_windows_in_use_order(m):
+    """M51 makes Alt+Tab walk the z-order, which - now that focus raises -
+    is the most-recently-used order. It used to walk windows[] by slot
+    index, i.e. by launch order, regardless of what you had been using.
+
+    Three windows, launched Clock, Files, Tasks. Alt+Tab from Tasks must
+    reach Files (the one used before it) and not Clock; a second Alt+Tab
+    comes back to Tasks, which is what tapping it does on a real desktop
+    once focus raises. Shift+Alt+Tab then goes the other way, wrapping
+    past the top of the order to the window used longest ago."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])   # Clock
+    wait_for_windows(m, 1)
+    m.double_click(ICON_X, ICONS[2][2])   # Files
+    wait_for_windows(m, 2)
+    m.double_click(ICON_X, ICONS[6][2])   # Tasks
+    shot = wait_for_windows(m, 3)
+    check(focused_slot(shot) == 2,
+          "the last window launched is not the focused one")
+
+    m.sendkey("alt-tab")
+    wait_for(m, lambda s: focused_slot(s) == 1,
+             "Alt+Tab did not reach the window used before the focused one")
+
+    m.sendkey("alt-tab")
+    wait_for(m, lambda s: focused_slot(s) == 2,
+             "a second Alt+Tab did not come back to the window it started on")
+
+    m.sendkey("shift-alt-tab")
+    wait_for(m, lambda s: focused_slot(s) == 0,
+             "Shift+Alt+Tab did not wrap to the window used longest ago")
+
+
 def test_soak_desktop_stays_usable(m):
     """M50's soak: leave the desktop up with everything that ticks on a
     timer running, then require the machine to still work.
@@ -1421,6 +1567,9 @@ TESTS = [
     ("alt_f4_closes_the_focused_window", test_alt_f4_closes_the_focused_window),
     ("ctrl_alt_arrows_snap_and_maximize", test_ctrl_alt_arrows_snap_and_maximize),
     ("drag_a_file_onto_the_desktop_opens_it", test_drag_a_file_onto_the_desktop_opens_it),
+    ("clicking_a_window_raises_it", test_clicking_a_window_raises_it),
+    ("overlap_click_reaches_the_front_window", test_overlap_click_reaches_the_front_window),
+    ("alt_tab_visits_windows_in_use_order", test_alt_tab_visits_windows_in_use_order),
     ("soak_desktop_stays_usable", test_soak_desktop_stays_usable),
     ("launch_close_stress", test_launch_close_stress),
 ]

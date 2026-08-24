@@ -67,6 +67,18 @@
  * no protocol yet for a client to grow its own shm-backed pixel buffer -
  * that's M31's job): it repositions to fill the screen minus any docked
  * panel, clamped to never exceed the window's own buffer dimensions.
+ *
+ * M51 gives this compositor a z-order, which it had never had - see
+ * `zorder` and z_hit_test below. Until then, paint order *was* the order
+ * clients happened to connect in, focusing a window changed its titlebar
+ * color without bringing it forward, and every hit-test in this file took
+ * the first window whose region matched rather than the topmost visible
+ * one, so a click could be delivered to a window that was entirely
+ * covered. All three are the same missing thing, and they are fixed
+ * together by one array of window indices plus one hit-test that walks
+ * it. The three depth classes this file already had - desktop background
+ * at the bottom, ordinary windows, panels always on top - survive as
+ * bands within that array rather than as three separate loops.
  */
 #include "font8x16.h" /* M38: window-title text in the titlebar - drawn through this file's own clip-aware put_pixel, not gfx_draw_text (see draw_text_clipped's own note) */
 #include "gfx.h" /* M34: gfx_point_in_rect - shared hit-test helper, see draw_titlebar_buttons' own note on why drawing itself stays on this file's own clip-aware fill_rect */
@@ -325,6 +337,7 @@ typedef struct {
 
 static window_t windows[MAX_WINDOWS];
 static int window_count;
+
 static int focused_window = -1; /* -1 = nothing focused yet */
 static uint32_t bg_color = DEFAULT_BG_COLOR; /* M33: settings.c's WM_SETTINGS_PIPE is the only way this ever changes at runtime */
 static uint32_t accent_color = TITLEBAR_FOCUS_COLOR; /* M38: settings.c's WM_SETTINGS_PIPE is the only way this ever changes at runtime, same as bg_color above */
@@ -334,6 +347,61 @@ static uint32_t accent_color = TITLEBAR_FOCUS_COLOR; /* M38: settings.c's WM_SET
  * Defaults to the gradient rather than to flat, because a desktop that
  * only looks polished after you visit Settings isn't polished. */
 static uint32_t wallpaper_id = 1; /* WALLPAPER_GRADIENT */
+
+/* Titlebar counts as part of a window's clickable/routable area, same as
+ * its content - a real WM lets you drag/focus by the titlebar too. A
+ * panel or desktop background has no titlebar (both are undecorated), so
+ * its clickable area is just its own content rect. */
+static int point_in_window(const window_t *win, int32_t x, int32_t y) {
+    /* M45: whatever a panel has raised above its dock line is part of
+     * what it can be clicked on - otherwise the menu it just drew would
+     * be visible and inert, and the click would fall through to the
+     * window underneath it. */
+    int32_t top = (win->is_panel || win->is_desktop) ? win->y - win->overhang : win->y - TITLEBAR_H;
+    return x >= win->x && x < win->x + win->w && y >= top && y < win->y + win->h;
+}
+
+/* M31: the titlebar *band* only - excludes the content area point_in_window
+ * also counts, since a titlebar click starts a move-drag (below) while a
+ * content click doesn't. Buttons are checked separately, and first (see
+ * handle_mouse) - clicking one is not a titlebar-body click. */
+static int point_in_titlebar(const window_t *win, int32_t x, int32_t y) {
+    return x >= win->x && x < win->x + win->w &&
+           y >= win->y - TITLEBAR_H && y < win->y;
+}
+
+/* M31: which edge(s) of win's *outer* (border-inclusive) rect (px, py) is
+ * within RESIZE_MARGIN of - a bitmask so a corner can hit two at once
+ * (diagonal resize). Zero means "not on a resize handle at all". (The
+ * RESIZE_* bit values themselves are #defined up near BTN_SIZE/TITLE_COLOR -
+ * M38's cursor-shape selection in redraw_rect needs them earlier in the
+ * file than this function itself is defined.) */
+static int resize_hit_mask(const window_t *win, int32_t px, int32_t py) {
+    int32_t x0 = win->x - BORDER;
+    int32_t y0 = win->y - TITLEBAR_H - BORDER;
+    int32_t x1 = win->x + win->w + BORDER;
+    int32_t y1 = win->y + win->h + BORDER;
+    int within_x = px >= x0 - RESIZE_MARGIN && px < x1 + RESIZE_MARGIN;
+    int within_y = py >= y0 - RESIZE_MARGIN && py < y1 + RESIZE_MARGIN;
+    int mask = 0;
+    if (within_y) {
+        if (px >= x0 - RESIZE_MARGIN && px < x0 + RESIZE_MARGIN) {
+            mask |= RESIZE_LEFT;
+        }
+        if (px >= x1 - RESIZE_MARGIN && px < x1 + RESIZE_MARGIN) {
+            mask |= RESIZE_RIGHT;
+        }
+    }
+    if (within_x) {
+        if (py >= y0 - RESIZE_MARGIN && py < y0 + RESIZE_MARGIN) {
+            mask |= RESIZE_TOP;
+        }
+        if (py >= y1 - RESIZE_MARGIN && py < y1 + RESIZE_MARGIN) {
+            mask |= RESIZE_BOTTOM;
+        }
+    }
+    return mask;
+}
 
 static wm_fb_info_t fb_info;
 static uint32_t *real_fb;       /* the live, scanned-out hardware framebuffer - write-only, touched only by present() */
@@ -367,6 +435,117 @@ static int32_t last_drawn_cursor_x, last_drawn_cursor_y; /* cursor position as o
  * of any single redraw, for a change that only ever touches an 8x8
  * pixel box. */
 static int dirty = 1; /* starts dirty: draw the first frame */
+
+/* ---- M51: the z-order -------------------------------------------------
+ *
+ * Until this milestone `windows[]`'s own index order *was* the paint
+ * order, which made a window's depth a property of when its client
+ * happened to connect and left every hit-test in this file walking the
+ * array backwards and taking the first *match* rather than the topmost
+ * *visible* window - so a click could be delivered to a window nobody
+ * could see, and clicking a window you could see never brought it
+ * forward. `zorder` fixes both by making depth its own thing:
+ * `windows[]` indices are stable slot ids and say nothing about depth,
+ * and every walk for painting, hit-testing or event routing goes through
+ * here instead.
+ *
+ * Bottom-most first, topmost last - so painting is a plain forward walk
+ * (strictly back-to-front, which is also what finally makes M38's drop
+ * shadows correct: each is drawn immediately before its own window, so
+ * back-to-front is exactly the order in which a nearer window covers a
+ * further one's shadow) and hit-testing is a plain backward one.
+ *
+ * The three depth *classes* this project already had - the desktop
+ * background pinned to the bottom, ordinary windows in the middle, panels
+ * always on top - used to be three separate loops in redraw_rect and
+ * three separate passes in window_under_cursor. They are now bands within
+ * this one array: the array is kept sorted by band, insertion goes to the
+ * top of the inserting window's own band, and raising can only ever move
+ * a window within its band. A window's band is fixed at connect time
+ * (is_panel/is_desktop never change afterwards), so the invariant cannot
+ * be broken by anything but a bug in this block.
+ *
+ * Only alive windows appear here, exactly once each. */
+static int zorder[MAX_WINDOWS];
+static int z_count;
+
+#define ZBAND_DESKTOP  0
+#define ZBAND_ORDINARY 1
+#define ZBAND_PANEL    2
+
+static int window_band(const window_t *win) {
+    if (win->is_desktop) {
+        return ZBAND_DESKTOP;
+    }
+    if (win->is_panel) {
+        return ZBAND_PANEL;
+    }
+    return ZBAND_ORDINARY;
+}
+
+/* Position of `idx` in the z-order, or -1 if it isn't in it. */
+static int z_position_of(int idx) {
+    for (int z = 0; z < z_count; z++) {
+        if (zorder[z] == idx) {
+            return z;
+        }
+    }
+    return -1;
+}
+
+static void z_remove(int idx) {
+    int z = z_position_of(idx);
+    if (z < 0) {
+        return;
+    }
+    for (int k = z; k + 1 < z_count; k++) {
+        zorder[k] = zorder[k + 1];
+    }
+    z_count--;
+}
+
+/* Puts `idx` at the top of its own band - the only insertion this file
+ * ever does, and therefore the only thing that has to preserve the
+ * band-sorted invariant. Idempotent: a window already in the z-order is
+ * lifted rather than duplicated, which is what makes this double as
+ * "raise" (see z_raise). */
+static void z_insert_top_of_band(int idx) {
+    z_remove(idx);
+    int band = window_band(&windows[idx]);
+    int at = z_count;
+    for (int z = 0; z < z_count; z++) {
+        if (window_band(&windows[zorder[z]]) > band) {
+            at = z;
+            break;
+        }
+    }
+    for (int k = z_count; k > at; k--) {
+        zorder[k] = zorder[k - 1];
+    }
+    zorder[at] = idx;
+    z_count++;
+}
+
+/* M51: raise-on-focus. set_focus is the only caller, because set_focus is
+ * the one thing every focus path in this file genuinely goes through -
+ * see its own comment for why the WM_ACTION_FOCUS branch, which looks
+ * like the funnel, isn't quite one.
+ *
+ * A panel never holds focus at all (focus_window_under_cursor), and the
+ * desktop background has nothing above it inside its own band, so in
+ * practice this only ever reorders ordinary windows. It is written for
+ * all three anyway because "raise within your band" is the rule, not
+ * "raise if ordinary". */
+static void z_raise(int idx) {
+    if (z_count > 0 && zorder[z_count - 1] == idx) {
+        return; /* already topmost overall - nothing to do, and no needless repaint */
+    }
+    int before = z_position_of(idx);
+    z_insert_top_of_band(idx);
+    if (z_position_of(idx) != before) {
+        dirty = 1;
+    }
+}
 /* M42/M43: the launcher's whole state - see LAUNCHER_W's own comment.
  * `entries` is every file on disk as of the last time it was opened (not
  * kept live: a list that changed under the cursor while you were typing
@@ -727,26 +906,132 @@ static void titlebar_button_rect(const window_t *win, titlebar_button_t btn, int
 static int hover_btn_window = -1;
 static titlebar_button_t hover_btn;
 
-/* Which button (if any) is under (px, py), topmost window first - same
- * order and the same first-match-wins limitation as every other hit-test
- * in this file. Shared by the click handler and the hover tracker, so the
- * button that lights and the button that acts can't disagree. */
-static int titlebar_button_at(int32_t px, int32_t py, titlebar_button_t *out_btn) {
-    for (int i = window_count - 1; i >= 0; i--) {
-        const window_t *w = &windows[i];
-        if (!w->alive || w->is_panel || w->is_desktop || w->minimized) {
-            continue;
+/* ---- M51: the one hit-test ------------------------------------------
+ *
+ * Before this milestone there were five near-copies of the same backwards
+ * `for (i = window_count - 1; ...)` loop - the plain window pick, the
+ * titlebar-button pick, the resize-edge pick (twice: once for the click,
+ * once for the cursor shape) and the move-drag titlebar pick - and every
+ * one of them carried the same apology in a comment: it took the first
+ * window whose *region* matched rather than the topmost *visible* one, so
+ * a click could be delivered to a window that was completely covered.
+ *
+ * They are one function now, and it is occlusion-correct: it walks the
+ * z-order from the top down, and the first window whose painted frame
+ * contains the point is the only window allowed to answer. If the region
+ * the caller asked about isn't there, the answer is "nothing" - not "keep
+ * looking underneath", which is exactly the bug.
+ *
+ * The one deliberate exception is HIT_RESIZE. A resize handle straddles
+ * the frame edge and reaches RESIZE_MARGIN pixels *outside* it, so a
+ * window's own grab halo is checked before that window is asked whether
+ * it occludes the point. That keeps the halo of a window on top winning
+ * over the frame of one beneath it, which is the behavior you want, while
+ * still refusing to hand a covered window's edge a click.
+ */
+typedef enum {
+    HIT_FRAME,    /* anywhere this window is painted, border and titlebar included - what a focus click and event routing want */
+    HIT_TITLEBAR, /* the titlebar band only, for a move-drag or a context menu */
+    HIT_BUTTON,   /* a titlebar button; *out_detail receives which one (titlebar_button_t) */
+    HIT_RESIZE,   /* a resize edge or corner; *out_detail receives the RESIZE_* mask */
+} hit_region_t;
+
+/* Which windows may *answer*. Every alive, non-minimized window occludes
+ * regardless of this - that is the point of the fix, and it is why a
+ * titlebar under the taskbar is unreachable rather than reachable through
+ * it. */
+#define WCLASS_DESKTOP  1u
+#define WCLASS_ORDINARY 2u
+#define WCLASS_PANEL    4u
+#define WCLASS_ALL      (WCLASS_DESKTOP | WCLASS_ORDINARY | WCLASS_PANEL)
+
+/* The rect this window actually paints over: its content, plus (for an
+ * ordinary window) the border and titlebar drawn around it, plus (for a
+ * panel) whatever it has raised above its dock line. Anything inside here
+ * belongs to this window even if the region the caller asked about is
+ * somewhere else in it. */
+static int point_occluded_by(const window_t *win, int32_t px, int32_t py) {
+    if (win->is_panel || win->is_desktop) {
+        return point_in_window(win, px, py);
+    }
+    return px >= win->x - BORDER && px < win->x + win->w + BORDER &&
+           py >= win->y - TITLEBAR_H - BORDER && py < win->y + win->h + BORDER;
+}
+
+static int window_class_bit(const window_t *win) {
+    if (win->is_desktop) {
+        return WCLASS_DESKTOP;
+    }
+    if (win->is_panel) {
+        return WCLASS_PANEL;
+    }
+    return WCLASS_ORDINARY;
+}
+
+static int hit_region_matches(const window_t *win, int32_t px, int32_t py,
+                               hit_region_t region, int *out_detail) {
+    switch (region) {
+    case HIT_FRAME:
+        return point_occluded_by(win, px, py);
+    case HIT_TITLEBAR:
+        return !win->is_panel && !win->is_desktop && point_in_titlebar(win, px, py);
+    case HIT_BUTTON:
+        if (win->is_panel || win->is_desktop) {
+            return 0;
         }
         for (int b = 0; b < BTN_COUNT; b++) {
             int32_t bx, by;
-            titlebar_button_rect(w, (titlebar_button_t)b, &bx, &by);
+            titlebar_button_rect(win, (titlebar_button_t)b, &bx, &by);
             if (gfx_point_in_rect(px, py, bx, by, BTN_SIZE, BTN_SIZE)) {
-                *out_btn = (titlebar_button_t)b;
-                return i;
+                if (out_detail) {
+                    *out_detail = b;
+                }
+                return 1;
             }
+        }
+        return 0;
+    case HIT_RESIZE: {
+        if (win->is_panel || win->is_desktop) {
+            return 0;
+        }
+        int mask = resize_hit_mask(win, px, py);
+        if (mask && out_detail) {
+            *out_detail = mask;
+        }
+        return mask != 0;
+    }
+    }
+    return 0;
+}
+
+static int z_hit_test(int32_t px, int32_t py, unsigned classes, hit_region_t region, int *out_detail) {
+    for (int z = z_count - 1; z >= 0; z--) {
+        int idx = zorder[z];
+        const window_t *w = &windows[idx];
+        if (!w->alive || w->minimized) {
+            continue; /* nothing there to click and nothing there to hide what's under it */
+        }
+        if ((window_class_bit(w) & classes) &&
+            hit_region_matches(w, px, py, region, out_detail)) {
+            return idx;
+        }
+        if (point_occluded_by(w, px, py)) {
+            return -1; /* this window covers the point and didn't want it - nothing below it can have it either */
         }
     }
     return -1;
+}
+
+/* Which window's which titlebar button the cursor is over, or -1 for
+ * none. Shared by the click handler and M46's hover tracker, so the
+ * button that lights and the button that acts can't disagree. */
+static int titlebar_button_at(int32_t px, int32_t py, titlebar_button_t *out_btn) {
+    int detail = 0;
+    int idx = z_hit_test(px, py, WCLASS_ORDINARY, HIT_BUTTON, &detail);
+    if (idx >= 0) {
+        *out_btn = (titlebar_button_t)detail;
+    }
+    return idx;
 }
 
 static uint32_t lighten(uint32_t color, uint32_t num, uint32_t den) {
@@ -1182,22 +1467,28 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
     }
 
     fill_rect(0, 0, (int32_t)fb_info.width, (int32_t)fb_info.height, bg_color);
-    /* Desktop windows first (a background layer under everything else -
-     * the opposite end of the z-order from panels below), then ordinary
-     * windows in creation order (no z-order raise on focus - a later
-     * connection or click just changes titlebar color, not paint order;
-     * see M20/M21's own notes on this simplification), then panels last
-     * so they're always on top regardless of when they connected - the
-     * one piece of z-ordering this compositor does enforce, since a
-     * taskbar that could be occluded wouldn't be much of a taskbar. */
-    for (int i = 0; i < window_count; i++) {
-        if (windows[i].alive && windows[i].is_desktop) {
-            blit_window(&windows[i]); /* no border/titlebar - a desktop background is its own chrome, same as a panel */
-        }
-    }
-    for (int i = 0; i < window_count; i++) {
+    /* M51: one strictly back-to-front walk of the z-order, where there
+     * used to be three loops over windows[] in creation order - the
+     * desktop band, then the ordinary band, then the panel band. The
+     * bands still exist; they are positions in `zorder` now rather than
+     * three separate passes, which is what lets a click raise a window
+     * (z_raise) and have the paint order follow.
+     *
+     * Back-to-front is also what finally makes M38's drop shadows right.
+     * fill_rect_shadow draws each window's shadow immediately before that
+     * window, so whatever is painted *after* covers it - correct only if
+     * "after" means "in front of". In creation order it did not: a window
+     * in front of an occluded one still had its shadow painted over by
+     * whatever happened to connect later. No new code, just the right
+     * order. */
+    for (int z = 0; z < z_count; z++) {
+        int i = zorder[z];
         const window_t *win = &windows[i];
-        if (!win->alive || win->is_panel || win->is_desktop || win->minimized) {
+        if (!win->alive || win->minimized || win->is_panel) {
+            continue; /* panels are the top band and are drawn below, after the snap preview */
+        }
+        if (win->is_desktop) {
+            blit_window(win); /* no border/titlebar - a desktop background is its own chrome, same as a panel */
             continue;
         }
         int focused = (i == focused_window);
@@ -1229,9 +1520,10 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
                          accent_color, SNAP_PREVIEW_NUM, SNAP_PREVIEW_DEN);
         stroke_rect(snap_preview_x, snap_preview_y, snap_preview_w, snap_preview_h, accent_color);
     }
-    for (int i = 0; i < window_count; i++) {
-        if (windows[i].alive && windows[i].is_panel) {
-            blit_window(&windows[i]); /* no border/titlebar - a panel is its own chrome */
+    for (int z = 0; z < z_count; z++) {
+        const window_t *win = &windows[zorder[z]];
+        if (win->alive && win->is_panel && !win->minimized) {
+            blit_window(win); /* no border/titlebar - a panel is its own chrome */
         }
     }
     /* M45: above the panels (it can be raised on a window whose titlebar
@@ -1289,61 +1581,6 @@ static void redraw(void) {
     redraw_rect(0, 0, (int32_t)fb_info.width, (int32_t)fb_info.height);
 }
 
-/* Titlebar counts as part of a window's clickable/routable area, same as
- * its content - a real WM lets you drag/focus by the titlebar too. A
- * panel or desktop background has no titlebar (both are undecorated), so
- * its clickable area is just its own content rect. */
-static int point_in_window(const window_t *win, int32_t x, int32_t y) {
-    /* M45: whatever a panel has raised above its dock line is part of
-     * what it can be clicked on - otherwise the menu it just drew would
-     * be visible and inert, and the click would fall through to the
-     * window underneath it. */
-    int32_t top = (win->is_panel || win->is_desktop) ? win->y - win->overhang : win->y - TITLEBAR_H;
-    return x >= win->x && x < win->x + win->w && y >= top && y < win->y + win->h;
-}
-
-/* M31: the titlebar *band* only - excludes the content area point_in_window
- * also counts, since a titlebar click starts a move-drag (below) while a
- * content click doesn't. Buttons are checked separately, and first (see
- * handle_mouse) - clicking one is not a titlebar-body click. */
-static int point_in_titlebar(const window_t *win, int32_t x, int32_t y) {
-    return x >= win->x && x < win->x + win->w &&
-           y >= win->y - TITLEBAR_H && y < win->y;
-}
-
-/* M31: which edge(s) of win's *outer* (border-inclusive) rect (px, py) is
- * within RESIZE_MARGIN of - a bitmask so a corner can hit two at once
- * (diagonal resize). Zero means "not on a resize handle at all". (The
- * RESIZE_* bit values themselves are #defined up near BTN_SIZE/TITLE_COLOR -
- * M38's cursor-shape selection in redraw_rect needs them earlier in the
- * file than this function itself is defined.) */
-static int resize_hit_mask(const window_t *win, int32_t px, int32_t py) {
-    int32_t x0 = win->x - BORDER;
-    int32_t y0 = win->y - TITLEBAR_H - BORDER;
-    int32_t x1 = win->x + win->w + BORDER;
-    int32_t y1 = win->y + win->h + BORDER;
-    int within_x = px >= x0 - RESIZE_MARGIN && px < x1 + RESIZE_MARGIN;
-    int within_y = py >= y0 - RESIZE_MARGIN && py < y1 + RESIZE_MARGIN;
-    int mask = 0;
-    if (within_y) {
-        if (px >= x0 - RESIZE_MARGIN && px < x0 + RESIZE_MARGIN) {
-            mask |= RESIZE_LEFT;
-        }
-        if (px >= x1 - RESIZE_MARGIN && px < x1 + RESIZE_MARGIN) {
-            mask |= RESIZE_RIGHT;
-        }
-    }
-    if (within_x) {
-        if (py >= y0 - RESIZE_MARGIN && py < y0 + RESIZE_MARGIN) {
-            mask |= RESIZE_TOP;
-        }
-        if (py >= y1 - RESIZE_MARGIN && py < y1 + RESIZE_MARGIN) {
-            mask |= RESIZE_BOTTOM;
-        }
-    }
-    return mask;
-}
-
 static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi) {
     if (v < lo) {
         return lo;
@@ -1398,24 +1635,16 @@ static uint32_t titlebar_last_click_ms;
 /* M38: the mask draw_cursor's shape selection (redraw_rect) uses - a
  * resize *in progress* keeps showing the shape for whichever edge/corner
  * started it (drag_resize_mask), even if the cursor drifts outside that
- * edge's own RESIZE_MARGIN mid-drag; otherwise, topmost-window-first hit
- * test against every eligible window, same order and same "first match
- * wins" shape as handle_mouse's own resize hit-test just below. */
+ * edge's own RESIZE_MARGIN mid-drag; otherwise, literally the same
+ * z_hit_test handle_mouse's own resize hit-test uses (M51), so the shape
+ * the cursor shows and the edge a press would actually grab cannot
+ * disagree. */
 static int hovered_resize_mask(void) {
     if (drag_mode == DRAG_RESIZE) {
         return drag_resize_mask;
     }
-    for (int i = window_count - 1; i >= 0; i--) {
-        const window_t *w = &windows[i];
-        if (!w->alive || w->is_panel || w->is_desktop || w->minimized) {
-            continue;
-        }
-        int mask = resize_hit_mask(w, cursor_x, cursor_y);
-        if (mask) {
-            return mask;
-        }
-    }
-    return 0;
+    int mask = 0;
+    return z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_RESIZE, &mask) >= 0 ? mask : 0;
 }
 
 /* M46: a move-drag in progress keeps showing the move cursor even if the
@@ -1430,14 +1659,7 @@ static int cursor_over_titlebar(void) {
     if (drag_mode != DRAG_NONE || hover_btn_window >= 0) {
         return 0; /* a titlebar button is its own target, not the band around it */
     }
-    for (int i = window_count - 1; i >= 0; i--) {
-        const window_t *w = &windows[i];
-        if (w->alive && !w->is_panel && !w->is_desktop && !w->minimized &&
-            point_in_titlebar(w, cursor_x, cursor_y)) {
-            return 1;
-        }
-    }
-    return 0;
+    return z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_TITLEBAR, 0) >= 0;
 }
 
 static void send_event(const window_t *win, const wm_event_t *ev) {
@@ -1445,6 +1667,22 @@ static void send_event(const window_t *win, const wm_event_t *ev) {
 }
 
 static void set_focus(int idx) {
+    /* M51: focusing a window brings it forward, and this is where that
+     * happens because this - not apply_window_action's WM_ACTION_FOCUS
+     * branch - is the actual funnel every focus path in this file goes
+     * through. WM_ACTION_FOCUS covers a taskbar button, Alt+Tab and an
+     * external WM_ACTION_PIPE request, but a plain click on a window's
+     * body (focus_window_under_cursor), a titlebar move-drag and a
+     * resize-edge grab all call set_focus directly; putting the raise in
+     * the action branch would have left exactly the three gestures a
+     * person uses most not raising anything.
+     *
+     * Above the early-return below, deliberately: a window can be focused
+     * and still not be topmost (something else was raised while it kept
+     * focus), and clicking it must then still bring it forward. */
+    if (idx >= 0) {
+        z_raise(idx);
+    }
     if (focused_window == idx) {
         return;
     }
@@ -1553,6 +1791,7 @@ static void reclaim_window(int idx) {
         win->pixels = (uint32_t *)0;
     }
     win->alive = 0;
+    z_remove(idx); /* M51: only live windows are in the z-order - see zorder's own comment */
     win->minimized = 0;
     win->overhang = 0;
     win->close_requested = 0;
@@ -1822,6 +2061,14 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     }
     win->title[ti] = '\0';
 
+    /* M51: a new window enters at the top of its own band - the top of
+     * the ordinary band for an app, above every other panel for a panel,
+     * above nothing at all for the desktop background. Below set_focus,
+     * an ordinary window is then raised again by the focus it is given;
+     * z_insert_top_of_band is idempotent, so that costs nothing and this
+     * still leaves a *panel* (which never takes focus) correctly placed. */
+    z_insert_top_of_band(idx);
+
     resp.window_id = idx;
     resp.shm_id = (int32_t)shm_id;
     resp.width = width;
@@ -1870,6 +2117,13 @@ static void accept_pending_query(int query_read_fd, int query_resp_write_fd) {
         resp.windows[out].maximized = win->maximized;
         resp.windows[out].is_panel = win->is_panel;
         resp.windows[out].is_desktop = win->is_desktop;
+        /* M51: depth, so a shell can show which window is frontmost
+         * without having to reorder the buttons it draws - see
+         * wm_window_info_t.z_index. Already dense: only alive windows are
+         * in the z-order and only alive windows are reported here, so
+         * z_count and resp.count are the same number and the ranks run
+         * 0..count-1 with no gaps. */
+        resp.windows[out].z_index = z_position_of(i);
         memcpy(resp.windows[out].title, win->title, WM_TITLE_MAX);
         resp.count++;
     }
@@ -1887,7 +2141,7 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
     window_t *win = &windows[idx];
     if (action == WM_ACTION_FOCUS) {
         win->minimized = 0;
-        set_focus(idx);
+        set_focus(idx); /* M51: which raises it - see set_focus */
     } else if (action == WM_ACTION_TOGGLE_MINIMIZE) {
         win->minimized = !win->minimized;
         if (win->minimized && focused_window == idx) {
@@ -2402,39 +2656,16 @@ static void accept_pending_settings_query(int query_read_fd, int query_resp_writ
  * a click focuses (focus_window_under_cursor, below) while event routing
  * only wants to know what's being hovered.
  *
- * Panels are checked first (they're drawn on top, so they'd visually win
- * any overlap anyway), ordinary windows next, and the desktop background
- * last at the very bottom of the z-order - so it only ever wins a click
- * that landed on empty desktop, nothing else on screen. A minimized
- * window can't be hit: there's nothing there to click. */
+ * M51: three backwards passes over windows[] - panels, then ordinary
+ * windows, then the desktop background - collapsed into one z_hit_test.
+ * That precedence used to be hand-written here; it is now simply where
+ * each class of window sits in the z-order, so it cannot disagree with
+ * what the screen shows. HIT_FRAME rather than the content rect, so a
+ * click on a window's 2px border focuses that window instead of falling
+ * through to whatever is behind it. A minimized window still can't be
+ * hit: there's nothing there to click. */
 static int window_under_cursor(void) {
-    int hit = -1;
-    for (int i = window_count - 1; i >= 0; i--) {
-        if (windows[i].alive && windows[i].is_panel && !windows[i].minimized &&
-            point_in_window(&windows[i], cursor_x, cursor_y)) {
-            hit = i;
-            break;
-        }
-    }
-    if (hit < 0) {
-        for (int i = window_count - 1; i >= 0; i--) {
-            if (windows[i].alive && !windows[i].is_panel && !windows[i].is_desktop && !windows[i].minimized &&
-                point_in_window(&windows[i], cursor_x, cursor_y)) {
-                hit = i;
-                break;
-            }
-        }
-    }
-    if (hit < 0) {
-        for (int i = window_count - 1; i >= 0; i--) {
-            if (windows[i].alive && windows[i].is_desktop && !windows[i].minimized &&
-                point_in_window(&windows[i], cursor_x, cursor_y)) {
-                hit = i;
-                break;
-            }
-        }
-    }
-    return hit;
+    return z_hit_test(cursor_x, cursor_y, WCLASS_ALL, HIT_FRAME, 0);
 }
 
 /* M42: a click on the taskbar no longer takes focus away from the app you
@@ -2727,12 +2958,12 @@ static void handle_mouse(void) {
 
         if (left_down_edge) {
             /* M30: titlebar buttons take priority over every other hit-
-             * test below - checked topmost-window-first, same order and
-             * same "first match wins" limitation as the ordinary-window
-             * hit-test just below it (occlusion-unaware - see that
-             * loop's own comment; a real fix is z-order work, out of
-             * scope here). Panels/desktop have no titlebar, so they're
-             * never candidates. */
+             * test below. M51: through the one occlusion-correct
+             * z_hit_test, so a button belonging to a window that is
+             * covered at that point can no longer take the click - which
+             * is exactly what the comment that used to sit here admitted
+             * it did. Panels/desktop have no titlebar, so they're never
+             * candidates. */
             /* M46: the same titlebar_button_at the hover highlight uses -
              * this used to be a second, identical loop, and a lit button
              * that wasn't the button that acted would be a particularly
@@ -2754,22 +2985,11 @@ static void handle_mouse(void) {
             /* M31: resize handles (window border edges/corners) come next -
              * a small, precise target that has to win over both the
              * titlebar-move check right after it and the generic content
-             * hit-test further down. Same topmost-first, first-match-wins
-             * order as every other hit-test in this function. */
-            int rz_idx = -1;
+             * hit-test further down. M51: the same z_hit_test as every
+             * other hit-test in this function, with the one documented
+             * exception a resize handle needs - see HIT_RESIZE. */
             int rz_mask = 0;
-            for (int i = window_count - 1; i >= 0; i--) {
-                const window_t *w = &windows[i];
-                if (!w->alive || w->is_panel || w->is_desktop || w->minimized) {
-                    continue;
-                }
-                int mask = resize_hit_mask(w, cursor_x, cursor_y);
-                if (mask) {
-                    rz_idx = i;
-                    rz_mask = mask;
-                    break;
-                }
-            }
+            int rz_idx = z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_RESIZE, &rz_mask);
             if (rz_idx >= 0) {
                 drag_mode = DRAG_RESIZE;
                 drag_window = rz_idx;
@@ -2788,14 +3008,7 @@ static void handle_mouse(void) {
             /* M31: a titlebar-body click (not a button, not a resize
              * handle) starts a move-drag instead of falling through to
              * the plain focus-click hit-test below. */
-            int mv_idx = -1;
-            for (int i = window_count - 1; i >= 0; i--) {
-                const window_t *w = &windows[i];
-                if (w->alive && !w->is_panel && !w->is_desktop && !w->minimized && point_in_titlebar(w, cursor_x, cursor_y)) {
-                    mv_idx = i;
-                    break;
-                }
-            }
+            int mv_idx = z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_TITLEBAR, 0);
             if (mv_idx >= 0) {
                 /* M46: a second press on the same titlebar inside the
                  * double-click window maximizes (or restores) instead of
@@ -2827,19 +3040,11 @@ static void handle_mouse(void) {
         } else if (right_down_edge) {
             /* M45: a right-click on an ordinary window's titlebar raises
              * the window context menu instead of only focusing it. Same
-             * topmost-first, first-match-wins order as every other
-             * hit-test in this function; anywhere else, right-click keeps
+             * occlusion-correct z_hit_test order as every other
+             * hit-test in this function (M51); anywhere else, right-click keeps
              * doing exactly what M40 made it do (pick a window so the
              * event routes to the one actually under the cursor). */
-            int tb_idx = -1;
-            for (int i = window_count - 1; i >= 0; i--) {
-                const window_t *w = &windows[i];
-                if (w->alive && !w->is_panel && !w->is_desktop && !w->minimized &&
-                    point_in_titlebar(w, cursor_x, cursor_y)) {
-                    tb_idx = i;
-                    break;
-                }
-            }
+            int tb_idx = z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_TITLEBAR, 0);
             if (tb_idx >= 0) {
                 set_focus(tb_idx);
                 wmenu_open_at(tb_idx, cursor_x, cursor_y);
@@ -2897,26 +3102,44 @@ static void handle_mouse(void) {
 }
 
 /* M32: cycles focus through every alive ordinary (non-panel, non-desktop)
- * window, un-minimizing the target the same way a titlebar/
- * panel WM_ACTION_FOCUS click already does - reuses apply_window_action
- * rather than duplicating its focus/un-minimize logic. `focused_window`
- * may be -1 (nothing focused) going in; `(start + step) % window_count`
- * still lands correctly on 0 for step 1 in that case. A no-op (focuses
- * itself back) if there's only one eligible window - harmless, set_focus
- * already no-ops on a same-window call.
+ * window, un-minimizing the target the same way a titlebar/panel
+ * WM_ACTION_FOCUS click already does - reuses apply_window_action rather
+ * than duplicating its focus/un-minimize logic.
  *
- * M49: `direction` is +1 for Alt+Tab and -1 for Shift+Alt+Tab. The
- * modulo is written to stay correct for a negative step, which is why
- * the existing `idx < 0` correction was already there. */
+ * M49: `direction` is +1 for Alt+Tab and -1 for Shift+Alt+Tab.
+ *
+ * M51: in z-order rather than in slot order. This used to walk windows[]
+ * by index, so on a desktop with four windows open it visited them in the
+ * order they were *launched* regardless of what you had been using - and
+ * with M51's raise-on-focus that would have been actively confusing,
+ * since the screen now shows a use order the keyboard didn't follow.
+ *
+ * Now that focus raises, the z-order *is* the most-recently-used order,
+ * so "the next window back" is simply the next one down. Alt+Tab goes
+ * backwards through it (the window you used before this one), Shift+Alt+
+ * Tab forwards, both wrapping. Tapping Alt+Tab repeatedly therefore
+ * swaps the front two rather than touring every window - which is what a
+ * tap-without-holding does on Windows too, and is the honest consequence
+ * of raising on focus rather than a shortcut taken here. */
 static void alt_tab_cycle(int direction) {
-    if (window_count == 0) {
+    if (z_count == 0) {
         return;
     }
-    for (int step = 1; step <= window_count; step++) {
-        int idx = (focused_window + step * direction) % window_count;
-        if (idx < 0) {
-            idx += window_count;
+    /* Where the focused window sits in the z-order. If nothing is focused,
+     * start above the top so a backwards step lands on the topmost. */
+    int start = focused_window >= 0 ? z_position_of(focused_window) : z_count;
+    if (start < 0) {
+        start = z_count;
+    }
+    /* direction +1 (Alt+Tab) means "one further back", which is one step
+     * *down* the z-order - hence the negation. */
+    int step = -direction;
+    for (int n = 1; n <= z_count; n++) {
+        int z = (start + n * step) % z_count;
+        if (z < 0) {
+            z += z_count;
         }
+        int idx = zorder[z];
         if (windows[idx].alive && !windows[idx].is_panel && !windows[idx].is_desktop) {
             apply_window_action(idx, WM_ACTION_FOCUS, 0);
             return;

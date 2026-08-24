@@ -123,6 +123,7 @@
 #define RUNNING_SLOT_FOCUS_BG      0x002E4A63u
 #define RUNNING_SLOT_FOCUS_BORDER  0x004C99E6u /* same blue as compositor.c's TITLEBAR_FOCUS_COLOR - the focused window's titlebar and its taskbar slot read as the same "this one" accent */
 #define RUNNING_SLOT_MIN_BG        0x00352A20u /* dim, warm - visually distinct from both normal and focused so a minimized app doesn't look like it just quietly vanished */
+#define RUNNING_SLOT_FRONT_BORDER  0x002E5C86u /* M51: half-lit accent - the window on top when nothing holds focus, see running_slot_t.frontmost */
 #define LABEL_COLOR         0x00FFFFFFu
 
 #define START_BG        0x00243447u
@@ -145,6 +146,17 @@ typedef struct {
     int32_t x, w;
     int32_t window_id;
     uint8_t focused;
+    /* M51: this is the window at the top of the compositor's z-order -
+     * which is almost always also the focused one, since focusing raises.
+     * The case worth drawing is the one where it isn't: minimizing the
+     * focused window leaves nothing focused at all, and the bar can still
+     * say which of the remaining windows is in front. Read from
+     * wm_window_info_t.z_index rather than from the order the query
+     * returned, deliberately: the buttons stay in window_id order for the
+     * whole life of a window so they can be found by muscle memory, which
+     * is the Windows behavior and the reason the query does not simply
+     * hand them back in z-order. */
+    uint8_t frontmost;
     uint8_t minimized;
     char name[LABEL_MAX + 1];
 } running_slot_t;
@@ -233,10 +245,34 @@ static void refresh_running_slots(wm_window_t *self) {
         slot->w = SLOT_W;
         slot->window_id = info->window_id;
         slot->focused = info->focused;
+        slot->frontmost = 0; /* filled in below - it is a property of the whole set, not of one row */
         slot->minimized = info->minimized;
         copy_label(slot->name, info->title);
         x += SLOT_W + SLOT_GAP;
         running_count++;
+    }
+    /* M51: whichever listed window sits highest in the z-order, ignoring
+     * minimized ones (a minimized window is not in front of anything -
+     * it isn't on screen at all). One pass over what was just laid out,
+     * so the marker follows the same slots the loop above kept. */
+    {
+        int front = -1;
+        int32_t best_z = -1;
+        for (int32_t i = 0, k = 0; i < q.count && k < running_count; i++) {
+            const wm_window_info_t *info = &q.windows[i];
+            if (info->is_panel || info->is_desktop || info->window_id == self->window_id) {
+                continue;
+            }
+            if (running_slots[k].window_id == info->window_id && !info->minimized &&
+                info->z_index > best_z) {
+                best_z = info->z_index;
+                front = k;
+            }
+            k++;
+        }
+        if (front >= 0) {
+            running_slots[front].frontmost = 1;
+        }
     }
     /* A slot that scrolled out from under the cursor must not stay lit. */
     if (hovered >= running_count) {
@@ -346,7 +382,8 @@ static void redraw(wm_window_t *self) {
         uint32_t bg = slot->minimized ? RUNNING_SLOT_MIN_BG
                                       : (slot->focused ? RUNNING_SLOT_FOCUS_BG
                                                        : (i == hovered ? RUNNING_SLOT_HOVER_BG : RUNNING_SLOT_BG));
-        uint32_t border = slot->focused ? RUNNING_SLOT_FOCUS_BORDER : SLOT_BORDER_COLOR;
+        uint32_t border = slot->focused ? RUNNING_SLOT_FOCUS_BORDER
+                                        : (slot->frontmost ? RUNNING_SLOT_FRONT_BORDER : SLOT_BORDER_COLOR);
         gfx_fill_rect_rounded(&bar_gfx, slot->x, BTN_Y, slot->w, SLOT_H, bg);
         gfx_draw_rect_rounded(&bar_gfx, slot->x, BTN_Y, slot->w, SLOT_H, border);
         gfx_draw_text(&bar_gfx, slot->x + LABEL_PAD, BTN_Y + 4, slot->name, LABEL_COLOR);
