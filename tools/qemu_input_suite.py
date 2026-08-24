@@ -310,6 +310,16 @@ CLOCK_W = 200  # gui_clock.c WIN_W
 # settings.c's wallpaper row.
 WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H = 270, 68, 22
 
+# file_manager.c: WIN_W/WIN_H, its header, and one row.
+FM_W, FM_H = 280, 360
+FM_HEADER_H = 24
+FM_ROW_H = 20   # FONT_HEIGHT + 4
+FM_LIST_W = FM_W - 8  # minus SCROLLBAR_W
+
+# M49: compositor.c's drag label, which follows the cursor during a
+# client-initiated drag.
+DRAG_LABEL_BG = 0x335577
+
 # M48: compositor.c's toast surface - 300x56, TOAST_MARGIN in from the
 # top-right, stacked downward. Opaque, drawn over everything but the
 # cursor, so no blend is involved in any of these reads.
@@ -1218,6 +1228,120 @@ def test_clicking_a_toast_dismisses_it(m):
           "the toast went away but left something behind at 0x%06X" % shot.px(*probe))
 
 
+def test_wheel_scrolls_the_file_list_one_row_per_detent(m):
+    """M49's wheel, end to end: a real emulated IntelliMouse packet
+    through QEMU's own `mouse_move dx dy dz`, negotiated by
+    kernel/drivers/mouse.c's 200/100/80 knock, routed as
+    WM_EVENT_MOUSE_WHEEL to whatever the pointer is over, and turned into
+    exactly one row of scroll per detent.
+
+    "Exactly one row" is checked without reading any filename: capture the
+    pixels of list row N before scrolling, scroll N detents, and require
+    row 0 to be those same pixels afterwards. That is content-independent
+    and off-by-one-proof in a way that counting rows by eye is not."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[2][2])  # Files
+    wait_for_windows(m, 1)
+
+    x, y = app_origin(FIRST_APP_IDX)
+    list_x = x + 6
+    row0_y = y + FM_HEADER_H
+
+    def row_pixels(shot, row):
+        top = row0_y + row * FM_ROW_H
+        return [shot.px(px, py)
+                for py in range(top, top + FM_ROW_H)
+                for px in range(list_x, x + FM_LIST_W - 4)]
+
+    # The pointer has to be *over* the list: the wheel acts on what it is
+    # over, not on what holds focus, which is the whole point of routing
+    # it that way.
+    m.move_to(x + FM_W // 2, y + FM_H // 2)
+    before = m.screenshot()
+    want = row_pixels(before, 3)
+    check(any(p != want[0] for p in want),
+          "the row this test scrolls to is blank - the file list is too short to scroll")
+
+    m.wheel(3)
+    after = m.screenshot()
+    got = row_pixels(after, 0)
+    if got != want:
+        # QEMU's dz sign is the emulator's convention, not the guest's;
+        # try the other direction before calling this a failure. The
+        # assertion that matters is the distance, not which way QEMU
+        # spells "down".
+        m.wheel(-6)
+        after = m.screenshot()
+        got = row_pixels(after, 0)
+    check(got == want,
+          "three wheel detents did not move the file list by exactly three rows")
+
+
+def test_alt_f4_closes_the_focused_window(m):
+    """One of the chords a desktop is expected to have, and the one whose
+    key did not previously exist at all: kernel/drivers/keyboard.c decoded
+    printable ASCII and four arrows, so F4 produced nothing. Alt+F4 goes
+    through WM_ACTION_CLOSE, so it honors an app's confirm_close opt-in -
+    it is the polite verb, not the forceful one, which is why the victim
+    here is the Clock rather than the Editor."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock
+    wait_for_windows(m, 1)
+    m.sendkey("alt-f4")
+    wait_for(m, lambda s: count_app_windows(s) == 0,
+             "Alt+F4 did not close the focused window")
+
+
+def test_ctrl_alt_arrows_snap_and_maximize(m):
+    """M43's snap actions and M30's maximize, reached from the keyboard.
+    Every one of these already had an action to call - what was missing
+    was only the binding, so this is checking the binding, using the same
+    pixels M43's own drag test grades its result on."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock: 200x90, narrower than half the screen
+    wait_for_windows(m, 1)
+
+    m.sendkey("ctrl-alt-right")
+    wait_for(m, lambda s: s.px(600, 12) == ACCENT,
+             "Ctrl+Alt+Right did not snap the window to the right half")
+
+    m.sendkey("ctrl-alt-left")
+    wait_for(m, lambda s: s.px(60, 12) == ACCENT and s.px(600, 12) == desktop_px(12),
+             "Ctrl+Alt+Left did not snap the window back to the left half")
+
+    m.sendkey("ctrl-alt-down")
+    wait_for(m, lambda s: count_app_windows(s) == 1 and focused_slot(s) == -1,
+             "Ctrl+Alt+Down did not minimize the window (its taskbar button should "
+             "still be there, just not focused)")
+
+
+def test_drag_a_file_onto_the_desktop_opens_it(m):
+    """M49's one genuinely new piece of plumbing: a payload carried across
+    two clients that know nothing about each other. Dragging a filename
+    out of file_manager.c and dropping it on the desktop opens it in the
+    editor - which means the drag label appeared, the compositor held the
+    payload across the gesture, and desktop_icons.c got both the
+    WM_EVENT_DROP and the payload behind it."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[2][2])  # Files
+    wait_for_windows(m, 1)
+
+    x, y = app_origin(FIRST_APP_IDX)
+    # Press on the first row, then drag well clear of the window onto
+    # empty desktop. The press alone only selects; the drag begins once
+    # the pointer has moved past file_manager.c's own DRAG_THRESHOLD.
+    m.press(x + 60, y + FM_HEADER_H + FM_ROW_H // 2)
+    m.move_held(700, 500)
+
+    shot = m.screenshot()
+    check(shot.count_color(DRAG_LABEL_BG, 700, 500, 200, 32) > 0,
+          "no drag label followed the cursor - the drag never started")
+
+    m.release()
+    wait_for(m, lambda s: count_app_windows(s) == 2,
+             "dropping a file on the desktop did not open it in the editor")
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -1245,6 +1369,10 @@ TESTS = [
     ("settings_persist_across_a_reboot", test_settings_persist_across_a_reboot),
     ("missing_program_raises_a_toast", test_missing_program_raises_a_toast),
     ("clicking_a_toast_dismisses_it", test_clicking_a_toast_dismisses_it),
+    ("wheel_scrolls_the_file_list_one_row_per_detent", test_wheel_scrolls_the_file_list_one_row_per_detent),
+    ("alt_f4_closes_the_focused_window", test_alt_f4_closes_the_focused_window),
+    ("ctrl_alt_arrows_snap_and_maximize", test_ctrl_alt_arrows_snap_and_maximize),
+    ("drag_a_file_onto_the_desktop_opens_it", test_drag_a_file_onto_the_desktop_opens_it),
     ("launch_close_stress", test_launch_close_stress),
 ]
 

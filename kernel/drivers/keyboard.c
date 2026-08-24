@@ -16,6 +16,16 @@
 #define SCANCODE_LALT         0x38
 #define SCANCODE_RELEASE_BIT  0x80
 
+/* M49: F1-F12. Set-1 make codes, and all of them sit past the end of
+ * unshifted_table (0x3A) - which is why they used to fall out of the
+ * `code >= sizeof(unshifted_table)` guard below and produce nothing at
+ * all. F11/F12 are the two that aren't contiguous with the rest, a
+ * historical artifact of the 84-key keyboard having only ten. */
+#define SCANCODE_F1  0x3B
+#define SCANCODE_F10 0x44
+#define SCANCODE_F11 0x57
+#define SCANCODE_F12 0x58
+
 /* M33: the four arrow keys, and only the four arrow keys, out of the
  * whole 0xE0-prefixed extended-scancode space (numpad Enter, right Ctrl/
  * Alt, media keys, ... none of that is decoded - see this file's own
@@ -136,6 +146,24 @@ static void keyboard_irq(isr_regs_t *regs) {
         alt_held = !released;
         return;
     }
+    /* M49: the function keys, decoded into the same buffered stream as
+     * the arrows (input.h's KBD_KEY_FN) and checked before the table
+     * bounds test, which they all fall outside of. */
+    if (!released) {
+        if (code >= SCANCODE_F1 && code <= SCANCODE_F10) {
+            buffer_push((char)KBD_KEY_FN(1 + (code - SCANCODE_F1)));
+            return;
+        }
+        if (code == SCANCODE_F11) {
+            buffer_push((char)KBD_KEY_FN(11));
+            return;
+        }
+        if (code == SCANCODE_F12) {
+            buffer_push((char)KBD_KEY_FN(12));
+            return;
+        }
+    }
+
     if (released || code >= sizeof(unshifted_table)) {
         return;
     }

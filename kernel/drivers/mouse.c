@@ -3,6 +3,7 @@
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/isr.h"
 #include "arch/x86_64/pic.h"
+#include "drivers/klog.h"
 #include "drivers/pit.h" /* pit_get_ticks - timestamping each event at the source (M40) */
 
 #define PS2_DATA_PORT   0x60
@@ -87,7 +88,13 @@ static mouse_event_t event_buffer[EVENT_BUFFER_SIZE];
 static volatile uint32_t buf_head;
 static volatile uint32_t buf_tail;
 
-static uint8_t packet[3];
+/* M49: 3 for a standard PS/2 mouse, 4 once the IntelliMouse extension is
+ * negotiated (see mouse_init). Set once at init and never changed, so the
+ * IRQ handler's packet framing is a plain comparison rather than a mode
+ * it has to keep track of. */
+static int packet_bytes = 3;
+
+static uint8_t packet[4];
 static int packet_index;
 
 static void push_event(mouse_event_t ev) {
@@ -112,7 +119,7 @@ static void mouse_irq(isr_regs_t *regs) {
     }
 
     packet[packet_index++] = data;
-    if (packet_index < 3) {
+    if (packet_index < packet_bytes) {
         return;
     }
     packet_index = 0;
@@ -136,6 +143,21 @@ static void mouse_irq(isr_regs_t *regs) {
      * mouse_event_t.time_ms for why it has to be here and not at the
      * reader. */
     ev.time_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+    /* M49: byte 3 of an IntelliMouse packet is the Z (wheel) delta, a
+     * 4-bit two's-complement value in its low nibble - the high nibble
+     * carries buttons 4/5 on a 5-button mouse, which this driver has no
+     * use for and deliberately masks off rather than misreading as a huge
+     * scroll. Sign sense: the wire protocol reports *up* as positive
+     * (like dy), and screen coordinates are down-positive, so this is
+     * negated for the same reason dy is - one convention for both axes. */
+    ev.wheel = 0;
+    if (packet_bytes == 4) {
+        int32_t z = packet[3] & 0x0F;
+        if (z & 0x08) {
+            z -= 16;
+        }
+        ev.wheel = -z;
+    }
     push_event(ev);
 }
 
@@ -143,6 +165,7 @@ void mouse_init(void) {
     buf_head = 0;
     buf_tail = 0;
     packet_index = 0;
+    packet_bytes = 3;
 
     ps2_write_command(0xA8); /* enable the auxiliary (mouse) device */
 
@@ -160,6 +183,27 @@ void mouse_init(void) {
      * for the entire polling handshake avoids ever latching that
      * condition in the first place. */
     mouse_write(0xF6); /* set defaults */
+
+    /* M49: the IntelliMouse "knock" - set sample rate to 200, then 100,
+     * then 80, and ask the device what it is (0xF2). A mouse that
+     * implements the extension answers 0x03 and starts sending 4-byte
+     * packets with a wheel delta in the fourth; anything else answers
+     * 0x00 and keeps the 3-byte protocol, which is a perfectly ordinary
+     * outcome and not a failure - every scrollable surface simply gets
+     * `wheel == 0` forever, exactly as it did before this milestone.
+     *
+     * Done here, in the same polled window as F6/F4 and before IRQ12
+     * generation is enabled at the controller, for precisely the reason
+     * this function's existing comment gives: the whole handshake has to
+     * stay out of the interrupt path or a latched aux-IRQ condition
+     * desynchronizes packet framing from the very first real packet. */
+    mouse_write(0xF3); mouse_write(200);
+    mouse_write(0xF3); mouse_write(100);
+    mouse_write(0xF3); mouse_write(80);
+    mouse_write(0xF2); /* get device id */
+    uint8_t device_id = ps2_read_data();
+    packet_bytes = (device_id == 0x03) ? 4 : 3;
+
     mouse_write(0xF4); /* enable data reporting */
     ps2_flush_output_buffer(); /* belt-and-suspenders: drop anything unexpected still sitting there */
 
@@ -168,6 +212,10 @@ void mouse_init(void) {
     config |= 0x02; /* bit 1: enable IRQ12 on aux (mouse) activity */
     ps2_write_command(0x60); /* "write controller configuration byte" */
     ps2_write_data(config);
+
+    klog_puts(packet_bytes == 4
+                  ? "[mouse] IntelliMouse 4-byte protocol negotiated - wheel events enabled.\n"
+                  : "[mouse] standard 3-byte protocol - no wheel on this device.\n");
 
     irq_register_handler(MOUSE_IRQ, mouse_irq);
     pic_clear_mask(CASCADE_IRQ);

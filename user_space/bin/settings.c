@@ -28,6 +28,7 @@
  * controls you hadn't touched.
  */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
+#include "shortcuts.h" /* system_api/include/shortcuts.h - M49: the Shortcuts pane is generated from the same table the compositor dispatches from */
 #include "str.h"
 #include "settings_file.h" /* M47: this window is where the three settings are chosen, so it is also where they get written down */
 #include "syscall_wrappers.h"
@@ -35,7 +36,12 @@
 #include "wmclient.h"
 
 #define WIN_W 320
-#define WIN_H 340
+/* M49: 340 -> 520, for the Shortcuts pane along the bottom. Still well
+ * inside what the compositor will place without clamping (a window is
+ * kept clear of the taskbar since M45), and taller is the right answer
+ * rather than a second tab: this list is reference material you read
+ * once, not a control you return to. */
+#define WIN_H 520
 
 #define BG_COLOR      0x00202430u
 #define TEXT_COLOR    0x00E0E0E0u
@@ -56,6 +62,16 @@
 #define WALL_BTN_H  22
 #define WALL_BTN_GAP 6
 #define WALL_BTN_X(i) (GFX_PAD + (i) * (WALL_BTN_W + WALL_BTN_GAP))
+
+/* M49: the Shortcuts pane. Rows come straight out of SHORTCUTS[] - the
+ * same table compositor.c's handle_keyboard dispatches from - so a chord
+ * cannot exist without being listed here, and nothing can be listed here
+ * that isn't wired up. That is the whole point: a shortcuts list is only
+ * worth having if it is true. */
+#define SHORTCUT_LABEL_Y 304
+#define SHORTCUT_ROW_Y   326
+#define SHORTCUT_ROW_H   18
+#define SHORTCUT_DESC_X  (GFX_PAD + 124) /* clears the longest chord ("Ctrl+Shift+Esc", 14 glyphs) */
 
 #define DEFAULT_BG_COLOR     0x001A1A2Eu /* mirrors compositor.c's own compile-time default - see this file's header comment */
 #define DEFAULT_ACCENT_COLOR 0x004C99E6u
@@ -209,6 +225,14 @@ static void redraw(wm_window_t *win, int clear_hover, int clear_pressed) {
         int32_t label_w = (int32_t)strlen(name) * FONT_WIDTH;
         gfx_draw_text(&win->gfx, x + (WALL_BTN_W - label_w) / 2,
                       WALL_BTN_Y + (WALL_BTN_H - FONT_HEIGHT) / 2, name, TEXT_COLOR);
+    }
+
+    gfx_draw_text(&win->gfx, GFX_PAD, SHORTCUT_LABEL_Y, "Shortcuts", LABEL_COLOR);
+    gfx_draw_line(&win->gfx, GFX_PAD, SHORTCUT_LABEL_Y + 16, WIN_W - GFX_PAD, SHORTCUT_LABEL_Y + 16, BORDER_COLOR);
+    for (int i = 0; i < SHORTCUT_COUNT; i++) {
+        int32_t y = SHORTCUT_ROW_Y + i * SHORTCUT_ROW_H;
+        gfx_draw_text(&win->gfx, GFX_PAD, y, SHORTCUTS[i].chord, TEXT_COLOR);
+        gfx_draw_text(&win->gfx, SHORTCUT_DESC_X, y, SHORTCUTS[i].what, LABEL_COLOR);
     }
 }
 

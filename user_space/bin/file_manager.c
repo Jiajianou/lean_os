@@ -58,6 +58,15 @@ static int selected = -1;
 static int scroll_top;
 static const char *status_text = "";
 
+/* M49: drag state. A press on a row arms it; the drag only actually
+ * begins once the pointer has moved DRAG_THRESHOLD away, so a click and a
+ * drag stay distinguishable - without that every selection click would
+ * announce a drag the moment the pointer twitched. */
+#define DRAG_THRESHOLD 8
+static int drag_armed_row = -1;
+static int32_t drag_press_x, drag_press_y;
+static int dragging;
+
 static void refresh_list(void) {
     static char buf[LIST_BUF_SIZE];
     long n = sys_listfiles(buf, sizeof(buf));
@@ -166,11 +175,64 @@ int main(void) {
                 } else if (ev.ch == '\n' || ev.ch == '\r') {
                     open_selected();
                 }
+            } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
+                /* M49: this window keeps receiving motion even once the
+                 * pointer has left it (the compositor routes by focus and
+                 * hands over out-of-bounds coordinates), which is exactly
+                 * what makes dragging a file *out* of it possible. */
+                if (drag_armed_row >= 0 && !dragging && (ev.buttons & 1)) {
+                    int32_t dx = ev.x - drag_press_x;
+                    int32_t dy = ev.y - drag_press_y;
+                    if (dx < 0) {
+                        dx = -dx;
+                    }
+                    if (dy < 0) {
+                        dy = -dy;
+                    }
+                    if (dx + dy >= DRAG_THRESHOLD) {
+                        dragging = 1;
+                        wm_drag_begin(names[drag_armed_row]);
+                        status_text = "";
+                        changed = 1;
+                    }
+                }
+                if (!(ev.buttons & 1)) {
+                    drag_armed_row = -1;
+                    dragging = 0;
+                }
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && !(ev.buttons & 1)) {
+                drag_armed_row = -1;
+                dragging = 0;
+            } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
+                /* M49: one row per detent - the same unit Up/Down move,
+                 * so the wheel and the keyboard agree about what a step
+                 * is. Scrolls the view without moving the selection: a
+                 * wheel is a look-around gesture, and dragging the
+                 * selection with it would make "scroll down to see, then
+                 * press Enter" open the wrong file. */
+                int max_top = file_count - ROWS_VISIBLE;
+                if (max_top < 0) {
+                    max_top = 0;
+                }
+                int want = scroll_top + ev.wheel;
+                if (want < 0) {
+                    want = 0;
+                }
+                if (want > max_top) {
+                    want = max_top;
+                }
+                if (want != scroll_top) {
+                    scroll_top = want;
+                    changed = 1;
+                }
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 if (ev.y >= HEADER_H && ev.y < HEADER_H + LIST_H) {
                     int row = scroll_top + (ev.y - HEADER_H) / ROW_H;
                     if (row < file_count) {
                         selected = row;
+                        drag_armed_row = row; /* M49: a drag may be starting - see DRAG_THRESHOLD */
+                        drag_press_x = ev.x;
+                        drag_press_y = ev.y;
                         changed = 1;
                         long now = sys_uptime_ms();
                         if (last_click_row == row && last_click_ms >= 0 && now - last_click_ms <= DOUBLE_CLICK_MS) {

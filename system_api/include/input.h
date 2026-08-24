@@ -28,6 +28,13 @@ typedef struct {
      * looks like from the outside. Timestamping at the source makes the
      * measurement independent of how busy everything downstream is. */
     uint32_t time_ms;
+    /* M49: wheel detents since the last event - negative up, positive
+     * down, matching the screen-coordinate sense dy already uses. Always
+     * 0 on a 3-byte-protocol mouse, which is exactly what a device
+     * without a wheel reports, so a reader never has to ask whether the
+     * hardware has one. See kernel/drivers/mouse.c's IntelliMouse
+     * negotiation. */
+    int32_t wheel;
 } mouse_event_t;
 
 /* M32: SYS_kbd_modifiers' bitmask - which modifiers were held for the
@@ -58,3 +65,16 @@ typedef struct {
 #define KBD_KEY_DOWN  2
 #define KBD_KEY_LEFT  3
 #define KBD_KEY_RIGHT 4
+
+/* M49: the function keys, in the same buffered-character stream and for
+ * the same reason - Alt+F4 is one of the chords a desktop is expected to
+ * have, and F4 had no representation at all in a driver that only
+ * decoded printable ASCII plus the four arrows.
+ *
+ * 14..25 rather than continuing 5..16 from the arrows: 8, 9, 10 and 13
+ * are '\b', '\t', '\n' and '\r', which this driver really does emit, and
+ * 27 is Escape. 14..25 is the longest run below 32 that collides with
+ * none of them, which is why the numbering has a gap in it. */
+#define KBD_KEY_F1  14
+#define KBD_KEY_F12 25
+#define KBD_KEY_FN(n) (KBD_KEY_F1 + (n) - 1) /* n is 1..12 */

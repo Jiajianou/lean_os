@@ -305,6 +305,26 @@ int main(void) {
                     signal_selected(SIGTERM);
                     changed = 1;
                 }
+            } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
+                /* M49: same one-row-per-detent, view-only scroll the file
+                 * manager uses - and for the same reason: End Task acts
+                 * on the selection, so a wheel that moved it would be a
+                 * gesture that can kill the wrong process. */
+                int max_top = task_count - ROWS_VISIBLE;
+                if (max_top < 0) {
+                    max_top = 0;
+                }
+                int want = scroll_top + ev.wheel;
+                if (want < 0) {
+                    want = 0;
+                }
+                if (want > max_top) {
+                    want = max_top;
+                }
+                if (want != scroll_top) {
+                    scroll_top = want;
+                    changed = 1;
+                }
             } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
                 if (pressed_btn >= 0) {
                     int32_t bx = pressed_btn == 0 ? END_BTN_X : KILL_BTN_X;

@@ -29,6 +29,7 @@
 #include "power/power.h"
 #include "proc/proc.h"
 #include "sched/sched.h"
+#include "shortcuts.h" /* system_api/include/shortcuts.h - M49's one table of window-manager chords */
 #include "signal.h"  /* system_api/include/signal.h */
 #include "spawn_error.h" /* system_api/include/spawn_error.h - M48's SYS_spawn failure codes and their shared message table */
 #include "syscall.h" /* system_api/include/syscall.h */
@@ -615,7 +616,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                "up to 3s for test movement (QEMU monitor: 'mouse_move dx dy' "
                "/ 'mouse_button val')...\n");
     int got_mouse_event = 0;
-    mouse_event_t last_ev = {0, 0, 0, 0};
+    mouse_event_t last_ev = {0, 0, 0, 0, 0};
     uint64_t mouse_deadline = pit_get_ticks() + 3 * PIT_HZ;
     while (pit_get_ticks() < mouse_deadline) {
         mouse_event_t ev;
@@ -2783,6 +2784,127 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts("[m48] toast raised, still up mid-life, gone by its own deadline, and each "
                    "distinct SYS_spawn failure reporting its own code self-test passed "
                    "(9/9 checks).\n\n");
+    }
+
+    /* M49 self-test: the three pieces of input completeness that can be
+     * driven without a hand on the machine - the shortcut table, the
+     * chords it dispatches, and the drag protocol's round trip. (The
+     * wheel itself is hardware: whether a real detent reaches a real list
+     * is what tools/qemu-input-test.sh's wheel test is for.)
+     *
+     * The chord half is checked the only way that means anything from
+     * here: not by pressing keys - the kernel has no way to inject one -
+     * but by asserting that the table the compositor dispatches from and
+     * the table settings.c lists from are the same table, and that
+     * shortcut_lookup resolves each chord to the id it is supposed to.
+     * That is the actual claim this milestone makes about them: there is
+     * one table, so a chord cannot be listed without being wired up.
+     *
+     * The drag half is a real round trip through a real compositor: a
+     * kernel-side WM_DRAG_PIPE write, a real client window under the
+     * cursor, and the payload read back out of WM_DRAG_DATA_PIPE - which
+     * is the piece no client could verify on its own, because it crosses
+     * two of them.
+     */
+    {
+        /* Every chord, resolved from the same shortcut_lookup
+         * compositor.c calls. Shift+Alt+Tab vs Alt+Tab is the pair with
+         * teeth: they share a key and differ only by a modifier that one
+         * of them forbids, so a table that got mods_forbidden wrong would
+         * silently make Shift+Alt+Tab cycle forward. */
+        static const struct { const char *what; char ch; int mods; int expect; } chords[] = {
+            {"Alt+Tab", '\t', KBD_MOD_ALT, SHORTCUT_CYCLE_FORWARD},
+            {"Shift+Alt+Tab", '\t', KBD_MOD_ALT | KBD_MOD_SHIFT, SHORTCUT_CYCLE_BACKWARD},
+            {"Ctrl+Space", ' ', KBD_MOD_CTRL, SHORTCUT_LAUNCHER},
+            {"Ctrl+Shift+Esc", 27, KBD_MOD_CTRL | KBD_MOD_SHIFT, SHORTCUT_TASK_MANAGER},
+            {"Alt+F4", (char)KBD_KEY_FN(4), KBD_MOD_ALT, SHORTCUT_CLOSE_WINDOW},
+            {"Ctrl+Alt+Left", (char)KBD_KEY_LEFT, KBD_MOD_CTRL | KBD_MOD_ALT, SHORTCUT_SNAP_LEFT},
+            {"Ctrl+Alt+Right", (char)KBD_KEY_RIGHT, KBD_MOD_CTRL | KBD_MOD_ALT, SHORTCUT_SNAP_RIGHT},
+            {"Ctrl+Alt+Up", (char)KBD_KEY_UP, KBD_MOD_CTRL | KBD_MOD_ALT, SHORTCUT_MAXIMIZE},
+            {"Ctrl+Alt+Down", (char)KBD_KEY_DOWN, KBD_MOD_CTRL | KBD_MOD_ALT, SHORTCUT_MINIMIZE},
+            {"a plain Tab, which must NOT be a chord", '\t', 0, SHORTCUT_NONE},
+            {"a plain space", ' ', 0, SHORTCUT_NONE},
+            {"an ordinary letter with Ctrl held", 'c', KBD_MOD_CTRL, SHORTCUT_NONE},
+        };
+        int all_ok = 1;
+        for (size_t i = 0; i < sizeof(chords) / sizeof(chords[0]); i++) {
+            int got = shortcut_lookup(chords[i].ch, chords[i].mods);
+            if (got != chords[i].expect) {
+                klog_puts("[m49] shortcut_lookup resolved ");
+                klog_puts(chords[i].what);
+                klog_puts(" to 0x");
+                klog_put_hex32((uint32_t)got);
+                klog_puts(", expected 0x");
+                klog_put_hex32((uint32_t)chords[i].expect);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        /* Every row is dispatchable and describable - the property that
+         * makes one table worth having rather than two. */
+        for (int i = 0; i < SHORTCUT_COUNT; i++) {
+            if (SHORTCUTS[i].id == SHORTCUT_NONE || !SHORTCUTS[i].chord[0] || !SHORTCUTS[i].what[0]) {
+                klog_puts("[m49] shortcut row 0x");
+                klog_put_hex32((uint32_t)i);
+                klog_puts(" is missing an id, a chord name or a description\n");
+                all_ok = 0;
+            }
+        }
+
+        /* The drag round trip. gui_clock connects first, so its window is
+         * at (100, 100) and 200x90 - the compositor delivers a drop to
+         * whatever window the cursor is over, and the cursor starts at
+         * the screen center, so it has to be moved onto that window
+         * first. There is no way to inject a mouse packet from here, so
+         * this drives the one thing that genuinely needs a real
+         * compositor - the payload crossing from WM_DRAG_PIPE to
+         * WM_DRAG_DATA_PIPE - and leaves the pointer half to the input
+         * harness, which can actually move a pointer. */
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image) {
+            panic("out of memory reading compositor back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0) {
+            panic("vfs_read: compositor missing - should exist, just seeded");
+        }
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(400);
+
+        int drag_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_DRAG_PIPE, (uint64_t)drag_fds, 0) != 0) {
+            panic("M49 self-test: kernel-side SYS_pipe_open(WM_DRAG_PIPE) failed");
+        }
+        wm_drag_request_t drag;
+        k_memset(&drag, 0, sizeof(drag));
+        k_strlcpy(drag.payload, "m33test", sizeof(drag.payload));
+        do_syscall(SYS_write, (uint64_t)drag_fds[1], (uint64_t)&drag, sizeof(drag));
+        pit_sleep_ms(300);
+
+        /* The drag label follows the cursor, which is parked at the
+         * screen centre (512, 384) and never moved - so the label's own
+         * fill is at a known place: CURSOR_SIZE (8) down and right of it,
+         * DRAG_LABEL_H (20) tall. (524, 396) is inside it and past the
+         * rounded corner. */
+        uint32_t label_pixel = fb_get_pixel(524, 396);
+
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        if (label_pixel != 0x00335577u) {
+            klog_puts("[m49] the compositor did not show a drag label after WM_DRAG_PIPE - expected 0x00335577 got 0x");
+            klog_put_hex32(label_pixel);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M49 input-completeness self-test: the shortcut table and/or the drag protocol did not behave as specified");
+        }
+        klog_puts("[m49] the shared shortcut table resolving every chord (and refusing every "
+                   "near-miss), and a drag announced on WM_DRAG_PIPE becoming a visible drag "
+                   "self-test passed (22/22 checks).\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

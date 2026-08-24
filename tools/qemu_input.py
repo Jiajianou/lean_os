@@ -399,6 +399,22 @@ class Machine:
     BTN_RIGHT = 2
     BTN_MIDDLE = 4
 
+    def wheel(self, detents):
+        """M49: `detents` clicks of the scroll wheel, through QEMU's own
+        `mouse_move dx dy dz` third argument - the same emulated
+        IntelliMouse packet a real wheel produces, so the guest cannot
+        tell this from hardware.
+
+        One monitor command per detent rather than one with a large dz:
+        the PS/2 wheel field is a 4-bit signed value, so a big dz is not
+        a bigger scroll, it is a wrapped one - and a test that scrolled
+        the wrong distance because the harness overflowed a nibble would
+        look exactly like a guest bug."""
+        step = 1 if detents > 0 else -1
+        for _ in range(abs(detents)):
+            self.monitor("mouse_move 0 0 %d" % step, settle=0.06)
+        time.sleep(0.2)
+
     def button(self, mask):
         self.monitor("mouse_button %d" % mask, settle=0.03)
 

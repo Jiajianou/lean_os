@@ -73,6 +73,7 @@
 #include "power_mode.h" /* system_api/include/power_mode.h - POWER_OFF/POWER_REBOOT, M47's launcher Power controls */
 #include "spawn_error.h" /* system_api/include/spawn_error.h - M48, so a failed launch can say why */
 #include "settings_file.h" /* M47: the desktop's three settings on disk - read once, below, before any client connects */
+#include "shortcuts.h" /* system_api/include/shortcuts.h - M49's one table of window-manager chords, shared with settings.c */
 #include "signal.h" /* system_api/include/signal.h - SIGTERM, M30's WM_ACTION_CLOSE */
 #include "str.h"
 #include "syscall_wrappers.h"
@@ -267,6 +268,16 @@
 #define TOAST_WARN_C   0x00E0A33Cu
 #define TOAST_ERROR_C  0x00E05C55u
 
+/* M49: the label that follows the cursor during a client drag. Without
+ * it a drag is invisible - the source window doesn't move and the target
+ * hasn't been told anything yet - so this is what makes the gesture
+ * something a person can see they are doing. */
+#define DRAG_LABEL_H      20
+#define DRAG_LABEL_PAD    6
+#define DRAG_LABEL_BG     0x00335577u
+#define DRAG_LABEL_BORDER 0x004C99E6u
+#define DRAG_LABEL_FG     0x00FFFFFFu
+
 /* M31's resize-edge hit-test bitmask - moved up here (still used first by
  * resize_hit_mask, far below) because M38's cursor-shape selection in
  * redraw_rect needs these bit values earlier in the file than that
@@ -386,6 +397,19 @@ typedef struct {
 
 static toast_t toasts[TOAST_MAX];
 static int toast_count;
+
+/* M49: a client-initiated drag in flight - the payload the source
+ * announced on WM_DRAG_PIPE, held until the button comes up. Separate
+ * from drag_mode below, which is this process's own window-frame drags:
+ * those move a window, this one carries a filename between two clients
+ * that know nothing about each other. */
+/* Write end of WM_DRAG_DATA_PIPE, opened once in main - handle_mouse is
+ * where a drop is delivered and it has no other way to reach it. */
+static int drag_data_write_fd = -1;
+
+static int client_drag_active;
+static char client_drag_payload[WM_DRAG_PAYLOAD_MAX];
+static int client_drag_last_target = -1;
 
 /* M45: which window the titlebar context menu is open for (-1 = closed),
  * where it was raised, and which row the cursor is over. */
@@ -1225,6 +1249,22 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
      * them (a spawn that didn't work) - so a toast hidden behind it would
      * be hidden at exactly the moment it mattered. */
     draw_toasts();
+    /* M49: below the cursor and above everything else, because it is
+     * *attached* to the cursor - a drag label the pointer disappeared
+     * behind would be worse than none. */
+    if (client_drag_active) {
+        int32_t len = 0;
+        for (const char *p = client_drag_payload; *p; p++) {
+            len += FONT_WIDTH;
+        }
+        int32_t lw = len + 2 * DRAG_LABEL_PAD;
+        int32_t lx = min_i32(cursor_x + CURSOR_SIZE, (int32_t)fb_info.width - lw);
+        int32_t ly = min_i32(cursor_y + CURSOR_SIZE, (int32_t)fb_info.height - DRAG_LABEL_H);
+        fill_rect_rounded(lx, ly, lw, DRAG_LABEL_H, DRAG_LABEL_BG);
+        stroke_rect_rounded(lx, ly, lw, DRAG_LABEL_H, DRAG_LABEL_BORDER);
+        draw_text_clipped(lx + DRAG_LABEL_PAD, ly + (DRAG_LABEL_H - FONT_HEIGHT) / 2,
+                           client_drag_payload, DRAG_LABEL_FG, 0);
+    }
     const uint8_t *cursor_shape_now = cursor_shape;
     int rmask = hovered_resize_mask();
     if ((rmask & (RESIZE_TOP | RESIZE_LEFT)) == (RESIZE_TOP | RESIZE_LEFT) ||
@@ -2209,6 +2249,21 @@ static int launcher_click(int32_t px, int32_t py) {
     return 1; /* inside the overlay but not on a row - swallowed, nothing else */
 }
 
+/* M49: the wheel over the launcher's result list, one row per detent -
+ * the same unit Up/Down move, so the two agree about what "one step"
+ * means. Moves the *selection* rather than the scroll offset alone,
+ * because launcher_clamp_scroll already keeps the selection on screen and
+ * a selection scrolled out of view would make Enter act on something the
+ * user can't see. */
+static void launcher_wheel(int32_t detents) {
+    if (launcher_match_count == 0) {
+        return;
+    }
+    launcher_selected += detents;
+    launcher_clamp_scroll();
+    dirty = 1;
+}
+
 /* Hovering a row selects it, so a click and the keyboard's Enter always
  * act on the same thing. Only repaints when the answer changes: this runs
  * on every mouse-move event. */
@@ -2271,6 +2326,27 @@ static void accept_pending_settings(int settings_read_fd) {
     bg_color = req.bg_color;
     accent_color = req.accent_color;
     wallpaper_id = req.wallpaper;
+    dirty = 1;
+}
+
+/* M49: a client announcing that it has started a drag. One-way, same
+ * poll-then-read shape as every other request channel here. The drag ends
+ * when the left button comes up, which this process sees anyway - so
+ * there is no "drag end" message for a client to forget to send, and a
+ * source that dies mid-drag simply releases nothing and the next button-up
+ * clears it. */
+static void accept_pending_drag(int drag_read_fd) {
+    if (sys_pipe_poll(drag_read_fd) < (long)sizeof(wm_drag_request_t)) {
+        return;
+    }
+    wm_drag_request_t req;
+    if (read_exact(drag_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
+        return;
+    }
+    req.payload[WM_DRAG_PAYLOAD_MAX - 1] = '\0';
+    memcpy(client_drag_payload, req.payload, WM_DRAG_PAYLOAD_MAX);
+    client_drag_active = 1;
+    client_drag_last_target = -1;
     dirty = 1;
 }
 
@@ -2430,6 +2506,85 @@ static void handle_mouse(void) {
          * cannot be running anyway while the launcher is up (opening it
          * takes a click on the taskbar or a keychord, neither of which
          * can happen mid-drag). */
+        /* M49: the wheel acts on whatever is under the pointer, not on
+         * whatever holds focus - which is what every desktop with a wheel
+         * does, and the only behavior that makes scrolling a background
+         * window's list possible at all. Handled before the drag state
+         * machine and the launcher, since both of those consume events
+         * they have no scroll meaning for. */
+        if (mev.wheel != 0) {
+            if (launcher_open) {
+                launcher_wheel(mev.wheel);
+            } else {
+                int target = window_under_cursor();
+                if (target >= 0 && !windows[target].is_panel) {
+                    const window_t *win = &windows[target];
+                    wm_event_t ev = {0};
+                    ev.type = WM_EVENT_MOUSE_WHEEL;
+                    ev.x = cursor_x - win->x;
+                    ev.y = cursor_y - win->y;
+                    ev.buttons = mev.buttons;
+                    ev.time_ms = mev.time_ms;
+                    ev.wheel = mev.wheel;
+                    send_event(win, &ev);
+                }
+            }
+            prev_buttons = mev.buttons;
+            continue;
+        }
+
+        /* M49: a client drag owns the pointer until the button comes up.
+         * The source window keeps receiving its own motion events (it is
+         * still focused, and this process routes those by focus), so it
+         * can keep tracking the gesture; what happens here is only the
+         * part no client can do - telling a *different* window that
+         * something is over it, and handing the payload across on
+         * release. */
+        if (client_drag_active) {
+            int target = window_under_cursor();
+            if (target >= 0 && windows[target].is_panel) {
+                target = -1; /* a taskbar is not a drop target */
+            }
+            if (left_up_edge) {
+                if (target >= 0) {
+                    /* Payload first, then the event: a client that reads
+                     * WM_DRAG_DATA_PIPE the instant it sees WM_EVENT_DROP
+                     * must find it already there. */
+                    wm_drag_request_t data;
+                    memcpy(data.payload, client_drag_payload, WM_DRAG_PAYLOAD_MAX);
+                    sys_write(drag_data_write_fd, &data, sizeof(data));
+                    wm_event_t ev = {0};
+                    ev.type = WM_EVENT_DROP;
+                    ev.x = cursor_x - windows[target].x;
+                    ev.y = cursor_y - windows[target].y;
+                    ev.time_ms = mev.time_ms;
+                    send_event(&windows[target], &ev);
+                }
+                client_drag_active = 0;
+                client_drag_last_target = -1;
+                dirty = 1;
+            } else {
+                /* One motion event per target change, not per pixel: this
+                 * exists so a target can highlight itself, and a client
+                 * being told forty times a second that nothing changed is
+                 * how the event pipe fills. */
+                if (target != client_drag_last_target) {
+                    client_drag_last_target = target;
+                    if (target >= 0) {
+                        wm_event_t ev = {0};
+                        ev.type = WM_EVENT_DRAG_MOTION;
+                        ev.x = cursor_x - windows[target].x;
+                        ev.y = cursor_y - windows[target].y;
+                        ev.time_ms = mev.time_ms;
+                        send_event(&windows[target], &ev);
+                    }
+                }
+                dirty = 1; /* the label follows the cursor */
+            }
+            prev_buttons = mev.buttons;
+            continue;
+        }
+
         /* M48: a toast is drawn over everything, so it takes its own
          * click before any other hit-test - including the launcher's,
          * which it is drawn on top of. */
@@ -2734,20 +2889,24 @@ static void handle_mouse(void) {
     }
 }
 
-/* M32: cycles focus forward through every alive ordinary (non-panel,
- * non-desktop) window, un-minimizing the target the same way a titlebar/
+/* M32: cycles focus through every alive ordinary (non-panel, non-desktop)
+ * window, un-minimizing the target the same way a titlebar/
  * panel WM_ACTION_FOCUS click already does - reuses apply_window_action
  * rather than duplicating its focus/un-minimize logic. `focused_window`
  * may be -1 (nothing focused) going in; `(start + step) % window_count`
  * still lands correctly on 0 for step 1 in that case. A no-op (focuses
  * itself back) if there's only one eligible window - harmless, set_focus
- * already no-ops on a same-window call. */
-static void alt_tab_cycle(void) {
+ * already no-ops on a same-window call.
+ *
+ * M49: `direction` is +1 for Alt+Tab and -1 for Shift+Alt+Tab. The
+ * modulo is written to stay correct for a negative step, which is why
+ * the existing `idx < 0` correction was already there. */
+static void alt_tab_cycle(int direction) {
     if (window_count == 0) {
         return;
     }
     for (int step = 1; step <= window_count; step++) {
-        int idx = (focused_window + step) % window_count;
+        int idx = (focused_window + step * direction) % window_count;
         if (idx < 0) {
             idx += window_count;
         }
@@ -2758,40 +2917,96 @@ static void alt_tab_cycle(void) {
     }
 }
 
+/* M49: everything a window-manager chord can do to the focused window,
+ * in one place. Every arm is an apply_window_action call that some other
+ * entry point (a titlebar button, a context menu, a drag) already makes -
+ * what was missing was only the binding, which is exactly why this is a
+ * dispatch table rather than nine new behaviors. */
+static void run_shortcut(int id) {
+    switch (id) {
+    case SHORTCUT_CYCLE_FORWARD:
+        alt_tab_cycle(1);
+        return;
+    case SHORTCUT_CYCLE_BACKWARD:
+        alt_tab_cycle(-1);
+        return;
+    case SHORTCUT_LAUNCHER:
+        launcher_set_open(!launcher_open);
+        return;
+    case SHORTCUT_TASK_MANAGER: {
+        /* An ordinary program on disk, so this is one spawn and nothing
+         * else - and it says so if the spawn fails, like every other
+         * launch path since M48. */
+        long rc = sys_spawn("task_manager", "");
+        if (rc < 0) {
+            toast_post(WM_NOTIFY_ERROR, "Task manager", spawn_error_message(rc));
+        }
+        return;
+    }
+    default:
+        break;
+    }
+
+    /* Everything below acts on the focused window, and there may not be
+     * one - a chord with no subject is a no-op, not an error. */
+    if (focused_window < 0 || !windows[focused_window].alive) {
+        return;
+    }
+    int idx = focused_window;
+    switch (id) {
+    case SHORTCUT_CLOSE_WINDOW:
+        /* Honors confirm_close, because it goes through the same
+         * WM_ACTION_CLOSE the titlebar button does - Alt+F4 is the
+         * polite verb, not the forceful one. */
+        apply_window_action(idx, WM_ACTION_CLOSE, 0);
+        break;
+    case SHORTCUT_SNAP_LEFT:
+        apply_window_action(idx, WM_ACTION_SNAP_LEFT, 0);
+        break;
+    case SHORTCUT_SNAP_RIGHT:
+        apply_window_action(idx, WM_ACTION_SNAP_RIGHT, 0);
+        break;
+    case SHORTCUT_MAXIMIZE:
+        apply_window_action(idx, WM_ACTION_MAXIMIZE, 0);
+        break;
+    case SHORTCUT_MINIMIZE:
+        /* Restore-then-minimize: from maximized this puts the window
+         * back to its own size, and from there it minimizes - so holding
+         * the chord walks a window down rather than doing nothing to a
+         * maximized one. */
+        if (windows[idx].maximized) {
+            apply_window_action(idx, WM_ACTION_RESTORE, 0);
+        } else {
+            apply_window_action(idx, WM_ACTION_TOGGLE_MINIMIZE, 0);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 static void handle_keyboard(void) {
     char ch;
     while (sys_kbd_read(&ch)) {
-        /* M32: Alt+Tab is intercepted here, before ever reaching a
-         * client - a real WM shortcut, not something any app's own input
-         * handling should see (or could even tell apart from a plain Tab
-         * keypress on its own - see SYS_kbd_modifiers' doc comment). A
-         * plain Tab (Alt not held) still forwards exactly as before.
+        /* M32: window-manager chords are intercepted here, before ever
+         * reaching a client - they are not something any app's own input
+         * handling should see, or could even tell apart from the plain
+         * keypress underneath (see SYS_kbd_modifiers' doc comment).
          *
-         * M43: Ctrl+Space is the second such chord, and is checked before
-         * the launcher's own key handling below so it toggles the
-         * launcher shut as well as open. */
+         * M49: what used to be two hand-written `if`s is a lookup in
+         * system_api/include/shortcuts.h's table, which settings.c's
+         * Shortcuts pane lists from - so a chord cannot exist without
+         * being discoverable, and the pane cannot describe one that
+         * isn't wired up. */
         long mods = sys_kbd_modifiers();
-        if (ch == '\t' && (mods & KBD_MOD_ALT)) {
-            alt_tab_cycle();
-            continue;
-        }
-        if (ch == ' ' && (mods & KBD_MOD_CTRL)) {
-            launcher_set_open(!launcher_open);
-            continue;
-        }
-        /* M45: Ctrl+Shift+Esc, the chord every desktop reserves for
-         * exactly this, intercepted here beside Alt+Tab and Ctrl+Space
-         * for the same reason - a window-manager shortcut is not
-         * something any client should be able to see or swallow. The task
-         * manager is an ordinary program on disk, so this is one spawn
-         * and nothing else; it is equally reachable from its desktop icon
-         * and from the launcher. */
-        if (ch == 27 && (mods & KBD_MOD_CTRL) && (mods & KBD_MOD_SHIFT)) {
-            sys_spawn("task_manager", "");
+        int shortcut = shortcut_lookup(ch, (int)mods);
+        if (shortcut != SHORTCUT_NONE) {
+            run_shortcut(shortcut);
             continue;
         }
         /* M43: while it is up, the launcher has the keyboard outright -
-         * see launcher_key. */
+         * see launcher_key. Checked after the chords so Ctrl+Space
+         * toggles it shut as well as open. */
         if (launcher_open) {
             launcher_key(ch);
             continue;
@@ -2857,13 +3072,18 @@ int main(void) {
     int settings_query_fds[2];
     int settings_query_resp_fds[2];
     int notify_fds[2];
+    int drag_fds[2];
+    int drag_data_fds[2];
     if (sys_pipe_open(WM_QUERY_PIPE, query_fds) != 0 || sys_pipe_open(WM_QUERY_RESP_PIPE, query_resp_fds) != 0 ||
         sys_pipe_open(WM_ACTION_PIPE, action_fds) != 0 || sys_pipe_open(WM_SETTINGS_PIPE, settings_fds) != 0 ||
         sys_pipe_open(WM_SETTINGS_QUERY_PIPE, settings_query_fds) != 0 ||
         sys_pipe_open(WM_SETTINGS_QUERY_RESP_PIPE, settings_query_resp_fds) != 0 ||
-        sys_pipe_open(WM_NOTIFY_PIPE, notify_fds) != 0) {
+        sys_pipe_open(WM_NOTIFY_PIPE, notify_fds) != 0 ||
+        sys_pipe_open(WM_DRAG_PIPE, drag_fds) != 0 ||
+        sys_pipe_open(WM_DRAG_DATA_PIPE, drag_data_fds) != 0) {
         sys_exit(1);
     }
+    drag_data_write_fd = drag_data_fds[1];
     /* Every message this process (or any client) prints to stdout goes
      * through the kernel's own graphical console (M17) - the same
      * framebuffer this process is compositing onto. Printed once, before
@@ -2887,6 +3107,7 @@ int main(void) {
         accept_pending_settings(settings_fds[0]);
         accept_pending_settings_query(settings_query_fds[0], settings_query_resp_fds[1]);
         accept_pending_notify(notify_fds[0]);
+        accept_pending_drag(drag_fds[0]);
         reap_dead_clients();
         handle_mouse();
         handle_keyboard();

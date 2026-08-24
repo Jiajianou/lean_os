@@ -199,6 +199,49 @@ int wm_notify(uint32_t level, const char *title, const char *body) {
     return sys_write(notify_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
 }
 
+/* M49: opened once and reused, like every other well-known channel here.
+ * Both ends of both pipes: a client can be a drag source, a drop target,
+ * or (dragging a file onto its own window) both. */
+static int drag_fds[2] = {-1, -1};
+static int drag_data_fds[2] = {-1, -1};
+
+int wm_drag_begin(const char *payload) {
+    if (drag_fds[0] < 0) {
+        if (sys_pipe_open(WM_DRAG_PIPE, drag_fds) != 0) {
+            return -1;
+        }
+    }
+    wm_drag_request_t req;
+    uint32_t i = 0;
+    for (; payload && payload[i] && i < WM_DRAG_PAYLOAD_MAX - 1; i++) {
+        req.payload[i] = payload[i];
+    }
+    req.payload[i] = '\0';
+    return sys_write(drag_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
+}
+
+int wm_drag_payload(char *out, uint32_t max) {
+    if (drag_data_fds[0] < 0) {
+        if (sys_pipe_open(WM_DRAG_DATA_PIPE, drag_data_fds) != 0) {
+            return -1;
+        }
+    }
+    wm_drag_request_t req;
+    if (sys_pipe_poll(drag_data_fds[0]) < (long)sizeof(req)) {
+        return -1;
+    }
+    if (read_exact(drag_data_fds[0], &req, sizeof(req)) != (long)sizeof(req)) {
+        return -1;
+    }
+    req.payload[WM_DRAG_PAYLOAD_MAX - 1] = '\0';
+    uint32_t i = 0;
+    for (; req.payload[i] && i + 1 < max; i++) {
+        out[i] = req.payload[i];
+    }
+    out[i] = '\0';
+    return 0;
+}
+
 static int settings_fds[2] = {-1, -1};
 static int settings_query_fds[2] = {-1, -1};
 static int settings_query_resp_fds[2] = {-1, -1};

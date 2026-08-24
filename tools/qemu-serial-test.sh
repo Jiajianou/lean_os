@@ -67,7 +67,7 @@ set -euo pipefail
 # M48: 64 -> 72. Proving a toast is gone *by its own deadline* means
 # waiting out that deadline (TOAST_TTL_MS, 4s) and then some - there is no
 # shorter way to check that something stopped being on screen on its own.
-SECONDS_TO_RUN="${1:-72}"
+SECONDS_TO_RUN="${1:-76}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -145,6 +145,7 @@ REQUIRED_MARKERS=(
   "[m46] circular titlebar buttons, focus-gated glyphs, the deeper focused"
   "[m47] settings.conf round trip (including a corrupted one falling back to"
   "[m48] toast raised, still up mid-life, gone by its own deadline, and each"
+  "[m49] the shared shortcut table resolving every chord (and refusing every"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

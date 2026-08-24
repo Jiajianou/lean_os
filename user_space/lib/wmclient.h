@@ -89,6 +89,22 @@ int wm_set_panel_overhang(int32_t window_id, int32_t rows);
  * Returns 0, or -1 if there is no compositor listening. */
 int wm_notify(uint32_t level, const char *title, const char *body);
 
+/* M49: announces that this client has begun dragging `payload` (a
+ * filename - see WM_DRAG_PAYLOAD_MAX). The compositor holds it until the
+ * left button comes up and then delivers WM_EVENT_DROP to whatever window
+ * the cursor is over, which may well be this one. There is no "drag end"
+ * call: the button coming up is the end, and the compositor sees that
+ * itself - so a source that crashes mid-drag cannot leave one stuck.
+ * Returns 0, or -1 if there is no compositor listening. */
+int wm_drag_begin(const char *payload);
+
+/* M49: the payload of the drop this client has just been told about
+ * (WM_EVENT_DROP). Only meaningful immediately on receiving that event -
+ * the compositor writes the payload just before sending it. Copies at
+ * most `max` bytes including the NUL. Returns 0, or -1 if nothing was
+ * waiting. */
+int wm_drag_payload(char *out, uint32_t max);
+
 /* M42: shows/hides the compositor's launcher overlay (M43). No window_id -
  * this is the one action that acts on the compositor rather than on a
  * window (see WM_ACTION_TOGGLE_LAUNCHER). desktop_shell.c's Start button

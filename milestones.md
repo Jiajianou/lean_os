@@ -1951,40 +1951,107 @@ symptom was not. This system had no way to tell its user anything.
 - [x] Full `tools/qemu-serial-test.sh` pass (34/34) and
       `tools/qemu-input-test.sh` pass (27/27)
 
-## M49 — Input completeness: scroll wheel, keyboard chords, drag & drop
+## M49 — Input completeness: scroll wheel, keyboard chords, drag & drop ✅
 
-- [ ] PS/2 wheel support: negotiate the IntelliMouse 4-byte protocol
-      (the 200/100/80 sample-rate knock) at init, falling back to the
-      3-byte packet when the device doesn't answer. `mouse_event_t`
-      grows a signed `wheel`, zero on hardware without one. Every
-      scrollable surface in this OS is keyboard-only today, which is the
-      single most obviously-missing input affordance left
-- [ ] Routed as `WM_EVENT_MOUSE_WHEEL` and handled everywhere scrolling
-      already exists: the file manager's list, the editor's text, the
-      terminal's scrollback, the launcher's results, and M37's scrollbar
-      widget itself
-- [ ] The chords a desktop is expected to have, intercepted in
-      `handle_keyboard` beside Alt+Tab: Alt+F4 (close focused, honoring
-      `confirm_close`), Ctrl+Alt+Left/Right (M43's snap actions from the
-      keyboard), Ctrl+Alt+Up/Down (maximize / restore-then-minimize),
-      Shift+Alt+Tab to cycle backward. Every one of these already has an
-      action to call - what is missing is only the binding
-- [ ] Somewhere to discover them: a Shortcuts pane in `settings.c`,
-      generated from the same table the compositor dispatches from
-      rather than a hand-maintained second copy that will drift within
-      two milestones
-- [ ] Drag and drop, scoped honestly to one case worth having: dragging
-      a file out of `file_manager.c` onto the desktop or onto the
-      editor's window opens it there. This is the only genuinely new
-      plumbing in the milestone - the compositor has to carry a drag
-      payload across two windows (`WM_DRAG_BEGIN`/`MOTION`/`DROP`, the
-      payload being a filename and nothing more) - and so it is also the
-      item to cut if the milestone runs long. The wheel and the chords
-      are not
-- [ ] New self-test (`[m49]`) and interactive tests: a wheel event
-      scrolls the file manager's list by exactly one row per detent,
-      each new chord drives its action with the right window as subject,
-      and the drag protocol round-trips a filename between two clients
+- [x] PS/2 wheel support: the IntelliMouse 4-byte protocol negotiated at
+      init with the 200/100/80 sample-rate knock, falling back to the
+      3-byte packet when the device doesn't answer 0x03. `mouse_event_t`
+      grew a signed `wheel`, zero on hardware without one - which is
+      exactly what a wheel-less device reports, so no reader ever has to
+      ask whether the hardware has one. The knock happens inside the same
+      polled window as the existing F6/F4 handshake and before IRQ12
+      generation is enabled, for precisely the reason mouse_init's own
+      comment already gave: any part of the handshake done inside the
+      interrupt path desynchronizes packet framing from the first real
+      packet. Byte 3's high nibble (buttons 4/5) is masked off rather
+      than misread as a huge scroll
+- [x] Routed as `WM_EVENT_MOUSE_WHEEL` to whatever the *pointer* is over
+      rather than to whatever holds focus - what every desktop with a
+      wheel does, and the only behavior that makes scrolling a background
+      window's list possible at all. Handled in the file manager's list,
+      the editor's text, the task manager's process list and the
+      launcher's results, one row per detent, which is the same unit
+      Up/Down already move
+- [x] The wheel scrolls the *view* and not the selection everywhere it
+      would matter: End Task acts on the task manager's selection and
+      Enter opens the file manager's, so a wheel that dragged the
+      selection with it would be a gesture that can act on the wrong
+      thing. The launcher is the exception and moves its selection,
+      because its list has no other meaning
+- [x] **`gui_terminal.c` has no scrollback to scroll.** Its `grid_scroll`
+      moves the live grid up and discards the top line - there is no
+      history buffer behind it, so there is nothing for a wheel to reveal.
+      Recorded rather than faked; a scrollback buffer is real, separate
+      scope
+- [x] The chords, all dispatched from one table
+      (`system_api/include/shortcuts.h`): Alt+F4 (close focused, honoring
+      `confirm_close` - it goes through `WM_ACTION_CLOSE`, so it is the
+      polite verb), Ctrl+Alt+Left/Right (M43's snap actions),
+      Ctrl+Alt+Up/Down (maximize / restore-then-minimize, so holding the
+      chord walks a maximized window down rather than doing nothing to
+      it), and Shift+Alt+Tab to cycle backward. Every one already had an
+      action to call; what was missing was only the binding
+- [x] F1-F12 had no representation at all - `keyboard.c` decoded
+      printable ASCII plus M33's four arrows, and every function-key
+      scancode fell out of the table-bounds guard. `KBD_KEY_F1`..`F12` are
+      14..25 rather than continuing 5..16 from the arrows, because 8, 9,
+      10 and 13 are `\b`, `\t`, `\n` and `\r` and 27 is Escape - the
+      numbering has a gap in it for a reason
+- [x] Somewhere to discover them: a Shortcuts pane in `settings.c`,
+      generated by looping over the same `SHORTCUTS[]` the compositor
+      dispatches from. Not a second copy that would drift within two
+      milestones - a chord cannot exist without being listed, and nothing
+      can be listed that isn't wired up
+- [x] `shortcut_lookup` matches on (character, modifiers) with an
+      explicit `mods_forbidden`, which is what keeps Alt+Tab and
+      Shift+Alt+Tab distinct - they share a key and differ only by a
+      modifier one of them must not have
+- [x] Drag and drop, scoped to the one case worth having: dragging a file
+      out of `file_manager.c` onto the desktop or onto the editor opens
+      it there. Two pipes rather than three -
+      `WM_DRAG_PIPE` carries the payload to the compositor, which holds it
+      until the button comes up and then writes it to `WM_DRAG_DATA_PIPE`
+      *before* sending `WM_EVENT_DROP`, so a client that reads the data
+      the instant it sees the event finds it already there. A single
+      well-known data pipe is safe because exactly one drop can be in
+      flight and only the dropped-on client is ever told there is one
+- [x] The payload deliberately does **not** ride inside `wm_event_t`: 28
+      bytes would more than double every event this system routes and cut
+      what an event pipe buffers from 42 events to 19 - a cost paid on
+      every keystroke and mouse move, for a field one event type uses once
+      per gesture
+- [x] There is no "drag end" message. The left button coming up is the
+      end, and the compositor sees that itself - so a source that crashes
+      mid-drag cannot leave one stuck, and a client cannot forget to send
+      it. A drag label follows the cursor while one is in flight, which is
+      what makes the gesture something a person can see they are doing
+- [x] Dropping onto the editor goes through its existing
+      confirm-discard prompt (a new `PENDING_DROP` beside the File menu's
+      two) rather than loading over the top: losing unsaved work to a
+      mis-drop is exactly the accident M36's prompt exists to prevent
+- [x] New boot self-test (`[m49]`, 22/22): every chord resolved through
+      the same `shortcut_lookup` the compositor calls, including three
+      near-misses that must *not* be chords (a plain Tab, a plain space,
+      Ctrl+an ordinary letter) - a table that got `mods_forbidden` wrong
+      would silently make Shift+Alt+Tab cycle forward. Plus every row
+      having an id, a chord name and a description, which is the property
+      that makes one table worth having. Then a real drag announced on
+      `WM_DRAG_PIPE` producing a real drag label at the pixel the cursor
+      is parked at
+- [x] The harness learned to inject a wheel (`Machine.wheel`, QEMU's
+      `mouse_move dx dy dz`) - one monitor command per detent, because
+      the PS/2 wheel field is a 4-bit signed value and a large dz is not a
+      bigger scroll, it is a wrapped one
+- [x] Four new interactive tests: three wheel detents move the file list
+      by exactly three rows - checked by capturing row 3's pixels before
+      and requiring row 0 to be those same pixels after, which is
+      content-independent and off-by-one-proof in a way that counting
+      rows by eye is not - plus Alt+F4 closing the focused window,
+      Ctrl+Alt+Right/Left/Down snapping and minimizing, and a file
+      dragged from the file manager onto the desktop opening in the
+      editor
+- [x] Full `tools/qemu-serial-test.sh` pass (35/35) and
+      `tools/qemu-input-test.sh` pass (31/31)
 
 ## M50 — Robustness & resource hygiene
 

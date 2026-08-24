@@ -92,7 +92,11 @@ static const char *const FILE_MENU_ITEMS[] = {"New", "Save", "Save As", "Quit"};
  * client-side rather than a compositor-level modal). Both share one
  * centered box; only PROMPT_SAVE_AS's contents accept typed input. */
 typedef enum { PROMPT_NONE = 0, PROMPT_SAVE_AS, PROMPT_CONFIRM_DISCARD } prompt_kind_t;
-typedef enum { PENDING_NONE = 0, PENDING_NEW, PENDING_QUIT } pending_action_t;
+/* M49: PENDING_DROP joins the two the File menu already had - a file
+ * dragged onto this window is one more thing that replaces the buffer,
+ * so it goes through the same confirm-discard prompt rather than round
+ * an existing guard. Which file is in pending_drop, below. */
+typedef enum { PENDING_NONE = 0, PENDING_NEW, PENDING_QUIT, PENDING_DROP } pending_action_t;
 
 #define PROMPT_W 360
 #define PROMPT_H 72
@@ -112,6 +116,10 @@ static int dirty; /* unsaved changes since the last Ctrl+S */
 static int menu_open; /* M35: File menu dropdown - toggled by clicking "File" in the menu row */
 
 static char filename[64];
+/* M49: the file a pending PENDING_DROP will open once the discard prompt
+ * is answered. Its own buffer rather than filename's, so declining the
+ * prompt leaves the current file's name untouched. */
+static char pending_drop[64];
 static char status[COLS + 1];
 
 static prompt_kind_t prompt_kind;
@@ -344,6 +352,8 @@ static void confirm_discard(int discard) {
         reset_to_new_file();
     } else if (action == PENDING_QUIT) {
         quit_now();
+    } else if (action == PENDING_DROP) {
+        load_file(pending_drop);
     }
 }
 
@@ -545,8 +555,48 @@ int main(const char *arg) {
                 continue;
             }
 
-            if (ev.type == WM_EVENT_CLOSE_REQUEST) {
+            if (ev.type == WM_EVENT_DROP) {
+                /* M49: a file dragged onto this window opens it here -
+                 * the one case drag and drop was scoped to. Routed
+                 * through request_action's existing confirm-discard path
+                 * rather than loading straight over the top, because
+                 * losing unsaved work to a mis-drop is exactly the
+                 * accident M36's prompt exists to prevent. */
+                char dropped[sizeof(pending_drop)];
+                if (wm_drag_payload(dropped, sizeof(dropped)) == 0 && dropped[0]) {
+                    if (dirty) {
+                        int i = 0;
+                        for (; dropped[i] && i < (int)sizeof(pending_drop) - 1; i++) {
+                            pending_drop[i] = dropped[i];
+                        }
+                        pending_drop[i] = '\0';
+                        prompt_kind = PROMPT_CONFIRM_DISCARD;
+                        pending_action = PENDING_DROP;
+                    } else {
+                        load_file(dropped);
+                    }
+                }
+            } else if (ev.type == WM_EVENT_CLOSE_REQUEST) {
                 request_action(PENDING_QUIT);
+            } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
+                /* M49: one text row per detent. Scrolls the viewport
+                 * without moving the caret - clamp_scroll (which the
+                 * caret's own movement goes through) would immediately
+                 * drag the view back if it did, so this deliberately
+                 * writes scroll_top directly and lets the next arrow key
+                 * or click re-anchor it. */
+                int max_top = line_count - TEXT_ROWS;
+                if (max_top < 0) {
+                    max_top = 0;
+                }
+                int want = scroll_top + ev.wheel;
+                if (want < 0) {
+                    want = 0;
+                }
+                if (want > max_top) {
+                    want = max_top;
+                }
+                scroll_top = want;
             } else if (ev.type == WM_EVENT_MOUSE_MOVE && sel_dragging) {
                 pixel_to_grid(ev.x, ev.y, &sel_end_row, &sel_end_col);
                 cur_row = sel_end_row;

@@ -210,7 +210,21 @@ int main(void) {
         wm_event_t ev;
         int changed = 0;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
+            if (ev.type == WM_EVENT_DROP) {
+                /* M49: dropping a file on the desktop opens it - the same
+                 * thing double-clicking it in the file manager does, and
+                 * for the same reason (this project has no per-file type
+                 * metadata, so "open" means text_editor.c). Goes through
+                 * launch() so a failure gets a toast like every other
+                 * spawn here. */
+                char dropped[WM_DRAG_PAYLOAD_MAX];
+                if (wm_drag_payload(dropped, sizeof(dropped)) == 0 && dropped[0]) {
+                    long rc = sys_spawn("text_editor", dropped);
+                    if (rc < 0) {
+                        wm_notify(WM_NOTIFY_ERROR, dropped, spawn_error_message(rc));
+                    }
+                }
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
                 /* Right-click always (re)opens the menu at the new click
                  * point, clamped so it can't be drawn partly off the
                  * desktop window's own edge. */

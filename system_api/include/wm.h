@@ -100,6 +100,9 @@ typedef enum {
     WM_EVENT_MOUSE_BUTTON = 3, /* same fields as MOUSE_MOVE, sent in addition to it whenever buttons actually changes */
     WM_EVENT_FOCUS = 4,        /* this window just became the focused one - no extra fields */
     WM_EVENT_UNFOCUS = 5,      /* this window just stopped being the focused one - no extra fields */
+    WM_EVENT_MOUSE_WHEEL = 7,  /* M49: mouse.wheel valid (detents, negative up), plus x/y/buttons as of this event - routed to whatever the cursor is over, not to whatever holds focus, because a wheel acts on the thing under the pointer and every desktop that has one behaves that way. Sent only when the wheel actually moved, so a client that ignores it sees nothing new. */
+    WM_EVENT_DRAG_MOTION = 8,  /* M49: a client-initiated drag is in progress and the cursor is over this window - x/y are in this window's coordinates. For a would-be drop target to highlight itself; ignoring it costs nothing. */
+    WM_EVENT_DROP = 9,         /* M49: a drag was released over this window. The payload is NOT in this struct - the compositor has already written it to WM_DRAG_DATA_PIPE, which wmclient.h's wm_drag_payload reads. See WM_DRAG_PIPE for why it isn't carried inline. */
     WM_EVENT_CLOSE_REQUEST = 6, /* M36: sent instead of an immediate SIGTERM when this window's own wm_create_request_t.confirm_close was set and a close was requested (a titlebar close button or an external WM_ACTION_CLOSE) - no extra fields. The client decides what to do next; see confirm_close's own comment above. */
 } wm_event_type_t;
 
@@ -116,6 +119,10 @@ typedef struct {
      * measuring its own scheduling latency. Zero for key/focus events,
      * which nothing times. */
     uint32_t time_ms;
+    /* M49: wheel detents for a WM_EVENT_MOUSE_WHEEL, carried straight
+     * through from input.h's mouse_event_t.wheel. Zero for every other
+     * event type, and zero forever on hardware without a wheel. */
+    int32_t wheel;
 } wm_event_t;
 
 #define WM_EVENT_PIPE_PREFIX "wm_evt"
@@ -213,6 +220,36 @@ typedef struct {
     uint32_t action; /* wm_action_type_t */
     int32_t value; /* M45: the one action that carries a number - WM_ACTION_SET_PANEL_OVERHANG's row count. 0 for every other action, which all ignore it. A field rather than a second pipe or a second request struct: this channel already has exactly one writer per action and one reader, and both change together (the same reasoning wm_settings_request_t's own comment gives for growing rather than versioning). */
 } wm_action_request_t;
+
+/* M49: drag and drop, scoped to the one case worth having - dragging a
+ * file out of file_manager.c onto the editor or onto the desktop opens it
+ * there. This is the only genuinely new plumbing in that milestone: the
+ * compositor has to carry a payload across two windows that know nothing
+ * about each other.
+ *
+ * Two pipes, not three. The source announces a drag on WM_DRAG_PIPE and
+ * the compositor holds the payload until the button comes up; at that
+ * point it writes the payload to WM_DRAG_DATA_PIPE and *then* sends
+ * WM_EVENT_DROP to whichever window the cursor is over. A single
+ * well-known data pipe is safe because exactly one drop can be in flight
+ * at a time and only the dropped-on client is ever told there is one.
+ *
+ * The payload deliberately does not ride inside wm_event_t: a filename is
+ * 28 bytes, which would more than double every event this system routes
+ * and cut what an event pipe can buffer from 42 events to 19 - a real
+ * cost paid on every keystroke and mouse move, for a field used by one
+ * event type that fires at most once per gesture. */
+#define WM_DRAG_PIPE      "wm_drag"
+#define WM_DRAG_DATA_PIPE "wm_drag_data"
+
+/* leanfs's real cap is 27 + NUL (kernel/fs/leanfs.h, not visible to
+ * user_space builds), and a filename is the only payload this protocol
+ * carries - "a filename and nothing more" was the scope. */
+#define WM_DRAG_PAYLOAD_MAX 28
+
+typedef struct {
+    char payload[WM_DRAG_PAYLOAD_MAX]; /* always NUL-terminated */
+} wm_drag_request_t;
 
 /* M48: transient toasts. One-way and fire-and-forget, the same shape
  * WM_SETTINGS_PIPE already has - a notification with a reply channel
