@@ -37,6 +37,15 @@ uint64_t vmm_kernel_pml4_phys(void);
  * mapped first 1 GiB - see vmm.c's phys_to_table). */
 void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
 
+/* M50: vmm_map_page_in's counterpart, and the piece SYS_shm_free needed.
+ * vmm_unmap_page above walks the *kernel* PML4 and panics on anything it
+ * doesn't find, which is right for kernel mappings and exactly wrong here:
+ * the address comes from a user process, so "not mapped" is ordinary bad
+ * input rather than a kernel bug. Returns 0 if a page was unmapped and -1
+ * if there was nothing there - never panics, which is the whole
+ * difference. */
+int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt);
+
 /* Allocates a fresh PML4 with PML4[0] shared with the kernel's (so ring 0
  * code - interrupt/syscall handlers - keeps working no matter which
  * process's CR3 is loaded) and everything else zeroed, ready for

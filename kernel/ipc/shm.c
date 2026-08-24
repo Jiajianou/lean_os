@@ -12,6 +12,14 @@
  * reclaim_window. With MAX_WINDOWS now 12, 16 was less than two full
  * desktops' worth, i.e. an exact-fit cap of exactly the kind M40 found
  * silently breaking the desktop. */
+/* M50: 32 is now a real bound rather than a countdown. Until this
+ * milestone nothing ever released a segment except a task exiting, so
+ * every window this OS composited consumed a slot permanently - about
+ * thirty window opens exhausted the table for the life of the machine.
+ * With SYS_shm_free, a compositor's live usage is exactly
+ * 1 (its back buffer) + one per live window = 13 at WM_MAX_ROUTABLE_WINDOWS,
+ * which the boot self-test measures and logs ("[m50] compositor after the
+ * storm"). Left at 32 deliberately: the number was never the problem. */
 #define MAX_SHM_SEGMENTS 32
 
 typedef struct {
@@ -89,6 +97,32 @@ void shm_free_by_owner(int owner_task_id) {
         segments[i].used = 0;
         segments[i].frames = (uint64_t *)0;
     }
+}
+
+int shm_free(int id, int owner_task_id) {
+    if (id < 0 || id >= MAX_SHM_SEGMENTS || !segments[id].used) {
+        return -1;
+    }
+    if (segments[id].owner_task_id != owner_task_id) {
+        /* Not a permission model - this project has none - but the one
+         * check that keeps "exactly one owner is responsible for
+         * releasing it" true rather than aspirational. */
+        return -1;
+    }
+    for (uint64_t p = 0; p < segments[id].page_count; p++) {
+        pmm_free_frame(segments[id].frames[p]);
+    }
+    kfree(segments[id].frames);
+    segments[id].used = 0;
+    segments[id].frames = (uint64_t *)0;
+    return 0;
+}
+
+int64_t shm_page_count(int id) {
+    if (id < 0 || id >= MAX_SHM_SEGMENTS || !segments[id].used) {
+        return -1;
+    }
+    return (int64_t)segments[id].page_count;
 }
 
 int shm_count_by_owner(int owner_task_id) {

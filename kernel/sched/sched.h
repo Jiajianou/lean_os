@@ -13,6 +13,8 @@
 
 #include <stdint.h>
 
+#include "proc.h" /* system_api/include/proc.h - TASK_INFO_MAX, which *is* MAX_TASKS below. Resolves to the system_api header: a quoted include searches this file's own directory first (kernel/sched/, no proc.h), then -Ikernel (no kernel/proc.h), then -Isystem_api/include. */
+
 struct pipe; /* kernel/ipc/pipe.h owns the real definition - not included here so sched.h doesn't have to know pipes exist */
 
 typedef enum {
@@ -46,8 +48,30 @@ typedef enum {
  * inherited from its parent - which is exactly what was happening (see
  * sched_reset_fds_to_std). Nothing here should be load-bearing to the
  * last slot: 64 leaves the same 8-window compositor half its table
- * spare. */
-#define MAX_FDS 64
+ * spare.
+ *
+ * M50: bumped again, 64 -> 128, and this time from a logged measurement
+ * rather than an argument. The boot self-test's own "[m50] compositor
+ * after the storm" line reports what a compositor that has been through
+ * sixteen connect/draw/die rounds actually holds, and it was 52 of 64.
+ * The derivation behind that number:
+ *
+ *    2  stdin/stdout
+ *  +22  eleven well-known protocol pipes, two fd slots each (window
+ *       create/response, query/response, action, settings,
+ *       settings-query/response, notify, drag, drag-data)
+ *  +24  two per window slot ever created, and slots are recycled but
+ *       their event pipes are kept and reset rather than reopened -
+ *       2 x WM_MAX_ROUTABLE_WINDOWS
+ *  = 48 for a compositor that has filled every window slot once
+ *
+ * 12 spare of 64 is not headroom, it is the state M40 was in when this
+ * broke the first time - and two more protocol channels or a larger
+ * WM_MAX_ROUTABLE_WINDOWS would have taken it. 128 leaves the same
+ * compositor 80 slots clear. (M50 also gave clients five of their own
+ * back: wm_connect closes the handshake pipes it used to hold forever -
+ * see wmclient.c.) */
+#define MAX_FDS 128
 
 /* M45: how long a per-task name may be, NUL included. A process was a
  * number and nothing else until this milestone - only whoever spawned it

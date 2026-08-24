@@ -76,6 +76,25 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
     out->gfx.width = (int32_t)resp.width;
     out->gfx.height = (int32_t)resp.height;
     out->evt_fd = evt_fds[0];
+
+    /* M50: five fd-table slots handed straight back. The two
+     * request/response pipes are a handshake - nothing here touches them
+     * again once the response has been read - and this client will never
+     * write to its own event pipe, so its write end was a slot claimed
+     * and abandoned at birth. Five of MAX_FDS (64) per client is not
+     * fatal on its own; being unable to give any of it back is the
+     * shape of the bug M40 root-caused, and SYS_close (M50) is the first
+     * thing in this project that could.
+     *
+     * Closing a *named* pipe's fd deliberately does not close the pipe -
+     * see SYS_close's contract. The compositor's own ends stay exactly as
+     * they were, and the next client to connect finds the same
+     * rendezvous points waiting. */
+    sys_close(req_fds[0]);
+    sys_close(req_fds[1]);
+    sys_close(resp_fds[0]);
+    sys_close(resp_fds[1]);
+    sys_close(evt_fds[1]);
     return 0;
 }
 

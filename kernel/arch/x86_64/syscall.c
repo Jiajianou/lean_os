@@ -424,6 +424,45 @@ static long sys_shm_map(uint64_t id, uint64_t a2, uint64_t a3, uint64_t a4, uint
 
 /* M20: read-only framebuffer geometry - see SYS_fb_map for the pixels
  * themselves. */
+/* M50: see SYS_shm_free's own doc comment. The order here is the whole
+ * point: unmap from this process first, *then* hand the frames back, so
+ * there is never a window in which a freed frame is still reachable
+ * through a live page table. (The dead client that also had it mapped is
+ * a different matter and a safe one - its address space is never loaded
+ * again, and this kernel has no vmm_destroy_address_space to reclaim it
+ * with either way.)
+ *
+ * `vaddr` comes from the caller because nothing in this kernel records
+ * which address spaces a segment is mapped into. Adding that registry
+ * would be real bookkeeping for exactly one caller that already knows the
+ * answer; passing a wrong vaddr unmaps the caller's own pages, which is
+ * no worse than any other bad pointer this ABI accepts. */
+static long sys_shm_free(uint64_t id, uint64_t vaddr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    int64_t pages = shm_page_count((int)id);
+    if (pages < 0) {
+        return -1;
+    }
+    if (vaddr != 0) {
+        if ((vaddr & (PAGE_SIZE - 1)) != 0) {
+            return -1; /* not something SYS_shm_map ever returned */
+        }
+        uint64_t pml4 = sched_current()->pml4_phys;
+        for (int64_t i = 0; i < pages; i++) {
+            /* Return value ignored on purpose: a page that wasn't mapped
+             * is nothing to undo, and the caller asking to free a segment
+             * it never mapped (vaddr from a stale variable, say) must not
+             * be able to fail the free. What matters is that nothing
+             * stays mapped to a frame that is about to be handed back. */
+            (void)vmm_unmap_page_in(pml4, vaddr + (uint64_t)i * PAGE_SIZE);
+        }
+    }
+    return shm_free((int)id, sched_current()->id);
+}
+
 static long sys_fb_info(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -608,6 +647,40 @@ static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, u
  * keeps redrawing/routing input) can poll this every iteration instead
  * of blocking. Reaps pid the same way SYS_wait does once it does report
  * a real exit code. */
+/* M50: the release half of the fd table, which this project has gone
+ * fifty milestones without.
+ *
+ * It only clears the caller's own slot. It deliberately does not free the
+ * pipe object, close the pipe, or touch anyone else's table: pipes here
+ * are not reference-counted (see kernel/ipc/pipe.h), a named pipe is
+ * *meant* to outlive every fd that has ever pointed at it - that is the
+ * whole rendezvous mechanism the window protocol is built on - and an
+ * anonymous pipe's other end is usually held by a child that was spawned
+ * with a copy of this table. Freeing anything here would turn "I am done
+ * with this descriptor" into "everyone else's is now dangling".
+ *
+ * So this is exactly as much close() as this kernel can honestly
+ * implement, and it is the part that was actually leaking: fd *slots*,
+ * of which there are MAX_FDS per task and which a long-lived process
+ * (the compositor, the shell) burns two of on every reconnect. */
+static long sys_close(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (fd >= MAX_FDS) {
+        return -1;
+    }
+    task_t *self = sched_current();
+    if (self->fds[fd].type == FD_NONE) {
+        return -1; /* closing something already closed is a caller bug worth reporting, not a no-op */
+    }
+    self->fds[fd].type = FD_NONE;
+    self->fds[fd].pipe = (struct pipe *)0;
+    return 0;
+}
+
 static long sys_wait_nb(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -822,6 +895,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_writefile] = sys_writefile,
     [SYS_taskinfo] = sys_taskinfo,
     [SYS_shutdown] = sys_shutdown,
+    [SYS_close] = sys_close,
+    [SYS_shm_free] = sys_shm_free,
 };
 
 void syscall_handler(isr_regs_t *regs) {

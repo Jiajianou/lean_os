@@ -174,3 +174,23 @@ long sys_taskinfo(task_info_t *buf, long max_entries);
  * SIGTERMed, given a bounded grace period and then SIGKILLed first, so
  * this is a shutdown rather than a power cut. */
 long sys_shutdown(int mode);
+
+/* M50: releases this process's own fd-table slot `fd`. Returns 0, or -1
+ * for an out-of-range fd or one that wasn't open.
+ *
+ * Slot only - it does not free or close the underlying pipe, because
+ * pipes here are not reference-counted and a named pipe is meant to
+ * outlive the fds pointing at it (system_api/include/syscall.h's
+ * SYS_close has the full contract). What it fixes is the thing that was
+ * actually leaking: a long-lived process burning two slots of MAX_FDS on
+ * every reconnect. */
+long sys_close(int fd);
+
+/* M50: releases shm segment `id`, which this process must have created,
+ * after unmapping it from this process's own address space starting at
+ * `vaddr` (what sys_shm_map returned). Returns 0, or -1 for an unknown
+ * id, one this process doesn't own, or a `vaddr` that isn't page
+ * aligned. Pass vaddr 0 to free a segment this process created but never
+ * mapped. See SYS_shm_free in system_api/include/syscall.h for why the
+ * address is the caller's to supply. */
+long sys_shm_free(long id, void *vaddr);

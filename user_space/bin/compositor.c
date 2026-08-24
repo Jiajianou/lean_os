@@ -292,6 +292,7 @@ typedef struct {
     int32_t x, y, w, h; /* current on-screen content geometry */
     int32_t buf_w, buf_h; /* M30: the shm-backed pixel buffer's actual, fixed dimensions (set once at connect, never mutated) - w/h above can now shrink below this (WM_ACTION_MAXIMIZE clamps to it) but never exceed it; blit_window strides by buf_w, not w, so a cropped display never reads past what this window's buffer actually holds */
     uint32_t *pixels;
+    int32_t shm_id; /* M50: so reclaim_window can hand this window's pixel buffer back - see its own comment for the eleven milestones this leaked */
     int evt_write_fd; /* write end of this window's own event pipe - see wm_event_pipe_name */
     uint8_t is_panel;  /* M22: chrome-less, always-on-top, bottom-docked - see wm_create_request_t.panel */
     /* M45: a panel's buffer may be taller than the strip it docks. buf_y0
@@ -1546,6 +1547,11 @@ static void reclaim_window(int idx) {
     if (!win->alive) {
         return;
     }
+    if (win->shm_id >= 0) {
+        sys_shm_free(win->shm_id, win->pixels);
+        win->shm_id = -1;
+        win->pixels = (uint32_t *)0;
+    }
     win->alive = 0;
     win->minimized = 0;
     win->overhang = 0;
@@ -1800,6 +1806,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     win->buf_y0 = (int32_t)height - win->h;
     win->overhang = 0;
     win->pixels = (uint32_t *)vaddr;
+    win->shm_id = (int32_t)shm_id;
     win->evt_write_fd = evt_write_fd;
     win->translucent = req.translucent;
     win->is_desktop = req.desktop;

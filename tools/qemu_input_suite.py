@@ -1342,6 +1342,54 @@ def test_drag_a_file_onto_the_desktop_opens_it(m):
              "dropping a file on the desktop did not open it in the editor")
 
 
+def test_soak_desktop_stays_usable(m):
+    """M50's soak: leave the desktop up with everything that ticks on a
+    timer running, then require the machine to still work.
+
+    The three timer-driven loops that allocate are all live here - the
+    clock redrawing every second, the taskbar refreshing every 300ms (a
+    WM_QUERY_PIPE round trip each time), and the file manager re-reading
+    the whole namespace once a second. Between them that is thousands of
+    pipe round trips and redraws over the soak.
+
+    What "nothing grew" is checked as, deliberately: at the end, launch
+    one more app and require it to open. That is not a proxy for a leak,
+    it is the *symptom* a leak in any of these caps actually produces -
+    exhausting MAX_TASKS, MAX_FDS, MAX_SHM_SEGMENTS or the window table
+    all present as "the next thing you launch silently doesn't", which is
+    precisely how M40's bug and M48's own MAX_TASKS bug both showed up.
+    The compositor also refuses windows out loud now (M40's klog line,
+    M48's toast), so the log is checked for a refusal too."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock: redraws every second
+    wait_for_windows(m, 1)
+    m.double_click(ICON_X, ICONS[2][2])  # Files: re-lists the namespace every second
+    wait_for_windows(m, 2)
+
+    # Long enough for hundreds of taskbar refreshes and file-list reloads.
+    # A fixed wait is right here: the assertion is that nothing degraded,
+    # and there is no state to poll toward.
+    soak_seconds = float(os.environ.get("LEANOS_SOAK_SECONDS", "180"))
+    deadline = time.time() + soak_seconds
+    while time.time() < deadline:
+        time.sleep(5.0)
+        # Keep the pointer moving over the taskbar so its hover path and
+        # the compositor's partial-redraw path are exercised too, not just
+        # the timers.
+        m.move_to(*slot_click(0))
+
+    check(count_app_windows(m.screenshot()) == 2,
+          "a window disappeared during the soak")
+
+    m.double_click(ICON_X, ICONS[0][2])  # Terminal
+    wait_for_windows(m, 3, timeout=20.0)
+
+    refused = refusals(m)
+    check(not refused,
+          "the compositor refused %d window request(s) during the soak: %s"
+          % (len(refused), refused))
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -1373,6 +1421,7 @@ TESTS = [
     ("alt_f4_closes_the_focused_window", test_alt_f4_closes_the_focused_window),
     ("ctrl_alt_arrows_snap_and_maximize", test_ctrl_alt_arrows_snap_and_maximize),
     ("drag_a_file_onto_the_desktop_opens_it", test_drag_a_file_onto_the_desktop_opens_it),
+    ("soak_desktop_stays_usable", test_soak_desktop_stays_usable),
     ("launch_close_stress", test_launch_close_stress),
 ]
 

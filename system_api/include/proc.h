@@ -35,6 +35,25 @@
  * truncate a name, never overrun a buffer. */
 #define TASK_INFO_NAME_MAX 24
 
+/* M50: how many task_info_t records a caller must be prepared for - and
+ * the *definition* of the scheduler's own MAX_TASKS, which is now
+ * `#define MAX_TASKS TASK_INFO_MAX` (kernel/sched/sched.h) rather than a
+ * separate number.
+ *
+ * It became one number because two was a bug that shipped. M48 raised
+ * MAX_TASKS from 64 to 128 and task_manager.c kept its own MAX_ENTRIES at
+ * 64 with a comment explaining that a private constant "at least as
+ * large" was fine - which it was, right up until the kernel's grew past
+ * it. The task manager then silently listed only the first 64 processes,
+ * so End Task acted on a long-dead task and the live one you were
+ * looking for was not on screen at all. sched.h's own comment had warned
+ * about exactly this ("a second hand-picked number that merely happened
+ * to be >= this"); the warning was right and the mitigation wasn't.
+ *
+ * See sched.h for where 128 itself comes from - it is derived from the
+ * boot log's "[sched] task table at handoff" measurement, not picked. */
+#define TASK_INFO_MAX 128
+
 /* Mirrors kernel/sched/sched.h's task_state_t, as plain numbers - an
  * enum whose values are part of a syscall's return payload has to be
  * pinned down here rather than inherited from a kernel header the other

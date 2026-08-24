@@ -50,6 +50,24 @@ int shm_create(size_t size, int owner_task_id);
  * for a task that owns none - just a no-op scan. */
 void shm_free_by_owner(int owner_task_id);
 
+/* M50: releases segment `id`, but only if `owner_task_id` really created
+ * it - the ownership invariant this milestone is about, stated as code
+ * rather than as a convention. Returns 0, or -1 for an unknown id or one
+ * owned by somebody else.
+ *
+ * Frees the frames and the table slot and nothing else: it does NOT
+ * unmap the segment from any address space, because it has no idea which
+ * ones it is mapped into (nothing here tracks that). Unmapping is the
+ * caller's half of the contract, and sys_shm_free is where the two halves
+ * are put together - see its own comment for why that is the honest
+ * split rather than a mapping registry nothing else would use. */
+int shm_free(int id, int owner_task_id);
+
+/* Pages segment `id` occupies (its size rounded up), or -1 for an
+ * unknown id - what a caller needs to unmap the right range before
+ * freeing it. */
+int64_t shm_page_count(int id);
+
 /* M45: how many live segments `owner_task_id` currently holds - the shm
  * half of what SYS_taskinfo reports per task, and the number that makes a
  * segment leak visible from user space at all (MAX_SHM_SEGMENTS is 32 and

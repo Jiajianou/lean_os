@@ -71,12 +71,17 @@
 #define COL_PPID  308
 #define COL_RES   356
 
-/* MAX_TASKS in kernel/sched/sched.h - not visible to a user_space build,
- * so this is the same "keep our own constant, at least as large" the
- * file manager already does for leanfs's name length. SYS_taskinfo
- * simply fills fewer entries if the kernel's table is smaller, and stops
- * at this cap if it is ever larger. */
-#define MAX_ENTRIES 64
+/* M50: TASK_INFO_MAX (system_api/include/proc.h) *is* the scheduler's
+ * MAX_TASKS - one definition on both sides of the syscall, not two.
+ *
+ * This used to be a private 64 with a comment arguing that a constant
+ * "at least as large" was fine, in the style file_manager.c uses for
+ * leanfs's name length. It was fine until M48 raised the kernel's to 128,
+ * at which point this window silently listed only the first 64 processes:
+ * End Task acted on a long-dead task from the boot self-tests and the
+ * live one you were looking at wasn't on screen at all. A cap you have to
+ * remember to raise in two places is a cap that will be wrong. */
+#define MAX_ENTRIES TASK_INFO_MAX
 
 /* The processes that *are* the desktop. Killing any of these does not
  * "close an app", it takes the screen away - so this list is refused

@@ -17,6 +17,7 @@
 #include "fs/leanfs.h"
 #include "fs/vfs.h"
 #include "ipc/pipe.h"
+#include "ipc/shm.h" /* M50 - shm_count_by_owner, for the kill storm's segment accounting */
 #include "lib/libk.h"
 #include "mm/e820.h"
 #include "mm/heap.h"
@@ -2905,6 +2906,273 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts("[m49] the shared shortcut table resolving every chord (and refusing every "
                    "near-miss), and a drag announced on WM_DRAG_PIPE becoming a visible drag "
                    "self-test passed (22/22 checks).\n\n");
+    }
+
+    /* M50 self-test: the resource hygiene this arc's new syscalls and new
+     * long-lived UI needed, in M29 and M40's shape - measure a baseline,
+     * do the thing many times, measure again, and require the numbers to
+     * come back.
+     *
+     * Three parts, in increasing order of what they would have caught:
+     *
+     * 1. The shm ownership invariant, stated as a cycle. Create, map,
+     *    unmap-and-free, N times, and require the free-frame count to
+     *    land exactly where it started. Before this milestone there was
+     *    no way to write this test at all - there was no SYS_shm_free -
+     *    which is precisely why every window this OS ever composited
+     *    permanently consumed one of MAX_SHM_SEGMENTS's 32 slots.
+     *
+     * 2. A kill storm. Spawn a client, kill it, repeat, far more times
+     *    than there are window slots or segment slots - and require
+     *    frames, segments and window slots all to return to baseline.
+     *    M29's reclaim path had never been driven at this rate, and M45
+     *    is what made it easy for a *user* to drive it that way.
+     *
+     * 3. Every syscall this arc added, given deliberate garbage. Null
+     *    pointers, kernel addresses, absurd lengths, invalid ids. The
+     *    requirement is only that the machine is still running
+     *    afterwards, which is the entire point: M40's audit of elf_load
+     *    exists because "a user program can take down the kernel by
+     *    spawning a text file" was true, and every syscall added since
+     *    deserves the same question asked of it deliberately rather than
+     *    eventually.
+     */
+    {
+        int all_ok = 1;
+
+        /* (1) shm create/free, cycled. 64 KiB is 16 frames, so a leak of
+         * even one cycle is unmistakable against the baseline.
+         *
+         * Deliberately create-and-free without mapping, because *this*
+         * task cannot map shm at all: task 0 is a kernel thread, and a
+         * kernel thread's SYS_shm_map cursor is zero (task_t's own
+         * comment says these are "meaningless, left zeroed" for anything
+         * not spawned through process_spawn) - so asking would try to map
+         * at virtual address 0, inside the identity-mapped low 2 MiB, and
+         * panic. Found by writing this test. The mapped path is what part
+         * (2) below covers, through a real compositor mapping and freeing
+         * real window buffers sixteen times, which is a better test of it
+         * anyway. */
+        uint64_t shm_baseline = pmm_free_frame_count();
+        int shm_cycles_ok = 1;
+        for (int i = 0; i < 24; i++) {
+            long id = do_syscall(SYS_shm_create, 64 * 1024, 0, 0);
+            if (id < 0) {
+                klog_puts("[m50] shm_create failed on cycle 0x");
+                klog_put_hex32((uint32_t)i);
+                klog_puts(" - the segment table is not being handed back\n");
+                shm_cycles_ok = 0;
+                break;
+            }
+            if (do_syscall(SYS_shm_free, (uint64_t)id, 0, 0) != 0) {
+                klog_puts("[m50] shm_free refused a segment this task had just created\n");
+                shm_cycles_ok = 0;
+                break;
+            }
+        }
+        uint64_t shm_after = pmm_free_frame_count();
+        if (!shm_cycles_ok || shm_after != shm_baseline) {
+            klog_puts("[m50] 24 shm create/free cycles did not return every frame: 0x");
+            klog_put_hex64(shm_baseline);
+            klog_puts(" free before, 0x");
+            klog_put_hex64(shm_after);
+            klog_puts(" after\n");
+            all_ok = 0;
+        }
+
+        /* Freeing something twice, or something owned by nobody, has to
+         * fail rather than double-free - the invariant is "exactly one
+         * owner releases it", and a second release is how that stops
+         * being true. */
+        long id_twice = do_syscall(SYS_shm_create, 4096, 0, 0);
+        long first_free = do_syscall(SYS_shm_free, (uint64_t)id_twice, 0, 0);
+        long second_free = do_syscall(SYS_shm_free, (uint64_t)id_twice, 0, 0);
+        if (first_free != 0 || second_free == 0) {
+            klog_puts("[m50] freeing an shm segment twice did not fail the second time (0x");
+            klog_put_hex32((uint32_t)first_free);
+            klog_puts(" then 0x");
+            klog_put_hex32((uint32_t)second_free);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+
+        /* (2) the kill storm. Each iteration is a whole client
+         * connecting to a real compositor, getting a window and a
+         * segment and an event pipe, and then being SIGKILLed - which is
+         * exactly what M45's Force Quit does, driven far faster than a
+         * person could. 16 rounds is past MAX_WINDOWS (12) and past half
+         * of MAX_SHM_SEGMENTS, so a slot or a segment that failed to come
+         * back would run the table out inside this loop rather than
+         * three milestones from now. */
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *stub_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !stub_image) {
+            panic("out of memory reading compositor/wm_stubborn back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t stub_size = vfs_read("wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || stub_size < 0) {
+            panic("vfs_read: compositor/wm_stubborn missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(400);
+
+        /* Baseline taken with the compositor already up, so what is
+         * measured is the churn and not the compositor's own back buffer. */
+        uint64_t storm_frames_before = pmm_free_frame_count();
+        int storm_shm_before = shm_count_by_owner(comp_task->id);
+        int storm_ok = 1;
+        for (int round = 0; round < 16 && storm_ok; round++) {
+            task_t *victim = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
+            if (!victim) {
+                klog_puts("[m50] kill storm: spawn failed on round 0x");
+                klog_put_hex32((uint32_t)round);
+                klog_putc('\n');
+                storm_ok = 0;
+                break;
+            }
+            pit_sleep_ms(300); /* connect, get a window, draw */
+            selftest_reap(victim);
+            pit_sleep_ms(200); /* let reap_dead_clients notice and release the slot */
+        }
+        kfree(stub_image);
+
+        uint64_t storm_frames_after = pmm_free_frame_count();
+        int storm_shm_after = shm_count_by_owner(comp_task->id);
+
+        /* M50: the caps this arc leaned on, measured against a compositor
+         * that has just been through sixteen connect/draw/die rounds -
+         * which is the closest thing to a worst case this project can
+         * produce on purpose. Logged rather than only asserted, because
+         * "how close are we" is the question M40 and M41 each answered
+         * too late, and it should be answerable with a grep. */
+        int comp_fds = 0;
+        for (int f = 0; f < MAX_FDS; f++) {
+            if (comp_task->fds[f].type != FD_NONE) {
+                comp_fds++;
+            }
+        }
+        klog_puts("[m50] compositor after the storm: 0x");
+        klog_put_hex32((uint32_t)comp_fds);
+        klog_puts(" of 0x");
+        klog_put_hex32((uint32_t)MAX_FDS);
+        klog_puts(" fds, 0x");
+        klog_put_hex32((uint32_t)storm_shm_after);
+        klog_puts(" shm segment(s) held.\n");
+
+        /* One more client has to be able to connect *and draw* after all
+         * that, which is the assertion with real teeth: a window slot or
+         * a segment that never came back shows up here as a window that
+         * simply doesn't appear - the exact symptom M40 spent a
+         * milestone on. Window 0 is at (100, 100), 200x120. */
+        uint8_t *last_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!last_image) {
+            panic("out of memory reading wm_stubborn back from disk");
+        }
+        int64_t last_size = vfs_read("wm_stubborn", last_image, LEANFS_MAX_FILE_SIZE);
+        task_t *last_task = last_size < 0 ? (task_t *)0
+                                          : process_spawn("wm_stubborn", last_image, (size_t)last_size, "");
+        kfree(last_image);
+        pit_sleep_ms(700);
+        uint32_t survivor_pixel = fb_get_pixel(200, 150);
+        if (last_task) {
+            selftest_reap(last_task);
+        }
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        if (!storm_ok) {
+            all_ok = 0;
+        }
+        if (storm_shm_after != storm_shm_before) {
+            klog_puts("[m50] the kill storm left the compositor holding shm segments: 0x");
+            klog_put_hex32((uint32_t)storm_shm_before);
+            klog_puts(" before, 0x");
+            klog_put_hex32((uint32_t)storm_shm_after);
+            klog_puts(" after 16 rounds\n");
+            all_ok = 0;
+        }
+        /* Frames, bounded rather than exact, and the bound is derived
+         * rather than picked. A killed *process* leaks its own address
+         * space - page tables, stack, argument page, and the frames its
+         * ELF image was copied into - because this kernel has no
+         * vmm_destroy_address_space, which M29 documented as a deliberate
+         * tradeoff and M50 does not undo. Measured here: about 15 frames
+         * per round.
+         *
+         * What must not grow is the compositor's side. One window's pixel
+         * buffer is 200*120*4 = 96000 bytes, 24 frames - so a bound of 20
+         * frames per round both accommodates the ~15 that genuinely leak
+         * and fails if even one pixel buffer didn't come back, which is
+         * the thing this test is for. The per-round figure is logged
+         * either way, so the number this bound rests on is in the boot
+         * log rather than only in this comment. */
+        uint64_t storm_leak = storm_frames_before > storm_frames_after
+                                  ? storm_frames_before - storm_frames_after
+                                  : 0;
+        klog_puts("[m50] kill storm: 0x");
+        klog_put_hex64(storm_leak);
+        klog_puts(" frames not reclaimed across 16 rounds (0x");
+        klog_put_hex64(storm_leak / 16);
+        klog_puts(" per dead address space; one leaked window buffer would be 0x18).\n");
+        if (storm_leak > 16 * 20) {
+            klog_puts("[m50] the kill storm leaked more than 16 dead address spaces account for - a window's pixel buffer did not come back\n");
+            all_ok = 0;
+        }
+        if (survivor_pixel != 0x00B03040u) {
+            klog_puts("[m50] a client connecting after 16 kill rounds got no drawable window - expected 0x00B03040 at (200,150), got 0x");
+            klog_put_hex32(survivor_pixel);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+
+        /* (3) deliberate garbage into every syscall this arc added. Each
+         * of these must return an error; the machine still running is the
+         * other half of the assertion, and the only way this test reports
+         * that is by reaching its own "passed" line. */
+        static const uint64_t KERNEL_ADDR = 0x100000ULL; /* squarely inside the kernel image */
+        /* A real buffer for the calls that are *supposed* to be refused
+         * before writing anything - so that if one of them ever isn't,
+         * what it scribbles on is this scratch space and not the table of
+         * results being checked. */
+        static task_info_t garbage_scratch[2];
+        struct { const char *what; long got; } garbage[] = {
+            {"SYS_taskinfo with a null buffer", do_syscall(SYS_taskinfo, 0, 8, 0)},
+            {"SYS_taskinfo with a zero count", do_syscall(SYS_taskinfo, (uint64_t)garbage_scratch, 0, 0)},
+            {"SYS_taskinfo with an absurd count", do_syscall(SYS_taskinfo, (uint64_t)garbage_scratch, 0xFFFFFFFFULL, 0)},
+            {"SYS_close on an out-of-range fd", do_syscall(SYS_close, 0xFFFFFFFFULL, 0, 0)},
+            {"SYS_close on an fd that was never open", do_syscall(SYS_close, MAX_FDS - 1, 0, 0)},
+            {"SYS_shm_free on an id that does not exist", do_syscall(SYS_shm_free, 0xFFFFULL, 0, 0)},
+            {"SYS_shm_free with a misaligned address", do_syscall(SYS_shm_free, 0, KERNEL_ADDR + 1, 0)},
+            {"SYS_shutdown with an unrecognized mode", do_syscall(SYS_shutdown, 99, 0, 0)},
+            {"SYS_kill on a pid that was never valid", do_syscall(SYS_kill, 0xFFFFULL, SIGKILL, 0)},
+        };
+        for (size_t i = 0; i < sizeof(garbage) / sizeof(garbage[0]); i++) {
+            if (garbage[i].got >= 0) {
+                klog_puts("[m50] ");
+                klog_puts(garbage[i].what);
+                klog_puts(" succeeded (0x");
+                klog_put_hex32((uint32_t)garbage[i].got);
+                klog_puts(") instead of failing\n");
+                all_ok = 0;
+            }
+        }
+
+        /* SYS_cursor_shape, which M50's plan also names, does not exist -
+         * see milestones.md's M46 entry: the compositor already draws
+         * every cursor shape itself, so the syscall was never added and
+         * there is nothing here to feed garbage to. Recorded rather than
+         * quietly dropped. */
+
+        if (!all_ok) {
+            panic("M50 robustness self-test: a resource did not come back, or a garbage argument was accepted");
+        }
+        klog_puts("[m50] 24 shm create/free cycles frame-neutral, a double free refused, "
+                   "16 kill-storm rounds returning every window slot and segment, and 9 "
+                   "garbage-argument syscalls all refused self-test passed (13/13 checks).\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

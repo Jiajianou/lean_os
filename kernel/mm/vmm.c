@@ -113,6 +113,33 @@ uint64_t vmm_kernel_pml4_phys(void) {
     return kernel_pml4_phys;
 }
 
+int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
+    spin_lock(&vmm_lock);
+    uint64_t *pml4 = phys_to_table(pml4_phys);
+    /* Every walk here is create = 0: a missing level means the address
+     * was never mapped in this address space, which is a -1, not a
+     * reason to build page tables for it. */
+    uint64_t *pdpt = table_walk(pml4, PML4_INDEX(virt), 0, 0);
+    uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(virt), 0, 0) : (uint64_t *)0;
+    if (!pd || (pd[PD_INDEX(virt)] & PTE_HUGE)) {
+        spin_unlock(&vmm_lock);
+        return -1;
+    }
+    uint64_t *pt = table_walk(pd, PD_INDEX(virt), 0, 0);
+    if (!pt || !(pt[PT_INDEX(virt)] & PTE_PRESENT)) {
+        spin_unlock(&vmm_lock);
+        return -1;
+    }
+    pt[PT_INDEX(virt)] = 0;
+    /* invlpg only touches this CPU's TLB, and this address is private to
+     * one process's address space (PML4[1]) - so the only CPU that can
+     * have it cached is one that has run this task, and it will reload
+     * CR3 before running any other address space anyway. */
+    __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+    spin_unlock(&vmm_lock);
+    return 0;
+}
+
 void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
     spin_lock(&vmm_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);

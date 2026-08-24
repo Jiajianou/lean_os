@@ -1500,7 +1500,7 @@ git history was never touched by it, since none of it was committed.
 - [x] Full `tools/qemu-serial-test.sh` pass (30/30) and
       `tools/qemu-input-test.sh` pass (15/15)
 
-## Path to a daily-usable desktop (M45+)
+## Path to a daily-usable desktop (M45+) ✅
 
 M40-M44 got the desktop looking right, and proved for the first time
 that real clicks and keystrokes reach the code meant to handle them.
@@ -1524,14 +1524,37 @@ milestones on their own:
   milestones before the input harness caught it. This system has no way
   to tell its user anything.
 
-M45 takes the first, M47 the second, M48 the third. M46 is the
-interface-detail pass the desktop has earned now that the layout has
-stopped moving - circular macOS-style titlebar buttons chief among
-them. M49 finishes the input surface (a scroll wheel; the keyboard
-chords a desktop is expected to have). M50 is the robustness and
-resource pass this arc's new syscalls and new long-lived UI will need,
-in the shape M29 and M40 already set - including `SYS_close`, which
-this project has never had.
+M45 took the first, M47 the second, M48 the third. M46 was the
+interface-detail pass the desktop had earned once the layout stopped
+moving - circular macOS-style titlebar buttons chief among them. M49
+finished the input surface (a scroll wheel; the keyboard chords a
+desktop is expected to have). M50 was the robustness and resource pass
+this arc's new syscalls and new long-lived UI needed, in the shape M29
+and M40 already set - including `SYS_close`, which this project had
+never had.
+
+**All six landed.** What the arc actually cost, beyond the features
+themselves, was six bugs that had been true for a while and had no way
+to announce themselves:
+
+- ACPI had found nothing at all since M26 made UEFI the only boot path,
+  so SMP had been silently single-core for twenty-one milestones (M47)
+- every window this OS composited leaked an shm segment, so roughly
+  thirty window opens exhausted a fixed 32-slot table for the life of
+  the machine (M50)
+- `MAX_TASKS` was exhausted by the boot self-tests plus six apps, which
+  is why the seventh stopped opening (M48)
+- the Makefile had no header dependency tracking, so editing a struct
+  recompiled nothing that used it (M48)
+- a tall window cascaded under the always-on-top taskbar, and every
+  window's shadow tinted it (M45)
+- `vmm_unmap_page` panics on an address it doesn't find, which is right
+  for kernel mappings and wrong the moment a user process supplies one
+  (M50)
+
+Three of the six were found *by* this arc's own new features - the task
+manager, the spawn error codes and the toast surface between them - which
+is the argument for having built them.
 
 ## M45 — Process control: task manager, Force Quit, app context menus ✅
 
@@ -2053,46 +2076,471 @@ symptom was not. This system had no way to tell its user anything.
 - [x] Full `tools/qemu-serial-test.sh` pass (35/35) and
       `tools/qemu-input-test.sh` pass (31/31)
 
-## M50 — Robustness & resource hygiene
+## M50 — Robustness & resource hygiene ✅
 
 The pass this arc's new syscalls, new long-lived UI and new ways to kill
-things will need - M29 and M40's shape, applied to what M45-M49 added.
+things needed - M29 and M40's shape, applied to what M45-M49 added.
 
-- [ ] `SYS_close` finally exists. There has never been one:
-      `SYS_dup2`'s own comment admits it, and M40's root-cause bug was
+- [x] `SYS_close` (32) finally exists. `SYS_dup2`'s own comment had
+      admitted there wasn't one since M21, and M40's root-cause bug was
       five never-released pipe fd-pairs riding into every process on the
-      system. The compositor closes a dead client's event pipe instead
-      of only resetting it, the shell closes what it dup2'd, and
-      `sched_reset_fds_to_std`'s big hammer stops being the only thing
-      between this OS and a slow fd leak
-- [ ] The shm counterpart audited to a stated invariant: every segment
-      has exactly one owner responsible for releasing it, and a boot
-      test that cycles N windows through create/map/destroy and compares
-      free-frame counts is what holds it. M29's reclaim covers a
-      compositor window; nothing has ever checked the general case
-- [ ] A kill-storm stress test: launch every app, force-quit all of them
-      through M45's path, repeat - asserting frames, fds, shm segments
-      and task slots all return to baseline. M29's reclaim path has
-      never been driven at that rate, and M45 is what makes it easy for
-      a *user* to drive it that way
-- [ ] A soak run: leave the desktop up with the clock ticking, the
-      taskbar refreshing every 300ms and the file manager polling once a
-      second, and assert nothing grows over several minutes. All three
-      are timer-driven loops that allocate
-- [ ] Re-derive the caps this arc leaned on - `MAX_TASKS`,
-      `WM_MAX_ROUTABLE_WINDOWS`, `MAX_SHM_SEGMENTS`, `MAX_FDS` - from a
-      measurement instead of a guess, which M45's task manager makes
-      possible for the first time by showing how close a real running
-      desktop sits to each. Both M40 and M41 shipped a bug that was
-      really an exactly-sized cap
-- [ ] Every panic path reachable from a user program re-audited the way
-      M40 did `elf_load`: each syscall this arc added (`SYS_taskinfo`,
-      `SYS_shutdown`, `SYS_close`, `SYS_cursor_shape`) gets a deliberate
-      garbage-argument test - null pointers, kernel addresses, absurd
-      lengths, invalid pids
-- [ ] Full regression pass on both suites, three consecutive runs -
-      M42's precedent, set after an intermittent teardown panic that a
-      single green run would have hidden
+      system. It releases the caller's own fd-table slot and nothing
+      more, deliberately: pipes here are not reference-counted, a named
+      pipe is *meant* to outlive every fd that has ever pointed at it -
+      that is the whole rendezvous mechanism the window protocol is built
+      on - and an anonymous pipe's other end is usually held by a child
+      spawned with a copy of this table. Freeing anything would turn "I
+      am done with this descriptor" into "everyone else's is dangling".
+      Slots are what were actually leaking
+- [x] `wm_connect` hands five slots back per client: the two
+      request/response pipes are a handshake nothing touches again, and a
+      client will never write to its own event pipe, so its write end was
+      a slot claimed and abandoned at birth
+- [x] The compositor keeps a reclaimed slot's event pipe rather than
+      closing it - M50's plan said to close it, and reusing it is
+      genuinely better fd hygiene, since `accept_pending_window` resets
+      it in place instead of spending two fresh slots on a reopen.
+      Recorded as a deliberate departure rather than done
+- [x] **`SYS_shm_free` (33), which turned a documented leak into a
+      documented bound.** `reclaim_window`'s own comment had explained
+      since M29 why it *couldn't* free a dead window's pixel buffer:
+      there was no such call, and freeing frames out from under this
+      process's own still-present mapping would alias live memory. Both
+      true - and the second is exactly why this unmaps before it frees
+      rather than the other way round. Without it, every window this OS
+      ever composited consumed one of `MAX_SHM_SEGMENTS`'s 32 slots
+      forever: **about thirty window opens exhausted the table for the
+      life of the machine, and the thirty-first silently got no window.**
+      The headroom that comment leaned on was never headroom, it was a
+      countdown
+- [x] `shm_free(id, owner)` refuses a segment owned by anybody else,
+      which is the ownership invariant stated as code rather than as a
+      convention. The address to unmap comes from the caller because
+      nothing here tracks which address spaces a segment is mapped into,
+      and adding that registry would be real bookkeeping for one caller
+      that already knows the answer
+- [x] `vmm_unmap_page_in`, which had to exist for any of that:
+      `vmm_unmap_page` walks the *kernel* PML4 and panics on anything it
+      doesn't find - right for kernel mappings and exactly wrong for an
+      address that arrives from a user process, where "not mapped" is
+      ordinary bad input. Found by the first boot after wiring
+      `SYS_shm_free` up, as a panic
+- [x] New boot self-test (`[m50]`, 13/13), in three parts. 24 shm
+      create/free cycles that must return every frame exactly; a double
+      free that must be refused; a **16-round kill storm** - each round a
+      whole client connecting to a real compositor, drawing, and being
+      SIGKILLed, which is M45's Force Quit driven far faster than a person
+      could - requiring every window slot and every segment back, and one
+      more client to still be able to connect *and draw* afterwards; and
+      nine deliberate garbage arguments to the syscalls this arc added
+- [x] The shm cycle can't map what it creates, and that is worth
+      recording: task 0 is a kernel thread, and a kernel thread's
+      `SYS_shm_map` cursor is zero (`task_t` says these are "meaningless,
+      left zeroed" for anything not spawned through `process_spawn`), so
+      asking would map at virtual address 0 - inside the identity-mapped
+      low 2 MiB - and panic. Found by writing the test. The mapped path is
+      what the kill storm covers, through a real compositor mapping and
+      freeing real window buffers sixteen times
+- [x] The kill storm's frame bound is derived, not picked. A dead process
+      leaks its whole address space (page tables, stack, argument page,
+      image) because this kernel has no `vmm_destroy_address_space` -
+      measured at 15 frames per round and **logged every boot**. One
+      leaked window pixel buffer would be 24 frames on its own, so the
+      bound is 20 per round: loose enough for what genuinely leaks, tight
+      enough to fail if even one buffer didn't come back
+- [x] Caps re-derived from measurement rather than guessed, which is what
+      the boot log now carries: `[sched] task table at handoff` (added in
+      M48, when it caught `MAX_TASKS` being exhausted) and `[m50]
+      compositor after the storm`, which reports what a compositor that
+      has filled every window slot actually holds
+- [x] `MAX_FDS` 64 -> 128 from that line. It measured **52 of 64**, and
+      the derivation is 2 (stdin/stdout) + 22 (eleven well-known protocol
+      pipes) + 24 (two per window slot ever created, since event pipes
+      are kept and reset rather than reopened) = 48. Twelve spare is not
+      headroom, it is the state M40 was in when this broke the first time
+- [x] `MAX_SHM_SEGMENTS` left at 32 deliberately: the number was never
+      the problem. With `SYS_shm_free` a compositor's live usage is
+      exactly 1 + one per live window = 13 at `WM_MAX_ROUTABLE_WINDOWS`,
+      which is now a bound instead of a countdown
+- [x] `SYS_cursor_shape`, which M50's plan also wanted garbage-tested,
+      does not exist - see M46: the compositor draws every cursor shape
+      itself, so the syscall was never added. Recorded rather than
+      quietly dropped
+- [x] A soak run as a new interactive test: the clock redrawing every
+      second, the taskbar refreshing every 300ms (a `WM_QUERY_PIPE` round
+      trip each time), and the file manager re-reading the whole
+      namespace once a second, for three minutes - thousands of pipe
+      round trips - with the pointer moved across the taskbar throughout.
+      "Nothing grew" is asserted as *launch one more app and require it
+      to open*, which is not a proxy for a leak but the actual symptom
+      one produces: exhausting any of these caps presents as "the next
+      thing you launch silently doesn't", exactly how both M40's bug and
+      M48's `MAX_TASKS` bug showed up. The log is checked for a window
+      refusal too
+- [x] **One more near-duplicate cap, found by the regression runs
+      themselves.** `task_manager.c` kept a private `MAX_ENTRIES` of 64
+      with a comment arguing that a constant "at least as large" as the
+      kernel's was fine - which it was, until M48 raised `MAX_TASKS` to
+      128. The task manager then silently listed only the *first 64*
+      processes, so End Task acted on a long-dead boot self-test task and
+      the live one you were looking at was not on screen at all. sched.h's
+      own comment had warned about exactly this shape of bug; the warning
+      was right and the mitigation wasn't. `TASK_INFO_MAX` in the shared
+      ABI header is now the single definition, and `MAX_TASKS` is spelled
+      as it
+- [x] Full regression on both suites, three consecutive runs - M42's
+      precedent, set after an intermittent teardown panic a single green
+      run would have hidden. 36/36 serial markers and 32/32 interactive
+      tests, three times each
+
+### Known gaps and things still unverified after M50
+
+Recorded rather than left implicit - each of these is a real limit of
+what M45-M50 actually shipped, and several are load-bearing for whatever
+comes next.
+
+- **A dead process's address space is never reclaimed.** M29 documented
+  the tradeoff and M50 measured it: ~15 frames per dead process (page
+  tables, stack, argument page, and the frames its ELF image was copied
+  into), logged every boot by the kill storm. There is no
+  `vmm_destroy_address_space`. At 128 task slots this is bounded, but
+  the bound is "the machine's whole uptime", not "concurrently running"
+- **Task slots are never recycled.** Ids are assigned sequentially and a
+  terminated task's slot stays valid forever, which is what makes
+  `SYS_wait`'s poll-the-exit-code approach work without zombie
+  bookkeeping. It also means `MAX_TASKS` is a budget for *launches over
+  the machine's lifetime*: the boot self-tests alone now spend 73 of 128
+  before PID 1 starts, and that number has grown every milestone this arc
+- **Real-hardware boot is still unverified.** Everything in M45-M50 was
+  developed and tested against QEMU/OVMF. M47's ACPI work in particular
+  is the kind that behaves differently on real firmware - the FADT on
+  this emulator reports no reset register at all, so the 8042 tier is
+  what actually restarts the machine here and the ACPI reset path has
+  never once fired
+- **The S5 sleep type is guessed, not read.** `\_S5` lives in AML in the
+  DSDT and this project has no AML parser, so `power.c` tries the two
+  well-known `SLP_TYP` values and says in the log that they are guesses.
+  Correct on QEMU; unknown on anything else
+- **No scrollback in the terminal.** `gui_terminal.c` discards the top
+  line when the grid scrolls, so M49's wheel has nothing to reveal there
+- **`gui_terminal` never restores its own stdout.** It `dup2`s a pipe
+  onto fd 1 before spawning and leaves it there deliberately (it reads
+  its own output back), but that means the terminal's stdout is a pipe
+  for the rest of its life
+- **`SYS_close` does not close a pipe**, only the caller's slot - pipes
+  are not reference-counted, so a reader blocked on a pipe whose last
+  writer "closed" waits forever rather than seeing EOF. Nothing depends
+  on EOF today; anything that ever does will need refcounting first
+- **Panic paths from *older* syscalls were not re-audited.** M50's
+  garbage-argument pass covers what M45-M50 added (`SYS_taskinfo`,
+  `SYS_shutdown`, `SYS_close`, `SYS_shm_free`, `SYS_kill`). The other
+  twenty-eight syscalls have never had the same treatment, and
+  `vmm_unmap_page_in` exists because the first one that reached
+  `vmm_unmap_page` with a user-supplied address panicked
+- **User pointers are still trusted.** `sys_write`'s own comment has said
+  so since M8: nothing validates that a ring-3 pointer is mapped and owned
+  by the caller. Every syscall that writes through one (`SYS_taskinfo`,
+  `SYS_fb_info`, `SYS_mouse_read`, ...) would fault the kernel on a bad
+  address rather than returning an error
+- **The desktop clients are unsupervised except for `desktop_shell`.**
+  init waits on the taskbar and restarts the whole session if it exits,
+  but a compositor or `desktop_icons` that dies on its own is not noticed
+  until the taskbar happens to die too
+- **The input harness is single-threaded against wall-clock time.** Two
+  tests have already failed for host-load reasons rather than guest bugs
+  (M45's key backlog, M48's slower run), and each was fixed by asserting
+  on a guest-side state signal instead of elapsed time. The pattern
+  works, but nothing enforces it for new tests
+
+
+## Path to a dependable desktop (M51+)
+
+M45-M50 closed the gap between "looks like a desktop" and "can be used
+as one". This arc is about the gap between "can be used" and "can be
+*relied on*" - and the ordering below is a judgment about what most
+damages the product, not what is most interesting to build.
+
+Three things decide it:
+
+- **Overlapping windows are broken, and it is the first thing anyone
+  will notice.** This compositor has never had a z-order. It paints in
+  creation order, and clicking a window changes its titlebar color
+  without bringing it forward - so a window you can see is behind one
+  you don't want, permanently. Worse, the click hit-test walks the array
+  backwards and takes the first *match* rather than the topmost
+  *visible* one, so a click can be delivered to a window that is
+  completely covered. Every hit-test in `compositor.c` carries a comment
+  admitting this ("occlusion-unaware - a real fix is z-order work, out of
+  scope here"). It is in scope now.
+- **Any user program can take down the kernel with a bad pointer.**
+  `sys_write`'s own comment has said so since M8. M40 fixed exactly one
+  instance of this class (`elf_load`) and called "a user program can take
+  down the kernel by spawning a text file" a bug at any threat model -
+  which it is, and the other thirty syscalls that dereference a ring-3
+  pointer have never been audited. This is the difference between a
+  buggy app and a machine you have to reset.
+- **Nothing that dies is ever fully reclaimed.** M50 measured it: ~15
+  frames per dead process, forever, plus a task slot that is never
+  recycled. Both are bounded only by the machine's total uptime, and the
+  boot self-tests alone now spend 73 of 128 task slots before PID 1
+  starts. This is the ceiling on how long the machine can be left on.
+
+M51 takes the first, M52 the second, M54 the third. M53 is the one
+structural limit that shows up in three separate apps at once - a flat
+filesystem - which is why it sits above resilience and app depth rather
+than in the stretch list where it started. M55 is the supervision this
+session has needed since init learned to watch exactly one of its three
+children. M56 is depth in the apps people actually spend time in.
+
+## M51 — Z-order: raising, occlusion-correct hit-testing, focus that means something
+
+The compositor's own header comment has described this as a
+"simplification" since M20 and every hit-test in the file repeats the
+apology. It is the largest remaining behavioral difference between this
+and a real window manager, and unlike most of them it is *wrong* rather
+than merely absent: a click can land on a window nobody can see.
+
+- [ ] An explicit z-order - an array of window indices, topmost last -
+      rather than paint order being `windows[]`'s own order. Everything
+      that walks windows for painting, hit-testing, or event routing
+      walks that instead. The three z-order *classes* this project
+      already has (desktop background at the bottom, ordinary windows,
+      panels always on top) become a property of where a window is
+      inserted rather than three separate loops in `redraw_rect`
+- [ ] Raise on focus: `apply_window_action`'s `WM_ACTION_FOCUS` moves
+      the window to the top of the ordinary-window band. That is one
+      place, and it is already the funnel every focus path goes through -
+      a titlebar click, a taskbar button, Alt+Tab, and an external
+      `WM_ACTION_PIPE` request all arrive there, so all four get raising
+      for free and none of them can drift
+- [ ] Hit-testing walks the z-order top-down and stops at the first
+      window whose rect contains the point - which is the actual fix.
+      `window_under_cursor`, `titlebar_button_at`, `resize_hit_mask`'s
+      caller and the move-drag hit-test are four copies of the same
+      backwards loop today; they become one helper that takes a filter
+- [ ] A window that is raised must not steal a click it was raised *by*.
+      The press that raises is the press the window then receives - which
+      is what every desktop does and is easy to get wrong in the
+      direction of eating it
+- [ ] Alt+Tab cycles in z-order (most-recently-used), not in slot order.
+      `alt_tab_cycle` walks `windows[]` by index today, so on a desktop
+      with four windows open it visits them in the order they were
+      launched regardless of what you have been using
+- [ ] The taskbar's running-app order stays *stable* rather than
+      following z-order, deliberately: a button that moves every time you
+      focus something is a button you can't build muscle memory for.
+      `wm_window_info_t` grows a `z_index` so the shell can show
+      "frontmost" without reordering, which is the Windows behavior and
+      the right one
+- [ ] Shadows get correct once z-order exists, and are currently wrong in
+      a way nobody has noticed: `fill_rect_shadow` draws each window's
+      shadow immediately before that window, so a later-painted window
+      correctly covers it - but a window *above* an occluded one still
+      has its shadow drawn over by whatever comes next in slot order.
+      Painting strictly back-to-front fixes it without new code
+- [ ] New boot self-test (`[m51]`): two deliberately overlapping windows,
+      the lower one clicked, and then three assertions that only a real
+      z-order satisfies - it paints *over* the other, it received the
+      click, and the one that was on top did not. Plus a click on the
+      overlap region delivered to exactly one window, which is the
+      occlusion bug stated as a test
+- [ ] New interactive tests: two overlapping windows raised by clicking
+      each in turn; a click in the overlap region reaching the front
+      window's content and not the back one's; Alt+Tab visiting them in
+      use order
+
+## M52 — Kernel hardening: validated user pointers, no user-triggerable panic
+
+`sys_write`'s comment - "buf is trusted as-is for now; validating that a
+ring-3 pointer is actually mapped and owned by the caller is left for
+whenever a genuinely untrusted program needs to run here" - has been true
+for forty-four milestones. The threat model argument was always right and
+is also beside the point: the programs this OS runs are *its own*, and
+the bug this prevents is a buggy app taking the machine down rather than
+itself.
+
+- [ ] `copy_from_user` / `copy_to_user` in the syscall layer: check the
+      address range lies inside the caller's own PML4[1] region
+      (`proc.h`'s constants already define exactly what that is) and is
+      actually mapped, then copy. Return -1 rather than faulting. Every
+      syscall that today casts a `uint64_t` argument straight to a
+      pointer goes through them
+- [ ] The audit is the milestone, not the primitive. Thirty-one syscalls
+      dereference at least one user pointer; each one gets converted and
+      each one gets a deliberate garbage-argument test, in the shape M50
+      established for the five it covered. Null, kernel addresses, an
+      address one byte before the user region, an address one byte past
+      the end of a mapped page, and a length that overflows the range
+- [ ] A page-fault handler that kills the offending task instead of
+      panicking. Today `isr.c` panics on #PF, so *any* wild pointer in
+      any user program stops the machine - the single largest source of
+      "you have to reset it" this project has. A fault in ring 3
+      terminates that task with a distinguishable exit code; a fault in
+      ring 0 still panics, because that is a kernel bug and should be
+      loud
+- [ ] M48's crash toast finally has something real to report: a client
+      that faults now dies the same way a SIGKILLed one does, and the
+      compositor already announces exactly that
+- [ ] `SYS_shm_map`'s id, `SYS_pipe_*`'s fd numbers, `SYS_taskinfo`'s
+      count and every other bounds check re-derived from the same rule -
+      an out-of-range argument is an error return, never a panic and
+      never a silent clamp
+- [ ] New boot self-test (`[m52]`): a deliberately faulting user program
+      (`user_space/bin/wm_faulter.c`, in the same self-test-only role
+      `wm_stubborn.c` holds) that dereferences a null pointer, spawned
+      and required to die *alone* - the machine still running afterwards
+      is the assertion, and the frame/task accounting around it is the
+      M40-shaped audit
+- [ ] Every syscall's garbage-argument matrix run as a table rather than
+      as prose, so adding a syscall without adding a row is visible
+
+## M53 — Directories in leanfs, and a namespace that isn't a junk drawer
+
+The filesystem is flat, and it shows up in three apps at once: the file
+manager lists this OS's own executables next to your text files, the
+launcher offers to "launch" `settings.conf`, and `SYS_listfiles` is
+documented as "the entire namespace" because it has no choice. The boot
+self-tests' own fixtures (`m33test`, `m48trunc`, `fstest`) sit in the
+same list.
+
+- [ ] Directory inodes in `leanfs.c`: a directory is a file whose
+      contents are name/inode records, which is the smallest change that
+      is still a real directory rather than a prefix convention. The
+      indirect-block support M15 added is what makes a directory able to
+      outgrow one block
+- [ ] Path resolution (`/bin/ls`), and every existing whole-file call
+      taking a path instead of a name. `vfs_read`/`vfs_write` keep their
+      shape - this is a resolver in front of them, not a new API
+- [ ] `SYS_mkdir`, and `SYS_listfiles` becoming `SYS_listdir(path, ...)`.
+      The old call keeps working against `/` for exactly as long as it
+      takes to convert the three callers
+- [ ] A layout worth having: `/bin` for programs, `/home` for user files,
+      `/etc` for `settings.conf`. The kernel's first-boot seeding writes
+      programs into `/bin`, and the self-test fixtures go somewhere that
+      is not `/home`
+- [ ] The launcher lists `/bin` and stops offering data files as
+      programs - which also retires M48's "That file is not a program."
+      toast for the common case, leaving it for the genuinely broken one
+- [ ] The file manager gets navigation: a path bar, double-click to
+      enter, `..` to leave. This is the app that most obviously wanted it
+- [ ] Absolute paths in `SYS_spawn`, so the shell, the launcher and every
+      desktop icon name `/bin/name` rather than relying on a single flat
+      namespace to be unambiguous
+- [ ] New boot self-test (`[m53]`): a directory created, entered, filled
+      past one block, listed, and read back by path; a path that escapes
+      the root refused; and the seeded `/bin` containing exactly the
+      programs `USER_PROGRAMS` names
+- [ ] New interactive test: the file manager navigating into `/bin` and
+      back, and the launcher no longer listing a file the file manager
+      shows in `/home`
+
+## M54 — Reclaiming what dies: address spaces, task slots, real uptime
+
+M29 documented the leak, M50 measured it, and neither fixed it: ~15
+frames per dead process, forever, plus a task slot that is never
+recycled. Both are bounded only by total uptime. The boot self-tests
+alone spend 73 of 128 slots before PID 1 starts, and that number has
+grown in every milestone of the last arc.
+
+- [ ] `vmm_destroy_address_space(pml4_phys)`: walk the PML4[1] subtree,
+      free every leaf frame and every page table, leave PML4[0] alone
+      (it is the shared kernel map and freeing it would take the machine
+      with it). Called from `task_exit_with_code`, next to the
+      `shm_free_by_owner` that is already there and is the precedent for
+      "the one funnel every exit path goes through"
+- [ ] The ordering matters and is the whole risk: a task cannot free the
+      address space it is currently running on. The teardown happens
+      after the switch away, from whichever context reaps it - which
+      means task reaping becomes a real thing this scheduler does rather
+      than something it avoids by never freeing anything
+- [ ] Task slots recycled, with a generation counter. `SYS_wait`,
+      `SYS_wait_nb` and `SYS_task_alive` all depend today on a terminated
+      task's slot staying valid and unique forever; a recycled id without
+      a generation would silently make them answer about the wrong
+      process. A pid becomes (index, generation) packed into the same
+      `int` every existing caller passes around
+- [ ] The self-tests stop being the largest consumer of the task table,
+      because their tasks come back. `[sched] task table at handoff`
+      becomes a measure of what is *live* rather than of what has ever
+      existed
+- [ ] `MAX_TASKS` re-derived once more from the same log line, and this
+      time it can honestly mean "concurrently running"
+- [ ] New boot self-test (`[m54]`): spawn and reap N tasks where N is
+      several times `MAX_TASKS`, and require both free frames and free
+      task slots to return to baseline - which is the test that could not
+      be written before this milestone. Plus a deliberate check that a
+      stale pid (an id whose slot has since been recycled) is reported
+      as invalid rather than as somebody else
+- [ ] The soak test extended to run long enough to have exhausted the old
+      caps outright
+
+## M55 — Session resilience: supervise every client, survive a compositor crash
+
+init waits on `desktop_shell` and restarts the whole session if it
+exits. A compositor or `desktop_icons` that dies on its own is not
+noticed until the taskbar happens to die too - and if the compositor
+goes, every client goes with it, because a window is the only thing
+holding them.
+
+- [ ] init supervises all three desktop clients rather than one, with the
+      same "restart the session" response it already has. The current
+      arrangement is not a design, it is `sys_wait` taking one pid
+- [ ] A compositor that dies takes the screen with it; clients should
+      survive it. `wmclient.c` learns to notice its event pipe has gone
+      quiet *and* that the compositor's pid is dead (`SYS_task_alive`,
+      which already exists for exactly this shape of question), and to
+      re-run the connect handshake against the new one
+- [ ] Which requires window creation to be idempotent enough to redo:
+      the client already re-creates its own pixels every frame, so what
+      has to survive is the *title* and the geometry, both of which the
+      client supplied in the first place
+- [ ] The desktop stops being the thing that has to be alive for anything
+      else to be. This is also the piece that makes M52's fault-kills
+      genuinely non-fatal: a compositor bug becomes a flicker rather than
+      the end of the session
+- [ ] New boot self-test (`[m55]`): a compositor SIGKILLed out from under
+      two live clients, restarted, and both clients' windows back on
+      screen with their own pixels - checked as pixels, since "the client
+      is still running" is not the claim
+- [ ] New interactive test: force-quit the compositor from the task
+      manager and watch the desktop come back with the app windows still
+      there
+
+## M56 — Depth where people actually spend time
+
+Every app in this project is a demonstration of a mechanism. Three of
+them are things a person would genuinely use, and each is one feature
+short of being usable for real work.
+
+- [ ] Undo in `text_editor.c`. It is the single most-missed thing in any
+      editor, and this one has had a clipboard since M32 without one -
+      so a paste is currently unrecoverable. A bounded ring of edit
+      records rather than snapshots: the buffer is already line-based,
+      and a snapshot-per-keystroke editor is one that stops working on a
+      large file
+- [ ] Scrollback in `gui_terminal.c`. `grid_scroll` discards the top line
+      today, which is why M49's wheel had nothing to do there - and why a
+      command whose output is longer than the window is a command whose
+      output you cannot read
+- [ ] File operations in `file_manager.c`: rename, delete, copy. Needs
+      `SYS_unlink` and `SYS_rename` in `leanfs` - the write half of the
+      filesystem stops at "create or overwrite a whole file", which is
+      how a filesystem that has never had to *remove* anything ends up
+      with `m48trunc` in it forever
+- [ ] Delete behind M36's confirm dialog, and nothing else - there is no
+      trash and inventing one would be scope this doesn't need
+- [ ] An icon image format, finally. Every icon in this project is
+      hand-drawn rectangles, noted as such in three separate files - a
+      tiny indexed-color blob plus a loader retires all of them, and it
+      is the last thing making the desktop look hand-drawn rather than
+      designed
+- [ ] New boot self-test (`[m56]`): an editor undo restoring an exact
+      buffer across a paste; a terminal scrollback holding more lines
+      than its window; and `SYS_unlink`/`SYS_rename` round-tripping,
+      including the inode and block accounting coming back
+- [ ] New interactive tests: type, paste, undo, and read the pixels back;
+      scroll a terminal's history with the wheel M49 added; rename a file
+      in one window and see the other window's listing follow
 
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
@@ -2103,14 +2551,11 @@ things will need - M29 and M40's shape, applied to what M45-M49 added.
 - [x] Networking stack + NIC driver (M27, above)
 - [~] Port to real hardware (USB boot test) - prep/tooling/runbook done
       (M28, above); the manual boot-on-real-hardware step itself isn't yet
-- [ ] Directories in leanfs. The filesystem is flat, and every listing in
-      the system (`SYS_listfiles`, the file manager, M43's launcher) is
-      "the entire namespace" because of it. This is the one structural
-      limit that shows up in three different apps at once
-- [ ] An icon image format. Every icon in this project - desktop icons,
-      the Start button's tile glyph, the tray - is hand-drawn rectangles,
-      noted as such in three separate files. A tiny indexed-color blob
-      plus a loader would retire all of them
+- [x] Directories in leanfs - promoted out of this list and scheduled as
+      M53. It was always "the one structural limit that shows up in three
+      different apps at once", which is a milestone, not a stretch goal
+- [x] An icon image format - promoted to M56, where it is the last thing
+      making the desktop look hand-drawn rather than designed
 - [ ] Audio: a PC-speaker beep at minimum, an AC'97/HDA output stream at
       most. Nothing in this OS has ever made a sound, so even a system
       beep on an error toast (M48) is a new capability

@@ -148,3 +148,11 @@ long sys_taskinfo(task_info_t *buf, long max_entries) {
 long sys_shutdown(int mode) {
     return do_syscall(SYS_shutdown, mode, 0, 0);
 }
+
+long sys_close(int fd) {
+    return do_syscall(SYS_close, fd, 0, 0);
+}
+
+long sys_shm_free(long id, void *vaddr) {
+    return do_syscall(SYS_shm_free, id, (long)vaddr, 0);
+}
