@@ -490,7 +490,12 @@ def desktop_is_painted(shot):
             shot.px(*START_PROBE) in START_COLORS)
 
 
-def boot(machine, timeout=90):
+def boot(machine, timeout=150):
+    """M51-M54: 90 -> 150. The same growth tools/qemu-serial-test.sh's own
+    SECONDS_TO_RUN took, and for the same reason - new boot self-tests,
+    several of which have to wait on real processes. 90 was measured
+    failing, which presents as a test erroring out during boot rather
+    than as anything that looks like a real bug."""
     machine.boot_to_desktop(settle=0.0, timeout=timeout)
     deadline = time.time() + 30
     while time.time() < deadline:

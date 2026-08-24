@@ -146,7 +146,7 @@ int power_orderly_stop(uint64_t grace_ticks) {
      * stops being able to reach its own shutdown code. They are told
      * apart the only way this scheduler can: they have no parent. */
     for (int i = 0; i < total; i++) {
-        task_t *t = sched_task_by_id(i);
+        task_t *t = sched_task_by_slot(i);
         if (!t || t == self || t->parent_id < 0 || t->state == TASK_TERMINATED) {
             continue;
         }
@@ -157,7 +157,7 @@ int power_orderly_stop(uint64_t grace_ticks) {
     for (;;) {
         int alive = 0;
         for (int i = 0; i < total; i++) {
-            task_t *t = sched_task_by_id(i);
+            task_t *t = sched_task_by_slot(i);
             if (t && t != self && t->parent_id >= 0 && t->state != TASK_TERMINATED) {
                 alive++;
             }
@@ -170,7 +170,7 @@ int power_orderly_stop(uint64_t grace_ticks) {
 
     int killed = 0;
     for (int i = 0; i < total; i++) {
-        task_t *t = sched_task_by_id(i);
+        task_t *t = sched_task_by_slot(i);
         if (!t || t == self || t->parent_id < 0 || t->state == TASK_TERMINATED) {
             continue;
         }
@@ -188,7 +188,7 @@ int power_orderly_stop(uint64_t grace_ticks) {
     while (pit_get_ticks() < kill_deadline) {
         int alive = 0;
         for (int i = 0; i < total; i++) {
-            task_t *t = sched_task_by_id(i);
+            task_t *t = sched_task_by_slot(i);
             if (t && t != self && t->parent_id >= 0 && t->state != TASK_TERMINATED) {
                 alive++;
             }

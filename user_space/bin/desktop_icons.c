@@ -34,6 +34,7 @@
  * press/hover redraw) is the same per-icon logic the single hardcoded
  * icon already had, just indexed now instead of hardcoded to one.
  */
+#include "children.h" /* M54: this process launches things and must reap them - see children.h */
 #include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h" /* strlen - ICONS[].label is data-driven now, not a compile-time sizeof() */
@@ -113,6 +114,7 @@ static void launch(const char *label, const char *program) {
     if (rc < 0) {
         wm_notify(WM_NOTIFY_ERROR, label, spawn_error_message(rc));
     }
+    child_track(rc); /* M54: so its task slot comes back when it closes - see children.h */
 }
 
 typedef struct {
@@ -214,6 +216,7 @@ int main(void) {
     redraw(&win, -1);
 
     for (;;) {
+        child_reap(); /* M54: hand back the task slot of anything launched from here that has since closed */
         wm_event_t ev;
         int changed = 0;
         while (wm_poll_event(&win, &ev)) {
@@ -230,6 +233,7 @@ int main(void) {
                     if (rc < 0) {
                         wm_notify(WM_NOTIFY_ERROR, dropped, spawn_error_message(rc));
                     }
+                    child_track(rc); /* M54 - see children.h */
                 }
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
                 /* Right-click always (re)opens the menu at the new click

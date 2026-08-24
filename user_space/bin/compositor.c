@@ -80,6 +80,7 @@
  * at the bottom, ordinary windows, panels always on top - survive as
  * bands within that array rather than as three separate loops.
  */
+#include "children.h" /* M54: the launcher spawns, so the launcher reaps - see children.h */
 #include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
 #include "font8x16.h" /* M38: window-title text in the titlebar - drawn through this file's own clip-aware put_pixel, not gfx_draw_text (see draw_text_clipped's own note) */
 #include "gfx.h" /* M34: gfx_point_in_rect - shared hit-test helper, see draw_titlebar_buttons' own note on why drawing itself stays on this file's own clip-aware fill_rect */
@@ -1827,7 +1828,16 @@ static void reclaim_window(int idx) {
  * (8), same headroom accept_pending_query already leans on. */
 static void reap_dead_clients(void) {
     for (int i = 0; i < window_count; i++) {
-        if (windows[i].alive && sys_task_alive(windows[i].client_pid) == 0) {
+        /* M54: `<= 0`, not `== 0`. SYS_task_alive gained a third way to
+         * say "not running": -1, meaning the kernel has no such task -
+         * which since M54 includes a task that terminated and had its
+         * slot reaped by whoever was waiting on it. A window whose client
+         * the kernel has never heard of is a dead window either way, and
+         * a compositor that kept it because it could not tell *how* the
+         * client went would leave a permanently inert window on screen.
+         * 2 (terminated cleanly) still keeps its window - that is M20's
+         * wm_demo, which draws one frame and exits on purpose. */
+        if (windows[i].alive && sys_task_alive(windows[i].client_pid) <= 0) {
             /* M48: SYS_task_alive's 0-vs-2 split has been able to tell a
              * crash from an orderly exit since M29 and had never
              * mentioned it to anyone. But "nonzero exit code" is not the
@@ -2420,6 +2430,7 @@ static void launcher_launch_selected(void) {
             if (rc < 0) {
                 toast_post(WM_NOTIFY_ERROR, name, spawn_error_message(rc));
             }
+            child_track(rc); /* M54: so its task slot comes back when it closes - see children.h */
         }
     }
     launcher_set_open(0);
@@ -3186,6 +3197,7 @@ static void run_shortcut(int id) {
          * else - and it says so if the spawn fails, like every other
          * launch path since M48. */
         long rc = sys_spawn(PATH_BIN_DIR "task_manager", "");
+        child_track(rc); /* M54 - see children.h */
         if (rc < 0) {
             toast_post(WM_NOTIFY_ERROR, "Task manager", spawn_error_message(rc));
         }
@@ -3332,6 +3344,7 @@ int main(void) {
         sys_exit(1);
     }
     drag_data_write_fd = drag_data_fds[1];
+
     /* Every message this process (or any client) prints to stdout goes
      * through the kernel's own graphical console (M17) - the same
      * framebuffer this process is compositing onto. Printed once, before
@@ -3357,6 +3370,7 @@ int main(void) {
         accept_pending_notify(notify_fds[0]);
         accept_pending_drag(drag_fds[0]);
         reap_dead_clients();
+        child_reap(); /* M54: and the task slots of whatever this process launched */
         handle_mouse();
         handle_keyboard();
 

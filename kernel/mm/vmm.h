@@ -63,6 +63,37 @@ int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt);
  * case in M52's garbage-argument matrix. */
 int vmm_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_write);
 
+/* M54: one virtual-address range whose *leaf* frames belong to the
+ * process and are therefore this allocator's to hand back - [lo, hi). */
+typedef struct {
+    uint64_t lo, hi;
+} vmm_range_t;
+
+/* M54: tears down a per-process address space - the thing M29 documented
+ * as missing, M50 measured at ~15 frames per dead process, and neither
+ * fixed. Frees every page table in the PML4[1..511] subtree, and every
+ * leaf frame whose virtual address falls inside one of `owned`.
+ *
+ * PML4[0] is deliberately untouched: it is the shared kernel map, the
+ * same subtree in *every* address space, and freeing it would take the
+ * machine with it.
+ *
+ * The `owned` list is why this takes an argument instead of freeing
+ * every leaf it finds. A process's address space contains mappings whose
+ * frames are emphatically not its own - an shm segment created by another
+ * process (kernel/ipc/shm.c owns those, and one of them may still be
+ * mapped by somebody else) and the linear framebuffer, whose physical
+ * addresses are device memory that was never a pmm frame at all and
+ * would poison the free list. The caller that knows the layout
+ * (kernel/proc/proc.c) says which ranges are genuinely the process's;
+ * everything else is unmapped by discarding the page tables and nothing
+ * more.
+ *
+ * The pml4 frame itself is freed last. Never call this on the address
+ * space the calling CPU is currently running on - see
+ * task_exit_with_code, which switches to the kernel's own first. */
+void vmm_destroy_address_space(uint64_t pml4_phys, const vmm_range_t *owned, int owned_count);
+
 /* Allocates a fresh PML4 with PML4[0] shared with the kernel's (so ring 0
  * code - interrupt/syscall handlers - keeps working no matter which
  * process's CR3 is loaded) and everything else zeroed, ready for

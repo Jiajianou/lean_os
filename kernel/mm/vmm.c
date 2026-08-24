@@ -223,6 +223,58 @@ int vmm_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_
     return 1;
 }
 
+static int addr_in_owned(uint64_t virt, const vmm_range_t *owned, int owned_count) {
+    for (int i = 0; i < owned_count; i++) {
+        if (virt >= owned[i].lo && virt < owned[i].hi) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void vmm_destroy_address_space(uint64_t pml4_phys, const vmm_range_t *owned, int owned_count) {
+    spin_lock(&vmm_lock);
+    uint64_t *pml4 = phys_to_table(pml4_phys);
+    /* From 1, not 0. PML4[0] is the kernel's own map, shared by reference
+     * with every address space - see this function's header. */
+    for (uint64_t i = 1; i < ENTRIES_PER_TABLE; i++) {
+        if (!(pml4[i] & PTE_PRESENT)) {
+            continue;
+        }
+        uint64_t *pdpt = phys_to_table(pml4[i] & PTE_ADDR_MASK);
+        for (uint64_t j = 0; j < ENTRIES_PER_TABLE; j++) {
+            if (!(pdpt[j] & PTE_PRESENT) || (pdpt[j] & PTE_HUGE)) {
+                continue; /* nothing here builds 1 GiB pages in a user space */
+            }
+            uint64_t *pd = phys_to_table(pdpt[j] & PTE_ADDR_MASK);
+            for (uint64_t k = 0; k < ENTRIES_PER_TABLE; k++) {
+                if (!(pd[k] & PTE_PRESENT) || (pd[k] & PTE_HUGE)) {
+                    continue; /* likewise 2 MiB - only the identity map has those, and it is under PML4[0] */
+                }
+                uint64_t *pt = phys_to_table(pd[k] & PTE_ADDR_MASK);
+                for (uint64_t l = 0; l < ENTRIES_PER_TABLE; l++) {
+                    if (!(pt[l] & PTE_PRESENT)) {
+                        continue;
+                    }
+                    uint64_t virt = (i << 39) | (j << 30) | (k << 21) | (l << 12);
+                    if (addr_in_owned(virt, owned, owned_count)) {
+                        pmm_free_frame(pt[l] & PTE_ADDR_MASK);
+                    }
+                    pt[l] = 0;
+                }
+                pmm_free_frame(pd[k] & PTE_ADDR_MASK);
+                pd[k] = 0;
+            }
+            pmm_free_frame(pdpt[j] & PTE_ADDR_MASK);
+            pdpt[j] = 0;
+        }
+        pmm_free_frame(pml4[i] & PTE_ADDR_MASK);
+        pml4[i] = 0;
+    }
+    pmm_free_frame(pml4_phys);
+    spin_unlock(&vmm_lock);
+}
+
 uint64_t vmm_create_address_space(void) {
     spin_lock(&vmm_lock);
     uint64_t new_phys = alloc_table();

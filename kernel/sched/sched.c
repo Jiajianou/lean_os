@@ -13,6 +13,7 @@
 #include "mm/heap.h"
 #include "mm/vmm.h"
 #include "panic.h"
+#include "proc/proc.h" /* M54 - process_destroy_address_space, called from task_exit_with_code */
 #include "signal.h" /* system_api/include/signal.h - SIGKILL/SIGTERM */
 
 #define TASK_STACK_SIZE (8 * 1024)
@@ -130,7 +131,8 @@ static void scheduler_tick(void) {
 
 void sched_init(void) {
     tasks[0].state = TASK_RUNNING;
-    tasks[0].id = 0;
+    tasks[0].generation = 0;
+    tasks[0].id = PID_MAKE(0, 0); /* == 0, which is what keeps kernel_main's own identity unchanged across M54 */
     tasks[0].stack_base = NULL; /* this is kernel_main's own stack, not one we allocated or will ever free */
     tasks[0].kernel_stack_top = 0; /* never consulted: RSP0 only matters for a ring3->ring0 transition, and task 0 never runs in ring 3 */
     tasks[0].pml4_phys = vmm_kernel_pml4_phys();
@@ -149,9 +151,11 @@ void sched_init(void) {
 void sched_init_ap(int cpu_id) {
     uint64_t flags = irq_save_disable();
     spin_lock(&sched_lock);
-    task_t *t = &tasks[task_count];
+    int slot = task_count;
+    task_t *t = &tasks[slot];
     t->state = TASK_RUNNING;
-    t->id = task_count;
+    t->generation = 0;
+    t->id = PID_MAKE(slot, 0);
     t->stack_base = NULL; /* this is ap_main's own boot stack (smp.c's start_ap kmalloc'd it), not one this table owns or will ever free */
     t->kernel_stack_top = 0; /* like task 0, never consulted - this idle identity never enters ring 3 */
     t->pml4_phys = vmm_kernel_pml4_phys();
@@ -181,15 +185,34 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
 
     uint64_t flags = irq_save_disable();
     spin_lock(&sched_lock);
-    if (task_count >= MAX_TASKS) {
-        spin_unlock(&sched_lock);
-        irq_restore(flags);
-        kfree(stack_base);
-        return NULL;
+    /* M54: the first free slot, which may be one a reaped task gave back
+     * rather than a brand-new one past the high-water mark. Scanning is
+     * fine at MAX_TASKS = 128 and costs nothing next to the address space
+     * this task is about to be given; a free list would be one more thing
+     * to keep in step with `state` for no measurable gain. */
+    int slot = -1;
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_FREE) {
+            slot = i;
+            break;
+        }
     }
-    task_t *t = &tasks[task_count];
+    if (slot < 0) {
+        if (task_count >= MAX_TASKS) {
+            spin_unlock(&sched_lock);
+            irq_restore(flags);
+            kfree(stack_base);
+            return NULL;
+        }
+        slot = task_count++;
+    }
+    task_t *t = &tasks[slot];
     task_t *caller = current_task[smp_current_cpu()];
-    t->id = task_count;
+    /* The generation is bumped on *release* (sched_reap_slot), not here,
+     * so a slot that has never been used keeps generation 0 and its first
+     * occupant's pid is just its slot number - which is what makes the
+     * ids in a boot log still readable. */
+    t->id = PID_MAKE(slot, t->generation);
     t->entry = entry;
     t->arg = arg;
     t->state = TASK_READY;
@@ -252,7 +275,6 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     *(--sp) = 0; /* r15 */
     t->rsp = (uint64_t)sp;
 
-    task_count++;
     spin_unlock(&sched_lock);
     irq_restore(flags);
     return t;
@@ -277,7 +299,10 @@ task_t *task_spawn_in(const char *name, uint64_t pml4_phys, void (*entry)(void *
  * CPUs scanning/claiming concurrently without it could both pick the same
  * READY task. */
 static task_t *pick_next(task_t *from) {
-    int start = from->id;
+    /* M54: from->id is a pid now, not an index - PID_SLOT is where in the
+     * table it actually lives. A free slot is skipped for the same reason
+     * a terminated one is: it holds no runnable task. */
+    int start = PID_SLOT(from->id);
     for (int offset = 1; offset <= task_count; offset++) {
         int i = (start + offset) % task_count;
         if (tasks[i].state == TASK_READY) {
@@ -356,6 +381,32 @@ void task_exit_with_code(int code) {
      * below) - so this is the one place that's guaranteed to run exactly
      * once per task, right as it leaves the scheduler for good. */
     shm_free_by_owner(t->id);
+
+    /* M54: and the address space, which nothing has ever reclaimed - M29
+     * documented the leak, M50 measured it at ~15 frames per dead
+     * process, and both stopped there.
+     *
+     * The ordering is the whole risk, and it is handled by switching this
+     * CPU to the kernel's own address space *first*. That is safe from
+     * exactly here and nowhere else: the code executing is kernel code
+     * and the stack under it is kernel heap, both of which live in
+     * PML4[0] and are therefore identical in every address space - so the
+     * switch changes nothing this function can observe, and the tables it
+     * then frees are no longer loaded anywhere.
+     *
+     * loaded_pml4_phys is updated to match, or schedule() would skip the
+     * CR3 reload for the next task on the belief that its address space
+     * was already loaded. pml4_phys itself is repointed at the kernel's
+     * so nothing can later try to switch to a table that has been freed. */
+    if (t->pml4_phys != vmm_kernel_pml4_phys()) {
+        int cpu = smp_current_cpu();
+        uint64_t dead = t->pml4_phys;
+        t->pml4_phys = vmm_kernel_pml4_phys();
+        vmm_switch_address_space(t->pml4_phys);
+        loaded_pml4_phys[cpu] = t->pml4_phys;
+        process_destroy_address_space(dead);
+    }
+
     t->exit_code = code;
     t->state = TASK_TERMINATED;
     schedule();
@@ -373,19 +424,94 @@ task_t *sched_current(void) {
     return current_task[smp_current_cpu()];
 }
 
-task_t *sched_task_by_id(int id) {
-    if (id < 0 || id >= task_count) {
+task_t *sched_task_by_id(int pid) {
+    if (pid < 0) {
         return (task_t *)0;
     }
-    return &tasks[id];
+    int slot = PID_SLOT(pid);
+    if (slot >= task_count) {
+        return (task_t *)0;
+    }
+    task_t *t = &tasks[slot];
+    /* M54: the generation check is the whole point - without it a pid
+     * whose slot has since been recycled would answer about whoever holds
+     * that slot now, which is a wrong answer that looks exactly like a
+     * right one. */
+    if (t->state == TASK_FREE || t->generation != PID_GEN(pid)) {
+        return (task_t *)0;
+    }
+    return t;
+}
+
+task_t *sched_task_by_slot(int slot) {
+    if (slot < 0 || slot >= task_count || tasks[slot].state == TASK_FREE) {
+        return (task_t *)0;
+    }
+    return &tasks[slot];
 }
 
 int sched_task_count(void) {
     return task_count;
 }
 
+int sched_live_task_count(void) {
+    int n = 0;
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state != TASK_FREE) {
+            n++;
+        }
+    }
+    return n;
+}
+
 int sched_has_free_task_slot(void) {
-    return task_count < MAX_TASKS;
+    if (task_count < MAX_TASKS) {
+        return 1;
+    }
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_FREE) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void sched_reap_slot(task_t *t) {
+    if (!t || t->state != TASK_TERMINATED) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    /* The kernel stack goes back rather than at exit, because at exit the
+     * task was still running on it. By now it has been switched away from
+     * for good - a TERMINATED task is never picked again, and the
+     * incoming task's own release of sched_lock is what proves that
+     * switch completed - so nothing is left pointing at it. 8 KiB a task,
+     * which at the rate the boot self-tests spawn is worth more than the
+     * slot itself.
+     *
+     * Detached here and freed *after* the unlock below: task_spawn_common
+     * takes its heap lock before sched_lock precisely so the two are
+     * never nested in the other order anywhere in this kernel, and
+     * kfree-ing inside this critical section would be the one place that
+     * broke it. */
+    uint8_t *stack = t->stack_base;
+    t->stack_base = NULL;
+    t->kernel_stack_top = 0;
+    t->generation++;
+    t->state = TASK_FREE;
+    t->pending_signal = 0;
+    t->reaped = 0;
+    t->parent_id = -1;
+    sched_reset_fds_to_std(t);
+    t->fds[0].type = FD_NONE; /* a free slot holds nothing at all, not even stdin/stdout */
+    t->fds[1].type = FD_NONE;
+    set_task_name(t, "");
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+    if (stack) {
+        kfree(stack);
+    }
 }
 
 void sched_reset_fds_to_std(task_t *t) {

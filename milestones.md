@@ -2659,45 +2659,114 @@ same list.
       built for, six milestones later
 - [x] Full regression: 39/39 serial markers and 37/37 interactive tests
 
-## M54 — Reclaiming what dies: address spaces, task slots, real uptime
+## M54 — Reclaiming what dies: address spaces, task slots, real uptime ✅
 
 M29 documented the leak, M50 measured it, and neither fixed it: ~15
-frames per dead process, forever, plus a task slot that is never
-recycled. Both are bounded only by total uptime. The boot self-tests
-alone spend 73 of 128 slots before PID 1 starts, and that number has
-grown in every milestone of the last arc.
+frames per dead process, forever, plus a task slot that was never
+recycled. Both were bounded only by total uptime, and the boot
+self-tests alone spent **79 of 128 slots** before PID 1 started.
 
-- [ ] `vmm_destroy_address_space(pml4_phys)`: walk the PML4[1] subtree,
-      free every leaf frame and every page table, leave PML4[0] alone
-      (it is the shared kernel map and freeing it would take the machine
-      with it). Called from `task_exit_with_code`, next to the
-      `shm_free_by_owner` that is already there and is the precedent for
-      "the one funnel every exit path goes through"
-- [ ] The ordering matters and is the whole risk: a task cannot free the
-      address space it is currently running on. The teardown happens
-      after the switch away, from whichever context reaps it - which
-      means task reaping becomes a real thing this scheduler does rather
-      than something it avoids by never freeing anything
-- [ ] Task slots recycled, with a generation counter. `SYS_wait`,
-      `SYS_wait_nb` and `SYS_task_alive` all depend today on a terminated
-      task's slot staying valid and unique forever; a recycled id without
-      a generation would silently make them answer about the wrong
-      process. A pid becomes (index, generation) packed into the same
-      `int` every existing caller passes around
-- [ ] The self-tests stop being the largest consumer of the task table,
-      because their tasks come back. `[sched] task table at handoff`
-      becomes a measure of what is *live* rather than of what has ever
-      existed
-- [ ] `MAX_TASKS` re-derived once more from the same log line, and this
-      time it can honestly mean "concurrently running"
-- [ ] New boot self-test (`[m54]`): spawn and reap N tasks where N is
-      several times `MAX_TASKS`, and require both free frames and free
-      task slots to return to baseline - which is the test that could not
-      be written before this milestone. Plus a deliberate check that a
-      stale pid (an id whose slot has since been recycled) is reported
-      as invalid rather than as somebody else
-- [ ] The soak test extended to run long enough to have exhausted the old
-      caps outright
+- [x] `vmm_destroy_address_space(pml4_phys, owned, n)`: walks the
+      PML4[1..511] subtree, frees every page table, and frees a *leaf*
+      frame only when its virtual address falls inside one of `owned`.
+      PML4[0] is untouched - it is the shared kernel map, the same
+      subtree in every address space, and freeing it would take the
+      machine with it
+- [x] **The `owned` list is the whole design, not a parameter.** A
+      process's address space contains mappings whose frames are
+      emphatically not its own: an shm segment created by *another*
+      process (which somebody else may still have mapped) and the linear
+      framebuffer, whose physical addresses are device memory that was
+      never a `pmm` frame at all and would have poisoned the free list.
+      `process_destroy_address_space` in `proc.c` supplies the two ranges
+      that genuinely are the process's - the image/stack/argument page,
+      and the sbrk heap - because that is `proc.h`'s layout knowledge and
+      `vmm.c` has no business holding it
+- [x] The ordering, which was the stated risk: a task cannot free the
+      address space it is running on. Solved by switching that CPU to the
+      *kernel's* address space first, which is safe from exactly one
+      place - `task_exit_with_code`, where the executing code and the
+      stack under it are both in PML4[0] and therefore identical in every
+      address space, so the switch changes nothing the function can
+      observe. `loaded_pml4_phys` is updated to match, or `schedule`
+      would skip the next task's CR3 reload
+- [x] Reclaimed on the failure paths too, which had leaked ~15 frames
+      each with a comment arguing a full task table was "an already
+      degraded state not worth recovering from". That was only true
+      because there was nothing to recover *with*; being under pressure
+      is exactly when leaking is worst
+- [x] Task slots recycled, with a generation counter. A pid is now
+      `(slot, generation)` packed into the same `int` every existing
+      caller passes around - 8 slot bits, the rest generation, and task 0
+      is still literally pid 0. `sched_task_by_id` refuses a pid whose
+      generation has moved on, which is the difference between "no such
+      task" and a *plausible wrong answer about somebody else*
+- [x] `sched_task_by_slot` split out for the callers that enumerate the
+      table (`SYS_wait(-1)`, `SYS_taskinfo`, the shutdown path). Those
+      two questions stopped being the same one the moment a pid stopped
+      being an index, and conflating them is precisely how a recycled
+      slot gets mistaken for its previous occupant
+- [x] **Reaping, not exiting, is what frees a slot** - and that is a
+      decision, not an implementation detail. A terminated-but-unreaped
+      task is exactly what the compositor's `SYS_task_alive` polling
+      reads to tell an orderly exit from a crash, and recycling under it
+      would turn "this client died" into "this pid is unknown", which
+      M29's `reap_dead_clients` and M48's crash toast both depend on
+- [x] The kernel stack (8 KiB a task) goes back at reap too - at exit the
+      task was still running on it. Detached under `sched_lock` and freed
+      after the unlock, because `task_spawn_common` takes its heap lock
+      *before* `sched_lock` specifically so the two are never nested the
+      other way anywhere in this kernel
+- [x] `user_space/lib/children.h` - "reap what you spawn", for the two
+      long-lived processes that launch things and then forget about them.
+      Without it the kernel half of this milestone would have fixed the
+      boot self-tests (which always waited) and done nothing at all for
+      the desktop, where an app launched from an icon had no parent that
+      ever called wait. **Only the parent reaps**: it would have been
+      less code for the compositor to reap every client whose window it
+      reclaims, since it already notices those deaths, but it is not
+      their parent - and a non-parent consuming an exit status races with
+      whoever is, which is a slot handed to somebody else between a
+      `SIGKILL` and the `SYS_wait` that named the same pid
+- [x] The compositor treats `SYS_task_alive <= 0` as dead, not `== 0`.
+      There is a third way to say "not running" now - `-1`, "the kernel
+      has no such task", which includes one whose slot was reaped - and a
+      window whose client the kernel has never heard of is a dead window
+      either way. `2` (terminated cleanly) still keeps its window, which
+      is M20's `wm_demo`
+- [x] **`MAX_TASKS` stays 128 and finally means what it says.** The boot
+      log's own line is the evidence, and it is the headline result of
+      this milestone: `[sched] task table at handoff` went from **79 live
+      of 128** to **6 live of 128, high-water mark 9**. The high-water
+      mark is printed next to the live count deliberately - the
+      difference between the two is exactly how much recycling did
+- [x] Three boot self-tests had to be corrected, and each was wrong in
+      the same instructive way: they asked about a task *after* reaping
+      it, which only ever worked because nothing was ever fully reclaimed.
+      The `[pgid]` test queried a child the `SYS_wait(-1)` test above had
+      already reaped; `[wm]` waited on `wm_demo` and then read the window
+      it left behind, which the compositor correctly tore down once the
+      kernel no longer knew that pid; `[m45]` read `SYS_task_alive` after
+      its own wait. All three now ask while the task is still there and
+      reap afterwards
+- [x] New boot self-test (`[m54]`), 5/5, and the test that could not be
+      written before this milestone: **384 spawn/reap rounds - three
+      times `MAX_TASKS`** - with both free frames and live task slots
+      required to come back to exactly where they started. Under the old
+      rules the 50th round would have failed outright and all 384 address
+      spaces would still have been resident. Plus a stale pid (one whose
+      slot has since been recycled) required to be *refused* rather than
+      answered about, which is the check that would fail loudly if the
+      generation counter were dropped
+- [x] `launch_close_stress` 5 -> 60 rounds, and the number is chosen
+      rather than picked: the boot self-tests used to leave 49 of
+      `MAX_TASKS` unspent, so the 50th launch would have failed with
+      `SPAWN_ERR_NO_TASK_SLOT` and simply not opened a window. 60 is past
+      that and comfortably under the 119 a post-M54 boot leaves - a test
+      that passes now and could not have before, rather than one that
+      merely takes longer. It needs both halves of the milestone: the
+      kernel recycling a reaped slot, and the desktop actually reaping
+- [x] Full regression: 40/40 serial markers and 37/37 interactive tests
 
 ## M55 — Session resilience: supervise every client, survive a compositor crash
 

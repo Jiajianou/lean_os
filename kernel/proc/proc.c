@@ -39,6 +39,21 @@ static void user_task_launcher(void *arg) {
     enter_user_mode(entry, stack, arg_ptr, GDT_USER_DATA_SEL | 3, GDT_USER_CODE_SEL | 3);
 }
 
+void process_destroy_address_space(uint64_t pml4_phys) {
+    if (pml4_phys == 0 || pml4_phys == vmm_kernel_pml4_phys()) {
+        return; /* a plain kernel thread shares the kernel's - there is nothing private to tear down */
+    }
+    /* Everything from the image's load address up to and including the
+     * argument page (the stack sits between them), plus the sbrk heap.
+     * Deliberately *not* [USER_SHM_BASE, ...) or USER_FB_BASE - see this
+     * function's declaration in proc.h. */
+    static const vmm_range_t OWNED[] = {
+        {USER_IMAGE_BASE, USER_ARG_ADDR + PAGE_SIZE},
+        {USER_HEAP_START, USER_HEAP_LIMIT},
+    };
+    vmm_destroy_address_space(pml4_phys, OWNED, (int)(sizeof(OWNED) / sizeof(OWNED[0])));
+}
+
 task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size, const char *arg) {
     /* M40: checked up front, before anything is allocated. The
      * task-table-full check further down still exists (it has to - it's
@@ -68,9 +83,12 @@ task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size,
     uint64_t entry = elf_load(pml4_phys, image, image_size);
     if (entry == 0) {
         /* Only reachable now by running out of physical memory partway
-         * through mapping (elf.c) - the frames and page tables built so
-         * far are leaked, the same tradeoff the task-table-full path
-         * below documents, and only on genuine exhaustion. */
+         * through mapping (elf.c). M54: whatever it did manage to build
+         * goes back, where before this milestone there was nothing to
+         * give it back *to* - an abandoned address space was simply lost
+         * for the machine's uptime, which is the leak M29 documented and
+         * M50 measured. */
+        process_destroy_address_space(pml4_phys);
         return (task_t *)0;
     }
 
@@ -112,12 +130,17 @@ task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size,
          * caller might hit and retry from). Every caller of process_spawn
          * (sys_spawn in syscall.c, and kernel.c's own self-tests) already
          * treats a NULL/-1 result as an ordinary failure, so propagate
-         * cleanly instead of dereferencing NULL below - the pml4/arg-page
-         * this function allocated above are leaked on this path, but
-         * that's the table being full anyway, an already-degraded state
-         * this project doesn't otherwise try to recover resources from
-         * (see shm.h's own note on the same tradeoff). */
+         * cleanly instead of dereferencing NULL below.
+         *
+         * M54: and give the address space back. This path used to leak
+         * the pml4, the image, the stack and the argument page - roughly
+         * fifteen frames - with a comment arguing that a full table was
+         * an already-degraded state not worth recovering from. That was
+         * only ever true because there was nothing to recover *with*;
+         * "the machine is under pressure" is precisely when leaking is
+         * worst. */
         kfree(args);
+        process_destroy_address_space(pml4_phys);
         return (task_t *)0;
     }
     /* M19's heap/shm starting points (USER_HEAP_START/USER_SHM_BASE) used

@@ -17,7 +17,13 @@
 
 struct pipe; /* kernel/ipc/pipe.h owns the real definition - not included here so sched.h doesn't have to know pipes exist */
 
+/* M54: TASK_FREE is 0 so a zeroed table is a table of free slots, which
+ * is what makes slot recycling a property of the array rather than of a
+ * separate in-use bitmap somebody has to keep in step. Before this
+ * milestone there was no such state: a slot was used from the moment it
+ * was first handed out until the machine was switched off. */
 typedef enum {
+    TASK_FREE = 0,
     TASK_READY,
     TASK_RUNNING,
     TASK_TERMINATED,
@@ -114,7 +120,41 @@ typedef enum {
  * matters: closing an app does *not* return its slot, so the real budget
  * is "how many programs may be started over this machine's whole
  * uptime", and 68 would have been another exact fit. */
+/* M54: 128 stays, but it finally means what it says. Until this
+ * milestone slots were never recycled, so this was a budget for
+ * *launches over the machine's whole uptime* - the boot self-tests alone
+ * spent 79 of it before PID 1 started, and closing an app never gave one
+ * back. Now that a reaped task's slot returns, the same number is a
+ * ceiling on how many tasks may exist *at once*, which is the thing a
+ * fixed table should be sizing. The measured live count on a fully
+ * loaded desktop is under twenty. */
 #define MAX_TASKS 128
+
+/* ---- M54: pids are (slot, generation) ---------------------------------
+ *
+ * A task id used to be a slot index, which worked only because slots were
+ * never reused. Recycling them without changing that would silently make
+ * SYS_wait, SYS_wait_nb and SYS_task_alive answer about *the wrong
+ * process* - the single most dangerous shape of bug this change could
+ * introduce, and one no test would obviously catch, since every answer
+ * would look plausible.
+ *
+ * So a pid packs both into the same `int` every existing caller already
+ * passes around: the slot in the low PID_SLOT_BITS, and a generation
+ * counter above it that increments each time the slot is handed out
+ * again. A stale pid names a slot whose generation has moved on, and is
+ * reported as invalid rather than as somebody else.
+ *
+ * 8 slot bits covers MAX_TASKS with room to grow; the remaining 22 usable
+ * bits of a positive int give four million reuses per slot, which at this
+ * machine's spawn rate is not a wrap anyone will see. Task 0 is
+ * (slot 0, generation 0) == pid 0, which is what keeps kernel_main's own
+ * identity unchanged. */
+#define PID_SLOT_BITS 8
+#define PID_SLOT_MASK ((1 << PID_SLOT_BITS) - 1)
+#define PID_MAKE(slot, gen) (((gen) << PID_SLOT_BITS) | (slot))
+#define PID_SLOT(pid) ((pid) & PID_SLOT_MASK)
+#define PID_GEN(pid) (((unsigned)(pid)) >> PID_SLOT_BITS)
 
 typedef struct {
     fd_type_t type;
@@ -126,7 +166,11 @@ typedef struct task {
     uint8_t *stack_base;
     uint64_t kernel_stack_top; /* fixed; installed as TSS.RSP0 whenever this task is about to run (M9) */
     task_state_t state;
-    int id;
+    int id; /* M54: a pid, not an index - see PID_MAKE. PID_SLOT(id) is where in this table it lives. */
+    /* M54: bumped every time this slot is handed to a new task, so a pid
+     * held by somebody who kept it too long can be told from a live one.
+     * Never reset. */
+    unsigned generation;
     void (*entry)(void *arg);
     void *arg;
     uint64_t pml4_phys; /* this task's address space - the shared kernel one for a plain kernel thread, a private one (M9) for a user process */
@@ -182,9 +226,10 @@ task_t *task_spawn(const char *name, void (*entry)(void *arg), void *arg);
  * allocating anything to find out. Advisory - task_spawn_common re-checks
  * under sched_lock, which is the authoritative one - but it lets
  * process_spawn bail before building an address space it would have to
- * abandon (there is no vmm_destroy_address_space to reclaim one with).
- * Slots are never recycled, so this is genuinely "has this machine
- * spawned MAX_TASKS tasks yet", not "are that many alive". */
+ * tear down again.
+ *
+ * M54: this now genuinely means "is there room for one more task", where
+ * it used to mean "has this machine spawned MAX_TASKS tasks *ever*". */
 int sched_has_free_task_slot(void);
 
 /* M40: heap_start/shm_base are the new task's SYS_sbrk and SYS_shm_map
@@ -237,19 +282,48 @@ void task_exit_with_code(int code) __attribute__((noreturn));
 
 task_t *sched_current(void);
 
-/* Bounds-checked lookup by id (== index - ids are assigned sequentially
- * and slots are never recycled, see task_spawn_common). Returns NULL for
- * an out-of-range id. Terminated tasks stay valid and inspectable
- * forever (their slot is never freed/reused) - that's what makes
- * SYS_wait's poll-the-exit_code approach work without any separate
- * zombie/reap bookkeeping. */
-task_t *sched_task_by_id(int id);
+/* Lookup by pid. Returns NULL for a slot that is free, out of range, or
+ * whose generation has moved on - which is what makes a *stale* pid an
+ * error rather than an answer about whoever holds that slot now (M54).
+ *
+ * A terminated task stays valid and inspectable until it is reaped, which
+ * is what SYS_wait's poll-the-exit-code approach needs. Reaping is also
+ * what frees the slot: see sched_reap_slot. */
+task_t *sched_task_by_id(int pid);
 
-/* Total number of tasks ever spawned (== the exclusive upper bound of
- * valid ids) - lets callers (SYS_wait(-1), M14) enumerate every task to
- * find children without needing their own separate child-list
- * bookkeeping. */
+/* M54: enumeration by *slot*, for the callers that walk the whole table
+ * looking for something (SYS_wait(-1) finding children, SYS_taskinfo,
+ * the shutdown path signalling everyone). Returns NULL for a free slot.
+ * Split from sched_task_by_id because the two questions stopped being
+ * the same one the moment a pid stopped being an index - and conflating
+ * them is exactly how a recycled slot would be mistaken for its previous
+ * occupant. */
+task_t *sched_task_by_slot(int slot);
+
+/* The exclusive upper bound for sched_task_by_slot - the high-water mark
+ * of slots ever handed out, not a count of live tasks. Recycling means a
+ * slot below this may well be free; sched_task_by_slot says so. */
 int sched_task_count(void);
+
+/* M54: how many slots are currently occupied. What "[sched] task table at
+ * handoff" reports now, and the number MAX_TASKS is a ceiling on. */
+int sched_live_task_count(void);
+
+/* M54: releases a terminated task's slot back to the table - its kernel
+ * stack freed and its generation bumped, so its pid can never be
+ * confused with whatever lands there next.
+ *
+ * Called from exactly one place in spirit and three in code: whenever a
+ * task's exit status has been *consumed* (SYS_wait, SYS_wait_nb, and
+ * SYS_wait(-1)'s reap of an arbitrary child). Deliberately not on exit:
+ * a terminated-but-unreaped task is precisely what the compositor's
+ * SYS_task_alive polling reads to tell an orderly exit from a crash, and
+ * recycling under it would turn "this client died" into "this pid is
+ * unknown" - a distinction M29's reap_dead_clients and M48's crash toast
+ * both depend on. So an unwaited task still holds a slot, exactly as
+ * before; the population that stopped consuming the table is the one that
+ * was always reaped and never gave anything back - the boot self-tests. */
+void sched_reap_slot(task_t *t);
 
 /* M40: drops every fd this task holds except stdin/stdout, restoring the
  * table a freshly-spawned process would have started with.

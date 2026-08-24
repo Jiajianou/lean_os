@@ -762,9 +762,20 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * exists to ever change a group), so all there is to prove is that a
      * spawned task really does inherit its parent's pgid - task 0's own
      * group (0, set by sched_init) propagating down to a task it spawns
-     * directly. */
+     * directly.
+     *
+     * M54: this used to ask about quick_a, which the SYS_wait(-1) test
+     * just above had already reaped - fine when a reaped task's slot
+     * stayed valid forever, and a -1 the moment slots started coming
+     * back. Asking about a *live* child is what the test always meant;
+     * the old version only worked because nothing ever died completely.
+     * `spinner_task` is used because it does not exit on its own, so it
+     * is still there to be asked about. */
+    task_t *pgid_child = task_spawn("pgidprobe", spinner_task, NULL);
     long self_pgid = do_syscall(SYS_getpgid, 0, 0, 0);
-    long child_pgid = do_syscall(SYS_getpgid, (uint64_t)quick_a->id, 0, 0);
+    long child_pgid = do_syscall(SYS_getpgid, (uint64_t)pgid_child->id, 0, 0);
+    do_syscall(SYS_kill, (uint64_t)pgid_child->id, SIGKILL, 0);
+    do_syscall(SYS_wait, (uint64_t)pgid_child->id, 0, 0);
     if (self_pgid != 0 || child_pgid != self_pgid) {
         panic("SYS_getpgid self-test: child did not inherit its parent's process group");
     }
@@ -922,9 +933,22 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         task_t *demo_task = process_spawn("wm_demo", demo_image, (size_t)demo_size, "");
         kfree(demo_image);
 
-        long demo_status = do_syscall(SYS_wait, (uint64_t)demo_task->id, 0, 0);
-        if (demo_status != 0) {
-            panic("wm_demo self-test: nonzero exit code - window creation failed");
+        /* M54: polled, not waited on. wm_demo draws one frame, exits
+         * cleanly and leaves its window behind on purpose - that window
+         * is what the rest of this block reads. Since M54 a SYS_wait also
+         * *reaps*, and the compositor watching a pid the kernel no longer
+         * knows correctly concludes the client is gone and reclaims the
+         * window - so waiting here would tear down the very thing under
+         * test. SYS_task_alive's 2 is the same assertion ("terminated,
+         * exit code 0") without consuming the task. It is reaped below,
+         * once every pixel has been read. */
+        long demo_status = 1;
+        for (int spin = 0; spin < 300 && demo_status == 1; spin++) {
+            pit_sleep_ms(10);
+            demo_status = do_syscall(SYS_task_alive, (uint64_t)demo_task->id, 0, 0);
+        }
+        if (demo_status != 2) {
+            panic("wm_demo self-test: did not exit cleanly - window creation failed");
         }
 
         /* The compositor redraws a handful of times right after accepting
@@ -2316,10 +2340,22 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         /* (2b) the verb that always works. */
         req.action = WM_ACTION_KILL;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0); /* wait for the death itself, not just for the signal to be posted - see selftest_reap */
-        pit_sleep_ms(400);                                 /* then for reap_dead_clients to notice and repaint */
+        /* M54: read the liveness answer *before* reaping, not after. A
+         * reaped task's slot comes back now, so a SYS_wait here would
+         * make the SYS_task_alive below answer -1 ("no such task") rather
+         * than 0 ("terminated, nonzero exit") - which is the right answer
+         * to a question about a pid that no longer exists, and the wrong
+         * question for this test to be asking. Polling for the death
+         * instead of waiting for it keeps the task in the table until the
+         * assertion has been made. */
+        long alive_after_kill = 1;
+        for (int spin = 0; spin < 200 && alive_after_kill == 1; spin++) {
+            pit_sleep_ms(10);
+            alive_after_kill = do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
+        }
+        pit_sleep_ms(400); /* then for reap_dead_clients to notice and repaint */
         uint32_t after_kill_pixel = fb_get_pixel(200, 150);
-        long alive_after_kill = do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
+        do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0); /* now it can be reaped - see selftest_reap */
         uint64_t frames_after_kill = pmm_free_frame_count();
 
         /* (3) the reclaim. A second client connecting now must be handed
@@ -3757,6 +3793,129 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "self-test passed (7/7 checks).\n\n");
     }
 
+    /* M54 self-test: the test that could not be written before this
+     * milestone.
+     *
+     * Spawn and reap several times MAX_TASKS worth of processes, and
+     * require both free frames and free task slots to come back to where
+     * they started. Under the old rules this was impossible in the most
+     * literal sense: slots were never recycled, so the 384th spawn would
+     * have failed outright with the table long since full, and every one
+     * of the 384 address spaces would still have been resident.
+     *
+     * `hello` is the program - the smallest thing on disk that runs to
+     * completion on its own, so each round is a genuine spawn/run/exit
+     * cycle rather than a spawn/kill one. Reaped by pid immediately, which
+     * is what returns the slot (see sched_reap_slot on why consuming the
+     * exit status, and not exiting, is what frees it).
+     *
+     * The frame comparison is the one that would have failed loudly
+     * before M54, at roughly fifteen frames a round. */
+    {
+        uint8_t *hello_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!hello_image) {
+            panic("out of memory reading hello back from disk");
+        }
+        int64_t hello_size = vfs_read(PATH_BIN_DIR "hello", hello_image, LEANFS_MAX_FILE_SIZE);
+        if (hello_size < 0) {
+            panic("vfs_read: hello missing - should exist, just seeded");
+        }
+
+        const int ROUNDS = MAX_TASKS * 3;
+
+        /* `hello` writes two lines to stdout, and a spawned task inherits
+         * this one's fd table - so 384 rounds would put 768 lines of
+         * "Hello, world from user_space!" through the boot log and make
+         * every other self-test's output unreadable. Closing fd 1 for the
+         * duration makes those writes fail cleanly (sys_write returns -1
+         * for an FD_NONE slot, which hello ignores) and costs the test
+         * nothing: what it measures is frames and slots, not output. */
+        fd_slot_t saved_stdout = sched_current()->fds[1];
+        sched_current()->fds[1].type = FD_NONE;
+
+        int live_before = sched_live_task_count();
+        uint64_t frames_before = pmm_free_frame_count();
+        int spawn_failures = 0;
+        int stale_seen_as_live = 0;
+        int stale_pid = -1;
+
+        for (int i = 0; i < ROUNDS; i++) {
+            task_t *t = process_spawn("hello", hello_image, (size_t)hello_size, "");
+            if (!t) {
+                spawn_failures++;
+                break;
+            }
+            int pid = t->id;
+            do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            /* The stale-pid check, from the first round: a pid whose slot
+             * has since been handed to somebody else must be reported as
+             * invalid, not as that somebody else. Without the generation
+             * counter this would come back 1 (alive) almost every round,
+             * because the slot really is occupied - by a different task. */
+            if (stale_pid < 0) {
+                stale_pid = pid;
+            } else if (do_syscall(SYS_task_alive, (uint64_t)stale_pid, 0, 0) != -1) {
+                stale_seen_as_live++;
+            }
+        }
+
+        int live_after = sched_live_task_count();
+        uint64_t frames_after = pmm_free_frame_count();
+        sched_current()->fds[1] = saved_stdout;
+        kfree(hello_image);
+
+        int all_ok = 1;
+        if (spawn_failures) {
+            klog_puts("[m54] a spawn failed partway through 0x");
+            klog_put_hex32((uint32_t)ROUNDS);
+            klog_puts(" rounds - the task table is still a lifetime budget\n");
+            all_ok = 0;
+        }
+        if (live_after != live_before) {
+            klog_puts("[m54] task slots did not come back: 0x");
+            klog_put_hex32((uint32_t)live_before);
+            klog_puts(" live before, 0x");
+            klog_put_hex32((uint32_t)live_after);
+            klog_puts(" after 0x");
+            klog_put_hex32((uint32_t)ROUNDS);
+            klog_puts(" spawn/reap rounds\n");
+            all_ok = 0;
+        }
+        if (frames_after != frames_before) {
+            klog_puts("[m54] frames did not come back: 0x");
+            klog_put_hex64(frames_before);
+            klog_puts(" free before, 0x");
+            klog_put_hex64(frames_after);
+            klog_puts(" after (0x");
+            klog_put_hex64(frames_before - frames_after);
+            klog_puts(" lost across 0x");
+            klog_put_hex32((uint32_t)ROUNDS);
+            klog_puts(" processes)\n");
+            all_ok = 0;
+        }
+        if (stale_seen_as_live) {
+            klog_puts("[m54] a stale pid was answered about 0x");
+            klog_put_hex32((uint32_t)stale_seen_as_live);
+            klog_puts(" time(s) instead of being refused - the generation counter is not doing its job\n");
+            all_ok = 0;
+        }
+        /* And the other half of the same rule: a pid that was never valid
+         * is refused too, and a *live* one is still found. */
+        if (do_syscall(SYS_task_alive, 0x7FFFFFFF, 0, 0) != -1 ||
+            do_syscall(SYS_task_alive, (uint64_t)sched_current()->id, 0, 0) != 1) {
+            klog_puts("[m54] SYS_task_alive no longer tells a live pid from an impossible one\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M54 reclaim self-test: something a dead process held did not come back");
+        }
+        klog_puts("[m54] every task slot and every frame returned across 0x");
+        klog_put_hex32((uint32_t)ROUNDS);
+        klog_puts(" spawn/reap rounds (three times MAX_TASKS), and a stale pid refused rather "
+                   "than answered about, self-test passed (5/5 checks).\n\n");
+    }
+
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
      * exactly where a user program would reach them. Before this
      * milestone the middle case here didn't fail at all - it panicked the
@@ -3774,7 +3933,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * page it built before giving up, would pass a bare "returned -1"
      * assertion and still be the bug this milestone is looking for. */
     {
-        int tasks_before = sched_task_count();
+        int tasks_before = sched_live_task_count();
         uint64_t frames_before = pmm_free_frame_count();
 
         long rc_missing = do_syscall(SYS_spawn, (uint64_t)"definitely_not_a_file", 0, 0);
@@ -3787,7 +3946,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M40 SYS_spawn self-test: spawning a non-ELF file should fail, not succeed");
         }
 
-        int tasks_after = sched_task_count();
+        int tasks_after = sched_live_task_count();
         uint64_t frames_after = pmm_free_frame_count();
         if (tasks_after != tasks_before) {
             klog_puts("[m40] failed spawns changed the task count: 0x");
@@ -3867,11 +4026,21 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * failing with SPAWN_ERR_NO_TASK_SLOT, which is a cap being reached,
      * not a program being broken. This line is what turns "how close are
      * we" from a bisect into a grep. */
+    /* M54: *live* slots, not the high-water mark. Until slots were
+     * recycled these were the same number and it only ever grew - the
+     * line read 79 of 128 by the last milestone, and every one of those
+     * was a task that had finished long before. It now measures what is
+     * actually there, which is what makes MAX_TASKS a ceiling on
+     * concurrency rather than a lifetime budget. The high-water mark is
+     * printed alongside it because the difference between the two is
+     * exactly how much recycling did. */
     klog_puts("[sched] task table at handoff: 0x");
-    klog_put_hex32((uint32_t)sched_task_count());
-    klog_puts(" of 0x");
+    klog_put_hex32((uint32_t)sched_live_task_count());
+    klog_puts(" live of 0x");
     klog_put_hex32((uint32_t)MAX_TASKS);
-    klog_puts(" slots used by the boot self-tests.\n");
+    klog_puts(" slots (high-water mark 0x");
+    klog_put_hex32((uint32_t)sched_task_count());
+    klog_puts(").\n");
 
     uint8_t *init_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
     if (!init_image) {

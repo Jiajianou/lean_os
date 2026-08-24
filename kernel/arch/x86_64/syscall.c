@@ -360,16 +360,25 @@ static long sys_wait(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, ui
     if ((int64_t)pid_arg == -1) {
         for (;;) {
             int any_children = 0;
+            /* M54: by *slot*, not by id. A pid is no longer an index, so
+             * walking the table means walking slots - sched_task_by_slot
+             * exists precisely so this loop cannot accidentally become a
+             * lookup that a recycled generation would answer wrongly. */
             int total = sched_task_count();
             for (int i = 0; i < total; i++) {
-                task_t *t = sched_task_by_id(i);
+                task_t *t = sched_task_by_slot(i);
                 if (!t || t->parent_id != self->id || t->reaped) {
                     continue;
                 }
                 any_children = 1;
                 if (t->state == TASK_TERMINATED) {
                     t->reaped = 1;
-                    return t->id;
+                    /* Read the pid out before the slot is released - the
+                     * whole point of sched_reap_slot is that afterwards
+                     * this task_t belongs to nobody. */
+                    int pid = t->id;
+                    sched_reap_slot(t);
+                    return pid;
                 }
             }
             if (!any_children) {
@@ -389,7 +398,9 @@ static long sys_wait(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, ui
         schedule();
     }
     t->reaped = 1;
-    return t->exit_code;
+    int code = t->exit_code;
+    sched_reap_slot(t); /* M54: the exit status has been consumed, so the slot can come back */
+    return code;
 }
 
 /* Whole-file read by name - no open/close/lseek yet, matching how few
@@ -914,7 +925,9 @@ static long sys_wait_nb(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4,
         return -2;
     }
     t->reaped = 1;
-    return t->exit_code;
+    int code = t->exit_code;
+    sched_reap_slot(t); /* M54: same as SYS_wait - consuming the status is what frees the slot */
+    return code;
 }
 
 /* Voluntary cooperative yield - see SYS_yield's comment in
@@ -1019,10 +1032,14 @@ static long sys_taskinfo(uint64_t buf, uint64_t max_entries, uint64_t a3, uint64
         return -1;
     }
     task_info_t *out = (task_info_t *)buf;
+    /* M54: by slot, and free slots are skipped - so this reports what is
+     * *live* rather than everything that has ever existed. Before slot
+     * recycling those were the same list, which is why the task manager
+     * used to show every boot self-test that had ever run. */
     int total = sched_task_count();
     uint64_t written = 0;
     for (int i = 0; i < total && written < max_entries; i++) {
-        task_t *t = sched_task_by_id(i);
+        task_t *t = sched_task_by_slot(i);
         if (!t) {
             continue;
         }

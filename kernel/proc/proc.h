@@ -53,6 +53,19 @@
 #define USER_IMAGE_BASE  0x0000008000000000ULL /* 512 GiB - matches user_space/lib/user.ld */
 #define USER_IMAGE_LIMIT (USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE)
 
+/* M54: hands `pml4_phys` and every frame the process itself owns back to
+ * the allocator. Lives here rather than in vmm.c because the decision it
+ * makes is entirely about *this* file's layout: the image, the stack and
+ * the argument page are the process's, the heap is the process's, and
+ * the shm and framebuffer windows are emphatically not - one holds
+ * segments another process may still have mapped, the other holds device
+ * physical addresses that were never pmm frames and would poison the
+ * free list. vmm.c has no business knowing any of that.
+ *
+ * Never call this on the address space the calling CPU is running on;
+ * task_exit_with_code switches to the kernel's own first. */
+void process_destroy_address_space(uint64_t pml4_phys);
+
 /* arg may be NULL (equivalent to an empty string) for a program that
  * doesn't take one.
  *
