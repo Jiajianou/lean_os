@@ -18,8 +18,10 @@
 #include "power/power.h" /* M47 - power_shutdown, and power_mode.h's POWER_OFF/POWER_REBOOT through it */
 #include "proc.h"      /* system_api/include/proc.h - task_info_t, M45. Resolves to the system_api one, not kernel/proc/proc.h below: a quoted include searches the *including* file's own directory first (kernel/arch/x86_64/, which has no proc.h), then -Ikernel (no kernel/proc.h either), then -Isystem_api/include. */
 #include "proc/proc.h"
+#include "proc/elf.h"   /* M48 - elf_validate, to tell "not a program" apart from "no such file" */
 #include "sched/sched.h"
 #include "signal.h"  /* system_api/include/signal.h - SIGKILL/SIGTERM */
+#include "spawn_error.h" /* system_api/include/spawn_error.h - M48's distinct SYS_spawn failure codes */
 #include "syscall.h" /* system_api/include/syscall.h - the shared ABI, on the include path via Makefile's -Isystem_api/include */
 #include "wm.h"      /* system_api/include/wm.h - wm_fb_info_t, M20 */
 
@@ -127,19 +129,35 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
     (void)a5;
     (void)a6;
     if (path_ptr == 0) {
-        return -1;
+        return SPAWN_ERR_NOT_FOUND;
     }
     const char *path = (const char *)path_ptr;
     const char *arg = arg_ptr ? (const char *)arg_ptr : "";
 
     uint8_t *image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
     if (!image) {
-        return -1;
+        return SPAWN_ERR_NO_MEMORY;
     }
     int64_t size = vfs_read(path, image, LEANFS_MAX_FILE_SIZE);
     if (size < 0) {
         kfree(image);
-        return -1;
+        return SPAWN_ERR_NOT_FOUND;
+    }
+
+    /* M48: process_spawn makes both of these checks itself and answers
+     * NULL either way, which is precisely the ambiguity this milestone is
+     * removing - so they are asked here too, where the answers can still
+     * be told apart. elf_validate is one pass over the program headers
+     * and sched_has_free_task_slot is a comparison; a spawn reads a whole
+     * file off disk first, so neither is worth the ambiguity it would
+     * save. */
+    if (!elf_validate(image, (size_t)size)) {
+        kfree(image);
+        return SPAWN_ERR_BAD_IMAGE;
+    }
+    if (!sched_has_free_task_slot()) {
+        kfree(image);
+        return SPAWN_ERR_NO_TASK_SLOT;
     }
 
     /* process_spawn's elf_load synchronously copies every byte it needs
@@ -150,7 +168,12 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
     task_t *t = process_spawn(path, image, (size_t)size, arg);
     kfree(image);
     if (!t) {
-        return -1;
+        /* Everything else was checked above, so the only ways left to
+         * fail are running out of frames while mapping the image or out
+         * of heap for the launch args - and the task table filling
+         * between that check and this one, which is the same answer a
+         * caller can act on ("try again"). */
+        return SPAWN_ERR_NO_MEMORY;
     }
     return t->id;
 }

@@ -214,6 +214,36 @@ typedef struct {
     int32_t value; /* M45: the one action that carries a number - WM_ACTION_SET_PANEL_OVERHANG's row count. 0 for every other action, which all ignore it. A field rather than a second pipe or a second request struct: this channel already has exactly one writer per action and one reader, and both change together (the same reasoning wm_settings_request_t's own comment gives for growing rather than versioning). */
 } wm_action_request_t;
 
+/* M48: transient toasts. One-way and fire-and-forget, the same shape
+ * WM_SETTINGS_PIPE already has - a notification with a reply channel
+ * would be a dialog, and M36 already built dialogs.
+ *
+ * Compositor-owned rather than a client, for the same reason M43's
+ * launcher is: the two things that most need to speak are the compositor
+ * itself (a window it had to refuse) and a client that has just *died* -
+ * neither of which can be asked to draw its own notification. It is also
+ * why this is a surface and not a window: a toast has to appear over
+ * whatever is on screen, including the panel, without becoming something
+ * the panel can then list or minimize.
+ *
+ * Levels differ only in the accent stripe's color. No buttons and no
+ * actions on a toast: that is a dialog's job.
+ */
+#define WM_NOTIFY_PIPE "wm_notify"
+
+#define WM_NOTIFY_TITLE_MAX 28
+#define WM_NOTIFY_BODY_MAX  40
+
+#define WM_NOTIFY_INFO  0
+#define WM_NOTIFY_WARN  1
+#define WM_NOTIFY_ERROR 2
+
+typedef struct {
+    uint32_t level; /* WM_NOTIFY_INFO/WARN/ERROR */
+    char title[WM_NOTIFY_TITLE_MAX]; /* always NUL-terminated; truncated by the sender, never by the compositor */
+    char body[WM_NOTIFY_BODY_MAX];
+} wm_notify_request_t;
+
 /* M33: the compositor's first genuinely global (not per-window) setting -
  * the desktop background color, previously a compile-time constant in
  * compositor.c. Same one-way "fire a request, no response expected"

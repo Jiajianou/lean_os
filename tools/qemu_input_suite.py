@@ -310,6 +310,31 @@ CLOCK_W = 200  # gui_clock.c WIN_W
 # settings.c's wallpaper row.
 WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H = 270, 68, 22
 
+# M48: compositor.c's toast surface - 300x56, TOAST_MARGIN in from the
+# top-right, stacked downward. Opaque, drawn over everything but the
+# cursor, so no blend is involved in any of these reads.
+TOAST_W, TOAST_H, TOAST_GAP, TOAST_MARGIN = 300, 56, 8, 12
+TOAST_STRIPE_W = 4
+TOAST_BG = 0x222A38
+TOAST_ERROR_C = 0xE05C55
+
+
+def toast_rect(i):
+    return (1024 - TOAST_W - TOAST_MARGIN, TOAST_MARGIN + i * (TOAST_H + TOAST_GAP))
+
+
+def toast_stripe_probe(i):
+    """On toast i's accent stripe - inset one pixel from its left edge,
+    vertically centered."""
+    x, y = toast_rect(i)
+    return (x + 1 + TOAST_STRIPE_W // 2, y + TOAST_H // 2)
+
+
+def toast_click_point(i):
+    """Well inside toast i and clear of its stripe and its text, so the
+    click lands on the toast rather than near it."""
+    x, y = toast_rect(i)
+    return (x + TOAST_W - 20, y + TOAST_H // 2)
 TASKS_W, TASKS_H = 420, 360  # task_manager.c WIN_W/WIN_H
 LIST_Y_IN_WIN = 40           # HEADER_H(22) + COLS_H(18)
 LIST_H_IN_WIN = TASKS_H - LIST_Y_IN_WIN - 34  # ...minus FOOTER_H
@@ -1138,6 +1163,61 @@ def test_settings_persist_across_a_reboot(m):
                   "rather than the saved Flat wallpaper")
 
 
+def test_missing_program_raises_a_toast(m):
+    """M48, and M40's exact symptom finally given a voice: a desktop icon
+    whose program isn't on disk used to do *nothing at all* - which is
+    what let an fd-table exhaustion bug hide for four milestones.
+
+    The icon is real and its program is deliberately not: the test
+    removes nothing (there is no unlink in this OS) and instead uses the
+    launcher to spawn a name that was never a program. That reaches the
+    same failure through the same SYS_spawn, and the launcher is one of
+    the two places M48 gave a voice to."""
+    boot(m)
+    m.sendkey("ctrl-spc")
+    wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
+             "Ctrl+Space did not open the launcher")
+
+    # "m33test" is an ordinary text file the boot self-tests leave on
+    # disk, so it is genuinely in the launcher's list and genuinely not a
+    # program - SPAWN_ERR_BAD_IMAGE rather than a name that matches
+    # nothing at all.
+    m.type_text("m33test")
+    m.sendkey("ret")
+
+    probe = toast_stripe_probe(0)
+    wait_for(m, lambda s: s.px(*probe) == TOAST_ERROR_C,
+             "launching a non-program raised no toast - the failure is still silent")
+
+    # And it goes away on its own, without anyone touching it.
+    wait_for(m, lambda s: s.px(*probe) != TOAST_ERROR_C,
+             "the toast never expired on its own deadline", timeout=12.0)
+
+
+def test_clicking_a_toast_dismisses_it(m):
+    """A toast is dismissable early, and the click is consumed rather
+    than falling through to whatever is underneath it - which matters
+    because a toast lands in the top-right corner, exactly where a
+    maximized window's close button is."""
+    boot(m)
+    m.sendkey("ctrl-spc")
+    wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
+             "Ctrl+Space did not open the launcher")
+    m.type_text("m33test")
+    m.sendkey("ret")
+
+    probe = toast_stripe_probe(0)
+    wait_for(m, lambda s: s.px(*probe) == TOAST_ERROR_C, "no toast was raised")
+
+    m.click(*toast_click_point(0))
+    # Dismissed well inside its own 4s deadline, so this can only be the
+    # click - a wait that outlived the timer would prove nothing.
+    shot = wait_for(m, lambda s: s.px(*probe) != TOAST_ERROR_C,
+                    "clicking the toast did not dismiss it", timeout=2.5)
+    check(shot.px(*probe) == desktop_px(probe[1]),
+          "the toast went away but left something behind at 0x%06X" % shot.px(*probe))
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -1163,6 +1243,8 @@ TESTS = [
     ("shutdown_confirm_can_be_cancelled", test_shutdown_confirm_can_be_cancelled),
     ("shutdown_powers_off_the_machine", test_shutdown_powers_off_the_machine),
     ("settings_persist_across_a_reboot", test_settings_persist_across_a_reboot),
+    ("missing_program_raises_a_toast", test_missing_program_raises_a_toast),
+    ("clicking_a_toast_dismisses_it", test_clicking_a_toast_dismisses_it),
     ("launch_close_stress", test_launch_close_stress),
 ]
 

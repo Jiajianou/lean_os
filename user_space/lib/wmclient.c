@@ -173,6 +173,32 @@ int wm_toggle_launcher(void) {
     return wm_send_action(-1, WM_ACTION_TOGGLE_LAUNCHER);
 }
 
+/* Opened once and reused, same as the query/action pipes above and for
+ * the same reason: a client that notifies on every failed launch would
+ * otherwise burn two fd-table slots per notification. */
+static int notify_fds[2] = {-1, -1};
+
+int wm_notify(uint32_t level, const char *title, const char *body) {
+    if (notify_fds[0] < 0) {
+        if (sys_pipe_open(WM_NOTIFY_PIPE, notify_fds) != 0) {
+            return -1;
+        }
+    }
+    wm_notify_request_t req;
+    req.level = level;
+    int i = 0;
+    for (; title && title[i] && i < WM_NOTIFY_TITLE_MAX - 1; i++) {
+        req.title[i] = title[i];
+    }
+    req.title[i] = '\0';
+    i = 0;
+    for (; body && body[i] && i < WM_NOTIFY_BODY_MAX - 1; i++) {
+        req.body[i] = body[i];
+    }
+    req.body[i] = '\0';
+    return sys_write(notify_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
+}
+
 static int settings_fds[2] = {-1, -1};
 static int settings_query_fds[2] = {-1, -1};
 static int settings_query_resp_fds[2] = {-1, -1};

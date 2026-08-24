@@ -36,6 +36,7 @@
  */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h" /* strlen - ICONS[].label is data-driven now, not a compile-time sizeof() */
+#include "spawn_error.h" /* system_api/include/spawn_error.h - M48 */
 #include "syscall_wrappers.h"
 #include "wallpaper.h" /* M44 - see refresh_theme */
 #include "wmclient.h"
@@ -97,6 +98,19 @@ static int refresh_theme(void) {
     theme_bg = settings.bg_color;
     theme_wallpaper = (int)settings.wallpaper;
     return 1;
+}
+
+/* M48: this is M40's exact symptom - "double-clicking that icon does
+ * nothing" - given a voice. The spawn already failed for a specific
+ * reason (system_api/include/spawn_error.h); all that was missing was
+ * anywhere for that reason to go. Titled with the icon's own label
+ * rather than its program name: the person double-clicked "Editor", not
+ * "text_editor". */
+static void launch(const char *label, const char *program) {
+    long rc = sys_spawn(program, "");
+    if (rc < 0) {
+        wm_notify(WM_NOTIFY_ERROR, label, spawn_error_message(rc));
+    }
 }
 
 typedef struct {
@@ -221,7 +235,7 @@ int main(void) {
                                              CTX_MENU_ITEM_W, CTX_MENU_ITEM_H, CTX_MENU_COUNT);
                 ctx_menu_open = 0;
                 if (idx >= 0) {
-                    sys_spawn(CTX_MENU_PROGRAMS[idx], "");
+                    launch(CTX_MENU_ITEMS[idx], CTX_MENU_PROGRAMS[idx]);
                 }
                 changed = 1;
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
@@ -240,7 +254,7 @@ int main(void) {
                     pressed_until_ms = sys_uptime_ms() + 150;
                     pressed_icon = i;
                     if (last_click_icon == i && last_click_ms >= 0 && now - last_click_ms <= DOUBLE_CLICK_MS) {
-                        sys_spawn(ICONS[i].program, "");
+                        launch(ICONS[i].label, ICONS[i].program);
                         last_click_icon = -1; /* a third quick click starts a fresh pair, not a third launch */
                         last_click_ms = -1;
                     } else {

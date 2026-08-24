@@ -64,9 +64,17 @@ FONT_FILES   := kernel/drivers/font8x16.h kernel/drivers/font8x16.c \
 # M20 verification, not anticipated in advance - this flag forces
 # scalar/GPR-only codegen, the standard freestanding-kernel fix for
 # exactly this.
+# -MMD -MP: M48. Until this milestone nothing in this build depended on a
+# header, so editing one recompiled nothing - and a struct that changed
+# size (task_t has done it twice) left every translation unit that wasn't
+# also touched linking against the old layout. That is a silent,
+# arbitrarily-weird class of bug, and it cost real time here: raising
+# MAX_TASKS in sched.h produced a kernel that still logged the old cap.
+# -MMD writes a .d file of each object's real header dependencies beside
+# it; -MP adds phony targets so deleting a header doesn't wedge the build.
 CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
           -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Werror \
-          -Ikernel -Isystem_api/include -c
+          -MMD -MP -Ikernel -Isystem_api/include -c
 
 # user_space code is freestanding for the same reasons kernel code is (see
 # milestones.md's ground rules) but has its own include root (its own
@@ -80,7 +88,7 @@ CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
 # binaries like these.
 USER_CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
                -mcmodel=large -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Werror \
-               -Iuser_space/lib -Isystem_api/include -c
+               -MMD -MP -Iuser_space/lib -Isystem_api/include -c
 
 MBR_BIN    := $(BUILD)/mbr.bin
 KERNEL_ELF := $(BUILD)/kernel.elf
@@ -334,6 +342,11 @@ preseed: $(IMAGE) $(LEANFS_PUT)
 # ones actually used to build this project's own user-space programs.
 print-%:
 	@echo $($*)
+
+# The .d files -MMD leaves beside every object (see CFLAGS above). Included
+# with a leading `-` so a from-scratch build, where none of them exist yet,
+# doesn't warn about every one.
+-include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
 clean:
 	rm -rf $(BUILD)

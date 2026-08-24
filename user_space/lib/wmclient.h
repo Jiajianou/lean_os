@@ -80,6 +80,15 @@ int wm_send_action_value(int32_t window_id, uint32_t action, int32_t value);
  * calls this. */
 int wm_set_panel_overhang(int32_t window_id, int32_t rows);
 
+/* M48: raises a transient toast on the compositor's own notification
+ * surface (system_api/include/wm.h's WM_NOTIFY_PIPE). One-way and
+ * fire-and-forget - there is no reply and no way to ask whether it was
+ * shown, which is the whole contract: a notification that its sender had
+ * to wait on would be a dialog. `level` is WM_NOTIFY_INFO/WARN/ERROR and
+ * changes only the accent color. Both strings are truncated silently.
+ * Returns 0, or -1 if there is no compositor listening. */
+int wm_notify(uint32_t level, const char *title, const char *body);
+
 /* M42: shows/hides the compositor's launcher overlay (M43). No window_id -
  * this is the one action that acts on the compositor rather than on a
  * window (see WM_ACTION_TOGGLE_LAUNCHER). desktop_shell.c's Start button

@@ -30,6 +30,7 @@
 #include "proc/proc.h"
 #include "sched/sched.h"
 #include "signal.h"  /* system_api/include/signal.h */
+#include "spawn_error.h" /* system_api/include/spawn_error.h - M48's SYS_spawn failure codes and their shared message table */
 #include "syscall.h" /* system_api/include/syscall.h */
 #include "wm.h"      /* system_api/include/wm.h - M30 self-test speaks WM_ACTION_PIPE directly */
 
@@ -2654,6 +2655,136 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "self-test passed (4/4 checks).\n\n");
     }
 
+    /* M48 self-test: the notification surface, and the spawn error codes
+     * behind most of what it will ever say.
+     *
+     * The toast half checks both ends of a toast's life - that it is
+     * where it should be, and that it is gone by its own deadline. The
+     * second is the one worth having: a notification surface that only
+     * ever appears is a notification surface that eventually covers the
+     * screen, and nothing but its own timer ever retires one.
+     *
+     * Geometry from compositor.c's own TOAST_* constants: a 300x56 toast
+     * TOAST_MARGIN (12) in from the top-right of a 1024x768 display, so
+     * x:[712, 1012), y:[12, 68). The accent stripe is TOAST_STRIPE_W (4)
+     * wide, inset one pixel, at x:[713, 717). (714, 40) is on it;
+     * (900, 40) is the toast's own background, right of both strings and
+     * in the gap between the title and body rows.
+     *
+     * The spawn half asserts each distinct cause against its own code -
+     * a name that isn't on disk, an ordinary text file (m33test, written
+     * by the SYS_writefile self-test far above), and a deliberately
+     * truncated ELF. M40's validation already rejected all three; it just
+     * rejected them anonymously.
+     */
+    {
+        /* A real ELF header followed by nothing - enough that this is not
+         * "not an ELF at all" but genuinely a *truncated* one, which is
+         * the third distinct cause this milestone's error codes have to
+         * survive contact with. */
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image) {
+            panic("out of memory reading compositor back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 64) {
+            panic("vfs_read: compositor missing or absurdly small - should exist, just seeded");
+        }
+        if (vfs_write("m48trunc", comp_image, 64) != 0) {
+            panic("M48 self-test: could not write the truncated-ELF fixture");
+        }
+
+        long rc_missing = do_syscall(SYS_spawn, (uint64_t)"definitely_not_a_file", 0, 0);
+        long rc_text = do_syscall(SYS_spawn, (uint64_t)"m33test", 0, 0);
+        long rc_trunc = do_syscall(SYS_spawn, (uint64_t)"m48trunc", 0, 0);
+
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(400);
+
+        int notify_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_NOTIFY_PIPE, (uint64_t)notify_fds, 0) != 0) {
+            panic("M48 self-test: kernel-side SYS_pipe_open(WM_NOTIFY_PIPE) failed");
+        }
+        wm_notify_request_t note;
+        k_memset(&note, 0, sizeof(note));
+        note.level = WM_NOTIFY_ERROR;
+        k_strlcpy(note.title, "Test", sizeof(note.title));
+        k_strlcpy(note.body, "Body", sizeof(note.body));
+        do_syscall(SYS_write, (uint64_t)notify_fds[1], (uint64_t)&note, sizeof(note));
+        pit_sleep_ms(300);
+
+        uint32_t stripe = fb_get_pixel(714, 40);
+        uint32_t toast_bg = fb_get_pixel(900, 40);
+
+        /* Comfortably inside TOAST_TTL_MS (4000) so this is "still up",
+         * not "up or not depending on how the boot went". */
+        pit_sleep_ms(2000);
+        uint32_t stripe_midlife = fb_get_pixel(714, 40);
+
+        /* And comfortably past it. */
+        pit_sleep_ms(2500);
+        uint32_t stripe_expired = fb_get_pixel(714, 40);
+        uint32_t bg_expired = fb_get_pixel(900, 40);
+
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        static const struct { const char *what; uint32_t expected; } names[] = {
+            {"the error toast's accent stripe", 0x00E05C55u},
+            {"the toast's own background, right of its text", 0x00222A38u},
+            {"that same stripe two seconds in - still well inside the toast's own deadline", 0x00E05C55u},
+            {"the stripe once the deadline has passed - bare desktop again", 0x001A1A2Eu},
+            {"the toast's background once the deadline has passed", 0x001A1A2Eu},
+        };
+        const uint32_t got[] = {stripe, toast_bg, stripe_midlife, stripe_expired, bg_expired};
+        int all_ok = 1;
+        for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
+            if (got[i] != names[i].expected) {
+                klog_puts("[m48] pixel check failed: ");
+                klog_puts(names[i].what);
+                klog_puts(" - expected 0x");
+                klog_put_hex32(names[i].expected);
+                klog_puts(" got 0x");
+                klog_put_hex32(got[i]);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        static const struct { const char *what; long expected; long got; } codes[] = {
+            {"a name that is not on disk", SPAWN_ERR_NOT_FOUND, 0},
+            {"an ordinary text file", SPAWN_ERR_BAD_IMAGE, 0},
+            {"a truncated ELF", SPAWN_ERR_BAD_IMAGE, 0},
+        };
+        const long got_codes[] = {rc_missing, rc_text, rc_trunc};
+        for (size_t i = 0; i < sizeof(got_codes) / sizeof(got_codes[0]); i++) {
+            if (got_codes[i] != codes[i].expected) {
+                klog_puts("[m48] SYS_spawn returned the wrong code for ");
+                klog_puts(codes[i].what);
+                klog_puts(" - expected 0x");
+                klog_put_hex32((uint32_t)codes[i].expected);
+                klog_puts(" got 0x");
+                klog_put_hex32((uint32_t)got_codes[i]);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        /* The message table is the other half of a distinct code being
+         * useful: two causes that return different numbers and the same
+         * sentence would tell a user nothing more than -1 did. */
+        if (k_strcmp(spawn_error_message(SPAWN_ERR_NOT_FOUND), spawn_error_message(SPAWN_ERR_BAD_IMAGE)) == 0) {
+            klog_puts("[m48] two distinct spawn errors share one message - the codes buy nothing\n");
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M48 feedback self-test: toasts and/or spawn error codes did not behave as specified");
+        }
+        klog_puts("[m48] toast raised, still up mid-life, gone by its own deadline, and each "
+                   "distinct SYS_spawn failure reporting its own code self-test passed "
+                   "(9/9 checks).\n\n");
+    }
+
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
      * exactly where a user program would reach them. Before this
      * milestone the middle case here didn't fail at all - it panicked the
@@ -2750,6 +2881,25 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     /* M47: whatever the user had chosen, back where they left it - the
      * self-tests above have been running against pinned defaults. */
     selftest_settings_restore();
+
+    /* M48: how much of the fixed task table the self-tests above have
+     * spent before the desktop even starts. Slots are never recycled
+     * (sched.c's task_spawn_common assigns ids sequentially and never
+     * reuses one), so every throwaway compositor and victim client this
+     * boot spawned is charged against MAX_TASKS for the life of the
+     * machine - and what is left is the entire budget the desktop and
+     * everything a user launches has to fit in.
+     *
+     * Logged rather than assumed because it stopped being an academic
+     * number: the seventh app launched from a desktop icon started
+     * failing with SPAWN_ERR_NO_TASK_SLOT, which is a cap being reached,
+     * not a program being broken. This line is what turns "how close are
+     * we" from a bisect into a grep. */
+    klog_puts("[sched] task table at handoff: 0x");
+    klog_put_hex32((uint32_t)sched_task_count());
+    klog_puts(" of 0x");
+    klog_put_hex32((uint32_t)MAX_TASKS);
+    klog_puts(" slots used by the boot self-tests.\n");
 
     uint8_t *init_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
     if (!init_image) {

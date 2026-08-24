@@ -19,6 +19,7 @@
  */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h"
+#include "spawn_error.h" /* system_api/include/spawn_error.h - M48 */
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
@@ -28,7 +29,13 @@
 #define HEADER_H 24
 #define SCROLLBAR_W 8 /* M37: reserved strip along the right edge - see redraw()'s gfx_draw_scrollbar call */
 #define LIST_W (WIN_W - SCROLLBAR_W)
-#define ROWS_VISIBLE ((WIN_H - HEADER_H) / ROW_H)
+/* M48: a one-row status strip along the bottom. An error about the file
+ * you just double-clicked belongs in the window you double-clicked it in
+ * - a toast in the far corner of the screen is the wrong place for
+ * something about what you are looking directly at. */
+#define STATUS_H (FONT_HEIGHT + 4)
+#define LIST_H   (WIN_H - HEADER_H - STATUS_H)
+#define ROWS_VISIBLE (LIST_H / ROW_H)
 
 #define BG_COLOR       0x001C1C24u
 #define HEADER_COLOR   0x00303850u
@@ -37,6 +44,8 @@
 #define LABEL_COLOR    0x0090A0C0u
 #define SCROLLBAR_TRACK 0x00141820u
 #define SCROLLBAR_THUMB 0x00506080u
+#define STATUS_BG      0x00141820u
+#define STATUS_ERR_FG  0x00E08878u
 
 #define MAX_FILES    48
 #define MAX_NAME_LEN 32 /* leanfs's real cap (LEANFS_MAX_NAME, kernel/fs/leanfs.h) is 27 + a NUL - this just needs to be at least that, kept as its own constant since that header isn't visible to user_space builds */
@@ -47,6 +56,7 @@ static char names[MAX_FILES][MAX_NAME_LEN];
 static int file_count;
 static int selected = -1;
 static int scroll_top;
+static const char *status_text = "";
 
 static void refresh_list(void) {
     static char buf[LIST_BUF_SIZE];
@@ -90,7 +100,10 @@ static void open_selected(void) {
     if (selected < 0 || selected >= file_count) {
         return;
     }
-    sys_spawn("text_editor", names[selected]);
+    /* M48: this used to throw the result away, so a file that couldn't be
+     * opened looked exactly like a double-click that didn't register. */
+    long rc = sys_spawn("text_editor", names[selected]);
+    status_text = rc < 0 ? spawn_error_message(rc) : "";
 }
 
 static void redraw(wm_window_t *win) {
@@ -113,9 +126,14 @@ static void redraw(wm_window_t *win) {
     /* M37: the on-screen position/extent indicator this list previously
      * had none of - it already scrolled (Up/Down, or clicking a row near
      * an edge), there was just no visual cue there was more above/below. */
-    gfx_draw_scrollbar(&win->gfx, LIST_W, HEADER_H, SCROLLBAR_W, WIN_H - HEADER_H,
+    gfx_draw_scrollbar(&win->gfx, LIST_W, HEADER_H, SCROLLBAR_W, LIST_H,
                         file_count, ROWS_VISIBLE, scroll_top,
                         SCROLLBAR_TRACK, SCROLLBAR_THUMB);
+
+    gfx_fill_rect(&win->gfx, 0, WIN_H - STATUS_H, WIN_W, STATUS_H, STATUS_BG);
+    gfx_draw_text(&win->gfx, 6, WIN_H - STATUS_H + 2,
+                  status_text[0] ? status_text : "Enter or double-click to open",
+                  status_text[0] ? STATUS_ERR_FG : LABEL_COLOR);
 }
 
 int main(void) {
@@ -149,7 +167,7 @@ int main(void) {
                     open_selected();
                 }
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
-                if (ev.y >= HEADER_H) {
+                if (ev.y >= HEADER_H && ev.y < HEADER_H + LIST_H) {
                     int row = scroll_top + (ev.y - HEADER_H) / ROW_H;
                     if (row < file_count) {
                         selected = row;

@@ -66,8 +66,31 @@ typedef enum {
  * behind them) has to size a buffer for it, and a second hand-picked
  * number that merely happened to be >= this is exactly the kind of
  * near-duplicate cap this project has been bitten by twice (M40 and M41
- * both shipped a bug that was really an exactly-sized cap). */
-#define MAX_TASKS 64
+ * both shipped a bug that was really an exactly-sized cap).
+ *
+ * M48: 64 -> 128, and this time from a measurement rather than a guess -
+ * the third time this project has shipped a bug that was really an
+ * exactly-sized cap, and the first time the machine said so itself. The
+ * seventh app launched from a desktop icon began failing, and because
+ * M48 had just given SYS_spawn distinct error codes the desktop put
+ * "Too many programs are running." on screen instead of doing nothing.
+ *
+ * The derivation, from the boot log's own "[sched] task table at
+ * handoff" line (kernel.c, added for exactly this):
+ *
+ *   54  slots the boot self-tests have already spent by the time PID 1
+ *       starts - they are never given back, because ids are assigned
+ *       sequentially and slots are never recycled
+ *  + 4  init, the compositor, desktop_icons and desktop_shell
+ *  +10  the most app windows that can exist at once
+ *       (WM_MAX_ROUTABLE_WINDOWS, 12, minus the desktop and the panel)
+ *  = 68 for a desktop with everything open, once
+ *
+ * 128 is that plus 60 more launches, which is the part that actually
+ * matters: closing an app does *not* return its slot, so the real budget
+ * is "how many programs may be started over this machine's whole
+ * uptime", and 68 would have been another exact fit. */
+#define MAX_TASKS 128
 
 typedef struct {
     fd_type_t type;

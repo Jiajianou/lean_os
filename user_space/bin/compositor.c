@@ -71,6 +71,7 @@
 #include "font8x16.h" /* M38: window-title text in the titlebar - drawn through this file's own clip-aware put_pixel, not gfx_draw_text (see draw_text_clipped's own note) */
 #include "gfx.h" /* M34: gfx_point_in_rect - shared hit-test helper, see draw_titlebar_buttons' own note on why drawing itself stays on this file's own clip-aware fill_rect */
 #include "power_mode.h" /* system_api/include/power_mode.h - POWER_OFF/POWER_REBOOT, M47's launcher Power controls */
+#include "spawn_error.h" /* system_api/include/spawn_error.h - M48, so a failed launch can say why */
 #include "settings_file.h" /* M47: the desktop's three settings on disk - read once, below, before any client connects */
 #include "signal.h" /* system_api/include/signal.h - SIGTERM, M30's WM_ACTION_CLOSE */
 #include "str.h"
@@ -240,6 +241,32 @@
 #define WMENU_BORDER   0x00506070u
 #define WMENU_TEXT     0x00FFFFFFu
 
+/* M48: transient toasts - the surface this system has never had for
+ * telling its user anything. Compositor-owned like the launcher, and for
+ * a sharper version of the same reason: the two things that most need to
+ * speak here are this process (a window it had to refuse) and a client
+ * that has just died, neither of which can be asked to draw its own.
+ *
+ * Stacked down from the top-right corner, oldest at the top, each
+ * auto-dismissing on its own deadline and dismissable early by a click.
+ * Top-right rather than above the taskbar: the bottom-right corner is
+ * where the tray is, and a toast that covers the clock is a toast in the
+ * way. */
+#define TOAST_MAX      4
+#define TOAST_W        300
+#define TOAST_H        56
+#define TOAST_GAP      8
+#define TOAST_MARGIN   12
+#define TOAST_STRIPE_W 4  /* the level's accent, down the left edge - the only thing that differs between an info and an error */
+#define TOAST_TTL_MS   4000
+#define TOAST_BG       0x00222A38u
+#define TOAST_BORDER   0x00465266u
+#define TOAST_TITLE_FG 0x00FFFFFFu
+#define TOAST_BODY_FG  0x00B4C0D0u
+#define TOAST_INFO_C   0x004C99E6u
+#define TOAST_WARN_C   0x00E0A33Cu
+#define TOAST_ERROR_C  0x00E05C55u
+
 /* M31's resize-edge hit-test bitmask - moved up here (still used first by
  * resize_hit_mask, far below) because M38's cursor-shape selection in
  * redraw_rect needs these bit values earlier in the file than that
@@ -272,6 +299,13 @@ typedef struct {
     uint8_t maximized; /* M30: WM_ACTION_MAXIMIZE/RESTORE toggle - see saved_x/y/w/h below */
     int32_t saved_x, saved_y, saved_w, saved_h; /* M30: pre-maximize geometry, restored by WM_ACTION_RESTORE - meaningless while !maximized */
     uint8_t alive; /* M29: 0 once this slot has been reclaimed (owning client died or closed) - excluded from redraw/hit-test/query, and eligible for accept_pending_window to hand to the next connecting client. Slots below window_count that are !alive are exactly the "holes" reap_dead_clients leaves behind. */
+    /* M48: this window's client was asked to stop - a titlebar close, a
+     * context menu, an external WM_ACTION_CLOSE/KILL. It is what keeps
+     * reap_dead_clients from announcing an ordinary close as a crash:
+     * both arrive here as "the process exited with a nonzero code" (a
+     * SIGTERM death is 143), and only the compositor knows whether it
+     * asked. Cleared when the slot is reused. */
+    uint8_t close_requested;
     uint8_t confirm_close; /* M36: from wm_create_request_t.confirm_close - see its own comment. Changes what apply_window_action's WM_ACTION_CLOSE branch does, nothing else. */
     int32_t client_pid; /* M29: from wm_create_request_t.client_pid - who to watch via SYS_task_alive so a crash (not just an orderly close) still frees this slot. -1 for a slot that's never been assigned. */
     char title[WM_TITLE_MAX]; /* echoed straight from wm_create_request_t.title into wm_window_info_t.title on every query - see accept_pending_query */
@@ -338,6 +372,20 @@ static int launcher_query_len;
 /* M47: -1, POWER_OFF or POWER_REBOOT - see POWER_CONFIRM_NONE. */
 static int power_confirm = POWER_CONFIRM_NONE;
 static int power_hover = POWER_CONFIRM_NONE; /* which Power button the cursor is over */
+
+/* M48: the live toasts, oldest first. A fixed array compacted on removal
+ * rather than a ring: at four entries the copy is nothing, and "oldest is
+ * index 0" is what makes the stacking order a property of the array
+ * instead of something the drawing has to work out. */
+typedef struct {
+    uint32_t level;
+    char title[WM_NOTIFY_TITLE_MAX];
+    char body[WM_NOTIFY_BODY_MAX];
+    long expires_ms;
+} toast_t;
+
+static toast_t toasts[TOAST_MAX];
+static int toast_count;
 
 /* M45: which window the titlebar context menu is open for (-1 = closed),
  * where it was raised, and which row the cursor is over. */
@@ -1032,6 +1080,38 @@ static void draw_launcher(void) {
     }
 }
 
+/* M48: where toast `i` sits - stacked down from the top-right corner,
+ * oldest at index 0. One function, so the drawing and the click hit-test
+ * cannot disagree about where a toast is (the same reason
+ * titlebar_button_rect exists). */
+static void toast_rect(int i, int32_t *out_x, int32_t *out_y) {
+    *out_x = (int32_t)fb_info.width - TOAST_W - TOAST_MARGIN;
+    *out_y = TOAST_MARGIN + i * (TOAST_H + TOAST_GAP);
+}
+
+static uint32_t toast_accent(uint32_t level) {
+    if (level == WM_NOTIFY_ERROR) {
+        return TOAST_ERROR_C;
+    }
+    return level == WM_NOTIFY_WARN ? TOAST_WARN_C : TOAST_INFO_C;
+}
+
+static void draw_toasts(void) {
+    for (int i = 0; i < toast_count; i++) {
+        int32_t x, y;
+        toast_rect(i, &x, &y);
+        fill_rect_rounded(x, y, TOAST_W, TOAST_H, TOAST_BG);
+        stroke_rect_rounded(x, y, TOAST_W, TOAST_H, TOAST_BORDER);
+        /* The stripe is inset by a pixel so the rounded border still
+         * reads as the toast's outline rather than being overdrawn at
+         * the corners. */
+        fill_rect(x + 1, y + GFX_CORNER_R, TOAST_STRIPE_W, TOAST_H - 2 * GFX_CORNER_R,
+                   toast_accent(toasts[i].level));
+        draw_text_clipped(x + TOAST_STRIPE_W + 10, y + 10, toasts[i].title, TOAST_TITLE_FG, 1 /* bold */);
+        draw_text_clipped(x + TOAST_STRIPE_W + 10, y + 10 + FONT_HEIGHT + 4, toasts[i].body, TOAST_BODY_FG, 0);
+    }
+}
+
 /* M45: the three verbs a window context menu offers. Item 0's label
  * follows the window's own state, so the menu never offers to minimize
  * something that already is - the taskbar's copy of this menu
@@ -1140,6 +1220,11 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
     if (launcher_open) {
         draw_launcher();
     }
+    /* M48: above even the launcher. A toast is usually *about* something
+     * that just failed, and the launcher is one of the things that raises
+     * them (a spawn that didn't work) - so a toast hidden behind it would
+     * be hidden at exactly the moment it mattered. */
+    draw_toasts();
     const uint8_t *cursor_shape_now = cursor_shape;
     int rmask = hovered_resize_mask();
     if ((rmask & (RESIZE_TOP | RESIZE_LEFT)) == (RESIZE_TOP | RESIZE_LEFT) ||
@@ -1336,6 +1421,73 @@ static void set_focus(int idx) {
     dirty = 1;
 }
 
+/* M48: raise a toast. Bounded copies from the caller's strings, and a
+ * full stack drops its *oldest* entry rather than refusing the new one -
+ * a burst of failures should show you the most recent ones, and the
+ * dropped one was already on its way out. */
+static void toast_post(uint32_t level, const char *title, const char *body) {
+    if (toast_count == TOAST_MAX) {
+        for (int i = 1; i < TOAST_MAX; i++) {
+            toasts[i - 1] = toasts[i];
+        }
+        toast_count--;
+    }
+    toast_t *t = &toasts[toast_count++];
+    t->level = level;
+    int i = 0;
+    for (; title && title[i] && i < WM_NOTIFY_TITLE_MAX - 1; i++) {
+        t->title[i] = title[i];
+    }
+    t->title[i] = '\0';
+    i = 0;
+    for (; body && body[i] && i < WM_NOTIFY_BODY_MAX - 1; i++) {
+        t->body[i] = body[i];
+    }
+    t->body[i] = '\0';
+    t->expires_ms = sys_uptime_ms() + TOAST_TTL_MS;
+    dirty = 1;
+}
+
+/* Drops every toast whose deadline has passed, keeping the rest packed
+ * from index 0 so toast_rect's stacking stays a property of the array.
+ * Called once per main-loop pass - the deadline is the only thing that
+ * removes a toast on its own, and nothing else will notice it. */
+static void toasts_expire(long now_ms) {
+    int out = 0;
+    for (int i = 0; i < toast_count; i++) {
+        if (toasts[i].expires_ms > now_ms) {
+            if (out != i) {
+                toasts[out] = toasts[i];
+            }
+            out++;
+        }
+    }
+    if (out != toast_count) {
+        toast_count = out;
+        dirty = 1;
+    }
+}
+
+/* A click on a toast dismisses it early. Returns 1 if one was hit, in
+ * which case the click is consumed and must not also reach whatever is
+ * underneath - a toast that appears over a window's close button and
+ * passes the click through would be worse than one you cannot dismiss. */
+static int toast_click(int32_t px, int32_t py) {
+    for (int i = 0; i < toast_count; i++) {
+        int32_t x, y;
+        toast_rect(i, &x, &y);
+        if (gfx_point_in_rect(px, py, x, y, TOAST_W, TOAST_H)) {
+            for (int j = i + 1; j < toast_count; j++) {
+                toasts[j - 1] = toasts[j];
+            }
+            toast_count--;
+            dirty = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* M29: shared teardown for a window slot, however it stops being valid -
  * a client crashing (reap_dead_clients, below) today, an explicit close
  * (M30's WM_ACTION_CLOSE) later. Clears focus if this was the focused
@@ -1357,6 +1509,7 @@ static void reclaim_window(int idx) {
     win->alive = 0;
     win->minimized = 0;
     win->overhang = 0;
+    win->close_requested = 0;
     win->client_pid = -1;
     /* M45: a context menu raised on this window has nothing left to act
      * on - and Force Quit is one of its rows, so this is the common case,
@@ -1385,6 +1538,18 @@ static void reclaim_window(int idx) {
 static void reap_dead_clients(void) {
     for (int i = 0; i < window_count; i++) {
         if (windows[i].alive && sys_task_alive(windows[i].client_pid) == 0) {
+            /* M48: SYS_task_alive's 0-vs-2 split has been able to tell a
+             * crash from an orderly exit since M29 and had never
+             * mentioned it to anyone. But "nonzero exit code" is not the
+             * same question as "did this surprise us": a SIGTERM death is
+             * 143, so an ordinary titlebar close arrives here looking
+             * exactly like a crash. close_requested is the difference -
+             * only a death the compositor did not ask for is news. */
+            if (!windows[i].close_requested) {
+                toast_post(WM_NOTIFY_ERROR,
+                            windows[i].title[0] ? windows[i].title : "A program",
+                            "stopped unexpectedly.");
+            }
             reclaim_window(i);
         }
     }
@@ -1457,6 +1622,11 @@ static void refuse_window(int resp_write_fd, const char *reason) {
     resp.width = 0;
     resp.height = 0;
     sys_write(resp_write_fd, &resp, sizeof(resp));
+
+    /* M48: M40 gave this a klog line so it would be one grep away. That
+     * is still true and still useful, but nobody reads stdout on a
+     * desktop - so it says it on screen too. */
+    toast_post(WM_NOTIFY_WARN, "Window refused", reason);
 
     const char prefix[] = "[wm] window request refused: ";
     sys_write(1, prefix, sizeof(prefix) - 1);
@@ -1596,6 +1766,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     win->minimized = 0;
     win->maximized = 0;
     win->alive = 1;
+    win->close_requested = 0;
     win->confirm_close = req.confirm_close;
     win->client_pid = req.client_pid;
     int ti = 0;
@@ -1695,6 +1866,7 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
              * exit code - signal deaths always are, system_api/include/
              * signal.h) within one loop iteration and reclaim the slot
              * then, the exact same path an actual crash goes through. */
+            win->close_requested = 1; /* M48: so its death isn't announced as a crash */
             sys_kill(win->client_pid, SIGTERM);
         }
     } else if (action == WM_ACTION_KILL) {
@@ -1707,6 +1879,7 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
          * reap_dead_clients notices the death and reclaims it, so a force
          * quit, an ordinary close and a real crash all converge on one
          * teardown path rather than three. */
+        win->close_requested = 1; /* M48: the user asked for this one too */
         sys_kill(win->client_pid, SIGKILL);
     } else if (action == WM_ACTION_SET_PANEL_OVERHANG) {
         /* M45: only a panel has anywhere to put one, and never more than
@@ -1920,12 +2093,15 @@ static void launcher_set_open(int open) {
 static void launcher_launch_selected(void) {
     if (launcher_selected >= 0 && launcher_selected < launcher_match_count) {
         /* Whatever it is. SYS_spawn refuses anything that isn't a valid
-         * ELF image without taking the kernel down (M40's audit), so
-         * launching a data file simply does nothing - which is the right
-         * behavior for a list that is honestly "every file on disk"
-         * rather than a curated set of applications this project has no
-         * metadata to build. */
-        sys_spawn(launcher_entries[launcher_matches[launcher_selected]], "");
+         * ELF image without taking the kernel down (M40's audit) - and
+         * since M48 it says *which* refusal, so launching a data file
+         * from a list that is honestly "every file on disk" now explains
+         * itself instead of silently doing nothing. */
+        const char *name = launcher_entries[launcher_matches[launcher_selected]];
+        long rc = sys_spawn(name, "");
+        if (rc < 0) {
+            toast_post(WM_NOTIFY_ERROR, name, spawn_error_message(rc));
+        }
     }
     launcher_set_open(0);
 }
@@ -2098,6 +2274,25 @@ static void accept_pending_settings(int settings_read_fd) {
     dirty = 1;
 }
 
+/* M48: any client's one-way notification request. Same non-blocking
+ * poll-then-read shape as accept_pending_action, and the same
+ * fire-and-forget contract - there is nothing to reply to. */
+static void accept_pending_notify(int notify_read_fd) {
+    if (sys_pipe_poll(notify_read_fd) < (long)sizeof(wm_notify_request_t)) {
+        return;
+    }
+    wm_notify_request_t req;
+    if (read_exact(notify_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
+        return;
+    }
+    /* The strings arrive from another process, so they are not trusted to
+     * be terminated - toast_post copies them bounded, but it stops at a
+     * NUL, so one has to exist. */
+    req.title[WM_NOTIFY_TITLE_MAX - 1] = '\0';
+    req.body[WM_NOTIFY_BODY_MAX - 1] = '\0';
+    toast_post(req.level, req.title, req.body);
+}
+
 /* M44: the read side of the same three settings - see wm.h's own note on
  * why a one-way channel stopped being enough once the desktop, not the
  * compositor, became the thing that paints the background. Same
@@ -2235,6 +2430,14 @@ static void handle_mouse(void) {
          * cannot be running anyway while the launcher is up (opening it
          * takes a click on the taskbar or a keychord, neither of which
          * can happen mid-drag). */
+        /* M48: a toast is drawn over everything, so it takes its own
+         * click before any other hit-test - including the launcher's,
+         * which it is drawn on top of. */
+        if (left_down_edge && toast_click(cursor_x, cursor_y)) {
+            prev_buttons = mev.buttons;
+            continue;
+        }
+
         if (launcher_open) {
             if (left_down_edge) {
                 launcher_click(cursor_x, cursor_y);
@@ -2653,10 +2856,12 @@ int main(void) {
     int settings_fds[2];
     int settings_query_fds[2];
     int settings_query_resp_fds[2];
+    int notify_fds[2];
     if (sys_pipe_open(WM_QUERY_PIPE, query_fds) != 0 || sys_pipe_open(WM_QUERY_RESP_PIPE, query_resp_fds) != 0 ||
         sys_pipe_open(WM_ACTION_PIPE, action_fds) != 0 || sys_pipe_open(WM_SETTINGS_PIPE, settings_fds) != 0 ||
         sys_pipe_open(WM_SETTINGS_QUERY_PIPE, settings_query_fds) != 0 ||
-        sys_pipe_open(WM_SETTINGS_QUERY_RESP_PIPE, settings_query_resp_fds) != 0) {
+        sys_pipe_open(WM_SETTINGS_QUERY_RESP_PIPE, settings_query_resp_fds) != 0 ||
+        sys_pipe_open(WM_NOTIFY_PIPE, notify_fds) != 0) {
         sys_exit(1);
     }
     /* Every message this process (or any client) prints to stdout goes
@@ -2681,11 +2886,13 @@ int main(void) {
         accept_pending_action(action_fds[0]);
         accept_pending_settings(settings_fds[0]);
         accept_pending_settings_query(settings_query_fds[0], settings_query_resp_fds[1]);
+        accept_pending_notify(notify_fds[0]);
         reap_dead_clients();
         handle_mouse();
         handle_keyboard();
 
         long now = sys_uptime_ms();
+        toasts_expire(now); /* M48: a deadline is the only thing that retires a toast on its own */
         if (dirty || now - last_redraw_ms >= REDRAW_INTERVAL_MS) {
             redraw();
             dirty = 0;

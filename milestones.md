@@ -1852,49 +1852,104 @@ picker for.
 - [x] Full `tools/qemu-serial-test.sh` pass (33/33) and
       `tools/qemu-input-test.sh` pass (25/25)
 
-## M48 — System feedback: notifications, errors, no silent failures
+## M48 — System feedback: notifications, errors, no silent failures ✅
 
 M40 spent an entire milestone chasing a bug whose only symptom was
-"double-clicking that icon does nothing." The bug is fixed; the class of
-symptom is not. This system still has no way to tell its user anything.
+"double-clicking that icon does nothing." The bug was fixed; the class of
+symptom was not. This system had no way to tell its user anything.
 
-- [ ] A compositor-owned notification surface: transient toasts stacked
-      in a screen corner, auto-dismissing on a timer, click to dismiss
-      early. Compositor-owned like M43's launcher rather than a client,
-      because the things that most need to speak are the compositor
-      itself and a client that has just died
-- [ ] `WM_NOTIFY_PIPE` plus `wm_notify(title, body, level)` in
+- [x] A compositor-owned notification surface: transient toasts stacked
+      down from the top-right corner, auto-dismissing on their own
+      deadline, click to dismiss early. Compositor-owned like M43's
+      launcher rather than a client, and for a sharper version of the
+      same reason - the two things that most need to speak are the
+      compositor itself (a window it had to refuse) and a client that has
+      just *died*, neither of which can be asked to draw its own. Drawn
+      above even the launcher, since a failed launch is one of the things
+      that raises them
+- [x] Top-right rather than above the taskbar: the bottom-right corner is
+      the tray, and a toast that covers the clock is a toast in the way
+- [x] `WM_NOTIFY_PIPE` plus `wm_notify(level, title, body)` in
       `wmclient.h` - one-way, fire-and-forget, the same shape
-      `WM_SETTINGS_PIPE` already has. Levels info/warn/error differing
-      only in accent color. No buttons or actions on a toast: that is a
-      dialog's job and M36 already built dialogs
-- [ ] Every silent failure gets a voice, which is the actual point of
-      this milestone: a `SYS_spawn` that fails from a desktop icon or
-      the launcher (M40's exact symptom), a window the compositor had to
-      refuse (M40 made it print to stdout - nobody reads stdout on a
-      desktop), a file that fails to save, and a client that *crashed*
-      rather than exited, which M29's reap path can already distinguish
-      via `SYS_task_alive`'s 0-vs-2 split and currently mentions to
-      nobody
-- [ ] Spawn failure needs a reason, not just a `-1`. `SYS_spawn` returns
-      the same -1 for a missing file, a malformed ELF, a full task table
-      and out-of-memory - M40 audited all four of those into existence
-      and they remain indistinguishable to the caller. Distinct negative
-      codes plus one shared message table, so a toast can say "no such
-      program" instead of "failed to launch"
-- [ ] An in-window status line for the apps that own their own failures
-      (editor save errors, file manager open errors) - a toast in the
-      far corner is the wrong place for something about the window you
-      are looking directly at
-- [ ] New boot self-test (`[m48]`): a deliberately failing spawn
-      produces a toast whose pixels are where they should be, and it is
-      gone by its own deadline; each distinct spawn error code asserted
-      against a real cause (a missing name, an ordinary text file, a
-      truncated ELF - all three of which M40's validation already
-      rejects, just anonymously)
-- [ ] New interactive test: a real double-click on a desktop icon whose
-      program isn't on disk raises a toast, and clicking the toast
-      dismisses it early
+      `WM_SETTINGS_PIPE` already has. Levels info/warn/error differ only
+      in the accent stripe's color. No buttons: that is a dialog's job,
+      and M36 already built dialogs
+- [x] `system_api/include/spawn_error.h`: distinct negative codes plus
+      one shared message table. `SYS_spawn` had returned the same -1 for
+      a missing file, a malformed ELF, a full task table and
+      out-of-memory since M13 - M40 audited all four into existence and
+      they stayed indistinguishable to the caller, which is exactly why a
+      desktop icon that couldn't launch could only ever "do nothing".
+      `SPAWN_ERR_NOT_FOUND` stays -1 so every existing `pid < 0` test
+      keeps meaning what it meant. `sys_spawn` asks `elf_validate` and
+      `sched_has_free_task_slot` itself, duplicating checks
+      `process_spawn` makes internally, because process_spawn's NULL is
+      the ambiguity being removed and a spawn reads a whole file off disk
+      first
+- [x] Every silent failure got a voice: a spawn that fails from a desktop
+      icon (M40's exact symptom) or from the launcher, a window the
+      compositor had to refuse (M40 made it print to stdout - nobody
+      reads stdout on a desktop), and a client that *crashed*, which
+      M29's `SYS_task_alive` 0-vs-2 split has been able to distinguish
+      since that milestone and had mentioned to nobody
+- [x] **"Nonzero exit code" turned out not to be the same question as
+      "did this surprise us."** A SIGTERM death is 143, so an ordinary
+      titlebar close arrives at `reap_dead_clients` looking exactly like
+      a crash - wiring the toast straight to M29's existing test would
+      have announced every deliberate close as a failure. `window_t`
+      grew a `close_requested` flag, set by `WM_ACTION_CLOSE`/`KILL`, so
+      only a death the compositor did not ask for is news
+- [x] An in-window status line for the app that owns its own failures:
+      `file_manager.c` threw away `sys_spawn`'s result, so a file that
+      couldn't be opened looked exactly like a double-click that didn't
+      register. `text_editor.c` already had one (its "SAVE FAILED"
+      status), so this is the second user of the same idea rather than a
+      new one - a toast in the far corner is the wrong place for
+      something about the window you are looking directly at
+- [x] New boot self-test (`[m48]`, 9/9): a toast's accent stripe and
+      background where they should be, still there two seconds in, and
+      gone once its own 4s deadline passes - the last of which is the one
+      worth having, since a notification surface that only ever appears
+      is one that eventually covers the screen. Plus each distinct spawn
+      cause asserted against its own code (a missing name, an ordinary
+      text file, and a deliberately truncated ELF built from a real
+      compositor's first 64 bytes), and a check that two distinct codes
+      don't share one message - which is what makes the codes buy
+      anything
+- [x] Two new interactive tests: launching a non-program from the
+      launcher raises a toast that then expires on its own, and clicking
+      a toast dismisses it well inside its deadline (so the dismissal can
+      only be the click) without leaving anything behind. The click is
+      consumed rather than falling through, which matters because a toast
+      lands exactly where a maximized window's close button is
+- [x] **The new error codes found a real bug within an hour of
+      existing.** The seventh app launched from a desktop icon stopped
+      opening - and because a spawn failure now has a reason and a voice,
+      the desktop said "Too many programs are running." on screen instead
+      of doing nothing at all. `MAX_TASKS` (64) was exhausted: task ids
+      are assigned sequentially and slots are never recycled, so every
+      throwaway compositor and victim client the boot self-tests spawn is
+      charged against that table for the life of the machine. This
+      milestone's own extra self-test was the one that tipped it over -
+      the third time this project has shipped a bug that was really an
+      exactly-sized cap, and the first time the machine diagnosed itself
+- [x] So `kernel_main` now logs `[sched] task table at handoff: N of
+      MAX_TASKS` - which measured 54 of 64, leaving 4 for the session and
+      6 for apps. `MAX_TASKS` went to 128 from that measurement rather
+      than from a guess: 54 + 4 + 10 concurrent app windows = 68 for a
+      full desktop *once*, and the remaining 60 are the part that
+      matters, since closing an app does not give its slot back. M50's
+      cap re-derivation starts from this line rather than from nothing
+- [x] **The Makefile had no header dependency tracking**, found while
+      fixing that: raising `MAX_TASKS` in a header recompiled nothing and
+      produced a kernel that still logged the old cap. Every translation
+      unit that wasn't independently touched had been linking against
+      whatever struct layout it last saw - and `task_t` has changed size
+      twice in this arc. `-MMD -MP` plus an `-include` of the generated
+      .d files fixes it; touching `sched.h` now rebuilds the 36 objects
+      that actually depend on it
+- [x] Full `tools/qemu-serial-test.sh` pass (34/34) and
+      `tools/qemu-input-test.sh` pass (27/27)
 
 ## M49 — Input completeness: scroll wheel, keyboard chords, drag & drop
 
