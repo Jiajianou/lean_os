@@ -24,6 +24,7 @@
 #include "net/icmp.h"
 #include "net/net.h"
 #include "panic.h"
+#include "proc.h"      /* system_api/include/proc.h - task_info_t, M45's SYS_taskinfo self-test. Resolves to the system_api header, not kernel/proc/proc.h - see syscall.c's own note on the search order. */
 #include "proc/proc.h"
 #include "sched/sched.h"
 #include "signal.h"  /* system_api/include/signal.h */
@@ -54,7 +55,9 @@
     X(gui_terminal)                  \
     X(text_editor)                   \
     X(file_manager)                  \
-    X(settings)
+    X(settings)                    \
+    X(task_manager)                \
+    X(wm_stubborn)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -584,8 +587,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
 
     sched_init();
     klog_puts("[sched] round-robin scheduler initialized (this context is task 0).\n");
-    task_spawn(demo_task, "A");
-    task_spawn(demo_task, "B");
+    task_spawn("demo-a", demo_task, "A");
+    task_spawn("demo-b", demo_task, "B");
     klog_puts("[sched] spawned tasks A and B; letting them run via "
                "preemption for ~1.5s...\n");
     pit_sleep_ms(1500);
@@ -606,7 +609,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         panic("syscall self-test: SYS_write returned an unexpected length");
     }
 
-    task_spawn(syscall_exit_task, NULL);
+    task_spawn("syscall-exit", syscall_exit_task, NULL);
     pit_sleep_ms(200);
     klog_puts("[syscall] SYS_exit self-test task ran and terminated.\n\n");
 
@@ -626,8 +629,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
     if (!test_pipe) {
         panic("pipe self-test: pipe_create failed");
     }
-    task_t *producer = task_spawn(pipe_producer_task, test_pipe);
-    task_t *consumer = task_spawn(pipe_consumer_task, test_pipe);
+    task_t *producer = task_spawn("pipe-producer", pipe_producer_task, test_pipe);
+    task_t *consumer = task_spawn("pipe-consumer", pipe_consumer_task, test_pipe);
     while (producer->state != TASK_TERMINATED || consumer->state != TASK_TERMINATED) {
         schedule();
     }
@@ -659,7 +662,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
      * actually being delivered through scheduler_tick's per-tick
      * pending-signal check (sched.c) - syscall_handler's check (M14)
      * would never fire for a task that never syscalls. */
-    task_t *spinner = task_spawn(spinner_task, NULL);
+    task_t *spinner = task_spawn("spinner", spinner_task, NULL);
     pit_sleep_ms(100);
     if (do_syscall(SYS_kill, (uint64_t)spinner->id, SIGTERM, 0) != 0) {
         panic("SYS_kill self-test: kill on a live task failed");
@@ -680,8 +683,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
      * single-pid form M13 already proved. */
     while (do_syscall(SYS_wait, (uint64_t)-1, 0, 0) != -1) {
     }
-    task_t *quick_a = task_spawn(quick_task, NULL);
-    task_t *quick_b = task_spawn(quick_task, NULL);
+    task_t *quick_a = task_spawn("quick", quick_task, NULL);
+    task_t *quick_b = task_spawn("quick", quick_task, NULL);
     long reaped1 = do_syscall(SYS_wait, (uint64_t)-1, 0, 0);
     long reaped2 = do_syscall(SYS_wait, (uint64_t)-1, 0, 0);
     int got_a = (reaped1 == quick_a->id) || (reaped2 == quick_a->id);
@@ -778,7 +781,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         if (memtest_size < 0) {
             panic("vfs_read(\"memtest\") failed - should exist, just seeded");
         }
-        task_t *memtest_task = process_spawn(memtest_image, (size_t)memtest_size, "");
+        task_t *memtest_task = process_spawn("memtest", memtest_image, (size_t)memtest_size, "");
         kfree(memtest_image);
         long memtest_status = do_syscall(SYS_wait, (uint64_t)memtest_task->id, 0, 0);
         if (memtest_status != 0) {
@@ -810,9 +813,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("vfs_read: compositor/wm_demo missing - should exist, just seeded");
         }
 
-        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        task_t *demo_task = process_spawn(demo_image, (size_t)demo_size, "");
+        task_t *demo_task = process_spawn("wm_demo", demo_image, (size_t)demo_size, "");
         kfree(demo_image);
 
         long demo_status = do_syscall(SYS_wait, (uint64_t)demo_task->id, 0, 0);
@@ -911,7 +914,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("vfs_read: compositor/gui_clock/gui_paint missing - should exist, just seeded");
         }
 
-        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(200); /* let the compositor map the fb and open its request/response pipes before any client tries to connect */
 
@@ -920,11 +923,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
          * multiple scheduler quanta) before the next one starts - so
          * which window ends up at index 0 vs 1 is deterministic instead
          * of a race between two tasks starting from the same instant. */
-        task_t *clock_task = process_spawn(clock_image, (size_t)clock_size, "");
+        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
         kfree(clock_image);
         pit_sleep_ms(500);
 
-        task_t *paint_task = process_spawn(paint_image, (size_t)paint_size, "");
+        task_t *paint_task = process_spawn("gui_paint", paint_image, (size_t)paint_size, "");
         kfree(paint_image);
         pit_sleep_ms(1000); /* gui_paint connects (stealing focus) and both settle into the compositor's periodic redraw */
 
@@ -1027,15 +1030,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("vfs_read: compositor/desktop_shell/gui_clock missing - should exist, just seeded");
         }
 
-        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(200);
 
-        task_t *shell_task = process_spawn(shell_image, (size_t)shell_size, "");
+        task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
         kfree(shell_image);
         pit_sleep_ms(500); /* connects, lists files, draws its first frame */
 
-        task_t *clock_task = process_spawn(clock_image, (size_t)clock_size, "");
+        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
         kfree(clock_image);
         pit_sleep_ms(1000); /* connects (window 1, focused); desktop_shell's next periodic query picks it up */
 
@@ -1135,11 +1138,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("vfs_read: compositor/gui_clock missing - should exist, just seeded");
         }
 
-        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(200);
 
-        task_t *clock_task = process_spawn(clock_image, (size_t)clock_size, "");
+        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
         kfree(clock_image);
         pit_sleep_ms(500); /* connects (window 0), draws its first frame */
 
@@ -1324,7 +1327,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         if (comp_size < 0) {
             panic("vfs_read: compositor missing - should exist, just seeded");
         }
-        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(300);
 
@@ -1385,11 +1388,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("vfs_read: compositor/text_editor missing - should exist, just seeded");
         }
 
-        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(200);
 
-        task_t *editor_task = process_spawn(editor_image, (size_t)editor_size, "");
+        task_t *editor_task = process_spawn("text_editor", editor_image, (size_t)editor_size, "");
         kfree(editor_image);
         pit_sleep_ms(500); /* connects (window 0), draws its first frame */
 
@@ -1485,11 +1488,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("vfs_read: compositor/gui_clock missing - should exist, just seeded");
         }
 
-        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(200);
 
-        task_t *clock_task = process_spawn(clock_image, (size_t)clock_size, "");
+        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
         kfree(clock_image);
         pit_sleep_ms(500); /* connects (window 0, auto-focused), draws its first frame */
 
@@ -1575,7 +1578,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         static volatile int smp_seen_cpu[MAX_CPUS];
         task_t *probe_tasks[4];
         for (int i = 0; i < 4; i++) {
-            probe_tasks[i] = task_spawn(smp_probe_task, (void *)smp_seen_cpu);
+            probe_tasks[i] = task_spawn("smp-probe", smp_probe_task, (void *)smp_seen_cpu);
         }
         pit_sleep_ms(2000);
 
@@ -1714,15 +1717,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("vfs_read: compositor/desktop_shell/gui_clock missing - should exist, just seeded");
         }
 
-        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(200);
 
-        task_t *shell_task = process_spawn(shell_image, (size_t)shell_size, "");
+        task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
         kfree(shell_image);
         pit_sleep_ms(500); /* connects as window 0 (the panel), draws its first frame */
 
-        task_t *clock_task = process_spawn(clock_image, (size_t)clock_size, "");
+        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
         kfree(clock_image);
         pit_sleep_ms(1000); /* connects as window 1 (focused); the taskbar's next periodic query picks it up */
 
@@ -1865,13 +1868,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("vfs_read: compositor/desktop_shell/text_editor missing - should exist, just seeded");
         }
 
-        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(200);
-        task_t *shell_task = process_spawn(shell_image, (size_t)shell_size, "");
+        task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
         kfree(shell_image);
         pit_sleep_ms(400); /* connects as window 0, the taskbar */
-        task_t *editor_task = process_spawn(editor_image, (size_t)editor_size, "");
+        task_t *editor_task = process_spawn("text_editor", editor_image, (size_t)editor_size, "");
         kfree(editor_image);
         pit_sleep_ms(700); /* connects as window 1, focused, and draws */
 
@@ -2002,13 +2005,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
             panic("vfs_read: compositor/desktop_icons/desktop_shell missing - should exist, just seeded");
         }
 
-        task_t *comp_task = process_spawn(comp_image, (size_t)comp_size, "");
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(200);
-        task_t *icons_task = process_spawn(icons_image, (size_t)icons_size, "");
+        task_t *icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
         kfree(icons_image);
         pit_sleep_ms(500);
-        task_t *shell_task = process_spawn(shell_image, (size_t)shell_size, "");
+        task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
         kfree(shell_image);
         pit_sleep_ms(700);
 
@@ -2094,6 +2097,189 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         }
         klog_puts("[m44] wallpaper gradient, taskbar translucency over it, and the "
                    "settings query round trip self-test passed (6/6 checks matched).\n\n");
+    }
+
+    /* M45 self-test: the three things this milestone claims that nothing
+     * before it could have checked.
+     *
+     * 1. SYS_taskinfo reports the tasks this test just spawned, by name.
+     *    A process was a pid and nothing else until this milestone, so
+     *    "the enumeration found compositor and wm_stubborn" is also the
+     *    assertion that process_spawn's new name plumbing reached the
+     *    scheduler at all.
+     *
+     * 2. WM_ACTION_CLOSE cannot remove a confirm_close client that
+     *    ignores WM_EVENT_CLOSE_REQUEST, and WM_ACTION_KILL can. Both
+     *    halves are checked, in that order, against the same window - the
+     *    close *failing* is the load-bearing one: it is what makes this
+     *    test fail the day the two verbs collapse back into one. M36's
+     *    contract explicitly permits a client to never answer, so
+     *    user_space/bin/wm_stubborn.c is a client that never does.
+     *
+     * 3. A force-killed client is reclaimed by M29's existing path with
+     *    no new code, which is worth asserting rather than assuming: the
+     *    window slot, its event pipe and the victim's own shm segment all
+     *    come back. The slot and the pipe are checked by connecting a
+     *    *second* stubborn client afterwards and watching it land in slot
+     *    0 and draw there (a reused slot resets the existing pipe in
+     *    place rather than opening a new one - see accept_pending_window);
+     *    the segment is checked as free frames, which is the one number
+     *    here that a signal death could plausibly get wrong, since
+     *    shm_free_by_owner runs from task_exit_with_code and nothing had
+     *    ever driven that path with a task that owned a segment.
+     *
+     * Window 0 is at x=100, y=100 (accept_pending_window's cascade,
+     * clamped to content_top_limit) and is 200x120, so (200, 150) is
+     * solidly inside its content and nowhere near its titlebar or
+     * borders. With no desktop client running, what is left when it goes
+     * away is the compositor's own DEFAULT_BG_COLOR fill. */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *stub_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !stub_image) {
+            panic("out of memory reading compositor/wm_stubborn back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t stub_size = vfs_read("wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || stub_size < 0) {
+            panic("vfs_read: compositor/wm_stubborn missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+
+        uint64_t frames_before_victim = pmm_free_frame_count();
+        task_t *victim = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
+        pit_sleep_ms(600); /* connects as window 0, focused, and fills its buffer */
+
+        uint32_t victim_pixel = fb_get_pixel(200, 150);
+        uint64_t frames_with_victim = pmm_free_frame_count();
+
+        /* (1) the enumeration. Both tasks were spawned by this test, so
+         * their ids are known exactly - this is not "find something that
+         * looks right", it is a lookup by pid with the name asserted. */
+        static task_info_t infos[MAX_TASKS];
+        long info_count = do_syscall(SYS_taskinfo, (uint64_t)infos, MAX_TASKS, 0);
+        int found_comp = 0, found_victim = 0, victim_shm = -1;
+        for (long i = 0; i < info_count; i++) {
+            if (infos[i].pid == comp_task->id && k_strcmp(infos[i].name, "compositor") == 0) {
+                found_comp = 1;
+            }
+            if (infos[i].pid == victim->id && k_strcmp(infos[i].name, "wm_stubborn") == 0) {
+                found_victim = 1;
+                victim_shm = infos[i].shm_segments;
+            }
+        }
+
+        int action_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+            panic("M45 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
+        }
+        wm_action_request_t req;
+        k_memset(&req, 0, sizeof(req));
+        req.window_id = 0;
+
+        /* (2a) the polite verb, which this client is entitled to ignore
+         * forever - so the window must still be there afterwards. */
+        req.action = WM_ACTION_CLOSE;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(600);
+        uint32_t after_close_pixel = fb_get_pixel(200, 150);
+        long alive_after_close = do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
+
+        /* (2b) the verb that always works. */
+        req.action = WM_ACTION_KILL;
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0); /* wait for the death itself, not just for the signal to be posted - see selftest_reap */
+        pit_sleep_ms(400);                                 /* then for reap_dead_clients to notice and repaint */
+        uint32_t after_kill_pixel = fb_get_pixel(200, 150);
+        long alive_after_kill = do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
+        uint64_t frames_after_kill = pmm_free_frame_count();
+
+        /* (3) the reclaim. A second client connecting now must be handed
+         * the slot the first one gave up, and must be able to draw
+         * through it - which it can only do if the shm segment and the
+         * event pipe behind that slot are both live again. */
+        task_t *victim2 = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
+        kfree(stub_image);
+        pit_sleep_ms(700);
+        uint32_t reused_slot_pixel = fb_get_pixel(200, 150);
+
+        selftest_reap(victim2);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        int all_ok = 1;
+        if (info_count <= 0 || !found_comp || !found_victim) {
+            klog_puts("[m45] SYS_taskinfo did not report the tasks this test spawned (count 0x");
+            klog_put_hex32((uint32_t)info_count);
+            klog_puts(", compositor found 0x");
+            klog_put_hex32((uint32_t)found_comp);
+            klog_puts(", wm_stubborn found 0x");
+            klog_put_hex32((uint32_t)found_victim);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+        if (victim_shm != 1) {
+            klog_puts("[m45] SYS_taskinfo reported the wrong shm-segment count for a task holding exactly one: 0x");
+            klog_put_hex32((uint32_t)victim_shm);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        static const struct { const char *what; uint32_t expected; } names[] = {
+            {"the stubborn client's window after it connected and drew", 0x00B03040u},
+            {"the same window after WM_ACTION_CLOSE, which this client is entitled to ignore - it must still be there", 0x00B03040u},
+            {"the desktop where that window was, after WM_ACTION_KILL", 0x001A1A2Eu},
+            {"a second client's window in the slot the killed one gave up", 0x00B03040u},
+        };
+        const uint32_t got[] = {victim_pixel, after_close_pixel, after_kill_pixel, reused_slot_pixel};
+        for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
+            if (got[i] != names[i].expected) {
+                klog_puts("[m45] pixel check failed: ");
+                klog_puts(names[i].what);
+                klog_puts(" - expected 0x");
+                klog_put_hex32(names[i].expected);
+                klog_puts(" got 0x");
+                klog_put_hex32(got[i]);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        if (alive_after_close != 1) {
+            klog_puts("[m45] WM_ACTION_CLOSE terminated a client that never answered WM_EVENT_CLOSE_REQUEST - the two verbs have collapsed into one (SYS_task_alive 0x");
+            klog_put_hex32((uint32_t)alive_after_close);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+        if (alive_after_kill != 0) {
+            klog_puts("[m45] WM_ACTION_KILL did not terminate the client (SYS_task_alive 0x");
+            klog_put_hex32((uint32_t)alive_after_kill);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+        /* The victim's own 64 KiB segment is 16 frames; its address space
+         * and stack are deliberately *not* reclaimed (there is no
+         * vmm_destroy_address_space in this project - see reclaim_window
+         * and shm.h's own note), so this is a "did shm_free_by_owner run
+         * on the signal path" check, not a leak-free-everything one. */
+        if (frames_after_kill < frames_with_victim + 16) {
+            klog_puts("[m45] killing a task that owned an shm segment did not hand its frames back: 0x");
+            klog_put_hex64(frames_before_victim);
+            klog_puts(" free before, 0x");
+            klog_put_hex64(frames_with_victim);
+            klog_puts(" with it running, 0x");
+            klog_put_hex64(frames_after_kill);
+            klog_puts(" after the kill\n");
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M45 process-control self-test: force quit did not behave as specified");
+        }
+        klog_puts("[m45] SYS_taskinfo naming, WM_ACTION_KILL forcing a confirm_close client "
+                   "WM_ACTION_CLOSE cannot, and the window slot/event pipe/shm reclaim after it "
+                   "self-test passed (8/8 checks).\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
@@ -2197,7 +2383,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
     if (init_size < 0) {
         panic("vfs_read(\"init\") failed - should exist, just seeded");
     }
-    process_spawn(init_image, (size_t)init_size, "");
+    process_spawn("init", init_image, (size_t)init_size, "");
     kfree(init_image);
 
     klog_puts("[init] PID 1 spawned - handing off to the desktop shell.\n\n");

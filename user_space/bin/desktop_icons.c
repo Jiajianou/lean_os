@@ -112,6 +112,7 @@ static const icon_def_t ICONS[] = {
     {"Settings", "settings",     "**"},
     {"Clock",    "gui_clock",    "()"},
     {"Paint",    "gui_paint",    "/\\"},
+    {"Tasks",    "task_manager", "T:"},
 };
 #define ICON_COUNT ((int)(sizeof(ICONS) / sizeof(ICONS[0])))
 

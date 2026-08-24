@@ -13,6 +13,7 @@
 #include <stddef.h>
 
 #include "input.h" /* system_api/include/input.h - mouse_event_t */
+#include "proc.h"  /* system_api/include/proc.h - task_info_t, M45 */
 #include "wm.h"    /* system_api/include/wm.h - wm_fb_info_t */
 
 long sys_write(int fd, const void *buf, size_t len);
@@ -158,3 +159,10 @@ long sys_clipboard_get(void *buf, size_t maxlen);
  * sys_readfile). Returns 0, or -1 on failure (name too long, no free
  * inode, no free space, or len exceeds leanfs's max file size). */
 long sys_writefile(const char *name, const void *buf, size_t len);
+
+/* M45: fills up to max_entries task_info_t records (system_api/include/
+ * proc.h) with a snapshot of every task the scheduler has ever created,
+ * terminated ones included. Returns how many were written, or -1 if buf
+ * is NULL or max_entries is 0. The caller sizes the array - same
+ * contract as sys_listfiles. */
+long sys_taskinfo(task_info_t *buf, long max_entries);

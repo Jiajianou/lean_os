@@ -91,6 +91,16 @@ void shm_free_by_owner(int owner_task_id) {
     }
 }
 
+int shm_count_by_owner(int owner_task_id) {
+    int n = 0;
+    for (int i = 0; i < MAX_SHM_SEGMENTS; i++) {
+        if (segments[i].used && segments[i].owner_task_id == owner_task_id) {
+            n++;
+        }
+    }
+    return n;
+}
+
 int64_t shm_get_size(int id) {
     if (id < 0 || id >= MAX_SHM_SEGMENTS || !segments[id].used) {
         return -1;

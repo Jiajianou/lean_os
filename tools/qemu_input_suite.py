@@ -41,8 +41,10 @@ CURRENT_TEST = "unknown"
 # strings.
 # ---------------------------------------------------------------------
 
-# desktop_icons.c: ICON_MARGIN 32, ICON_CELL_H 90, ICON_SIZE 48. Six icons
-# in one column at 1024x768. Coordinates are icon-box centers.
+# desktop_icons.c: ICON_MARGIN 32, ICON_CELL_H 90, ICON_SIZE 48. Seven
+# icons (M45 added Tasks) in one column at 1024x768 - the column wraps at
+# max_y 660, and the seventh sits at 572, so they still all fit in one.
+# Coordinates are icon-box centers.
 ICON_X = 56
 ICONS = [
     ("Terminal", "gui_terminal", 56),
@@ -51,6 +53,7 @@ ICONS = [
     ("Settings", "settings", 326),
     ("Clock", "gui_clock", 416),
     ("Paint", "gui_paint", 506),
+    ("Tasks", "task_manager", 596),
 ]
 
 ICON_BOX = 0x4C99E6          # desktop_icons.c ICON_BOX_COLOR
@@ -240,6 +243,29 @@ def titlebar_button_center(win_x, win_y, win_w, button):
 
 
 CLOCK_W = 200  # gui_clock.c WIN_W
+TASKS_W, TASKS_H = 420, 360  # task_manager.c WIN_W/WIN_H
+LIST_Y_IN_WIN = 40           # HEADER_H(22) + COLS_H(18)
+LIST_H_IN_WIN = TASKS_H - LIST_Y_IN_WIN - 34  # ...minus FOOTER_H
+SCROLLBAR_THUMB = 0x506080   # task_manager.c SCROLLBAR_THUMB
+
+# M45's two context menus, which are deliberately the same three verbs in
+# the same order drawn by two different processes - desktop_shell.c's
+# CTX_* for the taskbar one and compositor.c's WMENU_* for the titlebar
+# one. Identical geometry, so one set of constants covers both.
+MENU_W = 124
+MENU_ITEM_H = 22
+MENU_MINIMIZE, MENU_CLOSE, MENU_FORCE_QUIT = 0, 1, 2
+MENU_BG_RAW = 0x243040       # CTX_BG / WMENU_BG
+
+# The taskbar's copy rises out of the bar itself (WM_ACTION_SET_PANEL_
+# OVERHANG), so it is drawn into the panel's buffer and reaches the screen
+# through the panel's own translucency - unlike the compositor's copy,
+# which is drawn straight into the back buffer and is opaque.
+def taskbar_menu_row_center(slot, row):
+    """Where row `row` of the menu raised over taskbar slot `slot` is."""
+    x = SLOTS_X + slot * (SLOT_W + SLOT_GAP)
+    top = PANEL_TOP - MENU_ITEM_H * 3
+    return (x + MENU_W // 2, top + row * MENU_ITEM_H + MENU_ITEM_H // 2)
 
 
 # compositor.c: an ordinary window is placed at (100 + idx*40, 100 + idx*40).
@@ -691,6 +717,133 @@ def test_snap_drag_to_edge(m):
           "the snapped window is not confined to the right half")
 
 
+def test_taskbar_right_click_force_quit(m):
+    """M45's headline: a real right-click on a taskbar button raises a menu
+    that rises *out* of a 32px panel, and Force Quit on it removes the
+    window.
+
+    Everything here is new plumbing that no protocol-level test reaches.
+    The menu is drawn by desktop_shell.c into rows of its own buffer that
+    sit above the docked strip, and it is only visible - and only
+    clickable - because the compositor was told to raise the overhang
+    (WM_ACTION_SET_PANEL_OVERHANG). A test that sent WM_ACTION_KILL down
+    the action pipe would pass with every one of those pieces missing."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock
+    wait_for_windows(m, 1)
+
+    m.right_click(*slot_click(0))
+    # The menu occupies rows the panel did not previously composite at
+    # all, so "is it up" is a question about a pixel that was bare desktop
+    # a moment ago. Read at the menu's own top row, clear of its label
+    # text and of its 1px border.
+    probe = (SLOTS_X + MENU_W - 12, PANEL_TOP - MENU_ITEM_H * 3 + 6)
+    expected = panel_px(MENU_BG_RAW, probe[1])
+    wait_for(m, lambda s: s.px(*probe) == expected,
+             "right-clicking a taskbar button did not raise its context menu "
+             "(the panel overhang never came up)")
+
+    m.click(*taskbar_menu_row_center(0, MENU_FORCE_QUIT))
+    wait_for(m, lambda s: count_app_windows(s) == 0,
+             "Force Quit on the taskbar context menu did not remove the window")
+    # And the overhang goes back down with it - a menu that stayed
+    # composited would be a strip of stale pixels sitting over the desktop.
+    wait_for(m, lambda s: s.px(*probe) == desktop_px(probe[1]),
+             "the panel overhang stayed raised after the menu closed")
+
+
+def test_titlebar_right_click_force_quit(m):
+    """The same three verbs from the other entry point - a right-click on
+    the window's own titlebar, drawn by the compositor rather than by the
+    taskbar. Both end at apply_window_action, which is exactly why both
+    are worth driving from real pixels: the two menus are separate code,
+    and only the action underneath them is shared."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock
+    wait_for_windows(m, 1)
+
+    x, y = app_origin(FIRST_APP_IDX)
+    menu_x, menu_y = x + 60, y - TITLEBAR_H // 2
+    m.right_click(menu_x, menu_y)
+    # Compositor-drawn, so opaque - no panel blend. Probed on the *second*
+    # row: the pointer comes to rest inside the first one, which the
+    # compositor then draws hovered, so a probe there would be reading the
+    # highlight rather than the menu.
+    probe = (menu_x + MENU_W - 12, menu_y + MENU_ITEM_H + MENU_ITEM_H // 2)
+    wait_for(m, lambda s: s.px(*probe) == MENU_BG_RAW,
+             "right-clicking a titlebar did not raise the window context menu")
+
+    m.click(menu_x + MENU_W // 2, menu_y + MENU_FORCE_QUIT * MENU_ITEM_H + MENU_ITEM_H // 2)
+    wait_for(m, lambda s: count_app_windows(s) == 0,
+             "Force Quit on the titlebar context menu did not remove the window")
+
+
+def test_ctrl_shift_esc_opens_task_manager(m):
+    """The chord every desktop reserves for this, intercepted in
+    handle_keyboard beside Alt+Tab. Nothing else can open the task manager
+    without a click, and a chord that never reaches the compositor looks
+    exactly like a chord that isn't bound."""
+    boot(m)
+    check(count_app_windows(m.screenshot()) == 0, "the desktop did not start empty")
+    m.sendkey("ctrl-shift-esc")
+    wait_for_windows(m, 1)
+
+
+def test_task_manager_end_task(m):
+    """M45's task manager acting on a real process, through its own list
+    and its own button.
+
+    The victim is launched *after* the task manager, so it is the newest
+    task in the table and therefore the last row - tasks are appended and
+    never reordered (their slots are never recycled either, see
+    sched.c). Holding Down past the end of the list is what selects it
+    without this test having to know how many tasks a boot happens to
+    leave behind, which is a number no test should be asserting on."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[6][2])  # Tasks
+    wait_for_windows(m, 1)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock - the victim, and the newest task
+    wait_for_windows(m, 2)
+
+    tx, ty = app_origin(FIRST_APP_IDX)
+    # The task manager's own header strip: focuses its window without
+    # also landing on a list row. The clock's window (slot 3, at
+    # (220, 220), 200x90) is nowhere near this point.
+    m.click(tx + TASKS_W - 40, ty + 8)
+
+    # Far more Downs than there are tasks: the handler clamps at
+    # task_count - 1, so overshooting is how "select the last row" is
+    # expressed without knowing the count.
+    for _ in range(90):
+        m.sendkey("down")
+
+    # ...and then wait for the guest to have actually consumed them all
+    # before clicking anything. This is not politeness: 90 keystrokes is
+    # more than a 1024-byte event pipe holds (wm_event_t is 20 bytes), so
+    # the compositor blocks part-way through forwarding them - and its
+    # main loop services the mouse *before* the keyboard, which means a
+    # click issued while that backlog is draining lands in the middle of
+    # it. That is exactly how this test first failed: End Task fired with
+    # the selection still up in the desktop processes.
+    #
+    # The scrollbar is what says "done" precisely. gfx_draw_scrollbar puts
+    # the thumb's bottom edge flush with the track's only when scroll_top
+    # is at its maximum, which happens exactly when the selection has
+    # reached the last row - so this pixel is a direct read of the
+    # precondition this test needs, not a proxy for elapsed time.
+    sb = (tx + TASKS_W - 4, ty + LIST_Y_IN_WIN + LIST_H_IN_WIN - 2)
+    wait_for(m, lambda s: s.px(*sb) == SCROLLBAR_THUMB,
+             "the task list never scrolled to its last row", timeout=25.0)
+
+    # End Task, the leftmost of the two buttons (task_manager.c's
+    # END_BTN_X / BTN_Y).
+    end_x = tx + TASKS_W - 96 - 8 - 96 - 8 + 48
+    end_y = ty + TASKS_H - 22 - 6 + 11
+    m.click(end_x, end_y)
+    wait_for(m, lambda s: count_app_windows(s) == 1,
+             "End Task in the task manager did not terminate the selected process")
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -706,6 +859,10 @@ TESTS = [
     ("launcher_click_launches_a_result", test_launcher_click_launches_a_result),
     ("launcher_escape_dismisses", test_launcher_escape_dismisses),
     ("snap_drag_to_edge", test_snap_drag_to_edge),
+    ("taskbar_right_click_force_quit", test_taskbar_right_click_force_quit),
+    ("titlebar_right_click_force_quit", test_titlebar_right_click_force_quit),
+    ("ctrl_shift_esc_opens_task_manager", test_ctrl_shift_esc_opens_task_manager),
+    ("task_manager_end_task", test_task_manager_end_task),
     ("launch_close_stress", test_launch_close_stress),
 ]
 

@@ -121,3 +121,15 @@ global settings_elf_end
 settings_elf_start:
     incbin "build/settings.elf"
 settings_elf_end:
+
+global task_manager_elf_start
+global task_manager_elf_end
+task_manager_elf_start:
+    incbin "build/task_manager.elf"
+task_manager_elf_end:
+
+global wm_stubborn_elf_start
+global wm_stubborn_elf_end
+wm_stubborn_elf_start:
+    incbin "build/wm_stubborn.elf"
+wm_stubborn_elf_end:

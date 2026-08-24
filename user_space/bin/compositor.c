@@ -175,6 +175,23 @@
 #define LAUNCHER_SEL_BG  0x00335577u
 #define LAUNCHER_ROW_FG  0x00C8D4E4u
 
+/* M45: the window context menu the compositor draws for itself - what a
+ * right-click on a titlebar raises. Compositor-owned for the same reason
+ * the titlebar buttons are: it is about a window's frame, which is this
+ * process's own chrome, and no client has any business drawing it. (The
+ * *taskbar's* version of this same menu is deliberately the other way
+ * round - it belongs to desktop_shell.c and reaches the compositor
+ * through WM_ACTION_SET_PANEL_OVERHANG; see that action's own comment for
+ * the split.) Both drive apply_window_action, so the three entry points
+ * to "close this window" cannot drift apart on what close means. */
+#define WMENU_W        124
+#define WMENU_ITEM_H   22
+#define WMENU_COUNT    3
+#define WMENU_BG       0x00243040u
+#define WMENU_HOVER_BG 0x003A5A80u
+#define WMENU_BORDER   0x00506070u
+#define WMENU_TEXT     0x00FFFFFFu
+
 /* M31's resize-edge hit-test bitmask - moved up here (still used first by
  * resize_hit_mask, far below) because M38's cursor-shape selection in
  * redraw_rect needs these bit values earlier in the file than that
@@ -191,6 +208,16 @@ typedef struct {
     uint32_t *pixels;
     int evt_write_fd; /* write end of this window's own event pipe - see wm_event_pipe_name */
     uint8_t is_panel;  /* M22: chrome-less, always-on-top, bottom-docked - see wm_create_request_t.panel */
+    /* M45: a panel's buffer may be taller than the strip it docks. buf_y0
+     * is the buffer row that lands on win->y (0 for every non-panel
+     * window and every panel that docks its whole buffer); `overhang` is
+     * how many rows immediately above win->y are currently composited and
+     * click-routed - WM_ACTION_SET_PANEL_OVERHANG is the only thing that
+     * ever changes it. win->h stays the docked height throughout, which
+     * is what keeps window placement and maximize (both of which reserve
+     * room for a panel) indifferent to a menu that is up for a moment. */
+    int32_t buf_y0;
+    int32_t overhang;
     uint8_t translucent; /* M44: blend rather than blit - see wm_create_request_t.translucent */
     uint8_t is_desktop; /* chrome-less, full-screen, always-on-*bottom* - see wm_create_request_t.desktop */
     uint8_t minimized; /* M22: hidden from redraw() and from click hit-testing, but the client process keeps running (WM_ACTION_TOGGLE_MINIMIZE) */
@@ -260,6 +287,12 @@ static int launcher_selected; /* index into launcher_matches, not into launcher_
 static int launcher_scroll;   /* first match drawn - see launcher_clamp_scroll */
 static char launcher_query[LAUNCHER_QUERY_MAX];
 static int launcher_query_len;
+
+/* M45: which window the titlebar context menu is open for (-1 = closed),
+ * where it was raised, and which row the cursor is over. */
+static int wmenu_window = -1;
+static int32_t wmenu_x, wmenu_y;
+static int wmenu_hover = -1;
 
 /* M43: the snap preview's rect, in the same outer (border- and
  * titlebar-inclusive) coordinates a window's own frame is drawn in.
@@ -441,7 +474,27 @@ static void fill_rect_blend(int32_t x, int32_t y, int32_t w, int32_t h,
     }
 }
 
+/* Defined much further down, with the rest of the panel-aware placement
+ * limits; forward-declared here because the shadow fill (immediately
+ * below) is one of its callers and has to come earlier in the file, for
+ * the same z-order reasons draw_titlebar_buttons already does. */
+static int32_t content_bottom_limit(void);
+
+/* M45: clipped so a window's shadow never falls on the docked taskbar.
+ * With M44's translucency the bar blends against whatever is composited
+ * under it, so a shadow reaching that far doesn't sit *behind* the panel,
+ * it tints it - which makes the bar's own colors depend on which windows
+ * happen to be open. It also broke the input harness, whose taskbar
+ * probes are how it counts windows at all. The rule is simple enough to
+ * state: the panel is chrome, and window shadows stop at it. */
 static void fill_rect_shadow(int32_t x, int32_t y, int32_t w, int32_t h) {
+    int32_t limit = content_bottom_limit();
+    if (y + h > limit) {
+        h = limit - y;
+    }
+    if (h <= 0) {
+        return;
+    }
     fill_rect_blend(x, y, w, h, 0x00000000u, SHADOW_NUM, SHADOW_DEN);
 }
 
@@ -450,7 +503,11 @@ static void fill_rect_shadow(int32_t x, int32_t y, int32_t w, int32_t h) {
  * wants the whole window, so this is back to being one function. */
 static void blit_window(const window_t *win) {
     int32_t x0 = max_i32(win->x, clip_x0);
-    int32_t y0 = max_i32(win->y, clip_y0);
+    /* M45: a panel with a raised overhang paints the rows above its dock
+     * line too - one rect, not a second blit path, because the source row
+     * for any screen row is the same expression either way (see buf_y0).
+     * `overhang` is 0 for every window that has no such thing. */
+    int32_t y0 = max_i32(win->y - win->overhang, clip_y0);
     int32_t x1 = min_i32(win->x + win->w, clip_x1);
     int32_t y1 = min_i32(win->y + win->h, clip_y1);
     if (x1 <= x0) {
@@ -464,7 +521,7 @@ static void blit_window(const window_t *win) {
      * what costs it the memcpy below, and why it is opt-in. */
     if (win->translucent) {
         for (int32_t row = y0; row < y1; row++) {
-            const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y) * (uint32_t)win->buf_w;
+            const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y + win->buf_y0) * (uint32_t)win->buf_w;
             uint32_t *dst = back_buf + (uint32_t)row * back_pitch_pixels;
             for (int32_t col = x0; col < x1; col++) {
                 uint32_t src = src_row[col - win->x];
@@ -484,7 +541,7 @@ static void blit_window(const window_t *win) {
          * never changes, so indexing by anything else would read the
          * wrong bytes (or, once w > buf_w could ever happen, off the end
          * of it entirely - see window_t's own comment on buf_w). */
-        const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y) * (uint32_t)win->buf_w;
+        const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y + win->buf_y0) * (uint32_t)win->buf_w;
         /* One memcpy per row instead of a per-pixel put_pixel loop. This
          * is the hottest loop in the system - every window, every full
          * redraw, and the desktop background alone is a whole screen of
@@ -763,6 +820,33 @@ static void draw_launcher(void) {
     }
 }
 
+/* M45: the three verbs a window context menu offers. Item 0's label
+ * follows the window's own state, so the menu never offers to minimize
+ * something that already is - the taskbar's copy of this menu
+ * (desktop_shell.c) makes the same choice from the same field, which is
+ * why both read the state rather than hardcoding a label. */
+static const char *wmenu_label(int idx, const window_t *win) {
+    if (idx == 0) {
+        return win->minimized ? "Restore" : "Minimize";
+    }
+    return idx == 1 ? "Close" : "Force Quit";
+}
+
+static void draw_window_menu(void) {
+    const window_t *win = &windows[wmenu_window];
+    int32_t h = WMENU_ITEM_H * WMENU_COUNT;
+    fill_rect_rounded(wmenu_x, wmenu_y, WMENU_W, h, WMENU_BG);
+    stroke_rect_rounded(wmenu_x, wmenu_y, WMENU_W, h, WMENU_BORDER);
+    for (int i = 0; i < WMENU_COUNT; i++) {
+        int32_t ry = wmenu_y + i * WMENU_ITEM_H;
+        if (i == wmenu_hover) {
+            fill_rect_rounded(wmenu_x + 2, ry + 1, WMENU_W - 4, WMENU_ITEM_H - 2, WMENU_HOVER_BG);
+        }
+        draw_text_clipped(wmenu_x + 8, ry + (WMENU_ITEM_H - FONT_HEIGHT) / 2,
+                           wmenu_label(i, win), WMENU_TEXT, 0);
+    }
+}
+
 /* Recomposites and re-presents only [x0,x1) x [y0,y1) (clamped to the
  * real screen) rather than assuming the whole display - see clip_x0..
  * clip_y1's own comment above for why: a cursor moving is by far the
@@ -832,6 +916,12 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
             blit_window(&windows[i]); /* no border/titlebar - a panel is its own chrome */
         }
     }
+    /* M45: above the panels (it can be raised on a window whose titlebar
+     * sits right against the taskbar) but below the launcher, which owns
+     * the screen outright while it is up. */
+    if (wmenu_window >= 0 && windows[wmenu_window].alive) {
+        draw_window_menu();
+    }
     /* Above every window and every panel, below only the cursor - see
      * draw_launcher's own note on why this is compositor-owned. */
     if (launcher_open) {
@@ -863,7 +953,11 @@ static void redraw(void) {
  * panel or desktop background has no titlebar (both are undecorated), so
  * its clickable area is just its own content rect. */
 static int point_in_window(const window_t *win, int32_t x, int32_t y) {
-    int32_t top = (win->is_panel || win->is_desktop) ? win->y : win->y - TITLEBAR_H;
+    /* M45: whatever a panel has raised above its dock line is part of
+     * what it can be clicked on - otherwise the menu it just drew would
+     * be visible and inert, and the click would fall through to the
+     * window underneath it. */
+    int32_t top = (win->is_panel || win->is_desktop) ? win->y - win->overhang : win->y - TITLEBAR_H;
     return x >= win->x && x < win->x + win->w && y >= top && y < win->y + win->h;
 }
 
@@ -1011,7 +1105,15 @@ static void reclaim_window(int idx) {
     }
     win->alive = 0;
     win->minimized = 0;
+    win->overhang = 0;
     win->client_pid = -1;
+    /* M45: a context menu raised on this window has nothing left to act
+     * on - and Force Quit is one of its rows, so this is the common case,
+     * not a corner one. */
+    if (wmenu_window == idx) {
+        wmenu_window = -1;
+        wmenu_hover = -1;
+    }
     if (focused_window == idx) {
         set_focus(-1);
     }
@@ -1194,22 +1296,48 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
 
     window_t *win = &windows[idx];
     win->is_panel = req.panel;
+    /* M45: a panel's docked strip may be shorter than the buffer it
+     * allocated - the rest is the overhang it can raise a menu into (see
+     * wm_create_request_t.panel_dock_h). Clamped rather than trusted:
+     * 0 (every panel before M45) and anything past the buffer both mean
+     * "dock the whole thing". */
+    int32_t dock_h = (int32_t)height;
+    if (req.panel && req.panel_dock_h > 0 && req.panel_dock_h < height) {
+        dock_h = (int32_t)req.panel_dock_h;
+    }
     if (req.panel) {
         win->x = 0;
-        win->y = (int32_t)fb_info.height - (int32_t)height;
+        win->y = (int32_t)fb_info.height - dock_h;
     } else if (req.desktop) {
         win->x = 0;
         win->y = 0;
     } else {
         win->x = 100 + idx * 40;
         /* Cascade, clamped so a titlebar never starts off the top of the
-         * screen - the same limit every other placement path uses. */
-        win->y = max_i32(100 + idx * 40, content_top_limit());
+         * screen - the same limit every other placement path uses.
+         *
+         * M45: and clamped at the *bottom* too, so a window whose height
+         * would carry it under the docked taskbar is moved up instead.
+         * This was always wrong (the bottom of such a window is behind an
+         * always-on-top panel, so it is genuinely unreachable, not just
+         * crowded) but nothing had ever hit it: it takes a tall window
+         * far enough down the cascade, which is exactly what adding a
+         * seventh desktop icon produced. The top limit wins if a window
+         * is too tall to fit at all - a titlebar off the top of the
+         * screen cannot be grabbed either, and that is the worse of the
+         * two failures. */
+        int32_t cascade_y = 100 + idx * 40;
+        int32_t bottom_fit = content_bottom_limit() - (int32_t)height;
+        win->y = max_i32(min_i32(cascade_y, bottom_fit), content_top_limit());
     }
     win->w = (int32_t)width;
-    win->h = (int32_t)height;
+    win->h = req.panel ? dock_h : (int32_t)height;
     win->buf_w = (int32_t)width;  /* M30: fixed for this connection's whole lifetime - see window_t's own comment */
     win->buf_h = (int32_t)height;
+    /* The buffer row that lands on win->y: the docked strip is the
+     * *bottom* dock_h rows, so everything above it is the overhang. */
+    win->buf_y0 = (int32_t)height - win->h;
+    win->overhang = 0;
     win->pixels = (uint32_t *)vaddr;
     win->evt_write_fd = evt_write_fd;
     win->translucent = req.translucent;
@@ -1286,7 +1414,7 @@ static void accept_pending_query(int query_read_fd, int query_resp_write_fd) {
  * titlebar's minimize button" (M22 and M30's own bullet asking for
  * exactly this) drive the literal same code, not two copies that could
  * drift apart. */
-static void apply_window_action(int idx, uint32_t action) {
+static void apply_window_action(int idx, uint32_t action, int32_t value) {
     window_t *win = &windows[idx];
     if (action == WM_ACTION_FOCUS) {
         win->minimized = 0;
@@ -1317,6 +1445,34 @@ static void apply_window_action(int idx, uint32_t action) {
              * signal.h) within one loop iteration and reclaim the slot
              * then, the exact same path an actual crash goes through. */
             sys_kill(win->client_pid, SIGTERM);
+        }
+    } else if (action == WM_ACTION_KILL) {
+        /* M45: the verb that always works. Unlike WM_ACTION_CLOSE just
+         * above, confirm_close is deliberately not consulted - M36's
+         * contract lets a client never answer WM_EVENT_CLOSE_REQUEST, and
+         * an app that cannot be forced is an app that is on your screen
+         * permanently. The slot itself is untouched here for exactly the
+         * same reason the SIGTERM path leaves it alone: M29's
+         * reap_dead_clients notices the death and reclaims it, so a force
+         * quit, an ordinary close and a real crash all converge on one
+         * teardown path rather than three. */
+        sys_kill(win->client_pid, SIGKILL);
+    } else if (action == WM_ACTION_SET_PANEL_OVERHANG) {
+        /* M45: only a panel has anywhere to put one, and never more than
+         * the buffer it actually allocated above its dock line. */
+        int32_t want = value;
+        if (!win->is_panel) {
+            want = 0;
+        }
+        if (want < 0) {
+            want = 0;
+        }
+        if (want > win->buf_y0) {
+            want = win->buf_y0;
+        }
+        if (want != win->overhang) {
+            win->overhang = want;
+            dirty = 1;
         }
     } else if (action == WM_ACTION_MAXIMIZE) {
         if (!win->maximized) {
@@ -1354,6 +1510,57 @@ static void apply_window_action(int idx, uint32_t action) {
             win->maximized = 0;
             dirty = 1;
         }
+    }
+}
+
+/* M45: raise the window context menu for `idx` at the click point,
+ * clamped so it is drawn wholly on screen rather than half off an edge -
+ * the same clamp desktop_icons.c's own right-click menu has done since
+ * M35. */
+static void wmenu_open_at(int idx, int32_t px, int32_t py) {
+    wmenu_window = idx;
+    wmenu_hover = -1;
+    int32_t h = WMENU_ITEM_H * WMENU_COUNT;
+    wmenu_x = min_i32(px, (int32_t)fb_info.width - WMENU_W);
+    wmenu_y = min_i32(py, (int32_t)fb_info.height - h);
+    wmenu_x = max_i32(wmenu_x, 0);
+    wmenu_y = max_i32(wmenu_y, 0);
+    dirty = 1;
+}
+
+static void wmenu_close(void) {
+    if (wmenu_window >= 0) {
+        wmenu_window = -1;
+        wmenu_hover = -1;
+        dirty = 1;
+    }
+}
+
+/* Which row (0..WMENU_COUNT-1) is at (px, py), or -1 if the point is
+ * outside the menu entirely. */
+static int wmenu_row_at(int32_t px, int32_t py) {
+    if (!gfx_point_in_rect(px, py, wmenu_x, wmenu_y, WMENU_W, WMENU_ITEM_H * WMENU_COUNT)) {
+        return -1;
+    }
+    return (py - wmenu_y) / WMENU_ITEM_H;
+}
+
+/* An open menu owns the next click outright, the same rule every other
+ * menu in this project follows - it either picks a row or dismisses, and
+ * never also reaches whatever is underneath it. */
+static void wmenu_click(int32_t px, int32_t py) {
+    int idx = wmenu_window;
+    int row = wmenu_row_at(px, py);
+    wmenu_close();
+    if (row < 0 || idx < 0 || !windows[idx].alive) {
+        return;
+    }
+    if (row == 0) {
+        apply_window_action(idx, WM_ACTION_TOGGLE_MINIMIZE, 0);
+    } else if (row == 1) {
+        apply_window_action(idx, WM_ACTION_CLOSE, 0);
+    } else {
+        apply_window_action(idx, WM_ACTION_KILL, 0);
     }
 }
 
@@ -1568,7 +1775,7 @@ static void accept_pending_action(int action_read_fd) {
     if (req.window_id < 0 || req.window_id >= window_count || !windows[req.window_id].alive) {
         return;
     }
-    apply_window_action(req.window_id, req.action);
+    apply_window_action(req.window_id, req.action, req.value);
 }
 
 /* M33/M38: the compositor's two global (non-per-window) settings - see
@@ -1721,6 +1928,29 @@ static void handle_mouse(void) {
             continue;
         }
 
+        /* M45: an open window context menu owns the pointer the same way
+         * the launcher does - it is drawn over the window it acts on, so
+         * a click falling through would land on something the user can't
+         * see. A right-click while it is up re-raises it wherever the
+         * cursor now is, rather than leaving a stale one behind. */
+        if (wmenu_window >= 0) {
+            if (left_down_edge) {
+                wmenu_click(cursor_x, cursor_y);
+            } else if (right_down_edge) {
+                wmenu_close();
+            } else if (!(mev.buttons & 1)) {
+                int row = wmenu_row_at(cursor_x, cursor_y);
+                if (row != wmenu_hover) {
+                    wmenu_hover = row;
+                    dirty = 1;
+                }
+            }
+            if (!right_down_edge) {
+                prev_buttons = mev.buttons;
+                continue;
+            }
+        }
+
         /* M31: a drag in progress owns every event until release - no
          * hit-testing, no focus changes, no forwarding to the window's
          * own content, just updating its geometry. drag_window's own
@@ -1738,7 +1968,7 @@ static void handle_mouse(void) {
                     windows[drag_window].alive) {
                     apply_window_action(drag_window, drag_snap_hint == SNAP_LEFT
                                                           ? WM_ACTION_SNAP_LEFT
-                                                          : WM_ACTION_SNAP_RIGHT);
+                                                          : WM_ACTION_SNAP_RIGHT, 0);
                 }
                 drag_mode = DRAG_NONE;
                 drag_window = -1;
@@ -1840,11 +2070,11 @@ static void handle_mouse(void) {
             }
             if (btn_hit_idx >= 0) {
                 if (btn_hit == BTN_CLOSE) {
-                    apply_window_action(btn_hit_idx, WM_ACTION_CLOSE);
+                    apply_window_action(btn_hit_idx, WM_ACTION_CLOSE, 0);
                 } else if (btn_hit == BTN_MINIMIZE) {
-                    apply_window_action(btn_hit_idx, WM_ACTION_TOGGLE_MINIMIZE);
+                    apply_window_action(btn_hit_idx, WM_ACTION_TOGGLE_MINIMIZE, 0);
                 } else {
-                    apply_window_action(btn_hit_idx, windows[btn_hit_idx].maximized ? WM_ACTION_RESTORE : WM_ACTION_MAXIMIZE);
+                    apply_window_action(btn_hit_idx, windows[btn_hit_idx].maximized ? WM_ACTION_RESTORE : WM_ACTION_MAXIMIZE, 0);
                 }
                 prev_buttons = mev.buttons;
                 continue; /* consumed by chrome - not also a focus-changing click on whatever's under it */
@@ -1909,6 +2139,27 @@ static void handle_mouse(void) {
 
             focus_window_under_cursor();
         } else if (right_down_edge) {
+            /* M45: a right-click on an ordinary window's titlebar raises
+             * the window context menu instead of only focusing it. Same
+             * topmost-first, first-match-wins order as every other
+             * hit-test in this function; anywhere else, right-click keeps
+             * doing exactly what M40 made it do (pick a window so the
+             * event routes to the one actually under the cursor). */
+            int tb_idx = -1;
+            for (int i = window_count - 1; i >= 0; i--) {
+                const window_t *w = &windows[i];
+                if (w->alive && !w->is_panel && !w->is_desktop && !w->minimized &&
+                    point_in_titlebar(w, cursor_x, cursor_y)) {
+                    tb_idx = i;
+                    break;
+                }
+            }
+            if (tb_idx >= 0) {
+                set_focus(tb_idx);
+                wmenu_open_at(tb_idx, cursor_x, cursor_y);
+                prev_buttons = mev.buttons;
+                continue;
+            }
             focus_window_under_cursor();
         }
 
@@ -1977,7 +2228,7 @@ static void alt_tab_cycle(void) {
             idx += window_count;
         }
         if (windows[idx].alive && !windows[idx].is_panel && !windows[idx].is_desktop) {
-            apply_window_action(idx, WM_ACTION_FOCUS);
+            apply_window_action(idx, WM_ACTION_FOCUS, 0);
             return;
         }
     }
@@ -2002,6 +2253,17 @@ static void handle_keyboard(void) {
         }
         if (ch == ' ' && (mods & KBD_MOD_CTRL)) {
             launcher_set_open(!launcher_open);
+            continue;
+        }
+        /* M45: Ctrl+Shift+Esc, the chord every desktop reserves for
+         * exactly this, intercepted here beside Alt+Tab and Ctrl+Space
+         * for the same reason - a window-manager shortcut is not
+         * something any client should be able to see or swallow. The task
+         * manager is an ordinary program on disk, so this is one spawn
+         * and nothing else; it is equally reachable from its desktop icon
+         * and from the launcher. */
+        if (ch == 27 && (mods & KBD_MOD_CTRL) && (mods & KBD_MOD_SHIFT)) {
+            sys_spawn("task_manager", "");
             continue;
         }
         /* M43: while it is up, the launcher has the keyboard outright -

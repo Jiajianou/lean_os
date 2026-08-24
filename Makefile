@@ -102,7 +102,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # no filesystem driver the *boot loader* can use to load from disk, only
 # the kernel's own (M12), so this is still how anything gets onto the disk
 # leanfs formats on first boot in the first place.
-USER_PROGRAMS := hello echo cat ls init shell memtest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings
+USER_PROGRAMS := hello echo cat ls init shell memtest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
 KERNEL_C_SRCS := $(shell find kernel -name '*.c' -not -path 'kernel/boot/*')
@@ -234,22 +234,31 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 # read/write.
 FS_START_LBA     := 2048
 FS_TOTAL_SECTORS := 65560
-IMAGE_SECTORS    := 69632
+# M45: 69632 -> 71680, to make room for the ESP moving past the filesystem
+# (see ESP_START_LBA just below).
+IMAGE_SECTORS    := 71680
 
 # The EFI System Partition the UEFI firmware boots from - kernel/boot/mbr.asm's
 # partition entry hardcodes these same two numbers (passed in via `nasm -D`,
 # see $(MBR_BIN)'s recipe above) and must move with them if they ever change
-# here. Sits in the same "boot blob has to stay clear of this" gap
-# FS_START_LBA already carves out below; unlike leanfs, nothing here needs
-# to persist rebuild to rebuild, so every `make` reformats it from scratch
-# alongside BOOTX64.EFI.
-ESP_START_LBA    := 1024
+# here. Unlike leanfs, nothing here needs to persist rebuild to rebuild, so
+# every `make` reformats it from scratch alongside BOOTX64.EFI.
+#
+# M45: moved from LBA 1024 to past the end of the filesystem. It used to sit
+# in the 1024-sector gap between the boot blob and leanfs, and the kernel
+# grew into it - the guard below caught that at exactly 1025 sectors, which
+# is the guard doing its job but also a wall one milestone's worth of code
+# away. There is nothing that wants the ESP *before* the filesystem, and
+# moving it to the end turns that 1024-sector ceiling into a 2047-sector one
+# (the kernel now only has to stay clear of FS_START_LBA), at the cost of
+# 2048 more sectors of image file. IMAGE_SECTORS above moved with it.
+ESP_START_LBA    := 69632
 ESP_SECTOR_COUNT := 1024
 
 $(IMAGE): $(MBR_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)
 	@boot_sectors=$$(( ($$(stat -f%z $(MBR_BIN)) + $$(stat -f%z $(KERNEL_BIN))) / 512 )); \
-	if [ $$boot_sectors -ge $(ESP_START_LBA) ]; then \
-		echo "error: boot image ($$boot_sectors sectors) has grown into the ESP's start (LBA $(ESP_START_LBA)) - move ESP_START_LBA out further here and in mbr.asm" >&2; \
+	if [ $$boot_sectors -ge $(FS_START_LBA) ]; then \
+		echo "error: boot image ($$boot_sectors sectors) has grown into the filesystem's start (LBA $(FS_START_LBA)) - move FS_START_LBA out further here and in kernel/fs/leanfs.c's LEANFS_START_LBA" >&2; \
 		exit 1; \
 	fi
 	cat $(MBR_BIN) $(KERNEL_BIN) > $(IMAGE)

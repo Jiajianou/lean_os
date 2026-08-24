@@ -42,5 +42,13 @@
 #define USER_IMAGE_LIMIT (USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE)
 
 /* arg may be NULL (equivalent to an empty string) for a program that
- * doesn't take one. */
-task_t *process_spawn(const uint8_t *image, size_t image_size, const char *arg);
+ * doesn't take one.
+ *
+ * M45: `name` is what this process will be listed as (task_t.name,
+ * sched.h) - the path it was loaded from, which is the only thing at
+ * this layer that resembles a human-readable identity. Passed in rather
+ * than derived here because this function is handed an in-memory image,
+ * not a path: sys_spawn (which read the file) and kernel_main's own
+ * self-tests (which read it via vfs_read) are the two callers that
+ * actually know it. May be NULL. */
+task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size, const char *arg);

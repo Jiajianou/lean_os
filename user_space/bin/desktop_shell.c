@@ -43,6 +43,38 @@
 #include "wmclient.h"
 
 #define PANEL_HEIGHT      32
+
+/* M45: the bar can now raise a context menu *out* of itself. A panel is
+ * clipped to its own buffer and 32px tall, and a three-item menu is
+ * ~72px, so this window allocates PANEL_OVERHANG_MAX extra rows above
+ * the docked strip and asks the compositor to composite and click-route
+ * as many of them as the menu currently needs
+ * (WM_ACTION_SET_PANEL_OVERHANG / wm_set_panel_overhang). M41 built that
+ * mechanism for its top-bar dropdowns and M42 deleted it with the bar;
+ * this brings it back rather than inventing a second one.
+ *
+ * The buffer's layout is: rows [0, PANEL_OVERHANG_MAX) are the overhang,
+ * rows [PANEL_OVERHANG_MAX, PANEL_OVERHANG_MAX + PANEL_HEIGHT) are the
+ * bar itself. `bar_gfx` below is a gfx_ctx_t over just that second
+ * region, which is why not one coordinate in the bar's own drawing had
+ * to move for any of this. */
+#define PANEL_OVERHANG_MAX 96
+#define PANEL_BUF_H       (PANEL_OVERHANG_MAX + PANEL_HEIGHT)
+
+/* The right-click menu on a running-app button. Its three verbs are the
+ * same ones (and in the same order) the compositor draws for a
+ * right-click on the window's own titlebar - they act on another
+ * client's window, which is exactly the "the app defines the menu, the
+ * system only draws it" split this milestone kept. Every row ends at
+ * wm_send_action, so all three ways to close a window are literally one
+ * code path. */
+#define CTX_W        124
+#define CTX_ITEM_H   22
+#define CTX_COUNT    3
+#define CTX_BG       0x00243040u
+#define CTX_HOVER_BG 0x003A5A80u
+#define CTX_BORDER   0x00506070u
+#define CTX_TEXT     0x00FFFFFFu
 #define BTN_H             24
 #define BTN_Y             4  /* (PANEL_HEIGHT - BTN_H) / 2 */
 #define EDGE_PAD          4
@@ -122,6 +154,22 @@ static int running_count;
 static int hovered = HOVER_NONE;
 static long start_pressed_until_ms;
 
+/* M45: the context menu's state. `ctx_slot` is an index into
+ * running_slots (not a window id) so the menu re-reads that slot's live
+ * focused/minimized state on every redraw - the label on its first row
+ * follows it. -1 = closed. `ctx_x`/`ctx_y` are in the *bar's* coordinate
+ * space (y negative: the menu is above the bar's own top edge), the same
+ * space every event the compositor routes here arrives in. */
+static int ctx_slot = -1;
+static int32_t ctx_x, ctx_y;
+static int ctx_hover = -1;
+static int32_t ctx_overhang; /* what the compositor was last told to raise - only re-sent when it changes */
+
+/* A gfx_ctx_t over just the docked strip of this window's buffer. Every
+ * function that draws the bar takes this, so the bar's own coordinates
+ * are unchanged by the overhang rows sitting above it. */
+static gfx_ctx_t bar_gfx;
+
 /* "MM:SS" of uptime - this project has no RTC/wall-clock source (see
  * gui_clock.c for the same note). Minutes wrap at 100 so the field never
  * outgrows CLOCK_TEXT_W. Lived here until M41 moved it to the top menu
@@ -196,52 +244,102 @@ static void refresh_running_slots(wm_window_t *self) {
     }
 }
 
-static void draw_start_button(wm_window_t *self, int pressed) {
+static void draw_start_button(int pressed) {
     uint32_t bg = pressed ? START_PRESS_BG
                           : (hovered == HOVER_START ? START_HOVER_BG : START_BG);
     uint32_t glyph = pressed ? START_PRESS_GLYPH_FG : START_GLYPH_FG;
-    gfx_fill_rect_rounded(&self->gfx, START_X, BTN_Y, START_W, BTN_H, bg);
-    gfx_draw_rect_rounded(&self->gfx, START_X, BTN_Y, START_W, BTN_H, SLOT_BORDER_COLOR);
+    gfx_fill_rect_rounded(&bar_gfx, START_X, BTN_Y, START_W, BTN_H, bg);
+    gfx_draw_rect_rounded(&bar_gfx, START_X, BTN_Y, START_W, BTN_H, SLOT_BORDER_COLOR);
 
     int32_t gy = BTN_Y + (BTN_H - (2 * START_TILE + START_TILE_GAP)) / 2;
     for (int row = 0; row < 2; row++) {
         for (int col = 0; col < 2; col++) {
-            gfx_fill_rect(&self->gfx,
+            gfx_fill_rect(&bar_gfx,
                           START_GLYPH_X + col * (START_TILE + START_TILE_GAP),
                           gy + row * (START_TILE + START_TILE_GAP),
                           START_TILE, START_TILE, glyph);
         }
     }
-    gfx_draw_text(&self->gfx, START_TEXT_X, BTN_Y + (BTN_H - FONT_HEIGHT) / 2, "Start", LABEL_COLOR);
+    gfx_draw_text(&bar_gfx, START_TEXT_X, BTN_Y + (BTN_H - FONT_HEIGHT) / 2, "Start", LABEL_COLOR);
 }
 
 static void draw_tray(wm_window_t *self) {
     int32_t tray_x = (int32_t)self->width - TRAY_W;
-    gfx_draw_line(&self->gfx, tray_x, BTN_Y + 2, tray_x, BTN_Y + BTN_H - 3, TRAY_SEP_COLOR);
+    gfx_draw_line(&bar_gfx, tray_x, BTN_Y + 2, tray_x, BTN_Y + BTN_H - 3, TRAY_SEP_COLOR);
 
     int32_t icon_y = (PANEL_HEIGHT - TRAY_ICON) / 2;
     for (int i = 0; i < TRAY_ICONS; i++) {
-        gfx_draw_rect(&self->gfx, tray_x + TRAY_PAD + i * (TRAY_ICON + TRAY_ICON_GAP), icon_y,
+        gfx_draw_rect(&bar_gfx, tray_x + TRAY_PAD + i * (TRAY_ICON + TRAY_ICON_GAP), icon_y,
                       TRAY_ICON, TRAY_ICON, TRAY_ICON_COLOR);
     }
 
     char clock_text[CLOCK_CHARS + 1];
     format_clock(sys_uptime_ms(), clock_text);
-    gfx_draw_text(&self->gfx, (int32_t)self->width - TRAY_PAD - CLOCK_TEXT_W,
+    gfx_draw_text(&bar_gfx, (int32_t)self->width - TRAY_PAD - CLOCK_TEXT_W,
                   (PANEL_HEIGHT - FONT_HEIGHT) / 2, clock_text, CLOCK_FG);
 }
 
+/* M45: how tall the raised region has to be for the menu as currently
+ * positioned. The menu's top edge is at ctx_y (negative - above the
+ * bar), so this is simply how far above the bar's own top edge it
+ * reaches. Sent to the compositor only when it changes; the compositor
+ * clamps it to the buffer it actually allocated, so an over-tall answer
+ * degrades to "as much as exists" rather than reading past the buffer. */
+static int32_t ctx_needed_overhang(void) {
+    if (ctx_slot < 0) {
+        return 0;
+    }
+    return ctx_y < 0 ? -ctx_y : 0;
+}
+
+/* The first row's verb follows the target window's live state - the same
+ * choice the compositor's titlebar version of this menu makes from the
+ * same field, which is why both read it rather than hardcoding a label. */
+static const char *ctx_label(int i) {
+    if (i == 0) {
+        return running_slots[ctx_slot].minimized ? "Restore" : "Minimize";
+    }
+    return i == 1 ? "Close" : "Force Quit";
+}
+
+/* Drawn into the *window's* full buffer, not bar_gfx: the whole point is
+ * that it is above the bar. Buffer y is PANEL_OVERHANG_MAX + the menu's
+ * own (negative) bar-space y. */
+static void draw_ctx_menu(wm_window_t *self) {
+    int32_t by = PANEL_OVERHANG_MAX + ctx_y;
+    int32_t h = CTX_ITEM_H * CTX_COUNT;
+    gfx_fill_rect_rounded(&self->gfx, ctx_x, by, CTX_W, h, CTX_BG);
+    gfx_draw_rect_rounded(&self->gfx, ctx_x, by, CTX_W, h, CTX_BORDER);
+    for (int i = 0; i < CTX_COUNT; i++) {
+        int32_t ry = by + i * CTX_ITEM_H;
+        if (i == ctx_hover) {
+            gfx_fill_rect_rounded(&self->gfx, ctx_x + 2, ry + 1, CTX_W - 4, CTX_ITEM_H - 2, CTX_HOVER_BG);
+        }
+        gfx_draw_text(&self->gfx, ctx_x + 8, ry + (CTX_ITEM_H - FONT_HEIGHT) / 2, ctx_label(i), CTX_TEXT);
+    }
+}
+
+/* Which menu row is at (x, y) in bar space, or -1 if the point is
+ * outside the menu. */
+static int ctx_row_at(int32_t x, int32_t y) {
+    if (ctx_slot < 0 ||
+        !gfx_point_in_rect(x, y, ctx_x, ctx_y, CTX_W, CTX_ITEM_H * CTX_COUNT)) {
+        return -1;
+    }
+    return (y - ctx_y) / CTX_ITEM_H;
+}
+
 static void redraw(wm_window_t *self) {
-    gfx_fill_rect(&self->gfx, 0, 0, (int32_t)self->width, (int32_t)self->height, PANEL_BG);
+    gfx_fill_rect(&bar_gfx, 0, 0, (int32_t)self->width, PANEL_HEIGHT, PANEL_BG);
     /* Top edge is otherwise the only thing telling this panel apart from
      * the desktop it's docked to - one line makes it read as a distinct
      * bar rather than the desktop background bleeding into it. The
      * second, fainter line right under it is a one-pixel bevel highlight
      * - together they read as a lit top edge instead of a flat outline. */
-    gfx_draw_line(&self->gfx, 0, 0, (int32_t)self->width - 1, 0, PANEL_BORDER_COLOR);
-    gfx_draw_line(&self->gfx, 0, 1, (int32_t)self->width - 1, 1, PANEL_BEVEL_COLOR);
+    gfx_draw_line(&bar_gfx, 0, 0, (int32_t)self->width - 1, 0, PANEL_BORDER_COLOR);
+    gfx_draw_line(&bar_gfx, 0, 1, (int32_t)self->width - 1, 1, PANEL_BEVEL_COLOR);
 
-    draw_start_button(self, sys_uptime_ms() < start_pressed_until_ms);
+    draw_start_button(sys_uptime_ms() < start_pressed_until_ms);
 
     for (int i = 0; i < running_count; i++) {
         const running_slot_t *slot = &running_slots[i];
@@ -249,12 +347,22 @@ static void redraw(wm_window_t *self) {
                                       : (slot->focused ? RUNNING_SLOT_FOCUS_BG
                                                        : (i == hovered ? RUNNING_SLOT_HOVER_BG : RUNNING_SLOT_BG));
         uint32_t border = slot->focused ? RUNNING_SLOT_FOCUS_BORDER : SLOT_BORDER_COLOR;
-        gfx_fill_rect_rounded(&self->gfx, slot->x, BTN_Y, slot->w, SLOT_H, bg);
-        gfx_draw_rect_rounded(&self->gfx, slot->x, BTN_Y, slot->w, SLOT_H, border);
-        gfx_draw_text(&self->gfx, slot->x + LABEL_PAD, BTN_Y + 4, slot->name, LABEL_COLOR);
+        gfx_fill_rect_rounded(&bar_gfx, slot->x, BTN_Y, slot->w, SLOT_H, bg);
+        gfx_draw_rect_rounded(&bar_gfx, slot->x, BTN_Y, slot->w, SLOT_H, border);
+        gfx_draw_text(&bar_gfx, slot->x + LABEL_PAD, BTN_Y + 4, slot->name, LABEL_COLOR);
     }
 
     draw_tray(self);
+
+    /* M45: the overhang rows are cleared on every redraw and repainted
+     * only if the menu is up. The compositor stops compositing them the
+     * moment the overhang goes back to 0, so this is belt-and-braces -
+     * but a stale menu surviving in a buffer that gets raised again is
+     * exactly the kind of thing that would show up once, confusingly. */
+    gfx_fill_rect(&self->gfx, 0, 0, (int32_t)self->width, PANEL_OVERHANG_MAX, PANEL_BG);
+    if (ctx_slot >= 0) {
+        draw_ctx_menu(self);
+    }
 }
 
 /* Which button (if any) is at (x, y) - HOVER_START, a running-slot index,
@@ -275,6 +383,48 @@ static int button_at(int32_t x, int32_t y) {
     return HOVER_NONE;
 }
 
+/* Raises the menu above the slot that was right-clicked, clamped so it
+ * cannot be drawn off the bar's own left/right edges or ask for more
+ * overhang than exists. */
+static void ctx_open_on(int slot, int32_t x, int32_t win_w) {
+    ctx_slot = slot;
+    ctx_hover = -1;
+    ctx_x = x;
+    if (ctx_x > win_w - CTX_W) {
+        ctx_x = win_w - CTX_W;
+    }
+    if (ctx_x < 0) {
+        ctx_x = 0;
+    }
+    ctx_y = -(CTX_ITEM_H * CTX_COUNT);
+}
+
+static void ctx_close(void) {
+    ctx_slot = -1;
+    ctx_hover = -1;
+}
+
+/* Both menu rows that end a window drive wm_send_action, exactly as the
+ * bar's own left-click already does - Close is the polite verb
+ * (WM_ACTION_CLOSE, which honors an app's confirm_close opt-in) and
+ * Force Quit is the one that always works (WM_ACTION_KILL, which
+ * deliberately does not). */
+static void ctx_activate(int row) {
+    if (ctx_slot < 0 || ctx_slot >= running_count) {
+        ctx_close();
+        return;
+    }
+    int32_t window_id = running_slots[ctx_slot].window_id;
+    ctx_close();
+    if (row == 0) {
+        wm_send_action(window_id, WM_ACTION_TOGGLE_MINIMIZE);
+    } else if (row == 1) {
+        wm_send_action(window_id, WM_ACTION_CLOSE);
+    } else if (row == 2) {
+        wm_send_action(window_id, WM_ACTION_KILL);
+    }
+}
+
 static void handle_click(int32_t x, int32_t y) {
     int hit = button_at(x, y);
     if (hit == HOVER_START) {
@@ -290,9 +440,16 @@ static void handle_click(int32_t x, int32_t y) {
 
 int main(void) {
     wm_window_t win;
-    if (wm_connect_panel(PANEL_HEIGHT, &win) != 0) {
+    /* M45: the window is PANEL_BUF_H tall, but only PANEL_HEIGHT of it
+     * docks - see PANEL_OVERHANG_MAX. */
+    if (wm_connect_panel(PANEL_BUF_H, PANEL_HEIGHT, &win) != 0) {
         sys_exit(1);
     }
+    /* The bar's own drawing surface: the bottom PANEL_HEIGHT rows of the
+     * buffer, which is where the compositor docks them. */
+    bar_gfx.pixels = win.gfx.pixels + (int32_t)win.width * PANEL_OVERHANG_MAX;
+    bar_gfx.width = (int32_t)win.width;
+    bar_gfx.height = PANEL_HEIGHT;
 
     refresh_running_slots(&win);
     redraw(&win);
@@ -302,7 +459,32 @@ int main(void) {
         wm_event_t ev;
         int changed = 0;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+            if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
+                /* M45: right-click a running-app button -> its context
+                 * menu. Anywhere else on the bar just dismisses one that
+                 * is already up; there is nothing a right-click on the
+                 * Start button or the tray would sensibly offer. */
+                int hit = button_at(ev.x, ev.y);
+                if (hit >= 0) {
+                    ctx_open_on(hit, running_slots[hit].x, (int32_t)win.width);
+                } else {
+                    ctx_close();
+                }
+                changed = 1;
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ctx_slot >= 0) {
+                /* An open menu owns the next left-click outright - it
+                 * either picks a row or dismisses, and never also reaches
+                 * the taskbar button underneath it. Same rule every other
+                 * menu in this project follows. */
+                int row = ctx_row_at(ev.x, ev.y);
+                if (row >= 0) {
+                    ctx_activate(row);
+                } else {
+                    ctx_close();
+                }
+                refresh_running_slots(&win);
+                changed = 1;
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 handle_click(ev.x, ev.y);
                 refresh_running_slots(&win);
                 changed = 1;
@@ -312,6 +494,13 @@ int main(void) {
                  * routing block. Redrawing only when the answer actually
                  * changes keeps a moving cursor from repainting the whole
                  * bar on every single event. */
+                if (ctx_slot >= 0) {
+                    int row = ctx_row_at(ev.x, ev.y);
+                    if (row != ctx_hover) {
+                        ctx_hover = row;
+                        changed = 1;
+                    }
+                }
                 int now_over = button_at(ev.x, ev.y);
                 if (now_over != hovered) {
                     hovered = now_over;
@@ -337,6 +526,15 @@ int main(void) {
         }
         if (changed) {
             redraw(&win);
+        }
+        /* M45: tell the compositor how far out of the bar to draw, after
+         * the pixels are already there - raising the overhang first would
+         * composite one frame of whatever the buffer last held. Only on a
+         * change: this is a pipe write, and it runs every loop. */
+        int32_t want = ctx_needed_overhang();
+        if (want != ctx_overhang) {
+            ctx_overhang = want;
+            wm_set_panel_overhang(win.window_id, want);
         }
     }
 }

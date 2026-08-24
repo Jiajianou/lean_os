@@ -17,7 +17,7 @@
 ; numbers.
 
 %ifndef ESP_START_LBA
-%define ESP_START_LBA 1024
+%define ESP_START_LBA 69632
 %endif
 %ifndef ESP_SECTOR_COUNT
 %define ESP_SECTOR_COUNT 1024

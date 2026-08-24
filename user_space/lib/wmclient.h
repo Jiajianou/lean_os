@@ -37,7 +37,11 @@ int wm_connect(uint32_t width, uint32_t height, const char *title, wm_window_t *
  * width is the compositor's own call (always the full display), so only
  * a height is asked for here. Only user_space/bin/desktop_shell.c calls
  * this. */
-int wm_connect_panel(uint32_t height, wm_window_t *out);
+/* M45: `height` is now the whole buffer the panel allocates and `dock_h`
+ * how much of it actually docks at the bottom; the difference is the
+ * overhang it can raise a menu into (wm_set_panel_overhang). Pass
+ * dock_h == height for a panel that has no such thing. */
+int wm_connect_panel(uint32_t height, uint32_t dock_h, wm_window_t *out);
 
 /* Like wm_connect, but requests the chrome-less, full-screen, always-on-
  * *bottom* desktop background (wm_create_request_t.desktop) instead of an
@@ -62,6 +66,19 @@ int wm_query_windows(wm_query_response_t *out);
 /* M22: asks the compositor to focus or toggle-minimize window_id (see
  * wm_action_type_t). Returns 0, or -1 on failure. */
 int wm_send_action(int32_t window_id, uint32_t action);
+
+/* M45: the same call for the one action that carries a number
+ * (wm_action_request_t.value). wm_send_action is this with value 0 -
+ * kept as its own name because every caller but one passes no value at
+ * all and reading `wm_send_action(id, WM_ACTION_CLOSE, 0)` at fifteen
+ * call sites would say less, not more. */
+int wm_send_action_value(int32_t window_id, uint32_t action, int32_t value);
+
+/* M45: asks the compositor to composite and click-route `rows` of this
+ * panel's buffer above its docked strip - see
+ * WM_ACTION_SET_PANEL_OVERHANG. 0 puts it away. Only desktop_shell.c
+ * calls this. */
+int wm_set_panel_overhang(int32_t window_id, int32_t rows);
 
 /* M42: shows/hides the compositor's launcher overlay (M43). No window_id -
  * this is the one action that acts on the compositor rather than on a

@@ -53,4 +53,6 @@
 #define SYS_clipboard_get 28 /* (buf, maxlen) -> the clipboard's real length (may exceed maxlen, same "caller's responsibility to size its buffer" contract as SYS_readfile), or 0 if never set. */
 #define SYS_writefile 29 /* (name, buf, len) -> 0 or -1. M33: the missing write half of SYS_readfile - creates or overwrites a whole file by name (kernel/fs/vfs.h's vfs_write, already used internally since M12/M15 but never exposed to user space until text_editor.c needed to save one). Whole-file, no append/seek, same scope-trimming as SYS_readfile's own "no open/close/lseek yet" contract. */
 
-#define SYSCALL_COUNT 30
+#define SYS_taskinfo 30 /* (task_info_t *buf, max_entries) -> number of entries written, or -1. M45: a whole-shot, read-only snapshot of every task the scheduler has ever created (slots are never recycled, so a terminated task is still listed - with its exit code - exactly as SYS_wait already relies on), taken under the scheduler's own lock. Same "caller sizes the buffer, kernel fills what fits" contract SYS_listfiles has for files: no iterator, no handle, nothing to leak. See system_api/include/proc.h for the record layout, and for why this isn't filtered by owner. */
+
+#define SYSCALL_COUNT 31

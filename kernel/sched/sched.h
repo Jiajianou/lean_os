@@ -49,6 +49,26 @@ typedef enum {
  * spare. */
 #define MAX_FDS 64
 
+/* M45: how long a per-task name may be, NUL included. A process was a
+ * number and nothing else until this milestone - only whoever spawned it
+ * knew what it was, which made SYS_taskinfo's enumeration (and the task
+ * manager built on it) unable to show anything a person could act on.
+ * 24 comfortably holds every program name this project ships (the
+ * longest, "desktop_icons"/"gui_terminal", are 13) and leanfs's own
+ * LEANFS_MAX_NAME (27 + NUL) is the real upper bound on what a spawn
+ * path can even be; a name longer than this is truncated, never a spawn
+ * failure - a display string is not worth refusing to run a program
+ * over. */
+#define TASK_NAME_MAX 24
+
+/* M45: moved out of sched.c, where it had lived since M13. A caller that
+ * enumerates the task table (kernel.c's own self-tests, and SYS_taskinfo
+ * behind them) has to size a buffer for it, and a second hand-picked
+ * number that merely happened to be >= this is exactly the kind of
+ * near-duplicate cap this project has been bitten by twice (M40 and M41
+ * both shipped a bug that was really an exactly-sized cap). */
+#define MAX_TASKS 64
+
 typedef struct {
     fd_type_t type;
     struct pipe *pipe;
@@ -77,6 +97,7 @@ typedef struct task {
     uint64_t heap_brk;        /* current break - SYS_sbrk's return/growth point */
     uint64_t heap_mapped_end; /* one past the last vmm-mapped heap page; heap_brk <= this always */
     uint64_t shm_next_vaddr;  /* next free address for this process's own SYS_shm_map calls */
+    char name[TASK_NAME_MAX]; /* M45: what this task was spawned as - the path process_spawn loaded, or a short label for a kernel thread. Always NUL-terminated. Display only: nothing looks a task up by name, and two tasks may freely share one. */
 } task_t;
 
 /* Turns the currently executing context (kernel_main, at whatever point
@@ -104,7 +125,7 @@ void scheduler_tick_cpu(int cpu);
 /* Allocates a kernel stack and a task_t, marks it READY, and adds it to
  * the round-robin rotation. Runs in the kernel's own (shared) address
  * space. Returns NULL if the fixed task table is full. */
-task_t *task_spawn(void (*entry)(void *arg), void *arg);
+task_t *task_spawn(const char *name, void (*entry)(void *arg), void *arg);
 
 /* Like task_spawn, but the task's first action (via `entry`) is expected
  * to drop to ring 3 into its own private address space - see
@@ -126,7 +147,12 @@ int sched_has_free_task_slot(void);
  * afterwards because this task becomes schedulable - on any CPU - the
  * moment task_spawn_common's lock drops; see that function's own comment
  * for the panic that came of getting this wrong. */
-task_t *task_spawn_in(uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
+/* M45: `name` (may be NULL - stored as an empty string) is copied in
+ * under the same lock that publishes this task as schedulable, for
+ * exactly the reason heap_start/shm_base are: the task is runnable the
+ * instant the lock drops, and SYS_taskinfo running on another CPU must
+ * never see a half-written one. */
+task_t *task_spawn_in(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
                        uint64_t heap_start, uint64_t shm_base);
 
 /* Picks the next READY task (round-robin from the current one) and

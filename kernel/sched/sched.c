@@ -15,7 +15,6 @@
 #include "panic.h"
 #include "signal.h" /* system_api/include/signal.h - SIGKILL/SIGTERM */
 
-#define MAX_TASKS 64 /* generous headroom for M13's shell spawning a child per typed command */
 #define TASK_STACK_SIZE (8 * 1024)
 #define SCHED_QUANTUM_TICKS 5 /* 5 * 10 ms PIT ticks = 50 ms time slice */
 
@@ -66,6 +65,19 @@ static uint64_t loaded_pml4_phys[MAX_CPUS]; /* mirrors whatever schedule() last 
  * and get restored correctly whenever - and on whichever CPU - that exact
  * task resumes, the same way the lock ownership itself does. */
 static spinlock_t sched_lock;
+
+/* M45: bounded copy into a task_t's own fixed name buffer. NULL and an
+ * over-long name are both ordinary inputs here, not errors - see
+ * TASK_NAME_MAX's own comment in sched.h. */
+static void set_task_name(task_t *t, const char *name) {
+    int i = 0;
+    if (name) {
+        for (; name[i] && i < TASK_NAME_MAX - 1; i++) {
+            t->name[i] = name[i];
+        }
+    }
+    t->name[i] = '\0';
+}
 
 static void task_entry_trampoline(void) {
     spin_unlock(&sched_lock); /* pairs with the acquire in schedule() that first picked this task to run */
@@ -126,6 +138,7 @@ void sched_init(void) {
     tasks[0].fds[1].type = FD_STDOUT;
     tasks[0].parent_id = -1;
     tasks[0].pgid = 0;
+    set_task_name(&tasks[0], "kernel");
     task_count = 1;
     current_task[0] = &tasks[0];
     loaded_pml4_phys[0] = tasks[0].pml4_phys;
@@ -148,6 +161,7 @@ void sched_init_ap(int cpu_id) {
     t->pgid = 0;
     t->pending_signal = 0;
     t->reaped = 0;
+    set_task_name(t, "cpu-idle");
     current_task[cpu_id] = t;
     loaded_pml4_phys[cpu_id] = t->pml4_phys;
     task_count++;
@@ -155,7 +169,7 @@ void sched_init_ap(int cpu_id) {
     irq_restore(flags);
 }
 
-static task_t *task_spawn_common(uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
+static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
                                   uint64_t heap_start, uint64_t shm_base) {
     /* kmalloc takes its own lock (heap.c) - done before sched_lock so the
      * two are never nested in the reverse order anywhere in this kernel
@@ -213,6 +227,10 @@ static task_t *task_spawn_common(uint64_t pml4_phys, void (*entry)(void *arg), v
     t->heap_brk = heap_start;
     t->heap_mapped_end = heap_start;
     t->shm_next_vaddr = shm_base;
+    /* M45: inside the same critical section, and for the same reason -
+     * see this function's note just above. A SYS_taskinfo call running on
+     * another CPU can read this table the instant the lock drops. */
+    set_task_name(t, name);
 
     /* Fabricate a stack that looks exactly like a task that's already
      * mid-context_switch: context_switch's `ret` will pop
@@ -240,17 +258,17 @@ static task_t *task_spawn_common(uint64_t pml4_phys, void (*entry)(void *arg), v
     return t;
 }
 
-task_t *task_spawn(void (*entry)(void *arg), void *arg) {
+task_t *task_spawn(const char *name, void (*entry)(void *arg), void *arg) {
     /* A plain kernel thread never reaches SYS_sbrk/SYS_shm_map (both are
      * ring-3-only paths), so its user-VM cursors stay zero - the same
      * "meaningless, left zeroed" contract task_t's own field comments
      * already describe. */
-    return task_spawn_common(vmm_kernel_pml4_phys(), entry, arg, 0, 0);
+    return task_spawn_common(name, vmm_kernel_pml4_phys(), entry, arg, 0, 0);
 }
 
-task_t *task_spawn_in(uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
+task_t *task_spawn_in(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
                        uint64_t heap_start, uint64_t shm_base) {
-    return task_spawn_common(pml4_phys, entry, arg, heap_start, shm_base);
+    return task_spawn_common(name, pml4_phys, entry, arg, heap_start, shm_base);
 }
 
 /* Round-robin: scan forward from `from`, wrapping, for the next READY

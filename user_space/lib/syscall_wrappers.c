@@ -140,3 +140,7 @@ long sys_task_alive(long pid) {
 long sys_pipe_reset(int fd) {
     return do_syscall(SYS_pipe_reset, fd, 0, 0);
 }
+
+long sys_taskinfo(task_info_t *buf, long max_entries) {
+    return do_syscall(SYS_taskinfo, (long)buf, max_entries, 0);
+}

@@ -15,6 +15,7 @@
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "proc.h"      /* system_api/include/proc.h - task_info_t, M45. Resolves to the system_api one, not kernel/proc/proc.h below: a quoted include searches the *including* file's own directory first (kernel/arch/x86_64/, which has no proc.h), then -Ikernel (no kernel/proc.h either), then -Isystem_api/include. */
 #include "proc/proc.h"
 #include "sched/sched.h"
 #include "signal.h"  /* system_api/include/signal.h - SIGKILL/SIGTERM */
@@ -143,7 +144,9 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
     /* process_spawn's elf_load synchronously copies every byte it needs
      * into fresh physical frames before returning, so freeing this
      * buffer right away is safe - nothing keeps pointing at it. */
-    task_t *t = process_spawn(image, (size_t)size, arg);
+    /* M45: `path` is what this process gets listed as - the only
+     * human-readable identity anything at this layer has for it. */
+    task_t *t = process_spawn(path, image, (size_t)size, arg);
     kfree(image);
     if (!t) {
         return -1;
@@ -667,6 +670,63 @@ static long sys_kbd_modifiers(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
     return keyboard_modifiers();
 }
 
+/* M45: a whole-shot snapshot of the task table - see SYS_taskinfo's own
+ * doc comment (system_api/include/syscall.h) and system_api/include/
+ * proc.h for the record layout.
+ *
+ * Read-only and allocation-free, which is what lets it be honest about
+ * being a snapshot: nothing here can fail partway and leave a caller
+ * holding a half-filled iterator. Terminated tasks are included on
+ * purpose - their slots are never recycled (sched.c's task_spawn_common)
+ * and their exit code is exactly what a task manager wants to show for
+ * something that just died, rather than the row silently vanishing.
+ *
+ * sched_task_count() is read once up front rather than per iteration:
+ * tasks are only ever appended, so a task created *during* this loop
+ * simply isn't in this snapshot - which is the correct answer for a
+ * snapshot, and strictly better than a count that grows under the
+ * bounds check. */
+static long sys_taskinfo(uint64_t buf, uint64_t max_entries, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (buf == 0 || max_entries == 0 || max_entries > 4096) {
+        return -1;
+    }
+    task_info_t *out = (task_info_t *)buf;
+    int total = sched_task_count();
+    uint64_t written = 0;
+    for (int i = 0; i < total && written < max_entries; i++) {
+        task_t *t = sched_task_by_id(i);
+        if (!t) {
+            continue;
+        }
+        task_info_t *e = &out[written];
+        e->pid = t->id;
+        e->parent_pid = t->parent_id;
+        e->pgid = t->pgid;
+        e->state = (t->state == TASK_TERMINATED) ? TASK_INFO_TERMINATED
+                                                  : (t->state == TASK_RUNNING ? TASK_INFO_RUNNING : TASK_INFO_READY);
+        e->exit_code = t->exit_code;
+        int fds = 0;
+        for (int f = 0; f < MAX_FDS; f++) {
+            if (t->fds[f].type != FD_NONE) {
+                fds++;
+            }
+        }
+        e->open_fds = fds;
+        e->shm_segments = shm_count_by_owner(t->id);
+        int n = 0;
+        for (; t->name[n] && n < TASK_INFO_NAME_MAX - 1; n++) {
+            e->name[n] = t->name[n];
+        }
+        e->name[n] = '\0';
+        written++;
+    }
+    return (long)written;
+}
+
 static long sys_clipboard_set(uint64_t buf, uint64_t len, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
@@ -721,6 +781,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_clipboard_set] = sys_clipboard_set,
     [SYS_clipboard_get] = sys_clipboard_get,
     [SYS_writefile] = sys_writefile,
+    [SYS_taskinfo] = sys_taskinfo,
 };
 
 void syscall_handler(isr_regs_t *regs) {

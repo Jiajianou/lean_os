@@ -39,7 +39,7 @@ static void user_task_launcher(void *arg) {
     enter_user_mode(entry, stack, arg_ptr, GDT_USER_DATA_SEL | 3, GDT_USER_CODE_SEL | 3);
 }
 
-task_t *process_spawn(const uint8_t *image, size_t image_size, const char *arg) {
+task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size, const char *arg) {
     /* M40: checked up front, before anything is allocated. The
      * task-table-full check further down still exists (it has to - it's
      * the one that runs under sched_lock and is therefore the
@@ -103,7 +103,7 @@ task_t *process_spawn(const uint8_t *image, size_t image_size, const char *arg) 
     args->user_stack_top = USER_STACK_TOP;
     args->arg_ptr = USER_ARG_ADDR;
 
-    task_t *t = task_spawn_in(pml4_phys, user_task_launcher, args,
+    task_t *t = task_spawn_in(name, pml4_phys, user_task_launcher, args,
                                USER_HEAP_START, USER_SHM_BASE);
     if (!t) {
         /* Fixed MAX_TASKS table (sched.c) is full - task_spawn_in already

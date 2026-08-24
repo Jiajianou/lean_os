@@ -50,6 +50,14 @@ int shm_create(size_t size, int owner_task_id);
  * for a task that owns none - just a no-op scan. */
 void shm_free_by_owner(int owner_task_id);
 
+/* M45: how many live segments `owner_task_id` currently holds - the shm
+ * half of what SYS_taskinfo reports per task, and the number that makes a
+ * segment leak visible from user space at all (MAX_SHM_SEGMENTS is 32 and
+ * nothing but shm_free_by_owner ever gives one back). Counting rather
+ * than listing: a task manager wants "how many", and an id list would be
+ * a second, wider ABI for no extra answer. */
+int shm_count_by_owner(int owner_task_id);
+
 /* Size in bytes of segment `id` (as originally requested, not rounded up
  * to pages), or -1 if `id` doesn't name a live segment. */
 int64_t shm_get_size(int id);

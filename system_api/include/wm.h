@@ -59,6 +59,16 @@ typedef struct {
 typedef struct {
     uint32_t width;  /* ignored if panel or desktop != 0 - both always span the full display width, the compositor's own call */
     uint32_t height; /* ignored if desktop != 0 - a desktop window is always the full display, both dimensions */
+    /* M45: for a panel, how many of `height` rows are actually docked at
+     * the bottom of the screen. 0 means "all of them" - every panel
+     * before this milestone, and the shape wm_connect_panel had until
+     * M45 gave the taskbar a menu to raise. The rows *above* the docked
+     * strip are the overhang: allocated and drawn by the client like any
+     * other part of its buffer, but composited and click-routed only
+     * while WM_ACTION_SET_PANEL_OVERHANG has asked for them. Ignored for
+     * a non-panel window. See that action for why the mechanism lives
+     * here rather than in a second compositor-owned overlay. */
+    uint32_t panel_dock_h;
     uint8_t panel; /* M22: 0 for a normal window, WM_PANEL_BOTTOM for a chrome-less, always-on-top, bottom-docked panel. See wm.h's M22 comment below and desktop_shell.c, the only client that ever sets this */
     uint8_t translucent; /* M44: blend this window's pixels over what is already composited underneath instead of blitting them opaquely (compositor.c's blit_window). Opt-in and currently only the taskbar, which wm_connect_panel sets it for - a translucent *ordinary* window would let you read one app's text through another's, which is a different feature from a bar you can see the desktop through. Costs the memcpy fast path for whatever sets it, which is why it isn't simply on for everything. */
     uint8_t desktop; /* chrome-less, full-screen, always-on-*bottom* (the exact opposite z-order from panel) background window - see desktop_icons.c, the one client that ever sets this. Mutually exclusive with panel; nothing enforces that since only one client ever sets either flag. */
@@ -194,11 +204,14 @@ typedef enum {
     WM_ACTION_TOGGLE_LAUNCHER = 6,  /* M42: shows/hides the compositor-owned launcher overlay (M43). The one action here with no window_id at all - it acts on the compositor itself, not on a window, so accept_pending_action handles it before the window_id validation every other action goes through, and wmclient.h's wm_toggle_launcher passes -1. desktop_shell.c's Start button is what sends it; M43's Ctrl+Space keychord reaches the exact same toggle from inside the compositor. */
     WM_ACTION_SNAP_LEFT = 7,        /* M43: resizes and repositions window_id to exactly the left half of the content area (the screen minus the taskbar and minus the room a titlebar needs), clamped to its own buffer the same way WM_ACTION_MAXIMIZE is - see that action's note on why a window smaller than the target area is repositioned rather than stretched. Dragging a window's titlebar into the screen's left edge is what normally sends this, but it is an ordinary action on the pipe like every other one here, so the drag and an external caller drive literally the same code. */
     WM_ACTION_SNAP_RIGHT = 8,       /* M43: the mirror image of WM_ACTION_SNAP_LEFT - the right half. */
+    WM_ACTION_KILL = 9,             /* M45: SIGKILL window_id's owning client, and - the whole reason this exists rather than reusing WM_ACTION_CLOSE - deliberately ignoring `confirm_close`. M36's contract explicitly permits a client to never answer WM_EVENT_CLOSE_REQUEST, which means an app that hangs, or simply chooses not to, is on your screen until the machine is reset. Close stays the polite verb (SIGTERM, or the close-request event for opted-in clients); this is the one that always works. The window slot is reclaimed by exactly the same M29 reap_dead_clients path a crash or an ordinary close goes through - nothing here touches windows[] directly. */
+    WM_ACTION_SET_PANEL_OVERHANG = 10, /* M45: how many rows *above* its docked strip the panel window_id wants composited and click-routed right now (wm_action_request_t.value; 0 to put it away). A panel is 32px tall and clipped to its own buffer, and a three-item context menu is ~72px that has to rise out of the bar - this is that. Originally M41's mechanism for its top-bar dropdowns, removed in M42 along with the menu bar itself, and brought back rather than reinvented: what made it go away was the bar disappearing, not the overhang being wrong. Nothing about the panel's own geometry changes - win->h stays the docked height, so maximize and window placement (which reserve room for a panel) are unaffected by a menu that is up for a second and a half. */
 } wm_action_type_t;
 
 typedef struct {
     int32_t window_id; /* ignored (and -1 by convention) for WM_ACTION_TOGGLE_LAUNCHER, the one action that isn't about a window */
     uint32_t action; /* wm_action_type_t */
+    int32_t value; /* M45: the one action that carries a number - WM_ACTION_SET_PANEL_OVERHANG's row count. 0 for every other action, which all ignore it. A field rather than a second pipe or a second request struct: this channel already has exactly one writer per action and one reader, and both change together (the same reasoning wm_settings_request_t's own comment gives for growing rather than versioning). */
 } wm_action_request_t;
 
 /* M33: the compositor's first genuinely global (not per-window) setting -

@@ -48,9 +48,15 @@ set -euo pipefail
 # comfortably. M42's selftest_reap is why - every self-test now waits for
 # the clients it kills instead of leaving them to be noticed some
 # arbitrary number of scheduler quanta later, and a killed compositor that
-# keeps getting scheduled is not free. The budget stays at 40 anyway; the
-# headroom is the point.
-SECONDS_TO_RUN="${1:-40}"
+# keeps getting scheduled is not free. The budget stayed at 40 through M44;
+# the headroom is the point.
+#
+# M45: 40 -> 50. The new self-test spawns two compositor clients and waits
+# out a deliberate "did the polite close *fail*?" interval, which cannot be
+# shortened - proving something did not happen takes real time. 44s was
+# measured passing, so 50 keeps the same "not one slow boot from a false
+# failure" margin the number has always been chosen for.
+SECONDS_TO_RUN="${1:-50}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -124,6 +130,7 @@ REQUIRED_MARKERS=(
   "[m42] bottom taskbar (Start button, running-app button, tray, maximize clamp, launcher toggle) self-test passed"
   "[m43] window snapping (left/right half, buffer-clamped) and the launcher overlay self-test passed"
   "[m44] wallpaper gradient, taskbar translucency over it, and the settings query round trip self-test passed"
+  "[m45] SYS_taskinfo naming, WM_ACTION_KILL forcing a confirm_close client"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

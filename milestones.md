@@ -1500,6 +1500,400 @@ git history was never touched by it, since none of it was committed.
 - [x] Full `tools/qemu-serial-test.sh` pass (30/30) and
       `tools/qemu-input-test.sh` pass (15/15)
 
+## Path to a daily-usable desktop (M45+)
+
+M40-M44 got the desktop looking right, and proved for the first time
+that real clicks and keystrokes reach the code meant to handle them.
+This arc is about the gap between "looks like a desktop" and "can be
+used as one" - the things whose absence you notice inside the first
+minute of sitting down at it. Three of them are large enough to be
+milestones on their own:
+
+- **Nothing can be stopped.** An app that hangs, ignores its close
+  button, or opted into M36's confirm-close and never answers stays on
+  the screen until the machine is reset. `SYS_kill` has existed since
+  M14, and M42 even fixed its delivery into blocked tasks - but no
+  *user* can reach it. There is no process list, no right-click, no
+  Force Quit.
+- **The machine cannot be turned off.** No shutdown, no restart, no
+  ACPI S5 path in the kernel at all (`kernel/acpi/acpi.c` walks the
+  tables only far enough to find the MADT for SMP). Every session so
+  far has ended by killing QEMU.
+- **Failure is silent.** A spawn that fails does nothing visible -
+  which is exactly the shape M40's Editor/Clock bug wore for four
+  milestones before the input harness caught it. This system has no way
+  to tell its user anything.
+
+M45 takes the first, M47 the second, M48 the third. M46 is the
+interface-detail pass the desktop has earned now that the layout has
+stopped moving - circular macOS-style titlebar buttons chief among
+them. M49 finishes the input surface (a scroll wheel; the keyboard
+chords a desktop is expected to have). M50 is the robustness and
+resource pass this arc's new syscalls and new long-lived UI will need,
+in the shape M29 and M40 already set - including `SYS_close`, which
+this project has never had.
+
+## M45 — Process control: task manager, Force Quit, app context menus ✅
+
+The headline gap: there was no way for a person using this OS to stop a
+program. Everything needed underneath already existed - `SYS_kill`,
+M29's crash-reclaim path, M42's fix for signalling a task blocked in a
+syscall. What was missing was entirely above the kernel.
+
+- [x] Kernel: a per-task name. `task_t` (`kernel/sched/sched.h`) grew a
+      `char name[TASK_NAME_MAX]`, copied in by `task_spawn_common` inside
+      the *same* critical section that publishes the task as schedulable
+      - for exactly the reason M40 moved `heap_brk`/`shm_next_vaddr`
+      there: a `SYS_taskinfo` running on another CPU can read the table
+      the instant the lock drops. `process_spawn` takes the name as an
+      argument rather than deriving it, because it is handed an in-memory
+      image, not a path: `sys_spawn` and kernel.c's own self-tests are
+      the two callers that actually know it
+- [x] New `SYS_taskinfo` (30): `(buf, max_entries) -> count`, filling an
+      array of `task_info_t` (the new `system_api/include/proc.h`) - pid,
+      parent pid, pgid, state, exit code, name, plus the two numbers
+      that make a leak visible from user space at last (open fd count,
+      mapped shm segments; `shm_count_by_owner` is the new kernel-side
+      half of the second). A whole-shot read-only snapshot, the same
+      shape `SYS_listfiles` already has for files - no iterator, no
+      handle, nothing to leak. No filtering by owner
+- [x] `MAX_TASKS` moved from a `#define` inside sched.c to sched.h,
+      because a caller enumerating the table now has to size a buffer for
+      it and a second hand-picked number that merely happened to be big
+      enough is the exact shape of bug M40 and M41 each shipped once
+- [x] `WM_ACTION_KILL`: SIGKILL, and unlike `WM_ACTION_CLOSE` it
+      deliberately ignores `confirm_close`. That distinction is the whole
+      reason this action exists rather than reusing the old one - M36's
+      contract explicitly permits a client to never answer
+      `WM_EVENT_CLOSE_REQUEST`. Close stays the polite verb; kill is the
+      one that always works. Neither touches the window slot: both let
+      M29's `reap_dead_clients` notice the death, so force quit, ordinary
+      close and a real crash converge on one teardown path
+- [x] Right-click a running-app button in the taskbar -> Restore/Minimize,
+      Close, Force Quit. Right-click a window's own titlebar -> the same
+      three items, drawn by the compositor. Both drive
+      `apply_window_action`, and item 0's label is read from the window's
+      live minimized state in both rather than hardcoded in either
+- [x] The taskbar's menu needed the panel overhang back, as planned:
+      `wm_create_request_t.panel_dock_h` (the panel's window is now
+      `PANEL_OVERHANG_MAX + PANEL_HEIGHT` tall but docks only the bottom
+      32 rows) plus `WM_ACTION_SET_PANEL_OVERHANG`, which asks the
+      compositor to composite and click-route N rows above the dock line.
+      One extra field on `window_t` (`buf_y0`) makes `blit_window` cover
+      both regions with a single rect and a single source-row expression,
+      rather than a second blit path. `win->h` stays the docked height
+      throughout, so window placement and maximize - both of which
+      reserve room for a panel - are indifferent to a menu that is up for
+      a second. desktop_shell.c draws the bar through a `bar_gfx`
+      context over just the docked rows, which is why not one coordinate
+      in its existing drawing had to move
+- [x] `wm_action_request_t` grew one `value` field for the overhang's row
+      count, and `wm_send_action_value` alongside `wm_send_action` (which
+      is now that call with 0) - the one action in the protocol that
+      carries a number
+- [x] `user_space/bin/task_manager.c`: a real window listing every
+      process from `SYS_taskinfo` - pid, name, state, parent, and a
+      combined `fd/sh` column - polled on a timer the way
+      `file_manager.c` refreshes its listing, with End Task (SIGTERM) and
+      Force Quit (SIGKILL) acting on the selection, Up/Down + Enter or
+      click-to-select. Terminated tasks stay listed and dimmed rather
+      than vanishing: their slots are never recycled, and watching what
+      just died - and with what code - is most of the value of having the
+      list open
+- [x] The four processes that *are* the desktop are listed but refused,
+      with a status line saying why rather than a silently ignored click.
+      The guard is in the task manager, not in `sys_kill`: the kernel
+      stays exactly as permissive as it was, because a real rule there
+      needs a permission model this project doesn't have
+- [x] Reachable three ways: a new desktop icon, M43's launcher (it is a
+      file on disk, so it already was), and Ctrl+Shift+Esc intercepted in
+      `handle_keyboard` next to Alt+Tab and Ctrl+Space
+- [x] **Two placement bugs the seventh desktop icon exposed**, both about
+      the taskbar and neither previously reachable. A tall window far
+      enough down the cascade was placed with its bottom *under* the
+      always-on-top panel (unreachable, not just crowded), and every
+      window's drop shadow reached under the bar - which, since M44 made
+      the bar translucent, meant the taskbar's own colors depended on
+      which windows happened to be open. Placement now clamps at the
+      bottom as well as the top, and the shadow stops at
+      `content_bottom_limit()`. Found by the input harness, whose window
+      count is read from taskbar pixels and so broke outright
+- [x] New boot self-test (`[m45]`, 8/8 checks): `SYS_taskinfo`'s count
+      and names checked by pid against tasks the test spawned itself;
+      `WM_ACTION_CLOSE` **failing** to remove a `confirm_close` client
+      that ignores `WM_EVENT_CLOSE_REQUEST` (the load-bearing half - it
+      is what fails the day the two verbs collapse into one) and
+      `WM_ACTION_KILL` succeeding; and the reclaim afterwards, checked by
+      connecting a *second* client into the slot the first gave up and
+      watching it draw there, which only works if that slot's shm segment
+      and event pipe both came back
+- [x] `user_space/bin/wm_stubborn.c`, a self-test-only client in the same
+      role wm_demo.c has held since M20: it opts into `confirm_close` and
+      deliberately never answers, because every app this project ships
+      answers properly and the one case `WM_ACTION_CLOSE` cannot handle
+      needs a client that really doesn't. It also creates one shm segment
+      it never uses, which is what gives the kill path a reclaimable
+      resource to measure - `shm_free_by_owner` had never been driven
+      from a *signal* death with a segment outstanding
+- [x] Four new interactive tests through M40's harness: a real
+      right-click on a taskbar button raising the menu out of the panel
+      and Force Quit removing the window (plus the overhang going back
+      down); the same menu from a titlebar right-click; Ctrl+Shift+Esc
+      opening the task manager; and End Task against a victim spawned for
+      it. That last one first failed for a real harness reason worth
+      recording: 90 queued keystrokes exceed a 1024-byte event pipe, the
+      compositor blocks part-way through forwarding them, and its main
+      loop services the mouse before the keyboard - so a click issued
+      during the backlog lands in the middle of it. The test now waits on
+      the scrollbar thumb reaching the bottom of its track, which is a
+      direct read of "the selection is on the last row" rather than a
+      proxy for elapsed time
+- [x] The ESP moved from LBA 1024 to past the end of the filesystem: the
+      kernel grew into it at exactly 1025 sectors, which is the build's
+      size guard doing its job but also a ceiling one milestone away.
+      Nothing wanted the ESP *before* leanfs, and moving it turns a
+      1024-sector limit into a 2047-sector one
+- [x] Full `tools/qemu-serial-test.sh` pass (31/31) and
+      `tools/qemu-input-test.sh` pass (19/19)
+
+## M46 — Window chrome & control details
+
+The layout has stopped moving, so the details are worth paying for now.
+The house rule for this milestone, and the answer to "which OS is this
+copying": **macOS shapes, Windows positions.** The buttons become
+circular traffic lights, but they stay right-aligned in
+minimize/maximize/close order where every window in this project has
+always had them, and where M30's hit-test, M42's tests and every user's
+muscle memory already put them.
+
+- [ ] Circular titlebar buttons replacing M30's three flat 14px squares
+      (`draw_titlebar_buttons`, `compositor.c`): close is a red circle
+      carrying an ×, maximize an amber circle with a +, minimize a grey-
+      green circle with a −. The × is what the request was really about -
+      a red square says "something", a red circle with an × in it says
+      "close"
+- [ ] Glyphs are drawn on the focused window and under the cursor, and
+      omitted otherwise - macOS's own rule, and the thing that stops
+      three saturated dots from shouting from every unfocused window on
+      the desktop
+- [ ] Hover feedback at all, which no titlebar button has ever had: the
+      compositor tracks which button the cursor is over and lightens it.
+      It already receives every mouse move for hit-testing, so this is
+      new state, not new plumbing
+- [ ] One shared circle table, `gfx_circle_inset`, mirroring exactly
+      what M44 did with `gfx_corner_inset`: `compositor.c` has to draw
+      through its own clip-aware `put_pixel` and apps through `gfx.c`,
+      so two *implementations* are unavoidable - two *tables* are not,
+      and M44's note about them eventually disagreeing is why
+- [ ] Double-clicking a titlebar toggles maximize/restore, through
+      `apply_window_action` like everything else. M40 already made
+      double-click detection latency-independent by timestamping events
+      in the PS/2 handler; this is that machinery's second user
+- [ ] Cursor shape follows the resize zones. `kernel/drivers/cursor.c`
+      draws one hardcoded arrow, so this needs a small bitmap set and a
+      `SYS_cursor_shape` for the compositor to select between them: ↔ /
+      ↕ / ⤡ over M31's 5px edge and corner masks, and a move cursor over
+      the titlebar. This is not decoration - M31's resize zones are 5px
+      wide and completely invisible, so today the only way to find one
+      is to guess
+- [ ] Focused and unfocused windows differ by more than titlebar color:
+      the title text dims when unfocused, and M38's drop shadow is
+      deeper on the focused window. Depth is the cue that survives a
+      user changing the accent color out from under the design
+- [ ] A real pressed state for `gfx_draw_button`, so every dialog button
+      in `text_editor.c`, `settings.c` and `file_manager.c` reacts to
+      the press rather than only to the release
+- [ ] New pixel self-test (`[m46]`): the button's bounding-box *corner*
+      is titlebar color while its center is button color - which is what
+      proves a circle got drawn and not a square - the × present on a
+      focused window's close button and absent once that window is
+      unfocused, and the dimmed unfocused title text
+- [ ] New interactive tests: hovering a titlebar button lights it and
+      clicking it still closes; double-clicking the titlebar maximizes
+      then restores; moving the pointer onto a resize edge changes the
+      drawn cursor
+
+## M47 — Session lifecycle: shutdown, restart, persistent settings
+
+Every session of this OS so far has ended by killing QEMU. There is no
+way to turn the machine off from inside it, and nothing it remembers
+between boots - including the wallpaper M44 just added a picker for.
+
+- [ ] ACPI S5 poweroff: parse the FADT. `kernel/acpi/acpi.c` already
+      finds, validates and walks the RSDT/XSDT for the MADT - this is
+      the same walk and one more table. From it, the PM1a/PM1b control
+      block addresses; the `\_S5` sleep type properly lives in AML in
+      the DSDT, and **writing an AML parser is not in scope** - so the
+      honest plan is: use the FADT registers when they are there, take
+      the well-known `SLP_TYP` values otherwise, and keep QEMU's
+      documented port 0x604 as the last-resort fallback. Say which one
+      fired in the log, so a machine that powers off the ugly way says
+      so instead of looking like it worked properly
+- [ ] Reboot in three tiers: the FADT's ACPI reset register, falling
+      back to the 8042 pulse (0xFE to port 0x64), falling back to a
+      triple fault. The first two are firmware-dependent, and a machine
+      that will not restart at all is worse than one that restarts
+      inelegantly
+- [ ] `SYS_shutdown(mode)` (poweroff or reboot) performs an *orderly*
+      stop rather than just writing the port: SIGTERM every user task,
+      allow a bounded grace period (~1s counted in scheduler ticks, not
+      a spin), SIGKILL whatever is left, flush the filesystem's dirty
+      state through `vfs`/`leanfs`, then power off. Only the grace
+      period is new machinery; every other piece already exists and has
+      a self-test
+- [ ] A Power control in the launcher/Start surface: Shut Down and
+      Restart behind M36's confirm dialog. It sits one click from a
+      search field, and a mis-click that silently powers the machine off
+      is the worst possible first impression
+- [ ] `shutdown` and `reboot` as shell commands too - half the time you
+      are already in the terminal, and it gives the self-tests a
+      non-graphical way in
+- [ ] Settings persist: `settings.c` writes the chosen background,
+      accent and wallpaper to a `settings.conf` through `SYS_writefile`
+      as plain `key=value` text. Plain text deliberately - leanfs is
+      flat, this project has no config format, and inventing a binary
+      one to carry three integers would be worse than parsing three
+      lines. The compositor reads it at boot, before the first client
+      connects, and falls back to today's compiled-in defaults if the
+      file is missing *or* malformed
+- [ ] That last piece doubles as the best available end-to-end proof
+      that the shutdown path really flushed the disk: a reboot that
+      comes back with your wallpaper still set is one that wrote it
+- [ ] New boot self-test (`[m47]`): the settings file round-trips
+      through a real write, read and parse, including a deliberately
+      corrupted one falling back to defaults rather than to garbage
+      colors; and the orderly-stop sequence driven directly with a
+      victim task that ignores SIGTERM, checking it is SIGKILLed after
+      the grace period instead of blocking shutdown forever
+- [ ] The harness learns "the guest exited on its own":
+      `qemu-serial-test.sh` boots a guest, reads markers and kills it,
+      so it has never once observed a clean exit. A shutdown test drives
+      the power-off path and asserts QEMU's own process terminates with
+      the expected status - the only real proof S5 fired, and reachable
+      with the tooling already in `tools/`
+- [ ] Interactive test: Start > Power > Shut Down through real clicks,
+      including Cancel leaving the machine running
+
+## M48 — System feedback: notifications, errors, no silent failures
+
+M40 spent an entire milestone chasing a bug whose only symptom was
+"double-clicking that icon does nothing." The bug is fixed; the class of
+symptom is not. This system still has no way to tell its user anything.
+
+- [ ] A compositor-owned notification surface: transient toasts stacked
+      in a screen corner, auto-dismissing on a timer, click to dismiss
+      early. Compositor-owned like M43's launcher rather than a client,
+      because the things that most need to speak are the compositor
+      itself and a client that has just died
+- [ ] `WM_NOTIFY_PIPE` plus `wm_notify(title, body, level)` in
+      `wmclient.h` - one-way, fire-and-forget, the same shape
+      `WM_SETTINGS_PIPE` already has. Levels info/warn/error differing
+      only in accent color. No buttons or actions on a toast: that is a
+      dialog's job and M36 already built dialogs
+- [ ] Every silent failure gets a voice, which is the actual point of
+      this milestone: a `SYS_spawn` that fails from a desktop icon or
+      the launcher (M40's exact symptom), a window the compositor had to
+      refuse (M40 made it print to stdout - nobody reads stdout on a
+      desktop), a file that fails to save, and a client that *crashed*
+      rather than exited, which M29's reap path can already distinguish
+      via `SYS_task_alive`'s 0-vs-2 split and currently mentions to
+      nobody
+- [ ] Spawn failure needs a reason, not just a `-1`. `SYS_spawn` returns
+      the same -1 for a missing file, a malformed ELF, a full task table
+      and out-of-memory - M40 audited all four of those into existence
+      and they remain indistinguishable to the caller. Distinct negative
+      codes plus one shared message table, so a toast can say "no such
+      program" instead of "failed to launch"
+- [ ] An in-window status line for the apps that own their own failures
+      (editor save errors, file manager open errors) - a toast in the
+      far corner is the wrong place for something about the window you
+      are looking directly at
+- [ ] New boot self-test (`[m48]`): a deliberately failing spawn
+      produces a toast whose pixels are where they should be, and it is
+      gone by its own deadline; each distinct spawn error code asserted
+      against a real cause (a missing name, an ordinary text file, a
+      truncated ELF - all three of which M40's validation already
+      rejects, just anonymously)
+- [ ] New interactive test: a real double-click on a desktop icon whose
+      program isn't on disk raises a toast, and clicking the toast
+      dismisses it early
+
+## M49 — Input completeness: scroll wheel, keyboard chords, drag & drop
+
+- [ ] PS/2 wheel support: negotiate the IntelliMouse 4-byte protocol
+      (the 200/100/80 sample-rate knock) at init, falling back to the
+      3-byte packet when the device doesn't answer. `mouse_event_t`
+      grows a signed `wheel`, zero on hardware without one. Every
+      scrollable surface in this OS is keyboard-only today, which is the
+      single most obviously-missing input affordance left
+- [ ] Routed as `WM_EVENT_MOUSE_WHEEL` and handled everywhere scrolling
+      already exists: the file manager's list, the editor's text, the
+      terminal's scrollback, the launcher's results, and M37's scrollbar
+      widget itself
+- [ ] The chords a desktop is expected to have, intercepted in
+      `handle_keyboard` beside Alt+Tab: Alt+F4 (close focused, honoring
+      `confirm_close`), Ctrl+Alt+Left/Right (M43's snap actions from the
+      keyboard), Ctrl+Alt+Up/Down (maximize / restore-then-minimize),
+      Shift+Alt+Tab to cycle backward. Every one of these already has an
+      action to call - what is missing is only the binding
+- [ ] Somewhere to discover them: a Shortcuts pane in `settings.c`,
+      generated from the same table the compositor dispatches from
+      rather than a hand-maintained second copy that will drift within
+      two milestones
+- [ ] Drag and drop, scoped honestly to one case worth having: dragging
+      a file out of `file_manager.c` onto the desktop or onto the
+      editor's window opens it there. This is the only genuinely new
+      plumbing in the milestone - the compositor has to carry a drag
+      payload across two windows (`WM_DRAG_BEGIN`/`MOTION`/`DROP`, the
+      payload being a filename and nothing more) - and so it is also the
+      item to cut if the milestone runs long. The wheel and the chords
+      are not
+- [ ] New self-test (`[m49]`) and interactive tests: a wheel event
+      scrolls the file manager's list by exactly one row per detent,
+      each new chord drives its action with the right window as subject,
+      and the drag protocol round-trips a filename between two clients
+
+## M50 — Robustness & resource hygiene
+
+The pass this arc's new syscalls, new long-lived UI and new ways to kill
+things will need - M29 and M40's shape, applied to what M45-M49 added.
+
+- [ ] `SYS_close` finally exists. There has never been one:
+      `SYS_dup2`'s own comment admits it, and M40's root-cause bug was
+      five never-released pipe fd-pairs riding into every process on the
+      system. The compositor closes a dead client's event pipe instead
+      of only resetting it, the shell closes what it dup2'd, and
+      `sched_reset_fds_to_std`'s big hammer stops being the only thing
+      between this OS and a slow fd leak
+- [ ] The shm counterpart audited to a stated invariant: every segment
+      has exactly one owner responsible for releasing it, and a boot
+      test that cycles N windows through create/map/destroy and compares
+      free-frame counts is what holds it. M29's reclaim covers a
+      compositor window; nothing has ever checked the general case
+- [ ] A kill-storm stress test: launch every app, force-quit all of them
+      through M45's path, repeat - asserting frames, fds, shm segments
+      and task slots all return to baseline. M29's reclaim path has
+      never been driven at that rate, and M45 is what makes it easy for
+      a *user* to drive it that way
+- [ ] A soak run: leave the desktop up with the clock ticking, the
+      taskbar refreshing every 300ms and the file manager polling once a
+      second, and assert nothing grows over several minutes. All three
+      are timer-driven loops that allocate
+- [ ] Re-derive the caps this arc leaned on - `MAX_TASKS`,
+      `WM_MAX_ROUTABLE_WINDOWS`, `MAX_SHM_SEGMENTS`, `MAX_FDS` - from a
+      measurement instead of a guess, which M45's task manager makes
+      possible for the first time by showing how close a real running
+      desktop sits to each. Both M40 and M41 shipped a bug that was
+      really an exactly-sized cap
+- [ ] Every panic path reachable from a user program re-audited the way
+      M40 did `elf_load`: each syscall this arc added (`SYS_taskinfo`,
+      `SYS_shutdown`, `SYS_close`, `SYS_cursor_shape`) gets a deliberate
+      garbage-argument test - null pointers, kernel addresses, absurd
+      lengths, invalid pids
+- [ ] Full regression pass on both suites, three consecutive runs -
+      M42's precedent, set after an intermittent teardown panic that a
+      single green run would have hidden
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support
@@ -1509,5 +1903,21 @@ git history was never touched by it, since none of it was committed.
 - [x] Networking stack + NIC driver (M27, above)
 - [~] Port to real hardware (USB boot test) - prep/tooling/runbook done
       (M28, above); the manual boot-on-real-hardware step itself isn't yet
+- [ ] Directories in leanfs. The filesystem is flat, and every listing in
+      the system (`SYS_listfiles`, the file manager, M43's launcher) is
+      "the entire namespace" because of it. This is the one structural
+      limit that shows up in three different apps at once
+- [ ] An icon image format. Every icon in this project - desktop icons,
+      the Start button's tile glyph, the tray - is hand-drawn rectangles,
+      noted as such in three separate files. A tiny indexed-color blob
+      plus a loader would retire all of them
+- [ ] Audio: a PC-speaker beep at minimum, an AC'97/HDA output stream at
+      most. Nothing in this OS has ever made a sound, so even a system
+      beep on an error toast (M48) is a new capability
+- [ ] Window animations (minimize/restore, launcher fade). M44 added the
+      blend primitive these would need; what's missing is a frame clock
+      the compositor drives independently of input
+- [ ] Multiple virtual desktops - cheap once the compositor tracks a
+      workspace id per window, and the natural payoff for M49's chords
 
 ---
