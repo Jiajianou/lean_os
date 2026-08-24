@@ -337,9 +337,57 @@ static e820_map_t *build_e820_and_exit_boot_services(EFI_HANDLE image_handle) {
     }
 }
 
+/* M47: the ACPI 2.0 RSDP GUID (8868E871-E4F1-11D3-BC22-0080C73C8881) and
+ * the ACPI 1.0 one (EB9D2D30-2D88-11D3-9A16-0090273FC14D). Under UEFI the
+ * RSDP is handed over in the system table's configuration array - it is
+ * NOT in the legacy EBDA/0xE0000 range kernel/acpi/acpi.c scans, and
+ * firmware is under no obligation to leave a copy there.
+ *
+ * That was a real, silent regression: M26 made UEFI the only boot path,
+ * and from that moment acpi_find_madt found nothing on every boot, so SMP
+ * has been quietly falling back to single-core ever since. It surfaced
+ * here because M47 needs the FADT for S5 and the log said "no FADT
+ * found". Passing the pointer through costs one register in the handoff. */
+static const EFI_GUID ACPI2_RSDP_GUID = {0x8868E871, 0xE4F1, 0x11D3, {0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81}};
+static const EFI_GUID ACPI1_RSDP_GUID = {0xEB9D2D30, 0x2D88, 0x11D3, {0x9A, 0x16, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D}};
+
+static int guid_eq(const EFI_GUID *a, const EFI_GUID *b) {
+    if (a->Data1 != b->Data1 || a->Data2 != b->Data2 || a->Data3 != b->Data3) {
+        return 0;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (a->Data4[i] != b->Data4[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* The ACPI 2.0 table wins if both are present (it is the one with the
+ * XSDT), which is why this scans for it first rather than taking whatever
+ * turns up. 0 if the firmware published neither, which the kernel already
+ * treats as "no ACPI on this platform". */
+static UINTN find_rsdp(EFI_SYSTEM_TABLE *st) {
+    for (UINTN i = 0; i < st->NumberOfTableEntries; i++) {
+        if (guid_eq(&st->ConfigurationTable[i].VendorGuid, &ACPI2_RSDP_GUID)) {
+            return (UINTN)st->ConfigurationTable[i].VendorTable;
+        }
+    }
+    for (UINTN i = 0; i < st->NumberOfTableEntries; i++) {
+        if (guid_eq(&st->ConfigurationTable[i].VendorGuid, &ACPI1_RSDP_GUID)) {
+            return (UINTN)st->ConfigurationTable[i].VendorTable;
+        }
+    }
+    return 0;
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     gST = SystemTable;
     puts16(u"lean_os uefi: booting...\r\n");
+
+    /* Read before ExitBootServices: the configuration table is firmware
+     * memory, and nothing about it is guaranteed reachable afterwards. */
+    UINTN rsdp = find_rsdp(SystemTable);
 
     static fb_boot_info_t fb;
     init_framebuffer(&fb);
@@ -358,14 +406,19 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
      * call because this whole file, including efi_main itself, is
      * compiled ms_abi (the calling convention every UEFI firmware call
      * requires); the kernel image was built as an ordinary System V
-     * ELF64 (kernel/linker.ld) and knows nothing about ms_abi. */
+     * ELF64 (kernel/linker.ld) and knows nothing about ms_abi.
+     *
+     * M47: RDX carries the RSDP physical address (0 if the firmware
+     * published none) - the third System V integer argument, so
+     * kernel_main just grows a third parameter. */
     __asm__ volatile(
         "mov %0, %%rdi\n\t"
         "mov %1, %%rsi\n\t"
+        "mov %3, %%rdx\n\t"
         "jmp *%2\n\t"
         :
-        : "r"((UINTN)e820), "r"((UINTN)&fb), "r"((UINTN)KERNEL_LOAD_ADDR)
-        : "rdi", "rsi");
+        : "r"((UINTN)e820), "r"((UINTN)&fb), "r"((UINTN)KERNEL_LOAD_ADDR), "r"(rsdp)
+        : "rdi", "rsi", "rdx");
 
     __builtin_unreachable();
 }

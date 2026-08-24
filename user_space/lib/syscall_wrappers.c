@@ -144,3 +144,7 @@ long sys_pipe_reset(int fd) {
 long sys_taskinfo(task_info_t *buf, long max_entries) {
     return do_syscall(SYS_taskinfo, (long)buf, max_entries, 0);
 }
+
+long sys_shutdown(int mode) {
+    return do_syscall(SYS_shutdown, mode, 0, 0);
+}

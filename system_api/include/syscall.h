@@ -55,4 +55,6 @@
 
 #define SYS_taskinfo 30 /* (task_info_t *buf, max_entries) -> number of entries written, or -1. M45: a whole-shot, read-only snapshot of every task the scheduler has ever created (slots are never recycled, so a terminated task is still listed - with its exit code - exactly as SYS_wait already relies on), taken under the scheduler's own lock. Same "caller sizes the buffer, kernel fills what fits" contract SYS_listfiles has for files: no iterator, no handle, nothing to leak. See system_api/include/proc.h for the record layout, and for why this isn't filtered by owner. */
 
-#define SYSCALL_COUNT 31
+#define SYS_shutdown 31 /* (mode) -> never returns on success, -1 for an unrecognized mode. M47: mode is system_api/include/power_mode.h's POWER_OFF or POWER_REBOOT. Performs an *orderly* stop rather than just writing a port - SIGTERM every task, a bounded ~1s grace period counted in scheduler ticks, SIGKILL whatever is left, flush the filesystem - and only then hands over to kernel/power/power.h's tiered ACPI/8042/triple-fault machinery. Deliberately not restricted to any caller: this project has no permission model, and pretending otherwise here would be the same fake check the task manager's own desktop-process guard is careful not to make. */
+
+#define SYSCALL_COUNT 32

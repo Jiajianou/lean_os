@@ -37,10 +37,11 @@ _start:
     ;
     ; Runs before any call, so nothing is on the new stack yet - which
     ; matters, because kernel_stack_bottom below is itself in .bss and
-    ; gets cleared right along with everything else. RDI/RSI are left
-    ; untouched: they carry boot.c's e820 and framebuffer pointers
-    ; through to kernel_main, and both point into the loader's own
-    ; memory, never into the region being cleared here.
+    ; gets cleared right along with everything else. RDI/RSI/RDX are left
+    ; untouched: they carry boot.c's e820 pointer, framebuffer pointer and
+    ; (M47) the RSDP physical address through to kernel_main. The two
+    ; pointers point into the loader's own memory, never into the region
+    ; being cleared here, and the RSDP into firmware memory.
     mov rax, __bss_start
     mov rcx, __kernel_end
 .zero_bss:

@@ -93,7 +93,8 @@ UEFI_BOOT_EFI := $(BUILD)/BOOTX64.EFI
 UOBJ      := $(BUILD)/user_obj
 USER_LD   := user_space/lib/user.ld
 USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/malloc.o \
-                $(UOBJ)/gfx.o $(UOBJ)/font8x16.o $(UOBJ)/wmclient.o $(UOBJ)/wallpaper.o
+                $(UOBJ)/gfx.o $(UOBJ)/font8x16.o $(UOBJ)/wmclient.o $(UOBJ)/wallpaper.o \
+                $(UOBJ)/settings_file.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
 # init and shell in their own directories. Each becomes build/NAME.elf,
@@ -102,7 +103,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # no filesystem driver the *boot loader* can use to load from disk, only
 # the kernel's own (M12), so this is still how anything gets onto the disk
 # leanfs formats on first boot in the first place.
-USER_PROGRAMS := hello echo cat ls init shell memtest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn
+USER_PROGRAMS := hello echo cat ls init shell memtest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn shutdown reboot
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
 KERNEL_C_SRCS := $(shell find kernel -name '*.c' -not -path 'kernel/boot/*')

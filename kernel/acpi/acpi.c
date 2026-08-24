@@ -51,7 +51,25 @@ static int sig_eq(const void *a, const char *b, int len) {
     return 1;
 }
 
+/* Set once by kernel_main from the boot loader's handoff - see
+ * acpi_set_rsdp. 0 means "the firmware told us nothing", which sends
+ * find_rsdp back to its legacy scan. */
+static uint64_t handoff_rsdp_phys;
+
+void acpi_set_rsdp(uint64_t phys) {
+    handoff_rsdp_phys = phys;
+}
+
 static const acpi_rsdp_t *find_rsdp(void) {
+    /* M47: the firmware's own answer first. Still signature-checked
+     * rather than trusted: a pointer that doesn't start with "RSD PTR "
+     * is not an RSDP whatever handed it over, and falling through to the
+     * scan is a better outcome than parsing whatever is there. */
+    if (handoff_rsdp_phys != 0 && handoff_rsdp_phys < ACPI_IDENTITY_LIMIT &&
+        sig_eq((const void *)(uintptr_t)handoff_rsdp_phys, "RSD PTR ", 8)) {
+        return (const acpi_rsdp_t *)(uintptr_t)handoff_rsdp_phys;
+    }
+
     /* EBDA base address is a segment stored at the fixed BIOS Data Area
      * offset 0x40E; a physical address of 0 means "no EBDA reported",
      * which some BIOSes (QEMU included, depending on version) do - skip
@@ -90,38 +108,106 @@ static const acpi_sdt_header_t *table_at(uint64_t phys) {
     return (const acpi_sdt_header_t *)(uintptr_t)phys;
 }
 
-int acpi_find_madt(acpi_madt_info_t *out) {
+/* M47: the RSDT/XSDT walk, lifted out of acpi_find_madt now that a second
+ * caller wants a different table out of the same list. Returns the table
+ * whose signature is `sig`, or NULL - and NULL genuinely covers every
+ * "this platform didn't give us one" case (no RSDP, a root table outside
+ * the identity map, a signature mismatch, no such table), which is
+ * exactly what both callers already treat as a normal fallback rather
+ * than an error. Silent by design: the two callers say different things
+ * about a missing table, so the message belongs to them. */
+static const acpi_sdt_header_t *find_table(const char *sig) {
     const acpi_rsdp_t *rsdp = find_rsdp();
     if (!rsdp) {
-        klog_puts("[acpi] no RSDP found - platform may not support ACPI; continuing single-core.\n");
-        return 0;
+        return (const acpi_sdt_header_t *)0;
     }
-
     int use_xsdt = rsdp->revision >= 2 && rsdp->xsdt_address != 0;
     const acpi_sdt_header_t *root = table_at(use_xsdt ? rsdp->xsdt_address : (uint64_t)rsdp->rsdt_address);
-    if (!root) {
-        klog_puts("[acpi] root table (RSDT/XSDT) outside the identity-mapped range - continuing single-core.\n");
-        return 0;
+    if (!root || !sig_eq(root->signature, use_xsdt ? "XSDT" : "RSDT", 4)) {
+        return (const acpi_sdt_header_t *)0;
     }
-    if (!sig_eq(root->signature, use_xsdt ? "XSDT" : "RSDT", 4)) {
-        klog_puts("[acpi] root table signature mismatch - continuing single-core.\n");
-        return 0;
-    }
-
     int entry_size = use_xsdt ? 8 : 4;
     int entry_count = (int)((root->length - (uint32_t)sizeof(acpi_sdt_header_t)) / (uint32_t)entry_size);
     const uint8_t *entries = (const uint8_t *)root + sizeof(acpi_sdt_header_t);
-
-    const acpi_sdt_header_t *madt = (const acpi_sdt_header_t *)0;
     for (int i = 0; i < entry_count; i++) {
         uint64_t table_phys = use_xsdt ? *(const uint64_t *)(entries + i * 8)
                                         : (uint64_t) * (const uint32_t *)(entries + i * 4);
         const acpi_sdt_header_t *hdr = table_at(table_phys);
-        if (hdr && sig_eq(hdr->signature, "APIC", 4)) {
-            madt = hdr;
-            break;
+        if (hdr && sig_eq(hdr->signature, sig, 4)) {
+            return hdr;
         }
     }
+    return (const acpi_sdt_header_t *)0;
+}
+
+/* FADT field offsets from the start of the table (ACPI spec 5.2.9's
+ * "Fixed ACPI Description Table" layout). Written out as offsets rather
+ * than as a packed struct because only six of forty-odd fields are ever
+ * read here, and a struct would have to be correct about all of them. */
+#define FADT_SMI_CMD      48
+#define FADT_ACPI_ENABLE  52
+#define FADT_PM1A_CNT_BLK 64
+#define FADT_PM1B_CNT_BLK 68
+#define FADT_FLAGS        112
+#define FADT_RESET_REG    116 /* a 12-byte Generic Address Structure */
+#define FADT_RESET_VALUE  128
+#define FADT_FLAG_RESET_REG_SUP (1u << 10)
+#define GAS_SPACE_SYSTEM_IO 1
+
+int acpi_find_power(acpi_power_info_t *out) {
+    const acpi_sdt_header_t *fadt = find_table("FACP"); /* the FADT's signature is "FACP", not "FADT" */
+    if (!fadt) {
+        klog_puts("[acpi] no FADT found - power off/reset will use their fallback tiers.\n");
+        return 0;
+    }
+    const uint8_t *t = (const uint8_t *)fadt;
+    out->pm1a_cnt = 0;
+    out->pm1b_cnt = 0;
+    out->smi_cmd = 0;
+    out->acpi_enable = 0;
+    out->reset_port = 0;
+    out->reset_value = 0;
+
+    /* Every read is bounds-checked against the table's own declared
+     * length: RESET_REG in particular only exists on ACPI 2.0+ FADTs, and
+     * a 1.0 one is genuinely shorter than the offset it would live at. */
+    if (fadt->length > FADT_PM1A_CNT_BLK + 4) {
+        out->pm1a_cnt = *(const uint32_t *)(t + FADT_PM1A_CNT_BLK);
+    }
+    if (fadt->length > FADT_PM1B_CNT_BLK + 4) {
+        out->pm1b_cnt = *(const uint32_t *)(t + FADT_PM1B_CNT_BLK);
+    }
+    if (fadt->length > FADT_ACPI_ENABLE) {
+        out->smi_cmd = *(const uint32_t *)(t + FADT_SMI_CMD);
+        out->acpi_enable = t[FADT_ACPI_ENABLE];
+    }
+    if (fadt->length > FADT_RESET_VALUE) {
+        uint32_t flags = *(const uint32_t *)(t + FADT_FLAGS);
+        const uint8_t *gas = t + FADT_RESET_REG;
+        uint64_t addr = *(const uint64_t *)(gas + 4);
+        /* Only a SystemIO reset register is usable here: a memory-mapped
+         * one would need a vmm mapping this kernel has no reason to make
+         * for a single byte, and the 8042 tier below is a perfectly good
+         * answer when it isn't. */
+        if ((flags & FADT_FLAG_RESET_REG_SUP) && gas[0] == GAS_SPACE_SYSTEM_IO &&
+            addr != 0 && addr <= 0xFFFF) {
+            out->reset_port = (uint32_t)addr;
+            out->reset_value = t[FADT_RESET_VALUE];
+        }
+    }
+
+    klog_puts("[acpi] FADT found: PM1a_CNT=0x");
+    klog_put_hex32(out->pm1a_cnt);
+    klog_puts(", PM1b_CNT=0x");
+    klog_put_hex32(out->pm1b_cnt);
+    klog_puts(", reset port=0x");
+    klog_put_hex32(out->reset_port);
+    klog_puts(".\n");
+    return 1;
+}
+
+int acpi_find_madt(acpi_madt_info_t *out) {
+    const acpi_sdt_header_t *madt = find_table("APIC");
     if (!madt) {
         klog_puts("[acpi] no MADT (APIC table) found - continuing single-core.\n");
         return 0;

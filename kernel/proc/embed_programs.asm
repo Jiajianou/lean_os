@@ -133,3 +133,15 @@ global wm_stubborn_elf_end
 wm_stubborn_elf_start:
     incbin "build/wm_stubborn.elf"
 wm_stubborn_elf_end:
+
+global shutdown_elf_start
+global shutdown_elf_end
+shutdown_elf_start:
+    incbin "build/shutdown.elf"
+shutdown_elf_end:
+
+global reboot_elf_start
+global reboot_elf_end
+reboot_elf_start:
+    incbin "build/reboot.elf"
+reboot_elf_end:

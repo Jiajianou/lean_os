@@ -25,7 +25,7 @@ import sys
 import time
 import traceback
 
-from qemu_input import Machine
+from qemu_input import BOOT_MARKER, Machine
 
 # Where a failing test drops the screenshot it gave up on. A pixel
 # assertion that fails without showing you the pixels is a bad trade when
@@ -188,6 +188,42 @@ LAUNCHER_X = (1024 - LAUNCHER_W) // 2
 LAUNCHER_Y = (768 - LAUNCHER_H) // 3
 LAUNCHER_LIST_Y = 46         # LAUNCHER_PAD(12) + LAUNCHER_INPUT_H(24) + 10
 LAUNCHER_ROW_H = 20
+LAUNCHER_PAD = 12            # GFX_PAD
+
+# M47: the Power controls along the bottom of the overlay, and the confirm
+# box a click on either one raises. Mirrored from compositor.c's POWER_*.
+POWER_BTN_W, POWER_BTN_H, POWER_BTN_GAP = 96, 22, 8
+POWER_BTN_Y = LAUNCHER_H - LAUNCHER_PAD - POWER_BTN_H
+POWER_OFF_X = LAUNCHER_W - LAUNCHER_PAD - 2 * POWER_BTN_W - POWER_BTN_GAP
+POWER_REBOOT_X = LAUNCHER_W - LAUNCHER_PAD - POWER_BTN_W
+POWER_CONFIRM_W, POWER_CONFIRM_H = 300, 96
+POWER_CONFIRM_BG = 0x202838
+
+
+def power_button_center(which):
+    """Screen center of the Shut Down (0) or Restart (1) button."""
+    bx = POWER_OFF_X if which == 0 else POWER_REBOOT_X
+    return (LAUNCHER_X + bx + POWER_BTN_W // 2, LAUNCHER_Y + POWER_BTN_Y + POWER_BTN_H // 2)
+
+
+# M47: "is the launcher up" read somewhere the pointer's own travel can't
+# disturb. LAUNCHER_PROBE sits on a result row, and launcher_hover selects
+# whatever row the pointer passes over - so a click aimed at the Power
+# buttons, which the harness reaches by sweeping the pointer from (0, 0)
+# straight across the list, leaves a row highlighted underneath it. This
+# probe is in the overlay's bottom strip, left of both Power buttons and
+# below every row.
+LAUNCHER_LOWER_PROBE = (LAUNCHER_X + 20, LAUNCHER_Y + POWER_BTN_Y + POWER_BTN_H // 2)
+LAUNCHER_LOWER_BG = blend(desktop_px(LAUNCHER_LOWER_PROBE[1]), LAUNCHER_BG_RAW,
+                          LAUNCHER_OPACITY_NUM, LAUNCHER_OPACITY_DEN)
+
+
+def power_confirm_probe():
+    """Inside the confirm box, below its text and right of it - so this
+    reads the box's own fill rather than a glyph. The box is drawn opaque
+    over the (translucent) launcher, so no blend is involved."""
+    return (LAUNCHER_X + (LAUNCHER_W - POWER_CONFIRM_W) // 2 + POWER_CONFIRM_W - 12,
+            LAUNCHER_Y + (LAUNCHER_H - POWER_CONFIRM_H) // 2 + POWER_CONFIRM_H - 8)
 # Inside the overlay, on row 5 - which is never the selected one in these
 # tests, so it reads flat overlay background - and far right of any
 # filename text.
@@ -235,6 +271,33 @@ BTN_GAP = 4
 BTN_MARGIN = 4
 BTN_MINIMIZE, BTN_MAXIMIZE, BTN_CLOSE = 0, 1, 2
 
+# M46: the buttons are circles now, in macOS's colors but still in
+# Windows' positions - the rects above are unchanged, only what fills them
+# is. BTN_*_COLOR mirrors compositor.c; BTN_*_HOVER is that color halfway
+# to white (its `lighten`, BTN_HOVER_LIGHTEN = 2), recomputed here rather
+# than tabulated so a change to the ratio shows up naming both numbers.
+BTN_CLOSE_COLOR = 0xFF5F57
+BTN_MAXIMIZE_COLOR = 0xFEBC2E
+BTN_MINIMIZE_COLOR = 0x8FA88F
+BTN_HOVER_LIGHTEN = 2
+
+
+def lighten(color, num, den):
+    out = 0
+    for shift in (16, 8, 0):
+        c = (color >> shift) & 0xFF
+        out |= (c + (255 - c) * num // den) << shift
+    return out
+
+
+def titlebar_button_disc(win_x, win_y, win_w, button):
+    """A point inside button `button`'s disc and clear of both diagonals
+    of the close button's x - the middle column of the circle is exactly
+    where those two strokes cross, so reading the fill means staying off
+    it. Four pixels left of center, on the button's vertical midline."""
+    cx, cy = titlebar_button_center(win_x, win_y, win_w, button)
+    return (cx - 4, cy)
+
 
 def titlebar_button_center(win_x, win_y, win_w, button):
     x = win_x + win_w - BTN_MARGIN - BTN_SIZE - button * (BTN_SIZE + BTN_GAP)
@@ -243,6 +306,10 @@ def titlebar_button_center(win_x, win_y, win_w, button):
 
 
 CLOCK_W = 200  # gui_clock.c WIN_W
+
+# settings.c's wallpaper row.
+WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H = 270, 68, 22
+
 TASKS_W, TASKS_H = 420, 360  # task_manager.c WIN_W/WIN_H
 LIST_Y_IN_WIN = 40           # HEADER_H(22) + COLS_H(18)
 LIST_H_IN_WIN = TASKS_H - LIST_Y_IN_WIN - 34  # ...minus FOOTER_H
@@ -844,6 +911,233 @@ def test_task_manager_end_task(m):
              "End Task in the task manager did not terminate the selected process")
 
 
+def test_titlebar_button_hover_lights_and_still_closes(m):
+    """M46's hover feedback, which no titlebar button in this project has
+    ever had - and, in the same test, proof that adding it didn't cost the
+    click. Hover state is the kind of thing that is easy to get subtly
+    wrong (lit while the pointer is elsewhere, or a lit button that isn't
+    the one that acts, since the highlight and the click now share one
+    hit-test); reading the pixel and then clicking the same place is what
+    checks both halves against each other."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock
+    wait_for_windows(m, 1)
+
+    x, y = app_origin(FIRST_APP_IDX)
+    # Read the *minimize* button while hovering it: it is the outermost of
+    # the three, so the 8x8 pointer parked on the close button (which is
+    # where a click would go) can't be sitting on the pixel being read.
+    probe = titlebar_button_disc(x, y, CLOCK_W, BTN_MINIMIZE)
+    m.move_to(x + 60, y - TITLEBAR_H // 2)  # over the titlebar, off every button
+    shot = m.screenshot()
+    check(shot.px(*probe) == BTN_MINIMIZE_COLOR,
+          "the minimize button was already lit with the pointer elsewhere on the titlebar "
+          "(got 0x%06X)" % shot.px(*probe))
+
+    m.move_to(*titlebar_button_center(x, y, CLOCK_W, BTN_MINIMIZE))
+    expected = lighten(BTN_MINIMIZE_COLOR, 1, BTN_HOVER_LIGHTEN)
+    wait_for(m, lambda s: s.px(*probe) == expected,
+             "hovering the minimize button did not light it")
+
+    # And the close button still closes, from a real click at a real pixel.
+    m.click(*titlebar_button_center(x, y, CLOCK_W, BTN_CLOSE))
+    wait_for(m, lambda s: count_app_windows(s) == 0,
+             "the titlebar close button stopped closing once hover tracking was added")
+
+
+def test_titlebar_double_click_maximizes(m):
+    """M46: double-clicking a titlebar toggles maximize/restore, through
+    apply_window_action like everything else. M40 made double-click
+    detection latency-independent by timestamping events in the PS/2
+    handler; this is that machinery's second user, and the first one
+    inside the compositor itself."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock: 200x90, so maximizing visibly moves it
+    wait_for_windows(m, 1)
+
+    x, y = app_origin(FIRST_APP_IDX)
+    # Somewhere on the titlebar body: left of the buttons, right of the
+    # title text, and not a resize edge.
+    m.double_click(x + 100, y - TITLEBAR_H // 2)
+    # Maximized puts the window at (BORDER, content_top_limit) = (2, 22),
+    # clamped to its own 200x90 buffer - so its titlebar lands in
+    # y:[2, 22) at the far left, where bare desktop was a moment ago.
+    wait_for(m, lambda s: s.px(60, 12) == ACCENT,
+             "double-clicking the titlebar did not maximize the window")
+
+    m.double_click(2 + 100, 12)
+    wait_for(m, lambda s: s.px(60, 12) == desktop_px(12),
+             "double-clicking the titlebar again did not restore the window")
+
+
+def test_resize_edge_changes_cursor(m):
+    """M31's resize zones are 5px wide and were completely invisible: the
+    only way to find one was to guess. The compositor picks a cursor shape
+    from the same resize mask the drag itself uses, so this checks the one
+    thing no protocol-level test can - that moving the pointer onto an
+    edge changes what is drawn under it.
+
+    Matched against the harness's own copies of compositor.c's cursor
+    bitmaps (qemu_input.CURSOR_SHAPES) rather than by counting white
+    pixels, because a count is not specific: the arrow's 12 pixels and
+    whatever the window underneath happens to be drawing are the same
+    color."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock
+    wait_for_windows(m, 1)
+
+    x, y = app_origin(FIRST_APP_IDX)
+
+    def shape_at(at):
+        m.move_to(*at)
+        found = m.find_cursor_shape(m.screenshot(), at)
+        check(found is not None, "no cursor found at (%d, %d)" % at)
+        return found[2]
+
+    got = shape_at((x + 100, y + 45))  # over the window's own content
+    check(got == "arrow", "expected the plain arrow over window content, got %r" % got)
+
+    # The right border, clear of both corners.
+    got = shape_at((x + CLOCK_W + 2, y + 45))
+    check(got == "horizontal",
+          "moving onto a resize edge did not change the drawn cursor (got %r)" % got)
+
+    # The bottom-right corner, where two edges overlap.
+    got = shape_at((x + CLOCK_W + 2, y + 90))
+    check(got == "diag_nw_se",
+          "the bottom-right corner did not get the diagonal resize cursor (got %r)" % got)
+
+    # The titlebar body: M46's move cursor, the one genuinely new shape.
+    got = shape_at((x + 100, y - TITLEBAR_H // 2))
+    check(got == "move", "the titlebar did not get the move cursor (got %r)" % got)
+
+
+def test_shutdown_powers_off_the_machine(m):
+    """M47, and the first test in this project to watch the guest exit on
+    its own.
+
+    Every other test here - and tools/qemu-serial-test.sh - ends by
+    killing QEMU, so "does S5 actually fire" had never once been observed
+    from either side. QEMU's own process terminating is the only real
+    proof: a guest that merely halted, or wrote the wrong port and kept
+    running, leaves the process exactly where it was.
+
+    Driven through the UI rather than by spawning the `shutdown` command,
+    because the path being checked is the whole one: Start -> the
+    launcher's Power row -> a confirm step -> SYS_shutdown -> an orderly
+    stop -> ACPI."""
+    boot(m)
+    m.click(*START_CLICK)
+    wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
+             "the Start button did not open the launcher")
+
+    m.click(*power_button_center(0))  # Shut Down
+    wait_for(m, lambda s: s.px(*power_confirm_probe()) == POWER_CONFIRM_BG,
+             "clicking Shut Down did not raise a confirm box")
+
+    m.sendkey("y")
+    took = m.wait_for_exit(timeout=40.0)
+    check(took is not None,
+          "the guest never powered off - QEMU is still running 40s after confirming "
+          "Shut Down (log tail: %r)" % m.read_log()[-400:])
+    check(m.exit_status == 0,
+          "the guest exited, but with status %d rather than 0" % m.exit_status)
+    log = m.read_log()
+    check("[power] orderly stop complete" in log,
+          "the shutdown did not go through the orderly stop (log tail: %r)" % log[-400:])
+
+
+def test_shutdown_confirm_can_be_cancelled(m):
+    """The other half of putting a confirm step in front of it: Cancel
+    must leave the machine running. This is the check that would catch a
+    confirm box wired to the wrong key, which is a mistake you only find
+    out about once."""
+    boot(m)
+    m.click(*START_CLICK)
+    wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
+             "the Start button did not open the launcher")
+
+    m.click(*power_button_center(0))
+    wait_for(m, lambda s: s.px(*power_confirm_probe()) == POWER_CONFIRM_BG,
+             "clicking Shut Down did not raise a confirm box")
+
+    m.sendkey("n")
+    # The box goes away and the launcher is still up underneath it.
+    wait_for(m, lambda s: s.px(*power_confirm_probe()) != POWER_CONFIRM_BG and
+                          s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
+             "cancelling the confirm box did not return to the launcher")
+    # And, crucially, nothing happened. A fixed wait is right here for the
+    # same reason it is in single_click_does_not_launch: the assertion is
+    # that the machine is still on, and there is no state to poll toward.
+    time.sleep(4.0)
+    check(m.exit_status is None,
+          "cancelling the shutdown confirm powered the machine off anyway")
+
+
+def test_settings_persist_across_a_reboot(m):
+    """M47's best available end-to-end proof that a shutdown really wrote
+    the disk: pick a wallpaper, restart, and see it still set.
+
+    Deliberately a *restart* rather than two separate boots - a test that
+    booted twice would only prove SYS_writefile works, which M33 already
+    covers. What this adds is that the write survived the whole power
+    path, and that the compositor reads it back before the first client
+    connects. The guest's disk writes do survive: snapshot=on keeps them
+    in an overlay for the lifetime of the QEMU process, and a reset is the
+    same process.
+
+    The restart is triggered by typing `reboot` into the launcher rather
+    than by clicking its Power row - not to avoid the Power row (
+    shutdown_powers_off_the_machine drives that) but because every pixel
+    constant in this file is computed against the *default gradient*
+    desktop, and this test's whole point is that the desktop is no longer
+    that. Reading the taskbar or the launcher's own fill after the
+    wallpaper changes would be measuring the wrong blend."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[3][2])  # Settings
+    wait_for_windows(m, 1)
+
+    # settings.c's wallpaper row: four preview buttons under the
+    # "Wallpaper" label, WALL_BTN_X(i) = GFX_PAD + i * (WALL_BTN_W + gap).
+    # The first is WALLPAPER_FLAT, which is the one choice a screenshot
+    # can tell apart from the default gradient with a single pair of
+    # pixels: flat means two rows 400px apart read identical.
+    sx, sy = app_origin(FIRST_APP_IDX)
+    m.click(sx + 12 + WALL_BTN_W // 2, sy + WALL_BTN_Y + WALL_BTN_H // 2)
+    shot = wait_for(m, lambda s: s.px(700, 200) == s.px(700, 600),
+                    "picking the Flat wallpaper did not flatten the desktop gradient")
+    flat = shot.px(700, 200)
+    check(flat != desktop_px(200),
+          "the 'flat' desktop is the same color the gradient already was at that row")
+
+    boots_before = m.read_log().count(BOOT_MARKER)
+    m.sendkey("ctrl-spc")
+    m.type_text("reboot")
+    m.sendkey("ret")
+
+    # The guest resets and boots all the way through its self-tests again,
+    # which takes about as long as the original boot did.
+    deadline = time.time() + 200
+    while time.time() < deadline:
+        if m.read_log().count(BOOT_MARKER) > boots_before:
+            break
+        time.sleep(1.0)
+    else:
+        raise Failure("the machine never came back up after `reboot` (log tail: %r)"
+                      % m.read_log()[-400:])
+    check("[power] restarting." in m.read_log(),
+          "the machine restarted without going through SYS_shutdown's own path")
+
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        shot = m.screenshot()
+        if shot.px(700, 200) == flat and shot.px(700, 600) == flat:
+            return
+        time.sleep(1.0)
+    raise Failure("after restarting, the desktop came back with the default gradient "
+                  "rather than the saved Flat wallpaper")
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -863,6 +1157,12 @@ TESTS = [
     ("titlebar_right_click_force_quit", test_titlebar_right_click_force_quit),
     ("ctrl_shift_esc_opens_task_manager", test_ctrl_shift_esc_opens_task_manager),
     ("task_manager_end_task", test_task_manager_end_task),
+    ("titlebar_button_hover_lights_and_still_closes", test_titlebar_button_hover_lights_and_still_closes),
+    ("titlebar_double_click_maximizes", test_titlebar_double_click_maximizes),
+    ("resize_edge_changes_cursor", test_resize_edge_changes_cursor),
+    ("shutdown_confirm_can_be_cancelled", test_shutdown_confirm_can_be_cancelled),
+    ("shutdown_powers_off_the_machine", test_shutdown_powers_off_the_machine),
+    ("settings_persist_across_a_reboot", test_settings_persist_across_a_reboot),
     ("launch_close_stress", test_launch_close_stress),
 ]
 

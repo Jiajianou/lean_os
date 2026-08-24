@@ -70,6 +70,8 @@
  */
 #include "font8x16.h" /* M38: window-title text in the titlebar - drawn through this file's own clip-aware put_pixel, not gfx_draw_text (see draw_text_clipped's own note) */
 #include "gfx.h" /* M34: gfx_point_in_rect - shared hit-test helper, see draw_titlebar_buttons' own note on why drawing itself stays on this file's own clip-aware fill_rect */
+#include "power_mode.h" /* system_api/include/power_mode.h - POWER_OFF/POWER_REBOOT, M47's launcher Power controls */
+#include "settings_file.h" /* M47: the desktop's three settings on disk - read once, below, before any client connects */
 #include "signal.h" /* system_api/include/signal.h - SIGTERM, M30's WM_ACTION_CLOSE */
 #include "str.h"
 #include "syscall_wrappers.h"
@@ -99,14 +101,33 @@
  * padding on each side; every window this project ships is at least
  * 200px wide (see gui_clock.c/gui_paint.c/gui_terminal.c's own WIN_W),
  * well past the ~54px these three buttons plus margins need. */
-#define BTN_SIZE   14
+/* M46: BTN_SIZE is a circle's diameter now rather than a square's side,
+ * and is tied to gfx.h's shared table so this file and gfx.c cannot round
+ * differently - the same arrangement M44 set up for corners. The house
+ * rule for that milestone, and the answer to "which OS is this copying":
+ * macOS shapes, Windows positions. The buttons became traffic lights, but
+ * they stay right-aligned in minimize/maximize/close order where every
+ * window in this project has always had them, and where M30's hit-test,
+ * M42's tests and every user's muscle memory already put them - so
+ * titlebar_button_rect below is untouched. */
+#define BTN_SIZE   GFX_CIRCLE_D
 #define BTN_GAP    4
 #define BTN_MARGIN 4
-#define BTN_CLOSE_COLOR    0x00CC3333u
-#define BTN_MAXIMIZE_COLOR 0x0033AA55u
-#define BTN_MINIMIZE_COLOR 0x00888899u
+#define BTN_CLOSE_COLOR    0x00FF5F57u
+#define BTN_MAXIMIZE_COLOR 0x00FEBC2Eu
+#define BTN_MINIMIZE_COLOR 0x008FA88Fu /* grey-green: it's the one of the three that isn't a warning, and a saturated green would read as "go" */
+/* The mark inside each circle. Dark rather than white - macOS's own
+ * choice, and the right one here: all three fills are light, and a white
+ * glyph on amber is illegible at 6px. */
+#define BTN_GLYPH_COLOR 0x00303030u
+#define BTN_GLYPH_INSET 4 /* a 6x6 mark inside a 14px circle - big enough to tell the x from the +, small enough not to touch the rim */
+#define BTN_HOVER_LIGHTEN 2 /* halfway to white: the hover feedback no titlebar button in this project has ever had */
 
 #define TITLE_COLOR 0x00F0F0F0u
+/* M46: an unfocused window's title dims. Contrast and depth are the cues
+ * that survive a user changing the accent color out from under the
+ * design; a titlebar hue on its own does not. */
+#define TITLE_DIM_COLOR 0x009AA4B0u
 #define TITLE_MARGIN 6 /* gap between the titlebar's left edge and the title text */
 #define TITLE_BTN_GAP 6 /* gap kept clear between the title text and the leftmost button */
 
@@ -119,6 +140,11 @@
 #define SHADOW_OFFSET 6
 #define SHADOW_NUM 1
 #define SHADOW_DEN 3
+/* M46: the focused window's shadow is deeper - the other half of "these
+ * two windows differ by more than a titlebar color". Same blend, same
+ * offset, stronger ratio. */
+#define SHADOW_FOCUS_NUM 1
+#define SHADOW_FOCUS_DEN 2
 
 /* M43: the snap preview's translucency, same fixed-ratio integer blend as
  * the shadow above (fill_rect_blend) - just mixed toward the accent color
@@ -161,7 +187,7 @@
 #define LAUNCHER_INPUT_H  (FONT_HEIGHT + 8)
 #define LAUNCHER_ROW_H    20
 #define LAUNCHER_LIST_Y   (LAUNCHER_PAD + LAUNCHER_INPUT_H + 10)
-#define LAUNCHER_ROWS     12 /* LAUNCHER_LIST_Y + 12*20 + LAUNCHER_PAD fits inside LAUNCHER_H with room to spare */
+#define LAUNCHER_ROWS     10 /* M47: 12 -> 10, to leave the bottom of the overlay for the Power controls. LAUNCHER_LIST_Y + 10*20 still clears POWER_BTN_Y with room to spare */
 #define LAUNCHER_MAX_ENTRIES 48   /* file_manager.c's own MAX_FILES, for the same flat namespace */
 #define LAUNCHER_NAME_MAX 32      /* leanfs's real cap is 27 + NUL (kernel/fs/leanfs.h, not visible to user_space builds) - same constant file_manager.c keeps for the same reason */
 #define LAUNCHER_QUERY_MAX 24
@@ -174,6 +200,28 @@
 #define LAUNCHER_HINT    0x006C8098u
 #define LAUNCHER_SEL_BG  0x00335577u
 #define LAUNCHER_ROW_FG  0x00C8D4E4u
+
+/* M47: the Power controls, along the bottom of the launcher. They sit one
+ * click from a search field, so both are behind a confirm step (M36's
+ * rule, applied to the one action in this system that cannot be undone) -
+ * a mis-click that silently powers the machine off is the worst possible
+ * first impression. The confirm box is drawn over the launcher rather
+ * than replacing it, so it is obvious what is being confirmed. */
+#define POWER_BTN_W   96
+#define POWER_BTN_H   22
+#define POWER_BTN_GAP 8
+#define POWER_BTN_Y   (LAUNCHER_H - LAUNCHER_PAD - POWER_BTN_H)
+#define POWER_OFF_X   (LAUNCHER_W - LAUNCHER_PAD - 2 * POWER_BTN_W - POWER_BTN_GAP)
+#define POWER_REBOOT_X (LAUNCHER_W - LAUNCHER_PAD - POWER_BTN_W)
+#define POWER_BTN_BG      0x00303C52u
+#define POWER_BTN_HOVER   0x004C6699u
+#define POWER_CONFIRM_W   300
+#define POWER_CONFIRM_H   96
+#define POWER_CONFIRM_BG  0x00202838u
+
+/* Which power action a confirm box is currently asking about: -1 for
+ * "no box up", otherwise POWER_OFF or POWER_REBOOT. */
+#define POWER_CONFIRM_NONE (-1)
 
 /* M45: the window context menu the compositor draws for itself - what a
  * right-click on a titlebar raises. Compositor-owned for the same reason
@@ -287,6 +335,9 @@ static int launcher_selected; /* index into launcher_matches, not into launcher_
 static int launcher_scroll;   /* first match drawn - see launcher_clamp_scroll */
 static char launcher_query[LAUNCHER_QUERY_MAX];
 static int launcher_query_len;
+/* M47: -1, POWER_OFF or POWER_REBOOT - see POWER_CONFIRM_NONE. */
+static int power_confirm = POWER_CONFIRM_NONE;
+static int power_hover = POWER_CONFIRM_NONE; /* which Power button the cursor is over */
 
 /* M45: which window the titlebar context menu is open for (-1 = closed),
  * where it was raised, and which row the cursor is over. */
@@ -372,6 +423,21 @@ static const uint8_t cursor_shape_diag_nw_se[CURSOR_SIZE] = { /* top-left <-> bo
     0b00001111,
 };
 
+/* M46: the move cursor, shown over a window's titlebar - the one band
+ * where dragging moves the whole window rather than resizing an edge. A
+ * four-way arrow: this is the same 8x8 one-bit format as the four shapes
+ * above, so it costs one table and nothing else. */
+static const uint8_t cursor_shape_move[CURSOR_SIZE] = {
+    0b00011000,
+    0b00111100,
+    0b01011010,
+    0b11011011,
+    0b11011011,
+    0b01011010,
+    0b00111100,
+    0b00011000,
+};
+
 static const uint8_t cursor_shape_diag_ne_sw[CURSOR_SIZE] = { /* top-right <-> bottom-left corner */
     0b00001111,
     0b00000011,
@@ -407,6 +473,15 @@ static long read_exact(int fd, void *buf, size_t len) {
  * just be redundant branching on the hottest loop in this process. */
 static inline void put_pixel(int32_t x, int32_t y, uint32_t color) {
     back_buf[(uint32_t)y * back_pitch_pixels + (uint32_t)x] = color;
+}
+
+/* M46: the same thing with the clip test put_pixel deliberately omits -
+ * for the one caller that plots individual pixels along a diagonal (the
+ * close button's x) instead of walking an already-clipped rect. */
+static inline void put_pixel_clipped(int32_t x, int32_t y, uint32_t color) {
+    if (x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1) {
+        put_pixel(x, y, color);
+    }
 }
 
 /* Copies just the current clip rect from back_buf to the real hardware
@@ -487,7 +562,7 @@ static int32_t content_bottom_limit(void);
  * happen to be open. It also broke the input harness, whose taskbar
  * probes are how it counts windows at all. The rule is simple enough to
  * state: the panel is chrome, and window shadows stop at it. */
-static void fill_rect_shadow(int32_t x, int32_t y, int32_t w, int32_t h) {
+static void fill_rect_shadow(int32_t x, int32_t y, int32_t w, int32_t h, int focused) {
     int32_t limit = content_bottom_limit();
     if (y + h > limit) {
         h = limit - y;
@@ -495,7 +570,9 @@ static void fill_rect_shadow(int32_t x, int32_t y, int32_t w, int32_t h) {
     if (h <= 0) {
         return;
     }
-    fill_rect_blend(x, y, w, h, 0x00000000u, SHADOW_NUM, SHADOW_DEN);
+    fill_rect_blend(x, y, w, h, 0x00000000u,
+                     focused ? SHADOW_FOCUS_NUM : SHADOW_NUM,
+                     focused ? SHADOW_FOCUS_DEN : SHADOW_DEN);
 }
 
 /* M42: the sub-rect variant M41's panel-overhang blit needed went away
@@ -571,12 +648,93 @@ static void titlebar_button_rect(const window_t *win, titlebar_button_t btn, int
     *out_y = by;
 }
 
-static void draw_titlebar_buttons(const window_t *win) {
+/* M46: which window's which titlebar button the cursor is over, or -1 for
+ * none. The compositor already receives every mouse move for hit-testing,
+ * so hover feedback is new state, not new plumbing. */
+static int hover_btn_window = -1;
+static titlebar_button_t hover_btn;
+
+/* Which button (if any) is under (px, py), topmost window first - same
+ * order and the same first-match-wins limitation as every other hit-test
+ * in this file. Shared by the click handler and the hover tracker, so the
+ * button that lights and the button that acts can't disagree. */
+static int titlebar_button_at(int32_t px, int32_t py, titlebar_button_t *out_btn) {
+    for (int i = window_count - 1; i >= 0; i--) {
+        const window_t *w = &windows[i];
+        if (!w->alive || w->is_panel || w->is_desktop || w->minimized) {
+            continue;
+        }
+        for (int b = 0; b < BTN_COUNT; b++) {
+            int32_t bx, by;
+            titlebar_button_rect(w, (titlebar_button_t)b, &bx, &by);
+            if (gfx_point_in_rect(px, py, bx, by, BTN_SIZE, BTN_SIZE)) {
+                *out_btn = (titlebar_button_t)b;
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+static uint32_t lighten(uint32_t color, uint32_t num, uint32_t den) {
+    uint32_t out = 0;
+    for (int shift = 16; shift >= 0; shift -= 8) {
+        uint32_t c = (color >> shift) & 0xFF;
+        out |= (c + (255 - c) * num / den) << shift;
+    }
+    return out;
+}
+
+/* A filled GFX_CIRCLE_D disc through this file's own clip-aware
+ * fill_rect, using gfx.h's shared inset table - see gfx_circle_inset for
+ * why the table is shared even though the drawing can't be. */
+static void fill_circle(int32_t x, int32_t y, uint32_t color) {
+    for (int32_t row = 0; row < GFX_CIRCLE_D; row++) {
+        int32_t inset = gfx_circle_inset(row);
+        fill_rect(x + inset, y + row, GFX_CIRCLE_D - 2 * inset, 1, color);
+    }
+}
+
+/* x on close, + on maximize, - on minimize: 1px strokes inside a
+ * BTN_GLYPH_INSET-inset box, so all three share one size and one center
+ * and read as a set. The x is what the request was really about - a red
+ * square says "something", a red circle with an x in it says "close". */
+static void draw_button_glyph(int32_t bx, int32_t by, titlebar_button_t btn) {
+    int32_t g0 = BTN_GLYPH_INSET;
+    int32_t g1 = BTN_SIZE - 1 - BTN_GLYPH_INSET;
+    int32_t mid = BTN_SIZE / 2;
+    if (btn == BTN_CLOSE) {
+        for (int32_t k = 0; k <= g1 - g0; k++) {
+            put_pixel_clipped(bx + g0 + k, by + g0 + k, BTN_GLYPH_COLOR);
+            put_pixel_clipped(bx + g1 - k, by + g0 + k, BTN_GLYPH_COLOR);
+        }
+        return;
+    }
+    fill_rect(bx + g0, by + mid - 1, g1 - g0 + 1, 1, BTN_GLYPH_COLOR);
+    if (btn == BTN_MAXIMIZE) {
+        fill_rect(bx + mid - 1, by + g0, 1, g1 - g0 + 1, BTN_GLYPH_COLOR);
+    }
+}
+
+/* M46: the glyphs are drawn on the focused window and on whichever window
+ * the cursor is over, and omitted otherwise - macOS's own rule, and what
+ * keeps three saturated dots from shouting out of every unfocused window
+ * on the desktop. The circles themselves are always drawn: a titlebar
+ * with no buttons at all would be worse than a quiet one. */
+static void draw_titlebar_buttons(const window_t *win, int idx, int focused) {
     static const uint32_t colors[BTN_COUNT] = {BTN_MINIMIZE_COLOR, BTN_MAXIMIZE_COLOR, BTN_CLOSE_COLOR};
+    int hovered_here = (hover_btn_window == idx);
     for (int b = 0; b < BTN_COUNT; b++) {
         int32_t bx, by;
         titlebar_button_rect(win, (titlebar_button_t)b, &bx, &by);
-        fill_rect(bx, by, BTN_SIZE, BTN_SIZE, colors[b]);
+        uint32_t color = colors[b];
+        if (hovered_here && hover_btn == (titlebar_button_t)b) {
+            color = lighten(color, 1, BTN_HOVER_LIGHTEN);
+        }
+        fill_circle(bx, by, color);
+        if (focused || hovered_here) {
+            draw_button_glyph(bx, by, (titlebar_button_t)b);
+        }
     }
 }
 
@@ -652,6 +810,13 @@ static void fit_title(const window_t *win, char *out) {
  * here so redraw_rect (needs it, but is defined earlier for the same
  * z-order reasons draw_titlebar_buttons etc. already are) can call it. */
 static int hovered_resize_mask(void);
+
+/* M46: whether the cursor is over an ordinary window's titlebar band -
+ * checked after the resize mask, since a titlebar's own top edge is also
+ * a resize handle and the resize cursor is the more specific answer
+ * there. Forward-declared for the same reason hovered_resize_mask is:
+ * redraw_rect needs it, and it needs the drag state declared far below. */
+static int cursor_over_titlebar(void);
 
 static void draw_cursor(const uint8_t *shape) {
     int32_t x0 = max_i32(cursor_x, clip_x0);
@@ -775,6 +940,48 @@ static int32_t launcher_row_y(int32_t launcher_y, int i) {
     return launcher_y + LAUNCHER_LIST_Y + i * LAUNCHER_ROW_H;
 }
 
+/* M47: the two Power buttons, along the bottom of the overlay. Drawn
+ * through this file's own clip-aware primitives for the same reason
+ * everything else here is (see draw_text_clipped's note); the label is
+ * centered by measuring it, since these are the only two buttons in this
+ * process and gfx.c's gfx_draw_button is not reachable from here. */
+static void draw_power_button(int32_t x, int32_t y, int32_t bx, const char *label, int mode) {
+    int32_t px = x + bx;
+    int32_t py = y + POWER_BTN_Y;
+    fill_rect_rounded(px, py, POWER_BTN_W, POWER_BTN_H,
+                       power_hover == mode ? POWER_BTN_HOVER : POWER_BTN_BG);
+    stroke_rect_rounded(px, py, POWER_BTN_W, POWER_BTN_H, LAUNCHER_BORDER);
+    int32_t label_w = 0;
+    for (const char *p = label; *p; p++) {
+        label_w += FONT_WIDTH;
+    }
+    draw_text_clipped(px + (POWER_BTN_W - label_w) / 2, py + (POWER_BTN_H - FONT_HEIGHT) / 2,
+                       label, LAUNCHER_TEXT, 0);
+}
+
+static void draw_power_row(int32_t x, int32_t y) {
+    draw_power_button(x, y, POWER_OFF_X, "Shut Down", POWER_OFF);
+    draw_power_button(x, y, POWER_REBOOT_X, "Restart", POWER_REBOOT);
+}
+
+/* The confirm step. Keyboard-driven (Y/Enter confirms, Escape/N cancels)
+ * rather than a second pair of buttons: the launcher already owns the
+ * keyboard while it is up, and two more click targets over the two that
+ * raised them is how a mis-click becomes a double mis-click. */
+static void draw_power_confirm(int32_t x, int32_t y) {
+    int32_t cx = x + (LAUNCHER_W - POWER_CONFIRM_W) / 2;
+    int32_t cy = y + (LAUNCHER_H - POWER_CONFIRM_H) / 2;
+    fill_rect_rounded(cx, cy, POWER_CONFIRM_W, POWER_CONFIRM_H, POWER_CONFIRM_BG);
+    stroke_rect_rounded(cx, cy, POWER_CONFIRM_W, POWER_CONFIRM_H, LAUNCHER_BORDER);
+    draw_text_clipped(cx + GFX_PAD, cy + GFX_PAD,
+                       power_confirm == POWER_REBOOT ? "Restart this machine?" : "Shut down this machine?",
+                       LAUNCHER_TEXT, 1);
+    draw_text_clipped(cx + GFX_PAD, cy + GFX_PAD + 2 * FONT_HEIGHT,
+                       "Y / Enter = yes", LAUNCHER_ROW_FG, 0);
+    draw_text_clipped(cx + GFX_PAD, cy + GFX_PAD + 3 * FONT_HEIGHT,
+                       "N / Esc / click = cancel", LAUNCHER_ROW_FG, 0);
+}
+
 static void draw_launcher(void) {
     int32_t x, y;
     launcher_rect(&x, &y);
@@ -803,20 +1010,25 @@ static void draw_launcher(void) {
 
     if (launcher_match_count == 0) {
         draw_text_clipped(x + LAUNCHER_PAD, launcher_row_y(y, 0) + 2, "No matches", LAUNCHER_HINT, 0);
-        return;
+    } else {
+        for (int i = 0; i < LAUNCHER_ROWS; i++) {
+            int m = launcher_scroll + i;
+            if (m >= launcher_match_count) {
+                break;
+            }
+            int32_t ry = launcher_row_y(y, i);
+            if (m == launcher_selected) {
+                fill_rect_rounded(x + LAUNCHER_PAD / 2, ry, LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H, LAUNCHER_SEL_BG);
+            }
+            draw_text_clipped(x + LAUNCHER_PAD, ry + 2, launcher_entries[launcher_matches[m]],
+                               m == launcher_selected ? LAUNCHER_TEXT : LAUNCHER_ROW_FG,
+                               m == launcher_selected);
+        }
     }
-    for (int i = 0; i < LAUNCHER_ROWS; i++) {
-        int m = launcher_scroll + i;
-        if (m >= launcher_match_count) {
-            break;
-        }
-        int32_t ry = launcher_row_y(y, i);
-        if (m == launcher_selected) {
-            fill_rect_rounded(x + LAUNCHER_PAD / 2, ry, LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H, LAUNCHER_SEL_BG);
-        }
-        draw_text_clipped(x + LAUNCHER_PAD, ry + 2, launcher_entries[launcher_matches[m]],
-                           m == launcher_selected ? LAUNCHER_TEXT : LAUNCHER_ROW_FG,
-                           m == launcher_selected);
+
+    draw_power_row(x, y);
+    if (power_confirm != POWER_CONFIRM_NONE) {
+        draw_power_confirm(x, y);
     }
 }
 
@@ -883,9 +1095,10 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
         if (!win->alive || win->is_panel || win->is_desktop || win->minimized) {
             continue;
         }
-        uint32_t titlebar_color = (i == focused_window) ? accent_color : TITLEBAR_COLOR;
+        int focused = (i == focused_window);
+        uint32_t titlebar_color = focused ? accent_color : TITLEBAR_COLOR;
         fill_rect_shadow(win->x - BORDER + SHADOW_OFFSET, win->y - TITLEBAR_H - BORDER + SHADOW_OFFSET,
-                          win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER);
+                          win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER, focused);
         /* M44: the frame's *top* corners are rounded, its bottom ones are
          * not. Only the top is safe to round without alpha: the content
          * area is a straight memcpy of the client's own buffer (see
@@ -899,8 +1112,8 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
         char fitted_title[WM_TITLE_MAX];
         fit_title(win, fitted_title);
         draw_text_clipped(win->x + TITLE_MARGIN, win->y - TITLEBAR_H + (TITLEBAR_H - FONT_HEIGHT) / 2,
-                           fitted_title, TITLE_COLOR, 1 /* bold */);
-        draw_titlebar_buttons(win);
+                           fitted_title, focused ? TITLE_COLOR : TITLE_DIM_COLOR, 1 /* bold */);
+        draw_titlebar_buttons(win, i, focused);
         blit_window(win);
     }
     /* M43: the snap preview, above every ordinary window (it is about
@@ -939,6 +1152,8 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
         cursor_shape_now = cursor_shape_horizontal;
     } else if (rmask & (RESIZE_TOP | RESIZE_BOTTOM)) {
         cursor_shape_now = cursor_shape_vertical;
+    } else if (cursor_over_titlebar()) {
+        cursor_shape_now = cursor_shape_move;
     }
     draw_cursor(cursor_shape_now);
     present();
@@ -1034,11 +1249,25 @@ static int32_t drag_start_x, drag_start_y, drag_start_w, drag_start_h;
  * clamped so MOVE_MIN_VISIBLE px of it always stay on screen, so its edge
  * can never actually reach x=0 - but the pointer can, and "shove the
  * pointer into the edge" is the gesture every desktop that has this uses. */
+/* M46: double-clicking a titlebar toggles maximize/restore, through
+ * apply_window_action like everything else. M40 already made double-click
+ * detection latency-independent by timestamping events in the PS/2
+ * handler (input.h's mouse_event_t.time_ms); this is that machinery's
+ * second user, and it uses the same 500ms window desktop_icons.c and
+ * file_manager.c already do. */
+#define TITLEBAR_DOUBLE_CLICK_MS 500
+
 #define SNAP_EDGE_MARGIN 8
 #define SNAP_NONE  0
 #define SNAP_LEFT  1
 #define SNAP_RIGHT 2
 static int drag_snap_hint = SNAP_NONE; /* which half a release right now would snap to; only meaningful while drag_mode == DRAG_MOVE */
+
+/* M46: the previous titlebar press, for double-click detection - the
+ * window it landed on and the *event's own* timestamp, never
+ * SYS_uptime_ms here. See TITLEBAR_DOUBLE_CLICK_MS. */
+static int titlebar_last_click_window = -1;
+static uint32_t titlebar_last_click_ms;
 
 /* M38: the mask draw_cursor's shape selection (redraw_rect) uses - a
  * resize *in progress* keeps showing the shape for whichever edge/corner
@@ -1058,6 +1287,28 @@ static int hovered_resize_mask(void) {
         int mask = resize_hit_mask(w, cursor_x, cursor_y);
         if (mask) {
             return mask;
+        }
+    }
+    return 0;
+}
+
+/* M46: a move-drag in progress keeps showing the move cursor even if the
+ * pointer drifts off the titlebar it grabbed - same rule
+ * hovered_resize_mask already applies to a resize in progress, and for
+ * the same reason: the gesture, not the pixel under the pointer, is what
+ * the cursor is reporting. */
+static int cursor_over_titlebar(void) {
+    if (drag_mode == DRAG_MOVE) {
+        return 1;
+    }
+    if (drag_mode != DRAG_NONE || hover_btn_window >= 0) {
+        return 0; /* a titlebar button is its own target, not the band around it */
+    }
+    for (int i = window_count - 1; i >= 0; i--) {
+        const window_t *w = &windows[i];
+        if (w->alive && !w->is_panel && !w->is_desktop && !w->minimized &&
+            point_in_titlebar(w, cursor_x, cursor_y)) {
+            return 1;
         }
     }
     return 0;
@@ -1655,6 +1906,8 @@ static void launcher_reload(void) {
 
 static void launcher_set_open(int open) {
     launcher_open = open;
+    power_confirm = POWER_CONFIRM_NONE; /* M47: never leave a confirm box armed across an open/close */
+    power_hover = POWER_CONFIRM_NONE;
     if (open) {
         launcher_query[0] = '\0';
         launcher_query_len = 0;
@@ -1683,6 +1936,21 @@ static void launcher_launch_selected(void) {
  * here at all (see LAUNCHER_W's comment). Escape and Enter both close it,
  * so it can never be left holding input with no way out. */
 static void launcher_key(char ch) {
+    /* M47: an armed confirm box takes the keyboard from the search field
+     * outright. Anything that isn't an explicit yes cancels - including a
+     * stray letter, which is the right default for the one action in this
+     * system that cannot be undone. */
+    if (power_confirm != POWER_CONFIRM_NONE) {
+        if (ch == 'y' || ch == 'Y' || ch == '\n' || ch == '\r') {
+            sys_shutdown(power_confirm);
+            /* Only reached if the kernel refused the mode, which it
+             * cannot for these two - fall through to cancelling rather
+             * than leaving a box up that did nothing. */
+        }
+        power_confirm = POWER_CONFIRM_NONE;
+        dirty = 1;
+        return;
+    }
     if (ch == 27) { /* Escape */
         launcher_set_open(0);
         return;
@@ -1715,11 +1983,40 @@ static void launcher_key(char ch) {
  * (text_editor.c's File menu, desktop_icons.c's context menu). Returns 1
  * either way, since the click is consumed and must not also reach a
  * window underneath. */
+/* Which Power button (POWER_OFF/POWER_REBOOT) is at (px, py), or
+ * POWER_CONFIRM_NONE. Shared by the click handler and the hover
+ * highlight, so the lit button and the acting button can't disagree -
+ * the same reason titlebar_button_at exists. */
+static int power_button_at(int32_t px, int32_t py) {
+    int32_t lx, ly;
+    launcher_rect(&lx, &ly);
+    if (gfx_point_in_rect(px, py, lx + POWER_OFF_X, ly + POWER_BTN_Y, POWER_BTN_W, POWER_BTN_H)) {
+        return POWER_OFF;
+    }
+    if (gfx_point_in_rect(px, py, lx + POWER_REBOOT_X, ly + POWER_BTN_Y, POWER_BTN_W, POWER_BTN_H)) {
+        return POWER_REBOOT;
+    }
+    return POWER_CONFIRM_NONE;
+}
+
 static int launcher_click(int32_t px, int32_t py) {
     int32_t lx, ly;
     launcher_rect(&lx, &ly);
+    /* M47: while a confirm box is up, any click cancels it - confirming
+     * is deliberately keyboard-only (see draw_power_confirm). */
+    if (power_confirm != POWER_CONFIRM_NONE) {
+        power_confirm = POWER_CONFIRM_NONE;
+        dirty = 1;
+        return 1;
+    }
     if (!gfx_point_in_rect(px, py, lx, ly, LAUNCHER_W, LAUNCHER_H)) {
         launcher_set_open(0);
+        return 1;
+    }
+    int power = power_button_at(px, py);
+    if (power != POWER_CONFIRM_NONE) {
+        power_confirm = power;
+        dirty = 1;
         return 1;
     }
     for (int i = 0; i < LAUNCHER_ROWS; i++) {
@@ -1742,6 +2039,11 @@ static int launcher_click(int32_t px, int32_t py) {
 static void launcher_hover(int32_t px, int32_t py) {
     int32_t lx, ly;
     launcher_rect(&lx, &ly);
+    int power = power_button_at(px, py);
+    if (power != power_hover) {
+        power_hover = power;
+        dirty = 1;
+    }
     for (int i = 0; i < LAUNCHER_ROWS; i++) {
         if (launcher_scroll + i >= launcher_match_count) {
             break;
@@ -1911,6 +2213,21 @@ static void handle_mouse(void) {
          * everywhere else. */
         int right_down_edge = (mev.buttons & 2) && !(prev_buttons & 2);
 
+        /* M46: which titlebar button (if any) the cursor is over, updated
+         * on every event including the ones that go on to be consumed by
+         * a drag or a menu - a button left lit because the pointer
+         * happened to leave during a drag is exactly the kind of stale
+         * highlight this is supposed to be the fix for. */
+        {
+            titlebar_button_t over_btn = BTN_CLOSE;
+            int over_idx = (drag_mode == DRAG_NONE) ? titlebar_button_at(cursor_x, cursor_y, &over_btn) : -1;
+            if (over_idx != hover_btn_window || (over_idx >= 0 && over_btn != hover_btn)) {
+                hover_btn_window = over_idx;
+                hover_btn = over_btn;
+                dirty = 1;
+            }
+        }
+
         /* M43: an open launcher owns the pointer the same way it owns the
          * keyboard - it is drawn over everything, so a click that fell
          * through to a window underneath it would land somewhere the user
@@ -2051,23 +2368,12 @@ static void handle_mouse(void) {
              * loop's own comment; a real fix is z-order work, out of
              * scope here). Panels/desktop have no titlebar, so they're
              * never candidates. */
-            int btn_hit_idx = -1;
+            /* M46: the same titlebar_button_at the hover highlight uses -
+             * this used to be a second, identical loop, and a lit button
+             * that wasn't the button that acted would be a particularly
+             * annoying way to find that out. */
             titlebar_button_t btn_hit = BTN_CLOSE;
-            for (int i = window_count - 1; i >= 0 && btn_hit_idx < 0; i--) {
-                const window_t *w = &windows[i];
-                if (!w->alive || w->is_panel || w->is_desktop || w->minimized) {
-                    continue;
-                }
-                for (int b = 0; b < BTN_COUNT; b++) {
-                    int32_t bx, by;
-                    titlebar_button_rect(w, (titlebar_button_t)b, &bx, &by);
-                    if (gfx_point_in_rect(cursor_x, cursor_y, bx, by, BTN_SIZE, BTN_SIZE)) {
-                        btn_hit_idx = i;
-                        btn_hit = (titlebar_button_t)b;
-                        break;
-                    }
-                }
-            }
+            int btn_hit_idx = titlebar_button_at(cursor_x, cursor_y, &btn_hit);
             if (btn_hit_idx >= 0) {
                 if (btn_hit == BTN_CLOSE) {
                     apply_window_action(btn_hit_idx, WM_ACTION_CLOSE, 0);
@@ -2126,6 +2432,21 @@ static void handle_mouse(void) {
                 }
             }
             if (mv_idx >= 0) {
+                /* M46: a second press on the same titlebar inside the
+                 * double-click window maximizes (or restores) instead of
+                 * starting another move-drag. Checked before the drag is
+                 * armed, so the gesture can't do both. */
+                if (titlebar_last_click_window == mv_idx &&
+                    mev.time_ms - titlebar_last_click_ms <= TITLEBAR_DOUBLE_CLICK_MS) {
+                    titlebar_last_click_window = -1; /* a third quick press starts a fresh pair, not a third toggle */
+                    set_focus(mv_idx);
+                    apply_window_action(mv_idx,
+                                         windows[mv_idx].maximized ? WM_ACTION_RESTORE : WM_ACTION_MAXIMIZE, 0);
+                    prev_buttons = mev.buttons;
+                    continue;
+                }
+                titlebar_last_click_window = mv_idx;
+                titlebar_last_click_ms = mev.time_ms;
                 drag_mode = DRAG_MOVE;
                 drag_window = mv_idx;
                 drag_start_cursor_x = cursor_x;
@@ -2302,6 +2623,24 @@ int main(void) {
 
     cursor_x = (int32_t)(fb_info.width / 2);
     cursor_y = (int32_t)(fb_info.height / 2);
+
+    /* M47: whatever settings.c last wrote, applied before the first
+     * client connects - so the desktop comes up the way it was left
+     * rather than snapping to it a moment later. A missing or malformed
+     * file leaves the compiled-in defaults these three already hold,
+     * which is exactly what settings_file_load's all-or-nothing contract
+     * is for (see its own doc comment). */
+    {
+        wm_settings_request_t saved;
+        saved.bg_color = bg_color;
+        saved.accent_color = accent_color;
+        saved.wallpaper = wallpaper_id;
+        if (settings_file_load(&saved)) {
+            bg_color = saved.bg_color;
+            accent_color = saved.accent_color;
+            wallpaper_id = saved.wallpaper;
+        }
+    }
 
     int req_fds[2];
     int resp_fds[2];

@@ -1656,123 +1656,201 @@ syscall. What was missing was entirely above the kernel.
 - [x] Full `tools/qemu-serial-test.sh` pass (31/31) and
       `tools/qemu-input-test.sh` pass (19/19)
 
-## M46 — Window chrome & control details
+## M46 — Window chrome & control details ✅
 
-The layout has stopped moving, so the details are worth paying for now.
-The house rule for this milestone, and the answer to "which OS is this
-copying": **macOS shapes, Windows positions.** The buttons become
-circular traffic lights, but they stay right-aligned in
+The layout had stopped moving, so the details were worth paying for. The
+house rule for this milestone, and the answer to "which OS is this
+copying": **macOS shapes, Windows positions.** The buttons became
+circular traffic lights, but they stayed right-aligned in
 minimize/maximize/close order where every window in this project has
-always had them, and where M30's hit-test, M42's tests and every user's
-muscle memory already put them.
+always had them - so `titlebar_button_rect` is untouched and M30's
+hit-test, M42's tests and every user's muscle memory all still apply.
 
-- [ ] Circular titlebar buttons replacing M30's three flat 14px squares
-      (`draw_titlebar_buttons`, `compositor.c`): close is a red circle
-      carrying an ×, maximize an amber circle with a +, minimize a grey-
-      green circle with a −. The × is what the request was really about -
-      a red square says "something", a red circle with an × in it says
-      "close"
-- [ ] Glyphs are drawn on the focused window and under the cursor, and
-      omitted otherwise - macOS's own rule, and the thing that stops
-      three saturated dots from shouting from every unfocused window on
-      the desktop
-- [ ] Hover feedback at all, which no titlebar button has ever had: the
-      compositor tracks which button the cursor is over and lightens it.
-      It already receives every mouse move for hit-testing, so this is
-      new state, not new plumbing
-- [ ] One shared circle table, `gfx_circle_inset`, mirroring exactly
-      what M44 did with `gfx_corner_inset`: `compositor.c` has to draw
-      through its own clip-aware `put_pixel` and apps through `gfx.c`,
-      so two *implementations* are unavoidable - two *tables* are not,
-      and M44's note about them eventually disagreeing is why
-- [ ] Double-clicking a titlebar toggles maximize/restore, through
+- [x] Circular titlebar buttons replacing M30's three flat 14px squares:
+      close is a red circle carrying an ×, maximize an amber circle with
+      a +, minimize a grey-green circle with a −. The × is what the
+      request was really about - a red square says "something", a red
+      circle with an × in it says "close". The glyphs are dark rather
+      than white, macOS's own choice and the right one here: all three
+      fills are light and a white mark on amber is illegible at 6px
+- [x] Glyphs are drawn on the focused window and on whichever window the
+      cursor is over, and omitted otherwise - macOS's own rule, and what
+      stops three saturated dots shouting out of every unfocused window.
+      The circles are always drawn: a titlebar with no buttons at all
+      would be worse than a quiet one
+- [x] Hover feedback at all, which no titlebar button had ever had. The
+      compositor already receives every mouse move for hit-testing, so
+      this was new state, not new plumbing - and the highlight and the
+      click now share one `titlebar_button_at`, where before there were
+      two identical loops. A lit button that wasn't the button that acted
+      would be a particularly annoying way to discover that
+- [x] One shared circle table, `gfx_circle_inset`, mirroring exactly what
+      M44 did with `gfx_corner_inset`. No `gfx_fill_circle` alongside it:
+      nothing drawing into an app's own window wants a circle, and the
+      shared thing that mattered was the table, not a primitive with no
+      caller
+- [x] Double-clicking a titlebar toggles maximize/restore, through
       `apply_window_action` like everything else. M40 already made
       double-click detection latency-independent by timestamping events
-      in the PS/2 handler; this is that machinery's second user
-- [ ] Cursor shape follows the resize zones. `kernel/drivers/cursor.c`
-      draws one hardcoded arrow, so this needs a small bitmap set and a
-      `SYS_cursor_shape` for the compositor to select between them: ↔ /
-      ↕ / ⤡ over M31's 5px edge and corner masks, and a move cursor over
-      the titlebar. This is not decoration - M31's resize zones are 5px
-      wide and completely invisible, so today the only way to find one
-      is to guess
-- [ ] Focused and unfocused windows differ by more than titlebar color:
-      the title text dims when unfocused, and M38's drop shadow is
-      deeper on the focused window. Depth is the cue that survives a
-      user changing the accent color out from under the design
-- [ ] A real pressed state for `gfx_draw_button`, so every dialog button
-      in `text_editor.c`, `settings.c` and `file_manager.c` reacts to
-      the press rather than only to the release
-- [ ] New pixel self-test (`[m46]`): the button's bounding-box *corner*
-      is titlebar color while its center is button color - which is what
-      proves a circle got drawn and not a square - the × present on a
-      focused window's close button and absent once that window is
-      unfocused, and the dimmed unfocused title text
-- [ ] New interactive tests: hovering a titlebar button lights it and
-      clicking it still closes; double-clicking the titlebar maximizes
-      then restores; moving the pointer onto a resize edge changes the
-      drawn cursor
+      in the PS/2 handler; this is that machinery's second user, and its
+      first inside the compositor itself
+- [x] Focused and unfocused windows now differ by more than titlebar
+      color: the title text dims, and M38's drop shadow is deeper on the
+      focused window (1/2 rather than 1/3 of the way to black). Depth and
+      contrast are the cues that survive a user changing the accent color
+      out from under the design
+- [x] **Cursor shape over the resize zones was mostly already done**, by
+      M38 - `compositor.c` has had edge/corner cursor bitmaps and picked
+      between them from `resize_hit_mask` since that milestone. What was
+      actually missing was the *move* cursor over the titlebar band, so
+      that is what this milestone added. M46's plan called for a
+      `SYS_cursor_shape` and a kernel bitmap set; that would have been a
+      second cursor implementation for no gain, since
+      `kernel/drivers/cursor.c`'s arrow is invisible the whole time the
+      compositor owns the framebuffer. Recorded rather than done
+- [x] A real pressed state for buttons: `gfx_draw_button_state` darkens
+      the fill and nudges the label a pixel down and right, and
+      `gfx_draw_button` is that with `pressed = 0`. Wired into the two
+      files that actually have `gfx_draw_button` dialogs - `settings.c`'s
+      Clear and `task_manager.c`'s End Task / Force Quit, both of which
+      also un-press when the pointer leaves while held. `text_editor.c`
+      and `file_manager.c` are named in the original plan but have no
+      such buttons: the editor's prompts are keyboard-driven and the file
+      manager has none at all
+- [x] New pixel self-test (`[m46]`, 9/9): the close button's bounding-box
+      *corner* is titlebar color while its middle is button color - which
+      is exactly what says a circle got drawn and not a square, and the
+      one check a milestone that only changed the fill color would fail -
+      the × present on a focused window and gone once a second client
+      takes focus, both shadow ratios read at the same probe point either
+      side of that focus change, and the title text's bright/dim pixel
+      counts
+- [x] M38's own shadow expectation moved from the 1/3 blend to the 1/2
+      one, since its window is the focused one. Updated rather than
+      loosened - it still asserts the exact arithmetic the compositor
+      does
+- [x] The input harness learned every cursor shape. `move_to` verifies
+      where the pointer landed by matching the arrow's bitmap, so it
+      could not locate a pointer parked on a resize edge or a titlebar at
+      all - which had been latently true since M38 and only surfaced when
+      a test first tried to put the pointer there. `find_cursor_shape`
+      matches all six shapes and returns which one, so "which cursor is
+      drawn here" is now a question a test can ask
+- [x] Three new interactive tests: hovering a titlebar button lights it
+      (and the close button still closes, checked in the same test);
+      double-clicking the titlebar maximizes then restores; and the
+      pointer moving from window content to a resize edge to a corner to
+      the titlebar gets the arrow, the horizontal resize cursor, the
+      diagonal one and the move cursor in turn
+- [x] Full `tools/qemu-serial-test.sh` pass (32/32) and
+      `tools/qemu-input-test.sh` pass (22/22)
 
-## M47 — Session lifecycle: shutdown, restart, persistent settings
+## M47 — Session lifecycle: shutdown, restart, persistent settings ✅
 
-Every session of this OS so far has ended by killing QEMU. There is no
-way to turn the machine off from inside it, and nothing it remembers
-between boots - including the wallpaper M44 just added a picker for.
+Every session of this OS before this milestone ended by killing QEMU.
+There was no way to turn the machine off from inside it, and nothing it
+remembered between boots - including the wallpaper M44 had just added a
+picker for.
 
-- [ ] ACPI S5 poweroff: parse the FADT. `kernel/acpi/acpi.c` already
-      finds, validates and walks the RSDT/XSDT for the MADT - this is
-      the same walk and one more table. From it, the PM1a/PM1b control
-      block addresses; the `\_S5` sleep type properly lives in AML in
-      the DSDT, and **writing an AML parser is not in scope** - so the
-      honest plan is: use the FADT registers when they are there, take
-      the well-known `SLP_TYP` values otherwise, and keep QEMU's
-      documented port 0x604 as the last-resort fallback. Say which one
-      fired in the log, so a machine that powers off the ugly way says
-      so instead of looking like it worked properly
-- [ ] Reboot in three tiers: the FADT's ACPI reset register, falling
-      back to the 8042 pulse (0xFE to port 0x64), falling back to a
-      triple fault. The first two are firmware-dependent, and a machine
-      that will not restart at all is worse than one that restarts
-      inelegantly
-- [ ] `SYS_shutdown(mode)` (poweroff or reboot) performs an *orderly*
-      stop rather than just writing the port: SIGTERM every user task,
-      allow a bounded grace period (~1s counted in scheduler ticks, not
-      a spin), SIGKILL whatever is left, flush the filesystem's dirty
-      state through `vfs`/`leanfs`, then power off. Only the grace
-      period is new machinery; every other piece already exists and has
-      a self-test
-- [ ] A Power control in the launcher/Start surface: Shut Down and
-      Restart behind M36's confirm dialog. It sits one click from a
-      search field, and a mis-click that silently powers the machine off
-      is the worst possible first impression
-- [ ] `shutdown` and `reboot` as shell commands too - half the time you
-      are already in the terminal, and it gives the self-tests a
-      non-graphical way in
-- [ ] Settings persist: `settings.c` writes the chosen background,
-      accent and wallpaper to a `settings.conf` through `SYS_writefile`
-      as plain `key=value` text. Plain text deliberately - leanfs is
-      flat, this project has no config format, and inventing a binary
-      one to carry three integers would be worse than parsing three
-      lines. The compositor reads it at boot, before the first client
-      connects, and falls back to today's compiled-in defaults if the
-      file is missing *or* malformed
-- [ ] That last piece doubles as the best available end-to-end proof
-      that the shutdown path really flushed the disk: a reboot that
-      comes back with your wallpaper still set is one that wrote it
-- [ ] New boot self-test (`[m47]`): the settings file round-trips
-      through a real write, read and parse, including a deliberately
-      corrupted one falling back to defaults rather than to garbage
-      colors; and the orderly-stop sequence driven directly with a
-      victim task that ignores SIGTERM, checking it is SIGKILLed after
-      the grace period instead of blocking shutdown forever
-- [ ] The harness learns "the guest exited on its own":
-      `qemu-serial-test.sh` boots a guest, reads markers and kills it,
-      so it has never once observed a clean exit. A shutdown test drives
-      the power-off path and asserts QEMU's own process terminates with
-      the expected status - the only real proof S5 fired, and reachable
-      with the tooling already in `tools/`
-- [ ] Interactive test: Start > Power > Shut Down through real clicks,
-      including Cancel leaving the machine running
+- [x] **ACPI had not worked at all since M26.** `acpi_find_madt` scans
+      the legacy EBDA/0xE0000 ranges for the RSDP, but under UEFI the
+      RSDP is published in the system table's configuration array and
+      firmware owes nobody a copy in low memory - so from the moment the
+      BIOS path was removed, every boot logged "no RSDP found" and SMP
+      silently fell back to single-core. It surfaced here because M47
+      needs the FADT and the log said it wasn't there. The loader now
+      reads the RSDP out of the configuration table before
+      ExitBootServices and hands it over in RDX (`kernel_main` grew a
+      third parameter; `acpi_set_rsdp` still signature-checks it and
+      falls back to the legacy scan). The MADT and the FADT are both
+      found now
+- [x] ACPI S5 poweroff: `acpi_find_power` parses the FADT for the
+      PM1a/PM1b control ports and the ACPI-enable handshake - the same
+      RSDT/XSDT walk the MADT lookup already did, factored into a shared
+      `find_table`. The `\_S5` sleep type properly lives in AML in the
+      DSDT and **writing an AML parser is not in scope**, so `power.c`
+      supplies the well-known values (0 first, which is what QEMU's own
+      tables define, then 5) and says in the log that they are well-known
+      rather than read. QEMU's documented port 0x604 and Bochs's 0xB004
+      are the last-resort tiers. Every tier announces itself before it
+      fires, so the last line in the log is always the mechanism that was
+      actually tried last
+- [x] Reboot in three tiers: the FADT's reset register (SystemIO only - a
+      memory-mapped one would need a vmm mapping for a single byte, and
+      the next tier is a perfectly good answer), the 8042 pulse, then a
+      deliberate triple fault. On this QEMU the FADT reports no reset
+      register, so the 8042 tier is the one that actually restarts the
+      machine - which the harness now observes end to end
+- [x] `SYS_shutdown(mode)` (31) performs an *orderly* stop:
+      `power_orderly_stop` SIGTERMs every task except the caller and the
+      parentless idle ones, waits a bounded ~1s counted in real PIT ticks
+      (not a spin), SIGKILLs whatever is left and waits again, then
+      `vfs_sync` and the platform tier. It returns how many tasks needed
+      SIGKILL, which is what makes the escalation testable, and it is
+      deliberately separate from `power_shutdown` so a self-test can
+      drive it without the machine turning off underneath it
+- [x] `vfs_sync()` exists and is honest: leanfs is write-through, so
+      there is nothing buffered for it to push out, and it says so in the
+      log rather than pretending to do work. It exists because the day
+      leanfs grows a write cache, the fix belongs there and not in a
+      shutdown path that would otherwise have to learn what a filesystem
+      is
+- [x] A Power row in the launcher: Shut Down and Restart, both behind a
+      confirm step. Confirming is keyboard-only (Y/Enter; anything else,
+      including a click, cancels) - these sit one click from a search
+      field, and two more click targets over the two that raised them is
+      how a mis-click becomes a double mis-click. `LAUNCHER_ROWS` went
+      12 -> 10 to make room
+- [x] `shutdown` and `reboot` as programs on disk rather than shell
+      builtins, like every other command this project ships - which makes
+      them reachable from `gui_terminal.c` and from the launcher as well
+      as from the text shell, and gives the tests a non-graphical way
+      into the same syscall
+- [x] Settings persist through `user_space/lib/settings_file.c` - plain
+      `key=value` text, shared by the one writer (`settings.c`, via a new
+      `apply_theme` so the live compositor and the file can't drift) and
+      the one reader (`compositor.c`, once at startup before any client
+      connects). Loading is all-or-nothing: a half-parsed file would hand
+      the compositor one real color and two zeros, which is a black
+      desktop that looks like a compositor bug rather than a damaged file
+- [x] **Persistence broke every GUI self-test, which is the most
+      interesting thing this milestone found.** Eleven milestones of
+      pixel tests assert against the compositor's *compiled-in* defaults,
+      which was safe only while those were the only thing a fresh
+      compositor could start with. Pick a flat wallpaper and reboot, and
+      `[m44]` panics on the way back up. Caught the first time the input
+      harness rebooted a guest that had just changed its wallpaper -
+      exactly the scenario the feature exists for. The fix is that the
+      whole self-test phase runs against pinned defaults with the user's
+      own file held aside and handed back before PID 1 starts; "the tests
+      should tolerate any settings" is not the fix, because a pixel test
+      whose expected values depend on what somebody clicked last week
+      isn't a test
+- [x] New boot self-test (`[m47]`, 4/4): the settings file round-trips
+      through a real write, a real compositor and a real
+      `desktop_icons`, graded on the pixel the desktop actually paints -
+      the whole chain, not just the parser - and a deliberately corrupted
+      file falls back to the defaults rather than to garbage colors. Then
+      the orderly stop driven directly, twice: with no grace period both
+      victims must die of the *SIGKILL* that follows (exit code 137) and
+      the killed count must be 2; with a real one they must all be gone
+      before the SIGKILL round runs at all (143, and a count of 0). Two
+      independent measurements of the same escalation
+- [x] The harness learned "the guest exited on its own":
+      `Machine.wait_for_exit`. Nothing here had ever observed a clean
+      guest exit - every test ends by killing QEMU - so "did S5 actually
+      fire" had no way to be answered from either side. QEMU's own
+      process terminating is the only real proof
+- [x] Three new interactive tests: Start > Power > Shut Down through real
+      clicks, asserting QEMU exits with status 0 and that the log shows
+      the orderly stop ran; the same up to Cancel, asserting the machine
+      is still running four seconds later; and the end-to-end
+      persistence proof - pick the Flat wallpaper, restart, and watch the
+      desktop come back flat. That last one is deliberately a *restart*
+      rather than two boots: two boots would only prove `SYS_writefile`
+      works, which M33 already covers
+- [x] Full `tools/qemu-serial-test.sh` pass (33/33) and
+      `tools/qemu-input-test.sh` pass (25/25)
 
 ## M48 — System feedback: notifications, errors, no silent failures
 

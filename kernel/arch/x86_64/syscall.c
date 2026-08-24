@@ -15,6 +15,7 @@
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "power/power.h" /* M47 - power_shutdown, and power_mode.h's POWER_OFF/POWER_REBOOT through it */
 #include "proc.h"      /* system_api/include/proc.h - task_info_t, M45. Resolves to the system_api one, not kernel/proc/proc.h below: a quoted include searches the *including* file's own directory first (kernel/arch/x86_64/, which has no proc.h), then -Ikernel (no kernel/proc.h either), then -Isystem_api/include. */
 #include "proc/proc.h"
 #include "sched/sched.h"
@@ -750,6 +751,21 @@ static long sys_clipboard_get(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64
     return (long)clipboard_get((void *)buf, (size_t)maxlen);
 }
 
+/* M47: see SYS_shutdown's own doc comment. Returns only for a mode this
+ * kernel doesn't recognize; on POWER_OFF/POWER_REBOOT power_shutdown
+ * never comes back, so the caller's own return value is unobservable. */
+static long sys_shutdown(uint64_t mode, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (mode != POWER_OFF && mode != POWER_REBOOT) {
+        return -1;
+    }
+    power_shutdown((int)mode);
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -782,6 +798,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_clipboard_get] = sys_clipboard_get,
     [SYS_writefile] = sys_writefile,
     [SYS_taskinfo] = sys_taskinfo,
+    [SYS_shutdown] = sys_shutdown,
 };
 
 void syscall_handler(isr_regs_t *regs) {

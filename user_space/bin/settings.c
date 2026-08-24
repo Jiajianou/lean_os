@@ -29,6 +29,7 @@
  */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "str.h"
+#include "settings_file.h" /* M47: this window is where the three settings are chosen, so it is also where they get written down */
 #include "syscall_wrappers.h"
 #include "wallpaper.h"
 #include "wmclient.h"
@@ -106,7 +107,20 @@ static int format_uint(uint32_t v, char *buf) {
     return len;
 }
 
-static void redraw(wm_window_t *win, int clear_hover) {
+/* M47: every control that changes a setting goes through here rather than
+ * calling wm_set_theme directly - the live compositor and the file on
+ * disk have to move together, and three call sites each remembering to do
+ * both is three chances not to. */
+static void apply_theme(void) {
+    wm_settings_request_t settings;
+    settings.bg_color = current_bg;
+    settings.accent_color = current_accent;
+    settings.wallpaper = current_wallpaper;
+    wm_set_theme(settings.bg_color, settings.accent_color, settings.wallpaper);
+    settings_file_save(&settings);
+}
+
+static void redraw(wm_window_t *win, int clear_hover, int clear_pressed) {
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
 
     gfx_draw_text(&win->gfx, GFX_PAD, 10, "System", LABEL_COLOR);
@@ -155,8 +169,11 @@ static void redraw(wm_window_t *win, int clear_hover) {
     }
     gfx_draw_text(&win->gfx, GFX_PAD, 102, clip_buf, TEXT_COLOR);
 
-    gfx_draw_button(&win->gfx, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H,
-                     clear_hover ? BTN_HOVER : BTN_COLOR, BORDER_COLOR, "Clear", TEXT_COLOR);
+    /* M46: hover *and* press, rather than a button that only ever reacted
+     * once the click had already been acted on. */
+    gfx_draw_button_state(&win->gfx, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H,
+                           clear_hover ? BTN_HOVER : BTN_COLOR, BORDER_COLOR, "Clear", TEXT_COLOR,
+                           clear_pressed);
 
     gfx_draw_text(&win->gfx, GFX_PAD, 130, "Desktop color", LABEL_COLOR);
     gfx_draw_line(&win->gfx, GFX_PAD, 146, WIN_W - GFX_PAD, 146, BORDER_COLOR);
@@ -213,8 +230,9 @@ int main(void) {
     }
 
     int clear_hover = 0;
+    int clear_pressed = 0;
     long next_redraw = 0;
-    redraw(&win, 0);
+    redraw(&win, 0, 0);
 
     for (;;) {
         int changed = 0;
@@ -226,8 +244,20 @@ int main(void) {
                     clear_hover = hover;
                     changed = 1;
                 }
+                /* M46: the button un-presses if the pointer leaves it
+                 * while held, the way a real one does. */
+                if (clear_pressed && !((ev.buttons & 1) && hover)) {
+                    clear_pressed = 0;
+                    changed = 1;
+                }
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && !(ev.buttons & 1)) {
+                if (clear_pressed) {
+                    clear_pressed = 0;
+                    changed = 1;
+                }
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 if (gfx_point_in_rect(ev.x, ev.y, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H)) {
+                    clear_pressed = 1;
                     sys_clipboard_set("", 0);
                     changed = 1;
                 }
@@ -235,7 +265,7 @@ int main(void) {
                     int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
                     if (gfx_point_in_rect(ev.x, ev.y, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
                         current_bg = BG_SWATCHES[i];
-                        wm_set_theme(current_bg, current_accent, current_wallpaper);
+                        apply_theme();
                         changed = 1;
                         break;
                     }
@@ -244,7 +274,7 @@ int main(void) {
                     int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
                     if (gfx_point_in_rect(ev.x, ev.y, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
                         current_accent = ACCENT_SWATCHES[i];
-                        wm_set_theme(current_bg, current_accent, current_wallpaper);
+                        apply_theme();
                         changed = 1;
                         break;
                     }
@@ -252,7 +282,7 @@ int main(void) {
                 for (int i = 0; i < WALLPAPER_COUNT; i++) {
                     if (gfx_point_in_rect(ev.x, ev.y, WALL_BTN_X(i), WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H)) {
                         current_wallpaper = (uint32_t)i;
-                        wm_set_theme(current_bg, current_accent, current_wallpaper);
+                        apply_theme();
                         changed = 1;
                         break;
                     }
@@ -267,7 +297,7 @@ int main(void) {
         }
 
         if (changed) {
-            redraw(&win, clear_hover);
+            redraw(&win, clear_hover, clear_pressed);
         }
     }
 }

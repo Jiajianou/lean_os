@@ -90,6 +90,37 @@ CURSOR_PIXELS = tuple((x, y)
                       for x in range(CURSOR_W)
                       if bits & (0x80 >> x))
 
+# M46: the arrow is no longer the only shape the compositor ever draws.
+# M38 already gave it resize cursors and M46 adds a move cursor for the
+# titlebar band, which broke move_to outright: its verification finds the
+# pointer by matching the arrow's bitmap, so it simply could not locate a
+# pointer parked on a window edge or titlebar. Every shape compositor.c
+# can select lives here now, mirrored from its own tables (cursor_shape,
+# cursor_shape_horizontal/vertical/diag_*/move), and find_cursor tries all
+# of them. The name is worth having as well as the position: "which
+# cursor is drawn here" is exactly what M46's resize-zone test asks.
+_CURSOR_SHAPE_ROWS = {
+    "arrow": _CURSOR_ROWS,
+    "horizontal": (0b00011000, 0b00111100, 0b01100110, 0b11000011,
+                   0b11000011, 0b01100110, 0b00111100, 0b00011000),
+    "vertical": (0b00011000, 0b00111100, 0b01111110, 0b00011000,
+                 0b00011000, 0b01111110, 0b00111100, 0b00011000),
+    "diag_nw_se": (0b11110000, 0b11000000, 0b10000000, 0b00000000,
+                   0b00000000, 0b00000001, 0b00000011, 0b00001111),
+    "diag_ne_sw": (0b00001111, 0b00000011, 0b00000001, 0b00000000,
+                   0b00000000, 0b10000000, 0b11000000, 0b11110000),
+    "move": (0b00011000, 0b00111100, 0b01011010, 0b11011011,
+             0b11011011, 0b01011010, 0b00111100, 0b00011000),
+}
+
+CURSOR_SHAPES = {
+    name: tuple((x, y)
+                for y, bits in enumerate(rows)
+                for x in range(CURSOR_W)
+                if bits & (0x80 >> x))
+    for name, rows in _CURSOR_SHAPE_ROWS.items()
+}
+
 
 class Ppm:
     """A parsed P6 screendump. px(x, y) returns 0x00RRGGBB, the same
@@ -290,27 +321,39 @@ class Machine:
             dx -= sx
             dy -= sy
 
-    def find_cursor(self, shot, near, radius=48):
-        """Where the compositor is actually drawing the pointer, found by
-        matching its 8x8 arrow bitmap (compositor.c's cursor_shape) inside
-        a window around where we believe it to be. Returns (x, y) or None.
+    def find_cursor_shape(self, shot, near, radius=48):
+        """Where the compositor is actually drawing the pointer and which
+        of its shapes it is drawing - matched against every bitmap in
+        CURSOR_SHAPES inside a window around where we believe it to be.
+        Returns (x, y, name) or None.
 
-        Only the arrow's own distinctive pixels are matched, never the
-        gaps - the gaps show whatever is underneath, so requiring them to
-        be non-white would make this fail over pale content."""
+        Only a shape's own lit pixels are matched, never its gaps - the
+        gaps show whatever is underneath, so requiring them to be
+        non-white would make this fail over pale content. The flip side is
+        that one shape's pixel set can be a subset of another's, so ties
+        are broken toward the shape with the most lit pixels: the move
+        cursor's 24 pixels contain the vertical resize cursor's 20, and
+        answering "vertical" for a move cursor would be wrong in exactly
+        the test that cares."""
         cx, cy = near
         best = None
         for oy in range(max(0, cy - radius), min(shot.height - CURSOR_H, cy + radius + 1)):
             for ox in range(max(0, cx - radius), min(shot.width - CURSOR_W, cx + radius + 1)):
-                if all(shot.px(ox + px, oy + py) == CURSOR_COLOR
-                       for px, py in CURSOR_PIXELS):
-                    # Nearest match to the expected point wins, so a white
-                    # glyph elsewhere in the window can't outrank the real
-                    # pointer.
-                    d = abs(ox - cx) + abs(oy - cy)
-                    if best is None or d < best[0]:
-                        best = (d, ox, oy)
-        return None if best is None else (best[1], best[2])
+                for name, pixels in CURSOR_SHAPES.items():
+                    if all(shot.px(ox + px, oy + py) == CURSOR_COLOR for px, py in pixels):
+                        # Nearest match to the expected point wins, so a
+                        # white glyph elsewhere in the window can't outrank
+                        # the real pointer.
+                        key = (abs(ox - cx) + abs(oy - cy), -len(pixels))
+                        if best is None or key < best[0]:
+                            best = (key, ox, oy, name)
+        return None if best is None else (best[1], best[2], best[3])
+
+    def find_cursor(self, shot, near, radius=48):
+        """find_cursor_shape without the shape name - the position is all
+        move_to's verification loop needs."""
+        found = self.find_cursor_shape(shot, near, radius)
+        return None if found is None else (found[0], found[1])
 
     def move_to(self, x, y, verify=True):
         """Puts the pointer at exactly (x, y), then checks that it got
@@ -438,6 +481,29 @@ class Machine:
         raise RuntimeError("screendump never produced %s" % path)
 
     # ---- lifecycle ---------------------------------------------------
+
+    def wait_for_exit(self, timeout=30.0):
+        """M47: how long the guest took to exit on its own, or None if it
+        never did.
+
+        Nothing in this harness had ever observed a clean guest exit -
+        every test before this one ends by killing QEMU - so "did S5
+        actually fire" had no way to be answered from inside the guest or
+        out. QEMU's own process terminating is the only real proof: a
+        guest that merely halted, or that wrote the wrong port and kept
+        running, leaves the process exactly where it was."""
+        deadline = time.time() + timeout
+        started = time.time()
+        while time.time() < deadline:
+            if self._proc.poll() is not None:
+                return time.time() - started
+            time.sleep(0.25)
+        return None
+
+    @property
+    def exit_status(self):
+        """QEMU's exit status, or None if it is still running."""
+        return self._proc.poll()
 
     def kill(self):
         if self._sock is not None:

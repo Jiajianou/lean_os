@@ -100,17 +100,38 @@ int gfx_point_in_rect(int32_t px, int32_t py, int32_t x, int32_t y, int32_t w, i
     return px >= x && px < x + w && py >= y && py < y + h;
 }
 
-void gfx_draw_button(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
-                      uint32_t bg_color, uint32_t border_color,
-                      const char *label, uint32_t label_color) {
-    gfx_fill_rect(ctx, x, y, w, h, bg_color);
+/* M46: two thirds of each channel - dark enough to read as "held" at a
+ * glance, shallow enough that a button's own color still identifies it
+ * (task_manager.c's Force Quit stays visibly red while pressed). Integer,
+ * per channel, the same arithmetic every blend in this project uses. */
+static uint32_t darken(uint32_t color) {
+    uint32_t out = 0;
+    for (int shift = 16; shift >= 0; shift -= 8) {
+        out |= (((color >> shift) & 0xFF) * 2 / 3) << shift;
+    }
+    return out;
+}
+
+void gfx_draw_button_state(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
+                            uint32_t bg_color, uint32_t border_color,
+                            const char *label, uint32_t label_color, int pressed) {
+    gfx_fill_rect(ctx, x, y, w, h, pressed ? darken(bg_color) : bg_color);
     gfx_draw_rect(ctx, x, y, w, h, border_color);
     if (label) {
         int32_t label_w = (int32_t)strlen(label) * FONT_WIDTH;
         int32_t label_x = x + (w - label_w) / 2;
         int32_t label_y = y + (h - FONT_HEIGHT) / 2;
-        gfx_draw_text(ctx, label_x, label_y, label, label_color);
+        /* One pixel down and right while held - the oldest "the surface
+         * moved under your finger" cue there is, and the only one
+         * available without a second border color. */
+        gfx_draw_text(ctx, label_x + (pressed ? 1 : 0), label_y + (pressed ? 1 : 0), label, label_color);
     }
+}
+
+void gfx_draw_button(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
+                      uint32_t bg_color, uint32_t border_color,
+                      const char *label, uint32_t label_color) {
+    gfx_draw_button_state(ctx, x, y, w, h, bg_color, border_color, label, label_color, 0);
 }
 
 void gfx_draw_menu(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t item_w, int32_t item_h,
@@ -160,6 +181,29 @@ int32_t gfx_corner_inset(int32_t row_from_edge) {
         return 0;
     }
     return CORNER_INSET[row_from_edge];
+}
+
+/* M46: the same idea one size up - the horizontal inset of each row of a
+ * GFX_CIRCLE_D-diameter disc, top half only (the bottom mirrors it).
+ * Evaluated at half-pixel centers from the circle equation with r = 7:
+ * row k's center is (k - 6.5) from the middle, and the inset is
+ * 7 - floor(sqrt(49 - (k - 6.5)^2)). Tabulated for the same reason
+ * CORNER_INSET is: seven numbers are easier to check by eye than the
+ * integer-sqrt loop that would produce them, and the diameter is a design
+ * constant rather than a parameter. */
+static const int32_t CIRCLE_INSET[GFX_CIRCLE_D / 2] = {4, 3, 2, 1, 0, 0, 0};
+
+int32_t gfx_circle_inset(int32_t row_from_edge) {
+    if (row_from_edge < 0) {
+        return GFX_CIRCLE_D / 2;
+    }
+    if (row_from_edge >= GFX_CIRCLE_D / 2) {
+        row_from_edge = GFX_CIRCLE_D - 1 - row_from_edge; /* mirror the bottom half onto the top */
+    }
+    if (row_from_edge < 0 || row_from_edge >= GFX_CIRCLE_D / 2) {
+        return GFX_CIRCLE_D / 2;
+    }
+    return CIRCLE_INSET[row_from_edge];
 }
 
 /* How much row `row` of an h-tall rect is inset - nonzero only within

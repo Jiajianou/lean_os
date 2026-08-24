@@ -102,6 +102,11 @@ static int selected = -1;
 static int scroll_top;
 static const char *status_text = "";
 static uint32_t status_color = STATUS_OK;
+/* M46: which action button is being held (0 = End Task, 1 = Force Quit,
+ * -1 = neither) - the pressed look gfx_draw_button_state draws. Cleared
+ * on button-up and on the pointer leaving the button while held, so a
+ * click that slides off doesn't leave one stuck down. */
+static int pressed_btn = -1;
 
 static int is_protected(const char *name) {
     for (int i = 0; i < PROTECTED_COUNT; i++) {
@@ -262,8 +267,10 @@ static void redraw(wm_window_t *win) {
      * an in-window message about the window you are looking at, which is
      * the right place for it. */
     gfx_draw_text(&win->gfx, 8, BTN_Y - FONT_HEIGHT - 2, status_text, status_color);
-    gfx_draw_button(&win->gfx, END_BTN_X, BTN_Y, BTN_W, BTN_H, BTN_BG, BTN_BORDER, "End Task", BTN_TEXT);
-    gfx_draw_button(&win->gfx, KILL_BTN_X, BTN_Y, BTN_W, BTN_H, KILL_BTN_BG, BTN_BORDER, "Force Quit", BTN_TEXT);
+    gfx_draw_button_state(&win->gfx, END_BTN_X, BTN_Y, BTN_W, BTN_H, BTN_BG, BTN_BORDER,
+                           "End Task", BTN_TEXT, pressed_btn == 0);
+    gfx_draw_button_state(&win->gfx, KILL_BTN_X, BTN_Y, BTN_W, BTN_H, KILL_BTN_BG, BTN_BORDER,
+                           "Force Quit", BTN_TEXT, pressed_btn == 1);
 }
 
 int main(void) {
@@ -298,11 +305,26 @@ int main(void) {
                     signal_selected(SIGTERM);
                     changed = 1;
                 }
+            } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
+                if (pressed_btn >= 0) {
+                    int32_t bx = pressed_btn == 0 ? END_BTN_X : KILL_BTN_X;
+                    if (!((ev.buttons & 1) && gfx_point_in_rect(ev.x, ev.y, bx, BTN_Y, BTN_W, BTN_H))) {
+                        pressed_btn = -1;
+                        changed = 1;
+                    }
+                }
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && !(ev.buttons & 1)) {
+                if (pressed_btn >= 0) {
+                    pressed_btn = -1;
+                    changed = 1;
+                }
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 if (gfx_point_in_rect(ev.x, ev.y, END_BTN_X, BTN_Y, BTN_W, BTN_H)) {
+                    pressed_btn = 0;
                     signal_selected(SIGTERM);
                     changed = 1;
                 } else if (gfx_point_in_rect(ev.x, ev.y, KILL_BTN_X, BTN_Y, BTN_W, BTN_H)) {
+                    pressed_btn = 1;
                     signal_selected(SIGKILL);
                     changed = 1;
                 } else if (ev.y >= LIST_Y && ev.y < LIST_Y + LIST_H && ev.x < LIST_W) {

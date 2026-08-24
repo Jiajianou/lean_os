@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "acpi/acpi.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/pic.h"
@@ -25,6 +26,7 @@
 #include "net/net.h"
 #include "panic.h"
 #include "proc.h"      /* system_api/include/proc.h - task_info_t, M45's SYS_taskinfo self-test. Resolves to the system_api header, not kernel/proc/proc.h - see syscall.c's own note on the search order. */
+#include "power/power.h"
 #include "proc/proc.h"
 #include "sched/sched.h"
 #include "signal.h"  /* system_api/include/signal.h */
@@ -57,7 +59,9 @@
     X(file_manager)                  \
     X(settings)                    \
     X(task_manager)                \
-    X(wm_stubborn)
+    X(wm_stubborn)                 \
+    X(shutdown)                    \
+    X(reboot)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -112,6 +116,50 @@ static long do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
 static void selftest_reap(task_t *t) {
     do_syscall(SYS_kill, (uint64_t)t->id, SIGKILL, 0);
     do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+}
+
+/* M47: every GUI self-test below spawns a real compositor and grades real
+ * pixels against the compositor's *compiled-in* defaults - the desktop
+ * background, the accent color, the wallpaper style. That was safe for
+ * eleven milestones because those defaults were the only thing a fresh
+ * compositor could start with.
+ *
+ * M47 made settings persist, which quietly broke it: a user who picks a
+ * flat wallpaper writes settings.conf, and every subsequent boot's [m44]
+ * self-test then panics because the desktop is no longer the gradient it
+ * asserts. Found the first time the input harness rebooted a guest that
+ * had just changed its wallpaper - which is exactly the scenario the
+ * feature exists for.
+ *
+ * So the self-test phase runs against known settings, and hands the
+ * user's own file back before PID 1 ever starts. Not "the tests should
+ * tolerate any settings": a pixel test whose expected values depend on
+ * what somebody clicked last week isn't a test. */
+static char saved_user_settings[256];
+static int64_t saved_user_settings_len = -1;
+
+static const char SELFTEST_SETTINGS_CONF[] =
+    "bg=0x001a1a2e\n"      /* compositor.c's DEFAULT_BG_COLOR */
+    "accent=0x004c99e6\n"  /* its TITLEBAR_FOCUS_COLOR */
+    "wallpaper=0x00000001\n"; /* WALLPAPER_GRADIENT, its wallpaper_id default */
+
+static void selftest_settings_install_defaults(void) {
+    saved_user_settings_len = vfs_read("settings.conf", saved_user_settings, sizeof(saved_user_settings));
+    if (saved_user_settings_len > (int64_t)sizeof(saved_user_settings)) {
+        saved_user_settings_len = -1; /* bigger than anything settings_file_save writes - not ours to preserve */
+    }
+    vfs_write("settings.conf", SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
+}
+
+static void selftest_settings_restore(void) {
+    if (saved_user_settings_len >= 0) {
+        vfs_write("settings.conf", saved_user_settings, (size_t)saved_user_settings_len);
+    } else {
+        /* There wasn't one. Writing the defaults is behaviorally the same
+         * as leaving no file (settings_file_load falls back to exactly
+         * these), and this kernel has no unlink to do the other thing. */
+        vfs_write("settings.conf", SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
+    }
 }
 
 /* Self-test task body for M7: prints a few lines with a CPU-bound spin
@@ -236,8 +284,14 @@ static void quick_task(void *arg) {
  * (kernel/boot/uefi/boot.c) builds and hands off in RDI.
  * fb_info: fb_boot_info_t describing the linear framebuffer the boot
  * loader's init_framebuffer set up (M16) - handed off in RSI, the System V
- * ABI's second integer argument register. */
-void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
+ * ABI's second integer argument register.
+ * rsdp_phys: M47 - the ACPI RSDP's physical address, taken from the UEFI
+ * configuration table by the boot loader, or 0 if the firmware published
+ * none. RDX, the third argument register. Under UEFI the RSDP is not in
+ * the legacy BIOS ranges kernel/acpi/acpi.c scans, so without this ACPI
+ * simply is not found - which had been silently true (and quietly costing
+ * this kernel SMP) since M26 removed the BIOS boot path. */
+void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys) {
     klog_init();
     klog_puts("lean_os kernel: hello from C!\n\n");
 
@@ -789,6 +843,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         }
         klog_puts("[memtest] user-space malloc/free and cross-process shm self-tests passed.\n\n");
     }
+
+    /* M47: pin the desktop's settings to their compiled-in defaults for
+     * the whole self-test phase - see selftest_settings_install_defaults
+     * for why, and selftest_settings_restore (just before PID 1) for the
+     * other half. */
+    selftest_settings_install_defaults();
 
     /* M20 self-test: spawn the real compositor and a real client
      * (user_space/bin/compositor.c, wm_demo.c) - genuine ring-3 code
@@ -1496,13 +1556,22 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         kfree(clock_image);
         pit_sleep_ms(500); /* connects (window 0, auto-focused), draws its first frame */
 
-        /* Shadow: blend(desktop_bg, black, 1/3) - fill_rect_shadow's own
-         * SHADOW_NUM/SHADOW_DEN - computed against the same 0x001A1A2E
+        /* Shadow: blend(desktop_bg, black, ratio) - fill_rect_shadow's own
+         * SHADOW_* constants - computed against the same 0x001A1A2E
          * default every earlier self-test's own "desktop_bg" constant
          * already assumes (a fresh compositor instance, nothing in
-         * settings.c reachable to have changed it yet). */
+         * settings.c reachable to have changed it yet).
+         *
+         * M46: the ratio here moved from 1/3 to 1/2, because this window
+         * is the *focused* one and a focused window's shadow is now
+         * deeper - that is half of "these two windows differ by more than
+         * a titlebar color". Updated rather than loosened: the number
+         * this test asserts is still the exact arithmetic the compositor
+         * does, and [m46] below checks the same probe point on both sides
+         * of a focus change, which is what actually pins the pair of
+         * ratios down. */
         uint32_t shadow_pixel = fb_get_pixel(304, 150);
-        uint32_t expected_shadow = 0x0011111Eu;
+        uint32_t expected_shadow = 0x000D0D17u;
 
         int settings_fds[2];
         if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
@@ -1563,7 +1632,19 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
      * Falls back to single-core (cpu 0 only) if ACPI/the MADT isn't
      * present - see smp.c's own comment on why that's a normal fallback,
      * not a panic. */
+    /* M47: whatever the firmware handed the loader, before anything asks
+     * ACPI a question. acpi.c still falls back to its legacy scan if this
+     * is 0, which is what keeps a non-UEFI boot (or a firmware that
+     * publishes no RSDP) on exactly the path it was on before. */
+    acpi_set_rsdp(rsdp_phys);
+
     smp_init();
+
+    /* M47: reads the FADT once, here, rather than from inside the
+     * shutdown path - walking ACPI tables is exactly the kind of work
+     * that path should not be doing, and this is the same RSDT/XSDT walk
+     * smp_init just did for the MADT. */
+    power_init();
 
     /* Self-test: spawn several genuinely CPU-bound tasks and confirm more
      * than one *physical* CPU actually ran them, not just that the
@@ -2282,6 +2363,297 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
                    "self-test passed (8/8 checks).\n\n");
     }
 
+    /* M46 self-test: the window chrome this milestone reshaped, checked
+     * as pixels rather than as "something got drawn".
+     *
+     * The load-bearing check is the first pair. A titlebar button's
+     * bounding-box *corner* must be titlebar color while its middle is
+     * button color - which is precisely the difference between a circle
+     * and the 14px square that was there before, and the one assertion a
+     * milestone that only changed the fill color would fail.
+     *
+     * The second pair is macOS's own rule for the glyphs: they are drawn
+     * on the focused window and omitted otherwise, so three saturated
+     * dots don't shout from every unfocused window on the desktop. A
+     * second client connecting is what takes focus away (accept_pending_
+     * window focuses a new window), so the same close button is read
+     * twice - once with its x, once without.
+     *
+     * Geometry, all from this file's own constants: gui_clock is 200x90
+     * and connects first, so it lands at (100, 100) with a titlebar in
+     * y:[80, 100). The close button is the outermost of three
+     * right-aligned 14px circles - x = 100 + 200 - BTN_MARGIN(4) -
+     * BTN_SIZE(14) - 2*(BTN_SIZE + BTN_GAP)(36) = 246 - and sits at
+     * y = 80 + (20 - 14)/2 = 83. So:
+     *
+     *   (246, 83) is the button's top-left bounding-box corner, which a
+     *             circle of inset 4 on its first row does not cover
+     *   (250, 90) is inside the disc and clear of both diagonals of the x
+     *   (253, 90) is on the x's top-left-to-bottom-right stroke
+     */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *clock_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *stub_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !clock_image || !stub_image) {
+            panic("out of memory reading compositor/gui_clock/wm_stubborn back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t clock_size = vfs_read("gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
+        int64_t stub_size = vfs_read("wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || clock_size < 0 || stub_size < 0) {
+            panic("vfs_read: compositor/gui_clock/wm_stubborn missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
+        kfree(clock_image);
+        pit_sleep_ms(700); /* connects as window 0, focused, and draws */
+
+        uint32_t focused_corner = fb_get_pixel(246, 83);
+        uint32_t focused_disc = fb_get_pixel(250, 90);
+        uint32_t focused_glyph = fb_get_pixel(253, 90);
+        /* (304, 100) is in the right-hand sliver of this window's own drop
+         * shadow (the frame's right edge is x = 302, the shadow reaches
+         * x = 308) and above where the second client's frame will land,
+         * so the same point can be read before and after the focus change
+         * - which is what pins down *both* shadow ratios rather than just
+         * whichever one happens to be in effect. */
+        uint32_t focused_shadow = fb_get_pixel(304, 100);
+        /* The title itself is text, so counting its pixels is the honest
+         * check - picking one glyph pixel by hand would be asserting on
+         * the font's shape rather than on the color the title is drawn
+         * in. "Clock" starts at x = 100 + TITLE_MARGIN(6). */
+        int focused_bright = 0, focused_dim = 0;
+        for (int32_t ty = 82; ty < 98; ty++) {
+            for (int32_t tx = 106; tx < 150; tx++) {
+                uint32_t c = fb_get_pixel(tx, ty);
+                if (c == 0x00F0F0F0u) {
+                    focused_bright++;
+                } else if (c == 0x009AA4B0u) {
+                    focused_dim++;
+                }
+            }
+        }
+
+        /* A second client connects and takes focus, so the clock's window
+         * is now the unfocused one - without anything having touched the
+         * clock, its window or the cursor. */
+        task_t *stub_task = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
+        kfree(stub_image);
+        pit_sleep_ms(700);
+
+        uint32_t unfocused_corner = fb_get_pixel(246, 83);
+        uint32_t unfocused_disc = fb_get_pixel(250, 90);
+        uint32_t unfocused_glyph = fb_get_pixel(253, 90);
+        uint32_t unfocused_shadow = fb_get_pixel(304, 100);
+        int unfocused_bright = 0, unfocused_dim = 0;
+        for (int32_t ty = 82; ty < 98; ty++) {
+            for (int32_t tx = 106; tx < 150; tx++) {
+                uint32_t c = fb_get_pixel(tx, ty);
+                if (c == 0x00F0F0F0u) {
+                    unfocused_bright++;
+                } else if (c == 0x009AA4B0u) {
+                    unfocused_dim++;
+                }
+            }
+        }
+
+        selftest_reap(stub_task);
+        selftest_reap(clock_task);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        static const struct { const char *what; uint32_t expected; } names[] = {
+            {"the close button's bounding-box corner on a focused window - titlebar color, which is what says a circle got drawn and not a square", 0x004C99E6u},
+            {"the middle of that same button, clear of both strokes of its x", 0x00FF5F57u},
+            {"a pixel on that x itself", 0x00303030u},
+            {"the corner again once the window is unfocused - the unfocused titlebar color", 0x00335577u},
+            {"the middle of the button on an unfocused window - still the button's own color", 0x00FF5F57u},
+            {"the x's own pixel once unfocused - the glyph is gone, so this is button color too", 0x00FF5F57u},
+            {"the focused window's drop shadow - blend(0x1A1A2E, black, 1/2), the deeper of the two ratios", 0x000D0D17u},
+            {"that same shadow pixel once the window is unfocused - blend(0x1A1A2E, black, 1/3), the shallower one", 0x0011111Eu},
+        };
+        const uint32_t got[] = {focused_corner, focused_disc, focused_glyph,
+                                 unfocused_corner, unfocused_disc, unfocused_glyph,
+                                 focused_shadow, unfocused_shadow};
+        int all_ok = 1;
+        for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
+            if (got[i] != names[i].expected) {
+                klog_puts("[m46] pixel check failed: ");
+                klog_puts(names[i].what);
+                klog_puts(" - expected 0x");
+                klog_put_hex32(names[i].expected);
+                klog_puts(" got 0x");
+                klog_put_hex32(got[i]);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        if (focused_bright == 0 || focused_dim != 0 || unfocused_dim == 0 || unfocused_bright != 0) {
+            klog_puts("[m46] the title text did not dim when the window lost focus (focused: 0x");
+            klog_put_hex32((uint32_t)focused_bright);
+            klog_puts(" bright / 0x");
+            klog_put_hex32((uint32_t)focused_dim);
+            klog_puts(" dim, unfocused: 0x");
+            klog_put_hex32((uint32_t)unfocused_bright);
+            klog_puts(" bright / 0x");
+            klog_put_hex32((uint32_t)unfocused_dim);
+            klog_puts(" dim)\n");
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M46 window-chrome self-test: the titlebar did not look as computed");
+        }
+        klog_puts("[m46] circular titlebar buttons, focus-gated glyphs, the deeper focused "
+                   "shadow and the dimmed unfocused title self-test passed (9/9 checks).\n\n");
+    }
+
+    /* M47 self-test: the two halves of session lifecycle that can be
+     * checked without actually turning the machine off - the settings
+     * file, and the orderly stop's escalation from SIGTERM to SIGKILL.
+     * (Whether S5 really fires is the one thing no in-guest test can
+     * answer, so it is the harness's job: tools/qemu-input-test.sh's
+     * shutdown_powers_off_the_machine watches QEMU's own process exit.)
+     *
+     * The settings half is end to end on purpose. Rather than calling
+     * settings_file_load directly - which would test the parser and
+     * nothing else - it writes a file, starts a real compositor and a
+     * real desktop_icons, and reads the pixel the desktop actually
+     * paints. That is the whole chain the feature is: file on disk ->
+     * compositor reads it before any client connects -> relays it over
+     * WM_SETTINGS_QUERY_PIPE -> the desktop paints with it.
+     *
+     * Then the same thing with a deliberately corrupted file, which has
+     * to fall back to the compiled-in defaults rather than to garbage
+     * colors. Expected values, both at (600, 400) on a 768-row display:
+     *
+     *   saved:     WALLPAPER_FLAT over 0x203040 is exactly 0x203040
+     *   corrupted: WALLPAPER_GRADIENT over the default 0x1A1A2E, ramped
+     *              to row 400 - 155%% of (26,26,46) = (40,40,71) at the
+     *              top, 60%% = (15,15,27) at the bottom, so
+     *              (40 + (15-40)*400/767, ..., 71 + (27-71)*400/767)
+     *              = (27, 27, 49) = 0x1B1B31
+     */
+    {
+        /* This test overwrites settings.conf, including with a
+         * deliberately corrupted one. That is safe to do in place because
+         * the whole self-test phase is already running against pinned
+         * defaults with the user's own file held aside - see
+         * selftest_settings_install_defaults. */
+        static const char saved_conf[] = "bg=0x00203040\naccent=0x00aa5500\nwallpaper=0x00000000\n";
+        if (do_syscall(SYS_writefile, (uint64_t)"settings.conf", (uint64_t)saved_conf, sizeof(saved_conf) - 1) != 0) {
+            panic("M47 self-test: could not write settings.conf");
+        }
+
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *icons_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !icons_image) {
+            panic("out of memory reading compositor/desktop_icons back from disk");
+        }
+        int64_t comp_size = vfs_read("compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t icons_size = vfs_read("desktop_icons", icons_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || icons_size < 0) {
+            panic("vfs_read: compositor/desktop_icons missing - should exist, just seeded");
+        }
+
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        pit_sleep_ms(200);
+        task_t *icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
+        pit_sleep_ms(700);
+        uint32_t saved_pixel = fb_get_pixel(600, 400);
+        selftest_reap(icons_task);
+        selftest_reap(comp_task);
+
+        /* Corrupted: one key with a value that isn't a number, one key
+         * missing entirely, and a line that isn't a key=value at all.
+         * settings_file_load is all-or-nothing (see its own comment), so
+         * every one of these on its own is enough to fall back. */
+        static const char broken_conf[] = "this is not a settings file\nbg=nonsense\nwallpaper=1\n";
+        if (do_syscall(SYS_writefile, (uint64_t)"settings.conf", (uint64_t)broken_conf, sizeof(broken_conf) - 1) != 0) {
+            panic("M47 self-test: could not overwrite settings.conf with a corrupted one");
+        }
+
+        comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+        icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
+        kfree(icons_image);
+        pit_sleep_ms(700);
+        uint32_t fallback_pixel = fb_get_pixel(600, 400);
+        selftest_reap(icons_task);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        /* The orderly stop, driven directly. power_orderly_stop returns
+         * how many tasks it had to SIGKILL, and every task already
+         * records which signal killed it as 128 + that signal - so
+         * running it twice, once with no grace period and once with a
+         * real one, distinguishes the two branches by two independent
+         * measurements rather than by one.
+         *
+         * With grace 0 nothing gets a chance to notice the SIGTERM, so
+         * both victims must die of the SIGKILL that follows (exit code
+         * 128 + 9 = 137). With a full ~1s grace they must all be gone
+         * before the SIGKILL round runs at all (exit code 128 + 15 =
+         * 143, and a killed count of zero). A spinner is the right
+         * victim: it does real CPU-bound work and never exits on its
+         * own, so only a delivered signal can stop it. */
+        task_t *v1 = task_spawn("shutdown-victim", spinner_task, NULL);
+        task_t *v2 = task_spawn("shutdown-victim", spinner_task, NULL);
+        int killed_no_grace = power_orderly_stop(0);
+        int codes_no_grace = (v1->exit_code == 128 + SIGKILL) && (v2->exit_code == 128 + SIGKILL);
+
+        task_t *v3 = task_spawn("shutdown-victim", spinner_task, NULL);
+        task_t *v4 = task_spawn("shutdown-victim", spinner_task, NULL);
+        int killed_with_grace = power_orderly_stop(100);
+        int codes_with_grace = (v3->exit_code == 128 + SIGTERM) && (v4->exit_code == 128 + SIGTERM);
+
+        int all_ok = 1;
+        if (saved_pixel != 0x00203040u) {
+            klog_puts("[m47] the desktop did not come up with the saved settings - expected 0x00203040 got 0x");
+            klog_put_hex32(saved_pixel);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (fallback_pixel != 0x001B1B31u) {
+            klog_puts("[m47] a corrupted settings.conf did not fall back to the compiled-in defaults - expected 0x001B1B31 got 0x");
+            klog_put_hex32(fallback_pixel);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (killed_no_grace != 2 || !codes_no_grace) {
+            klog_puts("[m47] with no grace period, the orderly stop did not escalate to SIGKILL (0x");
+            klog_put_hex32((uint32_t)killed_no_grace);
+            klog_puts(" killed, exit codes 0x");
+            klog_put_hex32((uint32_t)v1->exit_code);
+            klog_puts("/0x");
+            klog_put_hex32((uint32_t)v2->exit_code);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+        if (killed_with_grace != 0 || !codes_with_grace) {
+            klog_puts("[m47] with a real grace period, tasks did not stop on SIGTERM alone (0x");
+            klog_put_hex32((uint32_t)killed_with_grace);
+            klog_puts(" needed SIGKILL, exit codes 0x");
+            klog_put_hex32((uint32_t)v3->exit_code);
+            klog_puts("/0x");
+            klog_put_hex32((uint32_t)v4->exit_code);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M47 session-lifecycle self-test: settings persistence and/or the orderly stop did not behave as specified");
+        }
+        klog_puts("[m47] settings.conf round trip (including a corrupted one falling back to "
+                   "defaults) and the orderly stop's SIGTERM-then-SIGKILL escalation "
+                   "self-test passed (4/4 checks).\n\n");
+    }
+
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
      * exactly where a user program would reach them. Before this
      * milestone the middle case here didn't fail at all - it panicked the
@@ -2374,6 +2746,10 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info) {
         klog_put_hex32((uint32_t)leaked);
         klog_puts(" leaked self-test fd(s) reclaimed before PID 1 inherits the table).\n\n");
     }
+
+    /* M47: whatever the user had chosen, back where they left it - the
+     * self-tests above have been running against pinned defaults. */
+    selftest_settings_restore();
 
     uint8_t *init_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
     if (!init_image) {

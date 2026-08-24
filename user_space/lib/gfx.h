@@ -99,9 +99,41 @@ int32_t gfx_corner_inset(int32_t row_from_edge);
  * own 4/8 margins are a considered choice rather than an oversight. */
 #define GFX_PAD 12
 
+/* M46: one circle shape for the whole desktop, in exactly the form M44
+ * settled on for rounded corners and for the same reason - compositor.c
+ * draws its titlebar buttons through its own clip-rect-aware put_pixel
+ * (see gfx_point_in_rect's note) and cannot use a gfx.c drawing
+ * primitive, so two *implementations* are unavoidable. Two *tables* are
+ * not, and M44's note about them eventually disagreeing is why this is
+ * exported rather than kept private to whoever draws first.
+ *
+ * gfx_circle_inset is how much narrower row `row_from_center_edge` (0 is
+ * the topmost row of a GFX_CIRCLE_D-diameter circle, valid up to
+ * GFX_CIRCLE_D/2 - 1) is at each end; the bottom half mirrors it. Derived
+ * once from the circle equation and tabulated, since this project has no
+ * floating point (see gfx_draw_line's note) and a per-pixel integer
+ * sqrt for a 14px button would be worse than seven numbers.
+ *
+ * Deliberately no gfx_fill_circle here yet: nothing drawing into an app's
+ * own window wants a circle, and the shared thing that mattered was the
+ * table. */
+#define GFX_CIRCLE_D 14
+int32_t gfx_circle_inset(int32_t row_from_edge);
+
 /* A filled rect with GFX_CORNER_R-rounded corners. Falls back to a plain
  * fill when the rect is too small to round without eating itself. */
 void gfx_fill_rect_rounded(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);
 
 /* The 1px outline companion, same corners. */
 void gfx_draw_rect_rounded(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);
+
+/* M46: gfx_draw_button with a real pressed look - a darkened fill and the
+ * label nudged one pixel down and right, the standard "this is being
+ * held" cue. Until this milestone a button in this project reacted only
+ * once the click had already been acted on, which is the one moment
+ * feedback is no longer useful. gfx_draw_button is this with pressed = 0
+ * (and stays the name every existing call site uses, since most buttons
+ * are drawn from a redraw that has no idea what the mouse is doing). */
+void gfx_draw_button_state(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h,
+                            uint32_t bg_color, uint32_t border_color,
+                            const char *label, uint32_t label_color, int pressed);

@@ -56,7 +56,14 @@ set -euo pipefail
 # shortened - proving something did not happen takes real time. 44s was
 # measured passing, so 50 keeps the same "not one slow boot from a false
 # failure" margin the number has always been chosen for.
-SECONDS_TO_RUN="${1:-50}"
+#
+# M46: 50 -> 56, for one more self-test that spawns a compositor and two
+# clients.
+#
+# M47: 56 -> 64. Its self-test starts two whole desktops (a compositor and
+# a desktop_icons each) to read a real painted pixel back, plus a second
+# ~1s grace period it has to wait out to prove nothing needed SIGKILL.
+SECONDS_TO_RUN="${1:-64}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -131,6 +138,8 @@ REQUIRED_MARKERS=(
   "[m43] window snapping (left/right half, buffer-clamped) and the launcher overlay self-test passed"
   "[m44] wallpaper gradient, taskbar translucency over it, and the settings query round trip self-test passed"
   "[m45] SYS_taskinfo naming, WM_ACTION_KILL forcing a confirm_close client"
+  "[m46] circular titlebar buttons, focus-gated glyphs, the deeper focused"
+  "[m47] settings.conf round trip (including a corrupted one falling back to"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

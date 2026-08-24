@@ -13,6 +13,7 @@
 #include <stddef.h>
 
 #include "input.h" /* system_api/include/input.h - mouse_event_t */
+#include "power_mode.h" /* system_api/include/power_mode.h - POWER_OFF/POWER_REBOOT, M47 */
 #include "proc.h"  /* system_api/include/proc.h - task_info_t, M45 */
 #include "wm.h"    /* system_api/include/wm.h - wm_fb_info_t */
 
@@ -166,3 +167,10 @@ long sys_writefile(const char *name, const void *buf, size_t len);
  * is NULL or max_entries is 0. The caller sizes the array - same
  * contract as sys_listfiles. */
 long sys_taskinfo(task_info_t *buf, long max_entries);
+
+/* M47: stops the machine - POWER_OFF or POWER_REBOOT
+ * (system_api/include/power_mode.h). Does not return on success; returns
+ * -1 for a mode this kernel doesn't recognize. Everything running is
+ * SIGTERMed, given a bounded grace period and then SIGKILLed first, so
+ * this is a shutdown rather than a power cut. */
+long sys_shutdown(int mode);
