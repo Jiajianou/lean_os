@@ -61,6 +61,10 @@ long sys_mkdir(const char *path) {
     return do_syscall(SYS_mkdir, (long)path, 0, 0);
 }
 
+long sys_shm_unmap(void *vaddr, unsigned long bytes) {
+    return do_syscall(SYS_shm_unmap, (long)vaddr, (long)bytes, 0);
+}
+
 long sys_kill(long pid, int sig) {
     return do_syscall(SYS_kill, pid, sig, 0);
 }

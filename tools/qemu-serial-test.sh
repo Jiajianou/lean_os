@@ -64,19 +64,30 @@ set -euo pipefail
 # a desktop_icons each) to read a real painted pixel back, plus a second
 # ~1s grace period it has to wait out to prove nothing needed SIGKILL.
 #
-# M51-M55: 96 -> 140. Five milestones, five new self-tests, and three of
+# M51-M56: 96 -> 180. Six new self-tests, and three of them are the slow
+# kind for the same unavoidable reason: proving something about a
+# *process* means starting one and waiting for it. M52 spawns a program
+# that deliberately faults 1.2s in and then waits for the compositor to
+# notice; M54 runs 384 spawn/reap rounds; M55 starts two whole
+# compositors to kill one out from under the other's clients; M56 types
+# into a real editor and a real terminal and waits for each to answer.
+# 96 was measured passing at the end of M54 with less than one
+# self-test's margin, which is exactly the "one slow boot from a false
+# failure" case this number has always been chosen to avoid. Five milestones, five new self-tests, and three of
 # them are the slow kind for the same unavoidable reason: proving
 # something about a *process* means starting one and waiting for it. M52
 # spawns a program that deliberately faults 1.2s in and then waits for
-# the compositor to notice; M54 runs 384 spawn/reap rounds. The previous
-# 96 was measured passing at the end of M54 with less than one
-# self-test's margin, which is exactly the "one slow boot from a false
-# failure" case this number has always been chosen to avoid.
+# the compositor to notice; M54 runs 384 spawn/reap rounds; M55 starts
+# two whole compositors and four clients to kill one of them out from
+# under the others. The previous 96 was measured passing at the end of
+# M54 and failing during M55 - by less than one self-test, which is
+# exactly the "one slow boot from a false failure" margin this number has
+# always been chosen to avoid.
 #
 # M48: 64 -> 72. Proving a toast is gone *by its own deadline* means
 # waiting out that deadline (TOAST_TTL_MS, 4s) and then some - there is no
 # shorter way to check that something stopped being on screen on its own.
-SECONDS_TO_RUN="${1:-140}"
+SECONDS_TO_RUN="${1:-180}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -164,6 +175,7 @@ REQUIRED_MARKERS=(
   "[m52] a ring-3 null dereference killing only its own task (exit 139), its"
   "[m53] directories created, entered, grown past one block, listed and read"
   "[m54] every task slot and every frame returned across"
+  "[m55] a compositor SIGKILLed out from under two live clients, replaced, and"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

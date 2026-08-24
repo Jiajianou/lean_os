@@ -608,6 +608,34 @@ static long sys_shm_create(uint64_t size, uint64_t a2, uint64_t a3, uint64_t a4,
  * slot of its private shm region (task_t's shm_next_vaddr, USER_SHM_BASE
  * upward) - like the kernel/user heaps, this only ever grows forward,
  * never reuses an address a previous SYS_shm_map call already claimed. */
+/* M55 - see SYS_shm_unmap's contract. Unmaps, never frees. */
+static long sys_shm_unmap(uint64_t vaddr, uint64_t bytes, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if ((vaddr & (PAGE_SIZE - 1)) != 0 || bytes == 0) {
+        return -1; /* not something SYS_shm_map ever returned */
+    }
+    uint64_t pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t end = vaddr + pages * PAGE_SIZE;
+    /* The shm window only. A caller that could name any address here
+     * could unmap its own code out from under itself, or - worse, since
+     * PML4[0] is the same subtree in every address space - a kernel page.
+     * That is the hole M52 closed in SYS_shm_free and it is not being
+     * reopened next to it. */
+    if (end < vaddr || vaddr < USER_SHM_BASE || end > USER_FB_BASE) {
+        return -1;
+    }
+    uint64_t pml4 = sched_current()->pml4_phys;
+    for (uint64_t i = 0; i < pages; i++) {
+        /* Return value ignored: a page that was not mapped is nothing to
+         * undo. What matters is that nothing is still mapped afterwards. */
+        (void)vmm_unmap_page_in(pml4, vaddr + i * PAGE_SIZE);
+    }
+    return 0;
+}
+
 static long sys_shm_map(uint64_t id, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -1142,6 +1170,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_close] = sys_close,
     [SYS_shm_free] = sys_shm_free,
     [SYS_mkdir] = sys_mkdir,
+    [SYS_shm_unmap] = sys_shm_unmap,
 };
 
 void syscall_handler(isr_regs_t *regs) {

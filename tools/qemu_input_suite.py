@@ -490,12 +490,21 @@ def desktop_is_painted(shot):
             shot.px(*START_PROBE) in START_COLORS)
 
 
-def boot(machine, timeout=150):
-    """M51-M54: 90 -> 150. The same growth tools/qemu-serial-test.sh's own
-    SECONDS_TO_RUN took, and for the same reason - new boot self-tests,
-    several of which have to wait on real processes. 90 was measured
-    failing, which presents as a test erroring out during boot rather
-    than as anything that looks like a real bug."""
+def boot(machine, timeout=240):
+    """M51-M56: 90 -> 240. The same growth tools/qemu-serial-test.sh's own
+    SECONDS_TO_RUN took, and for the same reason - six new boot
+    self-tests, several of which have to wait on real processes. 90 was
+    measured failing during M55 with the boot only as far as [m49].
+
+    A healthy boot is around 60 seconds, so 240 is four times what this
+    should ever need. That is deliberate: the two failures that pushed
+    this past 150 were guests that had genuinely stopped making progress
+    (both passed on a plain re-run, in 69s), and a *hung* guest is
+    something the timeout can only report, never fix. Making the number
+    generous costs nothing - this returns as soon as the marker appears -
+    and keeps a slow host from being reported as a bug in whatever change
+    is under test, which is the most expensive kind of test failure
+    there is."""
     machine.boot_to_desktop(settle=0.0, timeout=timeout)
     deadline = time.time() + 30
     while time.time() < deadline:
@@ -667,7 +676,20 @@ def test_launch_close_stress(m):
     stress at all to hit but was invisible without a test that watched
     what happens after the second window."""
     boot(m)
-    rounds = 5
+    # M54: 5 -> 60, and the number is chosen rather than picked. Under
+    # the old rules a task slot was claimed for the machine's whole
+    # uptime, and the boot self-tests left 49 of MAX_TASKS unspent - so
+    # the 50th launch here would have failed outright with
+    # SPAWN_ERR_NO_TASK_SLOT and the window simply would not have opened.
+    # 60 is past that and comfortably under the 119 a post-M54 boot
+    # leaves, which makes this a test that passes now and could not have
+    # before, rather than one that merely takes longer.
+    #
+    # It needs both halves of M54 to hold: the kernel recycling a reaped
+    # slot, and the desktop actually reaping - an app launched from an
+    # icon is desktop_icons.c's child, and nothing waited on it before
+    # user_space/lib/children.h.
+    rounds = 60
     for round_no in range(rounds):
         m.double_click(ICON_X, ICONS[4][2])  # Clock
         wait_for(m, lambda s: count_app_windows(s) == 1,
@@ -1204,8 +1226,11 @@ def test_settings_persist_across_a_reboot(m):
     m.sendkey("ret")
 
     # The guest resets and boots all the way through its self-tests again,
-    # which takes about as long as the original boot did.
-    deadline = time.time() + 200
+    # which takes about as long as the original boot did - so this budget
+    # tracks boot()'s own and is generous for the same reason. 200 was
+    # measured failing at the end of M55 with the second boot only as far
+    # as [m52].
+    deadline = time.time() + 300
     while time.time() < deadline:
         if m.read_log().count(BOOT_MARKER) > boots_before:
             break
@@ -1634,6 +1659,51 @@ def test_file_manager_navigates_directories(m):
              "double-clicking .. did not leave /bin")
 
 
+def test_desktop_survives_losing_the_compositor(m):
+    """M55, and the claim the whole milestone rests on: the desktop is no
+    longer the thing that has to be alive for anything else to be.
+
+    A compositor that died used to take every client with it - not by
+    killing them, but by wedging them. Their pixels were its shm segment,
+    their events came down its pipe, and neither survives it; a client
+    sat there owning a window nobody was compositing. So the assertion
+    here is deliberately about an app launched *before* the crash still
+    being on screen *after* it, which is the difference between "the
+    session restarted" and "the session survived".
+
+    The compositor is killed by `wm_crash`, a self-test-only program that
+    finds it by name in SYS_taskinfo and SIGKILLs it - see its own header
+    for why that had to exist. Launched from the launcher, so the whole
+    path is real user input."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock - the app that must outlive the crash
+    wait_for_windows(m, 1)
+
+    m.sendkey("ctrl-spc")
+    wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
+             "Ctrl+Space did not open the launcher")
+    m.type_text("wm_crash")
+    m.sendkey("ret")
+
+    # The taskbar is desktop_shell's window, so "the desktop is painted"
+    # is a direct read of init having rebuilt the session - the panel
+    # cannot be there unless a compositor is compositing it.
+    wait_for(m, lambda s: desktop_is_painted(s),
+             "the desktop never came back after the compositor was killed",
+             timeout=40.0)
+
+    # And the app is still there, with a taskbar button of its own - which
+    # needs the Clock process to have reconnected, been given a new
+    # window, and repainted it.
+    wait_for(m, lambda s: count_app_windows(s) == 1,
+             "the app that was open before the crash did not come back",
+             timeout=30.0)
+
+    # Still a working desktop afterwards, not just a picture of one.
+    m.double_click(ICON_X, ICONS[5][2])  # Paint
+    wait_for_windows(m, 2, timeout=20.0)
+
+
 def test_soak_desktop_stays_usable(m):
     """M50's soak: leave the desktop up with everything that ticks on a
     timer running, then require the machine to still work.
@@ -1718,6 +1788,7 @@ TESTS = [
     ("alt_tab_visits_windows_in_use_order", test_alt_tab_visits_windows_in_use_order),
     ("a_crashing_program_only_takes_itself_down", test_a_crashing_program_only_takes_itself_down),
     ("file_manager_navigates_directories", test_file_manager_navigates_directories),
+    ("desktop_survives_losing_the_compositor", test_desktop_survives_losing_the_compositor),
     ("soak_desktop_stays_usable", test_soak_desktop_stays_usable),
     ("launch_close_stress", test_launch_close_stress),
 ]

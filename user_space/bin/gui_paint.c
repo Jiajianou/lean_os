@@ -32,20 +32,34 @@ static void clear_canvas(gfx_ctx_t *gfx) {
     gfx_fill_rect(gfx, 1, SEPARATOR_Y + 1, WIN_W - 2, WIN_H - SEPARATOR_Y - 2, BG_COLOR);
 }
 
+static void draw_chrome(gfx_ctx_t *g) {
+    gfx_fill_rect(g, 0, 0, WIN_W, WIN_H, BG_COLOR);
+    gfx_draw_rect(g, 0, 0, WIN_W, WIN_H, BORDER_COLOR);
+    gfx_draw_text(g, 10, 6, "PAINT", TEXT_COLOR);
+    gfx_draw_line(g, 5, SEPARATOR_Y, WIN_W - 5, SEPARATOR_Y, BORDER_COLOR);
+}
+
 int main(void) {
     wm_window_t win;
     if (wm_connect(WIN_W, WIN_H, "Paint", &win) != 0) {
         sys_exit(1);
     }
 
-    gfx_fill_rect(&win.gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
-    gfx_draw_rect(&win.gfx, 0, 0, WIN_W, WIN_H, BORDER_COLOR);
-    gfx_draw_text(&win.gfx, 10, 6, "PAINT", TEXT_COLOR);
-    gfx_draw_line(&win.gfx, 5, SEPARATOR_Y, WIN_W - 5, SEPARATOR_Y, BORDER_COLOR);
+    draw_chrome(&win.gfx);
 
     for (;;) {
         wm_event_t ev;
         wm_wait_event(&win, &ev);
+
+        if (ev.type == WM_EVENT_EXPOSE) {
+            /* M55: a replacement compositor handed this client a blank
+             * buffer. The strokes themselves are gone - this program
+             * keeps no model of what was drawn, the pixel buffer *was*
+             * the model - so the honest thing is to come back as an
+             * empty canvas rather than pretend otherwise. */
+            draw_chrome(&win.gfx);
+            continue;
+        }
 
         if (ev.type == WM_EVENT_KEY && (ev.ch == 'c' || ev.ch == 'C')) {
             clear_canvas(&win.gfx);

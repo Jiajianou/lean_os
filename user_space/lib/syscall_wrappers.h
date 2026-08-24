@@ -55,6 +55,11 @@ long sys_listdir(const char *path, void *buf, size_t maxlen);
 /* M53: creates one directory whose parent already exists. */
 long sys_mkdir(const char *path);
 
+/* M55: drops a mapping without freeing what it points at - see
+ * SYS_shm_unmap. For a client whose compositor died holding its window
+ * buffer's frames. */
+long sys_shm_unmap(void *vaddr, unsigned long bytes);
+
 /* Only SIGKILL/SIGTERM (system_api/include/signal.h) are recognized.
  * Returns 0, or -1 if pid doesn't name a live task. */
 long sys_kill(long pid, int sig);

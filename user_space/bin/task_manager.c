@@ -83,12 +83,28 @@
  * remember to raise in two places is a cap that will be wrong. */
 #define MAX_ENTRIES TASK_INFO_MAX
 
-/* The processes that *are* the desktop. Killing any of these does not
- * "close an app", it takes the screen away - so this list is refused
- * with a reason rather than obeyed. Matched by name because that is what
- * SYS_taskinfo reports and what a person reading the list sees; a pid
- * would be no safer (they are not fixed) and much less obvious here. */
-static const char *const PROTECTED[] = {"init", "compositor", "desktop_shell", "desktop_icons"};
+/* The processes that must not be ended from here. Matched by name
+ * because that is what SYS_taskinfo reports and what a person reading the
+ * list sees; a pid would be no safer (they are not fixed) and much less
+ * obvious here.
+ *
+ * M55 rewrites this list in both directions, and the reasoning is the
+ * point of the milestone:
+ *
+ *  - "kernel" and "cpu-idle" are *added*, and their absence was a real
+ *    hazard nobody had noticed. SYS_taskinfo reports every task including
+ *    the scheduler's own, so End Task on the first row of this window
+ *    would have sent SIGKILL to task 0 - which is not an app crashing,
+ *    it is the machine stopping. Killing the kernel's own idle task is
+ *    the one thing on this screen with no recovery at all.
+ *
+ *  - "compositor", "desktop_shell" and "desktop_icons" are *removed*.
+ *    They were here because killing one took the screen away and nothing
+ *    brought it back; M55 makes init supervise all three and restart the
+ *    session, and makes every client reconnect to a replacement
+ *    compositor, so ending one of them is now a flicker. A guard against
+ *    something that no longer happens is a guard that is lying. */
+static const char *const PROTECTED[] = {"init", "kernel", "cpu-idle"};
 #define PROTECTED_COUNT ((int)(sizeof(PROTECTED) / sizeof(PROTECTED[0])))
 
 #define REFRESH_MS 1000
@@ -295,7 +311,9 @@ int main(void) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_KEY) {
+            if (ev.type == WM_EVENT_EXPOSE) {
+                changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
+            } else if (ev.type == WM_EVENT_KEY) {
                 if (ev.ch == KBD_KEY_UP && selected > 0) {
                     selected--;
                     clamp_scroll();

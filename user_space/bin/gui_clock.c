@@ -53,14 +53,18 @@ int main(void) {
     long next_redraw = 0;
     for (;;) {
         wm_event_t ev;
+        int expose = 0;
         while (wm_poll_event(&win, &ev)) {
             /* This app doesn't act on input - just drain the pipe so it
              * never fills while the compositor keeps routing events to
              * whichever window is focused, including this one. */
+            if (ev.type == WM_EVENT_EXPOSE) {
+                expose = 1; /* M55 - see WM_EVENT_EXPOSE */
+            }
         }
 
         long now = sys_uptime_ms();
-        if (now < next_redraw) {
+        if (now < next_redraw && !expose) {
             continue;
         }
         next_redraw = now + REDRAW_INTERVAL_MS;

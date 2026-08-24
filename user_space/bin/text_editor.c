@@ -528,6 +528,10 @@ int main(const char *arg) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
+            if (ev.type == WM_EVENT_EXPOSE) {
+                changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
+                continue;
+            }
             /* M36: an open prompt owns every event until answered - same
              * "in-progress interaction takes over the input stream"
              * shape as compositor.c's own drag state machine (M31), just

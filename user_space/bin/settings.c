@@ -262,7 +262,9 @@ int main(void) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_MOUSE_MOVE) {
+            if (ev.type == WM_EVENT_EXPOSE) {
+                changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
+            } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
                 int hover = gfx_point_in_rect(ev.x, ev.y, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H);
                 if (hover != clear_hover) {
                     clear_hover = hover;

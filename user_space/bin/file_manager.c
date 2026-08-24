@@ -283,7 +283,9 @@ int main(void) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_KEY) {
+            if (ev.type == WM_EVENT_EXPOSE) {
+                changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
+            } else if (ev.type == WM_EVENT_KEY) {
                 if (ev.ch == KBD_KEY_UP && selected > 0) {
                     selected--;
                     clamp_scroll();

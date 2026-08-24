@@ -146,6 +146,12 @@ wm_faulter_elf_start:
     incbin "build/wm_faulter.elf"
 wm_faulter_elf_end:
 
+global wm_crash_elf_start
+global wm_crash_elf_end
+wm_crash_elf_start:
+    incbin "build/wm_crash.elf"
+wm_crash_elf_end:
+
 global badptr_elf_start
 global badptr_elf_end
 badptr_elf_start:

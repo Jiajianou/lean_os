@@ -220,7 +220,9 @@ int main(void) {
         wm_event_t ev;
         int changed = 0;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_DROP) {
+            if (ev.type == WM_EVENT_EXPOSE) {
+                changed = 1; /* M55 - see WM_EVENT_EXPOSE */
+            } else if (ev.type == WM_EVENT_DROP) {
                 /* M49: dropping a file on the desktop opens it - the same
                  * thing double-clicking it in the file manager does, and
                  * for the same reason (this project has no per-file type

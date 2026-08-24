@@ -66,6 +66,7 @@
     X(wm_stubborn)                 \
     X(wm_zorder)                   \
     X(wm_faulter)                  \
+    X(wm_crash)                    \
     X(badptr)                      \
     X(shutdown)                    \
     X(reboot)
@@ -3914,6 +3915,117 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_put_hex32((uint32_t)ROUNDS);
         klog_puts(" spawn/reap rounds (three times MAX_TASKS), and a stale pid refused rather "
                    "than answered about, self-test passed (5/5 checks).\n\n");
+    }
+
+    /* M55 self-test: a compositor killed out from under two live clients,
+     * replaced, and both windows back on screen with their own pixels.
+     *
+     * The claim is deliberately *not* "the clients are still running" -
+     * that would have been true before this milestone too, in the sense
+     * that nobody killed them. They were wedged: their pixel buffer
+     * belonged to a dead process, their event pipe would never carry
+     * another byte, and gui_paint in particular sat in a blocking read
+     * that could not return. So this is checked as pixels, which is the
+     * only evidence that distinguishes "alive" from "working".
+     *
+     * wm_zorder is the client because it paints one flat, distinctive
+     * color and repaints it on WM_EVENT_EXPOSE - so a window that came
+     * back really is *this* client's window and not merely something
+     * drawn in that rectangle. Two of them, at the cascade positions
+     * (100,100) and (140,140), 300x200 each: (120, 250) is inside the
+     * first only and (420, 320) inside the second only, which is what
+     * lets one probe per client be unambiguous.
+     *
+     * The second compositor is spawned by this test rather than by init,
+     * because init is not running yet at this point in boot - what the
+     * *desktop* does about a dead compositor is init's job and is covered
+     * by the interactive test. What this proves is the piece that had to
+     * exist first: that a client can survive one. */
+    {
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *z_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !z_image) {
+            panic("out of memory reading compositor/wm_zorder back from disk");
+        }
+        int64_t comp_size = vfs_read(PATH_BIN_DIR "compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t z_size = vfs_read(PATH_BIN_DIR "wm_zorder", z_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || z_size < 0) {
+            panic("vfs_read: compositor/wm_zorder missing - should exist, just seeded");
+        }
+
+        task_t *comp1 = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        pit_sleep_ms(300);
+        task_t *a_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zA 00A02020");
+        pit_sleep_ms(400);
+        task_t *b_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zB 002060C0");
+        pit_sleep_ms(600);
+
+        uint32_t a_before = fb_get_pixel(120, 250);
+        uint32_t b_before = fb_get_pixel(420, 320);
+
+        /* The compositor dies the way a crashed one would - no orderly
+         * handover, no chance to tell anybody. */
+        do_syscall(SYS_kill, (uint64_t)comp1->id, SIGKILL, 0);
+        do_syscall(SYS_wait, (uint64_t)comp1->id, 0, 0);
+
+        int a_alive_after_crash = (int)do_syscall(SYS_task_alive, (uint64_t)a_task->id, 0, 0);
+        int b_alive_after_crash = (int)do_syscall(SYS_task_alive, (uint64_t)b_task->id, 0, 0);
+
+        /* The replacement. Both clients should find it on their own. */
+        task_t *comp2 = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        kfree(z_image);
+        /* Long enough for a reconnect that *lost* the race with this new
+         * compositor clearing the well-known pipes - the client's first
+         * request is discarded in that case and re-sent one
+         * WM_CONNECT_TIMEOUT_MS later (wmclient.c), so anything shorter
+         * than a couple of those intervals is a test that passes on
+         * timing rather than on behavior. */
+        pit_sleep_ms(2500);
+
+        uint32_t a_after = fb_get_pixel(120, 250);
+        uint32_t b_after = fb_get_pixel(420, 320);
+
+        selftest_reap(a_task);
+        selftest_reap(b_task);
+        selftest_reap(comp2);
+        console_init();
+        klog_use_console();
+
+        int all_ok = 1;
+        static const struct { const char *what; uint32_t expected; } names[] = {
+            {"the first client's window before the compositor was killed", 0x00A02020u},
+            {"the second client's window before the compositor was killed", 0x002060C0u},
+            {"the first client's window after a replacement compositor started - it reconnected and repainted", 0x00A02020u},
+            {"the second client's window after a replacement compositor started", 0x002060C0u},
+        };
+        const uint32_t got[] = {a_before, b_before, a_after, b_after};
+        for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
+            if (got[i] != names[i].expected) {
+                klog_puts("[m55] pixel check failed: ");
+                klog_puts(names[i].what);
+                klog_puts(" - expected 0x");
+                klog_put_hex32(names[i].expected);
+                klog_puts(" got 0x");
+                klog_put_hex32(got[i]);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        if (a_alive_after_crash != 1 || b_alive_after_crash != 1) {
+            klog_puts("[m55] a client did not outlive the compositor at all (SYS_task_alive 0x");
+            klog_put_hex32((uint32_t)a_alive_after_crash);
+            klog_puts(" and 0x");
+            klog_put_hex32((uint32_t)b_alive_after_crash);
+            klog_puts(")\n");
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M55 session-resilience self-test: a compositor crash still takes its clients with it");
+        }
+        klog_puts("[m55] a compositor SIGKILLed out from under two live clients, replaced, and "
+                   "both windows back on screen with their own pixels self-test passed "
+                   "(5/5 checks).\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

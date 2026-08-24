@@ -20,6 +20,32 @@ typedef struct {
     uint32_t width, height;
     gfx_ctx_t gfx; /* gfx.h context over this window's own shm-mapped pixels - draw into this directly */
     int evt_fd;     /* read end of this window's event pipe (system_api/include/wm.h's wm_event_t stream) */
+
+    /* ---- M55: everything needed to do this again ----------------------
+     *
+     * A compositor that dies used to take every client with it, because a
+     * window was the only thing holding them: the pixels a client draws
+     * into are the compositor's shm segment, its events come down the
+     * compositor's pipe, and neither survives. Nothing about that is
+     * fixable from the compositor's side - it is dead.
+     *
+     * What makes it fixable from *here* is that a client already supplies
+     * everything a window is made of. The geometry, the flags and the
+     * title came from this process in the first place, and the pixels it
+     * redraws every frame anyway. So the connect handshake is re-runnable
+     * as long as its arguments are kept - which is all the fields below
+     * are. `compositor_pid` is how the client knows to re-run it (see
+     * wm_create_response_t.compositor_pid); `shm_id`/`shm_bytes` are how
+     * it drops the mapping to the dead compositor's freed frames instead
+     * of leaving it aliasing whatever those frames become next.
+     *
+     * Written once at connect and never by a caller. */
+    uint32_t req_width, req_height, req_panel_dock_h;
+    uint8_t req_panel, req_translucent, req_desktop, req_confirm_close;
+    char req_title[WM_TITLE_MAX];
+    int32_t compositor_pid;
+    int32_t shm_id;
+    unsigned long shm_bytes;
 } wm_window_t;
 
 /* Requests a width x height window from the compositor (blocks on the
@@ -137,3 +163,20 @@ int wm_wait_event(wm_window_t *win, wm_event_t *out);
  * not - for a caller (a clock-style app) that has its own reason to keep
  * running even with no input, and can't afford to block on one. */
 int wm_poll_event(wm_window_t *win, wm_event_t *out);
+
+/* M55: has the compositor serving this window died, and if so, has a new
+ * one been connected to?
+ *
+ * Called automatically from wm_poll_event, so an ordinary client gets
+ * this for free and needs to know nothing about it. Returns 1 if a
+ * reconnect just happened - which is the caller's cue to redraw, since
+ * `win->gfx` now points at a brand-new (and blank) pixel buffer. Every
+ * client in this project already redraws on demand, so for most of them
+ * the return value is worth ignoring; the ones with an expensive frame
+ * use it to redraw immediately rather than at their next timer tick.
+ *
+ * Blocks inside the handshake if a new compositor is not up *yet* - the
+ * request sits in the well-known named pipe until one reads it, which is
+ * exactly the rendezvous those pipes are for, and there is nothing
+ * useful for a client with no screen to be doing in the meantime. */
+int wm_reconnect_if_needed(wm_window_t *win);

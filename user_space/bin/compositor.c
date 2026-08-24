@@ -424,6 +424,10 @@ static uint32_t fb_pitch_pixels;
 static uint32_t *back_buf;
 static uint32_t back_pitch_pixels; /* == fb_info.width - back_buf is allocated tightly packed, no pitch padding */
 
+/* M55: this process's own pid, read once at startup and echoed in every
+ * create response - see wm_create_response_t.compositor_pid. */
+static int32_t self_pid;
+
 static int32_t cursor_x, cursor_y;
 static uint8_t prev_buttons;
 static int last_hovered_panel = -1; /* M42: which panel (if any) the cursor was over on the previous mouse event - see the routing block at the bottom of handle_mouse for the one thing this is for */
@@ -1921,6 +1925,7 @@ static void refuse_window(int resp_write_fd, const char *reason) {
     resp.shm_id = -1;
     resp.width = 0;
     resp.height = 0;
+    resp.compositor_pid = self_pid; /* M55: even a refusal says who refused - a client that retries needs to know whether the answer came from the compositor it is waiting on */
     sys_write(resp_write_fd, &resp, sizeof(resp));
 
     /* M48: M40 gave this a klog line so it would be one grep away. That
@@ -2088,6 +2093,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     resp.shm_id = (int32_t)shm_id;
     resp.width = width;
     resp.height = height;
+    resp.compositor_pid = self_pid; /* M55: so this client can tell "quiet" from "gone" - see wm_create_response_t */
     if (!reused_slot) {
         window_count++;
     }
@@ -3299,6 +3305,8 @@ int main(void) {
     back_buf = (uint32_t *)back_vaddr;
     back_pitch_pixels = fb_info.width;
 
+    self_pid = (int32_t)sys_getpid(); /* M55 - echoed in every create response, see wm_create_response_t.compositor_pid */
+
     cursor_x = (int32_t)(fb_info.width / 2);
     cursor_y = (int32_t)(fb_info.height / 2);
 
@@ -3345,6 +3353,28 @@ int main(void) {
     }
     drag_data_write_fd = drag_data_fds[1];
 
+    /* M55: whatever a previous compositor left buffered in these
+     * rendezvous points is not this one's business, and is actively
+     * dangerous. A named pipe deliberately outlives every fd that ever
+     * pointed at it (kernel/ipc/pipe.h) - that is the whole mechanism -
+     * so a compositor that died mid-`sys_write`, or a client that queued
+     * a request nobody ever read, leaves a partial struct at the head of
+     * the stream. The next compositor's very first read would then be
+     * misaligned against every message after it, which is the difference
+     * between "the desktop came back" and "the desktop came back and
+     * nothing works". Resetting is one syscall per channel, at the one
+     * moment when there is definitionally nothing worth keeping. */
+    sys_pipe_reset(req_fds[0]);
+    sys_pipe_reset(resp_fds[0]);
+    sys_pipe_reset(query_fds[0]);
+    sys_pipe_reset(query_resp_fds[0]);
+    sys_pipe_reset(action_fds[0]);
+    sys_pipe_reset(settings_fds[0]);
+    sys_pipe_reset(settings_query_fds[0]);
+    sys_pipe_reset(settings_query_resp_fds[0]);
+    sys_pipe_reset(notify_fds[0]);
+    sys_pipe_reset(drag_fds[0]);
+    sys_pipe_reset(drag_data_fds[0]);
     /* Every message this process (or any client) prints to stdout goes
      * through the kernel's own graphical console (M17) - the same
      * framebuffer this process is compositing onto. Printed once, before

@@ -106,7 +106,18 @@ int main(const char *arg) {
             /* Presses only - see the header comment. A press is a button
              * event whose button state has the left bit set; the matching
              * release arrives with it clear. */
-            if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ticks < TICK_MAX) {
+            if (ev.type == WM_EVENT_EXPOSE) {
+                /* M55: a replacement compositor handed this client a
+                 * blank buffer. Repainting the fill *and* every tick
+                 * already earned is what makes this program usable as a
+                 * "did the window really come back with its own pixels"
+                 * probe rather than just a "is something there" one. */
+                gfx_fill_rect(&win.gfx, 0, 0, (int32_t)win.width, (int32_t)win.height, fill);
+                for (int t = 0; t < ticks; t++) {
+                    gfx_fill_rect(&win.gfx, tick_x(t), WIN_H - TICK_INSET - TICK_SIZE,
+                                   TICK_SIZE, TICK_SIZE, TICK_COLOR);
+                }
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ticks < TICK_MAX) {
                 gfx_fill_rect(&win.gfx, tick_x(ticks), WIN_H - TICK_INSET - TICK_SIZE,
                                TICK_SIZE, TICK_SIZE, TICK_COLOR);
                 ticks++;

@@ -27,6 +27,22 @@ static long read_exact(int fd, void *buf, size_t len) {
     return (long)got;
 }
 
+/* M55: how long a client waits for a create response before assuming its
+ * request went nowhere, and how many times it re-sends.
+ *
+ * 400ms x 12 rather than a couple of long waits, and the short interval
+ * is the load-bearing half. A *live* compositor answers in milliseconds -
+ * it is a poll loop whose slowest iteration is a full-screen redraw - so
+ * 400ms is already a hundredfold margin against "the answer was merely
+ * slow", which is the only way a re-send could produce two windows for
+ * one client. What the interval actually costs is how long a reconnecting
+ * client shows nothing after its request lost the race with a replacement
+ * compositor clearing these pipes, and 1.5s of blank window is long
+ * enough to look like the crash rather than the recovery. Twelve attempts
+ * keeps the total patience near five seconds either way. */
+#define WM_CONNECT_TIMEOUT_MS 400
+#define WM_CONNECT_ATTEMPTS   12
+
 static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h, uint8_t panel, uint8_t translucent, uint8_t desktop, uint8_t confirm_close, const char *title, wm_window_t *out) {
     int req_fds[2];
     int resp_fds[2];
@@ -48,12 +64,46 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
         req.title[i] = title[i];
     }
     req.title[i] = '\0';
-    if (sys_write(req_fds[1], &req, sizeof(req)) != (long)sizeof(req)) {
-        return -1;
-    }
-
+    /* M55: send, wait with a deadline, and send again if nothing came
+     * back - rather than the single write and blocking read this was
+     * until now.
+     *
+     * That was fine while there was only ever one compositor and it
+     * started before anything else. It stops being fine the moment a
+     * *replacement* one is what a client is trying to reach: a client
+     * notices the death and queues its request the instant it happens,
+     * while the new compositor clears these rendezvous points on startup
+     * (see its own note on why - a torn message left by a process that
+     * died mid-write would misalign the stream forever). The request and
+     * the reset race, and a client that lost that race blocked in
+     * sys_read on a response nobody was ever going to write.
+     *
+     * The deadline is long enough that a live compositor always answers
+     * inside it - this one is a tight poll loop and replies in
+     * milliseconds - so a re-send only happens when the first request
+     * genuinely went nowhere, not merely when the answer was slow. */
     wm_create_response_t resp;
-    if (read_exact(resp_fds[0], &resp, sizeof(resp)) != (long)sizeof(resp) || resp.shm_id < 0) {
+    int got_response = 0;
+    for (int attempt = 0; attempt < WM_CONNECT_ATTEMPTS && !got_response; attempt++) {
+        if (sys_write(req_fds[1], &req, sizeof(req)) != (long)sizeof(req)) {
+            return -1;
+        }
+        long deadline = sys_uptime_ms() + WM_CONNECT_TIMEOUT_MS;
+        while (sys_pipe_poll(resp_fds[0]) < (long)sizeof(resp) && sys_uptime_ms() < deadline) {
+            sys_yield();
+        }
+        if (sys_pipe_poll(resp_fds[0]) >= (long)sizeof(resp)) {
+            got_response = (read_exact(resp_fds[0], &resp, sizeof(resp)) == (long)sizeof(resp));
+        }
+    }
+    if (!got_response || resp.shm_id < 0) {
+        /* The fds are the caller's to lose either way - a failed connect
+         * is not a state anything here recovers into, it just tries the
+         * whole handshake again from scratch. */
+        sys_close(req_fds[0]);
+        sys_close(req_fds[1]);
+        sys_close(resp_fds[0]);
+        sys_close(resp_fds[1]);
         return -1;
     }
 
@@ -76,6 +126,20 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
     out->gfx.width = (int32_t)resp.width;
     out->gfx.height = (int32_t)resp.height;
     out->evt_fd = evt_fds[0];
+    /* M55: everything needed to do all of this again - see wm_window_t. */
+    out->req_width = width;
+    out->req_height = height;
+    out->req_panel_dock_h = panel_dock_h;
+    out->req_panel = panel;
+    out->req_translucent = translucent;
+    out->req_desktop = desktop;
+    out->req_confirm_close = confirm_close;
+    for (int t = 0; t < WM_TITLE_MAX; t++) {
+        out->req_title[t] = req.title[t];
+    }
+    out->compositor_pid = resp.compositor_pid;
+    out->shm_id = resp.shm_id;
+    out->shm_bytes = (unsigned long)resp.width * resp.height * sizeof(uint32_t);
 
     /* M50: five fd-table slots handed straight back. The two
      * request/response pipes are a handshake - nothing here touches them
@@ -117,12 +181,92 @@ int wm_connect_confirm_close(uint32_t width, uint32_t height, const char *title,
     return connect_common(width, height, 0, WM_PANEL_NONE, 0, 0, 1, title, out);
 }
 
+int wm_reconnect_if_needed(wm_window_t *win) {
+    /* 1 is "still running". Anything else - 0 or 2 for terminated, -1 for
+     * a pid this kernel no longer knows - means the process serving this
+     * window is gone. Asking about a pid rather than inferring from
+     * silence is the whole point: an idle desktop is silent too. */
+    if (win->compositor_pid < 0 || sys_task_alive(win->compositor_pid) == 1) {
+        return 0;
+    }
+
+    /* Drop the old mapping *before* asking for a new one. Those frames
+     * were the dead compositor's shm segment and the kernel handed them
+     * back the moment it exited (shm_free_by_owner), so this mapping now
+     * points at memory that belongs to whoever gets it next - and the
+     * caller may still be mid-frame writing into win->gfx. Unmapping
+     * turns a silent corruption into a fault, which M52 made survivable
+     * and which is the right way for a bug here to present. */
+    if (win->gfx.pixels && win->shm_bytes) {
+        sys_shm_unmap(win->gfx.pixels, win->shm_bytes);
+        win->gfx.pixels = (uint32_t *)0;
+        /* Zero dimensions rather than only a null pointer, because that
+         * is what actually makes drawing safe: every gfx.c primitive
+         * clips to ctx->width/height before touching ctx->pixels, so a
+         * client that redraws on a timer between losing its buffer and
+         * getting a new one draws nothing at all instead of
+         * dereferencing null. It gets the real numbers back below. */
+        win->gfx.width = 0;
+        win->gfx.height = 0;
+    }
+    /* The old event pipe's fd too: the pipe object outlives the
+     * compositor (that is what a named pipe is for), and the new
+     * compositor may well hand this client a different window id and
+     * therefore a different pipe. */
+    if (win->evt_fd >= 0) {
+        sys_close(win->evt_fd);
+        win->evt_fd = -1;
+    }
+
+    wm_window_t fresh;
+    if (connect_common(win->req_width, win->req_height, win->req_panel_dock_h,
+                        win->req_panel, win->req_translucent, win->req_desktop,
+                        win->req_confirm_close, win->req_title, &fresh) != 0) {
+        /* Leave compositor_pid alone so the next poll tries again. There
+         * is nothing else a client with no screen can usefully do. */
+        return 0;
+    }
+    *win = fresh;
+    return 1;
+}
+
 int wm_wait_event(wm_window_t *win, wm_event_t *out) {
-    read_exact(win->evt_fd, out, sizeof(*out));
-    return 0;
+    /* M55: a poll loop, not a blocking read. It used to sit in sys_read
+     * on the event pipe forever, which is fine right up until the process
+     * on the other end of that pipe dies - at which point nothing will
+     * ever write to it again and the client is wedged with no way to
+     * notice. Going through wm_poll_event gets the compositor-liveness
+     * check and the yield that makes spinning cheap, and keeps the
+     * contract this function has always had: it returns when there is an
+     * event, and not before. */
+    for (;;) {
+        if (wm_poll_event(win, out)) {
+            return 0;
+        }
+    }
 }
 
 int wm_poll_event(wm_window_t *win, wm_event_t *out) {
+    /* M55: checked here because this is the one call every GUI client's
+     * main loop already makes on every iteration - so a client gets
+     * compositor-crash survival without a line of its own, the same way
+     * it got SYS_yield in this function when M21 needed one. */
+    if (wm_reconnect_if_needed(win)) {
+        /* The new window's buffer is blank, and the caller is the only
+         * thing that knows what belongs in it - so tell it so, through
+         * the same event stream it is already reading. Synthesized here
+         * rather than sent by the compositor because the compositor has
+         * no idea this window is a *re*-connection; from its side it is
+         * an ordinary new client. */
+        out->type = WM_EVENT_EXPOSE;
+        out->x = 0;
+        out->y = 0;
+        out->buttons = 0;
+        out->time_ms = 0;
+        out->ch = 0;
+        out->wheel = 0;
+        return 1;
+    }
     if (sys_pipe_poll(win->evt_fd) < (long)sizeof(*out)) {
         /* Every GUI client's own loop (gui_clock.c, gui_terminal.c,
          * desktop_shell.c, desktop_icons.c) is `for (;;) { while

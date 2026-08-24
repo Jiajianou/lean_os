@@ -81,6 +81,17 @@ typedef struct {
     int32_t window_id; /* -1 on failure */
     int32_t shm_id;     /* -1 on failure; pass to sys_shm_map to get a drawable pointer */
     uint32_t width, height; /* M22: the size the compositor actually allocated - for a panel request this is NOT an echo of what was asked for (width in particular is always overridden to the full display width), so a client sizes its own gfx_ctx_t from this response, never from its own request */
+    /* M55: which process is serving this window. The mirror image of
+     * client_pid above, and it exists for the mirror-image reason: the
+     * compositor has been able to notice a dead client since M29, and
+     * until this milestone a client had no way at all to notice a dead
+     * compositor. Without it, "my events stopped arriving" is
+     * indistinguishable from "nothing is happening", which is the normal
+     * state of an idle desktop - so a client would have to guess, and the
+     * only safe guess is to do nothing forever. With it the question is
+     * one SYS_task_alive call (user_space/lib/wmclient.c's
+     * reconnect_if_compositor_died). */
+    int32_t compositor_pid;
 } wm_create_response_t;
 
 /* M21: input-routing protocol. Once a client's window is accepted (the
@@ -103,6 +114,7 @@ typedef enum {
     WM_EVENT_MOUSE_WHEEL = 7,  /* M49: mouse.wheel valid (detents, negative up), plus x/y/buttons as of this event - routed to whatever the cursor is over, not to whatever holds focus, because a wheel acts on the thing under the pointer and every desktop that has one behaves that way. Sent only when the wheel actually moved, so a client that ignores it sees nothing new. */
     WM_EVENT_DRAG_MOTION = 8,  /* M49: a client-initiated drag is in progress and the cursor is over this window - x/y are in this window's coordinates. For a would-be drop target to highlight itself; ignoring it costs nothing. */
     WM_EVENT_DROP = 9,         /* M49: a drag was released over this window. The payload is NOT in this struct - the compositor has already written it to WM_DRAG_DATA_PIPE, which wmclient.h's wm_drag_payload reads. See WM_DRAG_PIPE for why it isn't carried inline. */
+    WM_EVENT_EXPOSE = 10,      /* M55: this window's pixel buffer is new and blank - redraw everything. Sent by wmclient.c itself, not by the compositor, and exactly once after a client reconnects to a *replacement* compositor (see wm_window_t's own M55 note): the pixels a client had were the dead compositor's shm segment and are gone with it, but everything needed to draw them again lives in the client. A client that ignores this comes back as an empty rectangle, which is why every GUI program in this project handles it - it is one line in each, next to whatever already sets its redraw flag. */
     WM_EVENT_CLOSE_REQUEST = 6, /* M36: sent instead of an immediate SIGTERM when this window's own wm_create_request_t.confirm_close was set and a close was requested (a titlebar close button or an external WM_ACTION_CLOSE) - no extra fields. The client decides what to do next; see confirm_close's own comment above. */
 } wm_event_type_t;
 

@@ -306,7 +306,9 @@ int main(void) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_MOUSE_MOVE && sel_dragging) {
+            if (ev.type == WM_EVENT_EXPOSE) {
+                changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
+            } else if (ev.type == WM_EVENT_MOUSE_MOVE && sel_dragging) {
                 pixel_to_cell(ev.x, ev.y, &sel_end_row, &sel_end_col);
                 changed = 1;
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {

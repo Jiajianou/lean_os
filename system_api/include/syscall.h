@@ -63,4 +63,6 @@
 
 #define SYS_mkdir 34 /* (path) -> 0 or -1. M53: creates one directory whose parent already exists. Deliberately not recursive ("mkdir -p" is a shell convenience, not a kernel one) and deliberately an error rather than a no-op when the path is already taken, so "I made this" and "this was already here" cannot be confused by a caller that cares. */
 
-#define SYSCALL_COUNT 35
+#define SYS_shm_unmap 35 /* (vaddr, bytes) -> 0 or -1. M55: removes a mapping from the caller's own address space *without* freeing the frames behind it - the half of SYS_shm_free that makes sense when the segment is somebody else's and, in the case this exists for, no longer exists at all. A client that survives a compositor crash has its window's pixel buffer still mapped, pointing at frames the kernel handed back the moment the compositor died (shm_free_by_owner); leaving that mapping in place would alias whatever those frames become next. Deliberately does not consult the segment table: the whole point is that there may be nothing left to consult. Bounded to the caller's own shm window (proc.h's USER_SHM_BASE..USER_FB_BASE), so it can unmap a window buffer and nothing else - not its code, not its stack, not the framebuffer. */
+
+#define SYSCALL_COUNT 36

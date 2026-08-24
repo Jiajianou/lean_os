@@ -496,7 +496,9 @@ int main(void) {
         wm_event_t ev;
         int changed = 0;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
+            if (ev.type == WM_EVENT_EXPOSE) {
+                changed = 1; /* M55 - see WM_EVENT_EXPOSE */
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
                 /* M45: right-click a running-app button -> its context
                  * menu. Anywhere else on the bar just dismisses one that
                  * is already up; there is nothing a right-click on the

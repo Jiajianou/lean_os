@@ -2768,37 +2768,123 @@ self-tests alone spent **79 of 128 slots** before PID 1 started.
       kernel recycling a reaped slot, and the desktop actually reaping
 - [x] Full regression: 40/40 serial markers and 37/37 interactive tests
 
-## M55 — Session resilience: supervise every client, survive a compositor crash
+## M55 — Session resilience: supervise every client, survive a compositor crash ✅
 
-init waits on `desktop_shell` and restarts the whole session if it
-exits. A compositor or `desktop_icons` that dies on its own is not
-noticed until the taskbar happens to die too - and if the compositor
-goes, every client goes with it, because a window is the only thing
-holding them.
+init waited on `desktop_shell` and restarted the whole session if it
+exited. A compositor or `desktop_icons` that died on its own was not
+noticed until the taskbar happened to die too - and for the compositor
+that meant *never*, since nothing else in the session exits when the
+screen goes away. And if the compositor went, every client went with it:
+not killed, but wedged, because a window was the only thing holding them.
 
-- [ ] init supervises all three desktop clients rather than one, with the
-      same "restart the session" response it already has. The current
-      arrangement is not a design, it is `sys_wait` taking one pid
-- [ ] A compositor that dies takes the screen with it; clients should
-      survive it. `wmclient.c` learns to notice its event pipe has gone
-      quiet *and* that the compositor's pid is dead (`SYS_task_alive`,
-      which already exists for exactly this shape of question), and to
-      re-run the connect handshake against the new one
-- [ ] Which requires window creation to be idempotent enough to redo:
-      the client already re-creates its own pixels every frame, so what
-      has to survive is the *title* and the geometry, both of which the
-      client supplied in the first place
-- [ ] The desktop stops being the thing that has to be alive for anything
-      else to be. This is also the piece that makes M52's fault-kills
-      genuinely non-fatal: a compositor bug becomes a flicker rather than
-      the end of the session
-- [ ] New boot self-test (`[m55]`): a compositor SIGKILLed out from under
-      two live clients, restarted, and both clients' windows back on
-      screen with their own pixels - checked as pixels, since "the client
-      is still running" is not the claim
-- [ ] New interactive test: force-quit the compositor from the task
-      manager and watch the desktop come back with the app windows still
-      there
+- [x] init supervises all three desktop clients, with the same "restart
+      the session" response it already had. The old arrangement was not a
+      design, it was `sys_wait` taking one pid. Polled with
+      `SYS_task_alive` rather than waited on, because there is no
+      wait-for-any primitive here that says *which* child went, and this
+      loop has to know which pid to stop watching
+- [x] `wm_create_response_t.compositor_pid` - the mirror image of M29's
+      `client_pid`, and it exists for the mirror-image reason. Without
+      it, "my events stopped arriving" is indistinguishable from "nothing
+      is happening", which is the normal state of an idle desktop; a
+      client would have to guess, and the only safe guess is to do
+      nothing forever
+- [x] `wmclient.c` reconnects on its own. `wm_window_t` keeps everything
+      the handshake needs - geometry, flags, title - because a client
+      supplied all of it in the first place and redraws its pixels every
+      frame anyway. The check happens inside `wm_poll_event`, the one
+      call every GUI main loop already makes every iteration, so a client
+      gets crash survival without a line of its own
+- [x] `wm_wait_event` became a poll loop rather than a blocking read. It
+      used to sit in `sys_read` on the event pipe forever, which is fine
+      right up until the process on the other end dies - at which point
+      nothing will ever write to it again and the client is wedged with
+      no way to notice. `gui_paint` was the one client in this state
+- [x] `SYS_shm_unmap` (35): removes a mapping without freeing what it
+      points at - the half of `SYS_shm_free` that makes sense when the
+      segment is somebody else's and, in the case this exists for, no
+      longer exists at all. A reconnecting client's window buffer points
+      at frames the kernel handed back the instant the compositor died,
+      and leaving that mapping would alias whatever those frames become
+      next. Bounded to the caller's own shm window, so it cannot reopen
+      the hole M52 closed next door in `SYS_shm_free`
+- [x] While a client is between windows its `gfx` context is given zero
+      dimensions, not merely a null pixel pointer. That is what actually
+      makes it safe: every `gfx.c` primitive clips to `width`/`height`
+      before touching `pixels`, so a client that redraws on a timer in
+      that window draws nothing instead of dereferencing null
+- [x] `WM_EVENT_EXPOSE`, synthesized by `wmclient.c` rather than sent by
+      the compositor - which has no idea this window is a *re*-connection;
+      from its side it is an ordinary new client. Every GUI program in
+      this project handles it, one line each next to whatever already
+      sets its redraw flag. `gui_paint` is honest about coming back as an
+      empty canvas: the pixel buffer *was* its model of the drawing
+- [x] A fresh compositor resets the eleven well-known pipes at startup. A
+      named pipe deliberately outlives every fd that ever pointed at it -
+      that is the whole rendezvous mechanism - so a compositor that died
+      mid-`sys_write` leaves a partial struct at the head of the stream,
+      and the next one's first read would be misaligned against every
+      message after it forever
+- [x] **Which then broke reconnection, and the fix is the interesting
+      part.** A client notices the death and queues its request the
+      instant it happens; the replacement clears the pipes on startup;
+      the two race, and a client that lost blocked in `sys_read` on a
+      response nobody would ever write. So `connect_common` sends, waits
+      with a deadline, and sends again - four attempts at 1.5s. The
+      deadline is long enough that a live compositor (a tight poll loop,
+      answering in milliseconds) always replies inside it, so a re-send
+      only happens when the first request genuinely went nowhere
+- [x] `task_manager.c`'s protected list rewritten in both directions.
+      **"kernel" and "cpu-idle" added** - a real hazard nobody had
+      noticed, since `SYS_taskinfo` reports the scheduler's own tasks and
+      End Task on the first row would have SIGKILLed task 0, which is not
+      an app crashing but the machine stopping. **compositor,
+      desktop_shell and desktop_icons removed** - they were guarded
+      because killing one took the screen away and nothing brought it
+      back, and a guard against something that no longer happens is a
+      guard that is lying
+- [x] `user_space/bin/wm_crash.c`, a self-test-only program that finds
+      the compositor by name in `SYS_taskinfo` and SIGKILLs it. It exists
+      because M55's claim is only worth something if it can be triggered
+      the way a person would, and there was no such way - killing by name
+      rather than by pid precisely because the launcher can start
+      programs but not hand them a number somebody had to look up
+- [x] New boot self-test (`[m55]`), 5/5: a compositor SIGKILLed out from
+      under two live clients, replaced, and both windows back on screen
+      **with their own pixels**. Checked as pixels deliberately - "the
+      client is still running" was true before this milestone too, in the
+      sense that nobody killed it, and is not the claim
+- [x] New interactive test (`desktop_survives_losing_the_compositor`):
+      open an app, kill the compositor from the launcher, and require the
+      desktop back *and that app's window with it*. The proof that the
+      machine survived is launching something else afterwards, not the
+      screenshot still looking like a desktop - a frozen framebuffer keeps
+      showing the last frame it was given, which is exactly how the first
+      version of this test passed while the session was in fact dead
+- [x] Boot budgets raised in both harnesses: `SECONDS_TO_RUN` 96 -> 180
+      and the interactive suite's boot timeout 90 -> 240. Five milestones
+      added five self-tests and several are the slow kind for an
+      unavoidable reason - proving something about a *process* means
+      starting one and waiting for it. 90 was measured failing during
+      M55, which presents as every test erroring out at once rather than
+      as anything resembling a real bug. The final numbers are
+      deliberately several times a healthy boot (~60s): the two runs that
+      pushed past 150 were guests that had genuinely stopped making
+      progress, both of which passed on a plain re-run in 69s, and a hung
+      guest is something a timeout can only report rather than fix
+- [x] **The reconnect retry, and why it is 400ms.** A client notices the
+      compositor died and queues its request immediately; the replacement
+      clears the well-known pipes on startup; the two race, and a client
+      that lost blocked forever on a response nobody would write. The
+      first fix used 1.5s and passed - by luck, on timing - and then
+      failed the moment M56's own self-tests shifted the boot around it.
+      400ms x 12 is the honest version: a live compositor answers in
+      milliseconds, so the interval is a hundredfold margin against
+      re-sending into a merely-slow answer, and what it actually buys is
+      that a reconnecting window is blank for a moment rather than for
+      long enough to look like the crash
+- [x] Full regression: 41/41 serial markers and 38/38 interactive tests
+      (36 in one pass, plus two re-runs of guests that had wedged)
 
 ## M56 — Depth where people actually spend time
 
