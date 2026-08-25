@@ -2868,10 +2868,14 @@ not killed, but wedged, because a window was the only thing holding them.
       starting one and waiting for it. 90 was measured failing during
       M55, which presents as every test erroring out at once rather than
       as anything resembling a real bug. The final numbers are
-      deliberately several times a healthy boot (~60s): the two runs that
-      pushed past 150 were guests that had genuinely stopped making
-      progress, both of which passed on a plain re-run in 69s, and a hung
-      guest is something a timeout can only report rather than fix
+      deliberately several times a healthy boot, which costs nothing - the
+      wait returns as soon as the marker appears - and keeps a loaded host
+      from being reported as a bug in whatever change is under test. Both
+      went up again in M56 (180 and 300) once boot time turned out to be
+      *variable* rather than merely larger: 65s on a quiet host and past
+      180 on a busy one, because most of the added time is self-tests
+      waiting on real processes, and those wait on the scheduler rather
+      than on a clock
 - [x] **The reconnect retry, and why it is 400ms.** A client notices the
       compositor died and queues its request immediately; the replacement
       clears the well-known pipes on startup; the two race, and a client
@@ -2884,43 +2888,310 @@ not killed, but wedged, because a window was the only thing holding them.
       that a reconnecting window is blank for a moment rather than for
       long enough to look like the crash
 - [x] Full regression: 41/41 serial markers and 38/38 interactive tests
-      (36 in one pass, plus two re-runs of guests that had wedged)
+      (36 in one pass, plus two re-runs - see M56's note on the orphaned
+      QEMU processes those two "hangs" turned out to be)
 
-## M56 — Depth where people actually spend time
+## M56 — Depth where people actually spend time ✅
 
 Every app in this project is a demonstration of a mechanism. Three of
-them are things a person would genuinely use, and each is one feature
+them are things a person would genuinely use, and each was one feature
 short of being usable for real work.
 
-- [ ] Undo in `text_editor.c`. It is the single most-missed thing in any
-      editor, and this one has had a clipboard since M32 without one -
-      so a paste is currently unrecoverable. A bounded ring of edit
-      records rather than snapshots: the buffer is already line-based,
-      and a snapshot-per-keystroke editor is one that stops working on a
-      large file
-- [ ] Scrollback in `gui_terminal.c`. `grid_scroll` discards the top line
-      today, which is why M49's wheel had nothing to do there - and why a
-      command whose output is longer than the window is a command whose
-      output you cannot read
-- [ ] File operations in `file_manager.c`: rename, delete, copy. Needs
-      `SYS_unlink` and `SYS_rename` in `leanfs` - the write half of the
-      filesystem stops at "create or overwrite a whole file", which is
-      how a filesystem that has never had to *remove* anything ends up
-      with `m48trunc` in it forever
-- [ ] Delete behind M36's confirm dialog, and nothing else - there is no
-      trash and inventing one would be scope this doesn't need
-- [ ] An icon image format, finally. Every icon in this project is
-      hand-drawn rectangles, noted as such in three separate files - a
-      tiny indexed-color blob plus a loader retires all of them, and it
-      is the last thing making the desktop look hand-drawn rather than
-      designed
-- [ ] New boot self-test (`[m56]`): an editor undo restoring an exact
-      buffer across a paste; a terminal scrollback holding more lines
-      than its window; and `SYS_unlink`/`SYS_rename` round-tripping,
-      including the inode and block accounting coming back
-- [ ] New interactive tests: type, paste, undo, and read the pixels back;
-      scroll a terminal's history with the wheel M49 added; rename a file
-      in one window and see the other window's listing follow
+- [x] **Undo in `text_editor.c`** - a bounded ring of edit *records*, not
+      snapshots. A snapshot-per-keystroke editor is one that stops working
+      on a large file: this buffer is 600 x 80 characters, so even ten
+      levels of undo would be half a megabyte of copies of something that
+      barely changed between them. A record is six bytes and the ring
+      holds 512 of them; when it fills, the oldest is overwritten, which
+      is the trade a *bounded* history makes on purpose
+- [x] There are exactly three mutations in that file - insert a
+      character, delete a character, append an empty line - which is what
+      makes records practical here at all. Enter deliberately does not
+      split a line and Backspace deliberately does not merge one, so
+      there is no structural edit more complicated than "the buffer grew
+      by one row" to invert. Each inverse is performed through the same
+      primitives as the edit, so undo cannot drift away from what it is
+      undoing
+- [x] `group` is what makes a paste undo as one action rather than as
+      eighty. Every user-visible action bumps a counter and undo pops
+      until the group changes - one group per keystroke, which is what
+      every editor that does not try to be clever about coalescing runs
+      does, and being clever about it is how undo starts surprising
+      people
+- [x] **And paste, which did not exist.** This editor had `Ctrl+C` since
+      M32 and no `Ctrl+V` at all - the clipboard was a one-way street
+      between it and the terminal. The milestone's own framing ("a paste
+      is currently unrecoverable") assumed a feature that had to be
+      written first
+- [x] **Scrollback in `gui_terminal.c`.** `grid_scroll` discarded the top
+      line outright, which is why M49's wheel had nothing to reveal here
+      and why a command whose output was longer than the window was a
+      command whose output you could not read - `ls /bin` alone is more
+      lines than the grid has rows. 200 retained lines in a *ring*: at 70
+      characters a line, shifting an array on every scrolled line would
+      be 14 KiB of memcpy per line of output, which is exactly the case
+      this exists for
+- [x] The visible rows come from one combined sequence - scrollback then
+      the live grid - through a single `view_row`, so neither the drawing
+      nor the selection code has to know which half a row came from. A
+      reader scrolled back stays on the same *content* while new output
+      arrives rather than watching it slide upward; typing snaps back to
+      live, because a keystroke appearing somewhere off screen is the
+      worst possible way to find out you were scrolled up; and the cursor
+      is only drawn when the live grid is what is showing, since a cursor
+      in the middle of old output would be claiming you could type there
+- [x] `SYS_unlink` (36) and `SYS_rename` (37). The write half of this
+      filesystem stopped at "create or overwrite a whole file", which is
+      how a filesystem that had never had to remove anything ended up
+      with `m48trunc` on it forever. Unlink frees blocks, then the inode,
+      then the name - each step making the one before it unreachable, so
+      an interruption leaves a name pointing at a free inode (which the
+      resolver refuses) rather than a live inode pointing at blocks
+      somebody else now owns
+- [x] A rename moves *records*, not data - which is only true because M53
+      stopped storing a name in the inode; it would have been a copy
+      before that. The new record is added before the old one is removed,
+      because both halves rewrite a directory through the same block
+      allocator a file uses and either can fail on a full disk: a
+      duplicate name is recoverable, an unreachable inode is not
+- [x] A directory is refused by unlink rather than recursed into or
+      emptiness-checked, and a rename over an existing name is refused
+      rather than silently replacing it. Both are the same judgment:
+      guessing what someone meant is how a file gets lost
+- [x] File operations in `file_manager.c` - `R` rename, `C` copy, Delete
+      delete - as single keys rather than a menu, since this window has
+      no menu bar and a modifier chord would collide with the
+      window-manager ones the compositor swallows before a client sees
+      them. Copy is a read and a write, not a filesystem operation:
+      leanfs has no notion of one, and a whole-file pair is exactly what
+      this OS's file API offers
+- [x] **Delete behind M36's confirm, and nothing else.** There is no
+      trash and inventing one would be scope this does not need - which
+      makes the confirm the only thing between a keystroke and a file
+      that is gone, so it is the one operation that gets one. Rename and
+      copy are both recoverable by doing them again
+- [x] **An icon image format, finally** (`system_api/include/icon.h`).
+      Every icon in this project was hand-placed rectangles in whichever
+      client needed one, apologised for in three separate files - and
+      that is not fixable by drawing *better* rectangles, because what
+      was missing was a way to say "here is a picture" at all
+- [x] Deliberately the smallest thing that is genuinely a format: an
+      eight-byte header, a palette of up to sixteen RGB triples, and
+      4-bit indices two to a byte. Index 0 is always transparent, which
+      is what lets an icon sit over a wallpaper without an alpha channel
+      this compositor could not blend anyway. A 24x24 icon is 344 bytes
+- [x] `icon_draw` takes an integer scale, so one 24x24 blob serves both
+      the 48px desktop icon and a 24px one elsewhere - two sizes of the
+      same picture rather than two pictures that can disagree, which is
+      precisely what the old per-call-site rectangles were
+- [x] Not a file on disk yet, and the header says so: the loader takes a
+      pointer and does not care where the bytes came from. Compiled in
+      today costs a client no file I/O per redraw and no "the icon is
+      missing" failure path; the day icons are user-replaceable the
+      format does not change, only where they are read from
+- [x] `keyboard_inject(ch, mods)` in the keyboard driver - the
+      counterpart to M51's `mouse_inject`, and it carries an explicit
+      modifier mask because without one a self-test could type letters
+      but never a *chord*, and every interesting thing a client binds is
+      a chord. Deliberately not a syscall, for the same reason: a program
+      able to forge keystrokes could type into any other program's window
+- [x] New boot self-test (`[m56]`), 9/9. `SYS_unlink`/`SYS_rename` round
+      tripping across **64 unlink-then-rewrite cycles of the same 2000
+      bytes** - a filesystem leaking even one block per unlink runs out
+      inside that loop, which is the accounting a bare "the file is gone"
+      assertion misses entirely. Then a real editor, driven by real
+      injected keys through a real compositor: type, `Ctrl+V`, `Ctrl+S`,
+      `Ctrl+Z`, `Ctrl+S`, and compare the **bytes on disk** - "AB\n"
+      exactly, not "shorter than it was", which a paste that silently did
+      nothing would also satisfy. Then `ls /bin` into a real terminal and
+      the wheel scrolled back and forward, compared as lit pixels in the
+      top row so the assertion does not depend on which filename leanfs
+      returns first
+- [x] Three new interactive tests: `editor_undo_restores_the_buffer`
+      (the clipboard loaded from the *terminal*, since its `Ctrl+C` with
+      nothing selected copies the input line - one keystroke instead of a
+      drag whose pixel path the test would then also be asserting on),
+      `terminal_scrollback_scrolls_with_the_wheel`, and
+      `copying_a_file_shows_up_in_another_window` - copy rather than
+      rename or delete, because it is the one of the three that *adds* a
+      row, so the second window's list growing is a positive assertion
+      rather than "something is missing now"
+- [x] **Harness lessons, all of which cost real debugging time.**
+      A suite that is interrupted must kill its guest. Python
+      dies on SIGTERM without unwinding, so three QEMU processes
+      accumulated over an afternoon of interrupted runs, each burning a
+      quarter of a core - and the symptom was boots timing out at 240s in
+      tests that pass in 70 on an idle machine. That reads exactly like a
+      guest that has hung, which is the worst thing it could have looked
+      like: it sent a real investigation after a kernel bug that was
+      never there. `main` now installs a TERM/INT handler that raises, so
+      the `with Machine()` unwinds and reaps its child
+- [x] And it failed two tests before it was understood: a pixel
+      *baseline* must be captured from a settled frame. "Something is drawn" fires as soon as the first character
+      lands, and a baseline snatched between the A and the B is one a
+      correct undo can never get back to - so the failure looks exactly
+      like the feature being broken. `_settled_row` polls until two
+      consecutive screenshots agree, which is the honest fix; a fixed
+      sleep would be a guess that gets worse on a loaded host
+- [x] **An intermittent boot hang, found by the suite and traced to a
+      real deadlock this arc introduced.** About one boot in ten stopped
+      producing output entirely, always after a self-test that kills a
+      process, and it looked exactly like a wedged emulator - three
+      orphaned QEMU processes from interrupted runs had already produced
+      the same symptom for a completely different reason, which is how it
+      stayed unexplained for a while
+- [x] The cause is M54's own change, and the mechanism is worth stating
+      plainly: `task_exit_with_code` now tears down the dying task's
+      address space, so it takes `vmm_lock`. A fatal signal is delivered
+      from the *timer tick*. So a `SIGKILL` landing while its target was
+      inside `vmm_map_page_in` - holding `vmm_lock`, with interrupts on -
+      re-entered `vmm_destroy_address_space` and spun forever on a lock
+      its own interrupted stack was holding. One CPU, interrupts already
+      off inside the IRQ handler: the whole machine
+- [x] The fix is `spin_lock_irqsave`/`spin_unlock_irqrestore`, applied to
+      `vmm_lock`, `pmm_lock` and `heap_lock`. This kernel already knew the
+      rule and had written it down twice - `sched_lock`'s comment calls
+      `cli` there "not optional hardening the way it might look", and
+      `klog_lock`'s names the identical failure - it just had not applied
+      it to the allocators, because until M54 nothing on the task-exit
+      path took their locks. "Reachable from an interrupt handler" now
+      includes anything the exit path touches
+- [x] **A second race, found the same way and older than this arc.**
+      `WM_RESPONSE_PIPE` is one shared stream - there has only ever been
+      one, since M20, when there was only ever one client - so whichever
+      client the scheduler wakes first reads whatever is at its head, which
+      may be somebody else's window id and shm segment. That was
+      survivable while every client *blocked* on the read and the
+      compositor answered one request per loop iteration, so the orders
+      lined up in practice. M55's reconnect retry stopped them lining up:
+      a client can now have two requests in flight and two clients can
+      poll the same pipe at once. It presented as "the desktop never
+      finished painting"
+- [x] Fixed by *addressing* the answer rather than by giving each client
+      its own pipe: `wm_create_response_t` echoes the requesting
+      `client_pid`, a client that reads someone else's keeps waiting for
+      its own (the other will time out and re-ask, which is what the retry
+      is for), and the compositor answers a request from a client that
+      already has a live window with *that* window - which is what makes a
+      retry idempotent instead of a way to end up with two windows, one of
+      which nothing will ever reclaim because its owner is very much alive
+- [x] **A third, and the reason the second's symptom was so confusing.**
+      A client's create request is a `SYS_write` to a rendezvous pipe
+      whose reader may not exist yet - and `SYS_write` to a *full* pipe
+      blocks. A named pipe outlives every process that ever held it (that
+      is the mechanism), so a compositor killed with somebody's unread
+      request in flight leaves those bytes there; enough of them and the
+      next client to connect blocks forever. Alive, supervised, never
+      going to draw anything - which is precisely the one failure init's
+      liveness polling cannot see. `SYS_PIPE_CAPACITY` is part of the ABI
+      now (one definition, shared with `pipe.h`) so a client can ask
+      `SYS_pipe_poll` whether there is room, wait for it with a deadline,
+      and give up rather than block. A failed connect is loud, and init
+      answers it by restarting the session
+- [x] Two harness improvements that came out of chasing all three: a boot
+      timeout now *preserves the guest's serial log* (a boot that never
+      finishes is the one failure with no pixels and no assertion to
+      report - and the log was being deleted by the teardown before
+      anyone could read it), and the suite kills its guest on a signal so
+      an interrupted run cannot leave a QEMU process burning a core. "The
+      desktop never finished painting" also names *which* of its five
+      probes was wrong now - one symptom with five causes, and which one
+      it is decides whether to look at the compositor, desktop_icons or
+      desktop_shell
+- [x] **A self-test that made the machine look broken.** The first
+      version of the block-accounting check wrote and unlinked the same
+      2000 bytes sixty-four times and watched for the disk to fill - the
+      honest test available when leanfs could not count free blocks. It
+      cost about four thousand ATA sector writes, because every metadata
+      update in this filesystem rewrites the whole inode table and bitmap
+      (31 sectors since M53) and PIO writes are the most expensive thing
+      this OS does. It added more than a minute to a boot that reboots,
+      and presented as tests timing out. `leanfs_free_blocks` makes the
+      same claim as one comparison, which is both faster and a stronger
+      statement - "every block came back", not "we did not run out"
+- [x] Full regression: 42/42 serial markers, and 41/41 interactive tests
+      - 39 in one pass plus two re-runs. Both re-runs are boot timeouts
+      at 300s in a suite whose other 39 boots took 73 seconds each, and
+      both passed in 73-75s on their own immediately afterwards. That is
+      the host, not the guest: this machine had been running QEMU almost
+      continuously for ten hours by then, and a 41-boot suite is the
+      point in the day where that shows. Recorded rather than papered
+      over - see the known-gaps note below
+
+### Known gaps and things still unverified after M56
+
+Recorded rather than left implicit, the same way M50's list was - each of
+these is a real limit of what M51-M56 actually shipped.
+
+First, what this arc *closed* from that list, since half of it was the
+plan for these six milestones: user pointers are validated (M52), a
+ring-3 fault kills one task rather than the machine (M52), dead address
+spaces and task slots come back (M54), the terminal has scrollback (M56),
+and every desktop client is supervised (M55). What remains:
+
+- **Real-hardware boot is still unverified.** Everything from M45 to M56
+  was developed against QEMU/OVMF, and M47's ACPI work in particular is
+  the kind that behaves differently on real firmware. Unchanged since
+  M28; still the largest untested claim in the project
+- **The S5 sleep type is still guessed, not read.** `\_S5` lives in AML
+  and this project has no AML parser
+- **`SYS_close` still does not close a pipe**, only the caller's slot -
+  pipes are not reference-counted, so a reader blocked on a pipe whose
+  last writer "closed" waits forever rather than seeing EOF. Nothing
+  depends on EOF today
+- **A task nobody waits on still holds its slot forever.** M54 recycles
+  on *reap* deliberately (a terminated-but-unreaped task is what the
+  compositor's liveness polling reads), and M55's `children.h` made the
+  two processes that launch things reap them - but a child whose parent
+  dies before waiting has no reaper at all. Killing the compositor with
+  apps open leaks exactly that many slots. Bounded by MAX_TASKS, which is
+  now a concurrency limit rather than a lifetime one, so this is a much
+  smaller version of the old problem rather than a new one
+- **A reconnected window comes back at the cascade position, not where
+  you left it.** M55 restores a window's *identity* - size, title, flags,
+  and its pixels via `WM_EVENT_EXPOSE` - because those are things the
+  client supplied. Where it was on screen was the compositor's, and died
+  with it. Nothing in the protocol lets a client ask for a position
+- **`gui_paint` comes back empty after a compositor crash**, and says so
+  in its own handler: the pixel buffer *was* its model of the drawing. It
+  is the one client in this project with no state behind its window
+- **`shm_free_by_owner` still frees a segment its creator owns even if
+  another process has it mapped.** M50 documented this and M54's address
+  space teardown deliberately does not make it worse (it never frees a
+  leaf frame outside the two ranges a process genuinely owns), but the
+  underlying "one owner, no refcount" rule is unchanged
+- **No `rmdir`.** Directories can be created and never removed, which is
+  the same shape of gap `unlink` just closed for files - deliberately not
+  guessed at in M56, since nothing has asked
+- **Undo has no redo**, and its ring is bounded at 512 records. Both are
+  the bounded-history trade stated in the code rather than oversights
+- **The file manager copies at most 16 KiB**, refused out loud rather
+  than truncated. leanfs itself allows 72
+- **Icons are compiled in, not files.** The format is a real format and
+  the loader takes a pointer, so the day they become user-replaceable
+  nothing about either changes - but today "install an icon" means
+  rebuild
+- **`gui_terminal` still never restores its own stdout** - it `dup2`s a
+  pipe onto fd 1 and leaves it there deliberately, which means the
+  terminal's stdout is a pipe for the rest of its life
+- **The interactive suite takes about 45 minutes** and boots a fresh
+  guest per test, which makes it sensitive to anything else using the
+  host's CPU - and, apparently, to the host itself over a long session:
+  a boot that takes 73 seconds all day has been measured taking past 300
+  late in a run, with the guest log showing M54's spawn/reap storm
+  crawling at 64 of its 384 rounds. Every such test has passed on a plain
+  re-run. Nothing in the guest explains it and six consecutive serial
+  boots found nothing, so it is recorded as a property of the harness's
+  environment rather than diagnosed. `LEANOS_IMAGE` (M53) means a long run and ongoing
+  development no longer fight over `build/os-image.bin`, and M56 made
+  the suite kill its guest on a signal - but a `make` running alongside
+  it will still stretch a 60-second boot past the timeout
+- **Pixel baselines need settling, and nothing enforces it.** M56 added
+  `_settled_row` after two tests failed on correct behavior because a
+  baseline was captured mid-repaint. That is the third variant of the
+  same lesson (M45's key backlog, M48's slower run), and like the others
+  it is a pattern rather than something the harness makes hard to get
+  wrong
 
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
@@ -2934,8 +3205,10 @@ short of being usable for real work.
 - [x] Directories in leanfs - promoted out of this list and scheduled as
       M53. It was always "the one structural limit that shows up in three
       different apps at once", which is a milestone, not a stretch goal
-- [x] An icon image format - promoted to M56, where it is the last thing
-      making the desktop look hand-drawn rather than designed
+- [x] An icon image format - promoted to M56, where it landed as
+      `system_api/include/icon.h`: an eight-byte header, a sixteen-entry
+      palette and 4-bit indices, plus a loader that scales by an integer
+      so one blob serves two sizes
 - [ ] Audio: a PC-speaker beep at minimum, an AC'97/HDA output stream at
       most. Nothing in this OS has ever made a sound, so even a system
       beep on an error toast (M48) is a new capability

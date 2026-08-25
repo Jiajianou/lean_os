@@ -218,6 +218,84 @@ static void clamp_cursor(void) {
     }
 }
 
+/* ---- M56: undo -------------------------------------------------------
+ *
+ * The single most-missed thing in any editor, and this one had a
+ * clipboard before it had this - so a paste was unrecoverable.
+ *
+ * A bounded ring of edit *records*, not snapshots. A snapshot-per-
+ * keystroke editor is one that stops working on a large file: this
+ * buffer is 600 x 80 characters, so even ten levels of undo would be
+ * half a megabyte of copies, and the thing being copied barely changes
+ * between them. A record is six bytes.
+ *
+ * There are exactly three mutations in this file, which is what makes
+ * records practical here at all: insert one character, delete one
+ * character, and append an empty line. Enter deliberately does not split
+ * a line and Backspace deliberately does not merge one (see this file's
+ * header), so there is no structural edit more complicated than "the
+ * buffer grew by one empty row" to undo.
+ *
+ * `group` is what makes a paste undo as one action rather than as
+ * eighty. Every user-visible action bumps the counter; undo pops records
+ * until the group changes. Typing gets a group per keystroke, which is
+ * the behavior of every editor that does not try to be clever about
+ * coalescing runs - and being clever about it is how undo starts
+ * surprising people. */
+#define UNDO_MAX 512
+
+typedef enum {
+    EDIT_INSERT = 0, /* a character was inserted at (row, col) - undo deletes it */
+    EDIT_DELETE = 1, /* `ch` was deleted from (row, col) - undo puts it back */
+    EDIT_NEWLINE = 2, /* an empty line was appended - undo drops it */
+} edit_kind_t;
+
+typedef struct {
+    uint8_t kind;
+    uint8_t group;
+    int16_t row, col;
+    char ch;
+} edit_t;
+
+static edit_t undo_ring[UNDO_MAX];
+static int undo_count;   /* how many records are live, <= UNDO_MAX */
+static int undo_head;    /* where the next record goes */
+static uint8_t undo_group;
+/* Set while undo is replaying, so the inverse edits it performs are not
+ * themselves recorded - which would make undo a loop rather than a
+ * history. There is deliberately no redo: it would need this ring to
+ * grow a second direction, and nothing has asked. */
+static int undo_replaying;
+
+static void undo_begin_group(void) {
+    undo_group++;
+}
+
+static void undo_record(edit_kind_t kind, int row, int col, char ch) {
+    if (undo_replaying) {
+        return;
+    }
+    edit_t *e = &undo_ring[undo_head];
+    e->kind = (uint8_t)kind;
+    e->group = undo_group;
+    e->row = (int16_t)row;
+    e->col = (int16_t)col;
+    e->ch = ch;
+    undo_head = (undo_head + 1) % UNDO_MAX;
+    if (undo_count < UNDO_MAX) {
+        undo_count++;
+    }
+    /* Full: the oldest record is simply overwritten. Bounded history is
+     * the trade this design makes on purpose - an editor that can undo
+     * forever is one that can run out of memory while you type. */
+}
+
+static void undo_reset(void) {
+    undo_count = 0;
+    undo_head = 0;
+    undo_group = 0;
+}
+
 static void insert_char(char c) {
     int *len = &line_len[cur_row];
     if (*len >= MAX_LINE_LEN - 1) {
@@ -228,6 +306,7 @@ static void insert_char(char c) {
     }
     lines[cur_row][cur_col] = c;
     (*len)++;
+    undo_record(EDIT_INSERT, cur_row, cur_col, c);
     cur_col++;
     dirty = 1;
 }
@@ -237,6 +316,7 @@ static void backspace(void) {
         return; /* no line-merge - see this file's own header comment on Enter's matching simplification */
     }
     int *len = &line_len[cur_row];
+    undo_record(EDIT_DELETE, cur_row, cur_col - 1, lines[cur_row][cur_col - 1]);
     for (int i = cur_col - 1; i < *len - 1; i++) {
         lines[cur_row][i] = lines[cur_row][i + 1];
     }
@@ -251,6 +331,7 @@ static void new_line_at_end(void) {
     }
     line_len[line_count] = 0;
     line_count++;
+    undo_record(EDIT_NEWLINE, line_count - 1, 0, 0);
     cur_row = line_count - 1;
     cur_col = 0;
     dirty = 1;
@@ -288,8 +369,9 @@ static void reset_to_new_file(void) {
     cur_row = 0;
     cur_col = 0;
     scroll_top = 0;
-    memcpy(filename, "untitled", sizeof("untitled"));
+    memcpy(filename, PATH_HOME_DIR "untitled", sizeof(PATH_HOME_DIR "untitled"));
     dirty = 0;
+    undo_reset(); /* M56: the history described a buffer that no longer exists */
     status[0] = '\0';
     clear_selection(); /* M37: the old selection's row indices may no longer even exist in the fresh, 1-line buffer */
 }
@@ -404,6 +486,74 @@ static void normalized_selection(int *sr, int *sc, int *er, int *ec) {
         *er = sel_anchor_row;
         *ec = sel_anchor_col;
     }
+}
+
+/* M56: replays the most recent group of edits backwards. Each record's
+ * inverse is one of the same three mutations, performed through the same
+ * primitives - so undo cannot drift away from what it is undoing, which
+ * is the failure mode of every hand-written inverse. */
+static void undo_last_group(void) {
+    if (undo_count == 0) {
+        memcpy(status, "Nothing to undo.", sizeof("Nothing to undo."));
+        return;
+    }
+    int last = (undo_head - 1 + UNDO_MAX) % UNDO_MAX;
+    uint8_t group = undo_ring[last].group;
+    undo_replaying = 1;
+    while (undo_count > 0) {
+        int at = (undo_head - 1 + UNDO_MAX) % UNDO_MAX;
+        if (undo_ring[at].group != group) {
+            break;
+        }
+        edit_t e = undo_ring[at];
+        undo_head = at;
+        undo_count--;
+        if (e.kind == EDIT_INSERT) {
+            cur_row = e.row;
+            cur_col = e.col + 1;
+            clamp_cursor();
+            backspace();
+        } else if (e.kind == EDIT_DELETE) {
+            cur_row = e.row;
+            cur_col = e.col;
+            clamp_cursor();
+            insert_char(e.ch);
+        } else { /* EDIT_NEWLINE */
+            if (line_count > 1) {
+                line_count--;
+            }
+            cur_row = line_count - 1;
+            cur_col = line_len[cur_row];
+        }
+    }
+    undo_replaying = 0;
+    clamp_cursor();
+    dirty = 1;
+}
+
+/* M56: the other half of the clipboard this editor has had since M32.
+ * Copy existed; paste did not, which made "the clipboard" a one-way
+ * street between this window and gui_terminal. One undo group for the
+ * whole thing - eighty separate undos for one Ctrl+V would be a worse
+ * feature than none. */
+static void paste_from_clipboard(void) {
+    static char buf[1024];
+    long n = sys_clipboard_get(buf, sizeof(buf));
+    if (n <= 0) {
+        return;
+    }
+    if (n > (long)sizeof(buf)) {
+        n = (long)sizeof(buf);
+    }
+    undo_begin_group();
+    for (long i = 0; i < n; i++) {
+        if (buf[i] == '\n' || buf[i] == '\r') {
+            new_line_at_end();
+        } else if (buf[i] >= 0x20 && buf[i] < 0x7F) {
+            insert_char(buf[i]);
+        }
+    }
+    clamp_cursor();
 }
 
 static void copy_selection_to_clipboard(void) {
@@ -649,11 +799,22 @@ int main(const char *arg) {
                     if (sel_active) {
                         copy_selection_to_clipboard();
                     }
+                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'v' || ev.ch == 'V')) {
+                    status[0] = '\0';
+                    clear_selection();
+                    paste_from_clipboard();
+                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'z' || ev.ch == 'Z')) {
+                    status[0] = '\0';
+                    clear_selection();
+                    undo_last_group();
                 } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 's' || ev.ch == 'S')) {
                     save_file();
                 } else {
                     status[0] = '\0';
                     clear_selection();
+                    /* M56: one group per keystroke - see UNDO_MAX's note
+                     * on why this deliberately does not coalesce runs. */
+                    undo_begin_group();
                     handle_char(ev.ch);
                 }
             }

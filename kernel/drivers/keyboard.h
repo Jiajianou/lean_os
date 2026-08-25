@@ -15,6 +15,24 @@ void keyboard_init(void);
  * Never blocks. */
 int keyboard_read(void);
 
+/* M56: pushes a synthetic character onto the same ring the IRQ handler
+ * feeds, so a reader (SYS_kbd_read, and therefore the compositor) cannot
+ * tell it from a real keypress. The counterpart to M51's mouse_inject and
+ * it exists for the same reason: a boot self-test that has to drive a
+ * *program* - here gui_terminal, which only produces the output whose
+ * scrollback [m56] is about if somebody types a command into it.
+ *
+ * Deliberately not a syscall, exactly as mouse_inject is not: a user
+ * program able to forge keystrokes could type into any other program's
+ * window.
+ *
+ * `mods` is the KBD_MOD_* mask (system_api/include/input.h) this
+ * character is to be reported with, rather than whatever is physically
+ * held - which for an injected key is nothing. Without it a self-test
+ * could type letters but never a *chord*, and every interesting thing a
+ * client binds is a chord: Ctrl+V, Ctrl+Z, Ctrl+S. */
+void keyboard_inject(char ch, int mods);
+
 /* Which of Ctrl/Alt/Shift were held down for the character keyboard_read
  * most recently returned, as a bitmask of system_api/include/input.h's
  * KBD_MOD_* bits. Added at M32 so a caller could tell a plain 'c'

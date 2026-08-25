@@ -65,4 +65,17 @@
 
 #define SYS_shm_unmap 35 /* (vaddr, bytes) -> 0 or -1. M55: removes a mapping from the caller's own address space *without* freeing the frames behind it - the half of SYS_shm_free that makes sense when the segment is somebody else's and, in the case this exists for, no longer exists at all. A client that survives a compositor crash has its window's pixel buffer still mapped, pointing at frames the kernel handed back the moment the compositor died (shm_free_by_owner); leaving that mapping in place would alias whatever those frames become next. Deliberately does not consult the segment table: the whole point is that there may be nothing left to consult. Bounded to the caller's own shm window (proc.h's USER_SHM_BASE..USER_FB_BASE), so it can unmap a window buffer and nothing else - not its code, not its stack, not the framebuffer. */
 
-#define SYSCALL_COUNT 36
+#define SYS_unlink 36 /* (path) -> 0 or -1. M56: the write half of this filesystem stopped at "create or overwrite a whole file", which is how a filesystem that has never had to *remove* anything ends up with the boot self-tests' own fixtures on it forever. Regular files only - a directory is refused rather than recursed into or emptiness-checked, because rmdir is a different operation with a different failure mode and nothing has asked for one. */
+#define SYS_rename 37 /* (old_path, new_path) -> 0 or -1. M56: moves one entry from one name to another, possibly across directories. No data moves - a rename is a change to *records*, which is only true because M53 stopped storing a name in the inode. Refuses a destination that already exists: silently replacing a file is a way to lose one, and the caller can ask. */
+
+/* M56: how many bytes a pipe holds. Part of the ABI because a caller
+ * genuinely needs it: SYS_write to a full pipe *blocks*, and a client
+ * that cannot afford to block forever - one whose peer may not exist yet,
+ * which is every client of a rendezvous pipe - has no other way to ask
+ * "is there room". SYS_pipe_poll answers how much is already queued.
+ *
+ * kernel/ipc/pipe.h defines PIPE_BUF_SIZE as this, so the two cannot
+ * drift; this is the copy user space is allowed to see. */
+#define SYS_PIPE_CAPACITY 1024
+
+#define SYSCALL_COUNT 38

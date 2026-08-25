@@ -104,6 +104,49 @@ static int path_in_cwd(const char *name, char *out) {
     return 0;
 }
 
+/* ---- M56: rename, delete, copy ---------------------------------------
+ *
+ * The write half of this filesystem stopped at "create or overwrite a
+ * whole file" (SYS_writefile, M33), which is how a filesystem that had
+ * never removed anything ended up with the boot self-tests' own fixtures
+ * on it forever. SYS_unlink and SYS_rename close that; these three keys
+ * are what makes them reachable.
+ *
+ * Delete goes behind a confirm, and nothing else does. There is no trash
+ * and inventing one would be scope this does not need - which makes the
+ * confirm the only thing standing between a keystroke and a file that is
+ * gone, so it is the one operation that gets one. Rename and copy are
+ * both recoverable by doing them again.
+ *
+ * Same centered-box prompt shape text_editor.c has had since M36, in the
+ * same two flavors: one that takes typing and one that takes y/n. */
+#define PROMPT_W 260
+#define PROMPT_H 72
+#define PROMPT_MAX_LEN 27 /* LEANFS_MAX_NAME - a name this window cannot express is one it should not offer to create */
+#define PROMPT_BG      0x00243040u
+#define PROMPT_BORDER  0x004C6699u
+#define PROMPT_TEXT    0x00E8E8E8u
+#define PROMPT_INPUT_BG 0x00141820u
+
+/* How large a file this window will copy in one go. Not leanfs's own
+ * 72 KiB cap: a copy buffer is static storage in every process that has
+ * one, and the same 16 KiB text_editor.c settled on covers everything a
+ * person keeps in /home. A file larger than this is refused out loud
+ * rather than silently truncated - a half-copied file is worse than no
+ * copy at all. */
+#define FM_COPY_MAX 16384
+
+typedef enum {
+    FM_PROMPT_NONE = 0,
+    FM_PROMPT_RENAME,
+    FM_PROMPT_COPY,
+    FM_PROMPT_CONFIRM_DELETE,
+} fm_prompt_t;
+
+static fm_prompt_t prompt_kind;
+static char prompt_buf[PROMPT_MAX_LEN + 1];
+static int prompt_len;
+
 /* M49: drag state. A press on a row arms it; the drag only actually
  * begins once the pointer has moved DRAG_THRESHOLD away, so a click and a
  * drag stay distinguishable - without that every selection click would
@@ -221,6 +264,75 @@ static void open_selected(void) {
     status_text = rc < 0 ? spawn_error_message(rc) : "";
 }
 
+/* The selected row's full path, or -1 if there is no ordinary file
+ * selected. ".." and directories are excluded from all three operations:
+ * this filesystem has no rmdir and a directory rename would work but a
+ * directory *copy* would not, and offering two of three would be worse
+ * than offering none. */
+static int selected_file_path(char *out) {
+    if (selected < 0 || selected >= file_count || is_dir[selected]) {
+        return -1;
+    }
+    return path_in_cwd(names[selected], out);
+}
+
+static void prompt_open(fm_prompt_t kind) {
+    char scratch[PATH_MAX_LEN];
+    if (selected_file_path(scratch) != 0) {
+        status_text = "Select a file first.";
+        return;
+    }
+    prompt_kind = kind;
+    prompt_len = 0;
+    if (kind != FM_PROMPT_CONFIRM_DELETE) {
+        /* Pre-filled with the current name, which is what a rename
+         * usually starts from and what a copy usually differs from by a
+         * character or two. */
+        for (int i = 0; names[selected][i] && i < PROMPT_MAX_LEN; i++) {
+            prompt_buf[prompt_len++] = names[selected][i];
+        }
+    }
+    prompt_buf[prompt_len] = '\0';
+}
+
+static void prompt_confirm(void) {
+    char from[PATH_MAX_LEN];
+    if (selected_file_path(from) != 0) {
+        prompt_kind = FM_PROMPT_NONE;
+        return;
+    }
+    if (prompt_kind == FM_PROMPT_CONFIRM_DELETE) {
+        status_text = sys_unlink(from) == 0 ? "Deleted." : "Could not delete that.";
+    } else if (prompt_len > 0) {
+        prompt_buf[prompt_len] = '\0';
+        char to[PATH_MAX_LEN];
+        if (path_in_cwd(prompt_buf, to) != 0) {
+            status_text = "Name too long.";
+            prompt_kind = FM_PROMPT_NONE;
+            return;
+        }
+        if (prompt_kind == FM_PROMPT_RENAME) {
+            status_text = sys_rename(from, to) == 0 ? "Renamed." : "Could not rename that.";
+        } else {
+            /* Copy is a read and a write, not a filesystem operation -
+             * leanfs has no notion of one, and a whole-file read/write
+             * pair is exactly what this OS's file API offers. Bounded by
+             * the same buffer every other whole-file caller here uses. */
+            static char copy_buf[FM_COPY_MAX];
+            long n = sys_readfile(from, copy_buf, sizeof(copy_buf));
+            if (n < 0) {
+                status_text = "Could not read that file.";
+            } else if (n > (long)sizeof(copy_buf)) {
+                status_text = "Too large to copy.";
+            } else {
+                status_text = sys_writefile(to, copy_buf, (size_t)n) == 0 ? "Copied." : "Could not write the copy.";
+            }
+        }
+    }
+    prompt_kind = FM_PROMPT_NONE;
+    refresh_list();
+}
+
 static void redraw(wm_window_t *win) {
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
     gfx_fill_rect(&win->gfx, 0, 0, LIST_W, HEADER_H, HEADER_COLOR);
@@ -261,8 +373,32 @@ static void redraw(wm_window_t *win) {
 
     gfx_fill_rect(&win->gfx, 0, WIN_H - STATUS_H, WIN_W, STATUS_H, STATUS_BG);
     gfx_draw_text(&win->gfx, 6, WIN_H - STATUS_H + 2,
-                  status_text[0] ? status_text : "Enter or double-click to open",
+                  status_text[0] ? status_text : "R rename  C copy  Del delete",
                   status_text[0] ? STATUS_ERR_FG : LABEL_COLOR);
+
+    /* M56: the prompt, drawn last so it sits over the list it is about -
+     * this app owns its whole window buffer and there is no
+     * compositor-level popup surface to put it in (the same note M35 left
+     * on text_editor.c's own dialog). */
+    if (prompt_kind != FM_PROMPT_NONE) {
+        int32_t x = (WIN_W - PROMPT_W) / 2;
+        int32_t y = (WIN_H - PROMPT_H) / 2;
+        gfx_fill_rect_rounded(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BG);
+        gfx_draw_rect_rounded(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BORDER);
+        if (prompt_kind == FM_PROMPT_CONFIRM_DELETE) {
+            gfx_draw_text(&win->gfx, x + GFX_PAD, y + 8, "Delete this file?", PROMPT_TEXT);
+            gfx_draw_text(&win->gfx, x + GFX_PAD, y + 32, "Y = delete   any key = cancel", PROMPT_TEXT);
+        } else {
+            gfx_draw_text(&win->gfx, x + GFX_PAD, y + 8,
+                           prompt_kind == FM_PROMPT_RENAME ? "Rename to:" : "Copy to:", PROMPT_TEXT);
+            gfx_fill_rect_rounded(&win->gfx, x + GFX_PAD, y + 28, PROMPT_W - 2 * GFX_PAD, FONT_HEIGHT + 4, PROMPT_INPUT_BG);
+            char buf[PROMPT_MAX_LEN + 1];
+            memcpy(buf, prompt_buf, (size_t)prompt_len);
+            buf[prompt_len] = '\0';
+            gfx_draw_text(&win->gfx, x + GFX_PAD + 4, y + 30, buf, PROMPT_TEXT);
+            gfx_fill_rect(&win->gfx, x + GFX_PAD + 4 + prompt_len * FONT_WIDTH, y + 30, 2, FONT_HEIGHT, PROMPT_TEXT);
+        }
+    }
 }
 
 int main(void) {
@@ -285,8 +421,46 @@ int main(void) {
         while (wm_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_EXPOSE) {
                 changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
+            } else if (ev.type == WM_EVENT_KEY && prompt_kind != FM_PROMPT_NONE) {
+                /* M56: an open prompt owns every keystroke until it is
+                 * answered - the same "in-progress interaction takes over
+                 * the input stream" shape text_editor.c's own prompt has
+                 * had since M36, and compositor.c's drag state machine
+                 * since M31. */
+                changed = 1;
+                if (prompt_kind == FM_PROMPT_CONFIRM_DELETE) {
+                    if (ev.ch == 'y' || ev.ch == 'Y') {
+                        prompt_confirm();
+                    } else {
+                        prompt_kind = FM_PROMPT_NONE;
+                    }
+                } else if (ev.ch == '\n' || ev.ch == '\r') {
+                    prompt_confirm();
+                } else if (ev.ch == 0x1B) {
+                    prompt_kind = FM_PROMPT_NONE;
+                } else if (ev.ch == '\b' || ev.ch == 0x7F) {
+                    if (prompt_len > 0) {
+                        prompt_len--;
+                    }
+                } else if (ev.ch >= 0x20 && ev.ch < 0x7F && prompt_len < PROMPT_MAX_LEN) {
+                    prompt_buf[prompt_len++] = ev.ch;
+                }
             } else if (ev.type == WM_EVENT_KEY) {
-                if (ev.ch == KBD_KEY_UP && selected > 0) {
+                /* M56: three single keys rather than a menu. This window
+                 * has no menu bar to hang them off, and a modifier chord
+                 * would collide with the window-manager ones the
+                 * compositor swallows before a client ever sees them
+                 * (system_api/include/shortcuts.h). */
+                if (ev.ch == 'r' || ev.ch == 'R') {
+                    prompt_open(FM_PROMPT_RENAME);
+                    changed = 1;
+                } else if (ev.ch == 'c' || ev.ch == 'C') {
+                    prompt_open(FM_PROMPT_COPY);
+                    changed = 1;
+                } else if (ev.ch == 0x7F || ev.ch == '\b') {
+                    prompt_open(FM_PROMPT_CONFIRM_DELETE);
+                    changed = 1;
+                } else if (ev.ch == KBD_KEY_UP && selected > 0) {
                     selected--;
                     clamp_scroll();
                     changed = 1;

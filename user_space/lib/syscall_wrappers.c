@@ -61,6 +61,14 @@ long sys_mkdir(const char *path) {
     return do_syscall(SYS_mkdir, (long)path, 0, 0);
 }
 
+long sys_unlink(const char *path) {
+    return do_syscall(SYS_unlink, (long)path, 0, 0);
+}
+
+long sys_rename(const char *old_path, const char *new_path) {
+    return do_syscall(SYS_rename, (long)old_path, (long)new_path, 0);
+}
+
 long sys_shm_unmap(void *vaddr, unsigned long bytes) {
     return do_syscall(SYS_shm_unmap, (long)vaddr, (long)bytes, 0);
 }

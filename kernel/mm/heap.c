@@ -67,7 +67,7 @@ void *kmalloc(size_t size) {
     }
     size = (size_t)align_up(size, HEAP_ALIGN);
 
-    spin_lock(&heap_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&heap_lock);
 
     block_header_t *prev = (block_header_t *)0;
     for (block_header_t *b = heap_head; b; b = b->next) {
@@ -84,7 +84,7 @@ void *kmalloc(size_t size) {
                 b->size = size;
             }
             b->free = 0;
-            spin_unlock(&heap_lock);
+            spin_unlock_irqrestore(&heap_lock, irq_flags);
             return (void *)(b + 1);
         }
         prev = b;
@@ -108,7 +108,7 @@ void *kmalloc(size_t size) {
         heap_head = b;
     }
 
-    spin_unlock(&heap_lock);
+    spin_unlock_irqrestore(&heap_lock, irq_flags);
     return (void *)(b + 1);
 }
 
@@ -116,7 +116,7 @@ void kfree(void *ptr) {
     if (!ptr) {
         return;
     }
-    spin_lock(&heap_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&heap_lock);
     block_header_t *b = (block_header_t *)ptr - 1;
     if (b->free) {
         panic("kfree: double free");
@@ -132,5 +132,5 @@ void kfree(void *ptr) {
         b->size += sizeof(block_header_t) + b->next->size;
         b->next = b->next->next;
     }
-    spin_unlock(&heap_lock);
+    spin_unlock_irqrestore(&heap_lock, irq_flags);
 }

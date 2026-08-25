@@ -525,6 +525,25 @@ static int resolve_parent(const char *path, int *out_parent, char *out_leaf) {
     return 0;
 }
 
+/* M56: drops the record naming `name` from `dir`. The slot is blanked
+ * rather than the array compacted, so every other entry keeps its index
+ * across the round trip and dir_add can reuse the hole. Returns the
+ * inode the record pointed at, or -1. */
+static int dir_remove(int dir, const char *name) {
+    int count = dir_load(dir);
+    if (count < 0) {
+        return -1;
+    }
+    for (int i = 0; i < count; i++) {
+        if (dirent_scratch[i].name[0] && k_strcmp(dirent_scratch[i].name, name) == 0) {
+            int idx = (int)dirent_scratch[i].inode;
+            k_memset(&dirent_scratch[i], 0, sizeof(dirent_scratch[i]));
+            return dir_store(dir, count) == 0 ? idx : -1;
+        }
+    }
+    return -1;
+}
+
 /* ---- public API ------------------------------------------------------ */
 
 int leanfs_exists(const char *path) {
@@ -602,6 +621,71 @@ int leanfs_mkdir(const char *path) {
     inodes[idx].size = 0;
     if (dir_add(parent, leaf, idx) != 0) {
         inodes[idx].type = LEANFS_TYPE_FREE;
+        return -1;
+    }
+    save_inodes();
+    save_bitmap();
+    return 0;
+}
+
+uint32_t leanfs_free_blocks(void) {
+    uint32_t free_count = 0;
+    for (uint32_t i = 0; i < sb.data_blocks; i++) {
+        if (!bitmap_test(i)) {
+            free_count++;
+        }
+    }
+    return free_count;
+}
+
+int leanfs_unlink(const char *path) {
+    int parent;
+    char leaf[LEANFS_MAX_NAME + 1];
+    if (resolve_parent(path, &parent, leaf) != 0) {
+        return -1;
+    }
+    int idx = dir_lookup(parent, leaf);
+    if (!inode_valid(idx) || inodes[idx].type != LEANFS_TYPE_FILE) {
+        return -1;
+    }
+    /* Blocks first, then the inode, then the name - each step making the
+     * thing before it unreachable, so an interruption anywhere leaves a
+     * name pointing at a free inode (which resolve() refuses) rather than
+     * a live inode pointing at blocks somebody else now owns. */
+    free_inode_blocks(&inodes[idx]);
+    k_memset(&inodes[idx], 0, sizeof(inodes[idx]));
+    if (dir_remove(parent, leaf) < 0) {
+        return -1;
+    }
+    save_inodes();
+    save_bitmap();
+    return 0;
+}
+
+int leanfs_rename(const char *old_path, const char *new_path) {
+    int old_parent, new_parent;
+    char old_leaf[LEANFS_MAX_NAME + 1];
+    char new_leaf[LEANFS_MAX_NAME + 1];
+    if (resolve_parent(old_path, &old_parent, old_leaf) != 0 ||
+        resolve_parent(new_path, &new_parent, new_leaf) != 0) {
+        return -1;
+    }
+    int idx = dir_lookup(old_parent, old_leaf);
+    if (!inode_valid(idx)) {
+        return -1;
+    }
+    if (inode_valid(dir_lookup(new_parent, new_leaf))) {
+        return -1; /* taken - see the header on why this isn't a silent replace */
+    }
+    /* Added before removed, deliberately. Both halves rewrite a directory
+     * through the same block allocator a file uses, so either can fail on
+     * a full disk - and the order that survives a failure is the one
+     * where the file still has *a* name rather than none at all. A
+     * duplicate name is recoverable; an unreachable inode is not. */
+    if (dir_add(new_parent, new_leaf, idx) != 0) {
+        return -1;
+    }
+    if (dir_remove(old_parent, old_leaf) < 0) {
         return -1;
     }
     save_inodes();

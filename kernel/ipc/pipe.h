@@ -11,10 +11,13 @@
  */
 #pragma once
 
+#include "syscall.h" /* system_api/include/syscall.h - SYS_PIPE_CAPACITY, the capacity this file and user space have to agree on */
+
 #include <stddef.h>
 #include <stdint.h>
 
-#define PIPE_BUF_SIZE 1024
+/* M56: one definition, shared with user space - see SYS_PIPE_CAPACITY. */
+#define PIPE_BUF_SIZE SYS_PIPE_CAPACITY
 
 typedef struct pipe {
     uint8_t buf[PIPE_BUF_SIZE];

@@ -57,6 +57,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # silently invalidates every test that has not started yet. Snapshot the
 # image, export LEANOS_IMAGE, and the two are independent.
 IMAGE = os.environ.get("LEANOS_IMAGE") or os.path.join(REPO_ROOT, "build", "os-image.bin")
+# Where a failure's evidence is kept once the guest that produced it is
+# gone - the same directory tools/qemu_input_suite.py saves screendumps
+# into, since both answer the same question.
+ARTIFACT_DIR = os.environ.get("LEANOS_INPUT_ARTIFACTS", "/tmp/leanos-input-failures")
 OVMF_CODE = os.path.join(REPO_ROOT, "build", "ovmf", "OVMF_CODE.fd")
 OVMF_VARS = os.path.join(REPO_ROOT, "build", "ovmf", "OVMF_VARS.fd")
 
@@ -291,7 +295,7 @@ class Machine:
         pixel assertion downstream depends on the first frame being up."""
         if not self.wait_for_marker(timeout=timeout):
             raise RuntimeError("guest never reached %r - see %s"
-                               % (BOOT_MARKER, self.log_path))
+                               % (BOOT_MARKER, self.save_log("boot-timeout")))
         time.sleep(settle)
 
     # ---- input -------------------------------------------------------
@@ -543,6 +547,23 @@ class Machine:
 
     def __enter__(self):
         return self
+
+    def save_log(self, name):
+        """Copies this guest's serial log somewhere it will outlive the
+        guest, and returns that path (or the live one if the copy fails).
+
+        A boot that never finishes is the one failure whose *only*
+        evidence is this log - there are no pixels to screenshot and no
+        assertion that got far enough to say anything - and it used to be
+        deleted by __exit__ before anyone could read it. That is how an
+        intermittent hang stays intermittent."""
+        try:
+            os.makedirs(ARTIFACT_DIR, exist_ok=True)
+            dest = os.path.join(ARTIFACT_DIR, "%s-%d.log" % (name, os.getpid()))
+            shutil.copyfile(self.log_path, dest)
+            return dest
+        except OSError:
+            return self.log_path
 
     def __exit__(self, *_exc):
         self.kill()

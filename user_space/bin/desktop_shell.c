@@ -480,6 +480,9 @@ int main(void) {
     /* M45: the window is PANEL_BUF_H tall, but only PANEL_HEIGHT of it
      * docks - see PANEL_OVERHANG_MAX. */
     if (wm_connect_panel(PANEL_BUF_H, PANEL_HEIGHT, &win) != 0) {
+        /* M56: loud - see desktop_icons.c's own note. */
+        const char msg[] = "desktop_shell: no window from the compositor - exiting so init restarts the session\n";
+        sys_write(1, msg, sizeof(msg) - 1);
         sys_exit(1);
     }
     /* The bar's own drawing surface: the bottom PANEL_HEIGHT rows of the

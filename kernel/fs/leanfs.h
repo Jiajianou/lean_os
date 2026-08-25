@@ -122,6 +122,42 @@ int leanfs_is_dir(const char *path);
  * "this was already here" can't be confused. Returns 0 or -1. */
 int leanfs_mkdir(const char *path);
 
+/* M56: how many data blocks are currently free.
+ *
+ * Exists so a test can state the thing that actually matters about
+ * removing a file - that its blocks came back - as one comparison
+ * instead of as "do it sixty times and see if the disk fills up". That
+ * loop was the honest version when there was nothing to count, and it
+ * cost four thousand ATA sector writes: every metadata update in this
+ * filesystem rewrites the whole inode table and bitmap (31 sectors), and
+ * PIO writes are the most expensive thing this OS does. */
+uint32_t leanfs_free_blocks(void);
+
+/* M56: removes one regular file. Frees its blocks and its inode and
+ * drops its record from the parent directory, in that order, so nothing
+ * can be reached through a name after its blocks are gone.
+ *
+ * Refuses a directory outright rather than recursing or checking for
+ * emptiness. This filesystem has never had to remove anything - which is
+ * how `m48trunc` ended up living on it forever - and "rmdir" is a
+ * different operation with a different failure mode; adding it
+ * speculatively alongside the one the file manager actually needs would
+ * be the kind of guess this project has avoided elsewhere. Returns 0, or
+ * -1 for a path that doesn't resolve, isn't a regular file, or is
+ * malformed. */
+int leanfs_unlink(const char *path);
+
+/* M56: moves one entry from one name to another, which may be in a
+ * different directory. No data moves - a rename is a change to *records*,
+ * which is only true because M53 stopped storing a name in the inode; it
+ * would have been a copy before that.
+ *
+ * The new name must not already exist: silently replacing a file is a
+ * way to lose one, and the file manager it exists for can ask. Returns
+ * 0, or -1 if either path is malformed, the source is missing, or the
+ * destination is taken. */
+int leanfs_rename(const char *old_path, const char *new_path);
+
 /* Writes the name of every entry in the directory at `path`, each
  * followed by '\n', into buf up to maxlen bytes (stopping early and
  * silently if a name wouldn't fit). A directory's own name is suffixed

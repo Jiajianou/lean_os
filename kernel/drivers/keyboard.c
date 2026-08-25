@@ -190,6 +190,16 @@ int keyboard_modifiers(void) {
     return last_read_mods;
 }
 
+void keyboard_inject(char ch, int mods) {
+    uint32_t next = (buf_head + 1) % BUFFER_SIZE;
+    if (next == buf_tail) {
+        return; /* full: same drop-rather-than-overwrite rule buffer_push has */
+    }
+    buffer[buf_head] = ch;
+    mods_buffer[buf_head] = (uint8_t)mods;
+    buf_head = next;
+}
+
 int keyboard_read(void) {
     if (buf_tail == buf_head) {
         return -1;

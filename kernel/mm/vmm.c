@@ -114,7 +114,7 @@ uint64_t vmm_kernel_pml4_phys(void) {
 }
 
 int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
-    spin_lock(&vmm_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);
     /* Every walk here is create = 0: a missing level means the address
      * was never mapped in this address space, which is a -1, not a
@@ -122,12 +122,12 @@ int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
     uint64_t *pdpt = table_walk(pml4, PML4_INDEX(virt), 0, 0);
     uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(virt), 0, 0) : (uint64_t *)0;
     if (!pd || (pd[PD_INDEX(virt)] & PTE_HUGE)) {
-        spin_unlock(&vmm_lock);
+        spin_unlock_irqrestore(&vmm_lock, irq_flags);
         return -1;
     }
     uint64_t *pt = table_walk(pd, PD_INDEX(virt), 0, 0);
     if (!pt || !(pt[PT_INDEX(virt)] & PTE_PRESENT)) {
-        spin_unlock(&vmm_lock);
+        spin_unlock_irqrestore(&vmm_lock, irq_flags);
         return -1;
     }
     pt[PT_INDEX(virt)] = 0;
@@ -136,12 +136,12 @@ int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
      * have it cached is one that has run this task, and it will reload
      * CR3 before running any other address space anyway. */
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
-    spin_unlock(&vmm_lock);
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
     return 0;
 }
 
 void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
-    spin_lock(&vmm_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);
     uint64_t extra = flags & PTE_USER;
 
@@ -154,7 +154,7 @@ void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t 
 
     pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | (flags & (PTE_WRITABLE | PTE_USER)) | PTE_PRESENT;
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
-    spin_unlock(&vmm_lock);
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
 }
 
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -162,7 +162,7 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
 }
 
 void vmm_unmap_page(uint64_t virt) {
-    spin_lock(&vmm_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
     uint64_t *pdpt = table_walk(kernel_pml4, PML4_INDEX(virt), 0, 0);
     uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(virt), 0, 0) : (uint64_t *)0;
     if (!pd || (pd[PD_INDEX(virt)] & PTE_HUGE)) {
@@ -175,7 +175,7 @@ void vmm_unmap_page(uint64_t virt) {
 
     pt[PT_INDEX(virt)] = 0;
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
-    spin_unlock(&vmm_lock);
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
 }
 
 int vmm_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_write) {
@@ -188,7 +188,7 @@ int vmm_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_
     }
     uint64_t need = PTE_PRESENT | PTE_USER | (need_write ? PTE_WRITABLE : 0);
 
-    spin_lock(&vmm_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);
     for (uint64_t page = virt & ~(PAGE_SIZE - 1); page < end; page += PAGE_SIZE) {
         /* Deliberately not table_walk: that helper masks the entry down
@@ -198,28 +198,28 @@ int vmm_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_
          * required rather than assumed. */
         uint64_t e = pml4[PML4_INDEX(page)];
         if ((e & need) != need) {
-            spin_unlock(&vmm_lock);
+            spin_unlock_irqrestore(&vmm_lock, irq_flags);
             return 0;
         }
         uint64_t *pdpt = phys_to_table(e & PTE_ADDR_MASK);
         e = pdpt[PDPT_INDEX(page)];
         if ((e & need) != need || (e & PTE_HUGE)) {
-            spin_unlock(&vmm_lock);
+            spin_unlock_irqrestore(&vmm_lock, irq_flags);
             return 0; /* a 1 GiB page is never something a user process owns here */
         }
         uint64_t *pd = phys_to_table(e & PTE_ADDR_MASK);
         e = pd[PD_INDEX(page)];
         if ((e & need) != need || (e & PTE_HUGE)) {
-            spin_unlock(&vmm_lock);
+            spin_unlock_irqrestore(&vmm_lock, irq_flags);
             return 0; /* likewise 2 MiB - the identity map's huge pages are kernel-only and live under PML4[0] */
         }
         uint64_t *pt = phys_to_table(e & PTE_ADDR_MASK);
         if ((pt[PT_INDEX(page)] & need) != need) {
-            spin_unlock(&vmm_lock);
+            spin_unlock_irqrestore(&vmm_lock, irq_flags);
             return 0;
         }
     }
-    spin_unlock(&vmm_lock);
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
     return 1;
 }
 
@@ -233,7 +233,7 @@ static int addr_in_owned(uint64_t virt, const vmm_range_t *owned, int owned_coun
 }
 
 void vmm_destroy_address_space(uint64_t pml4_phys, const vmm_range_t *owned, int owned_count) {
-    spin_lock(&vmm_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);
     /* From 1, not 0. PML4[0] is the kernel's own map, shared by reference
      * with every address space - see this function's header. */
@@ -272,15 +272,15 @@ void vmm_destroy_address_space(uint64_t pml4_phys, const vmm_range_t *owned, int
         pml4[i] = 0;
     }
     pmm_free_frame(pml4_phys);
-    spin_unlock(&vmm_lock);
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
 }
 
 uint64_t vmm_create_address_space(void) {
-    spin_lock(&vmm_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
     uint64_t new_phys = alloc_table();
     uint64_t *new_pml4 = phys_to_table(new_phys);
     new_pml4[0] = kernel_pml4[0]; /* share the kernel's identity map + heap */
-    spin_unlock(&vmm_lock);
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
     return new_phys;
 }
 

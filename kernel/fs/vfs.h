@@ -23,6 +23,9 @@ int vfs_write(const char *path, const void *buf, size_t len);
 int vfs_exists(const char *path);
 int vfs_is_dir(const char *path);
 int vfs_mkdir(const char *path);
+uint32_t vfs_free_blocks(void);
+int vfs_unlink(const char *path);
+int vfs_rename(const char *old_path, const char *new_path);
 size_t vfs_list(const char *path, char *buf, size_t maxlen);
 
 /* M47: the flush the shutdown path (kernel/power/power.c) calls before

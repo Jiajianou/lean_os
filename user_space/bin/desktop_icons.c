@@ -34,6 +34,7 @@
  * press/hover redraw) is the same per-icon logic the single hardcoded
  * icon already had, just indexed now instead of hardcoded to one.
  */
+#include "icons.h" /* user_space/lib/icons.h - M56: real icons, from a real format */
 #include "children.h" /* M54: this process launches things and must reap them - see children.h */
 #include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
@@ -45,7 +46,6 @@
 
 #define ICON_BOX_COLOR 0x004C99E6u
 #define ICON_HOVER_COLOR 0x006CB9FFu
-#define ICON_GLYPH_COLOR 0x000A1420u
 #define LABEL_COLOR    0x00FFFFFFu
 
 #define ICON_SIZE    48
@@ -117,10 +117,13 @@ static void launch(const char *label, const char *program) {
     child_track(rc); /* M54: so its task slot comes back when it closes - see children.h */
 }
 
+/* M56: 24x24 blobs drawn at 2x inside the 48px box. */
+#define ICON_IMAGE_SCALE 2
+
 typedef struct {
     const char *label;
     const char *program;
-    const char *glyph; /* 2-3 chars drawn inside the icon box - this project has no separate icon-image format, see redraw_icon */
+    const uint8_t *image; /* M56: an icon.h blob - the "no separate icon-image format exists" note this field replaced was in three files */
 } icon_def_t;
 
 /* M53: absolute paths. Every icon named a bare program before, which
@@ -129,13 +132,13 @@ typedef struct {
  * icon that stops working the moment somebody creates a file with the
  * same name somewhere else. */
 static const icon_def_t ICONS[] = {
-    {"Terminal", PATH_BIN_DIR "gui_terminal", ">_"},
-    {"Editor",   PATH_BIN_DIR "text_editor",  "Ed"},
-    {"Files",    PATH_BIN_DIR "file_manager", "[]"},
-    {"Settings", PATH_BIN_DIR "settings",     "**"},
-    {"Clock",    PATH_BIN_DIR "gui_clock",    "()"},
-    {"Paint",    PATH_BIN_DIR "gui_paint",    "/\\"},
-    {"Tasks",    PATH_BIN_DIR "task_manager", "T:"},
+    {"Terminal", PATH_BIN_DIR "gui_terminal", ICON_TERMINAL},
+    {"Editor",   PATH_BIN_DIR "text_editor",  ICON_EDITOR},
+    {"Files",    PATH_BIN_DIR "file_manager", ICON_FILES},
+    {"Settings", PATH_BIN_DIR "settings",     ICON_SETTINGS},
+    {"Clock",    PATH_BIN_DIR "gui_clock",    ICON_CLOCK},
+    {"Paint",    PATH_BIN_DIR "gui_paint",    ICON_PAINT},
+    {"Tasks",    PATH_BIN_DIR "task_manager", ICON_TASKS},
 };
 #define ICON_COUNT ((int)(sizeof(ICONS) / sizeof(ICONS[0])))
 
@@ -174,11 +177,18 @@ static void redraw_icon(wm_window_t *self, int i, int pressed) {
     uint32_t box_color = pressed ? ICON_HOVER_COLOR : ICON_BOX_COLOR;
     gfx_fill_rect_rounded(&self->gfx, icon_x[i], icon_y[i], ICON_SIZE, ICON_SIZE, box_color);
 
-    /* A tiny glyph inside the icon box: a dark "screen" rect with a
-     * short mark on top, entirely gfx primitives (no separate icon-image
-     * format exists in this project). */
-    gfx_fill_rect(&self->gfx, icon_x[i] + 6, icon_y[i] + 6, ICON_SIZE - 12, ICON_SIZE - 16, ICON_GLYPH_COLOR);
-    gfx_draw_text(&self->gfx, icon_x[i] + 10, icon_y[i] + 12, ICONS[i].glyph, box_color);
+    /* M56: a real picture, from a real format (system_api/include/icon.h),
+     * instead of the dark rectangle with two letters on it that stood in
+     * for one here since M32. The blobs are 24x24 and ICON_SIZE is 48, so
+     * they draw at scale 2 - centered, which is (48 - 24*2)/2 = 0, but
+     * written as the arithmetic rather than as zero so changing either
+     * number keeps working. */
+    {
+        const uint8_t *blob = ICONS[i].image;
+        int32_t drawn = 24 * ICON_IMAGE_SCALE;
+        icon_draw(&self->gfx, icon_x[i] + (ICON_SIZE - drawn) / 2,
+                   icon_y[i] + (ICON_SIZE - drawn) / 2, blob, ICON_IMAGE_SCALE);
+    }
 
     int32_t label_w = (int32_t)strlen(ICONS[i].label) * FONT_WIDTH;
     int32_t label_x = icon_x[i] + ICON_SIZE / 2 - label_w / 2;
@@ -201,6 +211,13 @@ static void redraw(wm_window_t *self, int pressed_icon) {
 int main(void) {
     wm_window_t win;
     if (wm_connect_desktop(&win) != 0) {
+        /* M56: loud. A desktop client that cannot get a window used to
+         * exit silently, and the only evidence was a screen with nothing
+         * on it - which looks identical to a client that connected and
+         * never drew. init restarts the session either way; saying so is
+         * what makes the log able to tell them apart. */
+        const char msg[] = "desktop_icons: no window from the compositor - exiting so init restarts the session\n";
+        sys_write(1, msg, sizeof(msg) - 1);
         sys_exit(1);
     }
 

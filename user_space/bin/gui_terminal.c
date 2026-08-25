@@ -48,6 +48,68 @@
 static char grid[ROWS][COLS + 1];
 static int32_t cur_row, cur_col;
 
+/* ---- M56: scrollback -------------------------------------------------
+ *
+ * grid_scroll used to discard the top line outright, which is why M49
+ * gave this window a wheel that had nothing to reveal - and why a command
+ * whose output was longer than the window was a command whose output you
+ * could not read. `ls /bin` alone is more lines than this grid has rows.
+ *
+ * The retained lines live in a ring rather than a shifted array: at 200
+ * rows of 70 characters, shifting on every scrolled line would be 14 KiB
+ * of memcpy per line of output, which is exactly the case this is for.
+ *
+ * `view_offset` is how many lines back the window is showing, 0 being
+ * live. The visible rows are drawn from one combined sequence -
+ * scrollback first, then the live grid - so nothing in the drawing or the
+ * selection code has to know which half a row came from (see view_row). */
+#define SCROLLBACK_ROWS 200
+
+static char scrollback[SCROLLBACK_ROWS][COLS + 1];
+static int sb_start;  /* ring head: index of the oldest retained line */
+static int sb_count;  /* how many are retained, <= SCROLLBACK_ROWS */
+static int view_offset;
+
+static void scrollback_push(const char *row) {
+    int at = (sb_start + sb_count) % SCROLLBACK_ROWS;
+    if (sb_count == SCROLLBACK_ROWS) {
+        /* Full: the oldest line falls off, which is what makes this
+         * bounded rather than a slow leak of the machine's memory. */
+        at = sb_start;
+        sb_start = (sb_start + 1) % SCROLLBACK_ROWS;
+    } else {
+        sb_count++;
+    }
+    memcpy(scrollback[at], row, COLS);
+    scrollback[at][COLS] = '\0';
+}
+
+/* Row `r` of the visible window, given the current view offset. The
+ * combined sequence is scrollback[0..sb_count) then grid[0..ROWS), and
+ * the window shows its last ROWS entries shifted back by view_offset. */
+static const char *view_row(int r) {
+    int total = sb_count + ROWS;
+    int i = total - ROWS - view_offset + r;
+    if (i < 0) {
+        i = 0;
+    }
+    if (i >= total) {
+        i = total - 1;
+    }
+    return i < sb_count ? scrollback[i] : grid[i - sb_count];
+}
+
+static void view_scroll(int lines) {
+    int want = view_offset + lines;
+    if (want < 0) {
+        want = 0;
+    }
+    if (want > sb_count) {
+        want = sb_count;
+    }
+    view_offset = want;
+}
+
 static char line_buf[LINE_MAX];
 static int line_len;
 
@@ -68,14 +130,28 @@ static void grid_clear(void) {
     }
     cur_row = 0;
     cur_col = 0;
+    /* M56: `clear` clears the history too. A screen that looks empty
+     * while a wheel still reveals what was there is not cleared. */
+    sb_start = 0;
+    sb_count = 0;
+    view_offset = 0;
 }
 
 static void grid_scroll(void) {
+    scrollback_push(grid[0]); /* M56: kept, not discarded */
     for (int r = 0; r < ROWS - 1; r++) {
         memcpy(grid[r], grid[r + 1], COLS);
     }
     memset(grid[ROWS - 1], ' ', COLS);
     cur_row = ROWS - 1;
+    /* M56: a reader scrolled back stays on the *same content* while new
+     * output arrives, rather than watching it slide upward - which is
+     * what every terminal with a scrollback does, and the only behavior
+     * that makes reading old output while a command is still running
+     * possible at all. Clamped by view_scroll once the ring is full. */
+    if (view_offset > 0) {
+        view_scroll(1);
+    }
 }
 
 static void putc_term(char c) {
@@ -153,11 +229,12 @@ static void copy_selection_to_clipboard(void) {
     for (int r = sr; r <= er && n < sizeof(buf); r++) {
         int col_start = (r == sr) ? sc : 0;
         int col_end = (r == er) ? ec : COLS;
-        while (col_end > col_start && grid[r][col_end - 1] == ' ') {
+        const char *src = view_row(r); /* M56: selection reads what is on screen, which may be scrollback */
+        while (col_end > col_start && src[col_end - 1] == ' ') {
             col_end--;
         }
         for (int c = col_start; c < col_end && n < sizeof(buf); c++) {
-            buf[n++] = grid[r][c];
+            buf[n++] = src[c];
         }
         if (r != er && n < sizeof(buf)) {
             buf[n++] = '\n';
@@ -182,9 +259,12 @@ static void redraw(wm_window_t *win, int show_cursor) {
         }
     }
     for (int r = 0; r < ROWS; r++) {
-        gfx_draw_text(&win->gfx, 0, r * FONT_HEIGHT, grid[r], TEXT_COLOR);
+        gfx_draw_text(&win->gfx, 0, r * FONT_HEIGHT, view_row(r), TEXT_COLOR);
     }
-    if (show_cursor) {
+    /* M56: the cursor belongs to the live grid, so it is only drawn when
+     * the live grid is what is on screen. A blinking cursor sitting in
+     * the middle of old output would be claiming you could type there. */
+    if (show_cursor && view_offset == 0) {
         gfx_fill_rect(&win->gfx, cur_col * FONT_WIDTH, cur_row * FONT_HEIGHT + FONT_HEIGHT - 2,
                       FONT_WIDTH, 2, CURSOR_COLOR);
     }
@@ -322,7 +402,21 @@ int main(void) {
                 sel_dragging = 0;
                 sel_active = (sel_anchor_row != sel_end_row || sel_anchor_col != sel_end_col);
                 changed = 1;
+            } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
+                /* M56: the wheel M49 gave this window finally has
+                 * something to reveal. One line per detent, matching the
+                 * file manager's own one-row-per-detent rule so a wheel
+                 * means the same thing everywhere. Negative is up, which
+                 * is *back* through history - hence the negation. */
+                view_scroll(-ev.wheel);
+                changed = 1;
             } else if (ev.type == WM_EVENT_KEY && running_pid < 0) {
+                /* M56: typing snaps back to the live grid. A keystroke
+                 * that appeared somewhere off screen would be the worst
+                 * possible way to find out you were still scrolled up. */
+                if (view_offset != 0) {
+                    view_offset = 0;
+                }
                 /* M32: Ctrl+C/V is checked before ordinary line-editing -
                  * the decoded character alone ('c'/'v') can't tell a
                  * chord from a plain keypress, so SYS_kbd_modifiers'

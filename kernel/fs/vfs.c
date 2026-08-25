@@ -27,6 +27,18 @@ int vfs_mkdir(const char *path) {
     return leanfs_mkdir(path);
 }
 
+uint32_t vfs_free_blocks(void) {
+    return leanfs_free_blocks();
+}
+
+int vfs_unlink(const char *path) {
+    return leanfs_unlink(path);
+}
+
+int vfs_rename(const char *old_path, const char *new_path) {
+    return leanfs_rename(old_path, new_path);
+}
+
 size_t vfs_list(const char *path, char *buf, size_t maxlen) {
     return leanfs_list(path, buf, maxlen);
 }

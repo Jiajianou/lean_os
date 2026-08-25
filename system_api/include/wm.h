@@ -92,6 +92,25 @@ typedef struct {
      * one SYS_task_alive call (user_space/lib/wmclient.c's
      * reconnect_if_compositor_died). */
     int32_t compositor_pid;
+    /* M56: which client this answer is *for*, echoed from the request.
+     *
+     * WM_RESPONSE_PIPE is one shared stream - there has only ever been
+     * one, since M20, when there was only ever one client. With several
+     * connecting at once (init starts three back to back) whichever
+     * client the scheduler happens to wake first reads whatever is at the
+     * head, which may be somebody else's window: its id, its shm segment,
+     * its size. That was survivable while every client *blocked* on the
+     * read and the compositor answered one request per loop iteration, so
+     * the orders lined up in practice.
+     *
+     * M55's reconnect retry stopped it lining up: a client that re-sends
+     * after a timeout can have two requests in flight, and two clients
+     * can be polling the same pipe at once. So the answer says who it is
+     * for, and a client that reads someone else's keeps waiting for its
+     * own (see wmclient.c). Cheaper and far smaller than a response pipe
+     * per client, which is the other way to fix this and would cost a
+     * named pipe and two fds per connection. */
+    int32_t client_pid;
 } wm_create_response_t;
 
 /* M21: input-routing protocol. Once a client's window is accepted (the

@@ -114,17 +114,17 @@ void pmm_init(const uint32_t *e820_map) {
 }
 
 uint64_t pmm_try_alloc_frame(void) {
-    spin_lock(&pmm_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
     for (uint64_t f = search_hint; f < total_frames; f++) {
         if (!bitmap_test(f)) {
             bitmap_set(f);
             free_frames--;
             search_hint = f + 1;
-            spin_unlock(&pmm_lock);
+            spin_unlock_irqrestore(&pmm_lock, irq_flags);
             return f * PAGE_SIZE;
         }
     }
-    spin_unlock(&pmm_lock);
+    spin_unlock_irqrestore(&pmm_lock, irq_flags);
     return 0;
 }
 
@@ -137,7 +137,7 @@ uint64_t pmm_alloc_frame(void) {
 }
 
 void pmm_free_frame(uint64_t phys_addr) {
-    spin_lock(&pmm_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
     uint64_t f = phys_addr / PAGE_SIZE;
     if (f >= total_frames || !bitmap_test(f)) {
         panic("pmm_free_frame: double-free or invalid frame");
@@ -147,7 +147,7 @@ void pmm_free_frame(uint64_t phys_addr) {
     if (f < search_hint) {
         search_hint = f;
     }
-    spin_unlock(&pmm_lock);
+    spin_unlock_irqrestore(&pmm_lock, irq_flags);
 }
 
 uint64_t pmm_free_frame_count(void) {
@@ -160,7 +160,7 @@ uint64_t pmm_free_frame_count(void) {
  * don't advance it), and this is only ever called a handful of times at
  * driver init, not on any hot path, so the extra scan cost doesn't matter. */
 uint64_t pmm_alloc_contiguous(uint64_t count) {
-    spin_lock(&pmm_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
     uint64_t run_start = 0;
     uint64_t run_len = 0;
     for (uint64_t f = 0; f < total_frames; f++) {
@@ -177,7 +177,7 @@ uint64_t pmm_alloc_contiguous(uint64_t count) {
                 if (run_start <= search_hint && search_hint < run_start + count) {
                     search_hint = run_start + count;
                 }
-                spin_unlock(&pmm_lock);
+                spin_unlock_irqrestore(&pmm_lock, irq_flags);
                 return run_start * PAGE_SIZE;
             }
         } else {
@@ -188,7 +188,7 @@ uint64_t pmm_alloc_contiguous(uint64_t count) {
 }
 
 void pmm_free_contiguous(uint64_t phys_addr, uint64_t count) {
-    spin_lock(&pmm_lock);
+    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
     uint64_t first = phys_addr / PAGE_SIZE;
     if (first + count > total_frames) {
         panic("pmm_free_contiguous: invalid range");
@@ -203,5 +203,5 @@ void pmm_free_contiguous(uint64_t phys_addr, uint64_t count) {
     if (first < search_hint) {
         search_hint = first;
     }
-    spin_unlock(&pmm_lock);
+    spin_unlock_irqrestore(&pmm_lock, irq_flags);
 }

@@ -1,5 +1,6 @@
 #include "wmclient.h"
 
+#include "syscall.h" /* system_api/include/syscall.h - SYS_PIPE_CAPACITY, so a connect need never block on a full rendezvous pipe */
 #include "syscall_wrappers.h"
 
 /* kernel/ipc/pipe.h's pipe_read only guarantees "at least one byte, then
@@ -85,15 +86,50 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
     wm_create_response_t resp;
     int got_response = 0;
     for (int attempt = 0; attempt < WM_CONNECT_ATTEMPTS && !got_response; attempt++) {
+        /* M56: room first. SYS_write to a full pipe blocks, and this is
+         * the one write in the system whose reader may not exist yet -
+         * the compositor might be starting, or might have died leaving a
+         * rendezvous pipe with somebody's unread request still in it (a
+         * named pipe outlives every process that ever held it, which is
+         * the whole mechanism). A client that blocked here was stuck
+         * forever with no way for init to tell: still alive, just never
+         * going to draw anything. Waiting for room with a deadline, and
+         * giving up if it never comes, turns that into an ordinary failed
+         * connect - which the caller reports and init answers by
+         * restarting the session. */
+        long room_deadline = sys_uptime_ms() + WM_CONNECT_TIMEOUT_MS;
+        while (sys_pipe_poll(req_fds[0]) + (long)sizeof(req) > SYS_PIPE_CAPACITY &&
+               sys_uptime_ms() < room_deadline) {
+            sys_yield();
+        }
+        if (sys_pipe_poll(req_fds[0]) + (long)sizeof(req) > SYS_PIPE_CAPACITY) {
+            continue; /* still no room - try again next attempt rather than block */
+        }
         if (sys_write(req_fds[1], &req, sizeof(req)) != (long)sizeof(req)) {
+            sys_close(req_fds[0]);
+            sys_close(req_fds[1]);
+            sys_close(resp_fds[0]);
+            sys_close(resp_fds[1]);
             return -1;
         }
         long deadline = sys_uptime_ms() + WM_CONNECT_TIMEOUT_MS;
-        while (sys_pipe_poll(resp_fds[0]) < (long)sizeof(resp) && sys_uptime_ms() < deadline) {
-            sys_yield();
-        }
-        if (sys_pipe_poll(resp_fds[0]) >= (long)sizeof(resp)) {
-            got_response = (read_exact(resp_fds[0], &resp, sizeof(resp)) == (long)sizeof(resp));
+        while (!got_response && sys_uptime_ms() < deadline) {
+            if (sys_pipe_poll(resp_fds[0]) < (long)sizeof(resp)) {
+                sys_yield();
+                continue;
+            }
+            if (read_exact(resp_fds[0], &resp, sizeof(resp)) != (long)sizeof(resp)) {
+                break;
+            }
+            /* M56: WM_RESPONSE_PIPE is one shared stream, so this may be
+             * somebody else's answer - see wm_create_response_t.client_pid.
+             * Reading and discarding it is destructive to that client,
+             * which is exactly why the retry above exists: it will not get
+             * its response, will time out, and will ask again. Acting on
+             * an answer meant for another process, which is what happened
+             * before this check, is the outcome worth avoiding - it hands
+             * this client somebody else's shm segment and window id. */
+            got_response = (resp.client_pid == req.client_pid);
         }
     }
     if (!got_response || resp.shm_id < 0) {

@@ -21,6 +21,7 @@ of bug this suite was written to catch.
 
 import os
 import shutil
+import signal
 import sys
 import time
 import traceback
@@ -435,6 +436,21 @@ class Failure(Exception):
     pass
 
 
+# ---------------------------------------------------------------------
+# M56 geometry, mirrored from the sources that draw it.
+# ---------------------------------------------------------------------
+
+# text_editor.c: 80x24 cells of the 8x16 font, with MENU_ROWS(1) of menu
+# bar above the text.
+ED_W, ED_H = 640, 384
+ED_CONTENT_Y0 = 16
+ED_TEXT_COLOR = 0xE0E0E0
+
+# gui_terminal.c: 70x21 cells of the same font.
+TERM_W, TERM_H = 560, 336
+TERM_TEXT_COLOR = 0xD0D0D0
+
+
 def check(condition, message):
     if not condition:
         raise Failure(message)
@@ -490,14 +506,15 @@ def desktop_is_painted(shot):
             shot.px(*START_PROBE) in START_COLORS)
 
 
-def boot(machine, timeout=240):
-    """M51-M56: 90 -> 240. The same growth tools/qemu-serial-test.sh's own
+def boot(machine, timeout=300):
+    """M51-M56: 90 -> 300. The same growth tools/qemu-serial-test.sh's own
     SECONDS_TO_RUN took, and for the same reason - six new boot
     self-tests, several of which have to wait on real processes. 90 was
     measured failing during M55 with the boot only as far as [m49].
 
-    A healthy boot is around 60 seconds, so 240 is four times what this
-    should ever need. That is deliberate: the two failures that pushed
+    A quiet-host boot is around 60 seconds and a busy-host one has been
+    measured past 180, so this is five times the good case and not much
+    over the bad one. That is deliberate: the two failures that pushed
     this past 150 were guests that had genuinely stopped making progress
     (both passed on a plain re-run, in 69s), and a *hung* guest is
     something the timeout can only report, never fix. Making the number
@@ -507,11 +524,30 @@ def boot(machine, timeout=240):
     there is."""
     machine.boot_to_desktop(settle=0.0, timeout=timeout)
     deadline = time.time() + 30
+    shot = None
     while time.time() < deadline:
-        if desktop_is_painted(machine.screenshot()):
+        shot = machine.screenshot()
+        if desktop_is_painted(shot):
             return
         time.sleep(0.5)
-    raise Failure("the desktop never finished painting after boot")
+    # Say *which* of the five probes is wrong, and keep the evidence.
+    # "The desktop never finished painting" names a symptom with five
+    # possible causes - the wallpaper, the first icon, the panel, the tray
+    # separator, the Start button - and which one it is decides whether to
+    # look at the compositor, desktop_icons or desktop_shell.
+    probes = (
+        ("wallpaper", shot.px(*EMPTY_DESKTOP), desktop_px(EMPTY_DESKTOP[1])),
+        ("first icon", shot.px(76, 76), ICON_BOX),
+        ("taskbar", shot.px(512, PANEL_PROBE_Y), PANEL_BG),
+        ("tray separator", shot.px(*TRAY_SEP_PROBE), TRAY_SEP),
+        ("Start button", shot.px(*START_PROBE), START_COLORS[0]),
+    )
+    wrong = ", ".join("%s 0x%06X (wanted 0x%06X)" % p for p in probes if p[1] != p[2])
+    raise Failure("the desktop never finished painting after boot - %s; "
+                  "screendump %s, guest log %s"
+                  % (wrong or "every probe matched on the last look",
+                     save_failure_shot(machine, CURRENT_TEST),
+                     machine.save_log("desktop-never-painted")))
 
 
 def wait_for(machine, predicate, what, timeout=12.0):
@@ -1704,6 +1740,166 @@ def test_desktop_survives_losing_the_compositor(m):
     wait_for_windows(m, 2, timeout=20.0)
 
 
+def _settled_row(machine, sample, tries=8):
+    """The value of `sample` once two consecutive screenshots agree.
+
+    Every pixel baseline in the M56 tests is a *whole row*, captured to be
+    compared against later - so a baseline snatched mid-repaint is one
+    nothing can ever match again, and the failure looks exactly like the
+    feature being broken. Polling until it stops moving is the honest fix;
+    a fixed sleep would be a guess that gets worse on a loaded host."""
+    last = sample(machine.screenshot())
+    for _ in range(tries):
+        time.sleep(0.4)
+        now = sample(machine.screenshot())
+        if now == last:
+            return now
+        last = now
+    return last
+
+
+def test_editor_undo_restores_the_buffer(m):
+    """M56's undo, end to end from the keyboard: type, paste, undo, and
+    require the window to look exactly as it did before the paste.
+
+    "Exactly" is the point. A paste that silently did nothing, or an undo
+    that removed one character of six, would both satisfy "the text got
+    shorter" - so this compares the *whole* first text row pixel for
+    pixel, before and after, and requires the two to be identical.
+
+    The clipboard is loaded from the terminal rather than by selecting
+    text in the editor: gui_terminal.c's Ctrl+C with nothing selected
+    copies the current input line (M32), which is one keystroke instead
+    of a drag whose exact pixel path this test would then also be
+    asserting on."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[0][2])  # Terminal
+    wait_for_windows(m, 1)
+    m.type_text("HELLO")
+    time.sleep(0.5)
+    m.sendkey("ctrl-c")   # clipboard := the input line
+    time.sleep(0.5)
+
+    m.double_click(ICON_X, ICONS[1][2])  # Editor - takes focus, lands at slot 3
+    wait_for_windows(m, 2)
+    ex, ey = app_origin(FIRST_APP_IDX + 1)
+
+    def first_row(shot):
+        return [shot.px(px, py)
+                for py in range(ey + ED_CONTENT_Y0, ey + ED_CONTENT_Y0 + 16)
+                for px in range(ex, ex + 200)]
+
+    m.type_text("AB")
+    wait_for(m, lambda s: any(p == ED_TEXT_COLOR for p in first_row(s)),
+             "nothing was typed into the editor")
+    # ...and then wait for the row to stop changing before capturing it.
+    # "Something is drawn" fires as soon as the *first* character lands,
+    # and a baseline taken between the A and the B is one the undo below
+    # can never get back to - which is exactly how this test first
+    # failed, on a genuinely correct undo.
+    before = _settled_row(m, first_row)
+
+    m.sendkey("ctrl-v")
+    wait_for(m, lambda s: first_row(s) != before,
+             "Ctrl+V pasted nothing - the editor had no paste at all before M56")
+
+    m.sendkey("ctrl-z")
+    wait_for(m, lambda s: first_row(s) == before,
+             "one undo did not put the buffer back exactly as it was before the paste")
+
+
+def test_terminal_scrollback_scrolls_with_the_wheel(m):
+    """M56's scrollback, through the wheel M49 gave this window and which
+    until now had nothing to reveal here - grid_scroll discarded the top
+    line outright, which is why a command whose output was longer than the
+    window was a command whose output you could not read.
+
+    `ls /bin` is more lines than the 21-row grid holds, so the top of that
+    output has necessarily scrolled off. Compared as whole-row pixels, so
+    this asserts on "a different line is at the top" without depending on
+    which filename leanfs happens to return first."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[0][2])  # Terminal
+    wait_for_windows(m, 1)
+    tx, ty = app_origin(FIRST_APP_IDX)
+
+    def top_row(shot):
+        return [shot.px(px, py)
+                for py in range(ty, ty + 16)
+                for px in range(tx, tx + TERM_W - 8)]
+
+    m.type_text("ls /bin")
+    m.sendkey("ret")
+    wait_for(m, lambda s: any(p == TERM_TEXT_COLOR for p in top_row(s)),
+             "the terminal produced no output to scroll through", timeout=20.0)
+    before = _settled_row(m, top_row)
+
+    # The wheel acts on whatever the pointer is over, so it has to be over
+    # this window - which is also the only way a person would do it.
+    m.move_to(tx + TERM_W // 2, ty + TERM_H // 2)
+
+    # QEMU's dz sign is the emulator's convention, not the guest's, so
+    # which way is "back" is discovered rather than assumed - the same
+    # note the file manager's own wheel test carries. Discovering it once
+    # and then reversing *exactly* it is what makes the return trip a
+    # real assertion instead of a guess about magnitudes.
+    back = 5
+    m.wheel(back)
+    if _settled_row(m, top_row) == before:
+        back = -5
+        m.wheel(back)
+    check(_settled_row(m, top_row) != before,
+          "scrolling the wheel revealed nothing - the terminal is still discarding its top line")
+
+    m.wheel(-back)
+    wait_for(m, lambda s: top_row(s) == before,
+             "scrolling forward again did not return to the live view")
+    # And past the end: the view is clamped at live, not scrolled into
+    # whatever is after the last line.
+    m.wheel(-back)
+    wait_for(m, lambda s: top_row(s) == before,
+             "scrolling forward past the live view moved it")
+
+
+def test_copying_a_file_shows_up_in_another_window(m):
+    """M56's file operations, and the reason the file manager refreshes on
+    a timer at all: two windows onto the same directory must agree about
+    what is in it.
+
+    Copy rather than rename or delete, deliberately - it is the one of the
+    three that *adds* a row, so the second window's list growing is a
+    positive assertion rather than "something is missing now", and it
+    leaves the disk in a state the next test can still boot from."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[2][2])  # Files
+    wait_for_windows(m, 1)
+    m.double_click(ICON_X, ICONS[2][2])  # Files again - a second window on /home
+    wait_for_windows(m, 2)
+
+    ax, ay = app_origin(FIRST_APP_IDX)      # the first window, now behind
+    bx, by = app_origin(FIRST_APP_IDX + 1)  # the second, focused
+
+    before = fm_rows_with_text(m.screenshot(), bx, by)
+    check(before > 0, "the second Files window listed nothing")
+
+    # Select the first real row (row 0 is ".."), then C to copy.
+    m.click(*fm_row_point(bx, by, FM_FIRST_FILE_ROW))
+    time.sleep(0.4)
+    m.sendkey("c")
+    time.sleep(0.6)
+    m.type_text("m56copy")
+    m.sendkey("ret")
+
+    wait_for(m, lambda s: fm_rows_with_text(s, bx, by) == before + 1,
+             "the copy did not appear in the window that made it", timeout=15.0)
+    # The other window has its own listing on its own timer - it is only
+    # partly visible behind this one, so raising it is what makes its
+    # rows readable.
+    m.click(ax + 20, ay - TITLEBAR_H // 2)
+    wait_for(m, lambda s: fm_rows_with_text(s, ax, ay) == before + 1,
+             "the other window's listing never caught up with the new file", timeout=15.0)
+
+
 def test_soak_desktop_stays_usable(m):
     """M50's soak: leave the desktop up with everything that ticks on a
     timer running, then require the machine to still work.
@@ -1789,12 +1985,34 @@ TESTS = [
     ("a_crashing_program_only_takes_itself_down", test_a_crashing_program_only_takes_itself_down),
     ("file_manager_navigates_directories", test_file_manager_navigates_directories),
     ("desktop_survives_losing_the_compositor", test_desktop_survives_losing_the_compositor),
+    ("editor_undo_restores_the_buffer", test_editor_undo_restores_the_buffer),
+    ("terminal_scrollback_scrolls_with_the_wheel", test_terminal_scrollback_scrolls_with_the_wheel),
+    ("copying_a_file_shows_up_in_another_window", test_copying_a_file_shows_up_in_another_window),
     ("soak_desktop_stays_usable", test_soak_desktop_stays_usable),
     ("launch_close_stress", test_launch_close_stress),
 ]
 
 
+def _die_on_signal(signum, _frame):
+    """Turn a TERM/INT into an ordinary exception, so the `with Machine()`
+    below unwinds and kills its QEMU child.
+
+    Learned the expensive way. Interrupting this suite used to leave its
+    guest running - Python dies on SIGTERM without unwinding, and QEMU is
+    a separate process that nothing then reaps. Three such orphans
+    accumulated over an afternoon of interrupted runs, each burning a
+    quarter of a core, and the symptom was boots timing out at 240s in
+    tests that pass in 70 on an idle machine. That reads exactly like a
+    guest that has hung, which is the worst thing it could have looked
+    like: it sent a real debugging session after a kernel bug that was
+    never there."""
+    raise KeyboardInterrupt("received signal %d" % signum)
+
+
 def main(argv):
+    signal.signal(signal.SIGTERM, _die_on_signal)
+    signal.signal(signal.SIGINT, _die_on_signal)
+
     wanted = argv[1:]
     selected = [(n, f) for n, f in TESTS if not wanted or n in wanted]
     if not selected:
@@ -1814,6 +2032,9 @@ def main(argv):
         except Failure as exc:
             failures.append((name, str(exc)))
             print("   FAIL (%.0fs): %s" % (time.time() - started, exc), flush=True)
+        except KeyboardInterrupt:
+            print("   interrupted - stopping", flush=True)
+            raise
         except Exception:  # a harness/QEMU problem, not a guest verdict
             failures.append((name, "harness error:\n" + traceback.format_exc()))
             print("   ERROR (%.0fs):\n%s" % (time.time() - started,

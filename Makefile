@@ -102,7 +102,7 @@ UOBJ      := $(BUILD)/user_obj
 USER_LD   := user_space/lib/user.ld
 USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/malloc.o \
                 $(UOBJ)/gfx.o $(UOBJ)/font8x16.o $(UOBJ)/wmclient.o $(UOBJ)/wallpaper.o \
-                $(UOBJ)/settings_file.o $(UOBJ)/children.o
+                $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
 # init and shell in their own directories. Each becomes build/NAME.elf,

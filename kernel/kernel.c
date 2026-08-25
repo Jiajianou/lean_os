@@ -4028,6 +4028,300 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "(5/5 checks).\n\n");
     }
 
+    /* M56 self-test: the three things this milestone added, each checked
+     * as the thing itself rather than as "something changed".
+     *
+     * (1) SYS_unlink and SYS_rename round-tripping, *including the inode
+     *     and block accounting coming back*. A remove that leaves its
+     *     blocks marked in use is a remove that works exactly once per
+     *     block, which is the failure a bare "the file is gone" assertion
+     *     would miss entirely. Measured by filling a directory, removing
+     *     it all, and requiring the free-block count to return - which
+     *     needs a file large enough to span several blocks, hence 2000
+     *     bytes rather than a token one.
+     *
+     * (2) An editor undo restoring an exact buffer across a paste. Driven
+     *     by typing into a real text_editor through a real compositor -
+     *     M56 adds keyboard_inject for this, the counterpart to M51's
+     *     mouse_inject, because an undo self-test that called the undo
+     *     function directly would prove nothing about the key that
+     *     invokes it. The buffer is read back off *disk*: the editor
+     *     saves with Ctrl+S, so what is compared is the file the user
+     *     would have got.
+     *
+     * (3) A terminal scrollback holding more lines than its window. `ls
+     *     /bin` is more output than the 21-row grid, so the first line
+     *     has necessarily scrolled off; scrolling back must bring
+     *     something different to the top row and scrolling forward must
+     *     put it back. Compared as a count of lit pixels in the top row's
+     *     strip, which is content-independent - asserting on a particular
+     *     filename would be asserting on the order leanfs happens to
+     *     return its directory records in.
+     */
+    {
+        int all_ok = 1;
+
+        /* ---- (1) unlink and rename ---- */
+        {
+            static char payload[2000];
+            for (size_t i = 0; i < sizeof(payload); i++) {
+                payload[i] = (char)('a' + (i % 26));
+            }
+            /* Large enough to span several blocks, so "its blocks came
+             * back" is a number rather than a rounding error. A file's
+             * blocks are not frames, which is why the free-*frame*
+             * counter every other self-test uses says nothing here - see
+             * vfs_free_blocks. */
+            if (vfs_write(PATH_TMP_DIR "m56a", payload, sizeof(payload)) != 0) {
+                klog_puts("[m56] could not create the file this test is about\n");
+                all_ok = 0;
+            }
+            if (vfs_rename(PATH_TMP_DIR "m56a", PATH_TMP_DIR "m56b") != 0 ||
+                vfs_exists(PATH_TMP_DIR "m56a") || !vfs_exists(PATH_TMP_DIR "m56b")) {
+                klog_puts("[m56] rename did not move the name\n");
+                all_ok = 0;
+            }
+            static char readback[2000];
+            k_memset(readback, 0, sizeof(readback));
+            if (vfs_read(PATH_TMP_DIR "m56b", readback, sizeof(readback)) != (int64_t)sizeof(payload)) {
+                klog_puts("[m56] the renamed file did not read back at its own size - a rename moved data it should not have touched\n");
+                all_ok = 0;
+            }
+            for (size_t i = 0; i < sizeof(payload); i++) {
+                if (readback[i] != payload[i]) {
+                    klog_puts("[m56] the renamed file's contents changed\n");
+                    all_ok = 0;
+                    break;
+                }
+            }
+            if (vfs_rename(PATH_TMP_DIR "m56b", PATH_TMP_DIR "m53same") == 0) {
+                klog_puts("[m56] rename over an existing name succeeded - that is how a file gets lost silently\n");
+                all_ok = 0;
+            }
+            /* And the accounting, stated directly: the blocks a file
+             * held are free again once it is unlinked. Counted rather
+             * than inferred - the first version of this check wrote and
+             * unlinked the same 2000 bytes sixty-four times and watched
+             * for the disk to fill, which was the honest test available
+             * before leanfs could count, and cost four thousand ATA
+             * sector writes: every metadata update here rewrites the
+             * whole inode table and bitmap (31 sectors), and PIO writes
+             * are the most expensive thing this OS does. It added more
+             * than a minute to every boot, which is how a self-test
+             * starts making the machine look broken. */
+            uint32_t free_before = vfs_free_blocks();
+            if (vfs_write(PATH_TMP_DIR "m56c", payload, sizeof(payload)) != 0) {
+                klog_puts("[m56] could not create the file the block accounting is about\n");
+                all_ok = 0;
+            }
+            uint32_t free_with = vfs_free_blocks();
+            if (free_with >= free_before) {
+                klog_puts("[m56] writing 2000 bytes consumed no blocks at all\n");
+                all_ok = 0;
+            }
+            if (vfs_unlink(PATH_TMP_DIR "m56c") != 0) {
+                klog_puts("[m56] unlink failed on a file that had just been written\n");
+                all_ok = 0;
+            }
+            uint32_t free_after = vfs_free_blocks();
+            if (free_after != free_before) {
+                klog_puts("[m56] unlink did not return every block: 0x");
+                klog_put_hex32(free_before);
+                klog_puts(" free before, 0x");
+                klog_put_hex32(free_with);
+                klog_puts(" with the file, 0x");
+                klog_put_hex32(free_after);
+                klog_puts(" after removing it\n");
+                all_ok = 0;
+            }
+            /* A rename must move no blocks at all - it is a change to
+             * records, and a count that shifted would mean it had
+             * quietly copied something. */
+            uint32_t free_pre_rename = vfs_free_blocks();
+            int rename_ok = vfs_rename(PATH_TMP_DIR "m56b", PATH_TMP_DIR "m56d") == 0 &&
+                            vfs_rename(PATH_TMP_DIR "m56d", PATH_TMP_DIR "m56b") == 0;
+            if (!rename_ok || vfs_free_blocks() != free_pre_rename) {
+                klog_puts("[m56] a rename moved blocks, or failed outright\n");
+                all_ok = 0;
+            }
+
+            vfs_unlink(PATH_TMP_DIR "m56b");
+            if (vfs_unlink(PATH_BIN) == 0) {
+                klog_puts("[m56] unlink accepted a directory - see leanfs.h on why that is refused rather than recursed\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- (2) the editor's undo across a paste ----
+         *
+         * Driven with real keys through a real compositor: an undo test
+         * that called the undo function directly would prove nothing
+         * about the chord that invokes it, and the chord is the part with
+         * somewhere to go wrong (M56 had to teach keyboard_inject to
+         * carry a modifier mask for exactly this - see its own note).
+         *
+         * The assertion is on *bytes on disk*, not pixels: Ctrl+S writes
+         * the buffer through the same SYS_writefile a person's save would,
+         * so what is compared is the file they would have got. "AB\n"
+         * exactly - not "shorter than it was", which a paste that
+         * silently did nothing would also satisfy. */
+        static const char pasted[] = "PASTED";
+        do_syscall(SYS_clipboard_set, (uint64_t)pasted, sizeof(pasted) - 1, 0);
+
+        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *ed_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        uint8_t *term_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+        if (!comp_image || !ed_image || !term_image) {
+            panic("out of memory reading compositor/text_editor/gui_terminal back from disk");
+        }
+        int64_t comp_size = vfs_read(PATH_BIN_DIR "compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        int64_t ed_size = vfs_read(PATH_BIN_DIR "text_editor", ed_image, LEANFS_MAX_FILE_SIZE);
+        int64_t term_size = vfs_read(PATH_BIN_DIR "gui_terminal", term_image, LEANFS_MAX_FILE_SIZE);
+        if (comp_size < 0 || ed_size < 0 || term_size < 0) {
+            panic("vfs_read: compositor/text_editor/gui_terminal missing - should exist, just seeded");
+        }
+
+        /* M56: start from nothing, every time. The serial harness boots a
+         * snapshot disk so every run is a fresh filesystem - but a
+         * *reboot within one guest* is not, and the interactive suite has
+         * a test that does exactly that. Second time around the editor
+         * opened the file this test wrote last time, typed "AB" into it,
+         * and produced "ABAB"; the assertions below are about an exact
+         * buffer, so they correctly reported that as a failure of undo.
+         * Removing it first is what makes the test a statement about the
+         * editor rather than about what was on the disk - and it uses the
+         * unlink this milestone is adding, which is a fair way to find
+         * out it works. */
+        vfs_unlink(PATH_TMP_DIR "m56undo");
+
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        pit_sleep_ms(300);
+        task_t *ed_task = process_spawn("text_editor", ed_image, (size_t)ed_size,
+                                         PATH_TMP_DIR "m56undo");
+        kfree(ed_image);
+        pit_sleep_ms(800);
+
+        keyboard_inject('A', 0);
+        keyboard_inject('B', 0);
+        pit_sleep_ms(200);
+        keyboard_inject('V', KBD_MOD_CTRL); /* paste "PASTED" - six characters, one undo group */
+        pit_sleep_ms(300);
+        keyboard_inject('S', KBD_MOD_CTRL);
+        pit_sleep_ms(500);
+        static char after_paste[64];
+        k_memset(after_paste, 0, sizeof(after_paste));
+        int64_t paste_len = vfs_read(PATH_TMP_DIR "m56undo", after_paste, sizeof(after_paste) - 1);
+
+        keyboard_inject('Z', KBD_MOD_CTRL); /* one undo, and the whole paste goes */
+        pit_sleep_ms(300);
+        keyboard_inject('S', KBD_MOD_CTRL);
+        pit_sleep_ms(500);
+        static char after_undo[64];
+        k_memset(after_undo, 0, sizeof(after_undo));
+        int64_t undo_len = vfs_read(PATH_TMP_DIR "m56undo", after_undo, sizeof(after_undo) - 1);
+
+        selftest_reap(ed_task);
+        pit_sleep_ms(200);
+
+        /* ---- (3) the terminal's scrollback ----
+         *
+         * `ls /bin` is more lines than the 21-row grid, so the top of the
+         * output has necessarily scrolled off - which before this
+         * milestone meant gone. The comparison is a count of lit pixels
+         * across the top row's strip: content-independent, where
+         * asserting on a particular filename would be asserting on the
+         * order leanfs happens to return its records in.
+         *
+         * gui_terminal is 70x21 cells of an 8x16 font - 560x336 - and is
+         * the only window here, so it lands at (100, 100) and its first
+         * text row is y:[100, 116). */
+        task_t *term_task = process_spawn("gui_terminal", term_image, (size_t)term_size, "");
+        kfree(term_image);
+        pit_sleep_ms(900);
+
+        static const char cmd[] = "ls /bin\n";
+        for (size_t i = 0; i < sizeof(cmd) - 1; i++) {
+            keyboard_inject(cmd[i], 0);
+        }
+        pit_sleep_ms(1500); /* the spawn, its output, and the terminal draining it */
+
+        int lit_live = 0, lit_scrolled = 0, lit_back = 0;
+        for (int32_t ty = 100; ty < 116; ty++) {
+            for (int32_t tx = 100; tx < 660; tx++) {
+                if (fb_get_pixel((uint32_t)tx, (uint32_t)ty) == 0x00D0D0D0u) {
+                    lit_live++;
+                }
+            }
+        }
+        /* The wheel acts on whatever is under the pointer, which starts
+         * at the screen centre - inside this window. Ten detents back. */
+        mouse_inject(0, 0, 0, -10);
+        pit_sleep_ms(500);
+        for (int32_t ty = 100; ty < 116; ty++) {
+            for (int32_t tx = 100; tx < 660; tx++) {
+                if (fb_get_pixel((uint32_t)tx, (uint32_t)ty) == 0x00D0D0D0u) {
+                    lit_scrolled++;
+                }
+            }
+        }
+        mouse_inject(0, 0, 0, 10);
+        pit_sleep_ms(500);
+        for (int32_t ty = 100; ty < 116; ty++) {
+            for (int32_t tx = 100; tx < 660; tx++) {
+                if (fb_get_pixel((uint32_t)tx, (uint32_t)ty) == 0x00D0D0D0u) {
+                    lit_back++;
+                }
+            }
+        }
+
+        selftest_reap(term_task);
+        selftest_reap(comp_task);
+        kfree(comp_image);
+        console_init();
+        klog_use_console();
+
+        if (paste_len != 9 || k_strcmp(after_paste, "ABPASTED\n") != 0) { /* "ABPASTED" plus the newline save_file writes after every line */
+            klog_puts("[m56] the paste did not land as expected - saved 0x");
+            klog_put_hex32((uint32_t)paste_len);
+            klog_puts(" bytes: '");
+            klog_puts(after_paste);
+            klog_puts("'\n");
+            all_ok = 0;
+        }
+        if (undo_len != 3 || k_strcmp(after_undo, "AB\n") != 0) {
+            klog_puts("[m56] one undo did not restore the exact buffer from before the paste - saved 0x");
+            klog_put_hex32((uint32_t)undo_len);
+            klog_puts(" bytes: '");
+            klog_puts(after_undo);
+            klog_puts("'\n");
+            all_ok = 0;
+        }
+        if (lit_live == 0) {
+            klog_puts("[m56] the terminal drew no output at all - nothing to scroll back through\n");
+            all_ok = 0;
+        }
+        if (lit_scrolled == lit_live) {
+            klog_puts("[m56] scrolling back changed nothing - the top row still shows the live grid, so there is no history\n");
+            all_ok = 0;
+        }
+        if (lit_back != lit_live) {
+            klog_puts("[m56] scrolling forward again did not return to the live view (0x");
+            klog_put_hex32((uint32_t)lit_live);
+            klog_puts(" lit pixels before, 0x");
+            klog_put_hex32((uint32_t)lit_back);
+            klog_puts(" after)\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M56 depth self-test: undo, scrollback or the filesystem's remove half did not behave as specified");
+        }
+        klog_puts("[m56] SYS_unlink returning every block it freed and SYS_rename moving none, "
+                   "one editor undo restoring the exact buffer from before a paste, and a "
+                   "terminal scrollback holding lines its window no longer shows "
+                   "self-test passed (12/12 checks).\n\n");
+    }
+
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
      * exactly where a user program would reach them. Before this
      * milestone the middle case here didn't fail at all - it panicked the

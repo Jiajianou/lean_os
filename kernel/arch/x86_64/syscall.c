@@ -437,6 +437,36 @@ static long sys_writefile(uint64_t name_ptr, uint64_t buf, uint64_t len, uint64_
  * was the only answer available - the reason the launcher offered to run
  * settings.conf and the file manager listed this OS's own executables
  * next to your text files. */
+/* M56 - see SYS_unlink's contract. */
+static long sys_unlink(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    char path[LEANFS_MAX_PATH];
+    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
+        return -1;
+    }
+    return vfs_unlink(path);
+}
+
+/* M56 - see SYS_rename's contract. Two user strings, both copied in
+ * before either is used, for the same reason every other path is. */
+static long sys_rename(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    char old_path[LEANFS_MAX_PATH];
+    char new_path[LEANFS_MAX_PATH];
+    if (copy_str_from_user(old_path, old_ptr, sizeof(old_path)) != 0 ||
+        copy_str_from_user(new_path, new_ptr, sizeof(new_path)) != 0) {
+        return -1;
+    }
+    return vfs_rename(old_path, new_path);
+}
+
 static long sys_listdir(uint64_t path_ptr, uint64_t buf, uint64_t maxlen, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
@@ -1171,6 +1201,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_shm_free] = sys_shm_free,
     [SYS_mkdir] = sys_mkdir,
     [SYS_shm_unmap] = sys_shm_unmap,
+    [SYS_unlink] = sys_unlink,
+    [SYS_rename] = sys_rename,
 };
 
 void syscall_handler(isr_regs_t *regs) {

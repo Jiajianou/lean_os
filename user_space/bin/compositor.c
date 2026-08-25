@@ -1919,12 +1919,13 @@ static void snap_rect(const window_t *win, uint32_t action,
  * reason on the compositor's stdout, which SYS_write routes to klog and
  * so into tools/qemu-serial-test.sh's own capture - so the next time
  * this happens it is one grep away instead of a bisect. */
-static void refuse_window(int resp_write_fd, const char *reason) {
+static void refuse_window(int resp_write_fd, int32_t client_pid, const char *reason) {
     wm_create_response_t resp;
     resp.window_id = -1;
     resp.shm_id = -1;
     resp.width = 0;
     resp.height = 0;
+    resp.client_pid = client_pid; /* M56: a refusal has to be addressed too, or the client it was meant for waits out its whole timeout */
     resp.compositor_pid = self_pid; /* M55: even a refusal says who refused - a client that retries needs to know whether the answer came from the compositor it is waiting on */
     sys_write(resp_write_fd, &resp, sizeof(resp));
 
@@ -1956,8 +1957,33 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     long n = read_exact(req_read_fd, &req, sizeof(req));
     wm_create_response_t resp;
     if (n != (long)sizeof(req)) {
-        refuse_window(resp_write_fd, "short/torn create request");
+        refuse_window(resp_write_fd, -1, "short/torn create request");
         return;
+    }
+
+    /* M56: a client that already has a live window is re-asking, not
+     * asking again. M55's reconnect retry can put two requests in flight
+     * - that is the whole point of the retry, since the first may have
+     * been discarded by a replacement compositor clearing these pipes -
+     * and serving both would leave this client with two windows, one of
+     * which it will never draw into and nothing will ever reclaim (its
+     * owner is very much alive). Answering the second request with the
+     * first request's window makes the retry idempotent, which is what a
+     * retry has to be. Every client in this project has exactly one
+     * window, so "which one" is never ambiguous. */
+    if (req.client_pid > 0) {
+        for (int i = 0; i < window_count; i++) {
+            if (windows[i].alive && windows[i].client_pid == req.client_pid) {
+                resp.window_id = i;
+                resp.shm_id = windows[i].shm_id;
+                resp.width = (uint32_t)windows[i].buf_w;
+                resp.height = (uint32_t)windows[i].buf_h;
+                resp.compositor_pid = self_pid;
+                resp.client_pid = req.client_pid;
+                sys_write(resp_write_fd, &resp, sizeof(resp));
+                return;
+            }
+        }
     }
 
     /* M29: prefer a reclaimed (!alive) slot below window_count over
@@ -1976,7 +2002,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     int reused_slot = (idx >= 0);
     if (idx < 0) {
         if (window_count >= MAX_WINDOWS) {
-            refuse_window(resp_write_fd, "no free window slot (MAX_WINDOWS)");
+            refuse_window(resp_write_fd, req.client_pid, "no free window slot (MAX_WINDOWS)");
             return;
         }
         idx = window_count;
@@ -1996,7 +2022,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     long shm_id = sys_shm_create((size_t)width * height * sizeof(uint32_t));
     long vaddr = shm_id < 0 ? -1 : sys_shm_map(shm_id);
     if (shm_id < 0 || vaddr < 0) {
-        refuse_window(resp_write_fd, "SYS_shm_create/SYS_shm_map failed (MAX_SHM_SEGMENTS, or out of memory)");
+        refuse_window(resp_write_fd, req.client_pid, "SYS_shm_create/SYS_shm_map failed (MAX_SHM_SEGMENTS, or out of memory)");
         return;
     }
 
@@ -2014,7 +2040,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
         wm_event_pipe_name(idx, evt_name);
         int evt_fds[2];
         if (sys_pipe_open(evt_name, evt_fds) != 0) {
-            refuse_window(resp_write_fd, "SYS_pipe_open for this window's event pipe failed (this process's MAX_FDS, or MAX_NAMED_PIPES)");
+            refuse_window(resp_write_fd, req.client_pid, "SYS_pipe_open for this window's event pipe failed (this process's MAX_FDS, or MAX_NAMED_PIPES)");
             return;
         }
         evt_write_fd = evt_fds[1];
@@ -2094,6 +2120,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     resp.width = width;
     resp.height = height;
     resp.compositor_pid = self_pid; /* M55: so this client can tell "quiet" from "gone" - see wm_create_response_t */
+    resp.client_pid = req.client_pid; /* M56: and who this answer is for - see wm_create_response_t.client_pid */
     if (!reused_slot) {
         window_count++;
     }

@@ -55,6 +55,13 @@ long sys_listdir(const char *path, void *buf, size_t maxlen);
 /* M53: creates one directory whose parent already exists. */
 long sys_mkdir(const char *path);
 
+/* M56: removes one regular file. Returns 0 or -1. */
+long sys_unlink(const char *path);
+
+/* M56: moves one entry to a new name, which may be in another directory.
+ * Refuses a destination that already exists. Returns 0 or -1. */
+long sys_rename(const char *old_path, const char *new_path);
+
 /* M55: drops a mapping without freeing what it points at - see
  * SYS_shm_unmap. For a client whose compositor died holding its window
  * buffer's frames. */
