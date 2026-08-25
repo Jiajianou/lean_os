@@ -56,11 +56,11 @@
 #define SWATCH_SIZE 28
 #define SWATCH_GAP  8
 #define BG_SWATCH_Y     150
-#define ACCENT_SWATCH_Y 210
+#define ACCENT_SWATCH_Y 204
 
 /* M44: the wallpaper picker - one labeled button per style. Four of them
  * across WIN_W with the same 10px margin every other row here uses. */
-#define WALL_BTN_Y  270
+#define WALL_BTN_Y  258
 #define WALL_BTN_W  68 /* four of these plus their gaps land exactly inside the GFX_PAD margins */
 #define WALL_BTN_H  22
 #define WALL_BTN_GAP 6
@@ -71,12 +71,38 @@
  * cannot exist without being listed here, and nothing can be listed here
  * that isn't wired up. That is the whole point: a shortcuts list is only
  * worth having if it is true. */
+/* M61: the motion switch. On by default, and a real setting rather than
+ * a constant because motion that cannot be disabled is a genuine
+ * accessibility problem for some people, not a preference. One row, and
+ * it fits above the Resolution pane because M61 also moved the Shortcuts
+ * list to the 12-row face - a reference list is exactly the dense list
+ * that face is for. */
+/* M62: the volume control. It shares a row with the Motion switch - one
+ * row for the two settings that are about how this desktop *behaves*
+ * rather than how it looks. Five
+ * steps rather than a draggable slider: this project has no slider
+ * widget, a mute and four levels is what a person actually reaches for,
+ * and inventing a drag gesture for it would be a widget rather than a
+ * setting. */
+#define VOL_STEPS   5
+#define VOL_BTN_W   22
+#define VOL_BTN_H   20
+#define VOL_BTN_GAP 4
+#define VOL_X(i)    (GFX_PAD + 58 + (i) * (VOL_BTN_W + VOL_BTN_GAP))
+#define VOL_Y       288
+#define VOL_LABEL_Y 290
+
+#define MOTION_LABEL_Y 290
+#define MOTION_BTN_W   50
+#define MOTION_BTN_H   20
+#define MOTION_BTN_X   (WIN_W - GFX_PAD - MOTION_BTN_W)
+
 /* M58: the Resolution pane. The list is whatever SYS_display_modes
  * offers, which on hardware with no runtime mode-setting interface is
  * nothing at all - and the pane then says so rather than offering
  * buttons that cannot work. */
-#define MODE_LABEL_Y  304
-#define MODE_BTN_Y    328
+#define MODE_LABEL_Y  316
+#define MODE_BTN_Y    340
 #define MODE_BTN_W    92
 #define MODE_BTN_H    20
 #define MODE_BTN_GAP  6
@@ -89,9 +115,14 @@
 #define KEEP_BTN_W    64
 #define KEEP_BTN_X    (WIN_W - GFX_PAD - KEEP_BTN_W)
 
-#define SHORTCUT_LABEL_Y 436
-#define SHORTCUT_ROW_Y   458
-#define SHORTCUT_ROW_H   18
+#define SHORTCUT_LABEL_Y 452
+#define SHORTCUT_ROW_Y   474
+/* M61: 18 -> 15, in the 12-row face. Nine chords is a reference list you
+ * read once, which is the dense list M57's small face exists for - and
+ * the twenty-seven pixels it gives back are what the motion switch above
+ * is drawn in. */
+#define SHORTCUT_ROW_H   15
+#define SHORTCUT_FONT    ui_font_small
 #define SHORTCUT_DESC_X  (GFX_PAD + 124) /* clears the longest chord ("Ctrl+Shift+Esc", 14 glyphs) */
 
 #define DEFAULT_BG_COLOR     0x001A1A2Eu /* mirrors compositor.c's own compile-time default - see this file's header comment */
@@ -134,6 +165,15 @@ static long confirm_until_ms;
 static uint32_t current_bg = DEFAULT_BG_COLOR;
 static uint32_t current_accent = DEFAULT_ACCENT_COLOR;
 static uint32_t current_wallpaper = WALLPAPER_GRADIENT; /* mirrors compositor.c's own default */
+static uint32_t current_animations = 1;
+static uint32_t current_volume = 70;    /* mirrors compositor.c's own default */
+
+/* What clicking step `i` sets the volume to. Step 0 is mute; the rest
+ * spread evenly to 100, so the rightmost is genuinely all the way up
+ * rather than "nearly". */
+static int vol_step_percent(int i) {
+    return i == 0 ? 0 : 100 * i / (VOL_STEPS - 1);
+}                 /* likewise - motion is on unless somebody turned it off */
 
 #define CLEAR_BTN_X (WIN_W - GFX_PAD - CLEAR_BTN_W) /* M44: right-aligned to the same inset every other row uses, rather than a hand-placed 220 */
 #define CLEAR_BTN_Y 100
@@ -164,10 +204,17 @@ static int format_uint(uint32_t v, char *buf) {
  * both is three chances not to. */
 static void apply_theme(void) {
     wm_settings_request_t settings;
+    settings.volume = current_volume;
+    settings.animations = current_animations;
     settings.bg_color = current_bg;
     settings.accent_color = current_accent;
     settings.wallpaper = current_wallpaper;
-    wm_set_theme(settings.bg_color, settings.accent_color, settings.wallpaper);
+    /* M61: every setting together, which is what the struct on the wire
+     * was always for - and the reason this function existed from M47 is
+     * unchanged: the live compositor and the file on disk have to move
+     * together, and four call sites each remembering to do both is four
+     * chances not to. */
+    wm_set_settings(&settings);
     settings_file_save(&settings);
 }
 
@@ -283,8 +330,8 @@ static void redraw(wm_window_t *win, int clear_hover, int clear_pressed) {
         draw_selected_mark(win, x, BG_SWATCH_Y, BG_SWATCHES[i] == current_bg);
     }
 
-    gfx_draw_text(&win->gfx, GFX_PAD, 190, "Accent color", LABEL_COLOR);
-    gfx_draw_line(&win->gfx, GFX_PAD, 206, WIN_W - GFX_PAD, 206, BORDER_COLOR);
+    gfx_draw_text(&win->gfx, GFX_PAD, 184, "Accent color", LABEL_COLOR);
+    gfx_draw_line(&win->gfx, GFX_PAD, 200, WIN_W - GFX_PAD, 200, BORDER_COLOR);
     for (int i = 0; i < ACCENT_SWATCH_COUNT; i++) {
         int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
         gfx_fill_rect_rounded(&win->gfx, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, ACCENT_SWATCHES[i]);
@@ -298,8 +345,8 @@ static void redraw(wm_window_t *win, int clear_hover, int clear_pressed) {
      * ("Deep", "Grid") says much less about what you are picking than
      * eight pixels of the actual thing does, and wallpaper_fill draws a
      * 70x22 preview exactly the way it draws a 1024x768 desktop. */
-    gfx_draw_text(&win->gfx, GFX_PAD, 250, "Wallpaper", LABEL_COLOR);
-    gfx_draw_line(&win->gfx, GFX_PAD, 266, WIN_W - GFX_PAD, 266, BORDER_COLOR);
+    gfx_draw_text(&win->gfx, GFX_PAD, 238, "Wallpaper", LABEL_COLOR);
+    gfx_draw_line(&win->gfx, GFX_PAD, 254, WIN_W - GFX_PAD, 254, BORDER_COLOR);
     for (int i = 0; i < WALLPAPER_COUNT; i++) {
         int32_t x = WALL_BTN_X(i);
         wallpaper_fill(&win->gfx, x, WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H, i, current_bg);
@@ -356,12 +403,37 @@ static void redraw(wm_window_t *win, int clear_hover, int clear_pressed) {
         }
     }
 
+    /* M62: the volume row. The filled steps are the level; the leftmost
+     * is mute, which is a step rather than a separate control because
+     * "off" is where a volume goes. */
+    gfx_draw_text(&win->gfx, GFX_PAD, VOL_LABEL_Y, "Volume", LABEL_COLOR);
+    for (int i = 0; i < VOL_STEPS; i++) {
+        int filled = (int)current_volume >= vol_step_percent(i) && current_volume > 0;
+        if (i == 0) {
+            filled = current_volume == 0;
+        }
+        gfx_fill_rect_rounded(&win->gfx, VOL_X(i), VOL_Y, VOL_BTN_W, VOL_BTN_H,
+                               filled ? BTN_HOVER : BTN_COLOR);
+        gfx_draw_rect_rounded(&win->gfx, VOL_X(i), VOL_Y, VOL_BTN_W, VOL_BTN_H, BORDER_COLOR);
+        if (i == 0) {
+            /* Mute gets the close glyph rather than a number - it is not
+             * a quieter level, it is the absence of one. */
+            gfx_draw_char_font(&win->gfx, VOL_X(i) + 7, VOL_Y + 2, UI_G_CLOSE,
+                               TEXT_COLOR, gfx_ui_font(), 0);
+        }
+    }
+
+    gfx_draw_text(&win->gfx, MOTION_BTN_X - 52, MOTION_LABEL_Y, "Motion", LABEL_COLOR);
+    gfx_draw_button(&win->gfx, MOTION_BTN_X, MOTION_LABEL_Y - 2, MOTION_BTN_W, MOTION_BTN_H,
+                     current_animations ? BTN_HOVER : BTN_COLOR, BORDER_COLOR,
+                     current_animations ? "On" : "Off", TEXT_COLOR);
+
     gfx_draw_text(&win->gfx, GFX_PAD, SHORTCUT_LABEL_Y, "Shortcuts", LABEL_COLOR);
     gfx_draw_line(&win->gfx, GFX_PAD, SHORTCUT_LABEL_Y + 16, WIN_W - GFX_PAD, SHORTCUT_LABEL_Y + 16, BORDER_COLOR);
     for (int i = 0; i < SHORTCUT_COUNT; i++) {
         int32_t y = SHORTCUT_ROW_Y + i * SHORTCUT_ROW_H;
-        gfx_draw_text(&win->gfx, GFX_PAD, y, SHORTCUTS[i].chord, TEXT_COLOR);
-        gfx_draw_text(&win->gfx, SHORTCUT_DESC_X, y, SHORTCUTS[i].what, LABEL_COLOR);
+        gfx_draw_text_font(&win->gfx, GFX_PAD, y, SHORTCUTS[i].chord, TEXT_COLOR, &SHORTCUT_FONT, 0);
+        gfx_draw_text_font(&win->gfx, SHORTCUT_DESC_X, y, SHORTCUTS[i].what, LABEL_COLOR, &SHORTCUT_FONT, 0);
     }
 }
 
@@ -379,6 +451,8 @@ int main(void) {
             current_bg = settings.bg_color;
             current_accent = settings.accent_color;
             current_wallpaper = settings.wallpaper;
+            current_animations = settings.animations;
+            current_volume = settings.volume;
         }
     }
 
@@ -446,6 +520,20 @@ int main(void) {
                         changed = 1;
                         break;
                     }
+                }
+                for (int i = 0; i < VOL_STEPS; i++) {
+                    if (gfx_point_in_rect(ev.x, ev.y, VOL_X(i), VOL_Y, VOL_BTN_W, VOL_BTN_H)) {
+                        current_volume = (uint32_t)vol_step_percent(i);
+                        apply_theme();
+                        changed = 1;
+                        break;
+                    }
+                }
+                if (gfx_point_in_rect(ev.x, ev.y, MOTION_BTN_X, MOTION_LABEL_Y - 2,
+                                       MOTION_BTN_W, MOTION_BTN_H)) {
+                    current_animations = !current_animations;
+                    apply_theme();
+                    changed = 1;
                 }
                 /* M58: pick a resolution, then keep it. Nothing is
                  * written to disk until it is kept - a mode saved the

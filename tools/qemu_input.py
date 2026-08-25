@@ -218,6 +218,13 @@ class Machine:
             # Same SLIRP NAT tools/run-qemu.sh explains: the boot self-test
             # pings the gateway and panics with no NIC attached at all.
             "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",
+            # M62: an AC'97 controller, with a null backend - nothing here
+            # listens to the guest's audio, and the point is that the
+            # device exists for the driver to find and drive. Without it
+            # the boot's own [m62] self-test correctly reports no sound
+            # hardware and skips, which is not what this suite should be
+            # exercising.
+            "-audiodev", "none,id=snd0", "-device", "AC97,audiodev=snd0",
             "-serial", "file:" + self.log_path,
             "-monitor", "unix:" + self._mon_path + ",server,nowait",
         ] + list(extra_args), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

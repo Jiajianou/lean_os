@@ -103,6 +103,25 @@
 #define SYS_rmdir  43 /* (path) -> 0 or -1. M59: the same gap SYS_unlink closed for files in M56, left open there because nothing had asked. Empty directories only - recursive delete is one keystroke away from losing everything under a path, and this OS has no trash to take it back out of. */
 #define SYS_time   44 /* (os_datetime_t *out, may be NULL) -> seconds since 1970, or 0 on a machine with no readable CMOS clock. The first thing in this project that can answer "what time is it" rather than "how long has this been switched on". */
 
+/* ---- M62: sound -----------------------------------------------------
+ *
+ * The speaker is *owned* rather than exposed to everything, and that is
+ * the same judgment M56 made about keyboard_inject: there is one speaker,
+ * and a program able to seize it unasked can make the machine unusable.
+ *
+ * Ownership is enforceable without a permission model, which is why it is
+ * done this way rather than by a comment asking nicely: the first process
+ * to claim audio holds it until it exits, and every call below refuses
+ * anybody else. The compositor claims it at startup, for the same reason
+ * it owns the screen - it is the process that knows when the desktop has
+ * something to say.
+ */
+#define SYS_audio_claim  45 /* () -> 0 if the caller now owns the audio devices, -1 if another live process does. Claiming again from the owner is a no-op success. Released when the owner exits, so a compositor that crashes does not take the machine's sound with it. */
+#define SYS_beep         46 /* (freq_hz, ms) -> 0, or -1 if the caller does not own audio. Starts a square wave on the PC speaker and returns immediately - the timer tick turns it off. Works on machines with no sound device at all, which is the whole reason it is here alongside a real one. Silent while muted (see SYS_audio_volume). */
+#define SYS_audio_volume 47 /* (percent 0-100) -> 0 or -1. Applied to the AC'97 mixer *and* to the speaker, where the only thing it can honestly do is mute: the speaker is one bit, and a "quiet beep" is not something that hardware can produce. */
+#define SYS_audio_release 49 /* () -> 0, or -1 from a process that does not own audio. The counterpart to SYS_audio_claim, and it exists because ownership that is only released by *exiting* is ownership a long-lived process cannot hand over - kernel_main is exactly that: it claims audio for its own boot self-test, never exits, and without this would silently keep the speaker away from the compositor for the life of the machine. Found by writing that test, not by reading the design. */
+#define SYS_audio_play   48 /* (const int16_t *samples, frames) -> 0, or -1 with no device, a buffer too large, or from a non-owner. 16-bit signed stereo at 48 kHz - the one format AC'97 is guaranteed to do. Non-blocking: it returns once the device is armed, because a play that blocked would be a sound that stops the compositor drawing. */
+
 #define SYS_display_modes 38 /* (display_mode_t *out, max_entries) -> how many modes exist (may exceed max_entries; same "caller sizes the buffer" contract as SYS_taskinfo), or -1. M58: a *curated and validated* list, not an enumeration - kernel/drivers/dispi.h's own comment explains why there is nothing to enumerate. Zero modes is the honest answer on any machine without a Bochs/QEMU DISPI adapter, which is every real one. */
 #define SYS_display_set_mode 39 /* (width, height) -> 0 or -1. M58: reprograms the display adapter and re-maps the kernel's framebuffer, right now, with no reboot - see kernel/drivers/dispi.h for why this has to be a native driver rather than a call back into UEFI GOP. Refuses any geometry not in SYS_display_modes' list. Everything downstream of "the screen is a different size now" is the caller's problem and is deliberately not attempted here: the compositor owns the screen, so the compositor reallocates window buffers, re-spans the panels, clamps windows and the cursor back on-screen, and tells its clients. Not restricted to any caller, for the same reason SYS_shutdown isn't. */
 
@@ -116,4 +135,4 @@
  * drift; this is the copy user space is allowed to see. */
 #define SYS_PIPE_CAPACITY 1024
 
-#define SYSCALL_COUNT 45
+#define SYSCALL_COUNT 50

@@ -319,13 +319,54 @@ BORDER_COLOR = 0x444466
 
 # settings.c's window and the two rows of it this suite clicks.
 SETTINGS_W, SETTINGS_H = 320, 632
-WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H = 270, 68, 22
+WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H = 258, 68, 22
+
+# M61: settings.c's Motion switch - one button whose fill says which way
+# it is set (BTN_HOVER when animations are on, BTN_COLOR when off).
+MOTION_BTN_Y = 288           # MOTION_LABEL_Y(290) - 2
+# M62: the volume row shares it - five steps, the leftmost of which is
+# mute. Same two flat colours say which one is set.
+VOL_Y, VOL_BTN_W, VOL_BTN_H, VOL_BTN_GAP = 288, 22, 20, 4
+VOL_X0 = 12 + 58             # GFX_PAD + the label's width allowance
+MOTION_BTN_W, MOTION_BTN_H = 50, 20
+MOTION_BTN_X = 320 - 12 - MOTION_BTN_W   # WIN_W - GFX_PAD - MOTION_BTN_W
+SETTINGS_BTN_ON = 0x607088   # settings.c BTN_HOVER
+SETTINGS_BTN_OFF = 0x445566  # settings.c BTN_COLOR
+
+
+# The cursor is CURSOR_W x CURSOR_H and is drawn from its position
+# rightwards and downwards, so it covers whatever was clicked. Reading a
+# button's fill therefore has to happen somewhere the cursor cannot be:
+# these click on the *right* of a control and probe on its *left*, which
+# is the only arrangement that works without moving the mouse away first
+# (and moving it away is its own event the window would have to process).
+def volume_click(sx, sy, step):
+    return (sx + VOL_X0 + step * (VOL_BTN_W + VOL_BTN_GAP) + VOL_BTN_W - 4,
+            sy + VOL_Y + VOL_BTN_H - 4)
+
+
+def volume_probe(sx, sy, step):
+    """Inside volume step `step`'s fill, left of anywhere it is clicked.
+    Step 0 is mute."""
+    return (sx + VOL_X0 + step * (VOL_BTN_W + VOL_BTN_GAP) + 3,
+            sy + VOL_Y + 3)
+
+
+def motion_click(sx, sy):
+    return (sx + MOTION_BTN_X + MOTION_BTN_W - 6, sy + MOTION_BTN_Y + MOTION_BTN_H - 4)
+
+
+def motion_probe(sx, sy):
+    """Inside the Motion button's fill, left of both its label and the
+    point it is clicked at, so what is read is the button's state rather
+    than a glyph or the cursor sitting on it."""
+    return (sx + MOTION_BTN_X + 6, sy + MOTION_BTN_Y + 4)
 
 # M58: settings.c's Resolution pane. The offered modes come from
 # kernel/drivers/dispi.c's CANDIDATES list, filtered by what the adapter
 # reports - on QEMU's stdvga with its default 16 MiB every one of them
 # survives, so index 0 is 800x600.
-MODE_BTN_Y, MODE_BTN_W, MODE_BTN_H, MODE_BTN_GAP, MODE_COLS = 328, 92, 20, 6, 3
+MODE_BTN_Y, MODE_BTN_W, MODE_BTN_H, MODE_BTN_GAP, MODE_COLS = 340, 92, 20, 6, 3
 GFX_PAD = 12
 CONFIRM_Y = MODE_BTN_Y + 3 * (MODE_BTN_H + 4) + 6
 CONFIRM_H = 20
@@ -2128,6 +2169,62 @@ def test_display_resolution_reverts_when_not_confirmed(m):
     check(_bar_spans(shot), "after the revert the taskbar does not span the restored display")
 
 
+def test_behaviour_settings_persist(m):
+    """M61's animation switch and M62's volume, and the half of both that
+    matters: that they are *settings* rather than toggles that forget.
+
+    Motion that cannot be disabled is an accessibility problem rather
+    than a preference, and a switch that resets on every boot is not much
+    better than none - so this restarts the machine the same way
+    settings_persist_across_a_reboot does and reads the button back.
+
+    The assertion is the button's own fill, not its label: the fill is
+    two flat colours settings.c names, which a screenshot can compare
+    exactly, where a label needs the text to be found first."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[3][2])  # Settings
+    wait_for_windows(m, 1)
+
+    sx, sy = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    probe = motion_probe(sx, sy)
+    shot = wait_for(m, lambda s: s.px(*probe) == SETTINGS_BTN_ON,
+                    "Settings did not open with animations on, which is the default")
+
+    m.click(*motion_click(sx, sy))
+    wait_for(m, lambda s: s.px(*probe) == SETTINGS_BTN_OFF,
+             "clicking the Motion switch did not turn animations off")
+
+    # M62: and mute, which is volume step 0. Muting is the one audio
+    # setting a screenshot can check, and it is also the one that
+    # matters most - a machine that forgets it was muted is a machine
+    # that beeps at somebody who asked it not to.
+    mute = volume_probe(sx, sy, 0)
+    check(m.screenshot().px(*mute) == SETTINGS_BTN_OFF,
+          "the volume did not start un-muted, which is the default")
+    m.click(*volume_click(sx, sy, 0))
+    wait_for(m, lambda s: s.px(*mute) == SETTINGS_BTN_ON,
+             "clicking mute did not take")
+
+    boots_before = m.read_log().count(BOOT_MARKER)
+    m.sendkey("ctrl-spc")
+    m.type_text("reboot")
+    m.sendkey("ret")
+    deadline = time.time() + 120
+    while time.time() < deadline and m.read_log().count(BOOT_MARKER) <= boots_before:
+        time.sleep(1.0)
+    check(m.read_log().count(BOOT_MARKER) > boots_before, "the machine never restarted")
+
+    boot(m)
+    m.double_click(ICON_X, ICONS[3][2])
+    wait_for_windows(m, 1)
+    shot = wait_for(m, lambda s: s.px(*probe) in (SETTINGS_BTN_ON, SETTINGS_BTN_OFF),
+                    "Settings did not come back with a readable Motion switch")
+    check(shot.px(*probe) == SETTINGS_BTN_OFF,
+          "the Motion switch forgot it had been turned off across a restart")
+    check(shot.px(*volume_probe(sx, sy, 0)) == SETTINGS_BTN_ON,
+          "the volume forgot it had been muted across a restart")
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -2155,6 +2252,7 @@ TESTS = [
     ("settings_persist_across_a_reboot", test_settings_persist_across_a_reboot),
     ("display_resolution_changes_and_persists", test_display_resolution_changes_and_persists),
     ("display_resolution_reverts_when_not_confirmed", test_display_resolution_reverts_when_not_confirmed),
+    ("behaviour_settings_persist", test_behaviour_settings_persist),
     ("launcher_does_not_offer_data_files", test_launcher_does_not_offer_data_files),
     ("clicking_a_toast_dismisses_it", test_clicking_a_toast_dismisses_it),
     ("wheel_scrolls_the_file_list_one_row_per_detent", test_wheel_scrolls_the_file_list_one_row_per_detent),

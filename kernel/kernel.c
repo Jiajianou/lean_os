@@ -15,6 +15,10 @@
 #include "drivers/keyboard.h"
 #include "drivers/klog.h"
 #include "drivers/mouse.h"
+#include "arch/x86_64/fpu.h"
+#include "arch/x86_64/io.h"
+#include "drivers/ac97.h"
+#include "drivers/pcspk.h"
 #include "drivers/pit.h"
 #include "drivers/rtc.h"
 #include "fs/leanfs.h"
@@ -52,6 +56,9 @@
     X(echo)                          \
     X(cat)                           \
     X(cp)                            \
+    X(audiograb)                     \
+    X(libctest)                      \
+    X(whetstone)                     \
     X(ls)                            \
     X(init)                          \
     X(shell)                         \
@@ -161,6 +168,42 @@ static uint8_t *read_program(const char *path, size_t *out_size) {
  * loop is a burst that gets dropped. M56's own editor test injected two
  * characters by hand; a command line is thirty, which is where doing it
  * by hand stops being reasonable. */
+/* M61: how many pixels of the column at `x`, between the bottom of a
+ * cascaded window and the bottom of the screen, are not the desktop
+ * colour. An animation is deliberately *not* settled, so what a test can
+ * honestly assert is that something is somewhere on the path - not where
+ * exactly, which is a question about easing and scheduler jitter. */
+static int selftest_column_lit(uint32_t x, uint32_t bg) {
+    int lit = 0;
+    for (uint32_t y = 240; y < fb_height(); y += 4) {
+        if (fb_get_pixel(x, y) != bg) {
+            lit++;
+        }
+    }
+    return lit;
+}
+
+/* The same column, sampled repeatedly over roughly one animation's worth
+ * of time, reporting the most it ever saw.
+ *
+ * One sample is not enough and the reason is worth writing down: this
+ * task sleeps with `hlt` and comes back when the scheduler next picks it,
+ * so "wait 60 ms" is a floor rather than a time - a single sample can
+ * land after a 140 ms animation has already finished. Taking the maximum
+ * over several is what makes the assertion about whether motion happened
+ * rather than about when this task happened to wake up. */
+static int selftest_column_lit_peak(uint32_t x, uint32_t bg, int samples, uint32_t gap_ms) {
+    int peak = 0;
+    for (int i = 0; i < samples; i++) {
+        int lit = selftest_column_lit(x, bg);
+        if (lit > peak) {
+            peak = lit;
+        }
+        pit_sleep_ms(gap_ms);
+    }
+    return peak;
+}
+
 static void selftest_type(const char *s) {
     for (const char *p = s; *p; p++) {
         keyboard_inject(*p, 0);
@@ -196,7 +239,8 @@ static int64_t saved_user_settings_len = -1;
 static const char SELFTEST_SETTINGS_CONF[] =
     "bg=0x001a1a2e\n"      /* compositor.c's DEFAULT_BG_COLOR */
     "accent=0x004c99e6\n"  /* its TITLEBAR_FOCUS_COLOR */
-    "wallpaper=0x00000001\n"; /* WALLPAPER_GRADIENT, its wallpaper_id default */
+    "wallpaper=0x00000001\n" /* WALLPAPER_GRADIENT, its wallpaper_id default */
+    "animations=0x00000001\n"; /* M61: on, which is also the default - stated rather than left to the fallback, because this file is the whole point of "the self-tests run against known settings" */
 
 static void selftest_settings_install_defaults(void) {
     saved_user_settings_len = vfs_read(PATH_SETTINGS, saved_user_settings, sizeof(saved_user_settings));
@@ -434,6 +478,14 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * on the answer, and "files are dated zero" is much easier to explain
      * when the reason is one line near the top of the log. */
     rtc_init();
+    /* M62: the first sound this OS has ever been able to make. The
+     * speaker is unconditional - PIT channel 2 gated onto port 0x61 is
+     * hardware every PC-compatible machine has - and the AC'97 probe
+     * degrades to "no device found" exactly as M27 decided for the NIC,
+     * because a desktop that cannot find a sound card should still be a
+     * desktop. */
+    pcspk_init();
+    ac97_init();
 
     /* Self-test: clear to a background color, fill a smaller rectangle
      * with a different one, then read individual pixels back to confirm
@@ -800,6 +852,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     }
     klog_putc('\n');
 
+    /* M63: SSE on, before there is a second task to switch between.
+     * Everything above this line ran with the FPU in whatever state the
+     * firmware left it; from here it is this OS's, and every task carries
+     * its own copy of it. */
+    fpu_init_cpu();
     sched_init();
     klog_puts("[sched] round-robin scheduler initialized (this context is task 0).\n");
     task_spawn("demo-a", demo_task, "A");
@@ -1614,7 +1671,16 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
             panic("M33 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
+        /* M61: every field, always. This struct has grown three times
+         * (M38's accent, M44's wallpaper, M61's animation flag) and each
+         * time these kernel-side senders kept compiling while quietly
+         * sending stack garbage for the new one - which for M61's flag
+         * means "animations, maybe". Filling all of it in is the only
+         * version of this that stays correct when it grows again. */
         wm_settings_request_t req;
+        k_memset(&req, 0, sizeof(req));
+        req.animations = 1;
+        req.wallpaper = 0; /* WALLPAPER_FLAT - a flat desktop is what the probe below expects */
         req.bg_color = 0x00123456u; /* distinct from DEFAULT_BG_COLOR - a wrong pixel can't accidentally match */
         req.accent_color = 0; /* M38 added this field; this self-test only checks bg_color's effect */
         do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&req, sizeof(req));
@@ -1789,6 +1855,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M38 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
         wm_settings_request_t req;
+        k_memset(&req, 0, sizeof(req));
+        req.animations = 1;
+        req.wallpaper = 0; /* WALLPAPER_FLAT */
         req.bg_color = 0x001A1A2Eu; /* unchanged - keeps the shadow probe above valid if this ever re-read it */
         req.accent_color = 0x00AA5500u; /* distinct from both TITLEBAR_COLOR and the old TITLEBAR_FOCUS_COLOR default - a wrong pixel can't accidentally match either */
         do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&req, sizeof(req));
@@ -2319,6 +2388,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M44 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
         wm_settings_request_t set_req;
+        k_memset(&set_req, 0, sizeof(set_req));
+        set_req.animations = 1;
         set_req.bg_color = 0x001A1A2Eu;
         set_req.accent_color = 0x004C99E6u;
         set_req.wallpaper = 0; /* WALLPAPER_FLAT */
@@ -5082,6 +5153,433 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts("[m60] a real argument vector (cp with two arguments), a command line with "
                    "redirection and a pipe that ends, and an editor whose Enter splits a line - "
                    "with undo and redo inverting it - self-test passed.\n\n");
+    }
+
+    /* M61 self-test: motion, and the compositor meeting a deadline.
+     *
+     * An animation is the one thing in this project that is *deliberately*
+     * not settled, which is exactly what makes it awkward to assert on -
+     * and exactly why the assertion has to be about the middle rather
+     * than only the ends. Three claims:
+     *
+     *   1. The endpoints. Before the minimize, the window is on screen;
+     *      after it has had time to finish, it is not, and the desktop is
+     *      back. Those two are what every earlier self-test would have
+     *      checked, and on their own they cannot tell a 140ms animation
+     *      from an instantaneous change.
+     *   2. **An intermediate frame that is neither.** Sampled part way
+     *      through, a pixel on the path between the window and the
+     *      taskbar has to be lit by *something* - the ghost rectangle -
+     *      that is not there at either end. That single pixel is the
+     *      whole difference between "motion happened" and "it blinked".
+     *   3. The frame budget. The compositor counts frames that overrun
+     *      FRAME_BUDGET_MS and says so on stdout at the end of a run;
+     *      a run that met its deadline says nothing. So the assertion is
+     *      that the line never appeared - which is checked by the serial
+     *      harness rather than here, since it is this kernel's own
+     *      console the compositor prints through.
+     *
+     * And the setting: with animations off, the same minimize produces
+     * nothing on that path at any point. A feature that cannot be turned
+     * off is not a setting, and this is the check that says it can.
+     */
+    {
+        int all_ok = 1;
+
+        size_t comp_bytes = 0;
+        uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+        size_t clock_bytes = 0;
+        uint8_t *clock_image = read_program(PATH_BIN_DIR "gui_clock", &clock_bytes);
+
+        task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+        pit_sleep_ms(300);
+        task_t *clock_task = process_spawn("gui_clock", clock_image, clock_bytes, "");
+        pit_sleep_ms(800);
+
+        /* gui_clock connects as window 0 at (100, 100), 200x120 - the
+         * same placement every other self-test here relies on. A minimize
+         * animates from there down toward the taskbar; with no panel
+         * running, taskbar_target aims at the bottom of the screen under
+         * the window itself, so the path is the column below the window.
+         *
+         * Sampled as a *column* rather than at one point, deliberately:
+         * exactly where the rectangle is 60 ms in is a question about
+         * easing and scheduler jitter, and a test that asserted on it
+         * would be asserting on the wrong thing. Where it is somewhere on
+         * the path is the claim worth making. */
+        const uint32_t probe_x = 150;
+        uint32_t before_window = fb_get_pixel(150, 150); /* inside the window */
+        uint32_t desktop_bg = fb_get_pixel(probe_x, 700); /* bare desktop, well below the window */
+        int before_lit = selftest_column_lit(probe_x, desktop_bg);
+
+        int action_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+            panic("M61 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
+        }
+        wm_action_request_t req;
+        k_memset(&req, 0, sizeof(req));
+        req.window_id = 0;
+        req.action = WM_ACTION_TOGGLE_MINIMIZE;
+
+        /* Sampled 60 ms in - comfortably inside a 140 ms animation and
+         * well past the first frame, so this is the middle rather than
+         * either end. */
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        int during_lit = selftest_column_lit_peak(probe_x, desktop_bg, 12, 12);
+        pit_sleep_ms(400);
+        uint32_t after_window = fb_get_pixel(150, 150);
+        int after_lit = selftest_column_lit(probe_x, desktop_bg);
+
+        /* And again with motion switched off, which must produce nothing
+         * on that path at any point. */
+        int settings_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
+            panic("M61 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
+        }
+        wm_settings_request_t off;
+        off.animations = 0;
+        off.bg_color = 0x001A1A2Eu;   /* compositor.c's DEFAULT_BG_COLOR */
+        off.accent_color = 0x004C99E6u; /* and its TITLEBAR_FOCUS_COLOR */
+        off.wallpaper = 0;              /* WALLPAPER_FLAT - a flat desktop makes "nothing there" unambiguous */
+        do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&off, sizeof(off));
+        pit_sleep_ms(300);
+
+        /* Un-minimize (which with motion off is instantaneous), then
+         * minimize again and sample the same instant. */
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        pit_sleep_ms(400);
+        uint32_t quiet_bg = fb_get_pixel(probe_x, 700);
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        int quiet_lit = selftest_column_lit_peak(probe_x, quiet_bg, 12, 12);
+        pit_sleep_ms(400);
+
+        selftest_reap(clock_task);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        if (before_window == desktop_bg) {
+            klog_puts("[m61] the window and the bare desktop below it are the same colour - this test cannot see anything\n");
+            all_ok = 0;
+        }
+        if (before_lit != 0) {
+            klog_puts("[m61] the path to the taskbar was not bare desktop to begin with: 0x");
+            klog_put_hex32((uint32_t)before_lit);
+            klog_puts(" pixels lit\n");
+            all_ok = 0;
+        }
+        if (during_lit == 0) {
+            klog_puts("[m61] nothing was drawn on the path to the taskbar mid-minimize - the window blinked rather than moved\n");
+            all_ok = 0;
+        }
+        if (after_lit != 0) {
+            klog_puts("[m61] the animation left 0x");
+            klog_put_hex32((uint32_t)after_lit);
+            klog_puts(" pixels behind on its path\n");
+            all_ok = 0;
+        }
+        if (after_window == before_window) {
+            klog_puts("[m61] the window is still on screen after being minimized\n");
+            all_ok = 0;
+        }
+        if (quiet_lit != 0) {
+            klog_puts("[m61] motion is switched off and something still animated: 0x");
+            klog_put_hex32((uint32_t)quiet_lit);
+            klog_puts(" pixels lit\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M61 self-test: window animation did not move, did not clean up, or ignored its setting");
+        }
+        klog_puts("[m61] a minimize animating toward the taskbar - endpoints plus an intermediate "
+                   "frame that is neither, nothing left behind, and nothing at all when motion is "
+                   "switched off - self-test passed.\n\n");
+    }
+
+    /* M62 self-test: the first sound this OS has ever made.
+     *
+     * Sound is the one capability here that cannot be checked by looking,
+     * so what is checkable has to be chosen carefully rather than
+     * asserted vaguely. Four claims, and none of them is "it sounded
+     * right":
+     *
+     *   1. **Ownership is real.** The first claim succeeds, a second from
+     *      a different task is refused, and a beep from a non-owner does
+     *      nothing. That is the whole point of the design - there is one
+     *      speaker, and a program able to seize it unasked can make the
+     *      machine unusable - and it is enforceable without a permission
+     *      model, which is why it is a claim rather than a comment.
+     *   2. The speaker really is gated on and off. Port 0x61's low two
+     *      bits are the gate; they are set while a tone plays and clear
+     *      once its deadline passes. Reading the port back is as close to
+     *      "did it make a sound" as a headless test can get, and it is a
+     *      real read of real hardware state rather than of a flag this
+     *      code set.
+     *   3. **The AC'97 device consumed a buffer we gave it.** QEMU hands
+     *      no audio back, but it does raise the completion interrupt as
+     *      it drains the ring - so a generated tone plus a completion
+     *      count that goes up is proof the descriptor ring, the physical
+     *      addresses and the IRQ wiring are all right. Skipped, not
+     *      failed, on a machine with no such device.
+     *   4. Mute is honoured by the speaker as well as the stream: with
+     *      volume 0, the same beep leaves the gate closed.
+     */
+    {
+        int all_ok = 1;
+
+        /* kernel_main is task 0, and nothing has claimed audio yet. */
+        if (do_syscall(SYS_audio_claim, 0, 0, 0) != 0) {
+            klog_puts("[m62] the first claim on the audio devices was refused\n");
+            all_ok = 0;
+        }
+        if (do_syscall(SYS_audio_claim, 0, 0, 0) != 0) {
+            klog_puts("[m62] the owner could not re-claim what it already owns\n");
+            all_ok = 0;
+        }
+
+        /* A tone, and the gate bits that say it is really playing. */
+        do_syscall(SYS_audio_volume, 100, 0, 0);
+        do_syscall(SYS_beep, 880, 40, 0);
+        uint8_t gate_during = (uint8_t)(inb(0x61) & 0x03);
+        pit_sleep_ms(120); /* past the 40 ms deadline, with room for the tick that clears it */
+        uint8_t gate_after = (uint8_t)(inb(0x61) & 0x03);
+        if (gate_during != 0x03) {
+            klog_puts("[m62] the speaker gate never opened - no tone was played\n");
+            all_ok = 0;
+        }
+        if (gate_after != 0) {
+            klog_puts("[m62] the speaker gate is still open past the tone's deadline\n");
+            all_ok = 0;
+        }
+
+        /* Muted, the same beep must leave the gate shut. */
+        do_syscall(SYS_audio_volume, 0, 0, 0);
+        do_syscall(SYS_beep, 880, 40, 0);
+        uint8_t gate_muted = (uint8_t)(inb(0x61) & 0x03);
+        if (gate_muted != 0) {
+            klog_puts("[m62] muted, and the speaker still played\n");
+            all_ok = 0;
+        }
+        do_syscall(SYS_audio_volume, 100, 0, 0);
+
+        /* The stream. A quarter-second of a 440 Hz sine would need
+         * floating point this kernel does not have (and M63 is the
+         * milestone that changes that); a square wave is what the
+         * speaker makes anyway, and what matters here is that the device
+         * consumed the bytes. */
+        if (!ac97_available()) {
+            klog_puts("[m62] no AC'97 device on this machine - the stream half of this test is skipped, "
+                       "which is the same answer real hardware without one would give.\n");
+        } else {
+            uint32_t frames = 4800; /* 100 ms at 48 kHz */
+            if (frames > ac97_max_frames()) {
+                frames = ac97_max_frames();
+            }
+            int16_t *tone = (int16_t *)kmalloc((size_t)frames * 2 * sizeof(int16_t));
+            if (!tone) {
+                panic("M62 self-test: out of memory for a tenth of a second of audio");
+            }
+            uint32_t period = AC97_SAMPLE_RATE / 440; /* samples per cycle of a 440 Hz square wave */
+            for (uint32_t i = 0; i < frames; i++) {
+                int16_t v = ((i % period) < period / 2) ? 6000 : -6000;
+                tone[i * 2] = v;
+                tone[i * 2 + 1] = v;
+            }
+            uint32_t before = ac97_completions();
+            if (do_syscall(SYS_audio_play, (uint64_t)tone, frames, 0) != 0) {
+                klog_puts("[m62] SYS_audio_play refused a buffer the device advertised room for\n");
+                all_ok = 0;
+            }
+            /* 100 ms of audio, plus room for the device to get around to
+             * it - the completion is an interrupt, not a return value. */
+            pit_sleep_ms(600);
+            uint32_t after = ac97_completions();
+            kfree(tone);
+            if (after == before) {
+                klog_puts("[m62] the AC'97 device never reported finishing the buffer it was given\n");
+                ac97_debug_dump();
+                all_ok = 0;
+            }
+        }
+
+        /* And ownership, from somebody else. A spawned program is a
+         * different task, which is exactly the case the claim exists for -
+         * badptr is used because it is already on disk and already exits
+         * on its own. */
+        {
+            size_t claim_bytes = 0;
+            uint8_t *claim_image = read_program(PATH_BIN_DIR "audiograb", &claim_bytes);
+            task_t *grabber = process_spawn("audiograb", claim_image, claim_bytes, "");
+            kfree(claim_image);
+            long rc = do_syscall(SYS_wait, (uint64_t)grabber->id, 0, 0);
+            if (rc != 0) {
+                klog_puts("[m62] another process was able to take the speaker, or to beep without owning it: 0x");
+                klog_put_hex32((uint32_t)rc);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+
+        /* And hand it back. kernel_main never exits, so a claim it kept
+         * would keep the speaker away from the compositor for the life
+         * of the machine - which is how an error toast would have gone
+         * back to arriving in silence, the exact thing this milestone is
+         * about. */
+        if (do_syscall(SYS_audio_release, 0, 0, 0) != 0) {
+            klog_puts("[m62] the owner could not release the audio devices\n");
+            all_ok = 0;
+        }
+        if (do_syscall(SYS_beep, 880, 40, 0) == 0) {
+            klog_puts("[m62] a beep succeeded after the speaker was released\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M62 self-test: the speaker, the stream, or the ownership rule is wrong");
+        }
+        klog_puts("[m62] the PC speaker gated on and off by its own deadline, muted when the volume "
+                   "is zero, an AC'97 buffer the device reported finishing, and a second process "
+                   "refused both the claim and the beep, then the owner handing it back - self-test passed.\n\n");
+    }
+
+    /* M63 self-test: somebody else's program.
+     *
+     * Every binary this OS had ever run was written in this repo. Two
+     * things had to exist before that could stop being true, and both are
+     * asserted here rather than assumed:
+     *
+     *   1. **Floating point**, which did not exist in this kernel at all.
+     *      `libctest` is written as an ordinary C program - standard
+     *      headers, nothing from this project - and checks the maths
+     *      library against values that are either right or not, the
+     *      formatter against strings that are either right or not, and
+     *      then runs a float loop long enough to span many scheduler
+     *      quanta. That last one is the only way to catch a broken
+     *      FXSAVE/FXRSTOR: a switch that lost xmm state would corrupt the
+     *      sum, and would do it intermittently.
+     *   2. **A program nobody here wrote**, actually running.
+     *      third_party/whetstone is the 1998 C translation of the 1972
+     *      Whetstone benchmark - `sin`, `cos`, `atan`, `exp`, `log`,
+     *      `sqrt`, `printf("%.1f")`, `time(0)`, `atol`, `strncmp` - and
+     *      its link errors were literally the specification for
+     *      user_space/libc. Its output is read back through a pipe and
+     *      checked, because "it exited 0" would also be true of a program
+     *      that printed nothing.
+     */
+    {
+        int all_ok = 1;
+
+        {
+            size_t bytes = 0;
+            uint8_t *image = read_program(PATH_BIN_DIR "libctest", &bytes);
+            task_t *t = process_spawn("libctest", image, bytes, "");
+            kfree(image);
+            long rc = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+            if (rc != 0) {
+                klog_puts("[m63] the libc/SSE self-test program failed\n");
+                all_ok = 0;
+            }
+        }
+
+        /* Whetstone, with its output captured. The same dup2'd pipe
+         * gui_terminal.c has used since it was written - which is the
+         * point: a third-party program's stdout goes where any program's
+         * does, with no special path for it. */
+        {
+            int out_fds[2];
+            if (do_syscall(SYS_pipe, (uint64_t)out_fds, 0, 0) != 0) {
+                panic("M63 self-test: could not make a pipe for the ported program's output");
+            }
+            do_syscall(SYS_dup2, (uint64_t)out_fds[1], 1, 0);
+
+            size_t bytes = 0;
+            uint8_t *image = read_program(PATH_BIN_DIR "whetstone", &bytes);
+            /* A loop count chosen so the run crosses a whole second:
+             * whetstone reports "Insufficient duration" and exits
+             * nonzero otherwise, and a benchmark that measured nothing
+             * would be a weaker thing to assert on than one that did. */
+            /* Big enough that the run crosses several whole seconds: time()
+             * has one-second resolution, and 800 loops came back saying
+             * "Duration: 1 sec." - one host slower or faster and that is
+             * zero, which whetstone reports as insufficient and exits
+             * nonzero for. */
+            const char *argv[] = { PATH_BIN_DIR "whetstone", "2500", 0 };
+            task_t *t = process_spawnv("whetstone", image, bytes, argv);
+            kfree(image);
+
+            /* Drained while it runs: a pipe holds SYS_PIPE_CAPACITY
+             * bytes and a writer blocks when it is full, so waiting
+             * without reading is how this deadlocks. */
+            static char out[2048];
+            size_t got = 0;
+            long deadline = (long)pit_get_ticks() + 60 * PIT_HZ;
+            for (;;) {
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)out_fds[0], 0, 0);
+                if (avail > 0 && got < sizeof(out) - 1) {
+                    size_t room = sizeof(out) - 1 - got;
+                    long n = do_syscall(SYS_read, (uint64_t)out_fds[0], (uint64_t)(out + got),
+                                         (uint64_t)((size_t)avail < room ? (size_t)avail : room));
+                    if (n > 0) {
+                        got += (size_t)n;
+                    }
+                } else if (do_syscall(SYS_wait_nb, (uint64_t)t->id, 0, 0) != -2) {
+                    /* Exited - one last drain, then done. */
+                    long n;
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)out_fds[0], 0, 0)) > 0 &&
+                           got < sizeof(out) - 1) {
+                        size_t room = sizeof(out) - 1 - got;
+                        long r = do_syscall(SYS_read, (uint64_t)out_fds[0], (uint64_t)(out + got),
+                                             (uint64_t)((size_t)n < room ? (size_t)n : room));
+                        if (r <= 0) {
+                            break;
+                        }
+                        got += (size_t)r;
+                    }
+                    break;
+                } else if ((long)pit_get_ticks() > deadline) {
+                    break;
+                } else {
+                    do_syscall(SYS_yield, 0, 0, 0);
+                }
+            }
+            out[got] = '\0';
+            do_syscall(SYS_close, (uint64_t)out_fds[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)out_fds[1], 0, 0);
+            /* fd 1 back to the console, by hand. SYS_dup2 cannot express
+             * this - there is no descriptor anywhere that *is* stdout to
+             * duplicate from, only the implicit FD_STDOUT every task
+             * starts with - and sched_reset_fds_to_std would also drop
+             * every pipe the self-tests above still hold. Reaching into
+             * the table is the narrow thing to do here, and this is
+             * kernel_main rather than a syscall. */
+            fd_release(&sched_current()->fds[1]);
+            sched_current()->fds[1].type = FD_STDOUT;
+
+            if (!k_strstr(out, "Loops:")) {
+                klog_puts("[m63] the ported program did not report a completed run. It said:\n");
+                klog_puts(out);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+            if (!k_strstr(out, "Whetstones:")) {
+                klog_puts("[m63] the ported program produced no benchmark figure\n");
+                all_ok = 0;
+            } else {
+                /* Printed, because it is the interesting part: this is
+                 * the first number in this project's history produced by
+                 * code nobody here wrote. */
+                klog_puts("[m63] the ported program said:");
+                klog_puts(out);
+            }
+        }
+
+        if (!all_ok) {
+            panic("M63 self-test: floating point, the libc subset, or the ported program is wrong");
+        }
+        klog_puts("[m63] SSE state preserved across task switches, a libc subset checked against "
+                   "values that are either right or not, and a 1972 benchmark nobody here wrote "
+                   "running to completion and reporting a figure - self-test passed.\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

@@ -156,6 +156,18 @@ int wm_confirm_display_mode(void);
  * current state with one field changed. Returns 0, or -1 on failure. */
 int wm_set_theme(uint32_t bg_color, uint32_t accent_color, uint32_t wallpaper);
 
+/* M61: every setting at once, which is what the struct on the wire was
+ * always for - wm_set_theme is this with the animation flag left at its
+ * default, kept because "the three colours" is what three of its four
+ * call sites are actually about. */
+int wm_set_settings(const wm_settings_request_t *in);
+
+/* M61: tells the compositor where window_id's taskbar button is, in
+ * screen coordinates. Only desktop_shell.c calls it, and only when its
+ * layout changes. See WM_ACTION_SET_TASKBAR_SLOT for why the compositor
+ * is told rather than working it out. */
+int wm_set_taskbar_slot(int32_t window_id, int32_t x, int32_t width);
+
 /* M44: the read side of the same three settings. desktop_icons.c polls it
  * (it paints the wallpaper, so it has to be told which one) and
  * settings.c calls it once at startup so its own controls open showing

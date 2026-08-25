@@ -44,6 +44,24 @@ cp_elf_start:
     incbin "build/cp.elf"
 cp_elf_end:
 
+global audiograb_elf_start
+global audiograb_elf_end
+audiograb_elf_start:
+    incbin "build/audiograb.elf"
+audiograb_elf_end:
+
+global libctest_elf_start
+global libctest_elf_end
+libctest_elf_start:
+    incbin "build/libctest.elf"
+libctest_elf_end:
+
+global whetstone_elf_start
+global whetstone_elf_end
+whetstone_elf_start:
+    incbin "build/whetstone.elf"
+whetstone_elf_end:
+
 global ls_elf_start
 global ls_elf_end
 ls_elf_start:

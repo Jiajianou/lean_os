@@ -145,6 +145,26 @@ long sys_time(os_datetime_t *out) {
     return do_syscall(SYS_time, (long)out, 0, 0);
 }
 
+long sys_audio_claim(void) {
+    return do_syscall(SYS_audio_claim, 0, 0, 0);
+}
+
+long sys_audio_release(void) {
+    return do_syscall(SYS_audio_release, 0, 0, 0);
+}
+
+long sys_beep(uint32_t freq_hz, uint32_t ms) {
+    return do_syscall(SYS_beep, (long)freq_hz, (long)ms, 0);
+}
+
+long sys_audio_volume(uint32_t percent) {
+    return do_syscall(SYS_audio_volume, (long)percent, 0, 0);
+}
+
+long sys_audio_play(const int16_t *samples, uint32_t frames) {
+    return do_syscall(SYS_audio_play, (long)samples, (long)frames, 0);
+}
+
 long sys_mouse_read(mouse_event_t *out) {
     return do_syscall(SYS_mouse_read, (long)out, 0, 0);
 }

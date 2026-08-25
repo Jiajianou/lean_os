@@ -2,7 +2,9 @@
 
 #include <stdint.h>
 
+#include "drivers/ac97.h"
 #include "drivers/dispi.h"
+#include "drivers/pcspk.h"
 #include "drivers/fb.h"
 #include "drivers/keyboard.h"
 #include "drivers/klog.h"
@@ -1382,6 +1384,126 @@ static long sys_time(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, ui
     return now.valid ? (long)os_unix_time(&now) : 0;
 }
 
+/* ---- M62: sound ------------------------------------------------------
+ *
+ * One owner, enforced. See SYS_audio_claim's own note for why this is a
+ * claim rather than a comment asking programs to be polite: there is one
+ * speaker, and this project has no permission model to lean on - but
+ * "the first process to ask holds it until it exits" needs none. */
+static int audio_owner = -1;
+
+static int audio_owner_is_caller(void) {
+    task_t *self = sched_current();
+    if (audio_owner < 0) {
+        return 0;
+    }
+    if (audio_owner == self->id) {
+        return 1;
+    }
+    /* The owner may have exited without anything noticing - the same
+     * "ask about a pid rather than infer from silence" check M29's
+     * reap_dead_clients uses. A dead owner owns nothing. */
+    task_t *owner = sched_task_by_id(audio_owner);
+    if (!owner || owner->state == TASK_TERMINATED) {
+        audio_owner = -1;
+    }
+    return 0;
+}
+
+static long sys_audio_claim(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *self = sched_current();
+    if (audio_owner_is_caller()) {
+        return 0;
+    }
+    if (audio_owner >= 0) {
+        return -1;
+    }
+    audio_owner = self->id;
+    return 0;
+}
+
+static long sys_audio_release(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!audio_owner_is_caller()) {
+        return -1;
+    }
+    /* Quiet on the way out, so a release cannot leave a tone playing
+     * that nobody now owns the means to stop. */
+    pcspk_off();
+    audio_owner = -1;
+    return 0;
+}
+
+static long sys_beep(uint64_t freq_hz, uint64_t ms, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!audio_owner_is_caller()) {
+        return -1;
+    }
+    /* Bounded here rather than trusted: a caller asking for a ten-second
+     * tone is a caller making the machine unusable, which is the exact
+     * thing ownership exists to prevent - and the owner is a program too,
+     * with its own bugs. */
+    if (ms > 1000) {
+        ms = 1000;
+    }
+    pcspk_tone((uint32_t)freq_hz, (uint32_t)ms);
+    return 0;
+}
+
+static long sys_audio_volume(uint64_t percent, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!audio_owner_is_caller()) {
+        return -1;
+    }
+    if (percent > 100) {
+        percent = 100;
+    }
+    ac97_set_volume((uint32_t)percent);
+    /* The speaker has no volume - see pcspk.h. Mute is the only part of
+     * this it can honour, and honouring it is what makes a mute switch
+     * mean one thing rather than two. */
+    pcspk_set_muted(percent == 0);
+    return 0;
+}
+
+static long sys_audio_play(uint64_t buf, uint64_t frames, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!audio_owner_is_caller()) {
+        return -1;
+    }
+    if (frames == 0 || frames > ac97_max_frames()) {
+        return -1;
+    }
+    /* Stereo 16-bit: four bytes a frame, and the range is validated
+     * before a single byte is read - M52's rule, and this is a buffer a
+     * user process supplies. */
+    if (!user_range_ok(buf, frames * 4, 0)) {
+        return -1;
+    }
+    return ac97_play((const int16_t *)buf, (uint32_t)frames);
+}
+
 /* M58: the display-mode pair. The list is built once at boot by
  * dispi_init (which validates every candidate against the device's own
  * limits and its reported video memory) and simply copied out here -
@@ -1464,6 +1586,11 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_stat] = sys_stat,
     [SYS_rmdir] = sys_rmdir,
     [SYS_time] = sys_time,
+    [SYS_audio_claim] = sys_audio_claim,
+    [SYS_audio_release] = sys_audio_release,
+    [SYS_beep] = sys_beep,
+    [SYS_audio_volume] = sys_audio_volume,
+    [SYS_audio_play] = sys_audio_play,
     [SYS_display_modes] = sys_display_modes,
     [SYS_display_set_mode] = sys_display_set_mode,
 };

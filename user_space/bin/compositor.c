@@ -178,6 +178,11 @@
  * window will land, not as the window having landed there already. */
 #define SNAP_PREVIEW_NUM 1
 #define SNAP_PREVIEW_DEN 4
+/* SNAP_PREVIEW_NUM is 1 of 4, which leaves no room to scale a numerator
+ * smoothly - so the fade is expressed against a four-times-finer
+ * denominator (SNAP_FADE_DEN), which lands on exactly 1/4 when it
+ * finishes and gives four visible steps on the way. */
+#define SNAP_FADE_DEN (SNAP_PREVIEW_DEN * 4)
 
 /* M44: how much of a translucent window's own pixels survive the blend
  * with what is already composited under it. 3/4 is deliberately subtle -
@@ -451,6 +456,129 @@ static long back_shm_id = -1;      /* M58: kept so a mode change can hand the ol
  * no config file to edit blind, so the countdown is not a nicety. */
 static uint32_t mode_prev_w, mode_prev_h;
 static long mode_revert_at_ms;
+
+/* ---- M61: motion, and a frame clock ---------------------------------
+ *
+ * Windows in this OS appeared and disappeared instantly, and that was
+ * missing *information* rather than missing polish: a minimized window
+ * vanished and nothing on screen said where it went, which is precisely
+ * what an animation toward its taskbar button exists to say.
+ *
+ * What was actually missing was a clock. REDRAW_INTERVAL_MS is a
+ * *fallback poll* for changes this process cannot otherwise notice - its
+ * own comment says so - and a fallback poll is not a clock: nothing here
+ * could ask for "a frame in sixteen milliseconds because something is
+ * moving". FRAME_MS is that ask, and it is the first thing in this
+ * project that has to hold a deadline rather than merely finish.
+ *
+ * An animation draws a blended, rounded rectangle interpolating between
+ * two geometries - not a scaled copy of the window's own pixels. That is
+ * a deliberate scope line and not a shortcut: scaling a live client's
+ * buffer means resampling it every frame, sixteen milliseconds is not
+ * long, and the thing being communicated ("it went *there*") is carried
+ * entirely by the geometry. */
+#define ANIM_MS         140   /* short and unfussy - animations that announce themselves are the ones people go looking for a setting to turn off */
+#define FRAME_MS        16    /* ~60 Hz while something is moving */
+/* The budget, written down so it can be missed visibly. Measured on the
+ * machine this was developed against: an animation frame recomposites
+ * the union of where the rectangle was and where it is - a few hundred
+ * rows at most - which lands around 2 ms, well inside a 16 ms frame. The
+ * compositor counts frames that blow it and says so once at the end of a
+ * run, which is what turns "an animation that stutters is worse than
+ * none" into something a test can assert. */
+#define FRAME_BUDGET_MS 16
+#define ANIM_MAX        6
+
+typedef enum {
+    ANIM_NONE = 0,
+    ANIM_MINIMIZE,  /* the window's frame shrinking into its taskbar button */
+    ANIM_RESTORE,   /* and back out of it */
+    ANIM_OPEN,      /* a short scale-up from the middle of where the window will be */
+    ANIM_CLOSE,     /* and the reverse */
+} anim_kind_t;
+
+typedef struct {
+    uint8_t kind;
+    long start_ms;
+    int32_t fx, fy, fw, fh; /* from */
+    int32_t tx, ty, tw, th; /* to */
+    /* Where this was drawn last frame, so a frame only has to repaint the
+     * union of then and now rather than the whole screen. */
+    int32_t lx, ly, lw, lh;
+    uint8_t drawn;
+} anim_t;
+
+static anim_t anims[ANIM_MAX];
+static int animations_enabled = 1;
+/* M62: 0-100, this process's copy of the setting. Sent to the kernel on
+ * every change rather than read back from it, so the value settings.c
+ * shows and the value the mixer holds have one source. */
+static uint32_t audio_volume = 70;
+static long frame_due_ms;      /* when the next animation frame is owed */
+static uint32_t frames_over_budget;
+static uint32_t frames_drawn;
+static long anim_run_start_ms; /* when the current run of animations began */
+
+/* M61: where each window's taskbar button is, as desktop_shell.c last
+ * reported it (WM_ACTION_SET_TASKBAR_SLOT). -1 width means "never told",
+ * which is the ordinary state on a desktop with no panel and makes
+ * minimize aim at the bottom of the screen instead. */
+static int32_t slot_x[MAX_WINDOWS];
+static int32_t slot_w[MAX_WINDOWS];
+
+/* M61: when the launcher's fade began, or 0 when it is not fading. */
+static long launcher_fade_start_ms;
+/* And the snap preview's, which fades on the same clock for the same
+ * reason. */
+static long snap_fade_start_ms;
+
+static int launcher_fading(void);
+static int32_t launcher_opacity_num(void);
+static int snap_fading(void);
+static int32_t snap_preview_num(void);
+
+/* Ease-out, in integer thousandths: p = t * (2 - t). Motion that starts
+ * fast and settles is what reads as a thing arriving somewhere; linear
+ * motion reads as a thing being dragged. */
+static int32_t ease_out(int32_t t_permille) {
+    if (t_permille <= 0) {
+        return 0;
+    }
+    if (t_permille >= 1000) {
+        return 1000;
+    }
+    return (2000 * t_permille - t_permille * t_permille) / 1000;
+}
+
+static int32_t lerp(int32_t from, int32_t to, int32_t p) {
+    return from + (to - from) * p / 1000;
+}
+
+/* The rectangle an animation occupies right now, and whether it is still
+ * running. Retires it here rather than in the drawing code, so "is
+ * anything moving" has one answer. */
+static int anim_rect_now(anim_t *a, long now, int32_t *x, int32_t *y, int32_t *w, int32_t *h) {
+    long elapsed = now - a->start_ms;
+    if (elapsed >= ANIM_MS) {
+        return 0;
+    }
+    int32_t p = ease_out((int32_t)(elapsed * 1000 / ANIM_MS));
+    *x = lerp(a->fx, a->tx, p);
+    *y = lerp(a->fy, a->ty, p);
+    *w = lerp(a->fw, a->tw, p);
+    *h = lerp(a->fh, a->th, p);
+    return 1;
+}
+
+/* M61: the four things that start an animation, defined much further
+ * down (they need the window table's geometry helpers, which need most
+ * of this file) and declared here because the places something *happens*
+ * - a window opening, closing, minimizing or coming back - are spread
+ * across it. */
+static void anim_window_minimize(int idx);
+static void anim_window_restore(int idx);
+static void anim_window_open(int idx);
+static void anim_window_close(int idx);
 
 /* M55: this process's own pid, read once at startup and echoed in every
  * create response - see wm_create_response_t.compositor_pid. */
@@ -1413,7 +1541,7 @@ static void draw_launcher(void) {
      * desktop is still behind it, not enough to make the text field you
      * type into hard to read. */
     fill_rect_rounded_blend(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BG,
-                             LAUNCHER_OPACITY_NUM, LAUNCHER_OPACITY_DEN);
+                             launcher_opacity_num(), LAUNCHER_OPACITY_DEN);
     stroke_rect_rounded(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BORDER);
 
     /* The search field. An empty query shows a hint rather than nothing,
@@ -1523,6 +1651,78 @@ static void draw_window_menu(void) {
     }
 }
 
+/* M61: every animation's current rectangle, drawn in the accent colour
+ * over whatever is underneath. Blended rather than solid so it reads as a
+ * ghost of the window rather than as a window - what is moving is not the
+ * window, and pretending otherwise would raise the question of why its
+ * contents are not moving with it. */
+#define ANIM_FILL_NUM 2
+#define ANIM_FILL_DEN 5
+
+static void draw_animations(void) {
+    long now = sys_uptime_ms();
+    for (int i = 0; i < ANIM_MAX; i++) {
+        anim_t *a = &anims[i];
+        if (a->kind == ANIM_NONE) {
+            continue;
+        }
+        int32_t x, y, w, h;
+        if (!anim_rect_now(a, now, &x, &y, &w, &h)) {
+            continue;
+        }
+        if (w < 2 || h < 2) {
+            continue;
+        }
+        fill_rect_rounded_blend(x, y, w, h, accent_color, ANIM_FILL_NUM, ANIM_FILL_DEN);
+        stroke_rect_rounded(x, y, w, h, accent_color);
+        a->lx = x; a->ly = y; a->lw = w; a->lh = h;
+        a->drawn = 1;
+    }
+}
+
+/* Advances the clock: retires whatever has finished and reports the
+ * screen rectangle this frame has to repaint - the union of where every
+ * animation was and where it now is. Returns 0 when nothing is moving. */
+static int anim_step(long now, int32_t *out_x0, int32_t *out_y0, int32_t *out_x1, int32_t *out_y1) {
+    int32_t x0 = (int32_t)fb_info.width, y0 = (int32_t)fb_info.height, x1 = 0, y1 = 0;
+    int any = 0;
+    for (int i = 0; i < ANIM_MAX; i++) {
+        anim_t *a = &anims[i];
+        if (a->kind == ANIM_NONE) {
+            continue;
+        }
+        if (a->drawn) {
+            x0 = min_i32(x0, a->lx);
+            y0 = min_i32(y0, a->ly);
+            x1 = max_i32(x1, a->lx + a->lw);
+            y1 = max_i32(y1, a->ly + a->lh);
+            any = 1;
+        }
+        int32_t nx, ny, nw, nh;
+        if (!anim_rect_now(a, now, &nx, &ny, &nw, &nh)) {
+            a->kind = ANIM_NONE;
+            a->drawn = 0;
+            continue;
+        }
+        x0 = min_i32(x0, nx);
+        y0 = min_i32(y0, ny);
+        x1 = max_i32(x1, nx + nw);
+        y1 = max_i32(y1, ny + nh);
+        any = 1;
+    }
+    if (!any) {
+        return 0;
+    }
+    /* One pixel of slack on every side: the rounded stroke is drawn on
+     * the boundary, and a repaint that stops exactly at it leaves a
+     * one-pixel trail behind a moving rectangle. */
+    *out_x0 = x0 - 1;
+    *out_y0 = y0 - 1;
+    *out_x1 = x1 + 1;
+    *out_y1 = y1 + 1;
+    return 1;
+}
+
 /* Recomposites and re-presents only [x0,x1) x [y0,y1) (clamped to the
  * real screen) rather than assuming the whole display - see clip_x0..
  * clip_y1's own comment above for why: a cursor moving is by far the
@@ -1590,8 +1790,12 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
      * where one is going, so it has to be visible over the one being
      * dragged) but below the panels, which stay topmost as always. */
     if (snap_preview_active) {
+        /* M61: it fades in rather than appearing. The preview is a claim
+         * about where the window is going, and a claim that materialises
+         * fully formed under a moving cursor reads as a glitch - the
+         * fade is what makes it read as a response. */
         fill_rect_blend(snap_preview_x, snap_preview_y, snap_preview_w, snap_preview_h,
-                         accent_color, SNAP_PREVIEW_NUM, SNAP_PREVIEW_DEN);
+                         accent_color, snap_preview_num(), SNAP_FADE_DEN);
         stroke_rect(snap_preview_x, snap_preview_y, snap_preview_w, snap_preview_h, accent_color);
     }
     for (int z = 0; z < z_count; z++) {
@@ -1606,6 +1810,10 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
     if (wmenu_window >= 0 && windows[wmenu_window].alive) {
         draw_window_menu();
     }
+    /* M61: above the windows and the panel, below the launcher and the
+     * toasts. An animation is *about* a window, so it belongs in front of
+     * the windows; it is not something to obscure a notification with. */
+    draw_animations();
     /* Above every window and every panel, below only the cursor - see
      * draw_launcher's own note on why this is compositor-owned. */
     if (launcher_open) {
@@ -1775,6 +1983,20 @@ static void set_focus(int idx) {
  * a burst of failures should show you the most recent ones, and the
  * dropped one was already on its way out. */
 static void toast_post(uint32_t level, const char *title, const char *body) {
+    /* M62: an error makes a sound. M48 built an entire notification
+     * system in which an error arrived in complete silence, and this one
+     * connection is what makes a speaker driver a feature rather than a
+     * driver. Only errors: a beep on every informational toast is a
+     * machine people mute, and a muted machine is one that cannot tell
+     * them anything.
+     *
+     * 660 Hz for 90 ms - short, and deliberately not a two-tone chime.
+     * There is one speaker and one sound, and inventing a sound design
+     * for a system whose entire audio history is this milestone would be
+     * inventing rather than deciding. */
+    if (level == WM_NOTIFY_ERROR) {
+        sys_beep(660, 90);
+    }
     if (toast_count == TOAST_MAX) {
         for (int i = 1; i < TOAST_MAX; i++) {
             toasts[i - 1] = toasts[i];
@@ -1855,6 +2077,17 @@ static void reclaim_window(int idx) {
     if (!win->alive) {
         return;
     }
+    /* M61: the closing animation is started here rather than at the
+     * click, because this is the one place every way of losing a window
+     * funnels through - a close button, an external WM_ACTION_CLOSE, a
+     * kill, and a crash. A window that vanished because its process
+     * faulted gets the same short scale-down as one that was closed on
+     * purpose, which is right: from the screen's point of view they are
+     * the same event. */
+    if (!win->is_panel && !win->is_desktop && !win->minimized) {
+        anim_window_close(idx);
+    }
+    slot_w[idx] = -1;
     if (win->shm_id >= 0) {
         sys_shm_free(win->shm_id, win->pixels);
         win->shm_id = -1;
@@ -2220,6 +2453,15 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     win->close_requested = 0;
     win->confirm_close = req.confirm_close;
     win->client_pid = req.client_pid;
+    /* M61: chrome-less surfaces do not animate. A desktop background and
+     * a taskbar are not things that *appear* - they are the desktop, and
+     * a taskbar that scaled into place at boot would be motion about
+     * nothing. */
+    if (!req.panel && !req.desktop) {
+        anim_window_open(idx);
+    }
+    slot_x[idx] = 0;
+    slot_w[idx] = -1; /* until the panel says otherwise - see taskbar_target */
     int ti = 0;
     for (; req.title[ti] && ti < WM_TITLE_MAX - 1; ti++) {
         win->title[ti] = req.title[ti];
@@ -2310,6 +2552,16 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
         win->minimized = 0;
         set_focus(idx); /* M51: which raises it - see set_focus */
     } else if (action == WM_ACTION_TOGGLE_MINIMIZE) {
+        /* M61: the animation is started from the pre-change geometry
+         * (which is the same either way here - minimize does not move the
+         * window, it hides it) and is the one animation in this milestone
+         * that carries information rather than decoration: a window that
+         * simply vanished said nothing about where it went. */
+        if (win->minimized) {
+            anim_window_restore(idx);
+        } else {
+            anim_window_minimize(idx);
+        }
         win->minimized = !win->minimized;
         if (win->minimized && focused_window == idx) {
             set_focus(-1);
@@ -2555,6 +2807,16 @@ static void launcher_reload(void) {
 }
 
 static void launcher_set_open(int open) {
+    /* M61: the launcher fades in rather than appearing. It is the one
+     * surface here that covers a third of the screen in a single frame,
+     * which is exactly the transition a fade is for - and it is a fade of
+     * its own *opacity* rather than an ANIM_* rectangle, because the
+     * thing arriving is the panel itself, not a ghost of it. */
+    if (open && !launcher_open && animations_enabled) {
+        launcher_fade_start_ms = sys_uptime_ms();
+    } else {
+        launcher_fade_start_ms = 0;
+    }
     launcher_open = open;
     power_confirm = POWER_CONFIRM_NONE; /* M47: never leave a confirm box armed across an open/close */
     power_hover = POWER_CONFIRM_NONE;
@@ -2732,6 +2994,167 @@ static void launcher_hover(int32_t px, int32_t py) {
     }
 }
 
+/* ---- M61: the animation engine ------------------------------------ */
+
+/* Decimal into `out`, returning how many characters it wrote. The one
+ * number this process has ever had to print (M61's frame-budget line);
+ * there is no printf in this project - see milestones.md's ground
+ * rules. */
+static int format_uint(uint32_t v, char *out) {
+    char tmp[12];
+    int n = 0;
+    do {
+        tmp[n++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    } while (v);
+    int len = 0;
+    while (n > 0) {
+        out[len++] = tmp[--n];
+    }
+    return len;
+}
+
+static int anim_any_active(void) {
+    for (int i = 0; i < ANIM_MAX; i++) {
+        if (anims[i].kind != ANIM_NONE) {
+            return 1;
+        }
+    }
+    return launcher_fading() || snap_fading();
+}
+
+static int snap_fading(void) {
+    return snap_fade_start_ms != 0 && sys_uptime_ms() - snap_fade_start_ms < ANIM_MS;
+}
+
+static int32_t snap_preview_num(void) {
+    if (!snap_fade_start_ms) {
+        return SNAP_PREVIEW_NUM * 4;
+    }
+    long elapsed = sys_uptime_ms() - snap_fade_start_ms;
+    if (elapsed >= ANIM_MS) {
+        return SNAP_PREVIEW_NUM * 4;
+    }
+    int32_t p = ease_out((int32_t)(elapsed * 1000 / ANIM_MS));
+    int32_t num = SNAP_PREVIEW_NUM * 4 * p / 1000;
+    return num < 1 ? 1 : num;
+}
+
+/* Whether the launcher's fade is still running - which is a reason for
+ * the frame clock to keep ticking, exactly like a moving rectangle. */
+static int launcher_fading(void) {
+    return launcher_fade_start_ms != 0 &&
+           sys_uptime_ms() - launcher_fade_start_ms < ANIM_MS;
+}
+
+/* M61: the launcher's opacity right now - its full value once the fade
+ * has finished, which is also what it is when animations are off. */
+static int32_t launcher_opacity_num(void) {
+    if (!launcher_fade_start_ms) {
+        return LAUNCHER_OPACITY_NUM;
+    }
+    long elapsed = sys_uptime_ms() - launcher_fade_start_ms;
+    if (elapsed >= ANIM_MS) {
+        return LAUNCHER_OPACITY_NUM;
+    }
+    int32_t p = ease_out((int32_t)(elapsed * 1000 / ANIM_MS));
+    int32_t num = LAUNCHER_OPACITY_NUM * p / 1000;
+    return num < 1 ? 1 : num;
+}
+
+/* Starts one animation. Silently does nothing when animations are off,
+ * which is what makes the setting a real one: every caller is a place
+ * something *happened*, and the thing that happened still happens. */
+static void anim_start(anim_kind_t kind,
+                        int32_t fx, int32_t fy, int32_t fw, int32_t fh,
+                        int32_t tx, int32_t ty, int32_t tw, int32_t th) {
+    if (!animations_enabled) {
+        return;
+    }
+    int slot = -1;
+    for (int i = 0; i < ANIM_MAX; i++) {
+        if (anims[i].kind == ANIM_NONE) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        /* Six at once is already more motion than a desktop should have
+         * on screen; the seventh simply does not animate rather than
+         * evicting one mid-flight, which would look like a glitch
+         * rather than like restraint. */
+        return;
+    }
+    if (!anim_any_active()) {
+        anim_run_start_ms = sys_uptime_ms();
+        frames_drawn = 0;
+        frames_over_budget = 0;
+    }
+    anim_t *a = &anims[slot];
+    a->kind = (uint8_t)kind;
+    a->start_ms = sys_uptime_ms();
+    a->fx = fx; a->fy = fy; a->fw = fw; a->fh = fh;
+    a->tx = tx; a->ty = ty; a->tw = tw; a->th = th;
+    a->drawn = 0;
+    frame_due_ms = 0; /* the next loop iteration owes a frame immediately */
+}
+
+/* Where a window's taskbar button is, or the honest fallback. */
+static void taskbar_target(int idx, const window_t *win, int32_t *x, int32_t *y,
+                            int32_t *w, int32_t *h) {
+    int32_t panel_top = content_bottom_limit();
+    if (slot_w[idx] > 0) {
+        *x = slot_x[idx];
+        *w = slot_w[idx];
+    } else {
+        /* Nothing has told this process where the button is - aim at the
+         * bottom of the screen under the window itself, which still says
+         * "downward, out of the way" without claiming to know more. */
+        *w = min_i32(win->w, 96);
+        *x = win->x + (win->w - *w) / 2;
+    }
+    *y = panel_top;
+    *h = (int32_t)fb_info.height - panel_top;
+    if (*h <= 0) {
+        *h = 8;
+        *y = (int32_t)fb_info.height - 8;
+    }
+}
+
+static void anim_window_minimize(int idx) {
+    const window_t *win = &windows[idx];
+    int32_t tx, ty, tw, th;
+    taskbar_target(idx, win, &tx, &ty, &tw, &th);
+    anim_start(ANIM_MINIMIZE, win->x, win->y - TITLEBAR_H, win->w, win->h + TITLEBAR_H,
+                tx, ty, tw, th);
+}
+
+static void anim_window_restore(int idx) {
+    const window_t *win = &windows[idx];
+    int32_t fx, fy, fw, fh;
+    taskbar_target(idx, win, &fx, &fy, &fw, &fh);
+    anim_start(ANIM_RESTORE, fx, fy, fw, fh,
+                win->x, win->y - TITLEBAR_H, win->w, win->h + TITLEBAR_H);
+}
+
+/* Open and close: a short scale from (and to) the middle of where the
+ * window is. A quarter-size rectangle rather than a point, because a
+ * rectangle that starts at nothing spends most of its 140 ms being too
+ * small to see. */
+static void anim_window_open(int idx) {
+    const window_t *win = &windows[idx];
+    int32_t x = win->x, y = win->y - TITLEBAR_H;
+    int32_t w = win->w, h = win->h + TITLEBAR_H;
+    anim_start(ANIM_OPEN, x + w / 4, y + h / 4, w / 2, h / 2, x, y, w, h);
+}
+
+static void anim_window_close(int idx) {
+    const window_t *win = &windows[idx];
+    int32_t x = win->x, y = win->y - TITLEBAR_H;
+    int32_t w = win->w, h = win->h + TITLEBAR_H;
+    anim_start(ANIM_CLOSE, x, y, w, h, x + w / 4, y + h / 4, w / 2, h / 2);
+}
+
 /* ---- M58: changing the display mode -------------------------------
  *
  * The kernel syscall changes the mode and re-maps the kernel's own
@@ -2863,6 +3286,18 @@ static void accept_pending_action(int action_read_fd) {
     if (read_exact(action_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
         return;
     }
+    /* M61: where a window's taskbar button is. Handled before the
+     * window_id validation only in the sense that it is about a window
+     * that may since have gone - a stale slot report for a dead window is
+     * an ordinary race (the panel sends these from its own redraw), not
+     * an error worth reporting. */
+    if (req.action == WM_ACTION_SET_TASKBAR_SLOT) {
+        if (req.window_id >= 0 && req.window_id < MAX_WINDOWS) {
+            slot_x[req.window_id] = (int32_t)(((uint32_t)req.value >> 16) & 0xFFFFu);
+            slot_w[req.window_id] = (int32_t)((uint32_t)req.value & 0xFFFFu);
+        }
+        return;
+    }
     /* M42: the one action that isn't about a window, so it's handled
      * before (and instead of) the window_id validation every other one
      * goes through - see WM_ACTION_TOGGLE_LAUNCHER. */
@@ -2915,6 +3350,9 @@ static void accept_pending_settings(int settings_read_fd) {
     bg_color = req.bg_color;
     accent_color = req.accent_color;
     wallpaper_id = req.wallpaper;
+    animations_enabled = req.animations != 0;
+    audio_volume = req.volume > 100 ? 100 : req.volume;
+    sys_audio_volume(audio_volume);
     dirty = 1;
 }
 
@@ -2971,6 +3409,8 @@ static void accept_pending_settings_query(int query_read_fd, int query_resp_writ
         return;
     }
     wm_settings_request_t resp;
+    resp.volume = audio_volume;
+    resp.animations = (uint32_t)animations_enabled;
     resp.bg_color = bg_color;
     resp.accent_color = accent_color;
     resp.wallpaper = wallpaper_id;
@@ -3241,6 +3681,8 @@ static void handle_mouse(void) {
                     if (hint != drag_snap_hint) {
                         drag_snap_hint = hint;
                         snap_preview_active = (hint != SNAP_NONE);
+                        snap_fade_start_ms = snap_preview_active && animations_enabled
+                                                 ? sys_uptime_ms() : 0;
                         if (snap_preview_active) {
                             int32_t sx, sy, sw, sh;
                             snap_rect(win, hint == SNAP_LEFT ? WM_ACTION_SNAP_LEFT : WM_ACTION_SNAP_RIGHT,
@@ -3635,6 +4077,8 @@ int main(void) {
      * is for (see its own doc comment). */
     {
         wm_settings_request_t saved;
+        saved.volume = audio_volume;
+        saved.animations = (uint32_t)animations_enabled;
         saved.bg_color = bg_color;
         saved.accent_color = accent_color;
         saved.wallpaper = wallpaper_id;
@@ -3642,7 +4086,16 @@ int main(void) {
             bg_color = saved.bg_color;
             accent_color = saved.accent_color;
             wallpaper_id = saved.wallpaper;
+            animations_enabled = saved.animations != 0;
+            audio_volume = saved.volume > 100 ? 100 : saved.volume;
         }
+        /* M62: this process owns the speaker, claimed here for the same
+         * reason it owns the screen - it is the one that knows when the
+         * desktop has something to say. Claiming before any client
+         * connects is what makes the claim stick: a client that asked
+         * first would hold it, and there is only one. */
+        sys_audio_claim();
+        sys_audio_volume(audio_volume);
     }
 
     int req_fds[2];
@@ -3737,6 +4190,79 @@ int main(void) {
             }
         }
         toasts_expire(now); /* M48: a deadline is the only thing that retires a toast on its own */
+        /* M61: the frame clock. This is the first thing in the project
+         * that asks for a frame at a *time* rather than in response to
+         * something arriving, and it is deliberately checked before the
+         * dirty/fallback path below so that a frame owed at 16 ms is not
+         * waiting on a 100 ms poll.
+         *
+         * The repaint is the union of where each animation was and where
+         * it now is - a few hundred rows, not a screen - which is what
+         * keeps a 16 ms budget reachable at all. */
+        if (anim_any_active() && now >= frame_due_ms) {
+            int32_t ax0, ay0, ax1, ay1;
+            frame_due_ms = now + FRAME_MS;
+            long began = sys_uptime_ms();
+            int painted = 0;
+            if (anim_step(now, &ax0, &ay0, &ax1, &ay1)) {
+                redraw_rect(ax0, ay0, ax1, ay1);
+                painted = 1;
+            }
+            if (launcher_fading()) {
+                /* The fade is a change to the launcher's own opacity, so
+                 * the rectangle to repaint is the launcher, not a moving
+                 * ghost - one more reason for the clock to tick, handled
+                 * beside the others rather than by a second timer. */
+                int32_t lx, ly;
+                launcher_rect(&lx, &ly);
+                redraw_rect(lx, ly, lx + LAUNCHER_W, ly + LAUNCHER_H);
+                painted = 1;
+            } else {
+                launcher_fade_start_ms = 0;
+            }
+            if (snap_fading()) {
+                redraw_rect(snap_preview_x, snap_preview_y,
+                             snap_preview_x + snap_preview_w, snap_preview_y + snap_preview_h);
+                painted = 1;
+            } else {
+                snap_fade_start_ms = 0;
+            }
+            if (painted) {
+                long took = sys_uptime_ms() - began;
+                frames_drawn++;
+                if (took > FRAME_BUDGET_MS) {
+                    frames_over_budget++;
+                }
+            }
+            if (!anim_any_active()) {
+                /* The run is over: the whole area every animation passed
+                 * through has to come back as itself, and this is where
+                 * the budget gets reported if it was missed. Silence when
+                 * it was not - a line printed on a good run would draw
+                 * over the very desktop the animation was about. */
+                dirty = 1;
+                if (frames_over_budget > 0) {
+                    char msg[96];
+                    int n = 0;
+                    static const char pre[] = "[wm] animation missed its frame budget: ";
+                    for (int i = 0; pre[i]; i++) {
+                        msg[n++] = pre[i];
+                    }
+                    n += format_uint((uint32_t)frames_over_budget, msg + n);
+                    static const char mid[] = " of ";
+                    for (int i = 0; mid[i]; i++) {
+                        msg[n++] = mid[i];
+                    }
+                    n += format_uint(frames_drawn, msg + n);
+                    static const char post[] = " frames\n";
+                    for (int i = 0; post[i]; i++) {
+                        msg[n++] = post[i];
+                    }
+                    sys_write(1, msg, (size_t)n);
+                }
+            }
+        }
+
         if (dirty || now - last_redraw_ms >= REDRAW_INTERVAL_MS) {
             redraw();
             dirty = 0;

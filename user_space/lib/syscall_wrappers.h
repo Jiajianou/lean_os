@@ -147,6 +147,18 @@ long sys_rmdir(const char *path);
  * print the same way. */
 long sys_time(os_datetime_t *out);
 
+/* ---- M62: sound ------------------------------------------------------
+ *
+ * There is one speaker, so there is one owner - the first process to
+ * claim it holds it until it exits, and every call below refuses anybody
+ * else. The compositor claims it at startup for the same reason it owns
+ * the screen. See SYS_audio_claim. */
+long sys_audio_claim(void);
+long sys_audio_release(void);
+long sys_beep(uint32_t freq_hz, uint32_t ms);
+long sys_audio_volume(uint32_t percent);
+long sys_audio_play(const int16_t *samples, uint32_t frames);
+
 /* M20: pops the next buffered mouse event into *out. Returns 1 if one
  * was available, 0 if not (never blocks) - same contract as the
  * kernel-internal mouse_read() this wraps. */

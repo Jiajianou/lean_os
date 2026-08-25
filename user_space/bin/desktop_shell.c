@@ -168,6 +168,12 @@ typedef struct {
      * hand them back in z-order. */
     uint8_t frontmost;
     uint8_t minimized;
+    /* M61: what this slot last told the compositor about itself, so a
+     * layout that has not changed sends nothing. Slots are reused as
+     * windows come and go, so the window id is part of the comparison -
+     * a different window at the same x is a different button. */
+    int32_t reported_id;
+    int32_t reported_x;
     char name[LABEL_MAX + 1];
 } running_slot_t;
 
@@ -277,6 +283,25 @@ static void refresh_running_slots(wm_window_t *self) {
         x += SLOT_W + SLOT_GAP;
         running_count++;
     }
+    /* M61: tell the compositor where each button ended up, so a
+     * minimize can animate toward the one it is going to. Sent from
+     * here rather than from redraw because this is where the *layout*
+     * changes - a redraw happens several times a second and the layout
+     * does not. Only when it actually moved: an unchanged slot is a
+     * message nobody needs.
+     *
+     * The compositor is told rather than working it out, because this
+     * geometry is the taskbar's - a second copy of it over there would
+     * be a second thing to keep in step. */
+    for (int i = 0; i < running_count; i++) {
+        running_slot_t *slot = &running_slots[i];
+        if (slot->window_id != slot->reported_id || slot->x != slot->reported_x) {
+            wm_set_taskbar_slot(slot->window_id, slot->x, slot->w);
+            slot->reported_id = slot->window_id;
+            slot->reported_x = slot->x;
+        }
+    }
+
     /* M51: whichever listed window sits highest in the z-order, ignoring
      * minimized ones (a minimized window is not in front of anything -
      * it isn't on screen at all). One pass over what was just laid out,

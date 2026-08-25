@@ -31,6 +31,14 @@ int pci_find_device(uint16_t vendor_id, uint16_t device_id, pci_device_t *out);
  * device needs vmm mapping support this function doesn't attempt. */
 uint16_t pci_bar0_io_base(const pci_device_t *dev);
 
+/* M62: the same for BAR1, which is where a device's *second* I/O region
+ * lives - the AC'97 controller has two (a mixer and a bus-master block)
+ * and needs both. Split from pci_bar0_io_base rather than parameterised,
+ * because "which BAR" is a fact about a device rather than a loop
+ * variable, and two named functions read better at the two call sites
+ * than one that takes an index. */
+uint16_t pci_bar1_io_base(const pci_device_t *dev);
+
 /* Sets the Bus Master and I/O Space enable bits in the command register -
  * required before a device can do DMA (bus mastering) or respond to I/O
  * port cycles at all. */

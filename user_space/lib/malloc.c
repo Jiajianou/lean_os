@@ -94,3 +94,10 @@ void free(void *ptr) {
         b->next = b->next->next;
     }
 }
+
+size_t malloc_usable_size(void *ptr) {
+    if (!ptr) {
+        return 0;
+    }
+    return ((block_header_t *)ptr - 1)->size;
+}

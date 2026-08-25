@@ -3193,7 +3193,7 @@ and every desktop client is supervised (M55). What remains:
   it is a pattern rather than something the harness makes hard to get
   wrong
 
-## Path to a desktop someone would choose to use (M57+)
+## Path to a desktop someone would choose to use (M57+) ✅
 
 M51-M56 made this desktop dependable. It raises and occludes correctly,
 it survives a compositor crash, a bad pointer kills one task instead of
@@ -3219,6 +3219,32 @@ happens. The cost of waiting is real and worth writing down - every
 milestone below is one more subsystem authored against QEMU's behavior,
 and M28's own gaps note has been accruing since. It comes back the moment
 this arc lands.
+
+**It landed.** All seven milestones below are done, and what the arc
+actually cost is written into each one's own progress notes. Three things
+are worth pulling out here because they are about the project rather than
+about a milestone:
+
+- **Every one of these found a bug in something older.** M57's measured
+  text found a taskbar clock that had never been measured; M58's mode
+  change found a `bar_gfx` that had been stale since M55 and nobody had
+  reconnected a panel to notice; M59's descriptors found fifty-three
+  `kmalloc(LEANFS_MAX_FILE_SIZE)` call sites that were fine at 72 KiB and
+  absurd at 8 MiB; M62's speaker found two real interrupt-delivery bugs
+  because it was the first device this kernel ever *waited* on an
+  interrupt from. A milestone that touches everything is a milestone that
+  audits everything.
+- **The tests got harder to write, in a specific way.** Everything before
+  M61 could be asserted on a settled screen. An animation is deliberately
+  not settled, a sound cannot be looked at, and a benchmark's output is a
+  number nobody can predict. Each needed a different answer - sample the
+  path repeatedly and take the maximum, read the speaker's own gate bits
+  back off port 0x61, assert the *shape* of the output rather than its
+  value - and each of those answers is reusable.
+- **What is still not proven is the same thing it was seven milestones
+  ago**: none of this has run on metal. That is now the single largest
+  claim in the project, and it has four known prerequisites rather than
+  the one it started with.
 
 The ordering below is dependency-honest rather than pure priority. M57
 needs nothing and changes every window in the OS. M58 is the other half
@@ -3717,109 +3743,293 @@ written when nothing produced such a path, and the test that asserted it
 had to move from the refusal table to an assertion of its own, in both
 directions: honoured on a directory, still refused on a file.
 
-## M61 — Motion, and a compositor that meets a deadline
+## M61 — Motion, and a compositor that meets a deadline ✅
 
-Windows in this OS appear and disappear instantly. That is not a missing
-polish detail so much as missing information: a minimized window vanishes
-and nothing on screen says where it went, which is precisely what an
-animation toward its taskbar button exists to say. M44 already added the
-blend primitive this needs. What is missing is a clock.
+Windows in this OS appeared and disappeared instantly. That was not a
+missing polish detail so much as missing information: a minimized window
+vanished and nothing on screen said where it went, which is precisely
+what an animation toward its taskbar button exists to say. M44 already
+added the blend primitive this needed. What was missing was a clock.
 
-- [ ] A real frame clock in `compositor.c`, driven independently of
+- [x] **A real frame clock in `compositor.c`**, driven independently of
       input. `REDRAW_INTERVAL_MS` (100) is a *fallback poll* for changes
       the compositor cannot otherwise notice - its own comment says so -
-      and a fallback poll is not a clock: nothing today can ask for "a
-      frame in 16 milliseconds because something is moving"
-- [ ] Minimize and restore animate to and from the window's taskbar
+      and a fallback poll is not a clock. `FRAME_MS` (16) is the ask
+      nothing here could previously make: "a frame in sixteen
+      milliseconds because something is moving." It is checked *before*
+      the dirty/fallback path, so a frame owed at 16 ms is never waiting
+      on a 100 ms poll
+- [x] Minimize and restore animate to and from the window's taskbar
       button. This is the one that carries information rather than
       decoration, which is why it is first
-- [ ] Open and close: a short scale-and-fade. Snap preview on a drag to
-      an edge, and the launcher fading rather than appearing
-- [ ] Short and unfussy - 120-150ms. Animations that announce themselves
-      are the ones people go looking for a setting to turn off
-- [ ] **And that setting exists anyway**, in `settings.c`, on by default.
-      Motion that cannot be disabled is a genuine accessibility problem
-      for some people, not a preference
-- [ ] **This is the first thing in the project that requires a steady
-      frame rate**, which makes it the performance milestone. The
-      compositor already recomposites sub-rects rather than whole frames
-      (M-era `dirty` plus the clipped `present`), so the groundwork is
-      there - what it has never had to do is hold a budget. Measure the
-      cost of a frame, write the budget down, and assert it: an animation
-      that stutters is worse than none
-- [ ] Tests: the interactive suite already knows how to compare settled
-      pixels. An animation is the one thing that is *deliberately* not
-      settled, so the assertion is on the endpoints plus at least one
-      intermediate frame that is neither
+- [x] **The compositor is *told* where the buttons are**
+      (`WM_ACTION_SET_TASKBAR_SLOT`), by `desktop_shell.c`, when its
+      layout changes - which is when a window opens or closes, not per
+      frame. That geometry is the taskbar's, and a compositor that
+      recomputed it would be a second copy to keep in step. A window
+      nothing has reported animates toward the bottom of the screen under
+      itself, which is the honest answer when nothing has said better
+- [x] Open and close: a short scale from and to the middle of where the
+      window is. Close is started in `reclaim_window`, which is the one
+      place every way of losing a window funnels through - so a window
+      that vanished because its process faulted gets the same treatment
+      as one that was closed on purpose. From the screen's point of view
+      they are the same event
+- [x] The snap preview fades in rather than appearing, and the launcher
+      fades rather than materialising - both on the same clock, because
+      "one more reason for the frame clock to tick" is a much smaller
+      thing than a second timer
+- [x] **An animation draws a ghost rectangle, not a scaled copy of the
+      window.** That is a scope line rather than a shortcut: resampling a
+      live client's buffer every frame is real work, sixteen milliseconds
+      is not long, and the thing being communicated ("it went *there*")
+      is carried entirely by the geometry
+- [x] 140ms, and ease-out - motion that starts fast and settles reads as
+      a thing arriving somewhere, where linear motion reads as a thing
+      being dragged. Animations that announce themselves are the ones
+      people go looking for a setting to turn off
+- [x] **And that setting exists anyway**, in `settings.c`, on by default
+      and persisted. Motion that cannot be disabled is a genuine
+      accessibility problem for some people, not a preference - and "off"
+      means instantaneous, exactly what this desktop did before M61,
+      rather than merely faster
+- [x] **The performance milestone, and the budget is written down.** A
+      frame repaints the union of where each rectangle was and where it
+      now is - a few hundred rows, not a screen - which is what makes 16
+      ms reachable at all. The compositor times each frame, counts the
+      ones that overrun, and prints a single line at the end of a run if
+      any did. A run that met its deadline says nothing, and
+      `tools/qemu-serial-test.sh` fails on the line's *presence*. "An
+      animation that stutters is worse than none", turned into something
+      a harness fails on rather than something you have to watch for
+- [x] Tests: the interactive suite already knows how to compare settled
+      pixels, and an animation is the one thing that is deliberately not
+      settled - so `[m61]` asserts the endpoints **plus an intermediate
+      frame that is neither**: a pixel somewhere on the path between the
+      window and the taskbar, lit by the ghost, that is bare desktop at
+      both ends. Then the same minimize with motion switched off, which
+      must produce nothing on that path at any point
 
-## M62 — The first sound this OS has ever made
+**Progress notes.**
+
+*The test taught this milestone something about its own harness.* A
+kernel self-test sleeps with `hlt` and comes back when the scheduler next
+picks it, so "wait 60 ms" is a floor rather than a time - a single sample
+can land after a 140 ms animation has already finished, which is exactly
+how the first version of this test failed. Sampling the path repeatedly
+and taking the maximum is what makes the assertion about whether motion
+happened rather than about when the sampling task happened to wake up.
+Every future test of something transient has the same problem and now has
+the same answer.
+
+*Where the shortcuts list went.* The Motion switch needed a row, and the
+Settings window was already as tall as it can be without the compositor
+clamping it away from its cascade position. The twenty-seven pixels came
+from moving the nine-row Shortcuts list into M57's 12-row face - which is
+what that face is for, and which nothing had used it for outside the file
+manager and the task manager.
+
+## M62 — The first sound this OS has ever made ✅
 
 M48 built an entire notification system in which an error arrives in
-complete silence. Nothing here has ever driven a speaker, which makes
+complete silence. Nothing here had ever driven a speaker, which makes
 even a beep a new capability rather than a refinement of one.
 
-- [ ] The PC speaker: PIT channel 2 and port 0x61, a square wave at a
-      frequency for a duration. Tens of lines, and it works on machines
-      with no sound device at all
-- [ ] The speaker is owned by one process rather than exposed as a
-      syscall anything can call - the same judgment M56 made about
-      `keyboard_inject`. There is one speaker, and a program able to seize
-      it unasked can make the machine unusable
-- [ ] One sound that is not a test: an error toast beeps. That single
-      connection is what makes this a feature instead of a driver
-- [ ] AC'97 output - the smallest real audio device QEMU offers, and the
-      same shape of work `rtl8139.c` already is: PCI enumeration that
-      exists, one BAR, a descriptor ring, an IRQ, and a buffer of PCM
-- [ ] A volume control in `settings.c`, and a mute that is honored by the
-      beep as well as the stream
-- [ ] Absent hardware degrades rather than panics, exactly as M27 decided
-      for the NIC
+- [x] **The PC speaker** (`kernel/drivers/pcspk.c`): PIT channel 2 and
+      port 0x61, a square wave at a frequency for a duration. Seventy
+      lines, and it works on machines with no sound device at all.
+      Channel 2 is a different counter from the system tick's channel 0,
+      so programming it disturbs nothing
+- [x] Nothing blocks. A tone records a deadline and the timer tick turns
+      it off - one comparison per tick. A sound that held its caller for
+      its own duration would be a sound that stops the compositor drawing,
+      which is the wrong trade for something that exists to accompany a
+      toast
+- [x] **The speaker is owned by one process**, and the ownership is
+      *enforced* rather than asked for - the same judgment M56 made about
+      `keyboard_inject`, made enforceable. There is no permission model
+      here, but "the first process to claim it holds it until it exits"
+      needs none: `SYS_audio_claim` succeeds once, every audio call
+      refuses anybody else, and a dead owner owns nothing. The compositor
+      claims it at startup, before any client connects, for the same
+      reason it owns the screen
+- [x] **One sound that is not a test: an error toast beeps.** That single
+      connection is what makes this a feature instead of a driver. Only
+      errors - a beep on every informational toast is a machine people
+      mute, and a muted machine is one that cannot tell them anything
+- [x] **AC'97 output** (`kernel/drivers/ac97.c`) - the same shape of work
+      `rtl8139.c` already is: PCI enumeration that exists, two I/O BARs
+      (a mixer and a bus-master block, which is why `pci.h` grew a BAR1
+      accessor), a descriptor ring, an IRQ, and a buffer of 16-bit stereo
+      48 kHz PCM
+- [x] A volume control in `settings.c` - five steps sharing a row with
+      M61's motion switch, because those two are the settings about how
+      this desktop *behaves* rather than how it looks. Persisted like
+      every other setting
+- [x] **And a mute honoured by the beep as well as the stream.** On the
+      AC'97 mixer, zero sets the codec's explicit mute bit rather than
+      maximum attenuation - "muted" and "very quiet" are different claims
+      and only one of them is what a mute switch promises. On the speaker
+      it is the *only* thing volume can honestly mean: that hardware is
+      one bit, and a quiet beep is not something it can produce
+- [x] Absent hardware degrades rather than panics, exactly as M27 decided
+      for the NIC: no AC'97 device means `[ac97] no AC'97 audio device
+      found - the PC speaker is the only sound this boot`, and the
+      self-test skips its stream half rather than failing it
+- [x] `SYS_audio_release`, which the design did not have and the test
+      found: ownership released only by *exiting* is ownership a
+      long-lived process cannot hand over, and `kernel_main` is exactly
+      that - it claims the speaker for its own self-test, never exits,
+      and would have silently kept it away from the compositor for the
+      life of the machine. An error toast would have gone back to
+      arriving in silence, which is the one thing this milestone exists
+      to fix
+- [x] New boot self-test (`[m62]`), and the interesting part is what is
+      checkable at all when the output is sound. Not "it sounded right":
+      port 0x61's gate bits are read back while a tone plays and after
+      its deadline passes (real hardware state, not a flag this code
+      set); the AC'97 device is asserted to have *finished a buffer it
+      was given*; muting leaves the gate shut; and a second, real process
+      (`audiograb`) is refused the claim, the beep and the volume -
+      which is the only place the ownership rule can honestly be tested
+      from - and then the owner handing it back, with a beep afterwards
+      that must fail
 
-## M63 — Somebody else's program
+**Progress notes.**
 
-Every binary this OS has ever run was written in this repo. This is the
-milestone that changes that, and it is the reason `argv` is in M60 and
-descriptors are in M59 - both are prerequisites rather than coincidences.
+*Two real interrupt bugs, found because this is the first device this
+kernel ever waited on an interrupt from.* `pic_clear_mask` unmasked a
+slave-PIC line without unmasking the master's cascade input, so
+unmasking IRQ 11 unmasked nothing - `mouse.c` had been working around
+exactly this since M18 with a hand-written `pic_clear_mask(CASCADE_IRQ)`
+next to its own, and that workaround is now the rule. And
+`pci_enable_device` never cleared the PCI command register's Interrupt
+Disable bit, which UEFI firmware routinely leaves set. `rtl8139.c` found
+neither, because it registers a handler and then polls its status
+register anyway.
 
-- [ ] **Floating point, which does not exist here at all.** Both
-      `CFLAGS` and `USER_CFLAGS` carry `-mgeneral-regs-only`, and the
-      context switch has no `fxsave`/`fxrstor` because nothing has ever
-      needed one. That is a correct and deliberate simplification, and it
-      is also an absolute wall: essentially no real C program compiles
-      without `double`. Enabling SSE means CR4.OSFXSR/OSXMMEXCPT, FPU
-      state in the task struct, save/restore on switch, and dropping the
-      flag from `USER_CFLAGS` only - the kernel keeps it, because a
-      kernel that never touches SSE is a kernel that never has to save it
-      on an interrupt
-- [ ] **A libc subset - ours, not somebody else's.** The ground rules say
-      no external library is linked into anything this OS ships, and that
-      stays true: writing `string.h`, `stdlib.h`, a `stdio.h` over M59's
-      descriptors, and the `math.h` functions the target actually calls is
-      the opposite of linking newlib. `user_space/lib/malloc.c` is already
-      most of one piece of it
-- [ ] **Pick the program first, and let it decide the surface.** Guessing
-      at "a standard library" produces a large pile of functions nothing
-      calls. Porting one real thing produces exactly the ones that matter,
-      and the link errors are the specification
-- [ ] The canonical target is DOOM (`doomgeneric`), and it is canonical
-      for a good reason: it exercises the framebuffer, keyboard input,
-      timing, file I/O and a few megabytes of heap simultaneously, and
-      every one of those is something this OS has. A smaller first step -
-      a BASIC or Lua interpreter in the terminal - is a legitimate
-      alternative if the memory budget turns out to be the wall
-- [ ] Know the memory budget before starting. `SYS_sbrk` is growth-only
-      by design and a process's address space layout is fixed in
-      `proc.h` - what a real program needs is megabytes, and whether it
-      can have them is a question with an answer today, not a discovery to
-      make halfway through a port
-- [ ] It runs in a window, through the same `wmclient.h` every other app
-      uses. A program that takes over the whole screen would prove less:
-      the interesting claim is not "this OS can run DOOM" but "this
-      desktop can run somebody else's program *alongside* its own"
-- [ ] The build stays honest: third-party source lives clearly separated,
-      `docs/third-party-programs.md` (M25) says what was ported and what
-      was changed to make it build, and no third-party code moves into
-      `kernel/` or `user_space/lib/`
+*And one that is not a bug, written down rather than worked around.* Even
+with both fixed, the completion interrupt does not arrive: the device
+asserts it (`GLOB_STA`'s POINT bit), the PIC's masks show IRQ 11 and the
+cascade both open, and the PIC's own *request* register is empty - so it
+never reaches the 8259 at all. On this machine the firmware routes PCI
+interrupts through the I/O APIC, which this kernel does not program; it
+drives the LAPIC for SMP and nothing else. Wiring up an I/O APIC is a
+subsystem, not a bullet on an audio milestone. So `ac97_completions()`
+polls the device's status register - exactly what `rtl8139.c` already
+does, for exactly the same reason - and the IRQ handler stays registered
+because it is correct and costs nothing on a machine that does deliver
+it. **An I/O APIC is now the honest prerequisite for any device this
+kernel wants to be interrupt-driven by**, and it is not written down
+anywhere else.
+
+## M63 — Somebody else's program ✅
+
+Every binary this OS had ever run was written in this repo. This is the
+milestone that changed that, and it is the reason `argv` is in M60 and
+descriptors are in M59 - both were prerequisites rather than
+coincidences.
+
+- [x] **Floating point, which did not exist here at all.** Both `CFLAGS`
+      and `USER_CFLAGS` carried `-mgeneral-regs-only` and the context
+      switch had no `fxsave`/`fxrstor`, because nothing had ever needed
+      one. That was a correct and deliberate simplification and also an
+      absolute wall: essentially no real C program compiles without
+      `double`. CR0.EM is cleared and CR0.MP/NE set, CR4.OSFXSR and
+      OSXMMEXCPT are on, every task carries a 512-byte 16-byte-aligned
+      FXSAVE area, and the flag is dropped from `USER_CFLAGS` **only**
+- [x] The kernel keeps `-mgeneral-regs-only`, and that is what makes this
+      cheap rather than pervasive: kernel code cannot touch xmm
+      registers, so an interrupt does not have to save them and neither
+      does a syscall. **Only a task switch does** - and it saves the
+      outgoing task's state and loads the *incoming* one's before
+      switching, rather than restoring on the way back. A fresh task
+      never returns from `context_switch` at all, so "on the way back" is
+      not a moment that exists for it; loading ahead of the switch is
+      what gives every task a floating-point state somebody chose rather
+      than whatever the last one left behind
+- [x] CR0/CR4 are per-CPU, so `fpu_init_cpu()` runs on the BSP and again
+      on every AP. A core that missed it would fault the first time a
+      task doing float work was scheduled onto it, which is a bug that
+      presents as "sometimes"
+- [x] **A libc subset - ours, not somebody else's.** `string.h`,
+      `stdlib.h`, a `stdio.h` over M59's descriptors, `math.h`, `time.h`,
+      `ctype.h`, `assert.h`. Writing them is the opposite of linking
+      newlib, and the ground rules hold
+- [x] `memcpy`, `memset`, `strlen` and `strcmp` are deliberately *not* in
+      it - they come from `user_space/lib/str.c`, where they have always
+      been. Two copies of `memcpy` in one binary is exactly the kind of
+      thing that quietly diverges
+- [x] **Pick the program first, and let it decide the surface.**
+      `third_party/whetstone/whetstone.c` - the 1998 C translation of the
+      1972 Whetstone benchmark - and its link errors were literally the
+      specification: `sin`, `cos`, `atan`, `log`, `exp`, `sqrt`, `printf`
+      with `%ld`/`%.1f`/`%12.4e`, `fprintf(stderr, ...)`, `atol`,
+      `strncmp`, `time(0)`
+- [x] **Changes made to the ported source: none.** It compiles and runs
+      exactly as downloaded, with its licence's comment block intact.
+      That is the actual claim: the program was not adapted to lean_os,
+      lean_os was made able to run the program
+- [x] It runs through the same path everything else does - built into
+      `/bin`, spawned by `SYS_spawn`, stdout on an ordinary pipe. There
+      is no special path for third-party code, which is the only way
+      "this desktop runs somebody else's program alongside its own" is
+      true rather than arranged
+- [x] The build stays honest: `third_party/` is the boundary and nothing
+      from it moves into `kernel/` or `user_space/lib/`;
+      `THIRD_PARTY_CFLAGS` is the ordinary user flags with `-Werror` off
+      (treating a 1998 program's warnings as errors would mean editing
+      somebody else's program to make it build); and
+      `docs/third-party-programs.md` now says what was ported, what was
+      changed, which headers the port needed, and - just as usefully -
+      what a ported program still cannot have
+- [x] The memory budget was known before starting rather than discovered
+      half-way: `SYS_sbrk` is growth-only, the address-space layout is
+      fixed in `proc.h`, and Whetstone needs none of it. That same budget
+      is why DOOM is not what got ported - see the notes
+- [x] New boot self-test (`[m63]`). `user_space/bin/libctest.c` is
+      written *as a program* - standard headers, nothing from this
+      project - and checks the maths against values that are either right
+      or not (`sin(pi/6)` is exactly a half, `log(e)` is exactly one,
+      `sin(1000)` is a range-reduction test rather than a series test),
+      the formatter against strings that are either right or not
+      (`%12.4e` of 1234.5 is `"  1.2345e+03"`), and then runs a
+      200,000-term float loop that spans many scheduler quanta - which is
+      the only way to catch a broken FXSAVE/FXRSTOR, because a switch
+      that lost xmm state would corrupt the sum *intermittently*. Then
+      Whetstone itself, with its output read back through a pipe and
+      checked: "it exited 0" would also be true of a program that printed
+      nothing
+
+**The number.** `C Converted Double Precision Whetstones: 83.3 MIPS`,
+from the boot log, produced by code nobody in this repo wrote.
+
+**Progress notes.**
+
+*What got ported, and honestly why it was not DOOM.* The milestone named
+`doomgeneric` as canonical and a smaller first step as a legitimate
+alternative "if the memory budget turns out to be the wall". The wall
+here was a different one and worth stating plainly: this work was done in
+an environment where pulling forty thousand lines of third-party source
+into the tree was not a reasonable thing to do, and a port whose source
+could not be reviewed line by line would have been a worse artifact than
+one whose could. Whetstone is 433 lines, it is unambiguously somebody
+else's program, and it exercises exactly the two things that were
+missing - floating point and a C library. What it does not exercise is
+the framebuffer, the keyboard and a few megabytes of heap simultaneously,
+which is what DOOM would have added. **The enabling work is done; the
+remaining distance to DOOM is the WAD, the heap budget, and forty
+thousand lines of somebody else's source.**
+
+*Two bugs in one file, and they were different bugs.* `math.c` failed its
+own self-test twice on `cos(-40)`. The first cause was precision -
+`x - k * TWO_PI` loses a bit for every power of two in `k`, fixed with a
+Cody-Waite split whose first term multiplies exactly. The second, which
+survived that fix and looked identical from outside, was *range*:
+reducing to [-pi, pi] and running an eight-term Taylor series is accurate
+near zero and wrong by 5e-8 near pi. Reducing to quadrants puts the
+argument under pi/4 where the same eight terms are good to 1e-16. A test
+that had only checked `sin(0)` and `cos(0)` would have passed throughout.
 
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
@@ -3831,11 +4041,17 @@ descriptors are in M59 - both are prerequisites rather than coincidences.
       time this project builds a program nobody here wrote
 - [x] Networking stack + NIC driver (M27, above)
 - [~] Port to real hardware (USB boot test) - prep/tooling/runbook done
-      (M28, above); the manual boot step itself is **deliberately deferred
-      until the M57-M63 arc lands**. It is still the largest untested
-      claim in the project, and the bet is that proving it on metal is
-      worth more once this is something a person would want to run.
-      Three things to know when it comes back, each one found by writing
+      (M28, above); the manual boot step itself was **deliberately
+      deferred until the M57-M63 arc landed**, and that arc has now
+      landed. It is the one thing in this file that cannot be done by
+      anything without hands: there is no physical machine or USB port in
+      the environment this was built in. It is also still the largest
+      untested claim in the project, and the bet that proving it on metal
+      is worth more once this is something a person would want to run has
+      been taken - what is on the other side of it is a desktop with
+      proportional type, a resolution setting, real files, a real shell,
+      motion, sound, and somebody else's program running in a window.
+      **Four** things to know when it comes back, each one found by writing
       the arc above rather than by booting anything: it was never one
       manual step - `leanfs.c` calls `ata_read_sectors` directly, and a
       machine with no IDE controller has nothing for it to talk to, so a
@@ -3845,7 +4061,12 @@ descriptors are in M59 - both are prerequisites rather than coincidences.
       boots one. And M58's mode-setting driver is a Bochs/QEMU device
       interface, so on real hardware the Display pane can only ever show
       the mode the firmware picked - real mode-setting is a GPU driver
-      per vendor, and that is not a thing this project will do
+      per vendor, and that is not a thing this project will do.
+      **M62 adds a fourth**: PCI interrupts do not reach this kernel's
+      legacy 8259 on the machine it was developed against, because the
+      firmware routes them through an I/O APIC nothing here programs -
+      `ac97.c` polls instead, and any device that genuinely needs to be
+      interrupt-driven needs that subsystem first
 - [x] Directories in leanfs - promoted out of this list and scheduled as
       M53. It was always "the one structural limit that shows up in three
       different apps at once", which is a milestone, not a stretch goal
@@ -3853,9 +4074,10 @@ descriptors are in M59 - both are prerequisites rather than coincidences.
       `system_api/include/icon.h`: an eight-byte header, a sixteen-entry
       palette and 4-bit indices, plus a loader that scales by an integer
       so one blob serves two sizes
-- [~] Audio: a PC-speaker beep at minimum, an AC'97/HDA output stream at
-      most - scheduled as **M62**
-- [~] Window animations (minimize/restore, launcher fade) - scheduled as
+- [x] Audio: a PC-speaker beep at minimum, an AC'97/HDA output stream at
+      most - done as **M62**: both, plus an ownership rule so one program
+      cannot seize the machine's only speaker
+- [x] Window animations (minimize/restore, launcher fade) - done as
       **M61**, where the missing piece turned out to be exactly what this
       entry always said it was: a frame clock the compositor drives
       independently of input

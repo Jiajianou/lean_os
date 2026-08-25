@@ -12,6 +12,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "arch/x86_64/fpu.h" /* M63: FPU_STATE_SIZE/ALIGN - a task carries its own SSE state now */
 
 #include "proc.h" /* system_api/include/proc.h - TASK_INFO_MAX, which *is* MAX_TASKS below. Resolves to the system_api header: a quoted include searches this file's own directory first (kernel/sched/, no proc.h), then -Ikernel (no kernel/proc.h), then -Isystem_api/include. */
 
@@ -189,6 +190,11 @@ typedef struct task {
     void *arg;
     uint64_t pml4_phys; /* this task's address space - the shared kernel one for a plain kernel thread, a private one (M9) for a user process */
     int exit_code; /* valid once state == TASK_TERMINATED; set by task_exit_with_code (M13) */
+    /* M63: this task's x87/SSE registers while it is not running. 512
+     * bytes and 16-byte aligned, both architectural requirements of
+     * FXSAVE rather than preferences - see arch/x86_64/fpu.h for why
+     * only a *task switch* has to touch this and an interrupt does not. */
+    uint8_t fpu_state[FPU_STATE_SIZE] __attribute__((aligned(FPU_STATE_ALIGN)));
     fd_slot_t fds[MAX_FDS]; /* fd 0/1 default to FD_STDIN/FD_STDOUT; a spawned task inherits its parent's whole table (M14) so pipe fds set up before SYS_spawn carry over */
     int parent_id; /* -1 for task 0 (nothing spawned it) */
     int pgid; /* process group: a process's own id if it's a group leader, otherwise inherited from whoever spawned it - read-only (SYS_getpgid), no job control to ever need changing it yet */

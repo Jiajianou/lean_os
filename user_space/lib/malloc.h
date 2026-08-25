@@ -14,3 +14,10 @@
 
 void *malloc(size_t size);
 void free(void *ptr);
+
+/* M63: how many usable bytes the block at `ptr` actually has. The header
+ * that knows has always been right there, one word before the pointer -
+ * what was missing was anybody who needed to ask. `realloc` does: with
+ * no way to know the old size it would have to copy the *new* size,
+ * which reads past the end of a block being grown. Returns 0 for NULL. */
+size_t malloc_usable_size(void *ptr);

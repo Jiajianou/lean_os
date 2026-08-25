@@ -483,17 +483,33 @@ static int settings_fds[2] = {-1, -1};
 static int settings_query_fds[2] = {-1, -1};
 static int settings_query_resp_fds[2] = {-1, -1};
 
-int wm_set_theme(uint32_t bg_color, uint32_t accent_color, uint32_t wallpaper) {
+int wm_set_settings(const wm_settings_request_t *in) {
     if (settings_fds[0] < 0) {
         if (sys_pipe_open(WM_SETTINGS_PIPE, settings_fds) != 0) {
             return -1;
         }
     }
+    return sys_write(settings_fds[1], in, sizeof(*in)) == (long)sizeof(*in) ? 0 : -1;
+}
+
+int wm_set_theme(uint32_t bg_color, uint32_t accent_color, uint32_t wallpaper) {
+    /* M61: settings.c is the only caller and always sends every field, so
+     * this stays the three-colour name it has had since M44 and fills the
+     * fourth in from the default. A caller that wants to change the
+     * animation setting uses wm_set_settings, which is what having a
+     * struct on the wire was always for. */
     wm_settings_request_t req;
+    req.volume = 70;
+    req.animations = 1;
     req.bg_color = bg_color;
     req.accent_color = accent_color;
     req.wallpaper = wallpaper;
-    return sys_write(settings_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
+    return wm_set_settings(&req);
+}
+
+int wm_set_taskbar_slot(int32_t window_id, int32_t x, int32_t width) {
+    return wm_send_action_value(window_id, WM_ACTION_SET_TASKBAR_SLOT,
+                                 (int32_t)(((uint32_t)x << 16) | ((uint32_t)width & 0xFFFFu)));
 }
 
 int wm_query_settings(wm_settings_request_t *out) {

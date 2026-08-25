@@ -3,6 +3,7 @@
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/isr.h"
 #include "arch/x86_64/pic.h"
+#include "pcspk.h"
 
 #define PIT_CHANNEL0_DATA 0x40
 #define PIT_COMMAND       0x43
@@ -19,6 +20,11 @@ static void (*tick_hook)(void);
 static void pit_irq(isr_regs_t *regs) {
     (void)regs;
     ticks++;
+    /* M62: the speaker's own deadline. One comparison per tick, and the
+     * reason a tone does not block whoever asked for it - see pcspk.h.
+     * Ahead of the scheduler hook deliberately: a tick that ends in a
+     * context switch never comes back here. */
+    pcspk_tick();
     if (tick_hook) {
         tick_hook();
     }

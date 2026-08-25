@@ -5,6 +5,7 @@
 #include "acpi/acpi.h"
 #include "drivers/klog.h"
 #include "drivers/pit.h"
+#include "fpu.h"
 #include "gdt.h"
 #include "idt.h"
 #include "isr.h"
@@ -87,6 +88,11 @@ static inline uint32_t ap_params_read32(uint64_t offset) {
 void ap_main(uint32_t cpu_id) {
     gdt_init_ap((int)cpu_id);
     idt_load_ap();
+    /* M63: CR0/CR4 are per-CPU, so every core has to be told that this
+     * OS uses FXSAVE - an AP that missed this would fault the first time
+     * a task doing floating-point work was scheduled onto it, which is a
+     * bug that shows up as "sometimes". */
+    fpu_init_cpu();
     lapic_init_this_cpu();
     sched_init_ap((int)cpu_id);
 

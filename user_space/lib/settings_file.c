@@ -67,8 +67,8 @@ static void append_key(char *buf, int *len, const char *key, uint32_t value) {
  * read the whole file first so that saving one half does not erase the
  * other. */
 typedef struct {
-    uint32_t bg, accent, wallpaper, display_w, display_h;
-    int have_bg, have_accent, have_wallpaper, have_display;
+    uint32_t bg, accent, wallpaper, display_w, display_h, animations, volume;
+    int have_bg, have_accent, have_wallpaper, have_display, have_animations, have_volume;
 } settings_all_t;
 
 static void parse_all(settings_all_t *out) {
@@ -109,6 +109,12 @@ static void parse_all(settings_all_t *out) {
                 } else if (strcmp(line, "wallpaper") == 0) {
                     out->wallpaper = value;
                     out->have_wallpaper = 1;
+                } else if (strcmp(line, "animations") == 0) {
+                    out->animations = value;
+                    out->have_animations = 1;
+                } else if (strcmp(line, "volume") == 0) {
+                    out->volume = value;
+                    out->have_volume = 1;
                 } else if (strcmp(line, "display_w") == 0) {
                     out->display_w = value;
                     have_w = 1;
@@ -134,6 +140,8 @@ static int write_all(const settings_all_t *all) {
     append_key(buf, &len, "bg", all->bg);
     append_key(buf, &len, "accent", all->accent);
     append_key(buf, &len, "wallpaper", all->wallpaper);
+    append_key(buf, &len, "animations", all->animations);
+    append_key(buf, &len, "volume", all->volume);
     if (all->have_display) {
         append_key(buf, &len, "display_w", all->display_w);
         append_key(buf, &len, "display_h", all->display_h);
@@ -150,6 +158,16 @@ int settings_file_load(wm_settings_request_t *out) {
     out->bg_color = all.bg;
     out->accent_color = all.accent;
     out->wallpaper = all.wallpaper;
+    /* M61: optional, like the display keys and for the same reason - a
+     * settings.conf written before this milestone existed has no opinion
+     * about animations, and "whatever the caller already had" (which is
+     * on) is the right answer rather than off. */
+    if (all.have_animations) {
+        out->animations = all.animations;
+    }
+    if (all.have_volume) {
+        out->volume = all.volume;
+    }
     return 1;
 }
 
@@ -170,6 +188,10 @@ int settings_file_save(const wm_settings_request_t *in) {
     all.bg = in->bg_color;
     all.accent = in->accent_color;
     all.wallpaper = in->wallpaper;
+    all.animations = in->animations;
+    all.have_animations = 1;
+    all.volume = in->volume;
+    all.have_volume = 1;
     return write_all(&all);
 }
 

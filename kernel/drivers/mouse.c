@@ -218,6 +218,10 @@ void mouse_init(void) {
                   : "[mouse] standard 3-byte protocol - no wheel on this device.\n");
 
     irq_register_handler(MOUSE_IRQ, mouse_irq);
+    /* M62: pic_clear_mask unmasks the cascade itself now for any slave
+     * line, so this is redundant - kept because it is also *documented*
+     * here (see CASCADE_IRQ) and because a driver saying which lines it
+     * needs is not the wrong thing for it to say. */
     pic_clear_mask(CASCADE_IRQ);
     pic_clear_mask(MOUSE_IRQ);
 }

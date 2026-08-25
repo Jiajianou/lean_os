@@ -138,6 +138,11 @@ void sched_init(void) {
     tasks[0].stack_base = NULL; /* this is kernel_main's own stack, not one we allocated or will ever free */
     tasks[0].kernel_stack_top = 0; /* never consulted: RSP0 only matters for a ring3->ring0 transition, and task 0 never runs in ring 3 */
     tasks[0].pml4_phys = vmm_kernel_pml4_phys();
+    /* M63: task 0's own FPU image. It is in BSS, so an uninitialised one
+     * would be all zeros - and an all-zero MXCSR unmasks every SIMD
+     * exception, which the first task switched *to* task 0 would then be
+     * running under. */
+    fpu_state_init(tasks[0].fpu_state);
     tasks[0].fds[0].type = FD_STDIN;
     tasks[0].fds[1].type = FD_STDOUT;
     tasks[0].parent_id = -1;
@@ -161,6 +166,7 @@ void sched_init_ap(int cpu_id) {
     t->stack_base = NULL; /* this is ap_main's own boot stack (smp.c's start_ap kmalloc'd it), not one this table owns or will ever free */
     t->kernel_stack_top = 0; /* like task 0, never consulted - this idle identity never enters ring 3 */
     t->pml4_phys = vmm_kernel_pml4_phys();
+    fpu_state_init(t->fpu_state); /* M63: this AP's idle identity, same reason as task 0's */
     t->fds[0].type = FD_STDIN;
     t->fds[1].type = FD_STDOUT;
     t->parent_id = -1;
@@ -234,6 +240,12 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->pgid = caller->pgid;
     t->pending_signal = 0;
     t->reaped = 0;
+    /* M63: a clean FPU, not an inherited one. Deliberately *not* copied
+     * from the caller the way the fd table above is: descriptors are
+     * something a child is meant to inherit and floating-point registers
+     * are not - they are scratch, and starting from somebody else's
+     * would be starting from noise. */
+    fpu_state_init(t->fpu_state);
 
     /* M40: set *here*, inside the same critical section that publishes
      * this task as TASK_READY, not by the caller afterwards. proc.c used
@@ -345,6 +357,16 @@ void schedule(void) {
         vmm_switch_address_space(next->pml4_phys);
         loaded_pml4_phys[cpu] = next->pml4_phys;
     }
+
+    /* M63: save mine, load theirs, then switch - in that order, and the
+     * order is the design rather than a detail. Restoring on the way
+     * *back* would look symmetric and would leave a brand-new task
+     * running on whatever the previous task left in the xmm registers,
+     * because a fresh task never returns from context_switch at all (see
+     * its own header comment). Loading the incoming task's state here
+     * means every task starts from a state somebody chose. */
+    fpu_save(prev->fpu_state);
+    fpu_restore(next->fpu_state);
 
     /* sched_lock is still held here on purpose - see its own header
      * comment for why, and for exactly where/how it gets released once

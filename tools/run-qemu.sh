@@ -30,8 +30,16 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 # It always hands the guest 10.0.2.15 and answers as gateway 10.0.2.2
 # itself, the two addresses kernel/net/net.h hardcodes (no DHCP client -
 # see its header comment).
+#
+# M62: -device AC97 is the sound card kernel/drivers/ac97.c drives. The
+# `none` audiodev means QEMU emulates the controller without opening a
+# host audio device - which is what makes this safe to run headlessly and
+# in CI, and is enough for everything the driver's self-test asserts (the
+# device consumed the buffer it was handed). Swap it for `coreaudio`,
+# `pa` or `sdl` to actually hear the thing.
 qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
   -drive format=raw,file="$IMAGE" \
-  -netdev user,id=net0 -device rtl8139,netdev=net0
+  -netdev user,id=net0 -device rtl8139,netdev=net0 \
+  -audiodev none,id=snd0 -device AC97,audiodev=snd0

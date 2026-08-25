@@ -101,7 +101,7 @@ set -euo pipefail
 # and is therefore the one most worth a test. Same unavoidable shape as
 # M48's toast deadline: proving something happened *on its own* means
 # waiting for it.
-SECONDS_TO_RUN="${1:-420}"
+SECONDS_TO_RUN="${1:-480}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -136,6 +136,7 @@ qemu-system-x86_64 \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
   -drive format=raw,snapshot=on,file="$IMAGE" -display none \
   -netdev user,id=net0 -device rtl8139,netdev=net0 \
+  -audiodev none,id=snd0 -device AC97,audiodev=snd0 \
   -serial file:"$LOG" -monitor none ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} &
 QEMU_PID=$!
 disown "$QEMU_PID" 2>/dev/null || true
@@ -196,6 +197,9 @@ REQUIRED_MARKERS=(
   "[m58] a resolution change carrying the whole desktop with it - panels"
   "[m59] descriptors (open/lseek/read/write/close), a 200 KiB file through"
   "[m60] a real argument vector (cp with two arguments), a command line with"
+  "[m61] a minimize animating toward the taskbar - endpoints plus an intermediate"
+  "[m62] the PC speaker gated on and off by its own deadline, muted when the volume"
+  "[m63] SSE state preserved across task switches, a libc subset checked against"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."
@@ -208,6 +212,17 @@ pass=1
 if grep -qF "*** KERNEL PANIC:" "$LOG"; then
   pass=0
   echo "FAIL: kernel panicked - $(grep -F '*** KERNEL PANIC:' "$LOG" | head -1)"
+fi
+
+# M61: the frame budget, asserted by its silence. compositor.c counts
+# animation frames that overrun FRAME_BUDGET_MS and prints one line at the
+# end of a run if any did - a run that met its deadline says nothing at
+# all. "An animation that stutters is worse than none", made into
+# something a harness can fail on rather than something you have to watch
+# for.
+if grep -qF "[wm] animation missed its frame budget" "$LOG"; then
+  pass=0
+  echo "FAIL: $(grep -F '[wm] animation missed its frame budget' "$LOG" | head -1)"
 fi
 
 missing=()

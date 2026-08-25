@@ -9,6 +9,7 @@
 #define PCI_REG_VENDOR_DEVICE 0x00
 #define PCI_REG_COMMAND       0x04
 #define PCI_REG_BAR0          0x10
+#define PCI_REG_BAR1          0x14
 #define PCI_REG_INTERRUPT     0x3C
 
 static uint32_t pci_config_address(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
@@ -52,6 +53,14 @@ int pci_find_device(uint16_t vendor_id, uint16_t device_id, pci_device_t *out) {
     return 0;
 }
 
+uint16_t pci_bar1_io_base(const pci_device_t *dev) {
+    uint32_t bar1 = pci_config_read32(dev->bus, dev->slot, dev->func, PCI_REG_BAR1);
+    if ((bar1 & 1) == 0) {
+        panic("pci_bar1_io_base: BAR1 is memory-mapped, not I/O-mapped");
+    }
+    return (uint16_t)(bar1 & 0xFFFC);
+}
+
 uint16_t pci_bar0_io_base(const pci_device_t *dev) {
     uint32_t bar0 = pci_config_read32(dev->bus, dev->slot, dev->func, PCI_REG_BAR0);
     if ((bar0 & 1) == 0) {
@@ -64,5 +73,14 @@ void pci_enable_device(const pci_device_t *dev) {
     uint32_t command = pci_config_read32(dev->bus, dev->slot, dev->func, PCI_REG_COMMAND);
     command |= (1u << 0); /* I/O Space Enable */
     command |= (1u << 2); /* Bus Master Enable */
+    /* M62: and clear Interrupt Disable (bit 10), which UEFI firmware
+     * routinely leaves *set* - it has no reason to want INTx while it is
+     * driving devices by polling. Nothing here noticed until an AC'97
+     * controller became the first device this kernel actually waits on an
+     * interrupt from: its completion bits were set in its own status
+     * register the whole time and no interrupt had ever been delivered.
+     * (rtl8139.c registers a handler too, but polls its status register
+     * rather than depending on it, which is why it never found this.) */
+    command &= ~(1u << 10);
     pci_config_write32(dev->bus, dev->slot, dev->func, PCI_REG_COMMAND, command);
 }

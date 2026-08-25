@@ -52,6 +52,11 @@ void pic_send_eoi(uint8_t irq) {
     outb(PIC1_COMMAND, PIC_EOI);
 }
 
+/* The master's input the slave is wired into - fixed by the PC's own
+ * design since the AT, and the reason pic_clear_mask below has a special
+ * case rather than a parameter. */
+#define PIC_CASCADE_IRQ 2
+
 void pic_set_mask(uint8_t irq) {
     uint16_t port = irq < 8 ? PIC1_DATA : PIC2_DATA;
     uint8_t bit = irq < 8 ? irq : (uint8_t)(irq - 8);
@@ -62,4 +67,16 @@ void pic_clear_mask(uint8_t irq) {
     uint16_t port = irq < 8 ? PIC1_DATA : PIC2_DATA;
     uint8_t bit = irq < 8 ? irq : (uint8_t)(irq - 8);
     outb(port, inb(port) & (uint8_t)~(1 << bit));
+    /* M62: a line on the slave PIC reaches the CPU only through the
+     * master's cascade input (IRQ 2), so unmasking one without the other
+     * unmasks nothing at all. Everything this kernel had unmasked until
+     * now was on the master - the timer, the keyboard, the mouse - and
+     * the RTL8139's own IRQ is never actually waited on (rtl8139.c polls
+     * its status register), so an AC'97 controller on IRQ 11 was the
+     * first device to find this out: its completion bits were set in the
+     * status register the whole time and no interrupt had ever been
+     * delivered. */
+    if (irq >= 8) {
+        outb(PIC1_DATA, inb(PIC1_DATA) & (uint8_t)~(1 << PIC_CASCADE_IRQ));
+    }
 }

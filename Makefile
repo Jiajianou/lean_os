@@ -91,10 +91,23 @@ CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
 # takes the address of anything in .rodata/.data), and PIC/PLT machinery
 # would be pure overhead for statically-linked, position-*dependent*
 # binaries like these.
+# M63: -mgeneral-regs-only is gone from *user* code and stays in CFLAGS
+# above for the kernel, which is the whole reason FPU state is cheap here
+# (kernel/arch/x86_64/fpu.h has the full argument): a kernel that never
+# touches SSE never has to save it on an interrupt, so only a task switch
+# does. Essentially no real C program compiles without `double`, so this
+# one flag was the wall between this OS and running somebody else's
+# program.
+#
+# -Iuser_space/libc/include puts <stdio.h>, <string.h>, <math.h> and the
+# rest on the path for everything - our own programs included, which is
+# deliberate: two string libraries in one tree is how they diverge. The
+# cross-toolchain has no libc headers of its own, so nothing collides.
 USER_CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
-               -mcmodel=large -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Werror \
+               -mcmodel=large -mno-red-zone -Wall -Wextra -Werror \
                -ffunction-sections -fdata-sections \
-               -MMD -MP -Iuser_space/lib -Isystem_api/include -c
+               -MMD -MP -Iuser_space/lib -Iuser_space/libc/include \
+               -Isystem_api/include -c
 
 MBR_BIN    := $(BUILD)/mbr.bin
 KERNEL_ELF := $(BUILD)/kernel.elf
@@ -109,7 +122,9 @@ USER_LD   := user_space/lib/user.ld
 USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/malloc.o \
                 $(UOBJ)/gfx.o $(UOBJ)/font8x16.o $(UOBJ)/wmclient.o $(UOBJ)/wallpaper.o \
                 $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o \
-                $(UOBJ)/uifont.o
+                $(UOBJ)/uifont.o \
+                $(UOBJ)/libc_string.o $(UOBJ)/libc_stdlib.o $(UOBJ)/libc_stdio.o \
+                $(UOBJ)/libc_math.o $(UOBJ)/libc_time.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
 # init and shell in their own directories. Each becomes build/NAME.elf,
@@ -118,7 +133,15 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # no filesystem driver the *boot loader* can use to load from disk, only
 # the kernel's own (M12), so this is still how anything gets onto the disk
 # leanfs formats on first boot in the first place.
-USER_PROGRAMS := hello echo cat cp ls init shell memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot
+# M63: third-party programs are listed separately from this project's
+# own, and built with their own flags (see THIRD_PARTY_CFLAGS) - the
+# separation is the point. They are linked and embedded exactly like
+# everything else, because "this desktop can run somebody else's program
+# alongside its own" is only true if there is no special path for them.
+THIRD_PARTY_PROGRAMS := whetstone
+
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest init shell memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot
+USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
 KERNEL_C_SRCS := $(shell find kernel -name '*.c' -not -path 'kernel/boot/*')
@@ -154,6 +177,30 @@ $(UOBJ):
 
 $(UOBJ)/%.o: user_space/lib/%.c | $(UOBJ)
 	$(CC) $(USER_CFLAGS) $< -o $@
+
+# M63: the libc subset. Prefixed object names rather than a second
+# pattern rule on a bare basename, because `string.c` and `str.c` would
+# otherwise be one namespace away from each other in $(UOBJ) - and the
+# whole point of these files is that they are a *different* layer from
+# user_space/lib, not a rename of it.
+$(UOBJ)/libc_%.o: user_space/libc/src/%.c | $(UOBJ)
+	$(CC) $(USER_CFLAGS) $< -o $@
+
+# M63: third-party source, built with the warning flags relaxed and
+# nothing else changed.
+#
+# -Werror is dropped and that is the honest thing to do rather than a
+# shortcut: this code was written decades before these warnings existed
+# and its author is not going to fix them, so treating them as errors
+# would mean *editing somebody else's program* to make it build - which
+# is precisely what docs/third-party-programs.md exists to keep to a
+# minimum. -Wno-format-security is the one specific silence needed:
+# whetstone.c passes a `const char *` as printf's whole format string,
+# which is a warning about a pattern and not about a bug here.
+THIRD_PARTY_CFLAGS := $(filter-out -Wall -Wextra -Werror,$(USER_CFLAGS)) -Wno-format-security
+
+$(UOBJ)/whetstone.o: third_party/whetstone/whetstone.c | $(UOBJ)
+	$(CC) $(THIRD_PARTY_CFLAGS) $< -o $@
 
 $(UOBJ)/%.o: user_space/lib/%.asm | $(UOBJ)
 	$(AS) -f elf64 $< -o $@
