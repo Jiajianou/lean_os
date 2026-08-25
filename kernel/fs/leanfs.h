@@ -58,7 +58,13 @@
 #define LEANFS_DIRECT_BLOCKS        16
 #define LEANFS_BLOCK_SIZE           512
 #define LEANFS_INDIRECT_POINTERS    (LEANFS_BLOCK_SIZE / (int)sizeof(uint32_t)) /* 128 */
-#define LEANFS_MAX_FILE_SIZE        ((LEANFS_DIRECT_BLOCKS + LEANFS_INDIRECT_POINTERS) * LEANFS_BLOCK_SIZE) /* 72 KiB */
+/* M59: 16 direct + 128 indirect + 128 * 128 double-indirect blocks.
+ * 16528 blocks, a shade over 8 MiB - up from a 72 KiB ceiling that was
+ * smaller than this project's own largest source file, and which three
+ * separate apps were visibly working around. */
+#define LEANFS_DINDIRECT_BLOCKS     (LEANFS_INDIRECT_POINTERS * LEANFS_INDIRECT_POINTERS) /* 16384 */
+#define LEANFS_MAX_FILE_BLOCKS      (LEANFS_DIRECT_BLOCKS + LEANFS_INDIRECT_POINTERS + LEANFS_DINDIRECT_BLOCKS)
+#define LEANFS_MAX_FILE_SIZE        (LEANFS_MAX_FILE_BLOCKS * LEANFS_BLOCK_SIZE)
 
 /* M53: 32 -> 96. The old number was an exact fit the moment directories
  * arrived and it took a count to see it: this project ships 24 programs,
@@ -166,3 +172,67 @@ int leanfs_rename(const char *old_path, const char *new_path);
  * should do. Returns the number of bytes written, or 0 if the path
  * isn't a directory. */
 size_t leanfs_list(const char *path, char *buf, size_t maxlen);
+
+/* M59: the same gap unlink closed for files, left open there because
+ * nothing had asked. A file manager that can delete a file but not the
+ * folder it sits in is visibly half-finished.
+ *
+ * Empty directories only, and that is the whole design: recursive delete
+ * is one keystroke away from losing everything under a path, and this
+ * project has no trash to take it back out of. Refuses the root, which
+ * has no parent to be removed from. Returns 0 or -1. */
+int leanfs_rmdir(const char *path);
+
+/* M59: what a caller needs to know about a path without reading it -
+ * which the file manager's size and date columns are made of, and which
+ * every "how big a buffer do I need" caller in this kernel was
+ * previously answering with LEANFS_MAX_FILE_SIZE. */
+typedef struct {
+    uint32_t size;
+    uint32_t mtime;  /* seconds since 1970, or 0 - see the inode's own note */
+    uint8_t is_dir;
+} leanfs_stat_t;
+
+int leanfs_stat(const char *path, leanfs_stat_t *out);
+
+/* ---- M59: descriptors ------------------------------------------------
+ *
+ * SYS_readfile's own comment has said "no open/close/fd-table/lseek yet"
+ * since M13 and scoped that to what M13 needed. Six arcs later it was the
+ * limit three apps apologised for in three different ways.
+ *
+ * The kernel-side shape of the fix is deliberately small: an *inode
+ * handle* (an index into the inode table) plus byte-range read and write.
+ * Everything else a descriptor is - a current offset, whether it may be
+ * written, who holds it - belongs to the fd table in kernel/sched/sched.h,
+ * because that is where the rest of this kernel's descriptors already
+ * live. This file's job is the filesystem, not the process.
+ *
+ * leanfs_open resolves a path to a handle, creating an empty regular file
+ * if `create` is set and nothing is there. Returns -1 for a malformed
+ * path, a missing parent, a directory, or no free inode. */
+int leanfs_open(const char *path, int create);
+
+/* Byte-range read/write against an open handle. pwrite grows the file as
+ * needed, up to LEANFS_MAX_FILE_SIZE, and updates its mtime. Both return
+ * the number of bytes transferred, or -1. A read past the end returns 0. */
+int64_t leanfs_handle_read(int handle, void *buf, size_t len, uint32_t off);
+int64_t leanfs_handle_write(int handle, const void *buf, size_t len, uint32_t off);
+
+/* The handle's current size - what SYS_lseek needs to resolve a seek
+ * relative to the end. Returns 0 for an invalid handle, which is the same
+ * answer an empty file gives; a caller that needs to tell them apart
+ * checked when it opened. */
+uint32_t leanfs_handle_size(int handle);
+
+/* Drops a handle's contents back to zero bytes, freeing every block.
+ * What opening for writing does to an existing file - the whole-file
+ * overwrite semantics leanfs_write has always had, now reachable without
+ * having the whole file in memory. */
+int leanfs_handle_truncate(int handle);
+
+/* M59: how many metadata sectors this filesystem has written since boot.
+ * Exists so a test can assert what a one-byte save *costs* - the number
+ * of PIO sector writes - rather than how long it took, which is a
+ * property of the host and not of this code. See save_meta. */
+uint32_t leanfs_meta_writes(void);

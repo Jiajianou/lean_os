@@ -61,17 +61,28 @@ static void append_key(char *buf, int *len, const char *key, uint32_t value) {
     buf[(*len)++] = '\n';
 }
 
-int settings_file_load(wm_settings_request_t *out) {
+/* Every key the file can hold, parsed in one pass. M58 split this out of
+ * settings_file_load because there are two readers now with different
+ * ideas of what "present" has to mean - and because a *writer* has to
+ * read the whole file first so that saving one half does not erase the
+ * other. */
+typedef struct {
+    uint32_t bg, accent, wallpaper, display_w, display_h;
+    int have_bg, have_accent, have_wallpaper, have_display;
+} settings_all_t;
+
+static void parse_all(settings_all_t *out) {
     char buf[SETTINGS_BUF];
+    for (int i = 0; i < (int)sizeof(*out); i++) {
+        ((char *)out)[i] = 0;
+    }
     long n = sys_readfile(SETTINGS_FILE_NAME, buf, sizeof(buf) - 1);
     if (n <= 0 || n >= (long)sizeof(buf)) {
-        return 0;
+        return;
     }
     buf[n] = '\0';
 
-    uint32_t bg = 0, accent = 0, wallpaper = 0;
-    int have_bg = 0, have_accent = 0, have_wallpaper = 0;
-
+    int have_w = 0, have_h = 0;
     char *line = buf;
     while (*line) {
         char *end = line;
@@ -90,14 +101,20 @@ int settings_file_load(wm_settings_request_t *out) {
             uint32_t value;
             if (parse_uint(eq + 1, &value)) {
                 if (strcmp(line, "bg") == 0) {
-                    bg = value;
-                    have_bg = 1;
+                    out->bg = value;
+                    out->have_bg = 1;
                 } else if (strcmp(line, "accent") == 0) {
-                    accent = value;
-                    have_accent = 1;
+                    out->accent = value;
+                    out->have_accent = 1;
                 } else if (strcmp(line, "wallpaper") == 0) {
-                    wallpaper = value;
-                    have_wallpaper = 1;
+                    out->wallpaper = value;
+                    out->have_wallpaper = 1;
+                } else if (strcmp(line, "display_w") == 0) {
+                    out->display_w = value;
+                    have_w = 1;
+                } else if (strcmp(line, "display_h") == 0) {
+                    out->display_h = value;
+                    have_h = 1;
                 }
             }
         }
@@ -106,21 +123,61 @@ int settings_file_load(wm_settings_request_t *out) {
         }
         line = end + 1;
     }
+    /* A width with no height is not half a resolution, it is a damaged
+     * file - and applying it would be applying a guess. */
+    out->have_display = have_w && have_h && out->display_w > 0 && out->display_h > 0;
+}
 
-    if (!have_bg || !have_accent || !have_wallpaper) {
+static int write_all(const settings_all_t *all) {
+    char buf[SETTINGS_BUF];
+    int len = 0;
+    append_key(buf, &len, "bg", all->bg);
+    append_key(buf, &len, "accent", all->accent);
+    append_key(buf, &len, "wallpaper", all->wallpaper);
+    if (all->have_display) {
+        append_key(buf, &len, "display_w", all->display_w);
+        append_key(buf, &len, "display_h", all->display_h);
+    }
+    return sys_writefile(SETTINGS_FILE_NAME, buf, (size_t)len) == 0 ? 0 : -1;
+}
+
+int settings_file_load(wm_settings_request_t *out) {
+    settings_all_t all;
+    parse_all(&all);
+    if (!all.have_bg || !all.have_accent || !all.have_wallpaper) {
         return 0;
     }
-    out->bg_color = bg;
-    out->accent_color = accent;
-    out->wallpaper = wallpaper;
+    out->bg_color = all.bg;
+    out->accent_color = all.accent;
+    out->wallpaper = all.wallpaper;
+    return 1;
+}
+
+int settings_file_load_display(uint32_t *w, uint32_t *h) {
+    settings_all_t all;
+    parse_all(&all);
+    if (!all.have_display) {
+        return 0;
+    }
+    *w = all.display_w;
+    *h = all.display_h;
     return 1;
 }
 
 int settings_file_save(const wm_settings_request_t *in) {
-    char buf[SETTINGS_BUF];
-    int len = 0;
-    append_key(buf, &len, "bg", in->bg_color);
-    append_key(buf, &len, "accent", in->accent_color);
-    append_key(buf, &len, "wallpaper", in->wallpaper);
-    return sys_writefile(SETTINGS_FILE_NAME, buf, (size_t)len) == 0 ? 0 : -1;
+    settings_all_t all;
+    parse_all(&all); /* M58: read-modify-write - the display keys are not this caller's to erase */
+    all.bg = in->bg_color;
+    all.accent = in->accent_color;
+    all.wallpaper = in->wallpaper;
+    return write_all(&all);
+}
+
+int settings_file_save_display(uint32_t w, uint32_t h) {
+    settings_all_t all;
+    parse_all(&all);
+    all.display_w = w;
+    all.display_h = h;
+    all.have_display = 1;
+    return write_all(&all);
 }

@@ -43,7 +43,7 @@
  * other GUI client in this project still closes the old way, unchanged.
  */
 #include "paths.h" /* system_api/include/paths.h - M53: /home is where a new document goes */
-#include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
+#include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT - the editor's column arithmetic is a fixed cell by definition (M57) */
 #include "str.h"
 #include "syscall_wrappers.h"
 #include "wmclient.h"
@@ -65,7 +65,6 @@
 
 #define MAX_LINE_LEN (COLS)
 #define MAX_LINES    600 /* 600 * 80 = 48000 bytes of line storage - comfortably within a user process's SYS_sbrk-backed heap */
-#define EDITOR_MAX_FILE 16384
 #define STATUS_ROWS 1
 /* M35: one row reserved for the File menu bar, on top of the existing
  * status row at the bottom - see redraw()/menu_open below.
@@ -84,15 +83,21 @@
 
 #define FILE_MENU_X 4
 #define FILE_MENU_ITEM_W 110
-#define FILE_MENU_ITEM_H (FONT_HEIGHT + 4)
-static const char *const FILE_MENU_ITEMS[] = {"New", "Save", "Save As", "Quit"};
+#define FILE_MENU_ITEM_H (UI_FONT_UI_HEIGHT + 4)
+/* M57: "Save As" opens a dialog and now says so with the ellipsis glyph -
+ * the oldest menu convention there is, and one this project could not
+ * write down until the font had the character. */
+static const char *const FILE_MENU_ITEMS[] = {"New", "Save", "Save As" UI_S_ELLIPSIS, "Quit"};
 #define FILE_MENU_COUNT ((int)(sizeof(FILE_MENU_ITEMS) / sizeof(FILE_MENU_ITEMS[0])))
 
 /* M36: modal-to-this-window-only prompts (see this file's own note in
  * redraw()/main() and milestones.md's M36 entry for why this stays
  * client-side rather than a compositor-level modal). Both share one
  * centered box; only PROMPT_SAVE_AS's contents accept typed input. */
-typedef enum { PROMPT_NONE = 0, PROMPT_SAVE_AS, PROMPT_CONFIRM_DISCARD } prompt_kind_t;
+/* M60: PROMPT_FIND joins them - the most-reached-for editor feature that
+ * is not typing, and the same typed-input prompt shape Save As already
+ * uses rather than a second kind of dialog. */
+typedef enum { PROMPT_NONE = 0, PROMPT_SAVE_AS, PROMPT_CONFIRM_DISCARD, PROMPT_FIND } prompt_kind_t;
 /* M49: PENDING_DROP joins the two the File menu already had - a file
  * dragged onto this window is one more thing that replaces the buffer,
  * so it goes through the same confirm-discard prompt rather than round
@@ -114,6 +119,11 @@ static int line_count = 1;
 static int cur_row, cur_col;
 static int scroll_top; /* index of the first line[] drawn in the text viewport */
 static int dirty; /* unsaved changes since the last Ctrl+S */
+/* M60: this file has more lines than this editor can hold, so what is on
+ * screen is a prefix of it. A plain save over the original is refused
+ * while this is set - writing back 600 lines of a thousand-line file is
+ * how a person loses the other four hundred. */
+static int truncated;
 static int menu_open; /* M35: File menu dropdown - toggled by clicking "File" in the menu row */
 
 /* M53: a path, not a name - PATH_MAX_LEN so it can hold anything the
@@ -141,27 +151,56 @@ static int sel_dragging, sel_active;
 static int sel_anchor_row, sel_anchor_col, sel_end_row, sel_end_col;
 #define SELECTION_COLOR 0x00355070u
 
+/* M60: streamed through a descriptor rather than read whole.
+ *
+ * This used to `sys_readfile` into a 16 KiB buffer, which is why the
+ * editor's real limit was neither MAX_LINES nor MAX_LINE_LEN but "how
+ * much of a file fits in one whole-file read" - and why a file larger
+ * than that opened silently truncated. The byte cap is gone: what is
+ * left is the line cap, which is a property of what this editor can hold
+ * rather than of how it reads.
+ *
+ * A file with more lines than MAX_LINES still cannot be *held*, and that
+ * is said out loud rather than hidden - `truncated` refuses a plain save
+ * over the original afterwards, because writing back 600 lines of a
+ * thousand-line file is how a person loses the other four hundred. */
 static void load_file(const char *name) {
-    static char file_buf[EDITOR_MAX_FILE];
-    long n = sys_readfile(name, file_buf, sizeof(file_buf));
-    if (n < 0) {
+    long fd = sys_open(name, OPEN_READ);
+    if (fd < 0) {
         return; /* doesn't exist yet - starts as one empty line, same as "new file" */
     }
-    if (n > (long)sizeof(file_buf)) {
-        n = (long)sizeof(file_buf);
-    }
     line_count = 0;
+    truncated = 0;
     int col = 0;
-    for (long i = 0; i < n && line_count < MAX_LINES; i++) {
-        char c = file_buf[i];
-        if (c == '\n') {
-            line_len[line_count++] = col;
-            col = 0;
-        } else if (col < MAX_LINE_LEN - 1) {
-            lines[line_count][col++] = c;
+    char chunk[512];
+    for (;;) {
+        long got = sys_read((int)fd, chunk, sizeof(chunk));
+        if (got <= 0) {
+            break;
+        }
+        for (long i = 0; i < got; i++) {
+            char c = chunk[i];
+            if (c == '\n') {
+                if (line_count >= MAX_LINES) {
+                    truncated = 1;
+                    break;
+                }
+                line_len[line_count++] = col;
+                col = 0;
+            } else if (col < MAX_LINE_LEN - 1) {
+                if (line_count >= MAX_LINES) {
+                    truncated = 1;
+                    break;
+                }
+                lines[line_count][col++] = c;
+            }
+        }
+        if (truncated) {
+            break;
         }
     }
-    if (line_count < MAX_LINES && (col > 0 || line_count == 0)) {
+    sys_close((int)fd);
+    if (!truncated && line_count < MAX_LINES && (col > 0 || line_count == 0)) {
         line_len[line_count++] = col;
     }
     if (line_count == 0) {
@@ -171,18 +210,28 @@ static void load_file(const char *name) {
 }
 
 static void save_file(void) {
-    static char out_buf[EDITOR_MAX_FILE];
-    size_t written = 0;
-    for (int r = 0; r < line_count; r++) {
-        int n = line_len[r];
-        if (written + (size_t)n + 1 > sizeof(out_buf)) {
-            break; /* file grew past what this editor can hold at all - silently stops rather than corrupting a partial write */
-        }
-        memcpy(out_buf + written, lines[r], (size_t)n);
-        written += (size_t)n;
-        out_buf[written++] = '\n';
+    /* M60: a file this editor could only hold a prefix of is not one it
+     * may write back over. Save As is still offered, and is the honest
+     * way to keep what is on screen without destroying what is not. */
+    if (truncated) {
+        memcpy(status, "File is longer than this editor holds - use Save As.",
+               sizeof("File is longer than this editor holds - use Save As."));
+        return;
     }
-    int ok = sys_writefile(filename, out_buf, written) == 0;
+    /* M60: streamed out a line at a time, so what this can save is what
+     * it can hold rather than what fits in a second whole-file buffer. */
+    long fd = sys_open(filename, OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE);
+    int ok = fd >= 0;
+    for (int r = 0; ok && r < line_count; r++) {
+        int n = line_len[r];
+        if (sys_write((int)fd, lines[r], (size_t)n) != n ||
+            sys_write((int)fd, "\n", 1) != 1) {
+            ok = 0;
+        }
+    }
+    if (fd >= 0) {
+        sys_close((int)fd);
+    }
     int i = 0;
     const char *prefix = ok ? "saved " : "SAVE FAILED ";
     for (; prefix[i]; i++) {
@@ -247,7 +296,23 @@ static void clamp_cursor(void) {
 typedef enum {
     EDIT_INSERT = 0, /* a character was inserted at (row, col) - undo deletes it */
     EDIT_DELETE = 1, /* `ch` was deleted from (row, col) - undo puts it back */
-    EDIT_NEWLINE = 2, /* an empty line was appended - undo drops it */
+    /* M60: EDIT_NEWLINE is gone with the primitive that produced it.
+     * Enter appended an empty line at the *end* of the buffer regardless
+     * of the cursor - it split nothing, which is why undoing it was just
+     * "drop the last line". Enter splits now, so every newline this
+     * editor makes is an EDIT_SPLIT. The ring lives only in memory, so
+     * there is no old record of the retired kind anywhere to honour. */
+    /* M60: the two structural edits M56 deferred, and said why: they are
+     * the only edits that change how many lines there are, and undo has
+     * to invert them. That was the right call when undo did not exist; it
+     * exists now and works, which turns the argument around - these are
+     * the two edits that make it an editor.
+     *
+     * Each inverse is performed through the same primitive as the edit
+     * (split_line / join_line), under M56's own rule, so undo cannot
+     * drift from what it is undoing. */
+    EDIT_SPLIT = 3,  /* line `row` was split at `col` - undo joins them back */
+    EDIT_JOIN = 4,   /* line `row + 1` was appended onto `row` at `col` - undo splits at (row, col) */
 } edit_kind_t;
 
 typedef struct {
@@ -258,13 +323,18 @@ typedef struct {
 } edit_t;
 
 static edit_t undo_ring[UNDO_MAX];
-static int undo_count;   /* how many records are live, <= UNDO_MAX */
+static int undo_count;   /* records behind `head` that can still be undone */
 static int undo_head;    /* where the next record goes */
+/* M60: records *ahead* of head that have been undone and can be redone.
+ * The ring already held what redo needs; what was missing was a cursor
+ * into it and the rule that a fresh edit discards the forward half. That
+ * rule is one line in undo_record, and it is what keeps redo from
+ * replaying an edit against a buffer that has since moved on. */
+static int redo_count;
 static uint8_t undo_group;
-/* Set while undo is replaying, so the inverse edits it performs are not
+/* Set while undo or redo is replaying, so the edits they perform are not
  * themselves recorded - which would make undo a loop rather than a
- * history. There is deliberately no redo: it would need this ring to
- * grow a second direction, and nothing has asked. */
+ * history. */
 static int undo_replaying;
 
 static void undo_begin_group(void) {
@@ -285,6 +355,11 @@ static void undo_record(edit_kind_t kind, int row, int col, char ch) {
     if (undo_count < UNDO_MAX) {
         undo_count++;
     }
+    /* M60: a fresh edit discards the forward half. Anything that was
+     * undone described a buffer this edit has just diverged from, and
+     * replaying it would apply a change at coordinates that no longer
+     * mean what they did. */
+    redo_count = 0;
     /* Full: the oldest record is simply overwritten. Bounded history is
      * the trade this design makes on purpose - an editor that can undo
      * forever is one that can run out of memory while you type. */
@@ -292,6 +367,7 @@ static void undo_record(edit_kind_t kind, int row, int col, char ch) {
 
 static void undo_reset(void) {
     undo_count = 0;
+    redo_count = 0;
     undo_head = 0;
     undo_group = 0;
 }
@@ -311,9 +387,77 @@ static void insert_char(char c) {
     dirty = 1;
 }
 
+/* M60: split line `row` at `col` - everything from `col` onward becomes a
+ * new line below it. The primitive, with no cursor movement and no undo
+ * record of its own, because undo performs it too (as the inverse of a
+ * join) and a primitive that recorded itself would make undo a loop. */
+static int split_line(int row, int col) {
+    if (line_count >= MAX_LINES) {
+        return 0;
+    }
+    for (int r = line_count; r > row + 1; r--) {
+        memcpy(lines[r], lines[r - 1], (size_t)line_len[r - 1]);
+        line_len[r] = line_len[r - 1];
+    }
+    line_count++;
+    int tail = line_len[row] - col;
+    memcpy(lines[row + 1], lines[row] + col, (size_t)tail);
+    line_len[row + 1] = tail;
+    line_len[row] = col;
+    return 1;
+}
+
+/* The inverse: append line `row + 1` onto the end of `row`. Returns 0 if
+ * the joined line would not fit, which is what keeps Backspace from
+ * silently losing the tail of a long line. */
+static int join_line(int row) {
+    if (row + 1 >= line_count) {
+        return 0;
+    }
+    if (line_len[row] + line_len[row + 1] > MAX_LINE_LEN - 1) {
+        return 0;
+    }
+    memcpy(lines[row] + line_len[row], lines[row + 1], (size_t)line_len[row + 1]);
+    line_len[row] += line_len[row + 1];
+    for (int r = row + 1; r < line_count - 1; r++) {
+        memcpy(lines[r], lines[r + 1], (size_t)line_len[r + 1]);
+        line_len[r] = line_len[r + 1];
+    }
+    line_count--;
+    return 1;
+}
+
+/* M60: Enter, at last. It appended an empty line at the end of the buffer
+ * regardless of where the cursor was - which is what "you cannot split a
+ * line" looks like from the inside, and the first thing anyone typing a
+ * paragraph discovers. */
+static void split_at_cursor(void) {
+    if (!split_line(cur_row, cur_col)) {
+        return;
+    }
+    undo_record(EDIT_SPLIT, cur_row, cur_col, 0);
+    cur_row++;
+    cur_col = 0;
+    dirty = 1;
+}
+
 static void backspace(void) {
     if (cur_col == 0) {
-        return; /* no line-merge - see this file's own header comment on Enter's matching simplification */
+        /* M60: and the other half - Backspace at column 0 joins this line
+         * onto the one above, landing the cursor exactly where the join
+         * happened, which is where the text you just merged now starts. */
+        if (cur_row == 0) {
+            return;
+        }
+        int at = line_len[cur_row - 1];
+        if (!join_line(cur_row - 1)) {
+            return;
+        }
+        undo_record(EDIT_JOIN, cur_row - 1, at, 0);
+        cur_row--;
+        cur_col = at;
+        dirty = 1;
+        return;
     }
     int *len = &line_len[cur_row];
     undo_record(EDIT_DELETE, cur_row, cur_col - 1, lines[cur_row][cur_col - 1]);
@@ -325,21 +469,9 @@ static void backspace(void) {
     dirty = 1;
 }
 
-static void new_line_at_end(void) {
-    if (line_count >= MAX_LINES) {
-        return;
-    }
-    line_len[line_count] = 0;
-    line_count++;
-    undo_record(EDIT_NEWLINE, line_count - 1, 0, 0);
-    cur_row = line_count - 1;
-    cur_col = 0;
-    dirty = 1;
-}
-
 static void handle_char(char ch) {
     if (ch == '\n' || ch == '\r') {
-        new_line_at_end();
+        split_at_cursor();
     } else if (ch == '\b' || ch == 0x7F) {
         backspace();
     } else if (ch == KBD_KEY_UP) {
@@ -405,6 +537,11 @@ static void confirm_save_as(void) {
             filename[i] = prompt_buf[i];
         }
         filename[i] = '\0';
+        /* M60: Save As under a new name is exactly the escape hatch a
+         * truncated buffer needs, so the flag clears here - what gets
+         * written is the whole of *this* file, whatever it was a prefix
+         * of before. */
+        truncated = 0;
         save_file();
     }
     prompt_kind = PROMPT_NONE;
@@ -492,6 +629,125 @@ static void normalized_selection(int *sr, int *sc, int *er, int *ec) {
  * inverse is one of the same three mutations, performed through the same
  * primitives - so undo cannot drift away from what it is undoing, which
  * is the failure mode of every hand-written inverse. */
+/* ---- M60: find and find-next ----------------------------------------
+ *
+ * Searches forward from just after the cursor and wraps to the top, which
+ * is what makes repeated find-next walk every occurrence and stop where
+ * it started rather than at the end of the file. Case-sensitive and plain
+ * substring: this editor has no notion of a word and inventing one would
+ * be guessing at what somebody meant. */
+static char find_needle[PROMPT_MAX_LEN + 1];
+
+static int line_has_at(int row, int col, const char *needle) {
+    int n = 0;
+    while (needle[n]) {
+        if (col + n >= line_len[row] || lines[row][col + n] != needle[n]) {
+            return 0;
+        }
+        n++;
+    }
+    return 1;
+}
+
+static int find_from(int row, int col, const char *needle) {
+    if (!needle[0] || line_count == 0) {
+        return 0;
+    }
+    int total = line_count;
+    for (int step = 0; step <= total; step++) {
+        int r = (row + step) % total;
+        int start = (step == 0) ? col : 0;
+        for (int c = start; c < line_len[r]; c++) {
+            if (line_has_at(r, c, needle)) {
+                cur_row = r;
+                cur_col = c;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void find_next(void) {
+    if (!find_needle[0]) {
+        memcpy(status, "Nothing to find - Ctrl+F first.", sizeof("Nothing to find - Ctrl+F first."));
+        return;
+    }
+    /* From one past the cursor, so find-next moves off the match it is
+     * standing on rather than finding it again forever. */
+    int from_row = cur_row;
+    int from_col = cur_col + 1;
+    if (from_col > line_len[cur_row]) {
+        from_col = 0;
+        from_row = (cur_row + 1) % line_count;
+    }
+    if (find_from(from_row, from_col, find_needle)) {
+        clamp_cursor();
+        status[0] = '\0';
+    } else {
+        int i = 0;
+        static const char msg[] = "Not found: ";
+        for (; msg[i]; i++) {
+            status[i] = msg[i];
+        }
+        for (int j = 0; find_needle[j] && i < COLS - 1; j++, i++) {
+            status[i] = find_needle[j];
+        }
+        status[i] = '\0';
+    }
+}
+
+/* One record, undone. Every inverse is performed through the same
+ * primitive as the edit it reverses, which is what keeps undo from
+ * drifting away from what it is undoing - M56's rule, and the reason the
+ * two structural kinds M60 added needed no new machinery, only their own
+ * two lines here. */
+static void apply_inverse(const edit_t *e) {
+    if (e->kind == EDIT_INSERT) {
+        cur_row = e->row;
+        cur_col = e->col + 1;
+        clamp_cursor();
+        backspace();
+    } else if (e->kind == EDIT_DELETE) {
+        cur_row = e->row;
+        cur_col = e->col;
+        clamp_cursor();
+        insert_char(e->ch);
+    } else if (e->kind == EDIT_SPLIT) {
+        join_line(e->row);
+        cur_row = e->row;
+        cur_col = e->col;
+    } else if (e->kind == EDIT_JOIN) {
+        split_line(e->row, e->col);
+        cur_row = e->row + 1;
+        cur_col = 0;
+    }
+}
+
+/* And the same record, re-done - the edit itself rather than its
+ * inverse, through the same primitives again. */
+static void apply_forward(const edit_t *e) {
+    if (e->kind == EDIT_INSERT) {
+        cur_row = e->row;
+        cur_col = e->col;
+        clamp_cursor();
+        insert_char(e->ch);
+    } else if (e->kind == EDIT_DELETE) {
+        cur_row = e->row;
+        cur_col = e->col + 1;
+        clamp_cursor();
+        backspace();
+    } else if (e->kind == EDIT_SPLIT) {
+        split_line(e->row, e->col);
+        cur_row = e->row + 1;
+        cur_col = 0;
+    } else if (e->kind == EDIT_JOIN) {
+        join_line(e->row);
+        cur_row = e->row;
+        cur_col = e->col;
+    }
+}
+
 static void undo_last_group(void) {
     if (undo_count == 0) {
         memcpy(status, "Nothing to undo.", sizeof("Nothing to undo."));
@@ -508,23 +764,35 @@ static void undo_last_group(void) {
         edit_t e = undo_ring[at];
         undo_head = at;
         undo_count--;
-        if (e.kind == EDIT_INSERT) {
-            cur_row = e.row;
-            cur_col = e.col + 1;
-            clamp_cursor();
-            backspace();
-        } else if (e.kind == EDIT_DELETE) {
-            cur_row = e.row;
-            cur_col = e.col;
-            clamp_cursor();
-            insert_char(e.ch);
-        } else { /* EDIT_NEWLINE */
-            if (line_count > 1) {
-                line_count--;
-            }
-            cur_row = line_count - 1;
-            cur_col = line_len[cur_row];
+        if (redo_count < UNDO_MAX) {
+            redo_count++; /* the record stays in the ring, ahead of head, for redo */
         }
+        apply_inverse(&e);
+    }
+    undo_replaying = 0;
+    clamp_cursor();
+    dirty = 1;
+}
+
+/* M60: redo. The ring already held what this needs - the records are
+ * still there, ahead of head; what was missing was a cursor into it.
+ * Symmetric with undo down to the group rule, so one Ctrl+Y puts back
+ * exactly what one Ctrl+Z took away. */
+static void redo_next_group(void) {
+    if (redo_count == 0) {
+        memcpy(status, "Nothing to redo.", sizeof("Nothing to redo."));
+        return;
+    }
+    uint8_t group = undo_ring[undo_head].group;
+    undo_replaying = 1;
+    while (redo_count > 0 && undo_ring[undo_head].group == group) {
+        edit_t e = undo_ring[undo_head];
+        undo_head = (undo_head + 1) % UNDO_MAX;
+        redo_count--;
+        if (undo_count < UNDO_MAX) {
+            undo_count++;
+        }
+        apply_forward(&e);
     }
     undo_replaying = 0;
     clamp_cursor();
@@ -548,7 +816,9 @@ static void paste_from_clipboard(void) {
     undo_begin_group();
     for (long i = 0; i < n; i++) {
         if (buf[i] == '\n' || buf[i] == '\r') {
-            new_line_at_end();
+            /* M60: a pasted newline splits too, so pasting two lines into
+             * the middle of a third does what it looks like it should. */
+            split_at_cursor();
         } else if (buf[i] >= 0x20 && buf[i] < 0x7F) {
             insert_char(buf[i]);
         }
@@ -605,7 +875,7 @@ static void redraw(wm_window_t *win) {
         char row_buf[MAX_LINE_LEN + 1];
         memcpy(row_buf, lines[src], (size_t)line_len[src]);
         row_buf[line_len[src]] = '\0';
-        gfx_draw_text(&win->gfx, 0, CONTENT_Y0 + r * FONT_HEIGHT, row_buf, TEXT_COLOR);
+        gfx_draw_text_mono(&win->gfx, 0, CONTENT_Y0 + r * FONT_HEIGHT, row_buf, TEXT_COLOR);
     }
     gfx_fill_rect(&win->gfx, (cur_col) * FONT_WIDTH,
                   CONTENT_Y0 + (cur_row - scroll_top) * FONT_HEIGHT + FONT_HEIGHT - 2,
@@ -613,7 +883,11 @@ static void redraw(wm_window_t *win) {
 
     int status_y = CONTENT_Y0 + TEXT_ROWS * FONT_HEIGHT;
     gfx_fill_rect(&win->gfx, 0, status_y, WIN_W, FONT_HEIGHT, STATUS_BG);
-    gfx_draw_text(&win->gfx, 4, status_y, status[0] ? status : "Ctrl+S to save", STATUS_COLOR);
+    gfx_draw_text(&win->gfx, 4, status_y,
+                  status[0] ? status
+                            : (truncated ? "Showing the first part of a longer file"
+                                         : "Ctrl+S save  Ctrl+Z undo  Ctrl+Y redo  Ctrl+F find  Ctrl+G next"),
+                  STATUS_COLOR);
 
     /* Dropdown drawn last so it overlays whatever content is underneath -
      * this app owns its whole window buffer, there's no compositor-level
@@ -635,14 +909,18 @@ static void redraw(wm_window_t *win) {
          * were done. */
         gfx_fill_rect_rounded(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BG);
         gfx_draw_rect_rounded(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BORDER);
-        if (prompt_kind == PROMPT_SAVE_AS) {
-            gfx_draw_text(&win->gfx, x + GFX_PAD, y + 8, "Save as (Enter=save, click=cancel):", PROMPT_TEXT);
-            gfx_fill_rect_rounded(&win->gfx, x + GFX_PAD, y + 28, PROMPT_W - 2 * GFX_PAD, FONT_HEIGHT + 4, PROMPT_INPUT_BG);
+        if (prompt_kind == PROMPT_SAVE_AS || prompt_kind == PROMPT_FIND) {
+            gfx_draw_text(&win->gfx, x + GFX_PAD, y + 8,
+                          prompt_kind == PROMPT_FIND ? "Find (Enter=search, click=cancel):"
+                                                     : "Save as (Enter=save, click=cancel):",
+                          PROMPT_TEXT);
+            gfx_fill_rect_rounded(&win->gfx, x + GFX_PAD, y + 28, PROMPT_W - 2 * GFX_PAD, UI_FONT_UI_HEIGHT + 4, PROMPT_INPUT_BG);
             char buf[PROMPT_MAX_LEN + 1];
             memcpy(buf, prompt_buf, (size_t)prompt_len);
             buf[prompt_len] = '\0';
             gfx_draw_text(&win->gfx, x + GFX_PAD + 4, y + 30, buf, PROMPT_TEXT);
-            gfx_fill_rect(&win->gfx, x + GFX_PAD + 4 + prompt_len * FONT_WIDTH, y + 30, 2, FONT_HEIGHT, CURSOR_COLOR);
+            gfx_fill_rect(&win->gfx, x + GFX_PAD + 4 + gfx_text_width(gfx_ui_font(), buf), y + 30,
+                          2, (int32_t)gfx_ui_font()->height, CURSOR_COLOR);
         } else { /* PROMPT_CONFIRM_DISCARD */
             gfx_draw_text(&win->gfx, x + GFX_PAD, y + 8, "Discard unsaved changes?", PROMPT_TEXT);
             gfx_draw_text(&win->gfx, x + GFX_PAD, y + 32, "Y = discard      N / click = cancel", PROMPT_TEXT);
@@ -650,7 +928,12 @@ static void redraw(wm_window_t *win) {
     }
 }
 
-int main(const char *arg) {
+int main(int argc, char **argv) {
+    /* M60: argv[0] is this program's own path; argv[1] is the first thing
+     * the caller had to say. `arg` keeps the name the body already uses,
+     * and is the empty string when there was nothing - which is exactly
+     * what the single-string mechanism this replaced handed over. */
+    const char *arg = argc > 1 ? argv[1] : "";
     int i = 0;
     for (; arg && arg[i] && i < (int)sizeof(filename) - 1; i++) {
         filename[i] = arg[i];
@@ -678,7 +961,7 @@ int main(const char *arg) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE) {
+            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
                 continue;
             }
@@ -686,12 +969,25 @@ int main(const char *arg) {
              * "in-progress interaction takes over the input stream"
              * shape as compositor.c's own drag state machine (M31), just
              * scoped to this one window instead of the whole desktop. */
-            if (prompt_kind == PROMPT_SAVE_AS) {
+            if (prompt_kind == PROMPT_SAVE_AS || prompt_kind == PROMPT_FIND) {
                 if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                     prompt_kind = PROMPT_NONE; /* click anywhere cancels */
                 } else if (ev.type == WM_EVENT_KEY) {
                     if (ev.ch == '\n' || ev.ch == '\r') {
-                        confirm_save_as();
+                        if (prompt_kind == PROMPT_FIND) {
+                            prompt_buf[prompt_len] = '\0';
+                            memcpy(find_needle, prompt_buf, (size_t)prompt_len + 1);
+                            prompt_kind = PROMPT_NONE;
+                            /* From the cursor itself, so the first Enter
+                             * finds the nearest match rather than
+                             * skipping one. */
+                            if (!find_from(cur_row, cur_col, find_needle)) {
+                                find_next(); /* not found from here - say so, having wrapped */
+                            }
+                            clamp_cursor();
+                        } else {
+                            confirm_save_as();
+                        }
                     } else if (ev.ch == '\b' || ev.ch == 0x7F) {
                         if (prompt_len > 0) {
                             prompt_len--;
@@ -767,7 +1063,8 @@ int main(const char *arg) {
                  * click while it's open either picks an item or - same
                  * as a real menu - just dismisses it, consumed either
                  * way so it never also reaches handle_char/save_file. */
-                if (gfx_point_in_rect(ev.x, ev.y, 0, 0, FILE_MENU_X + 4 * FONT_WIDTH + 8, CONTENT_Y0)) {
+                if (gfx_point_in_rect(ev.x, ev.y, 0, 0,
+                                      FILE_MENU_X + gfx_text_width(gfx_ui_font(), "File") + 8, CONTENT_Y0)) {
                     menu_open = !menu_open;
                 } else if (menu_open) {
                     int idx = gfx_menu_hit_test(ev.x, ev.y, FILE_MENU_X, CONTENT_Y0,
@@ -807,6 +1104,20 @@ int main(const char *arg) {
                     status[0] = '\0';
                     clear_selection();
                     undo_last_group();
+                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'y' || ev.ch == 'Y')) {
+                    status[0] = '\0';
+                    clear_selection();
+                    redo_next_group();
+                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'f' || ev.ch == 'F')) {
+                    prompt_kind = PROMPT_FIND;
+                    prompt_len = 0;
+                    for (; find_needle[prompt_len] && prompt_len < PROMPT_MAX_LEN; prompt_len++) {
+                        prompt_buf[prompt_len] = find_needle[prompt_len];
+                    }
+                    prompt_buf[prompt_len] = '\0';
+                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'g' || ev.ch == 'G')) {
+                    clear_selection();
+                    find_next();
                 } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 's' || ev.ch == 'S')) {
                     save_file();
                 } else {

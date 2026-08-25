@@ -9,6 +9,19 @@
 ; _start itself. RSP arrives already 16-byte aligned (enter_user_mode
 ; sets it to a page-aligned stack top), which is exactly what the x86_64
 ; SysV ABI requires right before a `call`.
+;
+; M60: RDI arrives pointing at the argument page (proc.h's USER_ARG_ADDR),
+; which now holds a real argument vector rather than one string:
+;
+;     [rdi + 0]   argc
+;     [rdi + 8]   argv[0..argc], NULL-terminated
+;
+; so this unpacks it into main(int argc, char **argv). Deliberately a
+; *page* rather than a stack frame the kernel builds: RDI already pointed
+; here, so nothing about the ring-3 transition had to change, and the two
+; instructions below are the entire cost of the unpacking. A program
+; written as `int main(void)` keeps working untouched - SysV puts the
+; extra arguments in registers it simply never reads.
 
 bits 64
 
@@ -19,6 +32,9 @@ global _start
 
 section .text
 _start:
+    mov rax, [rdi]      ; argc
+    lea rsi, [rdi + 8]  ; argv
+    mov rdi, rax
     call main
     mov edi, eax    ; main's return value -> sys_exit's argument
     call sys_exit

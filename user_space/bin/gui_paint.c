@@ -51,7 +51,7 @@ int main(void) {
         wm_event_t ev;
         wm_wait_event(&win, &ev);
 
-        if (ev.type == WM_EVENT_EXPOSE) {
+        if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
             /* M55: a replacement compositor handed this client a blank
              * buffer. The strokes themselves are gone - this program
              * keeps no model of what was drawn, the pixel buffer *was*

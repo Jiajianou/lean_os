@@ -27,7 +27,6 @@
  * next click would send those wrong assumed values back for the two
  * controls you hadn't touched.
  */
-#include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "shortcuts.h" /* system_api/include/shortcuts.h - M49: the Shortcuts pane is generated from the same table the compositor dispatches from */
 #include "str.h"
 #include "settings_file.h" /* M47: this window is where the three settings are chosen, so it is also where they get written down */
@@ -41,11 +40,15 @@
  * kept clear of the taskbar since M45), and taller is the right answer
  * rather than a second tab: this list is reference material you read
  * once, not a control you return to. */
-#define WIN_H 520
+/* M58: 520 -> 632, for the Resolution pane. The Shortcuts list moves
+ * down rather than shrinking - it is reference material and the whole
+ * point of it is that it is complete. */
+#define WIN_H 632
 
 #define BG_COLOR      0x00202430u
 #define TEXT_COLOR    0x00E0E0E0u
 #define LABEL_COLOR   0x0090A0B0u
+#define MARK_COLOR     0x00FFFFFFu /* M57: the checkmark over a selected swatch - white, so it reads on every swatch colour */
 #define BORDER_COLOR  0x00404860u
 #define BTN_COLOR     0x00445566u
 #define BTN_HOVER     0x00607088u
@@ -68,8 +71,26 @@
  * cannot exist without being listed here, and nothing can be listed here
  * that isn't wired up. That is the whole point: a shortcuts list is only
  * worth having if it is true. */
-#define SHORTCUT_LABEL_Y 304
-#define SHORTCUT_ROW_Y   326
+/* M58: the Resolution pane. The list is whatever SYS_display_modes
+ * offers, which on hardware with no runtime mode-setting interface is
+ * nothing at all - and the pane then says so rather than offering
+ * buttons that cannot work. */
+#define MODE_LABEL_Y  304
+#define MODE_BTN_Y    328
+#define MODE_BTN_W    92
+#define MODE_BTN_H    20
+#define MODE_BTN_GAP  6
+#define MODE_COLS     3
+#define MODE_BTN_X(i) (GFX_PAD + ((i) % MODE_COLS) * (MODE_BTN_W + MODE_BTN_GAP))
+#define MODE_ROW_Y(i) (MODE_BTN_Y + ((i) / MODE_COLS) * (MODE_BTN_H + 4))
+#define MODE_ROWS     3
+#define CONFIRM_Y     (MODE_BTN_Y + MODE_ROWS * (MODE_BTN_H + 4) + 6)
+#define CONFIRM_H     20
+#define KEEP_BTN_W    64
+#define KEEP_BTN_X    (WIN_W - GFX_PAD - KEEP_BTN_W)
+
+#define SHORTCUT_LABEL_Y 436
+#define SHORTCUT_ROW_Y   458
 #define SHORTCUT_ROW_H   18
 #define SHORTCUT_DESC_X  (GFX_PAD + 124) /* clears the longest chord ("Ctrl+Shift+Esc", 14 glyphs) */
 
@@ -95,6 +116,20 @@ static const uint32_t ACCENT_SWATCHES[] = {
     0x00F1C40Fu, /* yellow */
 };
 #define ACCENT_SWATCH_COUNT ((int)(sizeof(ACCENT_SWATCHES) / sizeof(ACCENT_SWATCHES[0])))
+
+/* M58: the offered modes, read once at startup - the list is a property
+ * of the adapter and cannot change while this program runs. Zero of them
+ * is a perfectly ordinary answer (see kernel/drivers/dispi.h) and the
+ * pane is written for it. */
+static display_mode_t modes[DISPLAY_MAX_MODES];
+static int mode_count;
+
+/* A resolution change is on trial until it is confirmed. This is the
+ * countdown a person reads; the deadline that actually protects them is
+ * the compositor's own (see WM_ACTION_SET_MODE), because the case this
+ * whole feature exists for is a screen nobody can read - and a timer
+ * living in a window you cannot see would be no protection at all. */
+static long confirm_until_ms;
 
 static uint32_t current_bg = DEFAULT_BG_COLOR;
 static uint32_t current_accent = DEFAULT_ACCENT_COLOR;
@@ -136,15 +171,37 @@ static void apply_theme(void) {
     settings_file_save(&settings);
 }
 
+/* M57: which swatch is the current one, said with the checkmark glyph
+ * rather than with a one-pixel border colour alone. A border says
+ * "different"; a checkmark says "this one" - and against a swatch whose
+ * own colour happens to be near the highlight, the border said nothing
+ * at all. */
+static void draw_selected_mark(wm_window_t *win, int32_t x, int32_t y, int selected) {
+    if (!selected) {
+        return;
+    }
+    const ui_font_t *f = gfx_ui_font();
+    int32_t gw = gfx_char_advance(f, UI_G_CHECK);
+    gfx_draw_char_font(&win->gfx, x + (SWATCH_SIZE - gw) / 2,
+                       y + (SWATCH_SIZE - (int32_t)f->height) / 2,
+                       UI_G_CHECK, MARK_COLOR, f, 1);
+}
+
 static void redraw(wm_window_t *win, int clear_hover, int clear_pressed) {
     gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
 
     gfx_draw_text(&win->gfx, GFX_PAD, 10, "System", LABEL_COLOR);
     gfx_draw_line(&win->gfx, GFX_PAD, 26, WIN_W - GFX_PAD, 26, BORDER_COLOR);
 
+    /* Read once per redraw and used twice - the System strip below and
+     * the Resolution pane further down, which marks whichever offered
+     * mode is the live one. */
     wm_fb_info_t fb_info;
+    uint32_t fb_w = 0, fb_h = 0;
     char line[64];
     if (sys_fb_info(&fb_info) == 0) {
+        fb_w = fb_info.width;
+        fb_h = fb_info.height;
         int i = 0;
         static const char label[] = "Display: ";
         for (int j = 0; label[j]; j++) {
@@ -158,13 +215,38 @@ static void redraw(wm_window_t *win, int clear_hover, int clear_pressed) {
     }
 
     {
+        /* M59: the date, when there is one. This strip showed uptime and
+         * nothing else because uptime was all this machine could know;
+         * the CMOS clock makes "what day is it" answerable, and the
+         * fallback stays for a machine where it is not. */
+        os_datetime_t t;
         int i = 0;
-        static const char label[] = "Uptime: ";
-        for (int j = 0; label[j]; j++) {
-            line[i++] = label[j];
+        if (sys_time(&t) > 0 && t.valid) {
+            i += format_uint(t.year, line + i);
+            line[i++] = '-';
+            line[i++] = (char)('0' + t.month / 10);
+            line[i++] = (char)('0' + t.month % 10);
+            line[i++] = '-';
+            line[i++] = (char)('0' + t.day / 10);
+            line[i++] = (char)('0' + t.day % 10);
+            line[i++] = ' ';
+            line[i++] = (char)('0' + t.hour / 10);
+            line[i++] = (char)('0' + t.hour % 10);
+            line[i++] = ':';
+            line[i++] = (char)('0' + t.minute / 10);
+            line[i++] = (char)('0' + t.minute % 10);
+            line[i++] = ' ';
+            line[i++] = 'U';
+            line[i++] = 'T';
+            line[i++] = 'C';
+        } else {
+            static const char label[] = "Uptime: ";
+            for (int j = 0; label[j]; j++) {
+                line[i++] = label[j];
+            }
+            i += format_uint((uint32_t)(sys_uptime_ms() / 1000), line + i);
+            line[i++] = 's';
         }
-        i += format_uint((uint32_t)(sys_uptime_ms() / 1000), line + i);
-        line[i++] = 's';
         line[i] = '\0';
         gfx_draw_text(&win->gfx, GFX_PAD, 52, line, TEXT_COLOR);
     }
@@ -198,6 +280,7 @@ static void redraw(wm_window_t *win, int clear_hover, int clear_pressed) {
         gfx_fill_rect_rounded(&win->gfx, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, BG_SWATCHES[i]);
         gfx_draw_rect_rounded(&win->gfx, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE,
                               BG_SWATCHES[i] == current_bg ? TEXT_COLOR : BORDER_COLOR);
+        draw_selected_mark(win, x, BG_SWATCH_Y, BG_SWATCHES[i] == current_bg);
     }
 
     gfx_draw_text(&win->gfx, GFX_PAD, 190, "Accent color", LABEL_COLOR);
@@ -207,6 +290,7 @@ static void redraw(wm_window_t *win, int clear_hover, int clear_pressed) {
         gfx_fill_rect_rounded(&win->gfx, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, ACCENT_SWATCHES[i]);
         gfx_draw_rect_rounded(&win->gfx, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE,
                               ACCENT_SWATCHES[i] == current_accent ? TEXT_COLOR : BORDER_COLOR);
+        draw_selected_mark(win, x, ACCENT_SWATCH_Y, ACCENT_SWATCHES[i] == current_accent);
     }
 
     /* M44: the wallpaper row. Each button shows the style's own ramp
@@ -222,9 +306,54 @@ static void redraw(wm_window_t *win, int clear_hover, int clear_pressed) {
         gfx_draw_rect_rounded(&win->gfx, x, WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H,
                               (uint32_t)i == current_wallpaper ? TEXT_COLOR : BORDER_COLOR);
         const char *name = wallpaper_name(i);
-        int32_t label_w = (int32_t)strlen(name) * FONT_WIDTH;
+        int32_t label_w = gfx_text_width(gfx_ui_font(), name);
         gfx_draw_text(&win->gfx, x + (WALL_BTN_W - label_w) / 2,
-                      WALL_BTN_Y + (WALL_BTN_H - FONT_HEIGHT) / 2, name, TEXT_COLOR);
+                      WALL_BTN_Y + (WALL_BTN_H - (int32_t)gfx_ui_font()->height) / 2, name, TEXT_COLOR);
+    }
+
+    /* M58: the Resolution pane - the milestone's actual deliverable, and
+     * everything the mode-setting driver underneath it costs. */
+    gfx_draw_text(&win->gfx, GFX_PAD, MODE_LABEL_Y, "Resolution", LABEL_COLOR);
+    gfx_draw_line(&win->gfx, GFX_PAD, MODE_LABEL_Y + 16, WIN_W - GFX_PAD, MODE_LABEL_Y + 16, BORDER_COLOR);
+    if (mode_count == 0) {
+        /* The honest pane on hardware whose adapter this kernel cannot
+         * set modes on: the mode the firmware chose, and nothing on
+         * offer. Saying so beats offering buttons that do nothing. */
+        gfx_draw_text(&win->gfx, GFX_PAD, MODE_BTN_Y,
+                       "This display cannot be", LABEL_COLOR);
+        gfx_draw_text(&win->gfx, GFX_PAD, MODE_BTN_Y + 16,
+                       "resized after boot.", LABEL_COLOR);
+    } else {
+        for (int i = 0; i < mode_count; i++) {
+            char label[16];
+            int n = format_uint(modes[i].width, label);
+            label[n++] = 'x';
+            n += format_uint(modes[i].height, label + n);
+            label[n] = '\0';
+            int current = (fb_w == modes[i].width && fb_h == modes[i].height);
+            gfx_draw_button(&win->gfx, MODE_BTN_X(i), MODE_ROW_Y(i), MODE_BTN_W, MODE_BTN_H,
+                             current ? BTN_HOVER : BTN_COLOR,
+                             current ? TEXT_COLOR : BORDER_COLOR,
+                             label, TEXT_COLOR);
+        }
+        if (confirm_until_ms != 0) {
+            long left_ms = confirm_until_ms - sys_uptime_ms();
+            if (left_ms < 0) {
+                left_ms = 0;
+            }
+            char line[40];
+            int i = 0;
+            static const char ask[] = "Keep this size? ";
+            for (int j = 0; ask[j]; j++) {
+                line[i++] = ask[j];
+            }
+            i += format_uint((uint32_t)(left_ms / 1000) + 1, line + i);
+            line[i++] = 's';
+            line[i] = '\0';
+            gfx_draw_text(&win->gfx, GFX_PAD, CONFIRM_Y + 2, line, TEXT_COLOR);
+            gfx_draw_button(&win->gfx, KEEP_BTN_X, CONFIRM_Y, KEEP_BTN_W, CONFIRM_H,
+                             BTN_COLOR, BORDER_COLOR, "Keep", TEXT_COLOR);
+        }
     }
 
     gfx_draw_text(&win->gfx, GFX_PAD, SHORTCUT_LABEL_Y, "Shortcuts", LABEL_COLOR);
@@ -253,6 +382,11 @@ int main(void) {
         }
     }
 
+    {
+        long n = sys_display_modes(modes, DISPLAY_MAX_MODES);
+        mode_count = n < 0 ? 0 : (int)(n > DISPLAY_MAX_MODES ? DISPLAY_MAX_MODES : n);
+    }
+
     int clear_hover = 0;
     int clear_pressed = 0;
     long next_redraw = 0;
@@ -262,7 +396,7 @@ int main(void) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE) {
+            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
             } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
                 int hover = gfx_point_in_rect(ev.x, ev.y, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H);
@@ -313,10 +447,43 @@ int main(void) {
                         break;
                     }
                 }
+                /* M58: pick a resolution, then keep it. Nothing is
+                 * written to disk until it is kept - a mode saved the
+                 * moment it was applied would come back on the next boot
+                 * even if it was the mode that made the screen
+                 * unreadable, which is the one outcome the countdown
+                 * exists to prevent. */
+                if (confirm_until_ms != 0 &&
+                    gfx_point_in_rect(ev.x, ev.y, KEEP_BTN_X, CONFIRM_Y, KEEP_BTN_W, CONFIRM_H)) {
+                    wm_confirm_display_mode();
+                    confirm_until_ms = 0;
+                    wm_fb_info_t now_fb;
+                    if (sys_fb_info(&now_fb) == 0) {
+                        settings_file_save_display(now_fb.width, now_fb.height);
+                    }
+                    changed = 1;
+                } else {
+                    for (int i = 0; i < mode_count; i++) {
+                        if (gfx_point_in_rect(ev.x, ev.y, MODE_BTN_X(i), MODE_ROW_Y(i), MODE_BTN_W, MODE_BTN_H)) {
+                            wm_set_display_mode(modes[i].width, modes[i].height);
+                            confirm_until_ms = sys_uptime_ms() + WM_MODE_REVERT_MS;
+                            changed = 1;
+                            break;
+                        }
+                    }
+                }
             }
         }
 
         long now = sys_uptime_ms();
+        /* The trial is over one way or the other: either it was kept
+         * (which clears this itself) or the compositor has already put
+         * the old mode back, and the countdown should stop claiming
+         * otherwise. */
+        if (confirm_until_ms != 0 && now >= confirm_until_ms) {
+            confirm_until_ms = 0;
+            changed = 1;
+        }
         if (now >= next_redraw) {
             next_redraw = now + 500; /* uptime display is the only thing that changes with no input at all */
             changed = 1;

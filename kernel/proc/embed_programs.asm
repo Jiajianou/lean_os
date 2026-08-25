@@ -38,6 +38,12 @@ cat_elf_start:
     incbin "build/cat.elf"
 cat_elf_end:
 
+global cp_elf_start
+global cp_elf_end
+cp_elf_start:
+    incbin "build/cp.elf"
+cp_elf_end:
+
 global ls_elf_start
 global ls_elf_end
 ls_elf_start:
@@ -61,6 +67,12 @@ global memtest_elf_end
 memtest_elf_start:
     incbin "build/memtest.elf"
 memtest_elf_end:
+
+global fonttest_elf_start
+global fonttest_elf_end
+fonttest_elf_start:
+    incbin "build/fonttest.elf"
+fonttest_elf_end:
 
 global compositor_elf_start
 global compositor_elf_end

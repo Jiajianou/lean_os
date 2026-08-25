@@ -67,7 +67,129 @@ void gfx_draw_line(gfx_ctx_t *ctx, int32_t x0, int32_t y0, int32_t x1, int32_t y
     }
 }
 
+/* ---- text ---------------------------------------------------------
+ *
+ * M57. Two fonts with two jobs, and the split is deliberate: the
+ * monospace pair at the bottom is M39's 8x16 cell exactly as it was, for
+ * the two programs whose column arithmetic is real, and everything above
+ * it draws the proportional family with a per-glyph advance. See gfx.h.
+ */
+
+/* Defaults to the 16-row face, which is what chrome and labels want.
+ * Non-const so a program can pick a size once at startup; nothing
+ * changes it mid-frame, and nothing here is re-entrant anyway (a user
+ * program in this OS is single-threaded). */
+static const ui_font_t *ui_font_current = &ui_font_ui;
+
+void gfx_set_ui_font(const ui_font_t *font) {
+    if (font) {
+        ui_font_current = font;
+    }
+}
+
+const ui_font_t *gfx_ui_font(void) {
+    return ui_font_current;
+}
+
+int32_t gfx_char_advance(const ui_font_t *font, char c) {
+    uint8_t code = (uint8_t)c;
+    if (code >= 128) {
+        return 0;
+    }
+    return font->advance[code];
+}
+
+int32_t gfx_text_width_n(const ui_font_t *font, const char *s, int32_t n) {
+    int32_t w = 0, widest = 0;
+    for (int32_t i = 0; i < n && s[i]; i++) {
+        if (s[i] == '\n') {
+            if (w > widest) {
+                widest = w;
+            }
+            w = 0;
+            continue;
+        }
+        w += gfx_char_advance(font, s[i]);
+    }
+    return w > widest ? w : widest;
+}
+
+int32_t gfx_text_width(const ui_font_t *font, const char *s) {
+    return gfx_text_width_n(font, s, (int32_t)strlen(s));
+}
+
+int32_t gfx_text_fit(const ui_font_t *font, const char *s, int32_t max_w) {
+    int32_t w = 0;
+    int32_t i = 0;
+    for (; s[i]; i++) {
+        int32_t adv = gfx_char_advance(font, s[i]);
+        if (w + adv > max_w) {
+            break;
+        }
+        w += adv;
+    }
+    return i;
+}
+
+void gfx_text_measure(const ui_font_t *font, const char *s, gfx_text_metrics_t *out) {
+    out->width   = gfx_text_width(font, s);
+    out->height  = font->height;
+    out->ascent  = font->baseline;
+    out->descent = font->height - font->baseline;
+}
+
+void gfx_draw_char_font(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color,
+                         const ui_font_t *font, int bold) {
+    uint8_t code = (uint8_t)c;
+    if (code >= 128) {
+        return;
+    }
+    const uint16_t *rows = (bold && font->rows_bold) ? font->rows_bold : font->rows;
+    const uint16_t *glyph = rows + (int32_t)code * font->height;
+    /* The bold weight is a one-column dilation (tools/gen-font.c), so it
+     * reaches one column past the regular glyph's box - into the single
+     * column of letter spacing the advance provides, which is exactly
+     * what bold is meant to spend. */
+    int32_t w = font->width[code] + ((bold && font->rows_bold) ? 1 : 0);
+    if (w > UI_FONT_MAX_COLS) {
+        w = UI_FONT_MAX_COLS;
+    }
+    for (int32_t row = 0; row < font->height; row++) {
+        uint16_t bits = glyph[row];
+        if (!bits) {
+            continue;
+        }
+        for (int32_t col = 0; col < w; col++) {
+            if (bits & (uint16_t)(0x8000u >> col)) {
+                gfx_put_pixel(ctx, x + col, y + row, color);
+            }
+        }
+    }
+}
+
+void gfx_draw_text_font(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t color,
+                         const ui_font_t *font, int bold) {
+    int32_t cx = x;
+    for (const char *p = s; *p; p++) {
+        if (*p == '\n') {
+            cx = x;
+            y += font->height;
+            continue;
+        }
+        gfx_draw_char_font(ctx, cx, y, *p, color, font, bold);
+        cx += gfx_char_advance(font, *p);
+    }
+}
+
 void gfx_draw_char(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color) {
+    gfx_draw_char_font(ctx, x, y, c, color, ui_font_current, 0);
+}
+
+void gfx_draw_text(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t color) {
+    gfx_draw_text_font(ctx, x, y, s, color, ui_font_current, 0);
+}
+
+void gfx_draw_char_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color) {
     uint8_t code = (uint8_t)c;
     if (code >= 128) {
         return;
@@ -83,7 +205,7 @@ void gfx_draw_char(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color)
     }
 }
 
-void gfx_draw_text(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t color) {
+void gfx_draw_text_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t color) {
     int32_t cx = x;
     for (const char *p = s; *p; p++) {
         if (*p == '\n') {
@@ -91,7 +213,7 @@ void gfx_draw_text(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t
             y += FONT_HEIGHT;
             continue;
         }
-        gfx_draw_char(ctx, cx, y, *p, color);
+        gfx_draw_char_mono(ctx, cx, y, *p, color);
         cx += FONT_WIDTH;
     }
 }
@@ -118,9 +240,10 @@ void gfx_draw_button_state(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int3
     gfx_fill_rect(ctx, x, y, w, h, pressed ? darken(bg_color) : bg_color);
     gfx_draw_rect(ctx, x, y, w, h, border_color);
     if (label) {
-        int32_t label_w = (int32_t)strlen(label) * FONT_WIDTH;
+        const ui_font_t *font = ui_font_current;
+        int32_t label_w = gfx_text_width(font, label);
         int32_t label_x = x + (w - label_w) / 2;
-        int32_t label_y = y + (h - FONT_HEIGHT) / 2;
+        int32_t label_y = y + (h - font->height) / 2;
         /* One pixel down and right while held - the oldest "the surface
          * moved under your finger" cue there is, and the only one
          * available without a second border color. */

@@ -137,6 +137,15 @@ int wm_drag_payload(char *out, uint32_t max);
  * is the only caller. */
 int wm_toggle_launcher(void);
 
+/* M58: ask the compositor to change the display resolution (and then to
+ * keep it). Two calls rather than one with a flag, because they happen
+ * seconds apart and the gap is the feature: the mode is on trial until
+ * wm_confirm_display_mode arrives, and the compositor puts the old one
+ * back if it never does. Like wm_toggle_launcher, these act on the
+ * compositor rather than on a window. */
+int wm_set_display_mode(uint32_t width, uint32_t height);
+int wm_confirm_display_mode(void);
+
 /* M33/M38/M44: sets the compositor's three global, non-per-window
  * settings together (system_api/include/wm.h's WM_SETTINGS_PIPE,
  * wm_settings_request_t) - background color, focused-titlebar accent, and

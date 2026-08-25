@@ -20,3 +20,9 @@ int k_strcmp(const char *a, const char *b);
  * null-terminating (unlike the standard strncpy, which doesn't if src is
  * >= n bytes) - the only behavior any caller here actually wants. */
 void k_strlcpy(char *dst, const char *src, size_t n);
+
+/* M60: the first substring search this kernel has needed. A self-test
+ * that reads a directory listing back off disk has to ask "is this name
+ * in it" without asserting on the order leanfs happens to return - which
+ * is a property of the filesystem, not of the thing under test. */
+const char *k_strstr(const char *haystack, const char *needle);

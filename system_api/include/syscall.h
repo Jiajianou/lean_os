@@ -24,7 +24,15 @@
 #define SYS_write      0
 #define SYS_exit       1
 #define SYS_getpid     2
-#define SYS_spawn      3 /* (path, arg) -> pid or -1. Combines fork+exec into one call - a fork/exec "equivalent" (M13), not literal fork(): no address-space duplication, just a fresh process loaded straight from a named file. */
+/* M60: the most arguments SYS_spawn will carry. A vector longer than
+ * this is truncated at the last whole argument rather than refused - a
+ * program seeing fewer arguments than it was given is a failure it can
+ * report, and half an argument names something else. Sixteen is the
+ * width of every command line this OS's terminal can produce and then
+ * some; the real ceiling is the single page the vector is copied into. */
+#define SPAWN_MAX_ARGS 16
+
+#define SYS_spawn      3 /* (path, argv) -> pid or -1 (a SPAWN_ERR_* code, M48). Combines fork+exec into one call - a fork/exec "equivalent" (M13), not literal fork(): no address-space duplication, just a fresh process loaded straight from a named file. M60: `argv` is a NULL-terminated array of char* holding the arguments *after* the program name - the kernel puts `path` in argv[0] itself, because that is the one element it knows for certain and the one a program is entitled to assume is there. NULL is a program launched with no arguments. Truncated at SPAWN_MAX_ARGS, or at whatever fits in the single page the vector is copied into; the one-string form every caller in this project used until now is user_space/lib's sys_spawn(), which builds a two-element vector. */
 #define SYS_wait       4 /* (pid) -> exit code. Polls + cooperatively yields (schedule()) rather than a real blocking wait queue - M14 is where "more complete wait semantics" is scoped to land. */
 #define SYS_read       5 /* (fd, buf, len) -> bytes read. Only fd=0 (stdin/keyboard) is wired up; blocks (yields) until at least one byte is available. */
 #define SYS_readfile   6 /* (name, buf, maxlen) -> bytes copied or -1. Whole-file read by name - no open/close/fd-table/lseek yet, matching M13's "a couple of coreutils" scope rather than a full VFS API nothing needs yet. */
@@ -68,6 +76,36 @@
 #define SYS_unlink 36 /* (path) -> 0 or -1. M56: the write half of this filesystem stopped at "create or overwrite a whole file", which is how a filesystem that has never had to *remove* anything ends up with the boot self-tests' own fixtures on it forever. Regular files only - a directory is refused rather than recursed into or emptiness-checked, because rmdir is a different operation with a different failure mode and nothing has asked for one. */
 #define SYS_rename 37 /* (old_path, new_path) -> 0 or -1. M56: moves one entry from one name to another, possibly across directories. No data moves - a rename is a change to *records*, which is only true because M53 stopped storing a name in the inode. Refuses a destination that already exists: silently replacing a file is a way to lose one, and the caller can ask. */
 
+/* ---- M59: files with descriptors ------------------------------------
+ *
+ * SYS_readfile's own comment has carried "no open/close/fd-table/lseek
+ * yet" since M13. The fd table was never the missing part - MAX_FDS is
+ * 128 and pipes and stdio have lived in it since M14 - what was missing
+ * was a *file* entry in it.
+ *
+ * SYS_readfile/SYS_writefile stay, and stay the recommended call for a
+ * small whole file: every current caller is one, and rewriting nine
+ * working callers would be scope nothing has asked for. This makes them
+ * no longer the only option. */
+#define OPEN_READ     0x1
+#define OPEN_WRITE    0x2
+#define OPEN_CREATE   0x4  /* create if absent - an error otherwise */
+#define OPEN_TRUNCATE 0x8  /* drop existing contents (requires OPEN_WRITE) */
+#define OPEN_APPEND   0x10 /* start positioned at the end */
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+#define SYS_open   40 /* (path, flags) -> fd, or -1. Regular files only; a directory is refused rather than opened, because there is nothing a read of one would honestly return that SYS_listdir does not already give. The offset lives in a kernel-side open-file entry shared by every fd SYS_dup2 makes from this one, so two descriptors on the same file advance one position between them. */
+#define SYS_lseek  41 /* (fd, offset, whence) -> the new absolute position, or -1. offset is signed. Seeking past the end is allowed and creates a hole on the next write, which reads back as zeros - the ordinary sparse-file behaviour, and cheaper than refusing. -1 for a pipe: a pipe has no position, and saying so beats pretending. */
+#define SYS_stat   42 /* (path, os_stat_t *out) -> 0 or -1. Size, mtime and whether it is a directory - the three things the file manager's columns are made of, and what every "how big a buffer do I need" caller in this kernel was previously answering with LEANFS_MAX_FILE_SIZE. */
+#define SYS_rmdir  43 /* (path) -> 0 or -1. M59: the same gap SYS_unlink closed for files in M56, left open there because nothing had asked. Empty directories only - recursive delete is one keystroke away from losing everything under a path, and this OS has no trash to take it back out of. */
+#define SYS_time   44 /* (os_datetime_t *out, may be NULL) -> seconds since 1970, or 0 on a machine with no readable CMOS clock. The first thing in this project that can answer "what time is it" rather than "how long has this been switched on". */
+
+#define SYS_display_modes 38 /* (display_mode_t *out, max_entries) -> how many modes exist (may exceed max_entries; same "caller sizes the buffer" contract as SYS_taskinfo), or -1. M58: a *curated and validated* list, not an enumeration - kernel/drivers/dispi.h's own comment explains why there is nothing to enumerate. Zero modes is the honest answer on any machine without a Bochs/QEMU DISPI adapter, which is every real one. */
+#define SYS_display_set_mode 39 /* (width, height) -> 0 or -1. M58: reprograms the display adapter and re-maps the kernel's framebuffer, right now, with no reboot - see kernel/drivers/dispi.h for why this has to be a native driver rather than a call back into UEFI GOP. Refuses any geometry not in SYS_display_modes' list. Everything downstream of "the screen is a different size now" is the caller's problem and is deliberately not attempted here: the compositor owns the screen, so the compositor reallocates window buffers, re-spans the panels, clamps windows and the cursor back on-screen, and tells its clients. Not restricted to any caller, for the same reason SYS_shutdown isn't. */
+
 /* M56: how many bytes a pipe holds. Part of the ABI because a caller
  * genuinely needs it: SYS_write to a full pipe *blocks*, and a client
  * that cannot afford to block forever - one whose peer may not exist yet,
@@ -78,4 +116,4 @@
  * drift; this is the copy user space is allowed to see. */
 #define SYS_PIPE_CAPACITY 1024
 
-#define SYSCALL_COUNT 38
+#define SYSCALL_COUNT 45

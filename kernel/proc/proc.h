@@ -66,6 +66,29 @@
  * task_exit_with_code switches to the kernel's own first. */
 void process_destroy_address_space(uint64_t pml4_phys);
 
+/* M60: the real argument vector. `argv` is a NULL-terminated array of
+ * NUL-terminated strings, argv[0] conventionally the program's own path -
+ * the same shape every C program on every system expects, and the reason
+ * this milestone had to happen before a program nobody here wrote could
+ * be run at all.
+ *
+ * It is copied into a single page mapped at USER_ARG_ADDR, laid out so
+ * crt0 can find it with two instructions and without the kernel having to
+ * agree with the assembler about a stack frame:
+ *
+ *     [USER_ARG_ADDR + 0]        uint64_t argc
+ *     [USER_ARG_ADDR + 8]        char *argv[argc]   (user addresses)
+ *     [.. + 8 + 8*argc]          NULL terminator
+ *     [after that]               the strings themselves
+ *
+ * RDI still points at USER_ARG_ADDR, exactly as it did when this was one
+ * string - so enter_user_mode is untouched and the change is entirely in
+ * what the page holds. A vector that will not fit in one page is
+ * truncated at the last whole argument that does, which is refusing
+ * rather than corrupting: a half-copied argument names something else. */
+task_t *process_spawnv(const char *name, const uint8_t *image, size_t image_size,
+                        const char *const *argv);
+
 /* arg may be NULL (equivalent to an empty string) for a program that
  * doesn't take one.
  *

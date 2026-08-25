@@ -43,3 +43,19 @@ void k_strlcpy(char *dst, const char *src, size_t n) {
     }
     dst[i] = '\0';
 }
+
+const char *k_strstr(const char *haystack, const char *needle) {
+    if (!needle[0]) {
+        return haystack;
+    }
+    for (const char *h = haystack; *h; h++) {
+        size_t i = 0;
+        while (needle[i] && h[i] == needle[i]) {
+            i++;
+        }
+        if (!needle[i]) {
+            return h;
+        }
+    }
+    return (const char *)0;
+}

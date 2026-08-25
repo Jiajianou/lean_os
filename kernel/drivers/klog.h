@@ -28,6 +28,15 @@ void klog_init(void);
 void klog_putc(char c);
 void klog_puts(const char *s);
 void klog_put_hex32(uint32_t value);
+/* M59: the first thing in this project that genuinely wants base ten. A
+ * hex date reads as gibberish - "[rtc] 000007EA-00000008-00000019" is a
+ * real line this replaced - and a date in a boot log exists to be read by
+ * a person, which is the whole argument for it. Every other number here
+ * is an address, a mask or a count, and hex stays right for all three. */
+void klog_put_dec(uint32_t value);
+/* Zero-padded to `width` digits, for the fields of a timestamp - a clock
+ * that prints 9:5:0 is a clock nobody trusts. */
+void klog_put_dec_pad(uint32_t value, int width);
 void klog_put_hex64(uint64_t value);
 
 typedef enum {

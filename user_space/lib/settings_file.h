@@ -37,6 +37,23 @@
  * defaults and simply keeps them on a 0. */
 int settings_file_load(wm_settings_request_t *out);
 
+/* M58: the chosen display mode, which is a *fourth and fifth* key in the
+ * same file rather than a file of its own - one place a person can `cat`
+ * to see what this desktop remembers.
+ *
+ * Deliberately optional where the theme trio is all-or-nothing, and the
+ * asymmetry is the honest one: a missing colour means "I have no idea
+ * what you wanted", but a missing resolution means "whatever the firmware
+ * chose", which is a perfectly good answer and is what the first boot of
+ * every machine gives. Returns 1 and fills w/h only if both keys were
+ * present and parsed; 0 otherwise, leaving them untouched. */
+int settings_file_load_display(uint32_t *w, uint32_t *h);
+
+/* Writes the display mode, preserving the theme keys already in the file
+ * (and vice versa for settings_file_save - both are read-modify-write, so
+ * the two writers cannot clobber each other's half). */
+int settings_file_save_display(uint32_t w, uint32_t h);
+
 /* Writes the three settings as text. Returns 0, or -1 if the write
  * failed (SYS_writefile's own failure - a full disk or no free inode). */
 int settings_file_save(const wm_settings_request_t *in);

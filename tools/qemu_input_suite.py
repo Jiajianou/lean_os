@@ -131,7 +131,7 @@ def panel_px(raw, y):
 # text_editor.c: its File menu is drawn in the editor's own window again
 # (M42 - M41 had it in a shared top bar), one FONT_HEIGHT row at the top,
 # with the dropdown hanging below the "File" label inside the same window.
-EDITOR_MENU_ROW_H = 16       # FONT_HEIGHT
+EDITOR_MENU_ROW_H = 16       # UI_FONT_UI_HEIGHT
 EDITOR_MENU_BG = 0x242424    # MENU_BG - both the menu row and the dropdown
 EDITOR_MENU_ITEM_W = 110     # FILE_MENU_ITEM_W
 EDITOR_MENU_ITEM_H = 20      # FILE_MENU_ITEM_H = FONT_HEIGHT + 4
@@ -154,7 +154,7 @@ SLOT_GAP = 4
 START_X = 4
 START_W = 72
 SLOTS_X = START_X + START_W + 8
-TRAY_W = 92
+TRAY_W = 87   # M57: TRAY_ICONS_W(42) + a *measured* "00:00"(35) + TRAY_PAD(10)
 
 # Every button in the bar is read at one of two rows, so the blend is
 # resolved once here rather than at each call site.
@@ -317,13 +317,40 @@ CLOCK_W = 200  # gui_clock.c WIN_W
 BORDER = 2
 BORDER_COLOR = 0x444466
 
-# settings.c's wallpaper row.
+# settings.c's window and the two rows of it this suite clicks.
+SETTINGS_W, SETTINGS_H = 320, 632
 WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H = 270, 68, 22
 
-# file_manager.c: WIN_W/WIN_H, its header, and one row.
-FM_W, FM_H = 280, 360
+# M58: settings.c's Resolution pane. The offered modes come from
+# kernel/drivers/dispi.c's CANDIDATES list, filtered by what the adapter
+# reports - on QEMU's stdvga with its default 16 MiB every one of them
+# survives, so index 0 is 800x600.
+MODE_BTN_Y, MODE_BTN_W, MODE_BTN_H, MODE_BTN_GAP, MODE_COLS = 328, 92, 20, 6, 3
+GFX_PAD = 12
+CONFIRM_Y = MODE_BTN_Y + 3 * (MODE_BTN_H + 4) + 6
+CONFIRM_H = 20
+KEEP_BTN_W = 64
+KEEP_BTN_X = SETTINGS_W - GFX_PAD - KEEP_BTN_W
+SMALL_MODE = (800, 600)
+SMALL_MODE_INDEX = 0
+# system_api/include/wm.h's WM_MODE_REVERT_MS, plus room for the
+# compositor to notice the deadline and for the panel to re-handshake.
+MODE_REVERT_S = 10 + 5
+
+
+def mode_btn_center(sx, sy, i):
+    return (sx + GFX_PAD + (i % MODE_COLS) * (MODE_BTN_W + MODE_BTN_GAP) + MODE_BTN_W // 2,
+            sy + MODE_BTN_Y + (i // MODE_COLS) * (MODE_BTN_H + 4) + MODE_BTN_H // 2)
+
+# file_manager.c: WIN_W/WIN_H, its two header strips, and one row.
+# M59: 280 -> 340 for the size and date columns, and a second header
+# strip (the clickable column headings) between the path bar and the
+# list - so a row's y is measured from FM_LIST_Y, not from the path bar.
+FM_W, FM_H = 340, 360
 FM_HEADER_H = 24
-FM_ROW_H = 20   # FONT_HEIGHT + 4
+FM_COLS_H = 16
+FM_LIST_Y = FM_HEADER_H + FM_COLS_H
+FM_ROW_H = 16   # M57: LIST_FONT_H (ui_font_small, 12) + 4 - the list is dense-list text now
 FM_LIST_W = FM_W - 8  # minus SCROLLBAR_W
 
 # M53: the window opens on /home and row 0 is always "..", so the first
@@ -332,8 +359,8 @@ FM_LIST_W = FM_W - 8  # minus SCROLLBAR_W
 # a layout change makes wrong silently.
 FM_LABEL_COLOR = 0x90A0C0  # file_manager.c LABEL_COLOR - the path bar's text
 FM_TEXT_COLOR = 0xD8D8D8   # file_manager.c TEXT_COLOR - a listed name
-FM_STATUS_H = 20           # STATUS_H: FONT_HEIGHT + 4
-FM_ROWS_VISIBLE = (FM_H - FM_HEADER_H - FM_STATUS_H) // FM_ROW_H
+FM_STATUS_H = 20           # STATUS_H: UI_FONT_UI_HEIGHT + 4
+FM_ROWS_VISIBLE = (FM_H - FM_LIST_Y - FM_STATUS_H) // FM_ROW_H
 
 # M53: every directory but the root gets a ".." row at index 0, so the
 # first real entry is row 1 - *except* in "/", which has nowhere to go up
@@ -350,7 +377,7 @@ def fm_row_point(x, y, row):
     """A point inside file-manager row `row`, left of the scrollbar and
     right of nothing - the label starts at x+6, so this is on the row's
     fill or its text, either of which is what a click wants."""
-    return (x + 60, y + FM_HEADER_H + row * FM_ROW_H + FM_ROW_H // 2)
+    return (x + 60, y + FM_LIST_Y + row * FM_ROW_H + FM_ROW_H // 2)
 
 
 def fm_rows_with_text(shot, x, y):
@@ -360,7 +387,7 @@ def fm_rows_with_text(shot, x, y):
     two things apart from one holding two dozen."""
     n = 0
     for row in range(FM_ROWS_VISIBLE):
-        top = y + FM_HEADER_H + row * FM_ROW_H
+        top = y + FM_LIST_Y + row * FM_ROW_H
         if shot.count_color(FM_TEXT_COLOR, x + 6, top, FM_LIST_W - 12, FM_ROW_H) > 0:
             n += 1
     return n
@@ -398,6 +425,33 @@ TASKS_W, TASKS_H = 420, 360  # task_manager.c WIN_W/WIN_H
 LIST_Y_IN_WIN = 40           # HEADER_H(22) + COLS_H(18)
 LIST_H_IN_WIN = TASKS_H - LIST_Y_IN_WIN - 34  # ...minus FOOTER_H
 SCROLLBAR_THUMB = 0x506080   # task_manager.c SCROLLBAR_THUMB
+# M57: the process list draws in the 12-row face now, so a row is
+# LIST_FONT_H(12) + 4 rather than FONT_HEIGHT(16) + 4.
+TM_ROW_H = 16
+TM_SELECT = 0x4C6699         # task_manager.c SELECT_COLOR
+TM_BG = 0x1C1C24             # task_manager.c BG_COLOR
+
+
+def tm_row_states(shot, tx, ty):
+    """(selected_row, last_populated_row) of the task list, or (-1, -1).
+
+    M57 made the rows shorter, which made the whole list fit without
+    scrolling - and that quietly broke the precondition this suite used to
+    wait on. The scrollbar thumb is flush with the bottom of its track
+    both when the list is scrolled to the end *and* when there is nothing
+    to scroll, so waiting on it stopped meaning "the selection reached the
+    last row" and started meaning nothing at all. Reading the selection
+    highlight directly says what was actually wanted."""
+    selected = -1
+    last = -1
+    rows = (LIST_H_IN_WIN) // TM_ROW_H
+    for row in range(rows):
+        y = ty + LIST_Y_IN_WIN + row * TM_ROW_H + TM_ROW_H // 2
+        if shot.px(tx + 4, y) == TM_SELECT:
+            selected = row
+        if any(shot.px(x, y) != TM_BG for x in range(tx + 4, tx + TASKS_W - 12, 3)):
+            last = row
+    return selected, last
 
 # M45's two context menus, which are deliberately the same three verbs in
 # the same order drawn by two different processes - desktop_shell.c's
@@ -428,8 +482,27 @@ def taskbar_menu_row_center(slot, row):
 FIRST_APP_IDX = 2
 
 
-def app_origin(slot):
-    return (100 + slot * 40, 100 + slot * 40)
+# compositor.c's content_top_limit()/content_bottom_limit(): TITLEBAR_H +
+# BORDER at the top, and the screen minus the docked taskbar at the
+# bottom. A new window's cascade position is clamped between them.
+CONTENT_TOP = 22
+CONTENT_BOTTOM = SCREEN_H - 32
+
+
+def app_origin(slot, height=None):
+    """Where the compositor cascades the `slot`-th window.
+
+    `height` mirrors compositor.c's own bottom clamp: a window tall enough
+    that the cascade would push its bottom under the taskbar is moved *up*
+    instead. Every window in this suite was short enough for that never to
+    bite until M58 grew the Settings window for its Resolution pane, at
+    which point a test computing the un-clamped cascade was simply
+    clicking 76 pixels below everything it meant to click."""
+    x = 100 + slot * 40
+    y = 100 + slot * 40
+    if height is not None:
+        y = max(min(y, CONTENT_BOTTOM - height), CONTENT_TOP)
+    return (x, y)
 
 
 class Failure(Exception):
@@ -1039,14 +1112,15 @@ def test_task_manager_end_task(m):
     # it. That is exactly how this test first failed: End Task fired with
     # the selection still up in the desktop processes.
     #
-    # The scrollbar is what says "done" precisely. gfx_draw_scrollbar puts
-    # the thumb's bottom edge flush with the track's only when scroll_top
-    # is at its maximum, which happens exactly when the selection has
-    # reached the last row - so this pixel is a direct read of the
-    # precondition this test needs, not a proxy for elapsed time.
-    sb = (tx + TASKS_W - 4, ty + LIST_Y_IN_WIN + LIST_H_IN_WIN - 2)
-    wait_for(m, lambda s: s.px(*sb) == SCROLLBAR_THUMB,
-             "the task list never scrolled to its last row", timeout=25.0)
+    # The selection highlight sitting on the last populated row is what
+    # says "done" precisely - a direct read of the precondition this test
+    # needs, not a proxy for elapsed time.
+    def selection_at_end(shot):
+        selected, last = tm_row_states(shot, tx, ty)
+        return selected >= 0 and selected == last
+
+    wait_for(m, selection_at_end,
+             "the selection never reached the last row of the task list", timeout=25.0)
 
     # End Task, the leftmost of the two buttons (task_manager.c's
     # END_BTN_X / BTN_Y).
@@ -1248,7 +1322,7 @@ def test_settings_persist_across_a_reboot(m):
     # The first is WALLPAPER_FLAT, which is the one choice a screenshot
     # can tell apart from the default gradient with a single pair of
     # pixels: flat means two rows 400px apart read identical.
-    sx, sy = app_origin(FIRST_APP_IDX)
+    sx, sy = app_origin(FIRST_APP_IDX, SETTINGS_H)
     m.click(sx + 12 + WALL_BTN_W // 2, sy + WALL_BTN_Y + WALL_BTN_H // 2)
     shot = wait_for(m, lambda s: s.px(700, 200) == s.px(700, 600),
                     "picking the Flat wallpaper did not flatten the desktop gradient")
@@ -1372,7 +1446,7 @@ def test_wheel_scrolls_the_file_list_one_row_per_detent(m):
 
     x, y = app_origin(FIRST_APP_IDX)
     list_x = x + 6
-    row0_y = y + FM_HEADER_H
+    row0_y = y + FM_LIST_Y
 
     # M53: the window opens on /home, which is deliberately short. /bin is
     # where a list long enough to scroll lives, so this navigates there
@@ -1513,7 +1587,20 @@ TASKS_IN_FRONT_PROBE = (TASKS_ORIGIN[0] - BORDER, 400)
 # outside the *other* window's frame entirely, so which window a click
 # there reaches is not itself the thing under test.
 FILES_TITLEBAR_CLICK = (FILES_ORIGIN[0] + 20, FILES_ORIGIN[1] - TITLEBAR_H // 2)
-TASKS_TITLEBAR_CLICK = (FILES_ORIGIN[0] + FM_W + 60, TASKS_ORIGIN[1] - TITLEBAR_H // 2)
+# M59: Files grew for its new columns, which narrowed the band of Tasks'
+# titlebar that is both clear of Files' frame (x > FILES right edge) and
+# clear of Tasks' own three buttons (54px in from its right edge:
+# 3 * BTN_SIZE(14) + 2 * BTN_GAP(4) + BTN_MARGIN(4)). This picks the
+# middle of that band rather than a fixed offset, so it stays correct if
+# either window changes width again - and it is an error, not a silent
+# mis-click, if the band ever closes.
+TASKS_W = 400  # task_manager.c WIN_W
+_TASKS_BTN_BAND = TASKS_ORIGIN[0] + TASKS_W - 54
+_TASKS_FREE_LO = FILES_ORIGIN[0] + FM_W + 4
+if _TASKS_FREE_LO >= _TASKS_BTN_BAND:
+    raise SystemExit("qemu_input_suite: Files is now wide enough to cover every clickable "
+                     "part of Tasks' titlebar - the overlap tests need a different pair")
+TASKS_TITLEBAR_CLICK = ((_TASKS_FREE_LO + _TASKS_BTN_BAND) // 2, TASKS_ORIGIN[1] - TITLEBAR_H // 2)
 # Inside both windows' content, and well away from both probe rows.
 OVERLAP_CLICK = (400, 480)
 
@@ -1948,6 +2035,99 @@ def test_soak_desktop_stays_usable(m):
           % (len(refused), refused))
 
 
+def _bar_spans(shot):
+    """The taskbar reaching both edges of whatever screen this is - and
+    genuinely being a bar, not bare desktop, which is uniform too. Read at
+    the panel's own top margin strip (two rows below its top edge, above
+    the button row), so both probes land on plain panel fill whatever
+    happens to be running."""
+    y = shot.height - 30
+    left = shot.px(2, y)
+    right = shot.px(shot.width - 3, y)
+    above = shot.px(shot.width // 2, shot.height // 2)
+    return left == right and left != above
+
+
+def test_display_resolution_changes_and_persists(m):
+    """M58, driven the way a person drives it: open Settings, click a
+    resolution, click Keep, and see the desktop actually be that size.
+
+    The screenshot's own dimensions are the assertion. Everything else in
+    this file grades colors at coordinates; this is the one test where the
+    *size of the framebuffer QEMU dumps* is the thing under test, and it
+    is unfakeable - it comes from the display device, not from anything
+    the guest tells us.
+
+    Keeping it matters as much as changing it: nothing is written to disk
+    until the mode is confirmed, so this also proves the confirm path
+    reaches settings_file_save_display."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[3][2])  # Settings
+    wait_for_windows(m, 1)
+
+    sx, sy = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    m.click(*mode_btn_center(sx, sy, SMALL_MODE_INDEX))
+    shot = wait_for(m, lambda s: (s.width, s.height) == SMALL_MODE,
+                    "clicking a resolution did not change the display size")
+    check(_bar_spans(shot),
+          "the taskbar does not span the new %dx%d display - its buffer was not reallocated"
+          % SMALL_MODE)
+
+    # The Settings window was clamped back on screen by the change (a
+    # 632-tall window does not fit under a 600-row display), so the Keep
+    # button is wherever the clamp put it: hard against the top limit.
+    kx = sx + KEEP_BTN_X + KEEP_BTN_W // 2
+    ky = CONTENT_TOP + CONFIRM_Y + CONFIRM_H // 2
+    m.click(kx, ky)
+
+    # Well past the revert deadline. If Keep did not land, this is where
+    # the desktop snaps back and the check below fails.
+    time.sleep(MODE_REVERT_S)
+    shot = m.screenshot()
+    check((shot.width, shot.height) == SMALL_MODE,
+          "the confirmed resolution did not stick - the display is %dx%d again"
+          % (shot.width, shot.height))
+    check(_bar_spans(shot), "the taskbar stopped spanning the display after the mode was kept")
+
+
+def test_display_resolution_reverts_when_not_confirmed(m):
+    """The path that only ever runs when something has already gone
+    wrong, which is exactly why it is worth a test: pick a resolution,
+    confirm nothing, and the desktop comes back at the old size on its
+    own.
+
+    This is the whole reason a person can try a resolution on this
+    machine at all. There is no second machine to log in from and no
+    config file to edit blind - if a mode the display cannot show were
+    permanent, the honest thing would have been not to ship the
+    feature."""
+    boot(m)
+    before = m.screenshot()
+    original = (before.width, before.height)
+    check(original != SMALL_MODE, "the desktop already boots at the mode this test switches to")
+
+    m.double_click(ICON_X, ICONS[3][2])  # Settings
+    wait_for_windows(m, 1)
+    sx, sy = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    m.click(*mode_btn_center(sx, sy, SMALL_MODE_INDEX))
+    wait_for(m, lambda s: (s.width, s.height) == SMALL_MODE,
+             "clicking a resolution did not change the display size")
+
+    # Nothing confirms. Poll rather than sleep-then-look, so a revert that
+    # happens late still passes and one that never happens fails with the
+    # size it was stuck at.
+    deadline = time.time() + MODE_REVERT_S + 10
+    shot = None
+    while time.time() < deadline:
+        shot = m.screenshot()
+        if (shot.width, shot.height) == original:
+            break
+        time.sleep(0.5)
+    check((shot.width, shot.height) == original,
+          "an unconfirmed resolution was never reverted - still %dx%d" % (shot.width, shot.height))
+    check(_bar_spans(shot), "after the revert the taskbar does not span the restored display")
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -1973,6 +2153,8 @@ TESTS = [
     ("shutdown_confirm_can_be_cancelled", test_shutdown_confirm_can_be_cancelled),
     ("shutdown_powers_off_the_machine", test_shutdown_powers_off_the_machine),
     ("settings_persist_across_a_reboot", test_settings_persist_across_a_reboot),
+    ("display_resolution_changes_and_persists", test_display_resolution_changes_and_persists),
+    ("display_resolution_reverts_when_not_confirmed", test_display_resolution_reverts_when_not_confirmed),
     ("launcher_does_not_offer_data_files", test_launcher_does_not_offer_data_files),
     ("clicking_a_toast_dismisses_it", test_clicking_a_toast_dismisses_it),
     ("wheel_scrolls_the_file_list_one_row_per_detent", test_wheel_scrolls_the_file_list_one_row_per_detent),

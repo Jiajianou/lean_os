@@ -3193,15 +3193,659 @@ and every desktop client is supervised (M55). What remains:
   it is a pattern rather than something the harness makes hard to get
   wrong
 
+## Path to a desktop someone would choose to use (M57+)
+
+M51-M56 made this desktop dependable. It raises and occludes correctly,
+it survives a compositor crash, a bad pointer kills one task instead of
+the machine, and what dies gets reclaimed. None of that is what a person
+notices.
+
+What a person notices is that the clock in the taskbar counts *uptime*,
+because uptime is the only thing this machine can know. That every
+titlebar, menu item, button and filename is the same 8x16 monospace cell,
+because there is exactly one font at exactly one size and
+`gfx_draw_text` advances a fixed eight pixels per character. That
+pressing Enter in the text editor does not split the line. That `cp a b`
+cannot exist, because `SYS_spawn(path, arg)` carries one string and
+`run_line` splits the command on its first space. That windows appear and
+vanish with no motion at all, so a minimized window gives no clue where
+it went. And that nothing here has ever made a sound.
+
+**Real hardware is deliberately deferred.** It is still the largest
+untested claim in the project and the ordering here is a bet, not a
+dismissal: proving this on metal is worth much more once it is something
+people would want to run, and the work is the same work whenever it
+happens. The cost of waiting is real and worth writing down - every
+milestone below is one more subsystem authored against QEMU's behavior,
+and M28's own gaps note has been accruing since. It comes back the moment
+this arc lands.
+
+The ordering below is dependency-honest rather than pure priority. M57
+needs nothing and changes every window in the OS. M58 is the other half
+of the same question - how big everything is - and is the one milestone
+here whose cost is almost entirely downstream of its own driver. M59 is
+the foundation three separate apps are visibly working around, so it
+comes before the milestone that spends it. M60 finishes the two apps
+people actually live in. M61 is motion, and the first thing here that
+makes the compositor meet a deadline. M62 is a capability that has never
+existed. M63 is the one the others make possible: running a program
+nobody in this repo wrote.
+
+## M57 — Type that isn't 8x16 ✅
+
+M39 proved the property this milestone depends on: there is one font
+table and every text path in the project blits it, so fixing the table
+fixed text everywhere at once with no change to any drawing code. What
+M39 did not touch is the deeper limitation - one font, one size,
+monospaced, and a text renderer whose advance is a compile-time
+constant. This is the largest remaining visual difference between this
+desktop and one somebody would call finished, and it is the same
+one-change-everywhere shape.
+
+- [x] A proportional UI font: per-glyph advance widths in a table
+      alongside the bitmap (`user_space/lib/uifont.h`'s `ui_font_t`, with
+      `width[c]` for the glyph's box and `advance[c]` for how far the pen
+      moves). M39's "column 7 of every cell is reserved blank" was exactly
+      right for a fixed advance and is exactly what a variable one
+      replaces - so the conversion of the 16-row face *is* that trim, done
+      in the generator: each glyph shrunk to its own ink, with an advance
+      of width + 1 that is where letter spacing comes from now
+- [x] Three sizes on M39's shared baseline/cap/x-height metric, produced
+      three different ways and each way chosen for a reason. **small**
+      (12 rows) is hand-authored, because a 12-row cell has no room for a
+      2px stem at a readable x-height - it is a different drawing, not a
+      scaled one, and it is where the proportional metric shows most
+      ('.' and '!' one column wide, 'i' and 'l' three, 'M' and 'W'
+      seven). **ui** (16 rows) is M39's own glyphs trimmed, plus eight
+      re-authored ones - 'M', 'W', 'm' and 'w' get the eighth column
+      back, 'c', 'e', 's' and 'r' give one up. **large** (24 rows) is a
+      3/2 nearest-neighbour scale of `ui`, which is *exact* for this
+      design rather than approximate: every feature in it is a 2-pixel run
+      and floor(2n/3) maps any 2-run onto a 3-run wherever it starts.
+      Scaling a bitmap font is usually how you get mush; the ratio was
+      picked so that it cannot be
+- [x] **Tabular figures, which the milestone did not ask for and the
+      taskbar clock demanded.** A proportional '1' is narrower than a
+      '0', so the first thing the new font did was make the clock shuffle
+      sideways once a minute. Every digit now gets the widest digit's box
+      and is centred in it - what a real font's tabular-figure set does -
+      and `ui_check` asserts it, because it is a defect that is obvious in
+      motion and invisible in any single frame
+- [x] `gfx_text_width(font, str)`, `gfx_text_width_n`, `gfx_text_fit`,
+      `gfx_char_advance` and a `gfx_text_metrics_t`, **and every
+      `strlen(s) * FONT_WIDTH` in the tree deleted.** The grep was the
+      honest size of the milestone exactly as predicted: `settings.c`,
+      `file_manager.c`, `desktop_icons.c`, `desktop_shell.c`,
+      `text_editor.c`, `gfx.c` and `compositor.c` between them held every
+      centring, right-alignment and truncation in the OS, and each was a
+      different shape of the same wrong assumption. `gfx_text_fit` is what
+      replaced "divide the space by eight" - with a variable advance,
+      *how many characters fit* is a property of which characters they are
+- [x] Monospace stays, and stays correct: `gfx_draw_text_mono` /
+      `gfx_draw_char_mono` are M39's 8x16 cell unchanged, and
+      `gui_terminal.c`'s grid and `text_editor.c`'s column arithmetic draw
+      through them. Everything *around* the grid in those two programs -
+      menus, dialogs, status lines - is ordinary UI text and moved to the
+      proportional face. Two fonts with two jobs, as intended
+- [x] The kernel console keeps `font8x16` untouched, and so does
+      `kernel/drivers/font8x16.c`: the UI family is `user_space/lib` only,
+      because a panic's job is legibility and it draws before any of this
+      exists
+- [x] The eight glyphs the UI kept faking, at codepoints 0x01-0x08 -
+      arrows all four ways, a checkmark, a bullet, an ellipsis and a close
+      X. They live in the control-code range because no string this OS
+      draws contains one, so nothing real can collide with them. Four of
+      them are already load-bearing: a truncated window title ends in the
+      ellipsis rather than being indistinguishable from a window genuinely
+      named "Untitled do", a directory in the file manager carries the
+      arrow (until now the only thing that told one from a file was what
+      happened when you double-clicked it), the selected launcher row
+      carries one too, the selected colour swatch in Settings gets the
+      checkmark, and `Save As` in the editor finally has the ellipsis that
+      says it opens a dialog
+- [x] **A dense-list size with real consumers.** `file_manager.c` and
+      `task_manager.c` draw their list rows in the 12-row face and
+      everything else in the 16-row one - six and four more visible rows
+      respectively out of exactly the same window
+- [x] Tests: `user_space/bin/fonttest.c`, spawned and waited on from
+      `kernel_main` the way M19's `memtest` is, because the property worth
+      proving is not "the table is well formed" (the generator's own
+      `ui_check` covers that at build time) but that **`gfx_text_width`
+      and `gfx_draw_text_font` agree**. It renders into its own buffer and
+      measures the ink: nothing left of the pen, nothing past the advance,
+      every glyph inside the box its width table promises, all three faces
+      on one cap line and one baseline and one descender row measured in
+      real pixels, `gfx_text_fit`'s contract checked at forty widths, and
+      two clock readings measuring identically. Plus the M42 taskbar pixel
+      test, which caught the tray separator moving five pixels the first
+      time this booted - exactly the class of breakage `gfx_text_width`
+      exists to make visible
+
+**Progress notes.**
+
+*What the milestone predicted correctly.* The `strlen * FONT_WIDTH` grep
+really was larger than the font work, and it really was the part that
+mattered - every one of those sites was silently wrong the moment a glyph
+stopped being eight pixels wide, and two of them (the taskbar's
+right-aligned clock and the compositor's title truncation) were wrong in
+ways only a pixel test would have caught.
+
+*What it did not predict.* Tabular figures. A proportional advance is
+right for letters and wrong for anything that has to line up in a column
+or tick over in place, and nothing about "make the font proportional"
+suggests that the very first symptom would be a clock that walks.
+
+*A build-size result that paid for the font.* Every user program links
+`gfx.o`, and the UI family is about 18 KiB of tables, which would have
+been 18 KiB in each of twenty-five programs - all of them embedded into
+`kernel.bin`, which was already at 926 KiB against a 1 MiB ceiling.
+`-ffunction-sections -fdata-sections` plus `--gc-sections` on the
+user-program link was the fix and turned out to be worth far more than
+the font cost: `hello.elf` went from 29 KiB to 5 KiB and `kernel.bin`
+from 926 KiB to 402 KiB. The three faces are separate objects, so a
+program that only uses one only carries one.
+
+## M58 — Display settings: change the resolution without rebooting ✅
+
+The resolution this desktop runs at was chosen by `boot.c` before the
+kernel existed, out of a list the firmware offered: it prefers 1024x768
+and takes the first BGR8888 mode it finds if that is not available.
+Nothing since could change it, and the reason is worth stating plainly.
+GOP is a *boot services* protocol - `build_e820_and_exit_boot_services`
+is the last moment in this machine's life when anything can call
+`SetMode`. So a resolution setting is not a Settings pane with a small
+driver behind it. It is a native mode-setting driver with a Settings pane
+in front of it, and most of this milestone was everything downstream that
+had always been allowed to assume the screen never changes size.
+
+- [x] **A mode-setting driver** (`kernel/drivers/dispi.{h,c}`). QEMU's
+      default adapter is the Bochs/stdvga device and its VBE DISPI
+      registers at 0x1CE/0x1CF are exactly the runtime interface GOP is
+      not: disable, write width/height/bpp, re-enable with the
+      linear-framebuffer bit, then **read back** - the geometry *and* the
+      pitch, out of `VIRT_WIDTH`, rather than assuming `width * 4`. The
+      probe answers id 0xB0C5 on QEMU 10.1
+- [x] A curated, validated list rather than a pretend enumeration. DISPI
+      has no mode table - it takes any geometry inside its own limits - so
+      nine standard sizes, each checked against `MAX_XRES`/`MAX_YRES` and
+      against the video memory the device *reports* (16 MiB on stdvga,
+      read from `VIDEO_MEMORY_64K`, not assumed). Validation happens once
+      at boot rather than at the moment somebody clicks, because that is
+      the one place where a mistake costs them their desktop
+- [x] **`fb.c` learned to be re-initialized.** `fb_remap` maps through to
+      the new size and only ever *grows* the mapping (a smaller mode
+      leaves pages mapped that simply stop being read; unmapping them
+      would buy nothing and could race a draw already in flight), and
+      `fb_mapped_bytes()` is what `SYS_fb_map` now maps for a client, so
+      the two sides cannot disagree about how far the framebuffer reaches
+- [x] **And it re-derives the text console before it logs anything**,
+      which is not tidiness - it is the first thing a mode change breaks.
+      `console.c` caches how many cells fit; on a mode that got smaller
+      its cursor is instantly off-screen, and the very next `klog` line
+      draws a glyph through `fb_put_pixel`, which panics on an
+      out-of-bounds coordinate - from inside the logging path, so the
+      panic's own message tries to draw too. The first mode change this
+      project ever performed died mid-sentence in `fb_remap`'s own log
+      line, which is how this was found
+- [x] `SYS_display_modes` (38) and `SYS_display_set_mode` (39). The
+      syscall changes the mode and re-maps the kernel's framebuffer and
+      stops there; everything downstream belongs to the process that owns
+      the screen
+- [x] **A new event carrying the change** - `WM_EVENT_DISPLAY_CHANGED`
+      (11), shaped so a client already handling `WM_EVENT_EXPOSE` handles
+      this by falling into the same code. `wmclient.c` does the work (the
+      re-handshake M55 already wrote, factored out and now called for two
+      reasons instead of one) and hands the event on, so each of the ten
+      GUI programs changed by exactly one `||`
+- [x] **The shm buffer was the real constraint, named up front and
+      confirmed.** `window_t.buf_w/buf_h` are set once at connect, so a
+      panel allocated for 1024x768 cannot fill 1920x1080. The
+      reallocation happens at the one safe moment: the client unmaps its
+      copy, then asks again, and the compositor's *idempotent* answer
+      (M56) is replaced by a real rebuffer for exactly the windows flagged
+      by the mode change. Nothing is ever freed while another process
+      holds a mapping of it
+- [x] Panels re-span the screen, and the taskbar and the desktop
+      background are the two clients that genuinely resize rather than
+      merely being notified - their width was never the client's call
+- [x] Windows that are now off-screen get clamped back on, and maximized
+      windows re-maximize. Deliberately *position only*: cropping a
+      window to fit would be a resize nobody asked for, and one this
+      compositor could not undo when the screen grew back, since it keeps
+      no memory of the size a window had before it was trimmed
+- [x] The cursor is clamped too. The mouse driver turned out not to be
+      where this lives - it has never had bounds of its own; the clamp is
+      in `handle_mouse` against `fb_info`, so re-querying the geometry
+      *is* updating the bounds
+- [x] **A Resolution pane in `settings.c`**: the current mode marked, the
+      offered ones as buttons, and - on hardware with no DISPI adapter -
+      the honest empty state, "This display cannot be resized after boot."
+- [x] **Apply, then revert on a timer unless confirmed.** Ten seconds
+      (`WM_MODE_REVERT_MS`) with a countdown in the pane. The deadline
+      that actually protects anybody is the *compositor's*, not
+      settings.c's: the case this exists for is a screen nobody can read,
+      and a timer living in a window you cannot see would be no
+      protection at all - it also survives settings.c dying mid-trial.
+      Nothing is written to disk until the mode is kept, because a mode
+      saved the instant it was applied would come back on the next boot
+      even if it was the mode that made the screen unreadable
+- [x] Persisted through `settings_file.c` as two more keys in the same
+      `/etc/settings.conf`, and applied by the compositor at startup
+      before anything is allocated against the boot geometry - so the
+      desktop comes up the right size rather than changing size a moment
+      after it appears. Both save paths are read-modify-write now, so the
+      theme writer and the display writer cannot erase each other's half.
+      This is the point at which `boot.c`'s hardcoded 1024x768 stops being
+      the policy and becomes the fallback: for the first boot, and for
+      hardware the driver does not recognise
+- [x] **Where this stops working, said out loud**, in `dispi.h`'s header
+      and in `docs/real-hardware.md`: DISPI is a Bochs/QEMU *device*
+      interface and no real GPU implements it. On real hardware the probe
+      finds nothing, the `[m58]` self-test skips rather than fails, and
+      the pane offers nothing. Real mode setting means a GPU driver per
+      vendor and is not a thing this project will do
+- [x] Tests, and there are two boot self-tests because there are two
+      halves. `[m58]` in the kernel switches mode and asserts the geometry
+      *and the device-chosen pitch*, then writes and reads back the last
+      pixel of the new mode - which faults in ring 0 if the mapping did
+      not grow and returns the wrong value if the pitch is wrong - then
+      restores the boot mode. The second `[m58]` drives
+      `WM_ACTION_SET_MODE` down the action pipe with a real compositor and
+      a real taskbar, checks the bar re-spans the *new* width, then
+      **confirms nothing and waits the revert out**, checking the desktop
+      came back. Two interactive tests do the same through real clicks in
+      the Settings pane, and one of them asserts on the *screenshot's own
+      dimensions* - the one measurement in that whole suite that comes
+      from the display device rather than from anything the guest says
+
+**Progress notes.**
+
+*A latent M55 bug this turned into a certain one.* `desktop_shell.c`
+computed `bar_gfx` - a `gfx_ctx_t` over the bottom rows of its window
+buffer - exactly once, right after connecting. Every reconnect since M55
+has silently left it pointing at the previous compositor's segment; it
+never showed because nothing had reconnected a panel. A resolution change
+does, and the buffer is now both somewhere else *and* a different width,
+so the panel drew into memory it had just unmapped and vanished. Derived
+state has to be re-derived where it is used, and it is now.
+
+*A test that passed for the wrong reason.* The first version of the
+desktop self-test checked "the taskbar spans the screen" by comparing
+pixels at both ends of the bar row. Bare desktop is uniform too, so it
+passed while the taskbar was entirely absent. It now also compares
+against a pixel well above the bar - the difference between "the bar
+reaches both edges" and "there is a bar."
+
+*The interactive harness had its own version of the same assumption.*
+`app_origin()` computed the compositor's un-clamped cascade position.
+Every window in the suite was short enough for that to be right until
+this milestone grew the Settings window, at which point tests were
+clicking 76 pixels below everything they meant to click. It mirrors
+`content_bottom_limit()` now.
+
+## M59 — Files without limits, and a machine that knows the date ✅
+
+`SYS_readfile`'s own comment had said "no open/close/fd-table/lseek yet"
+since M13 and scoped that to what M13 needed. Six arcs later it was the
+limit three apps apologized for in three different ways: the editor was a
+600x80 buffer because that is what fits in one whole-file read, the file
+manager refused a copy past 16 KiB because its copy buffer was static
+storage in every process that has one, and the terminal could not write
+its output to a file at all. Separately and just as visibly, every file
+in this OS was dated zero, because the machine had no clock.
+
+- [x] `SYS_open` (40), `SYS_lseek` (41), `SYS_stat` (42), and
+      `SYS_read`/`SYS_write` accepting a file-backed descriptor. The fd
+      table really was already there - what was missing was a file entry
+      in it, not the machinery. `FD_FILE` points at a **shared open-file
+      entry** rather than carrying the inode and offset inline, and that
+      is not ceremony: `SYS_dup2` exists, two descriptors made from one
+      have to share a position, and shell redirection is the first thing
+      that would have hit it
+- [x] `SYS_readfile`/`SYS_writefile` stay, and stay the recommended call
+      for a small whole file. Every current caller is one. This milestone
+      makes them no longer the *only* option; rewriting nine working
+      callers would be scope nothing has asked for
+- [x] **`SYS_close` finally closes.** Pipes are reference counted now, so
+      "the last writer went away" is knowable - and a task exiting
+      releases every descriptor it holds, which is what makes it true
+      without anyone having to remember. *Named* pipes deliberately keep
+      the old never-auto-close behaviour and are marked `persistent`:
+      that is not an oversight, it is the mechanism M55's
+      compositor-replacement recovery is built on, and refcounting them
+      would have meant a client exiting could give the compositor EOF on
+      a rendezvous point forever
+- [x] `SYS_rmdir` (43) - the same gap `unlink` closed for files in M56.
+      Empty directories only, and the file manager's own message says so:
+      a recursive delete is one keystroke from losing everything under a
+      path and this OS has no trash to take it back out of
+- [x] **Double-indirect blocks.** 16 direct + 128 indirect + 128 x 128 is
+      16528 blocks, a shade over 8 MiB, up from a 72 KiB ceiling that was
+      smaller than `compositor.c`'s own source. The part worth writing
+      down is that this was only tractable because the direct/indirect
+      split got collected into *one* `map_block(inode, logical, allocate)`
+      first - it had been open-coded four times (read, write, free, and
+      the write's own rollback), and a third level would have meant
+      getting the same thing right four more times
+- [x] **Block 0 is now reserved forever**, which is what lets a zero
+      block pointer mean "nothing here" - and a freshly created file's
+      inode is all zeros. Nothing needed the distinction before, because
+      every block of a file was allocated in one pass and the pointers
+      were only ever read back. The on-demand allocator tests them, and
+      the first thing it did without this was hand every new file block 0
+      over and over
+- [x] **A CMOS RTC read** (`kernel/drivers/rtc.c`, ports 0x70/0x71, with
+      the update-in-progress wait, the read-it-twice-and-compare that
+      makes a sample coherent, BCD-or-binary, and 12-hour mode). About a
+      hundred lines, and it turns three zeros into truths at once: a
+      file's mtime, a date column in the file manager, and a taskbar
+      clock that shows the time instead of how long the machine has been
+      switched on. A machine with no readable clock is an ordinary
+      outcome, not a failure - files stay dated zero and the clock falls
+      back to uptime, which is exactly what it showed before
+- [x] `klog_put_dec`, because a date in hex is not a date. Seventeen
+      milestones of `klog_put_hex32` were right for addresses, masks and
+      counts; `[rtc] 000007EA-00000008-00000019` was the line that earned
+      base ten its place
+- [x] File manager: name, size and date columns, clickable headings that
+      sort by each, and a second click that reverses. Directories always
+      sort ahead of files whatever the key is, and ".." stays at row 0 -
+      it is this window's own invention rather than an entry, and "go up"
+      belongs in the same place every time. Sizes are three significant
+      figures and a suffix; an exact byte count is the wrong answer in a
+      column nobody compares 1048576 to 999999 in
+- [x] And its copy is a *loop* now. `FM_COPY_MAX` was how large a file
+      this window would copy **at all**; the same constant is now
+      `FM_COPY_CHUNK` and decides only how many times round the loop
+      goes. Delete handles a directory too, and rename always could
+- [x] **Save latency, which was a user-facing performance bug.** Every
+      metadata flush wrote the superblock, the entire inode table and the
+      entire 16-sector bitmap - 32 PIO sector writes whether one byte
+      changed or seventy kilobytes did. Dirty-sector tracking is the fix,
+      with exactly one rule holding it up: nothing mutates `inodes[]` or
+      `bitmap[]` without marking the sector it landed in, and
+      `mark_inode`/`mark_block_bit` are the only ways to do either. A
+      one-byte edit now costs **one** sector write
+- [x] `read_program()` in `kernel.c`, and `SYS_spawn` sizing its buffer
+      from `SYS_stat`. Fifty-three call sites said
+      `kmalloc(LEANFS_MAX_FILE_SIZE)`, which was a harmless 72 KiB
+      over-allocation right up until double indirection made that ceiling
+      eight megabytes - three of those at a time, per self-test, is not an
+      over-allocation any more
+- [x] New boot self-test (`[m59]`), six claims. A descriptor round trip
+      with a real seek across the join between two writes; **a 200 KiB
+      file written and read back byte for byte** with every block
+      distinguishable, so a mis-mapped block is a content mismatch rather
+      than an invisible one; every one of its ~400 blocks returned on
+      unlink; a file dated within a minute of when it was written; `rmdir`
+      refusing a directory that still holds something and accepting one
+      that does not; and **the metadata write count for a one-byte
+      change**, asserted as a count rather than as a latency, because
+      latency is a property of the host and this is a property of the code
+
+**Progress notes.**
+
+*The one bug this arc's shape made inevitable, and it showed up
+immediately.* Rewriting the fifty-three program loads mechanically left
+each site's `if (!image) panic("out of memory")` check sitting **above**
+the assignment that filled it in, so every one of them fired on the first
+boot. Mechanical edits to fifty-three call sites need the compiler or a
+boot to check them, and this got both.
+
+*Where the metadata-cost assertion had to be loose.* The bound is four
+sectors rather than one. An inode is 84 bytes and the table is packed, so
+a single inode can straddle a sector boundary and legitimately dirty two -
+and a create touches the parent directory as well. Four is tight enough
+that a return to whole-table flushes (31) fails instantly and loose
+enough not to be a tripwire on where an inode happens to land.
+
+## M60 — The two apps people live in, finished ✅
+
+M56 called these "one feature short of being usable for real work" and
+shipped undo, paste and scrollback into them. Both were still one feature
+short, and in both cases it was the feature you reach for without
+thinking.
+
+- [x] **Enter splits the line at the cursor, and Backspace at column 0
+      joins with the line above.** M56 deferred both deliberately and said
+      why: they are the only *structural* edits in the file, and undo has
+      to invert them. That was the right call when undo did not exist. It
+      exists now and works, which turned the argument around
+- [x] Two new undo record types, `EDIT_SPLIT` and `EDIT_JOIN`, each
+      inverse performed through the same primitive as the edit
+      (`split_line` / `join_line`) under M56's own rule - which is why
+      they needed no new machinery, only their own two lines in
+      `apply_inverse`. And `EDIT_NEWLINE` is *gone*, because the primitive
+      that produced it is: Enter appended an empty line at the end of the
+      buffer regardless of the cursor, which is what "you cannot split a
+      line" looks like from the inside
+- [x] Redo. The ring already held what it needed; what was missing was a
+      cursor into it (`redo_count`) and the rule that a fresh edit
+      discards the forward half - one line in `undo_record`, and the line
+      that keeps redo from replaying an edit against a buffer that has
+      since diverged from it
+- [x] Find (`Ctrl+F`) and find-next (`Ctrl+G`), searching forward from
+      the cursor and wrapping - which is what makes repeated find-next
+      walk every occurrence and stop where it started
+- [x] **The editor's byte cap is gone.** `load_file` streamed a 16 KiB
+      whole-file read, so the real limit was neither MAX_LINES nor
+      MAX_LINE_LEN but "how much fits in one read", and a bigger file
+      opened silently truncated. It streams through a descriptor now, and
+      saves through one too. A file with more lines than the buffer holds
+      still cannot be *held* - so it says so, and a plain save over the
+      original is refused. Writing back 600 lines of a thousand-line file
+      is how a person loses the other four hundred; Save As is the honest
+      way out and clears the flag
+- [x] **`argv`.** `SYS_spawn(path, arg)` carries a real vector: a
+      NULL-terminated array copied into the argument page proc.c has
+      always mapped, laid out as `argc`, then the pointers, then the
+      strings. RDI still points at that page, so `enter_user_mode` and
+      the `iretq` frame did not have to learn anything - the whole
+      unpacking is two instructions in `crt0.asm`, and a program written
+      as `int main(void)` keeps working untouched. The kernel supplies
+      `argv[0]` itself (the path), because that is the one element it
+      knows for certain and the one a program is entitled to assume
+- [x] `user_space/bin/cp.c`, which exists *because* of the milestone
+      rather than alongside it. `cp a b` is the example M59 and M60 both
+      used for what this OS could not express, and the only honest way to
+      write it before was not to
+- [x] `cat` takes files, plural - and with no arguments reads standard
+      input, which is what makes it the right-hand side of a pipe. That
+      needed exactly one thing beyond a loop: a read on a pipe has to be
+      able to *end*, and M59's refcount is what made "the last writer went
+      away" knowable
+- [x] The terminal parses a command line: multiple arguments, and quoted
+      arguments containing spaces. An unterminated quote is refused
+      rather than guessed at - guessing turns `rm "my file` into two
+      arguments neither of which was meant. Deliberately not globbing, not
+      `&&`, not variables: each is a shell feature with its own failure
+      modes and none of them was what was missing. What was missing was
+      being able to say two words
+- [x] Redirection (`>`, `>>`) and a single pipe (`|`), both of which are
+      exactly what M59's descriptors were for. **The step a pipe does not
+      work without is the terminal closing its own copy of the write end**
+      after spawning the left-hand command, so that command is the only
+      writer left - otherwise nothing brings the count to zero, the
+      right-hand command never sees EOF, and `ls | cat` hangs forever
+- [x] Tab completion over `/bin` and the current directory: the first
+      token completes against `/bin` because that is what a first token
+      *is*, every other token against the working directory. One match
+      completes; several print the shared prefix and the candidates
+- [x] **A working directory, `cd` and `pwd`**, which the milestone's own
+      "the current directory" turned out to require - this terminal had
+      never had one. There is no working directory in the kernel (every
+      path a syscall takes is absolute), so it is the terminal's own
+      state, exactly as `file_manager.c` already does it
+- [x] **And a trailing slash resolves.** `leanfs.c` refused `/bin/`
+      outright, which was defensible while nothing produced such a path -
+      and tab completion produces one every time it completes a
+      directory, because that suffix is what tells you it is one. `/bin/`
+      names the same directory `/bin` does; `/bin/ls/` is saying something
+      untrue about `ls` and is still refused
+- [x] The terminal closes its own fd 0 at startup. A GUI terminal has no
+      standard input to give away - keys reach it as window events - and
+      now that a command can be written to read one, a child that read fd
+      0 would pull keystrokes out of the same kernel ring the compositor
+      drains. That is a wedged desktop rather than a wedged command
+- [x] New boot self-test (`[m60]`), five claims, each one a thing this OS
+      could not express a milestone ago: `cp a b` with two real arguments
+      (asserted on the copied bytes, since a `cp` that made an empty file
+      would exit 0 too); `ls /bin > out` typed with real injected keys and
+      read back; `ls /bin | cat > out` producing *the same bytes*, which
+      is the assertion that says the pipe ended rather than merely ran;
+      `Tab` completing `/b` to `/bin/`, checked by which directory the
+      resulting listing is of; and a paragraph typed with `Enter` in the
+      middle of a line, saved, undone and redone, compared byte for byte
+      off disk each time
+
+**Progress notes.**
+
+*The conversion was the milestone.* Making `argv` real is fifty lines in
+`proc.c` and four in `crt0.asm`; what it costs is every program written
+as `int main(const char *arg)`, and there were eleven. A mechanical
+adapter (`const char *arg = argc > 1 ? argv[1] : ""`) kept ten of their
+bodies untouched, and the two that deserved the real thing got it - `echo`
+now echoes every argument, and `badptr` takes the argument page's address
+from `argv` itself rather than from a string in it, which is the only
+version of that test that is still true for a program launched with no
+arguments at all.
+
+*Tab completion found a filesystem rule that had stopped being right.*
+Completion appends `/` to a directory, which is what makes the next Tab
+descend - and `ls /bin/` was refused by the resolver. The rule was
+written when nothing produced such a path, and the test that asserted it
+had to move from the refusal table to an assertion of its own, in both
+directions: honoured on a directory, still refused on a file.
+
+## M61 — Motion, and a compositor that meets a deadline
+
+Windows in this OS appear and disappear instantly. That is not a missing
+polish detail so much as missing information: a minimized window vanishes
+and nothing on screen says where it went, which is precisely what an
+animation toward its taskbar button exists to say. M44 already added the
+blend primitive this needs. What is missing is a clock.
+
+- [ ] A real frame clock in `compositor.c`, driven independently of
+      input. `REDRAW_INTERVAL_MS` (100) is a *fallback poll* for changes
+      the compositor cannot otherwise notice - its own comment says so -
+      and a fallback poll is not a clock: nothing today can ask for "a
+      frame in 16 milliseconds because something is moving"
+- [ ] Minimize and restore animate to and from the window's taskbar
+      button. This is the one that carries information rather than
+      decoration, which is why it is first
+- [ ] Open and close: a short scale-and-fade. Snap preview on a drag to
+      an edge, and the launcher fading rather than appearing
+- [ ] Short and unfussy - 120-150ms. Animations that announce themselves
+      are the ones people go looking for a setting to turn off
+- [ ] **And that setting exists anyway**, in `settings.c`, on by default.
+      Motion that cannot be disabled is a genuine accessibility problem
+      for some people, not a preference
+- [ ] **This is the first thing in the project that requires a steady
+      frame rate**, which makes it the performance milestone. The
+      compositor already recomposites sub-rects rather than whole frames
+      (M-era `dirty` plus the clipped `present`), so the groundwork is
+      there - what it has never had to do is hold a budget. Measure the
+      cost of a frame, write the budget down, and assert it: an animation
+      that stutters is worse than none
+- [ ] Tests: the interactive suite already knows how to compare settled
+      pixels. An animation is the one thing that is *deliberately* not
+      settled, so the assertion is on the endpoints plus at least one
+      intermediate frame that is neither
+
+## M62 — The first sound this OS has ever made
+
+M48 built an entire notification system in which an error arrives in
+complete silence. Nothing here has ever driven a speaker, which makes
+even a beep a new capability rather than a refinement of one.
+
+- [ ] The PC speaker: PIT channel 2 and port 0x61, a square wave at a
+      frequency for a duration. Tens of lines, and it works on machines
+      with no sound device at all
+- [ ] The speaker is owned by one process rather than exposed as a
+      syscall anything can call - the same judgment M56 made about
+      `keyboard_inject`. There is one speaker, and a program able to seize
+      it unasked can make the machine unusable
+- [ ] One sound that is not a test: an error toast beeps. That single
+      connection is what makes this a feature instead of a driver
+- [ ] AC'97 output - the smallest real audio device QEMU offers, and the
+      same shape of work `rtl8139.c` already is: PCI enumeration that
+      exists, one BAR, a descriptor ring, an IRQ, and a buffer of PCM
+- [ ] A volume control in `settings.c`, and a mute that is honored by the
+      beep as well as the stream
+- [ ] Absent hardware degrades rather than panics, exactly as M27 decided
+      for the NIC
+
+## M63 — Somebody else's program
+
+Every binary this OS has ever run was written in this repo. This is the
+milestone that changes that, and it is the reason `argv` is in M60 and
+descriptors are in M59 - both are prerequisites rather than coincidences.
+
+- [ ] **Floating point, which does not exist here at all.** Both
+      `CFLAGS` and `USER_CFLAGS` carry `-mgeneral-regs-only`, and the
+      context switch has no `fxsave`/`fxrstor` because nothing has ever
+      needed one. That is a correct and deliberate simplification, and it
+      is also an absolute wall: essentially no real C program compiles
+      without `double`. Enabling SSE means CR4.OSFXSR/OSXMMEXCPT, FPU
+      state in the task struct, save/restore on switch, and dropping the
+      flag from `USER_CFLAGS` only - the kernel keeps it, because a
+      kernel that never touches SSE is a kernel that never has to save it
+      on an interrupt
+- [ ] **A libc subset - ours, not somebody else's.** The ground rules say
+      no external library is linked into anything this OS ships, and that
+      stays true: writing `string.h`, `stdlib.h`, a `stdio.h` over M59's
+      descriptors, and the `math.h` functions the target actually calls is
+      the opposite of linking newlib. `user_space/lib/malloc.c` is already
+      most of one piece of it
+- [ ] **Pick the program first, and let it decide the surface.** Guessing
+      at "a standard library" produces a large pile of functions nothing
+      calls. Porting one real thing produces exactly the ones that matter,
+      and the link errors are the specification
+- [ ] The canonical target is DOOM (`doomgeneric`), and it is canonical
+      for a good reason: it exercises the framebuffer, keyboard input,
+      timing, file I/O and a few megabytes of heap simultaneously, and
+      every one of those is something this OS has. A smaller first step -
+      a BASIC or Lua interpreter in the terminal - is a legitimate
+      alternative if the memory budget turns out to be the wall
+- [ ] Know the memory budget before starting. `SYS_sbrk` is growth-only
+      by design and a process's address space layout is fixed in
+      `proc.h` - what a real program needs is megabytes, and whether it
+      can have them is a question with an answer today, not a discovery to
+      make halfway through a port
+- [ ] It runs in a window, through the same `wmclient.h` every other app
+      uses. A program that takes over the whole screen would prove less:
+      the interesting claim is not "this OS can run DOOM" but "this
+      desktop can run somebody else's program *alongside* its own"
+- [ ] The build stays honest: third-party source lives clearly separated,
+      `docs/third-party-programs.md` (M25) says what was ported and what
+      was changed to make it build, and no third-party code moves into
+      `kernel/` or `user_space/lib/`
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support
 - [x] UEFI boot path as an alternative to BIOS (M24, above; BIOS itself
       later removed in M26, leaving UEFI as the only path)
-- [x] Package/build tooling for third-party user programs (M25, above)
+- [x] Package/build tooling for third-party user programs (M25, above) -
+      and finally used for its actual purpose in M63, which is the first
+      time this project builds a program nobody here wrote
 - [x] Networking stack + NIC driver (M27, above)
 - [~] Port to real hardware (USB boot test) - prep/tooling/runbook done
-      (M28, above); the manual boot-on-real-hardware step itself isn't yet
+      (M28, above); the manual boot step itself is **deliberately deferred
+      until the M57-M63 arc lands**. It is still the largest untested
+      claim in the project, and the bet is that proving it on metal is
+      worth more once this is something a person would want to run.
+      Three things to know when it comes back, each one found by writing
+      the arc above rather than by booting anything: it was never one
+      manual step - `leanfs.c` calls `ata_read_sectors` directly, and a
+      machine with no IDE controller has nothing for it to talk to, so a
+      block-device indirection plus a bootloader-supplied ramdisk root is
+      the real prerequisite. A panic on a machine with no serial port is
+      currently a black screen, so panic needs to paint before anyone
+      boots one. And M58's mode-setting driver is a Bochs/QEMU device
+      interface, so on real hardware the Display pane can only ever show
+      the mode the firmware picked - real mode-setting is a GPU driver
+      per vendor, and that is not a thing this project will do
 - [x] Directories in leanfs - promoted out of this list and scheduled as
       M53. It was always "the one structural limit that shows up in three
       different apps at once", which is a milestone, not a stretch goal
@@ -3209,13 +3853,50 @@ and every desktop client is supervised (M55). What remains:
       `system_api/include/icon.h`: an eight-byte header, a sixteen-entry
       palette and 4-bit indices, plus a loader that scales by an integer
       so one blob serves two sizes
-- [ ] Audio: a PC-speaker beep at minimum, an AC'97/HDA output stream at
-      most. Nothing in this OS has ever made a sound, so even a system
-      beep on an error toast (M48) is a new capability
-- [ ] Window animations (minimize/restore, launcher fade). M44 added the
-      blend primitive these would need; what's missing is a frame clock
-      the compositor drives independently of input
+- [~] Audio: a PC-speaker beep at minimum, an AC'97/HDA output stream at
+      most - scheduled as **M62**
+- [~] Window animations (minimize/restore, launcher fade) - scheduled as
+      **M61**, where the missing piece turned out to be exactly what this
+      entry always said it was: a frame clock the compositor drives
+      independently of input
 - [ ] Multiple virtual desktops - cheap once the compositor tracks a
-      workspace id per window, and the natural payoff for M49's chords
-
----
+      workspace id per window, and the natural payoff for M49's chords.
+      Left unscheduled only because it competes with M61 for the same
+      compositor attention and loses on how often it is felt
+- [ ] **A network user space can reach.** M27 shipped Ethernet, ARP, IPv4
+      and ICMP, and in the twenty-nine milestones since, the only thing
+      that has ever used any of it is one boot self-test pinging the
+      gateway - `sock` appears nowhere in `syscall.h`. UDP, a socket
+      surface in the fd table M59 makes real, a DHCP client so the
+      hardcoded 10.0.2.15 stops being a fiction on any other network, and
+      SNTP as the second way to know the time. Unscheduled because it is
+      breadth rather than depth, and this arc is depth - but it is the one
+      whole subsystem in the project with no consumers
+- [ ] **TCP**, separately and later. Retransmission, congestion control
+      and an eleven-state machine are not a bullet on somebody else's
+      milestone. Worth doing the day something here wants a stream
+- [ ] **A permission model.** Any process can map the framebuffer, kill
+      any task, power off the machine, or read the clipboard. This project
+      has declined to pretend otherwise several times in writing -
+      `SYS_shutdown`'s own comment calls a fake check here exactly that -
+      and for a single-user desktop running only its own programs that is
+      a defensible deferral. **M63 is the milestone that ends the "only
+      its own programs" half of that sentence**, so this should be
+      revisited the moment a ported program is something a person
+      downloads rather than something this repo builds
+- [ ] **An AML parser**, or enough of one to read `\_S5` instead of
+      guessing it. Named in every gaps list since M47 and still the honest
+      description of what shutdown does
+- [ ] **Icons as files rather than compiled in.** M56 built the format so
+      that this day changes only where the bytes are read from, not the
+      format or the loader. Waiting on a reason - "install an icon"
+      meaning "rebuild" has not cost anyone anything yet, though M63's
+      ported program is the first thing that would plausibly want to ship
+      its own
+- [ ] **A faster interactive suite.** 41 tests, a fresh guest each, about
+      45 minutes, and boots measured past 300 seconds late in a long run
+      that take 73 on an idle machine. Batching tests that do not need a
+      fresh machine, running guests in parallel, and a five-minute tier
+      for pre-commit would all pay for themselves. Not scheduled because
+      it is a tax on the author rather than on the product - but every
+      milestone above adds tests, and the trend only goes one way

@@ -39,6 +39,12 @@ typedef enum {
     FD_STDOUT,
     FD_PIPE_READ,
     FD_PIPE_WRITE,
+    /* M59: a file on disk, finally. Points at an entry in the kernel's
+     * shared open-file table (kernel/fs/openfile.h) rather than carrying
+     * the inode and offset inline, for the reason every real OS does the
+     * same: two fds produced by SYS_dup2 have to share one offset, or
+     * "append to the same file through both" quietly interleaves. */
+    FD_FILE,
 } fd_type_t;
 
 /* M21: bumped from 8 - a compositor juggling several windows needs
@@ -158,7 +164,15 @@ typedef enum {
 
 typedef struct {
     fd_type_t type;
-    struct pipe *pipe;
+    /* M59: a union rather than a second pointer field. task_t holds
+     * MAX_FDS of these and there are MAX_TASKS tasks, so eight more bytes
+     * here is 128 KiB of kernel BSS for a field only one of the two
+     * descriptor kinds ever uses. They are mutually exclusive by
+     * construction - `type` says which. */
+    union {
+        struct pipe *pipe;
+        struct openfile *file;
+    };
 } fd_slot_t;
 
 typedef struct task {
@@ -348,3 +362,13 @@ void sched_reap_slot(task_t *t);
  * this only makes sense for a task that is about to stop using its fds
  * entirely, which task 0 (the idle task from here on) is. */
 void sched_reset_fds_to_std(task_t *t);
+
+/* M59: drop / take one more reference to whatever a descriptor slot
+ * points at. Every path that stops or starts holding a slot goes through
+ * these, or the refcounts that now decide when a pipe closes and when an
+ * open file is freed are simply wrong. */
+void fd_release(fd_slot_t *slot);
+void fd_retain(const fd_slot_t *slot);
+/* Every one of a task's descriptors, released - what a task exiting owes
+ * the rest of the system. */
+void sched_release_fds(task_t *t);

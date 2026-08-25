@@ -26,7 +26,14 @@
  * project doesn't have - and inventing one for four hardcoded names
  * would be the first fake permission check in the project.
  */
-#include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
+/* M57: two sizes in one window, and the split is the point. Chrome -
+ * the title strip, the status line, the two buttons - is the 16-row UI
+ * face, the same one every other window in this desktop uses. The list
+ * itself is the 12-row face: a process table is exactly the "dense
+ * list" that smaller size exists for, and it buys four more visible
+ * rows out of the same window. */
+#define LIST_FONT   ui_font_small
+#define LIST_FONT_H UI_FONT_SMALL_HEIGHT
 #include "signal.h"   /* system_api/include/signal.h - SIGTERM/SIGKILL */
 #include "str.h"
 #include "syscall_wrappers.h"
@@ -34,7 +41,7 @@
 
 #define WIN_W 420
 #define WIN_H 360
-#define ROW_H (FONT_HEIGHT + 4)
+#define ROW_H (LIST_FONT_H + 4)
 #define HEADER_H 22
 #define COLS_H   18 /* the column-label strip under the header */
 #define FOOTER_H 34 /* the two action buttons plus the status line above them */
@@ -251,13 +258,13 @@ static void draw_row(wm_window_t *win, int i, int32_t y) {
     }
     char buf[16];
     format_int(t->pid, buf);
-    gfx_draw_text(&win->gfx, COL_PID, y + 2, buf, fg);
-    gfx_draw_text(&win->gfx, COL_NAME, y + 2, t->name[0] ? t->name : "?", fg);
-    gfx_draw_text(&win->gfx, COL_STATE, y + 2, state_name(t->state), fg);
+    gfx_draw_text_font(&win->gfx, COL_PID, y + 2, buf, fg, &LIST_FONT, 0);
+    gfx_draw_text_font(&win->gfx, COL_NAME, y + 2, t->name[0] ? t->name : "?", fg, &LIST_FONT, 0);
+    gfx_draw_text_font(&win->gfx, COL_STATE, y + 2, state_name(t->state), fg, &LIST_FONT, 0);
     format_int(t->parent_pid, buf);
-    gfx_draw_text(&win->gfx, COL_PPID, y + 2, buf, fg);
+    gfx_draw_text_font(&win->gfx, COL_PPID, y + 2, buf, fg, &LIST_FONT, 0);
     format_resources(t, buf);
-    gfx_draw_text(&win->gfx, COL_RES, y + 2, buf, fg);
+    gfx_draw_text_font(&win->gfx, COL_RES, y + 2, buf, fg, &LIST_FONT, 0);
 }
 
 static void redraw(wm_window_t *win) {
@@ -266,11 +273,11 @@ static void redraw(wm_window_t *win) {
     gfx_draw_text(&win->gfx, 6, 3, "Processes", LABEL_COLOR);
 
     gfx_fill_rect(&win->gfx, 0, HEADER_H, WIN_W, COLS_H, COLS_COLOR);
-    gfx_draw_text(&win->gfx, COL_PID, HEADER_H + 1, "PID", LABEL_COLOR);
-    gfx_draw_text(&win->gfx, COL_NAME, HEADER_H + 1, "Name", LABEL_COLOR);
-    gfx_draw_text(&win->gfx, COL_STATE, HEADER_H + 1, "State", LABEL_COLOR);
-    gfx_draw_text(&win->gfx, COL_PPID, HEADER_H + 1, "PPID", LABEL_COLOR);
-    gfx_draw_text(&win->gfx, COL_RES, HEADER_H + 1, "fd/sh", LABEL_COLOR);
+    gfx_draw_text_font(&win->gfx, COL_PID, HEADER_H + 1, "PID", LABEL_COLOR, &LIST_FONT, 0);
+    gfx_draw_text_font(&win->gfx, COL_NAME, HEADER_H + 1, "Name", LABEL_COLOR, &LIST_FONT, 0);
+    gfx_draw_text_font(&win->gfx, COL_STATE, HEADER_H + 1, "State", LABEL_COLOR, &LIST_FONT, 0);
+    gfx_draw_text_font(&win->gfx, COL_PPID, HEADER_H + 1, "PPID", LABEL_COLOR, &LIST_FONT, 0);
+    gfx_draw_text_font(&win->gfx, COL_RES, HEADER_H + 1, "fd/sh", LABEL_COLOR, &LIST_FONT, 0);
 
     for (int row = 0; row < ROWS_VISIBLE; row++) {
         int i = scroll_top + row;
@@ -287,7 +294,7 @@ static void redraw(wm_window_t *win) {
     /* The status line sits directly above the buttons that write to it -
      * an in-window message about the window you are looking at, which is
      * the right place for it. */
-    gfx_draw_text(&win->gfx, 8, BTN_Y - FONT_HEIGHT - 2, status_text, status_color);
+    gfx_draw_text(&win->gfx, 8, BTN_Y - (int32_t)gfx_ui_font()->height - 2, status_text, status_color);
     gfx_draw_button_state(&win->gfx, END_BTN_X, BTN_Y, BTN_W, BTN_H, BTN_BG, BTN_BORDER,
                            "End Task", BTN_TEXT, pressed_btn == 0);
     gfx_draw_button_state(&win->gfx, KILL_BTN_X, BTN_Y, BTN_W, BTN_H, KILL_BTN_BG, BTN_BORDER,
@@ -311,7 +318,7 @@ int main(void) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE) {
+            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
             } else if (ev.type == WM_EVENT_KEY) {
                 if (ev.ch == KBD_KEY_UP && selected > 0) {

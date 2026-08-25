@@ -217,15 +217,16 @@ int wm_connect_confirm_close(uint32_t width, uint32_t height, const char *title,
     return connect_common(width, height, 0, WM_PANEL_NONE, 0, 0, 1, title, out);
 }
 
-int wm_reconnect_if_needed(wm_window_t *win) {
-    /* 1 is "still running". Anything else - 0 or 2 for terminated, -1 for
-     * a pid this kernel no longer knows - means the process serving this
-     * window is gone. Asking about a pid rather than inferring from
-     * silence is the whole point: an idle desktop is silent too. */
-    if (win->compositor_pid < 0 || sys_task_alive(win->compositor_pid) == 1) {
-        return 0;
-    }
-
+/* M55's re-handshake, split out at M58 because there are now two reasons
+ * to perform it and only one of them is a dead compositor. The other is a
+ * live compositor that has replaced this window's buffer because the
+ * screen changed size - identical work, and deliberately so: "your pixel
+ * buffer is gone, ask for a new one" is one mechanism, not two.
+ *
+ * Returns 1 if the client has a usable window again, 0 if not (in which
+ * case it is left with a zero-sized gfx context, which every gfx.c
+ * primitive clips to nothing, and the next poll tries again). */
+static int rehandshake(wm_window_t *win) {
     /* Drop the old mapping *before* asking for a new one. Those frames
      * were the dead compositor's shm segment and the kernel handed them
      * back the moment it exited (shm_free_by_owner), so this mapping now
@@ -264,6 +265,17 @@ int wm_reconnect_if_needed(wm_window_t *win) {
     }
     *win = fresh;
     return 1;
+}
+
+int wm_reconnect_if_needed(wm_window_t *win) {
+    /* 1 is "still running". Anything else - 0 or 2 for terminated, -1 for
+     * a pid this kernel no longer knows - means the process serving this
+     * window is gone. Asking about a pid rather than inferring from
+     * silence is the whole point: an idle desktop is silent too. */
+    if (win->compositor_pid < 0 || sys_task_alive(win->compositor_pid) == 1) {
+        return 0;
+    }
+    return rehandshake(win);
 }
 
 int wm_wait_event(wm_window_t *win, wm_event_t *out) {
@@ -317,7 +329,25 @@ int wm_poll_event(wm_window_t *win, wm_event_t *out) {
         sys_yield();
         return 0;
     }
-    return read_exact(win->evt_fd, out, sizeof(*out)) == (long)sizeof(*out);
+    if (read_exact(win->evt_fd, out, sizeof(*out)) != (long)sizeof(*out)) {
+        /* A torn read. Yield rather than return straight away: this is
+         * the "nothing usable" result, and every caller's loop treats it
+         * as one - spinning on it would burn a whole scheduler quantum. */
+        sys_yield();
+        return 0;
+    }
+    /* M58: the compositor has changed the display mode and replaced this
+     * window's pixel buffer to match. The re-handshake happens here
+     * rather than in every client for the same reason the crash-recovery
+     * one does: it is the identical work, and a client's whole obligation
+     * should be "redraw everything", which is what this event then says.
+     * The compositor has already stopped reading the old segment before
+     * sending this, so unmapping it is safe - and it is what lets the
+     * compositor free it. */
+    if (out->type == WM_EVENT_DISPLAY_CHANGED) {
+        rehandshake(win);
+    }
+    return 1;
 }
 
 /* Opened once, on this process's first query/action call, and reused
@@ -376,6 +406,14 @@ int wm_toggle_launcher(void) {
  * the same reason: a client that notifies on every failed launch would
  * otherwise burn two fd-table slots per notification. */
 static int notify_fds[2] = {-1, -1};
+
+int wm_set_display_mode(uint32_t width, uint32_t height) {
+    return wm_send_action_value(-1, WM_ACTION_SET_MODE, wm_pack_mode(width, height));
+}
+
+int wm_confirm_display_mode(void) {
+    return wm_send_action_value(-1, WM_ACTION_CONFIRM_MODE, 0);
+}
 
 int wm_notify(uint32_t level, const char *title, const char *body) {
     if (notify_fds[0] < 0) {

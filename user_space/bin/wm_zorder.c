@@ -51,7 +51,12 @@ static int32_t tick_x(int i) {
  * client needs are a title and a fill color, space-separated:
  * "zA 00A02020". Both are optional and defaulted, so it is still
  * runnable by hand from the shell. */
-int main(const char *arg) {
+int main(int argc, char **argv) {
+    /* M60: argv[0] is this program's own path; argv[1] is the first thing
+     * the caller had to say. `arg` keeps the name the body already uses,
+     * and is the empty string when there was nothing - which is exactly
+     * what the single-string mechanism this replaced handed over. */
+    const char *arg = argc > 1 ? argv[1] : "";
     char title[WM_TITLE_MAX] = "ZOrder";
     uint32_t fill = 0x00206040u;
 
@@ -106,7 +111,7 @@ int main(const char *arg) {
             /* Presses only - see the header comment. A press is a button
              * event whose button state has the left bit set; the matching
              * release arrives with it clear. */
-            if (ev.type == WM_EVENT_EXPOSE) {
+            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 /* M55: a replacement compositor handed this client a
                  * blank buffer. Repainting the fill *and* every tick
                  * already earned is what makes this program usable as a

@@ -82,7 +82,16 @@
  */
 #include "children.h" /* M54: the launcher spawns, so the launcher reaps - see children.h */
 #include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
-#include "font8x16.h" /* M38: window-title text in the titlebar - drawn through this file's own clip-aware put_pixel, not gfx_draw_text (see draw_text_clipped's own note) */
+#include "uifont.h" /* M38/M57: window-title text and every other label this file draws - through its own clip-aware put_pixel rather than gfx_draw_text (see draw_text_clipped's own note) */
+
+/* M57: the compositor draws chrome, and chrome is the 16-row face. Named
+ * once here so the several dozen "centre this in that" sites below read
+ * as one decision rather than a repeated constant - and so the day a
+ * chrome size becomes a setting, this is the line that changes.
+ * UI_FONT_HEIGHT is the compile-time twin of UI_FONT.height, for the
+ * #defines above that need a constant. */
+#define UI_FONT        ui_font_ui
+#define UI_FONT_HEIGHT UI_FONT_UI_HEIGHT
 #include "gfx.h" /* M34: gfx_point_in_rect - shared hit-test helper, see draw_titlebar_buttons' own note on why drawing itself stays on this file's own clip-aware fill_rect */
 #include "power_mode.h" /* system_api/include/power_mode.h - POWER_OFF/POWER_REBOOT, M47's launcher Power controls */
 #include "spawn_error.h" /* system_api/include/spawn_error.h - M48, so a failed launch can say why */
@@ -204,7 +213,7 @@
 #define LAUNCHER_W 480
 #define LAUNCHER_H 320
 #define LAUNCHER_PAD      GFX_PAD /* M44: the shared dialog inset, not a number of its own - see gfx.h */
-#define LAUNCHER_INPUT_H  (FONT_HEIGHT + 8)
+#define LAUNCHER_INPUT_H  (UI_FONT_HEIGHT + 8)
 #define LAUNCHER_ROW_H    20
 #define LAUNCHER_LIST_Y   (LAUNCHER_PAD + LAUNCHER_INPUT_H + 10)
 #define LAUNCHER_ROWS     10 /* M47: 12 -> 10, to leave the bottom of the overlay for the Power controls. LAUNCHER_LIST_Y + 10*20 still clears POWER_BTN_Y with room to spare */
@@ -328,6 +337,16 @@ typedef struct {
     uint8_t minimized; /* M22: hidden from redraw() and from click hit-testing, but the client process keeps running (WM_ACTION_TOGGLE_MINIMIZE) */
     uint8_t maximized; /* M30: WM_ACTION_MAXIMIZE/RESTORE toggle - see saved_x/y/w/h below */
     int32_t saved_x, saved_y, saved_w, saved_h; /* M30: pre-maximize geometry, restored by WM_ACTION_RESTORE - meaningless while !maximized */
+    /* M58: this window's pixel buffer no longer matches the display and
+     * has to be replaced. Set on every live window when the resolution
+     * changes, together with a WM_EVENT_DISPLAY_CHANGED on its event
+     * pipe; cleared when the client comes back through the create
+     * handshake and is handed a fresh segment. The buffer cannot simply
+     * be reallocated here, because the *client* is the other process
+     * holding a mapping of it - so the replacement happens at the one
+     * moment the client has provably let go of the old one, which is the
+     * request it sends after unmapping. */
+    uint8_t needs_rebuffer;
     uint8_t alive; /* M29: 0 once this slot has been reclaimed (owning client died or closed) - excluded from redraw/hit-test/query, and eligible for accept_pending_window to hand to the next connecting client. Slots below window_count that are !alive are exactly the "holes" reap_dead_clients leaves behind. */
     /* M48: this window's client was asked to stop - a titlebar close, a
      * context menu, an external WM_ACTION_CLOSE/KILL. It is what keeps
@@ -423,6 +442,15 @@ static uint32_t fb_pitch_pixels;
  * (present(), below) means the hardware only ever shows complete frames. */
 static uint32_t *back_buf;
 static uint32_t back_pitch_pixels; /* == fb_info.width - back_buf is allocated tightly packed, no pitch padding */
+static long back_shm_id = -1;      /* M58: kept so a mode change can hand the old back buffer back and allocate one the new size */
+
+/* M58: display-mode state. `mode_revert_at_ms` is the deadline a mode
+ * change is on trial until - 0 when nothing is pending. Choosing a mode
+ * the display cannot show is how a person loses their machine with no way
+ * to get it back, and here there is no second machine to log in from and
+ * no config file to edit blind, so the countdown is not a nicety. */
+static uint32_t mode_prev_w, mode_prev_h;
+static long mode_revert_at_ms;
 
 /* M55: this process's own pid, read once at startup and echoed in every
  * create response - see wm_create_response_t.compositor_pid. */
@@ -1114,43 +1142,60 @@ static void draw_titlebar_buttons(const window_t *win, int idx, int focused) {
  * title text (drawn on every window, every full redraw) is exactly the
  * kind of per-pixel work that rect exists to bound.
  *
- * M39: bold is now a lookup into the generated font8x16_bold table
- * rather than the `bits | (bits >> 1)` this did per-pixel at draw time.
- * Same one-column dilation, but done once in tools/gen-font.c and - the
- * actual fix - lossless: the old smear thickened rightward *inside the
- * byte*, so any glyph with ink already in column 7 had that column
- * silently dropped instead of thickened. Every glyph now leaves column
- * 7 blank as a reserved advance gap (font8x16.h's FONT_GLYPH_COLS, which
- * gen-font.c enforces), so there is nothing left to fall off the end. */
+ * M39: bold is now a lookup into a generated bold table rather than the
+ * `bits | (bits >> 1)` this did per-pixel at draw time. Same one-column
+ * dilation, but done once in tools/gen-font.c and - the actual fix -
+ * lossless: the old smear thickened rightward *inside the byte*, so any
+ * glyph with ink already in the last column had that column silently
+ * dropped instead of thickened.
+ *
+ * M57: the font underneath is now the proportional one (uifont.h), so
+ * the advance is a per-glyph table lookup rather than a constant. Every
+ * measurement in this file goes through text_width() below - there is no
+ * longer any such thing as "how wide is a character here". */
 static void draw_char_clipped(int32_t x, int32_t y, char c, uint32_t color, int bold) {
     uint8_t code = (uint8_t)c;
     if (code >= 128) {
         return;
     }
-    const uint8_t *glyph = bold ? font8x16_bold[code] : font8x16[code];
-    for (int32_t row = 0; row < FONT_HEIGHT; row++) {
-        uint8_t bits = glyph[row];
+    const ui_font_t *f = &UI_FONT;
+    const uint16_t *rows = (bold && f->rows_bold) ? f->rows_bold : f->rows;
+    const uint16_t *glyph = rows + (int32_t)code * f->height;
+    int32_t w = f->width[code] + ((bold && f->rows_bold) ? 1 : 0);
+    if (w > UI_FONT_MAX_COLS) {
+        w = UI_FONT_MAX_COLS;
+    }
+    for (int32_t row = 0; row < f->height; row++) {
+        uint16_t bits = glyph[row];
         int32_t py = y + row;
-        if (py < clip_y0 || py >= clip_y1) {
+        if (!bits || py < clip_y0 || py >= clip_y1) {
             continue;
         }
-        for (int32_t col = 0; col < FONT_WIDTH; col++) {
+        for (int32_t col = 0; col < w; col++) {
             int32_t px = x + col;
             if (px < clip_x0 || px >= clip_x1) {
                 continue;
             }
-            if (bits & (0x80 >> col)) {
+            if (bits & (uint16_t)(0x8000u >> col)) {
                 put_pixel(px, py, color);
             }
         }
     }
 }
 
+/* The one place this file measures text. gfx.c's gfx_text_width does
+ * exactly this and is linked in, but it is the *drawing* primitives this
+ * file cannot borrow (see draw_char_clipped's note), not the arithmetic -
+ * so this is a call, not a second copy. */
+static int32_t text_width(const char *s) {
+    return gfx_text_width(&UI_FONT, s);
+}
+
 static void draw_text_clipped(int32_t x, int32_t y, const char *s, uint32_t color, int bold) {
     int32_t cx = x;
     for (const char *p = s; *p; p++) {
         draw_char_clipped(cx, y, *p, color, bold);
-        cx += FONT_WIDTH;
+        cx += gfx_char_advance(&UI_FONT, *p);
     }
 }
 
@@ -1164,10 +1209,24 @@ static void fit_title(const window_t *win, char *out) {
     int32_t unused_y;
     titlebar_button_rect(win, (titlebar_button_t)(BTN_COUNT - 1), &leftmost_btn_x, &unused_y);
     int32_t avail = leftmost_btn_x - TITLE_BTN_GAP - (win->x + TITLE_MARGIN);
-    int32_t max_chars = avail > 0 ? avail / FONT_WIDTH : 0;
+    if (avail < 0) {
+        avail = 0;
+    }
+    int32_t max_chars = gfx_text_fit(&UI_FONT, win->title, avail);
     int i = 0;
-    for (; win->title[i] && i < max_chars && i < WM_TITLE_MAX - 1; i++) {
+    for (; win->title[i] && i < max_chars && i < WM_TITLE_MAX - 2; i++) {
         out[i] = win->title[i];
+    }
+    /* M57: a title cut short now says so. Truncation used to be
+     * indistinguishable from a window whose name really was "Untitled
+     * do" - and the ellipsis is one of the glyphs the font gained in
+     * this milestone precisely because three periods is not one. */
+    if (win->title[i]) {
+        int32_t ell = gfx_char_advance(&UI_FONT, UI_G_ELLIPSIS);
+        while (i > 0 && gfx_text_width_n(&UI_FONT, out, i) + ell > avail) {
+            i--;
+        }
+        out[i++] = UI_G_ELLIPSIS;
     }
     out[i] = '\0';
 }
@@ -1319,11 +1378,8 @@ static void draw_power_button(int32_t x, int32_t y, int32_t bx, const char *labe
     fill_rect_rounded(px, py, POWER_BTN_W, POWER_BTN_H,
                        power_hover == mode ? POWER_BTN_HOVER : POWER_BTN_BG);
     stroke_rect_rounded(px, py, POWER_BTN_W, POWER_BTN_H, LAUNCHER_BORDER);
-    int32_t label_w = 0;
-    for (const char *p = label; *p; p++) {
-        label_w += FONT_WIDTH;
-    }
-    draw_text_clipped(px + (POWER_BTN_W - label_w) / 2, py + (POWER_BTN_H - FONT_HEIGHT) / 2,
+    int32_t label_w = text_width(label);
+    draw_text_clipped(px + (POWER_BTN_W - label_w) / 2, py + (POWER_BTN_H - UI_FONT_HEIGHT) / 2,
                        label, LAUNCHER_TEXT, 0);
 }
 
@@ -1344,9 +1400,9 @@ static void draw_power_confirm(int32_t x, int32_t y) {
     draw_text_clipped(cx + GFX_PAD, cy + GFX_PAD,
                        power_confirm == POWER_REBOOT ? "Restart this machine?" : "Shut down this machine?",
                        LAUNCHER_TEXT, 1);
-    draw_text_clipped(cx + GFX_PAD, cy + GFX_PAD + 2 * FONT_HEIGHT,
+    draw_text_clipped(cx + GFX_PAD, cy + GFX_PAD + 2 * UI_FONT_HEIGHT,
                        "Y / Enter = yes", LAUNCHER_ROW_FG, 0);
-    draw_text_clipped(cx + GFX_PAD, cy + GFX_PAD + 3 * FONT_HEIGHT,
+    draw_text_clipped(cx + GFX_PAD, cy + GFX_PAD + 3 * UI_FONT_HEIGHT,
                        "N / Esc / click = cancel", LAUNCHER_ROW_FG, 0);
 }
 
@@ -1368,13 +1424,14 @@ static void draw_launcher(void) {
     int32_t input_w = LAUNCHER_W - 2 * LAUNCHER_PAD;
     fill_rect_rounded(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_INPUT_BG);
     stroke_rect_rounded(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_BORDER);
-    int32_t text_y = input_y + (LAUNCHER_INPUT_H - FONT_HEIGHT) / 2;
+    int32_t text_y = input_y + (LAUNCHER_INPUT_H - UI_FONT_HEIGHT) / 2;
     if (launcher_query_len > 0) {
         draw_text_clipped(input_x + 6, text_y, launcher_query, LAUNCHER_TEXT, 0);
     } else {
         draw_text_clipped(input_x + 6, text_y, "Type to search", LAUNCHER_HINT, 0);
     }
-    fill_rect(input_x + 6 + launcher_query_len * FONT_WIDTH, text_y, 2, FONT_HEIGHT, LAUNCHER_TEXT);
+    fill_rect(input_x + 6 + (launcher_query_len > 0 ? text_width(launcher_query) : 0),
+               text_y, 2, UI_FONT_HEIGHT, LAUNCHER_TEXT);
 
     if (launcher_match_count == 0) {
         draw_text_clipped(x + LAUNCHER_PAD, launcher_row_y(y, 0) + 2, "No matches", LAUNCHER_HINT, 0);
@@ -1388,7 +1445,14 @@ static void draw_launcher(void) {
             if (m == launcher_selected) {
                 fill_rect_rounded(x + LAUNCHER_PAD / 2, ry, LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H, LAUNCHER_SEL_BG);
             }
-            draw_text_clipped(x + LAUNCHER_PAD, ry + 2, launcher_entries[launcher_matches[m]],
+            /* M57: the selected row carries the arrow glyph rather than
+             * relying on its highlight alone - the one cue that survives
+             * a screenshot, a squint and a low-contrast wallpaper. */
+            int32_t mark_w = gfx_char_advance(&UI_FONT, UI_G_ARROW_RIGHT);
+            if (m == launcher_selected) {
+                draw_text_clipped(x + LAUNCHER_PAD, ry + 2, UI_S_ARROW_RIGHT, LAUNCHER_TEXT, 0);
+            }
+            draw_text_clipped(x + LAUNCHER_PAD + mark_w + 2, ry + 2, launcher_entries[launcher_matches[m]],
                                m == launcher_selected ? LAUNCHER_TEXT : LAUNCHER_ROW_FG,
                                m == launcher_selected);
         }
@@ -1428,7 +1492,7 @@ static void draw_toasts(void) {
         fill_rect(x + 1, y + GFX_CORNER_R, TOAST_STRIPE_W, TOAST_H - 2 * GFX_CORNER_R,
                    toast_accent(toasts[i].level));
         draw_text_clipped(x + TOAST_STRIPE_W + 10, y + 10, toasts[i].title, TOAST_TITLE_FG, 1 /* bold */);
-        draw_text_clipped(x + TOAST_STRIPE_W + 10, y + 10 + FONT_HEIGHT + 4, toasts[i].body, TOAST_BODY_FG, 0);
+        draw_text_clipped(x + TOAST_STRIPE_W + 10, y + 10 + UI_FONT_HEIGHT + 4, toasts[i].body, TOAST_BODY_FG, 0);
     }
 }
 
@@ -1454,7 +1518,7 @@ static void draw_window_menu(void) {
         if (i == wmenu_hover) {
             fill_rect_rounded(wmenu_x + 2, ry + 1, WMENU_W - 4, WMENU_ITEM_H - 2, WMENU_HOVER_BG);
         }
-        draw_text_clipped(wmenu_x + 8, ry + (WMENU_ITEM_H - FONT_HEIGHT) / 2,
+        draw_text_clipped(wmenu_x + 8, ry + (WMENU_ITEM_H - UI_FONT_HEIGHT) / 2,
                            wmenu_label(i, win), WMENU_TEXT, 0);
     }
 }
@@ -1517,7 +1581,7 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
         draw_frame_top_rounded(win->x, win->y - TITLEBAR_H, win->w, TITLEBAR_H, titlebar_color);
         char fitted_title[WM_TITLE_MAX];
         fit_title(win, fitted_title);
-        draw_text_clipped(win->x + TITLE_MARGIN, win->y - TITLEBAR_H + (TITLEBAR_H - FONT_HEIGHT) / 2,
+        draw_text_clipped(win->x + TITLE_MARGIN, win->y - TITLEBAR_H + (TITLEBAR_H - UI_FONT_HEIGHT) / 2,
                            fitted_title, focused ? TITLE_COLOR : TITLE_DIM_COLOR, 1 /* bold */);
         draw_titlebar_buttons(win, i, focused);
         blit_window(win);
@@ -1556,16 +1620,12 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
      * *attached* to the cursor - a drag label the pointer disappeared
      * behind would be worse than none. */
     if (client_drag_active) {
-        int32_t len = 0;
-        for (const char *p = client_drag_payload; *p; p++) {
-            len += FONT_WIDTH;
-        }
-        int32_t lw = len + 2 * DRAG_LABEL_PAD;
+        int32_t lw = text_width(client_drag_payload) + 2 * DRAG_LABEL_PAD;
         int32_t lx = min_i32(cursor_x + CURSOR_SIZE, (int32_t)fb_info.width - lw);
         int32_t ly = min_i32(cursor_y + CURSOR_SIZE, (int32_t)fb_info.height - DRAG_LABEL_H);
         fill_rect_rounded(lx, ly, lw, DRAG_LABEL_H, DRAG_LABEL_BG);
         stroke_rect_rounded(lx, ly, lw, DRAG_LABEL_H, DRAG_LABEL_BORDER);
-        draw_text_clipped(lx + DRAG_LABEL_PAD, ly + (DRAG_LABEL_H - FONT_HEIGHT) / 2,
+        draw_text_clipped(lx + DRAG_LABEL_PAD, ly + (DRAG_LABEL_H - UI_FONT_HEIGHT) / 2,
                            client_drag_payload, DRAG_LABEL_FG, 0);
     }
     const uint8_t *cursor_shape_now = cursor_shape;
@@ -1944,6 +2004,55 @@ static void refuse_window(int resp_write_fd, int32_t client_pid, const char *rea
     sys_write(1, "\n", 1);
 }
 
+/* M58: defined further down with the rest of the display-mode code (it
+ * needs apply_window_action, which needs most of this file); declared
+ * here because the create handshake below is where a window that has
+ * been waiting for a new buffer actually gets one. */
+static void clamp_window_on_screen(int idx);
+
+/* M58: replace one window's pixel segment, at the one safe moment - the
+ * client has just unmapped its own copy (that is what wmclient.c does on
+ * WM_EVENT_DISPLAY_CHANGED, before it re-asks) and is blocked waiting for
+ * the answer, so nothing is holding a mapping of the frames about to be
+ * handed back.
+ *
+ * A panel's width and a desktop background's width and height are the
+ * display's, never the client's request - the same rule the original
+ * connect path applies, which is why those two are the windows that
+ * genuinely have to be resized rather than merely notified. Every other
+ * window keeps the size it asked for and gets a blank buffer of it. */
+static int rebuffer_window(int idx) {
+    window_t *win = &windows[idx];
+    uint32_t width = (win->is_panel || win->is_desktop) ? fb_info.width : (uint32_t)win->buf_w;
+    uint32_t height = win->is_desktop ? fb_info.height : (uint32_t)win->buf_h;
+
+    long id = sys_shm_create((size_t)width * height * sizeof(uint32_t));
+    long vaddr = id < 0 ? -1 : sys_shm_map(id);
+    if (vaddr < 0) {
+        if (id >= 0) {
+            sys_shm_free(id, (void *)0);
+        }
+        return -1;
+    }
+    if (win->shm_id >= 0) {
+        sys_shm_free(win->shm_id, win->pixels);
+    }
+    win->shm_id = (int32_t)id;
+    win->pixels = (uint32_t *)vaddr;
+    win->buf_w = (int32_t)width;
+    win->buf_h = (int32_t)height;
+    if (win->is_panel) {
+        win->w = (int32_t)width; /* the docked strip re-spans the screen; its height is unchanged */
+    } else if (win->is_desktop) {
+        win->w = (int32_t)width;
+        win->h = (int32_t)height;
+    }
+    win->needs_rebuffer = 0;
+    clamp_window_on_screen(idx);
+    dirty = 1;
+    return 0;
+}
+
 /* Non-blocking: only touches the request pipe (and does the one
  * necessarily-blocking-in-practice SYS_read, guaranteed immediate since
  * SYS_pipe_poll already confirmed a full request is buffered) when a
@@ -1974,6 +2083,16 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     if (req.client_pid > 0) {
         for (int i = 0; i < window_count; i++) {
             if (windows[i].alive && windows[i].client_pid == req.client_pid) {
+                /* M58: unless this client is here *because* the display
+                 * changed, in which case the idempotent answer is the
+                 * wrong one - it would hand back the buffer that no
+                 * longer fits the screen, which is exactly what it came
+                 * to replace. */
+                if (windows[i].needs_rebuffer && rebuffer_window(i) != 0) {
+                    refuse_window(resp_write_fd, req.client_pid,
+                                   "could not reallocate this window's buffer for the new display size");
+                    return;
+                }
                 resp.window_id = i;
                 resp.shm_id = windows[i].shm_id;
                 resp.width = (uint32_t)windows[i].buf_w;
@@ -2613,6 +2732,129 @@ static void launcher_hover(int32_t px, int32_t py) {
     }
 }
 
+/* ---- M58: changing the display mode -------------------------------
+ *
+ * The kernel syscall changes the mode and re-maps the kernel's own
+ * framebuffer, and stops there. Everything downstream of "the screen is a
+ * different size now" is this process's, because this process is the one
+ * that owns the screen: the framebuffer mapping, the back buffer, every
+ * window's pixel segment, the two panels that are display-width by
+ * definition, the windows that are suddenly off the right or bottom edge,
+ * and the cursor.
+ *
+ * The window buffers are the real constraint and it is worth naming: a
+ * window's buf_w/buf_h are set once at connect and never mutated (see
+ * window_t), so a panel allocated for 1024x768 cannot fill 1920x1080.
+ * Changing resolution therefore *reallocates* every window's segment -
+ * which is precisely the SYS_shm_free / SYS_shm_create / SYS_shm_map
+ * sequence M55 already performs when a client reconnects to a replacement
+ * compositor. The second time this project reallocates every window at
+ * once, not the first.
+ *
+ * Ordering matters and is deliberate: this process stops reading the old
+ * segments, tells each client, and lets the *client* unmap and come back
+ * asking. The segment is only freed and replaced at that moment, which is
+ * the one point where nobody is holding a mapping of memory that is about
+ * to be handed to somebody else. */
+static int apply_display_mode(uint32_t w, uint32_t h) {
+    if (w == fb_info.width && h == fb_info.height) {
+        return 0;
+    }
+    if (sys_display_set_mode(w, h) != 0) {
+        return -1;
+    }
+    if (sys_fb_info(&fb_info) != 0) {
+        return -1;
+    }
+    /* Re-map rather than reuse: a larger mode needs a larger mapping than
+     * the old one covered, and SYS_fb_map maps the kernel's whole
+     * high-water extent at the same fixed address. */
+    long fb_vaddr = sys_fb_map();
+    if (fb_vaddr < 0) {
+        return -1;
+    }
+    real_fb = (uint32_t *)fb_vaddr;
+    fb_pitch_pixels = fb_info.pitch / (uint32_t)sizeof(uint32_t);
+
+    /* The back buffer is this process's own, so it is the one allocation
+     * here that can simply be replaced in place. */
+    long new_id = sys_shm_create((size_t)fb_info.width * fb_info.height * sizeof(uint32_t));
+    long new_vaddr = new_id < 0 ? -1 : sys_shm_map(new_id);
+    if (new_vaddr < 0) {
+        /* Nothing has been torn down yet, so the old back buffer is still
+         * valid - but it is now smaller than the screen, which is not a
+         * state anything downstream is prepared for. Put the mode back. */
+        if (new_id >= 0) {
+            sys_shm_free(new_id, (void *)0);
+        }
+        sys_display_set_mode(mode_prev_w ? mode_prev_w : (uint32_t)back_pitch_pixels, h);
+        sys_fb_info(&fb_info);
+        return -1;
+    }
+    if (back_shm_id >= 0) {
+        sys_shm_free(back_shm_id, back_buf);
+    }
+    back_shm_id = new_id;
+    back_buf = (uint32_t *)new_vaddr;
+    back_pitch_pixels = fb_info.width;
+
+    cursor_x = clamp_i32(cursor_x, 0, (int32_t)fb_info.width - 1);
+    cursor_y = clamp_i32(cursor_y, 0, (int32_t)fb_info.height - 1);
+    last_drawn_cursor_x = cursor_x;
+    last_drawn_cursor_y = cursor_y;
+
+    /* Every live window: stop reading its pixels, and tell it. The flag
+     * is what makes the client's next create request a *replacement*
+     * rather than the idempotent no-op M56 made it. */
+    wm_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = WM_EVENT_DISPLAY_CHANGED;
+    for (int i = 0; i < window_count; i++) {
+        if (!windows[i].alive) {
+            continue;
+        }
+        windows[i].needs_rebuffer = 1;
+        send_event(&windows[i], &ev);
+    }
+    dirty = 1;
+    return 0;
+}
+
+/* Puts a window back inside a screen that just changed size. Shrinking is
+ * the *common* direction here rather than the edge case - "make
+ * everything bigger" is what a person is usually after - and a window at
+ * x=1500 on a screen that just became 1024 wide is a window nobody can
+ * reach. A maximized window re-maximizes instead, since its geometry was
+ * never its own to keep. */
+static void clamp_window_on_screen(int idx) {
+    window_t *win = &windows[idx];
+    if (win->is_panel) {
+        win->x = 0;
+        win->y = (int32_t)fb_info.height - win->h;
+        return;
+    }
+    if (win->is_desktop) {
+        win->x = 0;
+        win->y = 0;
+        return;
+    }
+    if (win->maximized) {
+        win->maximized = 0; /* apply_window_action no-ops on an already-maximized window */
+        apply_window_action(idx, WM_ACTION_MAXIMIZE, 0);
+        return;
+    }
+    /* Position only. Cropping a window to fit would be a resize nobody
+     * asked for, and - worse - one this compositor could not undo when
+     * the screen grew back, since it has no memory of what the window's
+     * size was before it was trimmed. A window taller than the screen
+     * simply extends past the bottom, which is already what happens to
+     * any oversized window here; what matters is that its titlebar is
+     * reachable, which is what the top clamp guarantees. */
+    win->x = clamp_i32(win->x, 0, max_i32(0, (int32_t)fb_info.width - win->w));
+    win->y = clamp_i32(win->y, content_top_limit(),
+                        max_i32(content_top_limit(), content_bottom_limit() - win->h));
+}
+
 static void accept_pending_action(int action_read_fd) {
     if (sys_pipe_poll(action_read_fd) < (long)sizeof(wm_action_request_t)) {
         return;
@@ -2626,6 +2868,30 @@ static void accept_pending_action(int action_read_fd) {
      * goes through - see WM_ACTION_TOGGLE_LAUNCHER. */
     if (req.action == WM_ACTION_TOGGLE_LAUNCHER) {
         launcher_set_open(!launcher_open);
+        return;
+    }
+    /* M58: two more actions that are about the display rather than about
+     * a window, handled here for the same reason WM_ACTION_TOGGLE_LAUNCHER
+     * is - there is no window_id to validate. */
+    if (req.action == WM_ACTION_SET_MODE) {
+        uint32_t prev_w = fb_info.width, prev_h = fb_info.height;
+        if (apply_display_mode(wm_mode_width(req.value), wm_mode_height(req.value)) != 0) {
+            toast_post(WM_NOTIFY_ERROR, "Display unchanged",
+                        "The adapter refused that resolution");
+            return;
+        }
+        /* On trial until confirmed. Nested changes keep the *original*
+         * mode as the one to fall back to: reverting to the mode you
+         * could not read either would not be a revert. */
+        if (mode_revert_at_ms == 0) {
+            mode_prev_w = prev_w;
+            mode_prev_h = prev_h;
+        }
+        mode_revert_at_ms = sys_uptime_ms() + WM_MODE_REVERT_MS;
+        return;
+    }
+    if (req.action == WM_ACTION_CONFIRM_MODE) {
+        mode_revert_at_ms = 0;
         return;
     }
     if (req.window_id < 0 || req.window_id >= window_count || !windows[req.window_id].alive) {
@@ -3324,7 +3590,31 @@ int main(void) {
     real_fb = (uint32_t *)fb_vaddr;
     fb_pitch_pixels = fb_info.pitch / sizeof(uint32_t);
 
-    long back_shm_id = sys_shm_create((size_t)fb_info.width * fb_info.height * sizeof(uint32_t));
+    /* M58: whatever resolution was last confirmed, applied before
+     * anything is allocated against the boot mode's geometry - so the
+     * desktop simply comes up at the right size rather than changing size
+     * a moment after it appears. This is the point at which boot.c's
+     * hardcoded 1024x768 preference stops being the policy and becomes
+     * the fallback: for the first boot, and for hardware whose adapter
+     * has no mode-setting interface this kernel recognises. A saved mode
+     * the adapter now refuses simply fails and leaves the boot mode,
+     * which is the right outcome for a disk moved to another machine. */
+    {
+        uint32_t saved_w = 0, saved_h = 0;
+        if (settings_file_load_display(&saved_w, &saved_h) &&
+            (saved_w != fb_info.width || saved_h != fb_info.height)) {
+            if (sys_display_set_mode(saved_w, saved_h) == 0) {
+                sys_fb_info(&fb_info);
+                long remapped = sys_fb_map();
+                if (remapped >= 0) {
+                    real_fb = (uint32_t *)remapped;
+                }
+                fb_pitch_pixels = fb_info.pitch / (uint32_t)sizeof(uint32_t);
+            }
+        }
+    }
+
+    back_shm_id = sys_shm_create((size_t)fb_info.width * fb_info.height * sizeof(uint32_t));
     long back_vaddr = back_shm_id < 0 ? -1 : sys_shm_map(back_shm_id);
     if (back_vaddr < 0) {
         sys_exit(1);
@@ -3432,6 +3722,20 @@ int main(void) {
         handle_keyboard();
 
         long now = sys_uptime_ms();
+        /* M58: a mode nobody confirmed goes back. This is the safety net
+         * the whole feature rests on, and it lives here rather than in
+         * settings.c on purpose: the case it exists for is a screen you
+         * cannot read, and a countdown owned by a window you cannot see
+         * is no countdown at all. It also survives settings.c dying
+         * mid-trial, which a self-owned timer would not. */
+        if (mode_revert_at_ms != 0 && now >= mode_revert_at_ms) {
+            uint32_t w = mode_prev_w, h = mode_prev_h;
+            mode_revert_at_ms = 0;
+            if (apply_display_mode(w, h) == 0) {
+                toast_post(WM_NOTIFY_WARN, "Display reverted",
+                            "Nobody confirmed the new resolution");
+            }
+        }
         toasts_expire(now); /* M48: a deadline is the only thing that retires a toast on its own */
         if (dirty || now - last_redraw_ms >= REDRAW_INTERVAL_MS) {
             redraw();

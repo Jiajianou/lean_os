@@ -12,6 +12,9 @@
 
 #include <stddef.h>
 
+#include "display.h" /* system_api/include/display.h - display_mode_t, M58 */
+#include "os_time.h" /* system_api/include/os_time.h - os_datetime_t/os_stat_t, M59 */
+#include "syscall.h" /* system_api/include/syscall.h - M59: the OPEN_ and SEEK_ flags belong to the ABI, not to this wrapper layer */
 #include "input.h" /* system_api/include/input.h - mouse_event_t */
 #include "power_mode.h" /* system_api/include/power_mode.h - POWER_OFF/POWER_REBOOT, M47 */
 #include "proc.h"  /* system_api/include/proc.h - task_info_t, M45 */
@@ -33,6 +36,13 @@ long sys_getpid(void);
 /* arg may be NULL for a program that doesn't take one. Returns the new
  * process's pid, or -1 if `path` doesn't exist on disk. */
 long sys_spawn(const char *path, const char *arg);
+
+/* M60: the real thing. `argv` is a NULL-terminated array of the arguments
+ * *after* the program name - the kernel puts the path in argv[0] itself.
+ * sys_spawn above is this with a one-element vector, kept because almost
+ * every caller in this project has exactly one thing to say ("open this
+ * file") and rewriting them all to build an array would say less. */
+long sys_spawnv(const char *path, const char *const *argv);
 /* Blocks (cooperatively) until `pid` has terminated; returns its exit
  * code, or -1 if `pid` was never valid. */
 long sys_wait(long pid);
@@ -105,6 +115,37 @@ long sys_fb_info(wm_fb_info_t *out);
  * space (by convention, only the compositor should call this). Returns
  * the mapped virtual address, or -1 on failure. */
 long sys_fb_map(void);
+
+/* M58: the display's *offered* modes - a curated, already-validated list
+ * (see kernel/drivers/dispi.h), not an enumeration. Copies at most `max`
+ * entries into `out` and returns how many exist, which may be more than
+ * `max` and is zero on any machine whose adapter has no runtime
+ * mode-setting interface. */
+long sys_display_modes(display_mode_t *out, long max);
+
+/* M58: changes the display resolution, now, with no reboot. Returns 0, or
+ * -1 for a geometry that is not one sys_display_modes offered. Changes
+ * the mode and the kernel's own framebuffer mapping and nothing else -
+ * every consequence of "the screen is a different size" belongs to the
+ * process that owns the screen. */
+long sys_display_set_mode(uint32_t width, uint32_t height);
+
+/* ---- M59: files with descriptors -----------------------------------
+ *
+ * sys_readfile/sys_writefile are still the right call for a small whole
+ * file and every existing caller is one. These are for the three things
+ * a whole-file API cannot do: read a file bigger than a buffer, write
+ * part of one, and hand a file to a child as its stdout. */
+long sys_open(const char *path, uint32_t flags);
+long sys_lseek(int fd, long offset, int whence);
+long sys_stat(const char *path, os_stat_t *out);
+long sys_rmdir(const char *path);
+
+/* M59: what time it is. Fills *out (may be NULL) and returns seconds
+ * since 1970 - or 0 on a machine with no readable clock, which is also
+ * what an un-timestamped file carries, so "no clock" and "no timestamp"
+ * print the same way. */
+long sys_time(os_datetime_t *out);
 
 /* M20: pops the next buffered mouse event into *out. Returns 1 if one
  * was available, 0 if not (never blocks) - same contract as the

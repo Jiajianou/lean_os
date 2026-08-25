@@ -2,12 +2,16 @@
 
 #include <stdint.h>
 
+#include "drivers/dispi.h"
 #include "drivers/fb.h"
 #include "drivers/keyboard.h"
 #include "drivers/klog.h"
 #include "drivers/mouse.h"
 #include "drivers/pit.h"
+#include "drivers/rtc.h"
+#include "lib/libk.h"
 #include "fs/leanfs.h"
+#include "fs/openfile.h"
 #include "fs/vfs.h"
 #include "ipc/clipboard.h"
 #include "ipc/pipe.h"
@@ -23,6 +27,8 @@
 #include "signal.h"  /* system_api/include/signal.h - SIGKILL/SIGTERM */
 #include "spawn_error.h" /* system_api/include/spawn_error.h - M48's distinct SYS_spawn failure codes */
 #include "syscall.h" /* system_api/include/syscall.h - the shared ABI, on the include path via Makefile's -Isystem_api/include */
+#include "display.h" /* system_api/include/display.h - display_mode_t, M58 */
+#include "os_time.h" /* system_api/include/os_time.h - os_datetime_t, M59 */
 #include "wm.h"      /* system_api/include/wm.h - wm_fb_info_t, M20 */
 
 /* Every syscall implementation shares one signature regardless of how
@@ -181,6 +187,17 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
     if (slot->type == FD_PIPE_WRITE) {
         return pipe_write(slot->pipe, s, (size_t)len);
     }
+    if (slot->type == FD_FILE) {
+        if (!slot->file->writable) {
+            return -1;
+        }
+        int64_t n = vfs_handle_write(slot->file->handle, s, (size_t)len, slot->file->offset);
+        if (n < 0) {
+            return -1;
+        }
+        slot->file->offset += (uint32_t)n;
+        return (long)n;
+    }
     return -1;
 }
 
@@ -220,6 +237,18 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
     }
     if (slot->type == FD_PIPE_READ) {
         return pipe_read(slot->pipe, dst, (size_t)len);
+    }
+    /* M59: and a file, which is the whole point of the fd table having
+     * existed since M14 without one. The offset lives in the shared
+     * open-file entry rather than in this slot, so two fds made by
+     * SYS_dup2 advance one position between them. */
+    if (slot->type == FD_FILE) {
+        int64_t n = vfs_handle_read(slot->file->handle, dst, (size_t)len, slot->file->offset);
+        if (n < 0) {
+            return -1;
+        }
+        slot->file->offset += (uint32_t)n;
+        return (long)n;
     }
     return -1;
 }
@@ -266,26 +295,77 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
     if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
         return SPAWN_ERR_NOT_FOUND;
     }
-    /* The argument gets a heap buffer rather than a stack one because it
-     * is a whole page: process_spawn copies it into a PAGE_SIZE frame it
-     * maps at USER_ARG_ADDR, and shortening it here would silently
-     * shorten what a program can be launched with. */
+    /* M60: a real argument vector, copied in one string at a time.
+     *
+     * The whole vector shares one PAGE_SIZE heap buffer for the same
+     * reason the single string used to have one: process_spawnv copies it
+     * into a PAGE_SIZE frame mapped at USER_ARG_ADDR, so a page is
+     * exactly what fits and anything bigger would be copied in only to be
+     * dropped. Each `char *` in the caller's array is validated and
+     * copied individually - the array itself is user memory and the
+     * pointers in it are user pointers, neither of which this kernel
+     * trusts (M52).
+     *
+     * A vector longer than SPAWN_MAX_ARGS, or strings that overflow the
+     * page, are truncated at the last whole argument rather than
+     * refused: half an argument names something else, and a program
+     * seeing fewer arguments than it was given is a failure it can
+     * report itself. */
     char *arg = (char *)kmalloc(PAGE_SIZE);
     if (!arg) {
         return SPAWN_ERR_NO_MEMORY;
     }
-    arg[0] = '\0';
-    if (arg_ptr && copy_str_from_user(arg, arg_ptr, PAGE_SIZE) != 0) {
+    const char *argv[SPAWN_MAX_ARGS + 1];
+    int argc = 0;
+    size_t used = 0;
+    /* argv[0] is always the path, whatever the caller passed - it is the
+     * one element the kernel knows for certain and the one a program is
+     * entitled to assume is there. */
+    {
+        size_t len = k_strlen(path) + 1;
+        k_memcpy(arg, path, len);
+        argv[argc++] = arg;
+        used = len;
+    }
+    if (arg_ptr) {
+        for (int i = 0; argc < SPAWN_MAX_ARGS; i++) {
+            uint64_t slot;
+            if (!user_range_ok(arg_ptr + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
+                break;
+            }
+            slot = ((const uint64_t *)arg_ptr)[i];
+            if (slot == 0) {
+                break;
+            }
+            char *dst = arg + used;
+            size_t room = PAGE_SIZE - used;
+            if (room < 2 || copy_str_from_user(dst, slot, room) != 0) {
+                break;
+            }
+            argv[argc++] = dst;
+            used += k_strlen(dst) + 1;
+        }
+    }
+    argv[argc] = (const char *)0;
+
+    /* M59: sized from the file rather than from the format's ceiling.
+     * That ceiling used to be 72 KiB, which was a fine over-allocation;
+     * double indirection made it 8 MiB, at which point "allocate the
+     * largest a file could possibly be" is eight megabytes of kernel heap
+     * per spawn - transient, but taken while a compositor may be
+     * launching several apps at once. SYS_stat is the call that makes
+     * asking first possible. */
+    leanfs_stat_t st;
+    if (vfs_stat(path, &st) != 0 || st.is_dir) {
         kfree(arg);
         return SPAWN_ERR_NOT_FOUND;
     }
-
-    uint8_t *image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
+    uint8_t *image = (uint8_t *)kmalloc(st.size ? st.size : 1);
     if (!image) {
         kfree(arg);
         return SPAWN_ERR_NO_MEMORY;
     }
-    int64_t size = vfs_read(path, image, LEANFS_MAX_FILE_SIZE);
+    int64_t size = vfs_read(path, image, st.size);
     if (size < 0) {
         kfree(image);
         kfree(arg);
@@ -328,7 +408,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
             name = c + 1;
         }
     }
-    task_t *t = process_spawn(name, image, (size_t)size, arg);
+    task_t *t = process_spawnv(name, image, (size_t)size, argv);
     kfree(image);
     kfree(arg);
     if (!t) {
@@ -770,7 +850,11 @@ static long sys_fb_map(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint6
     (void)a6;
     task_t *cur = sched_current();
     uint64_t phys_base = fb_phys_addr();
-    uint64_t size = (uint64_t)fb_pitch_bytes() * fb_height();
+    /* M58: the *mapped* extent, not this mode's. fb.c only ever grows its
+     * mapping, so after a mode change the high-water mark is what both
+     * sides have to cover - a client whose mapping stopped at the old
+     * mode's size would draw off the end of it. */
+    uint64_t size = fb_mapped_bytes();
     uint64_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     for (uint64_t i = 0; i < pages; i++) {
         vmm_map_page_in(cur->pml4_phys, USER_FB_BASE + i * PAGE_SIZE, phys_base + i * PAGE_SIZE,
@@ -924,7 +1008,18 @@ static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, u
     if (self->fds[oldfd].type == FD_NONE) {
         return -1;
     }
+    if (newfd == oldfd) {
+        return (long)newfd; /* dup2(fd, fd) is a no-op everywhere it exists, and releasing then retaining the same slot would not be */
+    }
+    /* M59: newfd's old occupant is genuinely released now, rather than
+     * overwritten. SYS_dup2's own comment used to say it deliberately did
+     * not close - which was the honest description when nothing was
+     * refcounted and "closing" meant blanking a slot. With a refcount it
+     * would be a leak: the shell's `> out.txt` points fd 1 at a file, and
+     * whatever fd 1 was would never be given back. */
+    fd_release(&self->fds[newfd]);
     self->fds[newfd] = self->fds[oldfd];
+    fd_retain(&self->fds[newfd]);
     return (long)newfd;
 }
 
@@ -964,8 +1059,7 @@ static long sys_close(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64
     if (self->fds[fd].type == FD_NONE) {
         return -1; /* closing something already closed is a caller bug worth reporting, not a no-op */
     }
-    self->fds[fd].type = FD_NONE;
-    self->fds[fd].pipe = (struct pipe *)0;
+    fd_release(&self->fds[fd]);
     return 0;
 }
 
@@ -1164,6 +1258,168 @@ static long sys_shutdown(uint64_t mode, uint64_t a2, uint64_t a3, uint64_t a4, u
     power_shutdown((int)mode);
 }
 
+/* ---- M59: files with descriptors ------------------------------------ */
+
+/* Finds a free fd, or -1. The two lowest are stdin/stdout by convention
+ * and are never handed out here even if a caller closed them - a
+ * program that closed its own stdout getting a *file* back as fd 1 from
+ * an unrelated open is exactly the kind of surprise this ABI does not
+ * need. */
+static int alloc_fd(task_t *t) {
+    for (int i = 2; i < MAX_FDS; i++) {
+        if (t->fds[i].type == FD_NONE) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    char path[LEANFS_MAX_PATH];
+    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
+        return -1;
+    }
+    int writable = (flags & OPEN_WRITE) != 0;
+    int handle = vfs_open(path, (flags & OPEN_CREATE) != 0);
+    if (handle < 0) {
+        return -1;
+    }
+    if ((flags & OPEN_TRUNCATE) && writable && vfs_handle_truncate(handle) != 0) {
+        return -1;
+    }
+    task_t *self = sched_current();
+    int fd = alloc_fd(self);
+    if (fd < 0) {
+        return -1;
+    }
+    openfile_t *of = openfile_alloc(handle, writable);
+    if (!of) {
+        return -1;
+    }
+    if (flags & OPEN_APPEND) {
+        of->offset = vfs_handle_size(handle);
+    }
+    self->fds[fd].type = FD_FILE;
+    self->fds[fd].file = of;
+    return fd;
+}
+
+static long sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (fd >= MAX_FDS) {
+        return -1;
+    }
+    fd_slot_t *slot = &sched_current()->fds[fd];
+    if (slot->type != FD_FILE) {
+        return -1; /* a pipe has no position to seek to, and saying so beats pretending */
+    }
+    int64_t base;
+    switch (whence) {
+    case SEEK_SET: base = 0; break;
+    case SEEK_CUR: base = (int64_t)slot->file->offset; break;
+    case SEEK_END: base = (int64_t)vfs_handle_size(slot->file->handle); break;
+    default: return -1;
+    }
+    int64_t target = base + (int64_t)(int32_t)offset;
+    if (target < 0 || target > (int64_t)LEANFS_MAX_FILE_SIZE) {
+        return -1;
+    }
+    slot->file->offset = (uint32_t)target;
+    return (long)target;
+}
+
+static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    char path[LEANFS_MAX_PATH];
+    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
+        return -1;
+    }
+    leanfs_stat_t st;
+    if (vfs_stat(path, &st) != 0) {
+        return -1;
+    }
+    os_stat_t out;
+    out.size = st.size;
+    out.mtime = st.mtime;
+    out.is_dir = st.is_dir;
+    out.reserved = 0;
+    return copy_to_user(out_ptr, &out, sizeof(out));
+}
+
+static long sys_rmdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    char path[LEANFS_MAX_PATH];
+    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
+        return -1;
+    }
+    return vfs_rmdir(path);
+}
+
+static long sys_time(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    os_datetime_t now;
+    rtc_read(&now);
+    if (out_ptr != 0 && copy_to_user(out_ptr, &now, sizeof(now)) != 0) {
+        return -1;
+    }
+    return now.valid ? (long)os_unix_time(&now) : 0;
+}
+
+/* M58: the display-mode pair. The list is built once at boot by
+ * dispi_init (which validates every candidate against the device's own
+ * limits and its reported video memory) and simply copied out here -
+ * validation at the moment somebody clicks would be validation in the one
+ * place a mistake costs them their desktop. */
+static long sys_display_modes(uint64_t out_ptr, uint64_t max_entries, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (max_entries > DISPLAY_MAX_MODES) {
+        max_entries = DISPLAY_MAX_MODES;
+    }
+    display_mode_t modes[DISPLAY_MAX_MODES];
+    int total = dispi_get_modes(modes, (int)max_entries);
+    int n = total < (int)max_entries ? total : (int)max_entries;
+    if (n > 0 && copy_to_user(out_ptr, modes, (size_t)n * sizeof(modes[0])) != 0) {
+        return -1;
+    }
+    return total;
+}
+
+static long sys_display_set_mode(uint64_t width, uint64_t height, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    uint32_t pitch = 0;
+    if (dispi_set_mode((uint32_t)width, (uint32_t)height, &pitch) != 0) {
+        return -1;
+    }
+    /* fb_remap re-derives the text console itself, before it logs
+     * anything - see its own comment for why that ordering is
+     * load-bearing rather than tidy. */
+    fb_remap(pitch, (uint32_t)width, (uint32_t)height);
+    return 0;
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -1203,6 +1459,13 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_shm_unmap] = sys_shm_unmap,
     [SYS_unlink] = sys_unlink,
     [SYS_rename] = sys_rename,
+    [SYS_open] = sys_open,
+    [SYS_lseek] = sys_lseek,
+    [SYS_stat] = sys_stat,
+    [SYS_rmdir] = sys_rmdir,
+    [SYS_time] = sys_time,
+    [SYS_display_modes] = sys_display_modes,
+    [SYS_display_set_mode] = sys_display_set_mode,
 };
 
 void syscall_handler(isr_regs_t *regs) {

@@ -5,9 +5,21 @@
  * queue - the same "poll + yield" pattern SYS_wait and SYS_read (fd=0)
  * already use, not a new inconsistency introduced here.
  *
- * Ownership is tracked with plain open/closed flags, not a refcount -
- * this project has no SYS_close (see syscall_wrappers.h's own note) to
- * ever need one for.
+ * Ownership was tracked with plain open/closed flags and not a refcount,
+ * because this project had no SYS_close to ever need one for.
+ *
+ * M59 gives it one, and the reason is a specific missing behaviour rather
+ * than tidiness: a refcount makes "the last writer went away" knowable,
+ * which is the difference between a terminal that sees the end of a
+ * command's output and one that waits forever. A command's stdout is an
+ * anonymous pipe held by the shell and by the child; nothing could ever
+ * tell that the child's end had gone.
+ *
+ * *Named* pipes deliberately keep the old behaviour, and that is not an
+ * oversight - it is the mechanism M55 rests on. A named pipe is a
+ * rendezvous point that outlives every process that ever held it, so a
+ * client exiting must not make the compositor's read return EOF forever.
+ * They are marked `persistent` and their counts are ignored.
  */
 #pragma once
 
@@ -24,6 +36,11 @@ typedef struct pipe {
     size_t head, tail, count;
     int read_closed;  /* no reader left - a blocked/future writer gets -1 (broken pipe) instead of blocking forever */
     int write_closed; /* no writer left - a blocked/future reader gets EOF (0) instead of blocking forever */
+    /* M59: how many fd-table slots, across every task, name each end. */
+    int readers, writers;
+    /* M59: a rendezvous point rather than a conversation - see the header
+     * comment. Never auto-closes, whatever the counts say. */
+    int persistent;
 } pipe_t;
 
 pipe_t *pipe_create(void);
@@ -47,6 +64,14 @@ pipe_t *pipe_create(void);
 pipe_t *pipe_named(const char *name);
 void pipe_close_read(pipe_t *p);
 void pipe_close_write(pipe_t *p);
+
+/* M59: one more / one fewer descriptor naming an end. The unref pair is
+ * what finally closes an anonymous pipe when its last holder lets go -
+ * and what deliberately does nothing at all for a named one. */
+void pipe_ref_read(pipe_t *p);
+void pipe_ref_write(pipe_t *p);
+void pipe_unref_read(pipe_t *p);
+void pipe_unref_write(pipe_t *p);
 
 /* M29: drops every byte currently buffered and clears both closed flags -
  * for a named pipe being handed to a brand-new owner (SYS_pipe_reset) that

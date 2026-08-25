@@ -6,7 +6,6 @@
  * content changes purely on a timer, and exercises user_space/lib/gfx.h
  * text rendering (font8x16.c) end to end through wmclient.h.
  */
-#include "font8x16.h" /* FONT_HEIGHT */
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
@@ -58,7 +57,7 @@ int main(void) {
             /* This app doesn't act on input - just drain the pipe so it
              * never fills while the compositor keeps routing events to
              * whichever window is focused, including this one. */
-            if (ev.type == WM_EVENT_EXPOSE) {
+            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 expose = 1; /* M55 - see WM_EVENT_EXPOSE */
             }
         }
@@ -69,7 +68,7 @@ int main(void) {
         }
         next_redraw = now + REDRAW_INTERVAL_MS;
 
-        gfx_fill_rect(&win.gfx, 10, 34, WIN_W - 20, FONT_HEIGHT, BG_COLOR);
+        gfx_fill_rect(&win.gfx, 10, 34, WIN_W - 20, UI_FONT_UI_HEIGHT, BG_COLOR);
 
         char line[32];
         int li = 0;

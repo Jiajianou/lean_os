@@ -37,8 +37,20 @@ long sys_getpid(void) {
     return do_syscall(SYS_getpid, 0, 0, 0);
 }
 
+long sys_spawnv(const char *path, const char *const *argv) {
+    return do_syscall(SYS_spawn, (long)path, (long)argv, 0);
+}
+
 long sys_spawn(const char *path, const char *arg) {
-    return do_syscall(SYS_spawn, (long)path, (long)arg, 0);
+    /* M60: one argument is a vector of one. The kernel supplies argv[0]
+     * (the path), so this array holds only what the caller had to say. */
+    const char *v[2];
+    int n = 0;
+    if (arg && arg[0]) {
+        v[n++] = arg;
+    }
+    v[n] = (const char *)0;
+    return sys_spawnv(path, v);
 }
 
 long sys_wait(long pid) {
@@ -103,6 +115,34 @@ long sys_fb_info(wm_fb_info_t *out) {
 
 long sys_fb_map(void) {
     return do_syscall(SYS_fb_map, 0, 0, 0);
+}
+
+long sys_display_modes(display_mode_t *out, long max) {
+    return do_syscall(SYS_display_modes, (long)out, max, 0);
+}
+
+long sys_display_set_mode(uint32_t width, uint32_t height) {
+    return do_syscall(SYS_display_set_mode, (long)width, (long)height, 0);
+}
+
+long sys_open(const char *path, uint32_t flags) {
+    return do_syscall(SYS_open, (long)path, (long)flags, 0);
+}
+
+long sys_lseek(int fd, long offset, int whence) {
+    return do_syscall(SYS_lseek, fd, offset, whence);
+}
+
+long sys_stat(const char *path, os_stat_t *out) {
+    return do_syscall(SYS_stat, (long)path, (long)out, 0);
+}
+
+long sys_rmdir(const char *path) {
+    return do_syscall(SYS_rmdir, (long)path, 0, 0);
+}
+
+long sys_time(os_datetime_t *out) {
+    return do_syscall(SYS_time, (long)out, 0, 0);
 }
 
 long sys_mouse_read(mouse_event_t *out) {

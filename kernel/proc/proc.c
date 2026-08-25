@@ -54,7 +54,7 @@ void process_destroy_address_space(uint64_t pml4_phys) {
     vmm_destroy_address_space(pml4_phys, OWNED, (int)(sizeof(OWNED) / sizeof(OWNED[0])));
 }
 
-task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size, const char *arg) {
+static task_t *spawn_common(const char *name, const uint8_t *image, size_t image_size, const char *const *argv) {
     /* M40: checked up front, before anything is allocated. The
      * task-table-full check further down still exists (it has to - it's
      * the one that runs under sched_lock and is therefore the
@@ -98,14 +98,42 @@ task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size,
         vmm_map_page_in(pml4_phys, va, phys, VMM_FLAG_WRITABLE | VMM_FLAG_USER);
     }
 
-    /* lean_os's entire "argv": one NUL-terminated string, not a real
-     * argc/argv array - a real C program would need to know a real ABI
-     * to unpack an array from the stack; a single string RDI already
-     * fits the normal SysV first-argument convention crt0 relies on. */
+    /* M60: a real argument vector, built into the one page this has
+     * always mapped at USER_ARG_ADDR. See proc.h for the layout and for
+     * why it lives in a page rather than on the stack - RDI pointing at
+     * USER_ARG_ADDR is unchanged, so enter_user_mode and the iretq frame
+     * did not have to learn anything. */
     uint64_t arg_phys = pmm_alloc_frame();
     k_memset((void *)arg_phys, 0, PAGE_SIZE);
-    if (arg) {
-        k_strlcpy((char *)arg_phys, arg, PAGE_SIZE);
+    {
+        int argc = 0;
+        if (argv) {
+            while (argv[argc]) {
+                argc++;
+            }
+        }
+        uint64_t *header = (uint64_t *)arg_phys;
+        /* The pointer array sits between argc and the strings, so where
+         * the strings start depends on how many there are. */
+        size_t strings_off = sizeof(uint64_t) * (size_t)(argc + 2);
+        size_t at = strings_off;
+        int stored = 0;
+        for (int i = 0; i < argc; i++) {
+            size_t len = k_strlen(argv[i]) + 1;
+            if (at + len > PAGE_SIZE) {
+                /* Truncated at the last whole argument that fits. Half an
+                 * argument names something else, so the vector simply
+                 * ends here - and the program sees a shorter argc rather
+                 * than a corrupt string. */
+                break;
+            }
+            k_memcpy((char *)arg_phys + at, argv[i], len);
+            header[1 + (size_t)stored] = USER_ARG_ADDR + at;
+            at += len;
+            stored++;
+        }
+        header[0] = (uint64_t)stored;
+        header[1 + (size_t)stored] = 0; /* the NULL every argv ends with */
     }
     vmm_map_page_in(pml4_phys, USER_ARG_ADDR, arg_phys, VMM_FLAG_WRITABLE | VMM_FLAG_USER);
 
@@ -149,4 +177,25 @@ task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size,
      * declaration in sched.h, and task_spawn_common for the race that
      * made this a real panic rather than a theoretical one. */
     return t;
+}
+
+task_t *process_spawnv(const char *name, const uint8_t *image, size_t image_size,
+                        const char *const *argv) {
+    return spawn_common(name, image, image_size, argv);
+}
+
+/* M60: the one-argument form, kept because almost every caller in this
+ * project has exactly one thing to say ("open this file"). It builds the
+ * two-element vector a real argv is - the program's own name, then the
+ * argument - so nothing below this line has two ways to launch a
+ * process. */
+task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size, const char *arg) {
+    const char *argv[3];
+    int n = 0;
+    argv[n++] = name;
+    if (arg && arg[0]) {
+        argv[n++] = arg;
+    }
+    argv[n] = (const char *)0;
+    return spawn_common(name, image, image_size, argv);
 }

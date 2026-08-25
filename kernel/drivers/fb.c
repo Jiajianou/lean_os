@@ -1,5 +1,6 @@
 #include "fb.h"
 
+#include "console.h"
 #include "klog.h"
 #include "lib/libk.h"
 #include "mm/vmm.h"
@@ -11,6 +12,26 @@ static uint64_t fb_base;   /* virtual == physical: identity-mapped on demand bel
 static uint32_t fb_pitch;
 static uint32_t fb_w;
 static uint32_t fb_h;
+/* M58: the high-water mark of what has actually been mapped, which is not
+ * the same as what the current mode uses once a mode change has happened.
+ * See fb_remap. */
+static uint64_t fb_mapped;
+
+/* Maps [fb_base, fb_base + bytes) identity-style, skipping whatever is
+ * already covered. Split out of fb_init at M58 because fb_remap needs
+ * exactly the same loop for a mode that got bigger. */
+static uint64_t map_through(uint64_t bytes) {
+    uint64_t pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t have = fb_mapped / PAGE_SIZE;
+    for (uint64_t i = have; i < pages; i++) {
+        uint64_t addr = fb_base + i * PAGE_SIZE;
+        vmm_map_page(addr, addr, VMM_FLAG_WRITABLE);
+    }
+    if (pages * PAGE_SIZE > fb_mapped) {
+        fb_mapped = pages * PAGE_SIZE;
+    }
+    return pages;
+}
 
 void fb_init(const fb_boot_info_t *info) {
     if (info->bpp != 32) {
@@ -32,12 +53,7 @@ void fb_init(const fb_boot_info_t *info) {
      * panics outright if that assumption ever breaks (an address that
      * falls inside the huge-mapped range), rather than silently
      * corrupting the mapping. */
-    uint64_t size = (uint64_t)fb_pitch * fb_h;
-    uint64_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    for (uint64_t i = 0; i < pages; i++) {
-        uint64_t addr = fb_base + i * PAGE_SIZE;
-        vmm_map_page(addr, addr, VMM_FLAG_WRITABLE);
-    }
+    uint64_t pages = map_through((uint64_t)fb_pitch * fb_h);
 
     klog_puts("[fb] framebuffer at 0x");
     klog_put_hex64(fb_base);
@@ -50,6 +66,52 @@ void fb_init(const fb_boot_info_t *info) {
     klog_puts(" (");
     klog_put_hex64(pages);
     klog_puts(" pages mapped)\n");
+}
+
+void fb_remap(uint32_t pitch, uint32_t width, uint32_t height) {
+    if (pitch == 0 || width == 0 || height == 0) {
+        panic("fb_remap: refusing an empty geometry");
+    }
+    /* Grow the mapping *before* the accessors start answering with the
+     * new geometry. The other order leaves a window - however short - in
+     * which fb_put_pixel's own bounds check says a row is legal and the
+     * page behind it is not mapped, which on this kernel is a page fault
+     * in ring 0. */
+    uint64_t pages = map_through((uint64_t)pitch * height);
+    fb_pitch = pitch;
+    fb_w = width;
+    fb_h = height;
+
+    /* Re-derive the text console *before* anything logs, and that
+     * ordering is not a nicety - it is the first thing a mode change
+     * breaks. console.c caches how many cells fit across and down; on a
+     * mode that got smaller its cursor is immediately outside the new
+     * screen, and the very next klog line draws a glyph through
+     * fb_put_pixel, which panics on an out-of-bounds coordinate - from
+     * inside the logging path, so the panic's own message tries to draw
+     * too. Found exactly that way: the first mode change this project
+     * ever performed died mid-sentence in this function's own log line.
+     *
+     * A driver calling a driver above it is unusual here and worth the
+     * exception: the console is *defined* in terms of the framebuffer, so
+     * a framebuffer whose geometry changed has to hand it the new one,
+     * and there must be no instruction in between where a log would
+     * fault. */
+    console_init();
+
+    klog_puts("[fb] re-mapped for a new mode: ");
+    klog_put_hex32(fb_w);
+    klog_puts("x");
+    klog_put_hex32(fb_h);
+    klog_puts(" pitch=0x");
+    klog_put_hex32(fb_pitch);
+    klog_puts(" (");
+    klog_put_hex64(pages);
+    klog_puts(" pages mapped in total)\n");
+}
+
+uint64_t fb_mapped_bytes(void) {
+    return fb_mapped;
 }
 
 uint32_t fb_width(void) {

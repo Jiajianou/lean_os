@@ -28,7 +28,7 @@
  * pipe) would deadlock the moment a command's output exceeded that.
  */
 #include "paths.h" /* system_api/include/paths.h - M53: /bin is this terminal's search path too */
-#include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
+#include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT - the terminal grid is a fixed cell by definition (M57) */
 #include "str.h"
 #include "syscall_wrappers.h"
 #include "wmclient.h"
@@ -44,6 +44,14 @@
 
 #define LINE_MAX (COLS - 4) /* leaves room for the "$ " prompt without ever wrapping a typed line onto a second row */
 #define IO_BUF_SIZE 512
+/* M60: how much of a directory listing tab completion reads at once.
+ * /bin holds every program this OS ships and is by far the longest thing
+ * this will ever list. */
+#define LIST_BUF 2048
+/* leanfs's own LEANFS_MAX_NAME (27) plus the '/' SYS_listdir appends to a
+ * directory and a NUL - that header is not visible to user_space builds,
+ * which is why file_manager.c keeps its own copy of the same number. */
+#define LEANFS_NAME_MAX 28
 
 static char grid[ROWS][COLS + 1];
 static int32_t cur_row, cur_col;
@@ -114,6 +122,56 @@ static char line_buf[LINE_MAX];
 static int line_len;
 
 static int running_pid = -1;
+/* M60: the right-hand side of a pipe. Two children instead of one, and
+ * the prompt does not come back until both are gone - a prompt printed
+ * while `cat` is still writing would interleave its output with whatever
+ * gets typed next. */
+static int pipe_pid = -1;
+
+/* M60: a working directory, which this terminal has never had. It is what
+ * `cd` changes, what tab completion completes against, and what a
+ * relative path is resolved from. There is no working directory in the
+ * *kernel* - every path a syscall takes is absolute (leanfs.h) - so this
+ * is the terminal's own state and every path it hands over is built
+ * absolute from it, exactly as file_manager.c already does. */
+static char term_cwd[PATH_MAX_LEN] = PATH_HOME;
+
+/* A user-typed path made absolute. Absolute stays absolute; anything else
+ * is joined onto the working directory. The rule is one sentence and has
+ * no heuristic in it - a token that reaches here is already known to be a
+ * path (a redirect target, a `cd` argument), not a word that might be
+ * one. */
+static int resolve_path(const char *name, char *out) {
+    if (name[0] == '/') {
+        int i = 0;
+        for (; name[i] && i < PATH_MAX_LEN - 1; i++) {
+            out[i] = name[i];
+        }
+        out[i] = '\0';
+        return name[i] ? -1 : 0;
+    }
+    /* path_join concatenates without a separator (its callers all pass a
+     * directory constant that already ends in '/'), so the separator is
+     * this function's job - term_cwd is "/home", not "/home/". */
+    int n = 0;
+    for (const char *s = term_cwd; *s; s++) {
+        if (n >= PATH_MAX_LEN - 2) {
+            return -1;
+        }
+        out[n++] = *s;
+    }
+    if (n == 0 || out[n - 1] != '/') {
+        out[n++] = '/';
+    }
+    for (const char *s = name; *s; s++) {
+        if (n >= PATH_MAX_LEN - 1) {
+            return -1;
+        }
+        out[n++] = *s;
+    }
+    out[n] = '\0';
+    return 0;
+}
 static int read_fd, write_fd;
 
 /* M37: click-drag text selection over the output grid - the gap M32's own
@@ -259,7 +317,7 @@ static void redraw(wm_window_t *win, int show_cursor) {
         }
     }
     for (int r = 0; r < ROWS; r++) {
-        gfx_draw_text(&win->gfx, 0, r * FONT_HEIGHT, view_row(r), TEXT_COLOR);
+        gfx_draw_text_mono(&win->gfx, 0, r * FONT_HEIGHT, view_row(r), TEXT_COLOR);
     }
     /* M56: the cursor belongs to the live grid, so it is only drawn when
      * the live grid is what is on screen. A blinking cursor sitting in
@@ -288,6 +346,97 @@ static void start_prompt(void) {
     print_str_term("$ ");
 }
 
+/* ---- M60: a command line ----------------------------------------------
+ *
+ * This split on the first space, which is all `SYS_spawn(path, arg)`
+ * could carry: one program, one argument. `cp a b` was not a command this
+ * terminal could express, and that was a property of the *kernel* ABI,
+ * not of the parser - which is why M60 had to make argv real first.
+ *
+ * What is here now: multiple arguments, quoted arguments containing
+ * spaces, `>` and `>>` redirection, and one `|`. Deliberately not
+ * globbing, not `&&`, not variables and not a job table - each is a shell
+ * feature with its own failure modes and none of them is what was
+ * missing. What was missing was being able to say two words.
+ */
+#define MAX_ARGS 16
+
+typedef struct {
+    char *argv[MAX_ARGS + 1];
+    int argc;
+} cmd_t;
+
+/* Splits `line` in place into whitespace-separated tokens, honouring
+ * single and double quotes so a filename with a space in it is one
+ * argument. Returns the token count, or -1 for an unterminated quote -
+ * which is refused rather than guessed at, because guessing turns
+ * `rm "my file` into two arguments neither of which was meant. */
+static int tokenize(char *line, char **out, int max) {
+    int n = 0;
+    char *p = line;
+    while (*p && n < max) {
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (!*p) {
+            break;
+        }
+        char *dst = p;      /* quotes are removed in place, so the token is written back over itself */
+        out[n++] = dst;
+        while (*p && *p != ' ' && *p != '\t') {
+            if (*p == '"' || *p == '\'') {
+                char quote = *p++;
+                while (*p && *p != quote) {
+                    *dst++ = *p++;
+                }
+                if (!*p) {
+                    return -1; /* unterminated */
+                }
+                p++; /* the closing quote */
+            } else {
+                *dst++ = *p++;
+            }
+        }
+        int at_end = (*p == '\0');
+        p++;
+        *dst = '\0';
+        if (at_end) {
+            break;
+        }
+    }
+    return n;
+}
+
+/* M53's /bin lookup, unchanged in rule: a name with no '/' in it is
+ * looked for in /bin, anything else is taken as the path it is. */
+static int resolve_program(const char *name, char *out) {
+    for (const char *c = name; *c; c++) {
+        if (*c == '/') {
+            int i = 0;
+            for (; name[i] && i < PATH_MAX_LEN - 1; i++) {
+                out[i] = name[i];
+            }
+            out[i] = '\0';
+            return name[i] ? -1 : 0;
+        }
+    }
+    return path_join(out, PATH_BIN_DIR, name);
+}
+
+/* Everything the terminal has to put back after a command has been
+ * launched with its descriptors pointed somewhere else. fd 1 always goes
+ * back to this window's own output pipe; fd 0 goes back to the keyboard,
+ * which is what FD_NONE means for a fresh process here (this window never
+ * reads fd 0 itself - it gets keys as window events). */
+static void restore_std_fds(void) {
+    sys_dup2(write_fd, 1);
+}
+
+static void report(const char *what, const char *why) {
+    print_str_term(what);
+    print_str_term(why);
+}
+
 static void run_line(void) {
     line_buf[line_len] = '\0';
     putc_term('\n');
@@ -302,49 +451,392 @@ static void run_line(void) {
         return;
     }
 
-    char *space = line_buf;
-    while (*space && *space != ' ') {
-        space++;
+    char *tokens[MAX_ARGS * 2 + 8];
+    int ntok = tokenize(line_buf, tokens, (int)(sizeof(tokens) / sizeof(tokens[0])));
+    if (ntok < 0) {
+        report("", "unterminated quote\n");
+        start_prompt();
+        return;
     }
-    char *prog_arg = "";
-    if (*space == ' ') {
-        *space = '\0';
-        prog_arg = space + 1;
+    if (ntok == 0) {
+        start_prompt();
+        return;
     }
 
-    /* M53: same /bin lookup the text shell does, and for the same reason -
-     * see user_space/shell/shell.c. Anything with a '/' in it is taken as
-     * the path it is. */
-    char resolved[PATH_MAX_LEN];
-    const char *target = line_buf;
-    int has_slash = 0;
-    for (const char *c = line_buf; *c; c++) {
-        if (*c == '/') {
-            has_slash = 1;
+    /* One pass over the tokens, splitting them into up to two commands
+     * and pulling out the redirection target. Each of `>`, `>>` and `|`
+     * may appear once; a second one is an error rather than a silent
+     * last-one-wins, because "which of the two did it use" is not a
+     * question a person should have to ask. */
+    cmd_t left, right;
+    left.argc = 0;
+    right.argc = 0;
+    cmd_t *into = &left;
+    const char *redirect_to = 0;
+    int append = 0;
+    int have_pipe = 0;
+    for (int i = 0; i < ntok; i++) {
+        const char *t = tokens[i];
+        if (strcmp(t, "|") == 0) {
+            if (have_pipe || left.argc == 0) {
+                report("", "syntax error near |\n");
+                start_prompt();
+                return;
+            }
+            have_pipe = 1;
+            into = &right;
+            continue;
         }
-    }
-    if (!has_slash) {
-        if (path_join(resolved, PATH_BIN_DIR, line_buf) != 0) {
-            print_str_term(line_buf);
-            print_str_term(": name too long\n");
+        if (strcmp(t, ">") == 0 || strcmp(t, ">>") == 0) {
+            if (redirect_to || i + 1 >= ntok) {
+                report("", "syntax error near >\n");
+                start_prompt();
+                return;
+            }
+            append = (t[1] == '>');
+            redirect_to = tokens[++i];
+            continue;
+        }
+        if (into->argc >= MAX_ARGS) {
+            report("", "too many arguments\n");
             start_prompt();
             return;
         }
-        target = resolved;
+        into->argv[into->argc++] = tokens[i];
+    }
+    left.argv[left.argc] = 0;
+    right.argv[right.argc] = 0;
+    if (left.argc == 0 || (have_pipe && right.argc == 0)) {
+        report("", "syntax error\n");
+        start_prompt();
+        return;
     }
 
-    sys_dup2(write_fd, 1);
-    long pid = sys_spawn(target, prog_arg);
+    /* M60: the two builtins a working directory needs. They are builtins
+     * for the reason `cd` is a builtin everywhere: a child process
+     * changing its own idea of where it is would change nothing about
+     * this one. */
+    if (strcmp(left.argv[0], "cd") == 0) {
+        char target[PATH_MAX_LEN];
+        const char *where = left.argc > 1 ? left.argv[1] : PATH_HOME;
+        if (strcmp(where, "..") == 0) {
+            /* Textual, like file_manager.c's own ".." - leanfs stores no
+             * parent link and refuses ".." in a path, so climbing here is
+             * being honest about where the knowledge lives. */
+            int n = 0;
+            while (term_cwd[n]) {
+                n++;
+            }
+            while (n > 0 && term_cwd[n - 1] != '/') {
+                n--;
+            }
+            if (n > 1) {
+                n--;
+            }
+            term_cwd[n ? n : 1] = '\0';
+            term_cwd[0] = '/';
+        } else {
+            os_stat_t st;
+            if (resolve_path(where, target) != 0 ||
+                sys_stat(target, &st) != 0 || !st.is_dir) {
+                report(where, ": not a directory\n");
+                start_prompt();
+                return;
+            }
+            int i = 0;
+            for (; target[i] && i < PATH_MAX_LEN - 1; i++) {
+                term_cwd[i] = target[i];
+            }
+            term_cwd[i] = '\0';
+        }
+        start_prompt();
+        return;
+    }
+    if (strcmp(left.argv[0], "pwd") == 0) {
+        print_str_term(term_cwd);
+        putc_term('\n');
+        start_prompt();
+        return;
+    }
+
+    char left_path[PATH_MAX_LEN];
+    char right_path[PATH_MAX_LEN];
+    if (resolve_program(left.argv[0], left_path) != 0 ||
+        (have_pipe && resolve_program(right.argv[0], right_path) != 0)) {
+        report("", "name too long\n");
+        start_prompt();
+        return;
+    }
+
+    /* The redirection target is opened *before* anything is spawned, so a
+     * path that cannot be written is reported as itself rather than as a
+     * command that ran and produced nothing. */
+    int out_fd = -1;
+    if (redirect_to) {
+        char full[PATH_MAX_LEN];
+        if (resolve_path(redirect_to, full) != 0) {
+            report(redirect_to, ": name too long\n");
+            start_prompt();
+            return;
+        }
+        uint32_t flags = OPEN_WRITE | OPEN_CREATE | (append ? OPEN_APPEND : OPEN_TRUNCATE);
+        long fd = sys_open(full, flags);
+        if (fd < 0) {
+            report(redirect_to, ": cannot write there\n");
+            start_prompt();
+            return;
+        }
+        out_fd = (int)fd;
+    }
+
+    int pipe_fds[2] = {-1, -1};
+    if (have_pipe && sys_pipe(pipe_fds) != 0) {
+        report("", "no pipe available\n");
+        if (out_fd >= 0) {
+            sys_close(out_fd);
+        }
+        start_prompt();
+        return;
+    }
+
+    /* The left-hand command. Its stdout is the pipe if there is one, the
+     * redirect if there is one, and this window otherwise. */
+    sys_dup2(have_pipe ? pipe_fds[1] : (out_fd >= 0 ? out_fd : write_fd), 1);
+    long pid = sys_spawnv(left_path, (const char *const *)&left.argv[1]);
     if (pid < 0) {
-        print_str_term(line_buf);
-        print_str_term(": command not found\n");
+        restore_std_fds();
+        if (out_fd >= 0) {
+            sys_close(out_fd);
+        }
+        if (have_pipe) {
+            sys_close(pipe_fds[0]);
+            sys_close(pipe_fds[1]);
+        }
+        report(left.argv[0], ": command not found\n");
         start_prompt();
         return;
     }
     running_pid = (int)pid;
+
+    if (have_pipe) {
+        /* This is the step a pipe does not work without, and it is not
+         * bookkeeping: the write end has to be closed *here*, in the
+         * terminal, so the left-hand command is the only process left
+         * holding one. Otherwise nothing ever brings the writer count to
+         * zero, the right-hand command never sees EOF, and `ls | cat`
+         * hangs forever. M59's pipe refcount is what makes closing it
+         * mean something. */
+        restore_std_fds();
+        sys_close(pipe_fds[1]);
+
+        sys_dup2(pipe_fds[0], 0);
+        sys_dup2(out_fd >= 0 ? out_fd : write_fd, 1);
+        long pid2 = sys_spawnv(right_path, (const char *const *)&right.argv[1]);
+        sys_close(pipe_fds[0]);
+        /* fd 0 back to the keyboard: FD_NONE is what a fresh process here
+         * has, and this window reads keys as window events rather than
+         * from fd 0. */
+        sys_close(0);
+        restore_std_fds();
+        if (pid2 < 0) {
+            report(right.argv[0], ": command not found\n");
+        } else {
+            pipe_pid = (int)pid2;
+        }
+    } else {
+        restore_std_fds();
+    }
+    if (out_fd >= 0) {
+        sys_close(out_fd);
+    }
+}
+
+/* ---- M60: tab completion ---------------------------------------------
+ *
+ * Small, and the thing that makes a terminal feel like one. The rule is
+ * the one every shell uses and is worth stating because it is the whole
+ * design: the *first* token completes against /bin, because that is what
+ * a first token is - a program; every other token completes against the
+ * working directory, because that is what an argument usually is.
+ *
+ * One match completes it. Several print the shared prefix and then the
+ * candidates, which is the behaviour that lets you keep typing rather
+ * than guess. None does nothing at all - a terminal that beeps at you for
+ * a name that does not exist is not telling you anything you did not
+ * already know.
+ */
+static int common_prefix_len(const char *a, const char *b) {
+    int n = 0;
+    while (a[n] && a[n] == b[n]) {
+        n++;
+    }
+    return n;
+}
+
+static void complete_line(void) {
+    /* Where the token under the cursor starts. Quotes are deliberately
+     * not honoured here: completing inside a quoted string would have to
+     * decide where to put the closing quote, and the token this is
+     * about - a path - is exactly the kind that rarely has a space. */
+    int start = line_len;
+    while (start > 0 && line_buf[start - 1] != ' ') {
+        start--;
+    }
+    int is_first = 1;
+    for (int i = 0; i < start; i++) {
+        if (line_buf[i] != ' ') {
+            is_first = 0;
+            break;
+        }
+    }
+    line_buf[line_len] = '\0';
+    const char *stem = line_buf + start;
+    int stem_len = line_len - start;
+
+    /* The directory being completed against, and the part of the stem
+     * that is a name rather than a path. `cat /bi<Tab>` completes the
+     * last component against "/", not against the working directory. */
+    char dir[PATH_MAX_LEN];
+    const char *leaf = stem;
+    if (is_first) {
+        int i = 0;
+        for (; PATH_BIN_DIR[i]; i++) {
+            dir[i] = PATH_BIN_DIR[i];
+        }
+        dir[i] = '\0';
+    } else {
+        int last_slash = -1;
+        for (int i = 0; i < stem_len; i++) {
+            if (stem[i] == '/') {
+                last_slash = i;
+            }
+        }
+        if (last_slash < 0) {
+            int i = 0;
+            for (; term_cwd[i] && i < PATH_MAX_LEN - 1; i++) {
+                dir[i] = term_cwd[i];
+            }
+            dir[i] = '\0';
+        } else {
+            int n = last_slash == 0 ? 1 : last_slash;
+            for (int i = 0; i < n; i++) {
+                dir[i] = stem[i];
+            }
+            dir[n] = '\0';
+            leaf = stem + last_slash + 1;
+        }
+    }
+    int leaf_len = (int)strlen(leaf);
+
+    static char listing[LIST_BUF];
+    long n = sys_listdir(dir, listing, sizeof(listing));
+    if (n <= 0) {
+        return;
+    }
+    if (n > (long)sizeof(listing)) {
+        n = (long)sizeof(listing);
+    }
+
+    char best[LEANFS_NAME_MAX + 1];
+    int best_len = 0;
+    int matches = 0;
+    char name[LEANFS_NAME_MAX + 2];
+    int col = 0;
+    for (long i = 0; i < n; i++) {
+        if (listing[i] != '\n') {
+            if (col < (int)sizeof(name) - 1) {
+                name[col++] = listing[i];
+            }
+            continue;
+        }
+        /* SYS_listdir marks a directory with a trailing '/', which is
+         * kept: completing to "docs/" and letting the next Tab descend is
+         * exactly what it is for. */
+        name[col] = '\0';
+        int this_len = col;
+        col = 0;
+        if (this_len < leaf_len) {
+            continue;
+        }
+        int same = 1;
+        for (int k = 0; k < leaf_len; k++) {
+            if (name[k] != leaf[k]) {
+                same = 0;
+                break;
+            }
+        }
+        if (!same) {
+            continue;
+        }
+        matches++;
+        if (matches == 1) {
+            for (int k = 0; k <= this_len; k++) {
+                best[k] = name[k];
+            }
+            best_len = this_len;
+        } else {
+            best_len = common_prefix_len(best, name);
+            best[best_len] = '\0';
+        }
+    }
+    if (matches == 0) {
+        return;
+    }
+
+    /* Type the shared prefix in, exactly as if it had been typed - which
+     * keeps the grid, the cursor and line_buf in step without this
+     * function knowing anything about any of the three. */
+    for (int k = leaf_len; k < best_len && line_len < LINE_MAX - 1; k++) {
+        line_buf[line_len++] = best[k];
+        putc_term(best[k]);
+    }
+    if (matches == 1 && best_len > 0 && best[best_len - 1] != '/' && line_len < LINE_MAX - 1) {
+        line_buf[line_len++] = ' ';
+        putc_term(' ');
+        return;
+    }
+    if (matches > 1) {
+        /* Several - show them, then reprint the prompt and the line so
+         * the cursor ends up back where it was. */
+        putc_term('\n');
+        col = 0;
+        for (long i = 0; i < n; i++) {
+            if (listing[i] != '\n') {
+                if (col < (int)sizeof(name) - 1) {
+                    name[col++] = listing[i];
+                }
+                continue;
+            }
+            name[col] = '\0';
+            int this_len = col;
+            col = 0;
+            if (this_len < leaf_len) {
+                continue;
+            }
+            int same = 1;
+            for (int k = 0; k < leaf_len; k++) {
+                if (name[k] != leaf[k]) {
+                    same = 0;
+                    break;
+                }
+            }
+            if (same) {
+                print_str_term(name);
+                putc_term(' ');
+            }
+        }
+        putc_term('\n');
+        start_prompt();
+        line_buf[line_len] = '\0';
+        print_str_term(line_buf);
+    }
 }
 
 static void handle_key(char ch) {
+    if (ch == '\t') {
+        complete_line();
+        return;
+    }
     if (ch == '\n' || ch == '\r') {
         run_line();
         line_len = 0;
@@ -377,8 +869,20 @@ int main(void) {
     read_fd = pipe_fds[0];
     write_fd = pipe_fds[1];
 
+    /* M60: this window has no standard input to give away, and now that a
+     * command can be written to read one, saying so matters. Keys reach
+     * this process as window events, not on fd 0 - a child that read fd 0
+     * would be pulling keystrokes out of the same kernel ring the
+     * compositor drains, which is a wedged desktop rather than a wedged
+     * command. Closing it means a child inherits nothing there and a read
+     * fails immediately, which is exactly what "no input" should look
+     * like. A pipe puts a real read end back for the one command that
+     * has one. */
+    sys_close(0);
+
     grid_clear();
-    print_str_term("lean_os terminal - type a program name (ls, cat <f>, echo ..., clear)\n");
+    print_str_term("lean_os terminal - a shell: ls, cat, cp, echo, cd, pwd, clear\n"
+                    "quotes, > redirect, >> append, | pipe, Tab completes\n");
     start_prompt();
     redraw(&win, 1);
 
@@ -386,7 +890,7 @@ int main(void) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE) {
+            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
             } else if (ev.type == WM_EVENT_MOUSE_MOVE && sel_dragging) {
                 pixel_to_cell(ev.x, ev.y, &sel_end_row, &sel_end_col);
@@ -410,7 +914,7 @@ int main(void) {
                  * is *back* through history - hence the negation. */
                 view_scroll(-ev.wheel);
                 changed = 1;
-            } else if (ev.type == WM_EVENT_KEY && running_pid < 0) {
+            } else if (ev.type == WM_EVENT_KEY && running_pid < 0 && pipe_pid < 0) {
                 /* M56: typing snaps back to the live grid. A keystroke
                  * that appeared somewhere off screen would be the worst
                  * possible way to find out you were still scrolled up. */
@@ -457,12 +961,22 @@ int main(void) {
             }
         }
 
-        if (running_pid >= 0) {
+        if (running_pid >= 0 || pipe_pid >= 0) {
             drain_output();
-            long rc = sys_wait_nb(running_pid);
-            if (rc != -2) {
-                drain_output(); /* one last catch-up read after the child is confirmed dead */
+            /* M60: both halves of a pipe, and the prompt waits for both.
+             * They are polled rather than waited on for the reason this
+             * loop has always polled: pipe_write blocks a child once its
+             * 1 KiB buffer fills, so a blocking wait here - which never
+             * drains the output pipe - would deadlock on any command
+             * whose output outgrew it. */
+            if (running_pid >= 0 && sys_wait_nb(running_pid) != -2) {
                 running_pid = -1;
+            }
+            if (pipe_pid >= 0 && sys_wait_nb(pipe_pid) != -2) {
+                pipe_pid = -1;
+            }
+            if (running_pid < 0 && pipe_pid < 0) {
+                drain_output(); /* one last catch-up read after both are confirmed dead */
                 start_prompt();
             }
             changed = 1;

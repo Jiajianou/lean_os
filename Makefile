@@ -40,7 +40,11 @@ LEANFS_PUT   := $(BUILD)/leanfs-put
 # M39: a second host program, same arrangement - tools/gen-font.c holds the
 # single glyph source both copies of the 8x16 font table are generated from
 # (kernel/drivers/font8x16.{h,c} and user_space/lib/font8x16.{h,c}), plus the
-# metric checks that keep them honest. The generated files stay checked in, so
+# metric checks that keep them honest. M57 added the proportional UI font
+# family to the same generator (user_space/lib/uifont.{h,c}) - three sizes on
+# one shared baseline, checked the same way and by the same program, because
+# "they read as one family" is exactly the property that quietly stops being
+# true otherwise. The generated files stay checked in, so
 # an ordinary build never needs to run this; what the stamp below guarantees is
 # that they can't be edited by hand - or drift apart - without the build
 # noticing. See tools/gen-font.c's header for why the duplication itself is
@@ -48,7 +52,8 @@ LEANFS_PUT   := $(BUILD)/leanfs-put
 GEN_FONT     := $(BUILD)/gen-font
 FONT_STAMP   := $(BUILD)/.font-check-stamp
 FONT_FILES   := kernel/drivers/font8x16.h kernel/drivers/font8x16.c \
-                user_space/lib/font8x16.h user_space/lib/font8x16.c
+                user_space/lib/font8x16.h user_space/lib/font8x16.c \
+                user_space/lib/uifont.h user_space/lib/uifont.c
 
 # -O1: added at M20 - a from-scratch software compositor doing
 # per-pixel fill_rect/blit calls at -O0 turned out genuinely too slow to
@@ -88,6 +93,7 @@ CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
 # binaries like these.
 USER_CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
                -mcmodel=large -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Werror \
+               -ffunction-sections -fdata-sections \
                -MMD -MP -Iuser_space/lib -Isystem_api/include -c
 
 MBR_BIN    := $(BUILD)/mbr.bin
@@ -102,7 +108,8 @@ UOBJ      := $(BUILD)/user_obj
 USER_LD   := user_space/lib/user.ld
 USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/malloc.o \
                 $(UOBJ)/gfx.o $(UOBJ)/font8x16.o $(UOBJ)/wmclient.o $(UOBJ)/wallpaper.o \
-                $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o
+                $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o \
+                $(UOBJ)/uifont.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
 # init and shell in their own directories. Each becomes build/NAME.elf,
@@ -111,7 +118,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # no filesystem driver the *boot loader* can use to load from disk, only
 # the kernel's own (M12), so this is still how anything gets onto the disk
 # leanfs formats on first boot in the first place.
-USER_PROGRAMS := hello echo cat ls init shell memtest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot
+USER_PROGRAMS := hello echo cat cp ls init shell memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
 KERNEL_C_SRCS := $(shell find kernel -name '*.c' -not -path 'kernel/boot/*')
@@ -168,7 +175,7 @@ $(UOBJ)/%.o: user_space/shell/%.c | $(UOBJ)
 # rule below, the same "side effect a generic rule wouldn't know to
 # guarantee" situation $(UEFI_BOOT_OBJ)'s kernel.sectors dependency below is.
 $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(USER_LD)
-	$(LD) -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/$*.o
+	$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/$*.o
 
 # AP_TRAMPOLINE_BIN: the standalone 16-bit SMP AP bring-up blob (see
 # kernel/arch/x86_64/ap_trampoline.asm's header comment) - built like
@@ -313,6 +320,7 @@ $(FONT_STAMP): tools/gen-font.c $(FONT_FILES) $(GEN_FONT) | $(BUILD)
 
 $(KOBJ)/drivers/font8x16.o: $(FONT_STAMP)
 $(UOBJ)/font8x16.o: $(FONT_STAMP)
+$(UOBJ)/uifont.o: $(FONT_STAMP)
 
 # Optional, one-time-per-image step for the third-party program workflow
 # (tools/build-user-program.sh + tools/leanfs-put.c): writes every

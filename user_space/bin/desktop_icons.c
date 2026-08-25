@@ -37,7 +37,9 @@
 #include "icons.h" /* user_space/lib/icons.h - M56: real icons, from a real format */
 #include "children.h" /* M54: this process launches things and must reap them - see children.h */
 #include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
-#include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
+/* M57: icon labels are UI text - the 16-row proportional face, measured
+ * with gfx_text_width rather than counted in fixed cells. */
+#define LABEL_H UI_FONT_UI_HEIGHT
 #include "str.h" /* strlen - ICONS[].label is data-driven now, not a compile-time sizeof() */
 #include "spawn_error.h" /* system_api/include/spawn_error.h - M48 */
 #include "syscall_wrappers.h"
@@ -63,7 +65,7 @@
  * compositor.c's own event forwarding - nothing new needed to reach it,
  * just the first client that ever reads it). */
 #define CTX_MENU_ITEM_W 120
-#define CTX_MENU_ITEM_H (FONT_HEIGHT + 4)
+#define CTX_MENU_ITEM_H (LABEL_H + 4)
 #define CTX_MENU_BG     0x00243040u
 #define CTX_MENU_HOVER  0x003A5A80u
 #define CTX_MENU_BORDER 0x00506070u
@@ -151,7 +153,7 @@ static int32_t icon_x[ICON_COUNT], icon_y[ICON_COUNT]; /* filled by layout_icons
  * stops a single icon that itself doesn't fit from wrapping forever. */
 static void layout_icons(int32_t win_h) {
     int32_t x = ICON_MARGIN, y = ICON_MARGIN;
-    int32_t max_y = win_h - PANEL_MARGIN - ICON_SIZE - FONT_HEIGHT - 4;
+    int32_t max_y = win_h - PANEL_MARGIN - ICON_SIZE - LABEL_H - 4;
     for (int i = 0; i < ICON_COUNT; i++) {
         if (y > max_y && y > ICON_MARGIN) {
             y = ICON_MARGIN;
@@ -165,12 +167,12 @@ static void layout_icons(int32_t win_h) {
 
 /* M34: the box-plus-label hit region as one rect (gfx_point_in_rect,
  * user_space/lib/gfx.c) instead of hand-rolled comparisons - top edge is
- * pulled up by FONT_HEIGHT+4 and the height grown by twice that so the
+ * pulled up by LABEL_H+4 and the height grown by twice that so the
  * label drawn below the box (redraw_icon) is clickable too, not just the
  * box itself. */
 static int point_in_icon(int i, int32_t x, int32_t y) {
-    return gfx_point_in_rect(x, y, icon_x[i], icon_y[i] - FONT_HEIGHT - 4,
-                              ICON_SIZE, ICON_SIZE + 2 * (FONT_HEIGHT + 4));
+    return gfx_point_in_rect(x, y, icon_x[i], icon_y[i] - LABEL_H - 4,
+                              ICON_SIZE, ICON_SIZE + 2 * (LABEL_H + 4));
 }
 
 static void redraw_icon(wm_window_t *self, int i, int pressed) {
@@ -190,7 +192,7 @@ static void redraw_icon(wm_window_t *self, int i, int pressed) {
                    icon_y[i] + (ICON_SIZE - drawn) / 2, blob, ICON_IMAGE_SCALE);
     }
 
-    int32_t label_w = (int32_t)strlen(ICONS[i].label) * FONT_WIDTH;
+    int32_t label_w = gfx_text_width(gfx_ui_font(), ICONS[i].label);
     int32_t label_x = icon_x[i] + ICON_SIZE / 2 - label_w / 2;
     gfx_draw_text(&self->gfx, label_x, icon_y[i] + ICON_SIZE + 4, ICONS[i].label, LABEL_COLOR);
 }
@@ -237,7 +239,7 @@ int main(void) {
         wm_event_t ev;
         int changed = 0;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE) {
+            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 changed = 1; /* M55 - see WM_EVENT_EXPOSE */
             } else if (ev.type == WM_EVENT_DROP) {
                 /* M49: dropping a file on the desktop opens it - the same

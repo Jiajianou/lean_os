@@ -16,7 +16,12 @@
 #include "signal.h" /* system_api/include/signal.h - SIGKILL */
 #include "syscall_wrappers.h"
 
-int main(const char *arg) {
+int main(int argc, char **argv) {
+    /* M60: argv[0] is this program's own path; argv[1] is the first thing
+     * the caller had to say. `arg` keeps the name the body already uses,
+     * and is the empty string when there was nothing - which is exactly
+     * what the single-string mechanism this replaced handed over. */
+    const char *arg = argc > 1 ? argv[1] : "";
     (void)arg;
     for (;;) {
         long comp_pid = sys_spawn(PATH_BIN_DIR "compositor", "");

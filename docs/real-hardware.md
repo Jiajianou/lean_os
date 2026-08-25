@@ -97,6 +97,26 @@ neither is something a real machine can be assumed to have:
   but isn't guaranteed. `[kbd]`/`[mouse]` already log "no keypress/
   movement within timeout - driver is installed, just untested" rather
   than failing either way, same as any QEMU boot nobody typed into.
+- **Changing resolution** (M58): won't be possible, and this is a
+  property of the feature rather than a bug to find. The mode-setting
+  driver (`kernel/drivers/dispi.c`) talks to the Bochs/QEMU display
+  adapter's VBE DISPI registers, which is a *device* interface those two
+  emulators implement and no real GPU does. On real hardware the probe
+  finds nothing (`[dispi] no Bochs/QEMU DISPI adapter ... - resolution
+  stays whatever the firmware chose`), the `[m58]` self-test skips itself
+  rather than failing, and Settings' Resolution pane says "This display
+  cannot be resized after boot." The resolution is then whatever
+  `boot.c` picked out of the modes GOP offered - which is the whole
+  reason that preference is still in `boot.c` rather than having been
+  replaced by the driver.
+
+  Real mode setting on real hardware means a GPU driver per vendor, and
+  that is not a thing this project will do. This is one of three things
+  the deferred real-hardware step has to answer for - the other two being
+  the ramdisk root (`leanfs.c` calls `ata_read_sectors` directly, so a
+  machine with no IDE controller has nothing for it to talk to) and a
+  panic that paints (on a machine with no serial port, a panic is
+  currently a black screen).
 
 ## If it doesn't boot at all
 

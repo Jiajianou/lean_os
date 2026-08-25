@@ -17,6 +17,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "leanfs.h" /* M59: leanfs_stat_t - the one type this pass-through has to name */
+
 void vfs_init(void);
 int64_t vfs_read(const char *path, void *buf, size_t maxlen);
 int vfs_write(const char *path, const void *buf, size_t len);
@@ -27,6 +29,18 @@ uint32_t vfs_free_blocks(void);
 int vfs_unlink(const char *path);
 int vfs_rename(const char *old_path, const char *new_path);
 size_t vfs_list(const char *path, char *buf, size_t maxlen);
+
+/* M59: see the leanfs.h declarations of the same names for what each one
+ * promises. This layer stays the thin, honest pass-through it has always
+ * been - a second filesystem type would implement these, not reshape
+ * them. */
+int vfs_rmdir(const char *path);
+int vfs_stat(const char *path, leanfs_stat_t *out);
+int vfs_open(const char *path, int create);
+int64_t vfs_handle_read(int handle, void *buf, size_t len, uint32_t off);
+int64_t vfs_handle_write(int handle, const void *buf, size_t len, uint32_t off);
+uint32_t vfs_handle_size(int handle);
+int vfs_handle_truncate(int handle);
 
 /* M47: the flush the shutdown path (kernel/power/power.c) calls before
  * cutting power.

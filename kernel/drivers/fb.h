@@ -30,6 +30,32 @@ typedef struct __attribute__((packed)) {
 
 void fb_init(const fb_boot_info_t *info);
 
+/* M58: fb_init used to run exactly once, from the fb_boot_info_t the
+ * bootloader filled in, and every accessor answered out of statics that
+ * nothing could ever change. A resolution setting makes that false: after
+ * kernel/drivers/dispi.h reprograms the adapter, this driver is pointed
+ * at the same physical base with a different pitch and a different size,
+ * and a *larger* mode needs a larger mapping than the boot mode's covered
+ * - so this is a re-map, not a struct update.
+ *
+ * Only ever grows the mapping (it tracks the high-water mark), because a
+ * smaller mode leaves pages mapped that simply stop being read; unmapping
+ * them would buy nothing and could race a draw already in flight.
+ *
+ * The framebuffer's *physical* base does not move on a mode change with
+ * this adapter - it is the device's BAR, not something the mode selects -
+ * so this deliberately keeps the base fb_init was given rather than
+ * re-deriving it, which would be a second source of truth for a value
+ * that has one. */
+void fb_remap(uint32_t pitch, uint32_t width, uint32_t height);
+
+/* How many bytes of framebuffer are currently mapped - the high-water
+ * mark fb_remap maintains. SYS_fb_map needs it: a client mapping the
+ * framebuffer into its own address space has to cover the same range the
+ * kernel does, or a mode change would leave it drawing off the end of its
+ * own mapping. */
+uint64_t fb_mapped_bytes(void);
+
 uint32_t fb_width(void);
 uint32_t fb_height(void);
 uint32_t fb_pitch_bytes(void);

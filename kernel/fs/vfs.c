@@ -49,3 +49,32 @@ void vfs_sync(void) {
      * platter by the time vfs_write returns to its caller. */
     klog_puts("[vfs] sync: leanfs is write-through, nothing buffered to flush.\n");
 }
+
+/* M59 */
+int vfs_rmdir(const char *path) {
+    return leanfs_rmdir(path);
+}
+
+int vfs_stat(const char *path, leanfs_stat_t *out) {
+    return leanfs_stat(path, out);
+}
+
+int vfs_open(const char *path, int create) {
+    return leanfs_open(path, create);
+}
+
+int64_t vfs_handle_read(int handle, void *buf, size_t len, uint32_t off) {
+    return leanfs_handle_read(handle, buf, len, off);
+}
+
+int64_t vfs_handle_write(int handle, const void *buf, size_t len, uint32_t off) {
+    return leanfs_handle_write(handle, buf, len, off);
+}
+
+uint32_t vfs_handle_size(int handle) {
+    return leanfs_handle_size(handle);
+}
+
+int vfs_handle_truncate(int handle) {
+    return leanfs_handle_truncate(handle);
+}

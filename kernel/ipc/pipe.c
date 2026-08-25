@@ -14,7 +14,42 @@ pipe_t *pipe_create(void) {
     p->count = 0;
     p->read_closed = 0;
     p->write_closed = 0;
+    /* SYS_pipe hands back exactly one fd of each end, so that is what a
+     * fresh anonymous pipe starts with. */
+    p->readers = 1;
+    p->writers = 1;
+    p->persistent = 0;
     return p;
+}
+
+void pipe_ref_read(pipe_t *p) {
+    if (p) {
+        p->readers++;
+    }
+}
+
+void pipe_ref_write(pipe_t *p) {
+    if (p) {
+        p->writers++;
+    }
+}
+
+void pipe_unref_read(pipe_t *p) {
+    if (!p || p->persistent) {
+        return;
+    }
+    if (p->readers > 0 && --p->readers == 0) {
+        p->read_closed = 1;
+    }
+}
+
+void pipe_unref_write(pipe_t *p) {
+    if (!p || p->persistent) {
+        return;
+    }
+    if (p->writers > 0 && --p->writers == 0) {
+        p->write_closed = 1;
+    }
 }
 
 void pipe_close_read(pipe_t *p) {
@@ -65,6 +100,10 @@ pipe_t *pipe_named(const char *name) {
     if (!p) {
         return (pipe_t *)0;
     }
+    /* M59: a rendezvous point, not a conversation - it outlives every
+     * process that ever holds an fd on it, which is exactly what M55's
+     * compositor-replacement recovery is built on. */
+    p->persistent = 1;
     k_strlcpy(named_pipes[named_pipe_count].name, name, NAMED_PIPE_NAME_LEN);
     named_pipes[named_pipe_count].p = p;
     named_pipe_count++;

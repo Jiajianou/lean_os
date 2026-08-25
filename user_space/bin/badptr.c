@@ -123,7 +123,8 @@ static void put_num(long v) {
     put(out);
 }
 
-int main(const char *arg) {
+int main(int argc, char **argv) {
+    (void)argc;
     /* The private region's base is PML4 entry 1, so it is this program's
      * own load address with the low 39 bits (everything one PML4 entry
      * covers) masked off - derived from where the linker actually put
@@ -134,8 +135,15 @@ int main(const char *arg) {
     /* The argument page is exactly one page and the page above it is
      * never mapped (kernel/proc/proc.c maps one frame at USER_ARG_ADDR
      * and the stack grows *below* it), which is what makes a read that
-     * starts on its last byte cross into nothing. */
-    unsigned long long arg_page = (unsigned long long)(void *)arg;
+     * starts on its last byte cross into nothing.
+     *
+     * M60: taken from `argv` rather than from a string in it. The vector
+     * itself is at a fixed offset into that page, so this is true even
+     * for a program launched with no arguments at all - where the only
+     * string would have been a .rodata "" that is nowhere near the page
+     * this test is about. */
+    unsigned long long arg_page =
+        (unsigned long long)(void *)argv & ~(unsigned long long)(PAGE_SIZE - 1);
 
     unsigned long long bad_ptr[BAD_COUNT];
     unsigned long long bad_len[BAD_COUNT];

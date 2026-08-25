@@ -8,12 +8,15 @@
 #include "arch/x86_64/smp.h"
 #include "drivers/console.h"
 #include "drivers/cursor.h"
+#include "display.h" /* system_api/include/display.h - display_mode_t, M58 */
+#include "drivers/dispi.h"
 #include "drivers/fb.h"
 #include "drivers/font8x16.h" /* M39 self-test reads the glyph tables and the shared metric directly */
 #include "drivers/keyboard.h"
 #include "drivers/klog.h"
 #include "drivers/mouse.h"
 #include "drivers/pit.h"
+#include "drivers/rtc.h"
 #include "fs/leanfs.h"
 #include "fs/vfs.h"
 #include "ipc/pipe.h"
@@ -48,10 +51,12 @@
     X(hello)                         \
     X(echo)                          \
     X(cat)                           \
+    X(cp)                            \
     X(ls)                            \
     X(init)                          \
     X(shell)                         \
     X(memtest)                       \
+    X(fonttest)                      \
     X(compositor)                    \
     X(wm_demo)                       \
     X(gui_clock)                     \
@@ -121,6 +126,48 @@ static long do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
  *
  * M42: every self-test that spawns a compositor or a client now goes
  * through here instead of firing a bare SYS_kill and moving on. */
+/* M59: read a program off disk into a buffer sized for the file, not for
+ * the format's ceiling. Every self-test below used to say
+ * `kmalloc(LEANFS_MAX_FILE_SIZE)`, which was a harmless 72 KiB
+ * over-allocation right up until double-indirect blocks made that ceiling
+ * eight megabytes. Fifty-two of those, some of them three at a time, is
+ * not an over-allocation any more.
+ *
+ * Panics rather than returning an error on purpose: every caller is a
+ * boot self-test loading a program this kernel seeded onto the disk
+ * moments earlier, so a failure here is a broken filesystem, not a
+ * situation to recover from. Returns the image; *out_size gets its real
+ * length. */
+static uint8_t *read_program(const char *path, size_t *out_size) {
+    leanfs_stat_t st;
+    if (vfs_stat(path, &st) != 0 || st.is_dir || st.size == 0) {
+        panic("read_program: a program this kernel just seeded is missing or empty");
+    }
+    uint8_t *image = (uint8_t *)kmalloc(st.size);
+    if (!image) {
+        panic("read_program: out of memory reading a program back from disk");
+    }
+    if (vfs_read(path, image, st.size) < 0) {
+        panic("read_program: vfs_read failed on a program that stat succeeded on");
+    }
+    *out_size = st.size;
+    return image;
+}
+
+/* M60: type a whole string into whatever holds focus, one injected key
+ * at a time, with a gap between keys. The gap is not politeness: the
+ * keyboard ring is small and the compositor forwards keys to a client's
+ * event pipe one loop iteration at a time, so a burst faster than that
+ * loop is a burst that gets dropped. M56's own editor test injected two
+ * characters by hand; a command line is thirty, which is where doing it
+ * by hand stops being reasonable. */
+static void selftest_type(const char *s) {
+    for (const char *p = s; *p; p++) {
+        keyboard_inject(*p, 0);
+        pit_sleep_ms(25);
+    }
+}
+
 static void selftest_reap(task_t *t) {
     do_syscall(SYS_kill, (uint64_t)t->id, SIGKILL, 0);
     do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
@@ -375,6 +422,18 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * function's second argument) - needs vmm live first, since fb_init
      * maps the physical framebuffer region in. */
     fb_init(fb_info);
+    /* M58: probe the display adapter for a runtime mode-setting interface
+     * and build the validated mode list, right after the framebuffer the
+     * firmware handed us is mapped. Finding nothing is an ordinary
+     * outcome, not a failure - on any machine without a Bochs/QEMU DISPI
+     * adapter the answer is "the mode the firmware picked, and nothing on
+     * offer", which is exactly what the Display pane then shows. */
+    dispi_init();
+    /* M59: read the CMOS clock once here so the boot log says up front
+     * whether this machine knows the date - every timestamp below depends
+     * on the answer, and "files are dated zero" is much easier to explain
+     * when the reason is one line near the top of the log. */
+    rtc_init();
 
     /* Self-test: clear to a background color, fill a smaller rectangle
      * with a different one, then read individual pixels back to confirm
@@ -396,6 +455,100 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         panic("fb self-test: rectangle color readback mismatch (outside, should be background)");
     }
     klog_puts("[fb] framebuffer clear/fill/readback self-test passed.\n\n");
+
+    /* M58 self-test: a real mode change, in the kernel, before anything
+     * has been built on top of the boot geometry. Three things are worth
+     * proving and only one of them is "the call returned 0":
+     *
+     *   1. The geometry SYS_fb_info would report is the one the device
+     *      actually took, not the one that was asked for.
+     *   2. The *pitch* is the one read back out of the adapter's own
+     *      VIRT_WIDTH register. fb.h has said since M16 that pitch is not
+     *      necessarily width * 4; a mode change that assumed otherwise
+     *      would shear the whole screen, and would do it on a machine
+     *      where the only way to see the damage is to look at it.
+     *   3. The mapping actually grew. A larger mode needs more pages than
+     *      the boot mode's mapping covered, so the far corner of the new
+     *      mode is written and read back - which faults in ring 0 if
+     *      fb_remap did not map through to it, and returns the wrong
+     *      value if the pitch is wrong.
+     *
+     * Then it puts the boot mode back, because everything after this line
+     * (the console, the desktop, every other self-test's pixel
+     * coordinates) is written against it.
+     *
+     * On hardware with no DISPI adapter this is skipped rather than
+     * failed - "this display cannot be resized after boot" is the honest
+     * answer there, and the Display pane says exactly that. */
+    {
+        uint32_t boot_w = fb_width(), boot_h = fb_height(), boot_pitch = fb_pitch_bytes();
+
+        if (!dispi_available()) {
+            klog_puts("[m58] no runtime mode-setting interface on this adapter - "
+                       "resolution stays what the firmware chose (self-test skipped).\n\n");
+        } else {
+            display_mode_t list[DISPLAY_MAX_MODES];
+            int n = dispi_get_modes(list, DISPLAY_MAX_MODES);
+            if (n <= 0) {
+                panic("M58 self-test: a DISPI adapter answered the probe but offers no modes");
+            }
+            /* Any offered mode that is not the one already running - and
+             * preferring a *larger* one, since growing the mapping is the
+             * half that can actually fail. */
+            int pick = -1;
+            for (int i = 0; i < n; i++) {
+                if (list[i].width == boot_w && list[i].height == boot_h) {
+                    continue;
+                }
+                if (pick < 0 || (uint64_t)list[i].width * list[i].height >
+                                 (uint64_t)list[pick].width * list[pick].height) {
+                    pick = i;
+                }
+            }
+            if (pick < 0) {
+                panic("M58 self-test: the only offered mode is the one already running");
+            }
+
+            uint32_t pitch = 0;
+            if (dispi_set_mode(list[pick].width, list[pick].height, &pitch) != 0) {
+                panic("M58 self-test: the adapter refused a mode this driver had already validated");
+            }
+            if (pitch < list[pick].width * 4u) {
+                panic("M58 self-test: the pitch read back from the device is narrower than one row of pixels");
+            }
+            fb_remap(pitch, list[pick].width, list[pick].height);
+
+            if (fb_width() != list[pick].width || fb_height() != list[pick].height) {
+                panic("M58 self-test: fb geometry after a mode change is not the mode that was set");
+            }
+            if (fb_pitch_bytes() != pitch) {
+                panic("M58 self-test: fb pitch is not the one read back from the device");
+            }
+            if (fb_mapped_bytes() < (uint64_t)pitch * fb_height()) {
+                panic("M58 self-test: the framebuffer mapping does not cover the new mode");
+            }
+
+            /* The far corner - the pixel that only exists in the new
+             * mode, at the stride the device chose. */
+            fb_put_pixel(fb_width() - 1, fb_height() - 1, 0x00123456u);
+            if (fb_get_pixel(fb_width() - 1, fb_height() - 1) != 0x00123456u) {
+                panic("M58 self-test: the last pixel of the new mode did not read back");
+            }
+
+            uint32_t back_pitch = 0;
+            if (dispi_set_mode(boot_w, boot_h, &back_pitch) != 0) {
+                panic("M58 self-test: could not restore the boot mode - this is the failure the revert timer exists for");
+            }
+            fb_remap(back_pitch, boot_w, boot_h);
+            if (fb_width() != boot_w || fb_height() != boot_h || fb_pitch_bytes() != boot_pitch) {
+                panic("M58 self-test: the boot mode did not come back exactly as it was");
+            }
+            fb_clear(0x00000000u);
+
+            klog_puts("[m58] display mode set and read back from the device (geometry, "
+                       "device-chosen pitch and a grown mapping), then restored - self-test passed.\n\n");
+        }
+    }
 
     /* M17: hand logging over to the graphical console (console.h) - from
      * here on, klog's visual half draws through the framebuffer instead
@@ -883,14 +1036,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * this only needs to wait for the one (creator) child and check
      * that. */
     {
-        uint8_t *memtest_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!memtest_image) {
-            panic("out of memory reading memtest back from disk");
-        }
-        int64_t memtest_size = vfs_read("/bin/memtest", memtest_image, LEANFS_MAX_FILE_SIZE);
-        if (memtest_size < 0) {
-            panic("vfs_read(\"memtest\") failed - should exist, just seeded");
-        }
+        size_t memtest_size_bytes = 0;
+        uint8_t *memtest_image = read_program("/bin/memtest", &memtest_size_bytes);
+        int64_t memtest_size = (int64_t)memtest_size_bytes;
         task_t *memtest_task = process_spawn("memtest", memtest_image, (size_t)memtest_size, "");
         kfree(memtest_image);
         long memtest_status = do_syscall(SYS_wait, (uint64_t)memtest_task->id, 0, 0);
@@ -898,6 +1046,27 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("memtest self-test: nonzero exit code - malloc or shm is broken");
         }
         klog_puts("[memtest] user-space malloc/free and cross-process shm self-tests passed.\n\n");
+    }
+
+    /* M57 self-test: the proportional UI font family, checked from ring 3
+     * because that is the only place it exists - uifont.c is a
+     * user_space library, and the property being proved is that
+     * gfx_text_width() and gfx_draw_text_font() agree about where the
+     * ink lands. fonttest.c renders into its own buffer and measures the
+     * result; see its header for why a table check would not have been
+     * the same test. Spawned and waited on exactly the way memtest above
+     * is. */
+    {
+        size_t fonttest_size_bytes = 0;
+        uint8_t *fonttest_image = read_program("/bin/fonttest", &fonttest_size_bytes);
+        int64_t fonttest_size = (int64_t)fonttest_size_bytes;
+        task_t *fonttest_task = process_spawn("fonttest", fonttest_image, (size_t)fonttest_size, "");
+        kfree(fonttest_image);
+        long fonttest_status = do_syscall(SYS_wait, (uint64_t)fonttest_task->id, 0, 0);
+        if (fonttest_status != 0) {
+            panic("M57 font self-test: a measured text width disagrees with the pixels drawn");
+        }
+        klog_puts("[m57] proportional UI font: per-glyph advances, one shared baseline across three sizes, and every measured width matching the ink drawn - self-test passed.\n\n");
     }
 
     /* M47: pin the desktop's settings to their compiled-in defaults for
@@ -918,16 +1087,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * discipline as every earlier milestone's self-tests, extended to a
      * case where the thing being proven is graphical. */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *demo_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !demo_image) {
-            panic("out of memory reading compositor/wm_demo back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t demo_size = vfs_read("/bin/wm_demo", demo_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || demo_size < 0) {
-            panic("vfs_read: compositor/wm_demo missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t demo_size_bytes = 0;
+        uint8_t *demo_image = read_program("/bin/wm_demo", &demo_size_bytes);
+        int64_t demo_size = (int64_t)demo_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -1030,18 +1195,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * a boot-time self-test. See milestones.md's M21 entry for that
      * verification's results. */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *clock_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *paint_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !clock_image || !paint_image) {
-            panic("out of memory reading compositor/gui_clock/gui_paint back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
-        int64_t paint_size = vfs_read("/bin/gui_paint", paint_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || clock_size < 0 || paint_size < 0) {
-            panic("vfs_read: compositor/gui_clock/gui_paint missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t clock_size_bytes = 0;
+        uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
+        int64_t clock_size = (int64_t)clock_size_bytes;
+        size_t paint_size_bytes = 0;
+        uint8_t *paint_image = read_program("/bin/gui_paint", &paint_size_bytes);
+        int64_t paint_size = (int64_t)paint_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -1146,18 +1308,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * gui_paint strokes were; see milestones.md's M22 entry for that
      * verification's results. */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *shell_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *clock_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !shell_image || !clock_image) {
-            panic("out of memory reading compositor/desktop_shell/gui_clock back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t shell_size = vfs_read("/bin/desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || shell_size < 0 || clock_size < 0) {
-            panic("vfs_read: compositor/desktop_shell/gui_clock missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t shell_size_bytes = 0;
+        uint8_t *shell_image = read_program("/bin/desktop_shell", &shell_size_bytes);
+        int64_t shell_size = (int64_t)shell_size_bytes;
+        size_t clock_size_bytes = 0;
+        uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
+        int64_t clock_size = (int64_t)clock_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -1256,16 +1415,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * connects here, so WM_ACTION_MAXIMIZE's available area is simply
      * the whole screen (BORDER/TITLEBAR_H insets only). */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *clock_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !clock_image) {
-            panic("out of memory reading compositor/gui_clock back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || clock_size < 0) {
-            panic("vfs_read: compositor/gui_clock missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t clock_size_bytes = 0;
+        uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
+        int64_t clock_size = (int64_t)clock_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -1448,14 +1603,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * already redraws the desktop background every frame regardless of
      * whether anything is connected to it. */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image) {
-            panic("out of memory reading compositor back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0) {
-            panic("vfs_read: compositor missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(300);
@@ -1506,16 +1656,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * code) rather than being killed out from under it, and the window
      * slot still ends up reclaimed either way. */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *editor_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !editor_image) {
-            panic("out of memory reading compositor/text_editor back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t editor_size = vfs_read("/bin/text_editor", editor_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || editor_size < 0) {
-            panic("vfs_read: compositor/text_editor missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t editor_size_bytes = 0;
+        uint8_t *editor_image = read_program("/bin/text_editor", &editor_size_bytes);
+        int64_t editor_size = (int64_t)editor_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -1606,16 +1752,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      *      and the leftmost titlebar button (starts ~x:246), so it can
      *      only ever read the flat titlebar fill underneath either. */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *clock_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !clock_image) {
-            panic("out of memory reading compositor/gui_clock back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || clock_size < 0) {
-            panic("vfs_read: compositor/gui_clock missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t clock_size_bytes = 0;
+        uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
+        int64_t clock_size = (int64_t)clock_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -1854,18 +1996,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      *      milestone's whole point was to make possible.
      */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *shell_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *clock_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !shell_image || !clock_image) {
-            panic("out of memory reading compositor/desktop_shell/gui_clock back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t shell_size = vfs_read("/bin/desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || shell_size < 0 || clock_size < 0) {
-            panic("vfs_read: compositor/desktop_shell/gui_clock missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t shell_size_bytes = 0;
+        uint8_t *shell_image = read_program("/bin/desktop_shell", &shell_size_bytes);
+        int64_t shell_size = (int64_t)shell_size_bytes;
+        size_t clock_size_bytes = 0;
+        uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
+        int64_t clock_size = (int64_t)clock_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -1904,7 +2043,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         uint32_t above_panel_px = fb_get_pixel(512, 700);
         uint32_t start_btn_px = fb_get_pixel(71, 742);
         uint32_t running_slot_px = fb_get_pixel(168, 752);
-        uint32_t tray_sep_px = fb_get_pixel(932, 750);
+        /* M57: 932 -> 937. The tray is right-aligned and its width now
+         * includes a *measured* clock ("00:00" in the proportional UI
+         * face, 35px) rather than five fixed 8px cells, so the separator
+         * moved five pixels right. Exactly the class of breakage
+         * gfx_text_width exists to make visible - this test caught it
+         * on the first boot after the font landed. */
+        uint32_t tray_sep_px = fb_get_pixel(937, 750);
 
         int action_fds[2];
         if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
@@ -2005,18 +2150,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * the same split every milestone since has used.
      */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *shell_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *editor_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !shell_image || !editor_image) {
-            panic("out of memory reading compositor/desktop_shell/text_editor back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t shell_size = vfs_read("/bin/desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
-        int64_t editor_size = vfs_read("/bin/text_editor", editor_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || shell_size < 0 || editor_size < 0) {
-            panic("vfs_read: compositor/desktop_shell/text_editor missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t shell_size_bytes = 0;
+        uint8_t *shell_image = read_program("/bin/desktop_shell", &shell_size_bytes);
+        int64_t shell_size = (int64_t)shell_size_bytes;
+        size_t editor_size_bytes = 0;
+        uint8_t *editor_image = read_program("/bin/text_editor", &editor_size_bytes);
+        int64_t editor_size = (int64_t)editor_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -2142,18 +2284,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * blend were mixing against the wrong thing.
      */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *icons_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *shell_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !icons_image || !shell_image) {
-            panic("out of memory reading compositor/desktop_icons/desktop_shell back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t icons_size = vfs_read("/bin/desktop_icons", icons_image, LEANFS_MAX_FILE_SIZE);
-        int64_t shell_size = vfs_read("/bin/desktop_shell", shell_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || icons_size < 0 || shell_size < 0) {
-            panic("vfs_read: compositor/desktop_icons/desktop_shell missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t icons_size_bytes = 0;
+        uint8_t *icons_image = read_program("/bin/desktop_icons", &icons_size_bytes);
+        int64_t icons_size = (int64_t)icons_size_bytes;
+        size_t shell_size_bytes = 0;
+        uint8_t *shell_image = read_program("/bin/desktop_shell", &shell_size_bytes);
+        int64_t shell_size = (int64_t)shell_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -2284,16 +2423,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * borders. With no desktop client running, what is left when it goes
      * away is the compositor's own DEFAULT_BG_COLOR fill. */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *stub_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !stub_image) {
-            panic("out of memory reading compositor/wm_stubborn back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t stub_size = vfs_read("/bin/wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || stub_size < 0) {
-            panic("vfs_read: compositor/wm_stubborn missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t stub_size_bytes = 0;
+        uint8_t *stub_image = read_program("/bin/wm_stubborn", &stub_size_bytes);
+        int64_t stub_size = (int64_t)stub_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -2473,18 +2608,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      *   (253, 90) is on the x's top-left-to-bottom-right stroke
      */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *clock_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *stub_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !clock_image || !stub_image) {
-            panic("out of memory reading compositor/gui_clock/wm_stubborn back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t clock_size = vfs_read("/bin/gui_clock", clock_image, LEANFS_MAX_FILE_SIZE);
-        int64_t stub_size = vfs_read("/bin/wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || clock_size < 0 || stub_size < 0) {
-            panic("vfs_read: compositor/gui_clock/wm_stubborn missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t clock_size_bytes = 0;
+        uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
+        int64_t clock_size = (int64_t)clock_size_bytes;
+        size_t stub_size_bytes = 0;
+        uint8_t *stub_image = read_program("/bin/wm_stubborn", &stub_size_bytes);
+        int64_t stub_size = (int64_t)stub_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -2630,16 +2762,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M47 self-test: could not write settings.conf");
         }
 
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *icons_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !icons_image) {
-            panic("out of memory reading compositor/desktop_icons back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t icons_size = vfs_read("/bin/desktop_icons", icons_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || icons_size < 0) {
-            panic("vfs_read: compositor/desktop_icons missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t icons_size_bytes = 0;
+        uint8_t *icons_image = read_program("/bin/desktop_icons", &icons_size_bytes);
+        int64_t icons_size = (int64_t)icons_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         pit_sleep_ms(200);
@@ -2762,11 +2890,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * "not an ELF at all" but genuinely a *truncated* one, which is
          * the third distinct cause this milestone's error codes have to
          * survive contact with. */
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image) {
-            panic("out of memory reading compositor back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
         if (comp_size < 64) {
             panic("vfs_read: compositor missing or absurdly small - should exist, just seeded");
         }
@@ -2939,14 +3065,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * compositor - the payload crossing from WM_DRAG_PIPE to
          * WM_DRAG_DATA_PIPE - and leaves the pointer half to the input
          * harness, which can actually move a pointer. */
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image) {
-            panic("out of memory reading compositor back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0) {
-            panic("vfs_read: compositor missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         pit_sleep_ms(400);
@@ -3082,16 +3203,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * of MAX_SHM_SEGMENTS, so a slot or a segment that failed to come
          * back would run the table out inside this loop rather than
          * three milestones from now. */
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *stub_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !stub_image) {
-            panic("out of memory reading compositor/wm_stubborn back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t stub_size = vfs_read("/bin/wm_stubborn", stub_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || stub_size < 0) {
-            panic("vfs_read: compositor/wm_stubborn missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t stub_size_bytes = 0;
+        uint8_t *stub_image = read_program("/bin/wm_stubborn", &stub_size_bytes);
+        int64_t stub_size = (int64_t)stub_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -3145,12 +3262,10 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * a segment that never came back shows up here as a window that
          * simply doesn't appear - the exact symptom M40 spent a
          * milestone on. Window 0 is at (100, 100), 200x120. */
-        uint8_t *last_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!last_image) {
-            panic("out of memory reading wm_stubborn back from disk");
-        }
-        int64_t last_size = vfs_read("/bin/wm_stubborn", last_image, LEANFS_MAX_FILE_SIZE);
-        task_t *last_task = last_size < 0 ? (task_t *)0
+        size_t last_size_bytes = 0;
+        uint8_t *last_image = read_program("/bin/wm_stubborn", &last_size_bytes);
+        int64_t last_size = (int64_t)last_size_bytes;
+        task_t *last_task = last_size == 0 ? (task_t *)0
                                           : process_spawn("wm_stubborn", last_image, (size_t)last_size, "");
         kfree(last_image);
         pit_sleep_ms(700);
@@ -3410,7 +3525,6 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         static const struct { const char *what; const char *path; } BAD_PATHS[] = {
             {"a relative path, which has nothing to be relative to", "bin/ls"},
             {"an empty component", "//bin"},
-            {"a trailing slash", PATH_BIN_DIR},
             {"a '.' component", "/./bin"},
             {"a '..' component, the escape this format refuses to synthesize", "/bin/../etc"},
             {"a '..' climbing out of the root", "/.."},
@@ -3429,6 +3543,25 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             }
         }
 
+        /* M60: a *single* trailing slash on a directory is legal now and
+         * moved out of the refusal table above - see next_component's own
+         * note for why tab completion is the reason. It gets an assertion
+         * of its own rather than simply disappearing, because "/bin/" and
+         * "/bin" naming the same directory is now a promise: the one that
+         * still has to be refused is a trailing slash on a *file*, which
+         * would be claiming it is something it is not. */
+        if (!vfs_is_dir(PATH_BIN_DIR)) {
+            klog_puts("[m53] a trailing slash on a directory was refused ('" PATH_BIN_DIR "')\n");
+            all_ok = 0;
+        }
+        {
+            char scratch[16];
+            if (vfs_read(PATH_BIN_DIR "ls/", scratch, sizeof(scratch)) >= 0) {
+                klog_puts("[m53] a trailing slash on a regular file was accepted\n");
+                all_ok = 0;
+            }
+        }
+
         /* And the one thing the launcher's own behavior now rests on:
          * a data file is not in /bin. */
         if (vfs_exists(PATH_BIN_DIR "settings.conf") || !vfs_exists(PATH_SETTINGS)) {
@@ -3440,8 +3573,10 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M53 directory self-test: the namespace is not a tree");
         }
         klog_puts("[m53] directories created, entered, grown past one block, listed and read "
-                   "back by path; the same name in two directories staying two files; eight "
-                   "malformed or escaping paths refused; and " PATH_BIN " holding exactly the "
+                   "back by path; the same name in two directories staying two files; seven "
+                   "malformed or escaping paths refused (and, since M60, a trailing slash "
+                   "honoured on a directory and still refused on a file); and " PATH_BIN
+                   " holding exactly the "
                    "programs this build ships self-test passed (");
         klog_put_hex32((uint32_t)found);
         klog_puts(" programs seeded).\n\n");
@@ -3489,16 +3624,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * cursor parks where it last clicked, so neither click point is
      * within 8px of any pixel read afterwards. */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *z_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !z_image) {
-            panic("out of memory reading compositor/wm_zorder back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t z_size = vfs_read("/bin/wm_zorder", z_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || z_size < 0) {
-            panic("vfs_read: compositor/wm_zorder missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t z_size_bytes = 0;
+        uint8_t *z_image = read_program("/bin/wm_zorder", &z_size_bytes);
+        int64_t z_size = (int64_t)z_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -3650,16 +3781,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * syscall.c's user_range_ok exempts kernel threads, so every row run
      * from here would take that early return and prove nothing. */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *fault_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !fault_image) {
-            panic("out of memory reading compositor/wm_faulter back from disk");
-        }
-        int64_t comp_size = vfs_read("/bin/compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t fault_size = vfs_read("/bin/wm_faulter", fault_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || fault_size < 0) {
-            panic("vfs_read: compositor/wm_faulter missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t fault_size_bytes = 0;
+        uint8_t *fault_image = read_program("/bin/wm_faulter", &fault_size_bytes);
+        int64_t fault_size = (int64_t)fault_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
@@ -3767,14 +3894,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * wrongly accepted, and prints each one to its stdout - which is
          * this klog, so a failure names itself in the same log this
          * message is in. */
-        uint8_t *bad_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!bad_image) {
-            panic("out of memory reading badptr back from disk");
-        }
-        int64_t bad_size = vfs_read("/bin/badptr", bad_image, LEANFS_MAX_FILE_SIZE);
-        if (bad_size < 0) {
-            panic("vfs_read: badptr missing - should exist, just seeded");
-        }
+        size_t bad_size_bytes = 0;
+        uint8_t *bad_image = read_program("/bin/badptr", &bad_size_bytes);
+        int64_t bad_size = (int64_t)bad_size_bytes;
         task_t *bad_task = process_spawn("badptr", bad_image, (size_t)bad_size, "");
         kfree(bad_image);
         long bad_exit = do_syscall(SYS_wait, (uint64_t)bad_task->id, 0, 0);
@@ -3813,14 +3935,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * The frame comparison is the one that would have failed loudly
      * before M54, at roughly fifteen frames a round. */
     {
-        uint8_t *hello_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!hello_image) {
-            panic("out of memory reading hello back from disk");
-        }
-        int64_t hello_size = vfs_read(PATH_BIN_DIR "hello", hello_image, LEANFS_MAX_FILE_SIZE);
-        if (hello_size < 0) {
-            panic("vfs_read: hello missing - should exist, just seeded");
-        }
+        size_t hello_size_bytes = 0;
+        uint8_t *hello_image = read_program(PATH_BIN_DIR "hello", &hello_size_bytes);
+        int64_t hello_size = (int64_t)hello_size_bytes;
 
         const int ROUNDS = MAX_TASKS * 3;
 
@@ -3942,16 +4059,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * by the interactive test. What this proves is the piece that had to
      * exist first: that a client can survive one. */
     {
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *z_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !z_image) {
-            panic("out of memory reading compositor/wm_zorder back from disk");
-        }
-        int64_t comp_size = vfs_read(PATH_BIN_DIR "compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t z_size = vfs_read(PATH_BIN_DIR "wm_zorder", z_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || z_size < 0) {
-            panic("vfs_read: compositor/wm_zorder missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t z_size_bytes = 0;
+        uint8_t *z_image = read_program(PATH_BIN_DIR "wm_zorder", &z_size_bytes);
+        int64_t z_size = (int64_t)z_size_bytes;
 
         task_t *comp1 = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         pit_sleep_ms(300);
@@ -4168,18 +4281,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         static const char pasted[] = "PASTED";
         do_syscall(SYS_clipboard_set, (uint64_t)pasted, sizeof(pasted) - 1, 0);
 
-        uint8_t *comp_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *ed_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        uint8_t *term_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-        if (!comp_image || !ed_image || !term_image) {
-            panic("out of memory reading compositor/text_editor/gui_terminal back from disk");
-        }
-        int64_t comp_size = vfs_read(PATH_BIN_DIR "compositor", comp_image, LEANFS_MAX_FILE_SIZE);
-        int64_t ed_size = vfs_read(PATH_BIN_DIR "text_editor", ed_image, LEANFS_MAX_FILE_SIZE);
-        int64_t term_size = vfs_read(PATH_BIN_DIR "gui_terminal", term_image, LEANFS_MAX_FILE_SIZE);
-        if (comp_size < 0 || ed_size < 0 || term_size < 0) {
-            panic("vfs_read: compositor/text_editor/gui_terminal missing - should exist, just seeded");
-        }
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t ed_size_bytes = 0;
+        uint8_t *ed_image = read_program(PATH_BIN_DIR "text_editor", &ed_size_bytes);
+        int64_t ed_size = (int64_t)ed_size_bytes;
+        size_t term_size_bytes = 0;
+        uint8_t *term_image = read_program(PATH_BIN_DIR "gui_terminal", &term_size_bytes);
+        int64_t term_size = (int64_t)term_size_bytes;
 
         /* M56: start from nothing, every time. The serial harness boots a
          * snapshot disk so every run is a fresh filesystem - but a
@@ -4322,6 +4432,658 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "self-test passed (12/12 checks).\n\n");
     }
 
+    /* M58 self-test: the *desktop's* half of a resolution change, which
+     * is everything the kernel's own mode-set self-test above
+     * deliberately does not touch. Driven exactly the way settings.c
+     * drives it - a WM_ACTION_SET_MODE on the action pipe - because the
+     * point is the path, not the syscall.
+     *
+     * Three claims:
+     *
+     *   1. The taskbar re-spans the screen. A panel's width is the
+     *      compositor's own decision (wm_create_request_t.width is
+     *      documented as ignored for one), and its buffer was allocated
+     *      for the old display - so the panel is one of the two clients
+     *      that has to be genuinely *resized* rather than merely
+     *      notified. Reading both ends of the bar at the new width is
+     *      what proves the reallocation actually happened; a bar that
+     *      kept its old buffer would simply stop short.
+     *   2. The mode really changed underneath it (SYS_fb_info's answer).
+     *   3. **The countdown works.** This test never confirms, waits the
+     *      revert out, and checks that the desktop came back at the old
+     *      size with the bar spanning it again. That path only ever runs
+     *      when something has already gone wrong, which is exactly why it
+     *      is the one worth a test - and it is the whole reason a person
+     *      can try a resolution on a machine with no second screen to
+     *      recover from.
+     *
+     * Skipped on an adapter with no runtime mode setting, same as the
+     * kernel-side test above.
+     */
+    if (dispi_available()) {
+        display_mode_t list[DISPLAY_MAX_MODES];
+        int n = dispi_get_modes(list, DISPLAY_MAX_MODES);
+        uint32_t boot_w = fb_width(), boot_h = fb_height();
+        /* The smallest offered mode that is not the current one -
+         * shrinking is the direction that exercises the clamps, and it is
+         * the direction a person hits by accident. */
+        int pick = -1;
+        for (int i = 0; i < n; i++) {
+            if (list[i].width == boot_w && list[i].height == boot_h) {
+                continue;
+            }
+            if (pick < 0 || (uint64_t)list[i].width * list[i].height <
+                             (uint64_t)list[pick].width * list[pick].height) {
+                pick = i;
+            }
+        }
+        if (pick < 0) {
+            panic("M58 desktop self-test: no offered mode other than the one already running");
+        }
+
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        int64_t comp_size = (int64_t)comp_size_bytes;
+        size_t shell_size_bytes = 0;
+        uint8_t *shell_image = read_program("/bin/desktop_shell", &shell_size_bytes);
+        int64_t shell_size = (int64_t)shell_size_bytes;
+        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        kfree(comp_image);
+        pit_sleep_ms(200);
+        task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
+        kfree(shell_image);
+        pit_sleep_ms(700);
+
+        /* PANEL_HEIGHT is 32 and the bar's top two rows are its own
+         * margin strip, above the button row - so this row is plain
+         * panel fill at both ends, which is what makes "did it span"
+         * answerable by comparing two pixels rather than by knowing a
+         * blend. */
+        const uint32_t bar_row_from_bottom = 30;
+        uint32_t before_left  = fb_get_pixel(2, boot_h - bar_row_from_bottom);
+        uint32_t before_right = fb_get_pixel(boot_w - 3, boot_h - bar_row_from_bottom);
+
+        int action_fds[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+            panic("M58 desktop self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
+        }
+        wm_action_request_t req;
+        k_memset(&req, 0, sizeof(req));
+        req.window_id = -1;
+        req.action = WM_ACTION_SET_MODE;
+        req.value = wm_pack_mode(list[pick].width, list[pick].height);
+        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        /* Long enough for the compositor to change the mode, for the
+         * panel to notice its buffer is gone, re-handshake and draw a
+         * frame at the new width. */
+        pit_sleep_ms(2500);
+
+        uint32_t after_w = fb_width(), after_h = fb_height();
+        uint32_t after_left = 0, after_right = 0, after_beyond_old = 0, after_desktop = 0;
+        if (after_w >= 8 && after_h > bar_row_from_bottom) {
+            after_left  = fb_get_pixel(2, after_h - bar_row_from_bottom);
+            after_right = fb_get_pixel(after_w - 3, after_h - bar_row_from_bottom);
+            after_beyond_old = fb_get_pixel(after_w / 2, after_h - bar_row_from_bottom);
+            /* Well above the bar - bare desktop, and the control that
+             * stops "the bar spans the screen" from being satisfied by
+             * *no bar at all*, which is uniform too. The first version of
+             * this test passed on exactly that. */
+            after_desktop = fb_get_pixel(after_w / 2, after_h / 2);
+        }
+
+        /* Nothing confirms. The revert deadline is WM_MODE_REVERT_MS from
+         * the moment the change landed, so this waits it out plus enough
+         * for the panel to re-handshake a second time. */
+        pit_sleep_ms(WM_MODE_REVERT_MS + 2500);
+
+        uint32_t back_w = fb_width(), back_h = fb_height();
+        uint32_t back_left = 0, back_right = 0;
+        if (back_w == boot_w && back_h == boot_h) {
+            back_left  = fb_get_pixel(2, boot_h - bar_row_from_bottom);
+            back_right = fb_get_pixel(boot_w - 3, boot_h - bar_row_from_bottom);
+        }
+
+        selftest_reap(shell_task);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        int all_ok = 1;
+        if (before_left != before_right) {
+            klog_puts("[m58] the taskbar did not span the boot display to begin with\n");
+            all_ok = 0;
+        }
+        if (after_w != list[pick].width || after_h != list[pick].height) {
+            klog_puts("[m58] WM_ACTION_SET_MODE did not change the mode: 0x");
+            klog_put_hex32(after_w);
+            klog_puts("x");
+            klog_put_hex32(after_h);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (after_left != after_right || after_left != after_beyond_old) {
+            klog_puts("[m58] the taskbar did not re-span the new display width - its buffer was not reallocated\n");
+            all_ok = 0;
+        }
+        if (after_left == after_desktop) {
+            klog_puts("[m58] the taskbar row is indistinguishable from bare desktop at the new size - there is no bar there\n");
+            all_ok = 0;
+        }
+        if (back_w != boot_w || back_h != boot_h) {
+            klog_puts("[m58] the unconfirmed mode was never reverted - 0x");
+            klog_put_hex32(back_w);
+            klog_puts("x");
+            klog_put_hex32(back_h);
+            klog_puts(" is still up\n");
+            all_ok = 0;
+        }
+        if (back_left != back_right || back_left != before_left) {
+            klog_puts("[m58] after the revert the taskbar does not span the restored display: before 0x");
+            klog_put_hex32(before_left);
+            klog_puts("/0x");
+            klog_put_hex32(before_right);
+            klog_puts(" after 0x");
+            klog_put_hex32(after_left);
+            klog_puts("/0x");
+            klog_put_hex32(after_right);
+            klog_puts(" back 0x");
+            klog_put_hex32(back_left);
+            klog_puts("/0x");
+            klog_put_hex32(back_right);
+            klog_putc('\n');
+            all_ok = 0;
+        }
+        if (!all_ok) {
+            panic("M58 desktop self-test: a resolution change did not carry the desktop with it");
+        }
+        klog_puts("[m58] a resolution change carrying the whole desktop with it - panels "
+                   "re-spanning the new width, and an unconfirmed mode reverting on its own "
+                   "deadline - self-test passed.\n\n");
+    }
+
+    /* M59 self-test: descriptors, a file bigger than the old ceiling, a
+     * clock, and the cost of a save.
+     *
+     * Six claims, and the last two are the ones a bare "it worked" check
+     * would miss:
+     *
+     *   1. SYS_open/SYS_lseek/SYS_read/SYS_write round trip - written in
+     *      pieces, read back in pieces, at offsets.
+     *   2. A file past the 72 KiB ceiling double-indirect blocks
+     *      replaced. 200 KiB is comfortably into the second level, which
+     *      is the part that did not exist before this milestone, and it
+     *      is verified by content rather than by size: a block-mapping
+     *      bug that returned the *wrong* block would produce a file of
+     *      exactly the right length full of the wrong bytes.
+     *   3. Every one of those blocks comes back on unlink. A leak here
+     *      is 400 blocks a go, which is the kind of thing that only shows
+     *      up as a full disk three milestones later.
+     *   4. A written file carries the date it was written.
+     *   5. **The metadata write count for a one-byte change**, which is
+     *      the user-facing performance bug this milestone set out to fix:
+     *      every flush used to write the superblock, the whole inode
+     *      table and the whole bitmap - 32 PIO sector writes whether one
+     *      byte changed or seventy kilobytes did. Asserted as a *count*
+     *      rather than as a latency, because latency is a property of the
+     *      host and this is a property of the code.
+     *   6. SYS_rmdir, including its refusal to remove a directory that
+     *      still holds something.
+     */
+    {
+        int all_ok = 1;
+
+        /* 1. descriptors */
+        static const char PART_A[] = "hello ";
+        static const char PART_B[] = "descriptors";
+        long fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59fd"),
+                              OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0);
+        if (fd < 0) {
+            klog_puts("[m59] SYS_open could not create a file\n");
+            all_ok = 0;
+        } else {
+            do_syscall(SYS_write, (uint64_t)fd, (uint64_t)PART_A, sizeof(PART_A) - 1);
+            do_syscall(SYS_write, (uint64_t)fd, (uint64_t)PART_B, sizeof(PART_B) - 1);
+            do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+
+            fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59fd"), OPEN_READ, 0);
+            char back[32];
+            k_memset(back, 0, sizeof(back));
+            /* Seek to the join between the two writes and read across it -
+             * a seek that landed anywhere else would still return
+             * *something*, which is why the assertion is on the bytes. */
+            long pos = do_syscall(SYS_lseek, (uint64_t)fd, 6, SEEK_SET);
+            long n = do_syscall(SYS_read, (uint64_t)fd, (uint64_t)back, 11);
+            if (pos != 6 || n != 11 || k_strcmp(back, "descriptors") != 0) {
+                klog_puts("[m59] a seek-then-read did not land where it was told to\n");
+                all_ok = 0;
+            }
+            long end = do_syscall(SYS_lseek, (uint64_t)fd, 0, SEEK_END);
+            if (end != (long)(sizeof(PART_A) - 1 + sizeof(PART_B) - 1)) {
+                klog_puts("[m59] SEEK_END does not agree with what was written\n");
+                all_ok = 0;
+            }
+            if (do_syscall(SYS_read, (uint64_t)fd, (uint64_t)back, 4) != 0) {
+                klog_puts("[m59] a read at the end of a file returned data\n");
+                all_ok = 0;
+            }
+            do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+        }
+
+        /* 1b. a hole, which is where a byte-range write is easiest to get
+         * wrong in two opposite ways at once: zero the block too eagerly
+         * and the bytes before the seek are lost, read it back too
+         * eagerly and a deleted file's contents leak into the gap. Both
+         * live in the same partial-block branch, so one file exercises
+         * both - the write lands past the end of a block that still holds
+         * real bytes below it. */
+        {
+            fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59hole"),
+                             OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0);
+            do_syscall(SYS_write, (uint64_t)fd, (uint64_t)"ABC", 3);
+            do_syscall(SYS_lseek, (uint64_t)fd, 300, SEEK_SET);
+            do_syscall(SYS_write, (uint64_t)fd, (uint64_t)"Z", 1);
+            do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+
+            static uint8_t hole[512];
+            k_memset(hole, 0xAA, sizeof(hole));
+            fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59hole"), OPEN_READ, 0);
+            long got = do_syscall(SYS_read, (uint64_t)fd, (uint64_t)hole, sizeof(hole));
+            do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+            if (got != 301) {
+                klog_puts("[m59] a write past the end did not extend the file to that point\n");
+                all_ok = 0;
+            } else if (hole[0] != 'A' || hole[1] != 'B' || hole[2] != 'C') {
+                klog_puts("[m59] writing past the end of a block erased the bytes before it\n");
+                all_ok = 0;
+            } else if (hole[300] != 'Z') {
+                klog_puts("[m59] the byte written past the end is not where it was put\n");
+                all_ok = 0;
+            } else {
+                for (int i = 3; i < 300; i++) {
+                    if (hole[i] != 0) {
+                        klog_puts("[m59] the hole is not zeros - a recycled block leaked into it\n");
+                        all_ok = 0;
+                        break;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59hole"), 0, 0);
+        }
+
+        /* 2 + 3. a file past the old ceiling, and its blocks coming back */
+        {
+            uint32_t free_before = vfs_free_blocks();
+            const uint32_t BIG = 200u * 1024u;   /* well past the old 72 KiB cap */
+            static uint8_t chunk[1024];
+            fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59big"),
+                             OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0);
+            if (fd < 0) {
+                klog_puts("[m59] could not create the large file this test is about\n");
+                all_ok = 0;
+            } else {
+                for (uint32_t off = 0; off < BIG; off += sizeof(chunk)) {
+                    /* Every block distinguishable from every other, so a
+                     * mis-mapped block is a content mismatch rather than
+                     * an invisible one. */
+                    for (size_t i = 0; i < sizeof(chunk); i++) {
+                        chunk[i] = (uint8_t)((off / sizeof(chunk)) + i);
+                    }
+                    if (do_syscall(SYS_write, (uint64_t)fd, (uint64_t)chunk, sizeof(chunk)) != (long)sizeof(chunk)) {
+                        klog_puts("[m59] a write into the double-indirect range failed\n");
+                        all_ok = 0;
+                        break;
+                    }
+                }
+                do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+
+                os_stat_t st;
+                if (do_syscall(SYS_stat, (uint64_t)(PATH_TMP_DIR "m59big"), (uint64_t)&st, 0) != 0 ||
+                    st.size != BIG) {
+                    klog_puts("[m59] the large file is not the size it was written at\n");
+                    all_ok = 0;
+                }
+                fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59big"), OPEN_READ, 0);
+                static uint8_t verify[1024];
+                for (uint32_t off = 0; off < BIG && all_ok; off += sizeof(verify)) {
+                    if (do_syscall(SYS_read, (uint64_t)fd, (uint64_t)verify, sizeof(verify)) != (long)sizeof(verify)) {
+                        klog_puts("[m59] the large file read short\n");
+                        all_ok = 0;
+                        break;
+                    }
+                    for (size_t i = 0; i < sizeof(verify); i++) {
+                        if (verify[i] != (uint8_t)((off / sizeof(verify)) + i)) {
+                            klog_puts("[m59] the large file read back the wrong bytes - a block mapped to the wrong place\n");
+                            all_ok = 0;
+                            break;
+                        }
+                    }
+                }
+                do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+            }
+            if (do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59big"), 0, 0) != 0) {
+                klog_puts("[m59] could not unlink the large file\n");
+                all_ok = 0;
+            }
+            uint32_t free_after = vfs_free_blocks();
+            if (free_after != free_before) {
+                klog_puts("[m59] the large file did not return every block: 0x");
+                klog_put_hex32(free_before);
+                klog_puts(" free before, 0x");
+                klog_put_hex32(free_after);
+                klog_puts(" after\n");
+                all_ok = 0;
+            }
+        }
+
+        /* 4. the date a file was written */
+        {
+            os_stat_t st;
+            uint32_t now = rtc_now();
+            if (do_syscall(SYS_stat, (uint64_t)(PATH_TMP_DIR "m59fd"), (uint64_t)&st, 0) != 0) {
+                klog_puts("[m59] SYS_stat failed on a file that exists\n");
+                all_ok = 0;
+            } else if (rtc_available()) {
+                /* Within a minute of now, which is the honest assertion:
+                 * this test wrote the file seconds ago and the clock has
+                 * one-second resolution. */
+                uint32_t age = now > st.mtime ? now - st.mtime : st.mtime - now;
+                if (st.mtime == 0 || age > 60) {
+                    klog_puts("[m59] a file written moments ago is not dated moments ago\n");
+                    all_ok = 0;
+                }
+            } else if (st.mtime != 0) {
+                klog_puts("[m59] a machine with no clock dated a file anyway\n");
+                all_ok = 0;
+            }
+        }
+
+        /* 5. what a one-byte change costs */
+        {
+            uint32_t before = leanfs_meta_writes();
+            fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59fd"), OPEN_WRITE, 0);
+            do_syscall(SYS_lseek, (uint64_t)fd, 0, SEEK_SET);
+            do_syscall(SYS_write, (uint64_t)fd, (uint64_t)"H", 1);
+            do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+            uint32_t cost = leanfs_meta_writes() - before;
+            /* One inode-table sector. The whole-table flush this replaced
+             * was 31, so the bound is set at 4 - loose enough not to be a
+             * tripwire on an inode that happens to straddle a sector,
+             * tight enough that a return to whole-table writes fails it
+             * immediately. */
+            if (cost > 4) {
+                klog_puts("[m59] a one-byte change cost 0x");
+                klog_put_hex32(cost);
+                klog_puts(" metadata sector writes - dirty-sector tracking is not working\n");
+                all_ok = 0;
+            }
+        }
+
+        /* 6. rmdir, and its refusal */
+        {
+            if (do_syscall(SYS_mkdir, (uint64_t)(PATH_TMP_DIR "m59dir"), 0, 0) != 0) {
+                klog_puts("[m59] could not create the directory this test is about\n");
+                all_ok = 0;
+            }
+            if (vfs_write(PATH_TMP_DIR "m59dir/inside", "x", 1) != 0) {
+                klog_puts("[m59] could not put a file inside the test directory\n");
+                all_ok = 0;
+            }
+            if (do_syscall(SYS_rmdir, (uint64_t)(PATH_TMP_DIR "m59dir"), 0, 0) == 0) {
+                klog_puts("[m59] rmdir removed a directory that still held a file\n");
+                all_ok = 0;
+            }
+            if (do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59dir/inside"), 0, 0) != 0 ||
+                do_syscall(SYS_rmdir, (uint64_t)(PATH_TMP_DIR "m59dir"), 0, 0) != 0) {
+                klog_puts("[m59] rmdir refused a directory that was empty\n");
+                all_ok = 0;
+            }
+            if (vfs_exists(PATH_TMP_DIR "m59dir")) {
+                klog_puts("[m59] the removed directory is still there\n");
+                all_ok = 0;
+            }
+        }
+
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59fd"), 0, 0);
+
+        if (!all_ok) {
+            panic("M59 self-test: descriptors, large files, timestamps or metadata cost are wrong");
+        }
+        klog_puts("[m59] descriptors (open/lseek/read/write/close), a 200 KiB file through "
+                   "double-indirect blocks read back byte for byte and every block returned, "
+                   "a real mtime, rmdir, and a one-byte save costing one metadata sector "
+                   "instead of thirty-one - self-test passed.\n\n");
+    }
+
+    /* M60 self-test: a real argument vector, a real command line, and an
+     * editor that can split a line.
+     *
+     * Four claims, and each one is a thing this OS could not express one
+     * milestone ago:
+     *
+     *   1. **`cp a b`.** Two arguments, which is the whole reason argv
+     *      had to become real - `SYS_spawn(path, arg)` carried one
+     *      string, so a program could be told one thing. The assertion is
+     *      on the copied bytes rather than on the exit code: a `cp` that
+     *      created an empty file would exit 0 too.
+     *   2. `ls /bin > out.txt` typed into a real terminal with real
+     *      injected keys, and the file read back. Redirection is exactly
+     *      what M59's descriptors were for, and the terminal has had a
+     *      `dup2`'d pipe on fd 1 since it was written - this is the same
+     *      mechanism made reachable from a command line.
+     *   3. `ls /bin | cat > out.txt`, which additionally proves the thing
+     *      no test could have proved before M59: that a pipe *ends*. `cat`
+     *      reading standard input stops when the last writer goes away,
+     *      and "the last writer went away" only became a knowable fact
+     *      when pipe ends got a refcount.
+     *   4. A paragraph typed into the editor with Enter in the middle of
+     *      a line, saved, and compared byte for byte. Enter splitting the
+     *      line is M60's headline editor change; comparing the file
+     *      rather than the screen is what makes it an assertion about
+     *      what a person would actually have got.
+     */
+    {
+        int all_ok = 1;
+
+        /* ---- (1) cp, with two arguments ---- */
+        {
+            static const char body[] = "argv is real now\n";
+            vfs_unlink(PATH_TMP_DIR "m60src");
+            vfs_unlink(PATH_TMP_DIR "m60dst");
+            if (vfs_write(PATH_TMP_DIR "m60src", body, sizeof(body) - 1) != 0) {
+                klog_puts("[m60] could not create the file cp is about to copy\n");
+                all_ok = 0;
+            }
+            size_t cp_bytes = 0;
+            uint8_t *cp_image = read_program(PATH_BIN_DIR "cp", &cp_bytes);
+            const char *cp_argv[] = { PATH_BIN_DIR "cp", PATH_TMP_DIR "m60src", PATH_TMP_DIR "m60dst", 0 };
+            task_t *cp_task = process_spawnv("cp", cp_image, cp_bytes, cp_argv);
+            kfree(cp_image);
+            if (!cp_task) {
+                klog_puts("[m60] could not spawn cp\n");
+                all_ok = 0;
+            } else if (do_syscall(SYS_wait, (uint64_t)cp_task->id, 0, 0) != 0) {
+                klog_puts("[m60] cp exited nonzero - it did not get two arguments\n");
+                all_ok = 0;
+            } else {
+                static char copied[64];
+                k_memset(copied, 0, sizeof(copied));
+                int64_t n = vfs_read(PATH_TMP_DIR "m60dst", copied, sizeof(copied) - 1);
+                if (n != (int64_t)(sizeof(body) - 1) || k_strcmp(copied, body) != 0) {
+                    klog_puts("[m60] cp produced the wrong bytes\n");
+                    all_ok = 0;
+                }
+            }
+        }
+
+        /* ---- (2) + (3) a command line, through a real terminal ---- */
+        {
+            size_t comp_bytes = 0;
+            uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+            size_t term_bytes = 0;
+            uint8_t *term_image = read_program(PATH_BIN_DIR "gui_terminal", &term_bytes);
+
+            vfs_unlink(PATH_TMP_DIR "m60out");
+            vfs_unlink(PATH_TMP_DIR "m60pipe");
+            vfs_unlink(PATH_TMP_DIR "m60tab");
+
+            task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+            kfree(comp_image);
+            pit_sleep_ms(300);
+            task_t *term_task = process_spawn("gui_terminal", term_image, term_bytes, "");
+            kfree(term_image);
+            pit_sleep_ms(900);
+
+            selftest_type("ls /bin > " PATH_TMP_DIR "m60out");
+            keyboard_inject('\n', 0);
+            pit_sleep_ms(2500);
+
+            selftest_type("ls /bin | cat > " PATH_TMP_DIR "m60pipe");
+            keyboard_inject('\n', 0);
+            pit_sleep_ms(3500);
+
+            /* Tab completion, checked by its effect rather than by
+             * reading the screen: "/b" has exactly one completion in the
+             * root, so Tab must turn `ls /b` into `ls /bin/` - and a
+             * listing that comes back holding "compositor" is proof it
+             * did. A Tab that did nothing would list the root instead,
+             * which holds no such name. */
+            selftest_type("ls /b");
+            keyboard_inject('\t', 0);
+            pit_sleep_ms(300);
+            selftest_type(" > " PATH_TMP_DIR "m60tab");
+            keyboard_inject('\n', 0);
+            pit_sleep_ms(2500);
+
+            selftest_reap(term_task);
+            selftest_reap(comp_task);
+            console_init();
+            klog_use_console();
+
+            static char redirected[2048];
+            k_memset(redirected, 0, sizeof(redirected));
+            int64_t rn = vfs_read(PATH_TMP_DIR "m60out", redirected, sizeof(redirected) - 1);
+            /* "compositor" is a program this kernel seeded into /bin
+             * itself, so its presence is a fact about the listing rather
+             * than about whatever happens to be on disk. */
+            if (rn <= 0 || !k_strstr(redirected, "compositor")) {
+                klog_puts("[m60] `ls /bin > file` did not put the listing in the file\n");
+                all_ok = 0;
+            }
+
+            static char completed[2048];
+            k_memset(completed, 0, sizeof(completed));
+            int64_t cn = vfs_read(PATH_TMP_DIR "m60tab", completed, sizeof(completed) - 1);
+            if (cn <= 0 || !k_strstr(completed, "compositor")) {
+                klog_puts("[m60] Tab did not complete `/b` to `/bin/` - the listing is of the wrong directory\n");
+                all_ok = 0;
+            }
+
+            static char piped[2048];
+            k_memset(piped, 0, sizeof(piped));
+            int64_t pn = vfs_read(PATH_TMP_DIR "m60pipe", piped, sizeof(piped) - 1);
+            if (pn <= 0 || !k_strstr(piped, "compositor")) {
+                klog_puts("[m60] `ls /bin | cat > file` produced nothing - the pipe never ended\n");
+                all_ok = 0;
+            } else if (pn != rn) {
+                klog_puts("[m60] the piped listing is a different length from the redirected one: 0x");
+                klog_put_hex32((uint32_t)rn);
+                klog_puts(" vs 0x");
+                klog_put_hex32((uint32_t)pn);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+
+        /* ---- (4) a paragraph, with Enter in the middle of a line ---- */
+        {
+            size_t comp_bytes = 0;
+            uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+            size_t ed_bytes = 0;
+            uint8_t *ed_image = read_program(PATH_BIN_DIR "text_editor", &ed_bytes);
+
+            vfs_unlink(PATH_TMP_DIR "m60para");
+
+            task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+            kfree(comp_image);
+            pit_sleep_ms(300);
+            task_t *ed_task = process_spawn("text_editor", ed_image, ed_bytes, PATH_TMP_DIR "m60para");
+            kfree(ed_image);
+            pit_sleep_ms(900);
+
+            /* Type "ONETWO", put the cursor back between them, and press
+             * Enter - which under M56's editor appended an empty line at
+             * the *end* of the buffer and left "ONETWO" intact. If Enter
+             * splits, the file is "ONE\nTWO\n". */
+            selftest_type("ONETWO");
+            for (int i = 0; i < 3; i++) {
+                keyboard_inject((char)KBD_KEY_LEFT, 0);
+            }
+            pit_sleep_ms(200);
+            keyboard_inject('\n', 0);
+            pit_sleep_ms(200);
+            keyboard_inject('S', KBD_MOD_CTRL);
+            pit_sleep_ms(600);
+
+            static char para[64];
+            k_memset(para, 0, sizeof(para));
+            int64_t pl = vfs_read(PATH_TMP_DIR "m60para", para, sizeof(para) - 1);
+
+            /* And then undo it, which is the half M56 said made this hard:
+             * a split is a structural edit and its inverse is a join. One
+             * Ctrl+Z must put "ONETWO" back on one line. */
+            keyboard_inject('Z', KBD_MOD_CTRL);
+            pit_sleep_ms(200);
+            keyboard_inject('S', KBD_MOD_CTRL);
+            pit_sleep_ms(600);
+            static char undone[64];
+            k_memset(undone, 0, sizeof(undone));
+            int64_t ul = vfs_read(PATH_TMP_DIR "m60para", undone, sizeof(undone) - 1);
+
+            /* And redo, which M60 added and which must land back exactly
+             * where the undo started. */
+            keyboard_inject('Y', KBD_MOD_CTRL);
+            pit_sleep_ms(200);
+            keyboard_inject('S', KBD_MOD_CTRL);
+            pit_sleep_ms(600);
+            static char redone[64];
+            k_memset(redone, 0, sizeof(redone));
+            int64_t rl = vfs_read(PATH_TMP_DIR "m60para", redone, sizeof(redone) - 1);
+
+            selftest_reap(ed_task);
+            selftest_reap(comp_task);
+            console_init();
+            klog_use_console();
+
+            if (pl != 8 || k_strcmp(para, "ONE\nTWO\n") != 0) {
+                klog_puts("[m60] Enter did not split the line - saved 0x");
+                klog_put_hex32((uint32_t)pl);
+                klog_puts(" bytes: \"");
+                klog_puts(para);
+                klog_puts("\"\n");
+                all_ok = 0;
+            }
+            if (ul != 7 || k_strcmp(undone, "ONETWO\n") != 0) {
+                klog_puts("[m60] one undo did not join the split back - saved \"");
+                klog_puts(undone);
+                klog_puts("\"\n");
+                all_ok = 0;
+            }
+            if (rl != 8 || k_strcmp(redone, "ONE\nTWO\n") != 0) {
+                klog_puts("[m60] redo did not put the split back - saved \"");
+                klog_puts(redone);
+                klog_puts("\"\n");
+                all_ok = 0;
+            }
+        }
+
+        if (!all_ok) {
+            panic("M60 self-test: argv, the command line, or the editor's structural edits are wrong");
+        }
+        klog_puts("[m60] a real argument vector (cp with two arguments), a command line with "
+                   "redirection and a pipe that ends, and an editor whose Enter splits a line - "
+                   "with undo and redo inverting it - self-test passed.\n\n");
+    }
+
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
      * exactly where a user program would reach them. Before this
      * milestone the middle case here didn't fail at all - it panicked the
@@ -4448,14 +5210,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     klog_put_hex32((uint32_t)sched_task_count());
     klog_puts(").\n");
 
-    uint8_t *init_image = (uint8_t *)kmalloc(LEANFS_MAX_FILE_SIZE);
-    if (!init_image) {
-        panic("out of memory reading init back from disk");
-    }
-    int64_t init_size = vfs_read("/bin/init", init_image, LEANFS_MAX_FILE_SIZE);
-    if (init_size < 0) {
-        panic("vfs_read(\"init\") failed - should exist, just seeded");
-    }
+    size_t init_size_bytes = 0;
+    uint8_t *init_image = read_program("/bin/init", &init_size_bytes);
+    int64_t init_size = (int64_t)init_size_bytes;
     process_spawn("init", init_image, (size_t)init_size, "");
     kfree(init_image);
 

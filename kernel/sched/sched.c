@@ -8,6 +8,8 @@
 #include "arch/x86_64/io.h" /* irq_save_disable/irq_restore */
 #include "arch/x86_64/smp.h"
 #include "drivers/pit.h"
+#include "fs/openfile.h"
+#include "ipc/pipe.h"
 #include "ipc/shm.h" /* shm_free_by_owner - see task_exit_with_code */
 #include "lib/spinlock.h"
 #include "mm/heap.h"
@@ -226,6 +228,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
      * records who to attribute this task to for SYS_wait(-1). */
     for (int i = 0; i < MAX_FDS; i++) {
         t->fds[i] = caller->fds[i];
+        fd_retain(&t->fds[i]); /* M59: the child holds these too - see fd_retain */
     }
     t->parent_id = caller->id;
     t->pgid = caller->pgid;
@@ -381,6 +384,13 @@ void task_exit_with_code(int code) {
      * below) - so this is the one place that's guaranteed to run exactly
      * once per task, right as it leaves the scheduler for good. */
     shm_free_by_owner(t->id);
+    /* M59: and every descriptor it still holds. Until this milestone
+     * there was nothing to give back - a pipe was not refcounted and
+     * there were no file descriptors at all - so a task simply
+     * disappeared with its table. Now dropping them is what tells a
+     * reader that the last writer went away, which is the whole point of
+     * the refcount. */
+    sched_release_fds(t);
 
     /* M54: and the address space, which nothing has ever reclaimed - M29
      * documented the leak, M50 measured it at ~15 frames per dead
@@ -514,10 +524,57 @@ void sched_reap_slot(task_t *t) {
     }
 }
 
+/* M59: the one place a descriptor stops being held. Before this
+ * milestone "closing" an fd was blanking a slot and nothing else, because
+ * neither of the two things a slot can point at was reference counted.
+ * Both are now, and every path that drops a slot - SYS_close, a task
+ * exiting, a slot being recycled, SYS_dup2 overwriting one - has to come
+ * through here or the count is a lie. */
+void fd_release(fd_slot_t *slot) {
+    switch (slot->type) {
+    case FD_PIPE_READ:
+        pipe_unref_read(slot->pipe);
+        break;
+    case FD_PIPE_WRITE:
+        pipe_unref_write(slot->pipe);
+        break;
+    case FD_FILE:
+        openfile_unref(slot->file);
+        break;
+    default:
+        break;
+    }
+    slot->type = FD_NONE;
+    slot->pipe = (struct pipe *)0;
+}
+
+/* M59: the mirror image, for a slot being copied rather than dropped - a
+ * spawned task inheriting its parent's whole table, and SYS_dup2. */
+void fd_retain(const fd_slot_t *slot) {
+    switch (slot->type) {
+    case FD_PIPE_READ:
+        pipe_ref_read(slot->pipe);
+        break;
+    case FD_PIPE_WRITE:
+        pipe_ref_write(slot->pipe);
+        break;
+    case FD_FILE:
+        openfile_ref(slot->file);
+        break;
+    default:
+        break;
+    }
+}
+
+void sched_release_fds(task_t *t) {
+    for (int i = 0; i < MAX_FDS; i++) {
+        fd_release(&t->fds[i]);
+    }
+}
+
 void sched_reset_fds_to_std(task_t *t) {
     for (int i = 0; i < MAX_FDS; i++) {
-        t->fds[i].type = FD_NONE;
-        t->fds[i].pipe = (struct pipe *)0;
+        fd_release(&t->fds[i]);
     }
     t->fds[0].type = FD_STDIN;
     t->fds[1].type = FD_STDOUT;

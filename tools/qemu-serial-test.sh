@@ -94,7 +94,14 @@ set -euo pipefail
 # M48: 64 -> 72. Proving a toast is gone *by its own deadline* means
 # waiting out that deadline (TOAST_TTL_MS, 4s) and then some - there is no
 # shorter way to check that something stopped being on screen on its own.
-SECONDS_TO_RUN="${1:-300}"
+#
+# M58: 300 -> 360. Its desktop self-test lets a resolution change's
+# revert countdown (WM_MODE_REVERT_MS, 10s) expire without confirming it,
+# because that path only ever runs when something has already gone wrong
+# and is therefore the one most worth a test. Same unavoidable shape as
+# M48's toast deadline: proving something happened *on its own* means
+# waiting for it.
+SECONDS_TO_RUN="${1:-420}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -150,6 +157,7 @@ REQUIRED_MARKERS=(
   "[vmm] map/unmap self-test passed."
   "[heap] kmalloc/kfree self-test passed."
   "[fb] framebuffer clear/fill/readback self-test passed."
+  "[m58] display mode set and read back from the device (geometry,"
   "[font39] glyph table + shared-baseline render self-test passed."
   "[sched] back on the main task - preemption round trip verified."
   "[syscall] SYS_exit self-test task ran and terminated."
@@ -160,6 +168,7 @@ REQUIRED_MARKERS=(
   "[pgid] SYS_getpgid self-test passed"
   "[fs] leanfs indirect-block self-test passed"
   "[memtest] user-space malloc/free and cross-process shm self-tests passed."
+  "[m57] proportional UI font: per-glyph advances, one shared baseline across"
   "[wm] compositor + client self-test passed"
   "[wm21] multi-window compositor + focus-routing self-test passed"
   "[wm22] desktop shell (panel + taskbar query, no launcher) self-test passed"
@@ -184,6 +193,9 @@ REQUIRED_MARKERS=(
   "[m54] every task slot and every frame returned across"
   "[m55] a compositor SIGKILLed out from under two live clients, replaced, and"
   "[m56] SYS_unlink returning every block it freed and SYS_rename moving none,"
+  "[m58] a resolution change carrying the whole desktop with it - panels"
+  "[m59] descriptors (open/lseek/read/write/close), a 200 KiB file through"
+  "[m60] a real argument vector (cp with two arguments), a command line with"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

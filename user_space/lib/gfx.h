@@ -14,6 +14,8 @@
 
 #include <stdint.h>
 
+#include "uifont.h"
+
 typedef struct {
     uint32_t *pixels; /* tightly packed, row-major, `width` pixels per row - matches how compositor.c sizes a window's shm segment (width * height * 4 bytes) */
     int32_t width;
@@ -29,8 +31,70 @@ void gfx_draw_rect(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, u
  * -mgeneral-regs-only comment), so this is the only kind of line drawing
  * that was ever an option here. */
 void gfx_draw_line(gfx_ctx_t *ctx, int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint32_t color);
+/* ---- text (M57) ---------------------------------------------------
+ *
+ * Until M57 there was one font at one size and text drawing advanced a
+ * compile-time eight pixels per character, so every caller that needed
+ * to centre or right-align a label wrote `strlen(s) * FONT_WIDTH`. That
+ * idiom is gone from this tree, and it has to stay gone: with a
+ * per-glyph advance it is not an approximation, it is simply a different
+ * number, and the label lands somewhere else.
+ *
+ * Measure with gfx_text_width(). Everything here takes an explicit
+ * ui_font_t (uifont.h) except the plain gfx_draw_text/gfx_draw_char
+ * pair, which use the process's current UI font - see gfx_set_ui_font.
+ */
+
+/* The shape a caller needs to lay text out against something else: the
+ * advance width of the whole string, the font's line height, and where
+ * the baseline sits inside it (ascent + descent == height). */
+typedef struct {
+    int32_t width;
+    int32_t height;
+    int32_t ascent;   /* top of the cell down to the baseline */
+    int32_t descent;  /* baseline down to the bottom of the cell */
+} gfx_text_metrics_t;
+
+/* The font gfx_draw_text, gfx_draw_button and gfx_draw_menu use. Per
+ * process, set once at startup (file_manager.c and task_manager.c pick
+ * ui_font_small for their list rows); defaults to ui_font_ui. Deliberate
+ * hidden state, and the reason it is worth it: the alternative is
+ * threading a font pointer through every helper in this header for a
+ * value that is constant for the life of a program. */
+void gfx_set_ui_font(const ui_font_t *font);
+const ui_font_t *gfx_ui_font(void);
+
+/* Advance width of `s` - the exact number of pixels gfx_draw_text_font
+ * will move the pen. Counts the widest line if `s` contains newlines. */
+int32_t gfx_text_width(const ui_font_t *font, const char *s);
+/* The same for the first `n` characters, for callers laying out a
+ * substring (a cursor position inside an edit field, say). */
+int32_t gfx_text_width_n(const ui_font_t *font, const char *s, int32_t n);
+int32_t gfx_char_advance(const ui_font_t *font, char c);
+/* How many leading characters of `s` fit in `max_w` pixels - what every
+ * "truncate this to the space I have" site needs now that it cannot
+ * divide by a constant. */
+int32_t gfx_text_fit(const ui_font_t *font, const char *s, int32_t max_w);
+void gfx_text_measure(const ui_font_t *font, const char *s, gfx_text_metrics_t *out);
+
+void gfx_draw_char_font(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color,
+                         const ui_font_t *font, int bold);
+void gfx_draw_text_font(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t color,
+                         const ui_font_t *font, int bold);
+
+/* The process's current UI font, regular weight. */
 void gfx_draw_char(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color);
 void gfx_draw_text(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t color);
+
+/* The 8x16 monospace cell (font8x16.h), unchanged since M39 and staying
+ * that way: gui_terminal.c's character grid and text_editor.c's column
+ * arithmetic both genuinely depend on a fixed advance, and a proportional
+ * font underneath either of them would not be an improvement, it would be
+ * a bug. Everything *around* the grid in those two programs - their
+ * menus, dialogs and status lines - is ordinary UI text and uses the
+ * proportional pair above. */
+void gfx_draw_char_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color);
+void gfx_draw_text_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t color);
 
 /* M34: pure geometry, no ctx needed - the same "is this point inside this
  * rect" test compositor.c, settings.c, and desktop_icons.c each used to

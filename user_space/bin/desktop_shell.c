@@ -38,7 +38,6 @@
  * only ever reflects what's actually open. An empty desktop means an
  * empty running-app list.
  */
-#include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT */
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
@@ -103,13 +102,24 @@
  * drawing them as live would be drawing a lie. They are the tray's shape,
  * and what a real status indicator would slot into. */
 #define CLOCK_CHARS   5 /* "MM:SS" */
-#define CLOCK_TEXT_W  (CLOCK_CHARS * FONT_WIDTH)
 #define TRAY_PAD      10
 #define TRAY_ICON     8
 #define TRAY_ICON_GAP 6
 #define TRAY_ICONS    2
-#define TRAY_W (TRAY_PAD + TRAY_ICONS * TRAY_ICON + (TRAY_ICONS - 1) * TRAY_ICON_GAP + \
-                TRAY_PAD + CLOCK_TEXT_W + TRAY_PAD)
+#define TRAY_ICONS_W  (TRAY_PAD + TRAY_ICONS * TRAY_ICON + (TRAY_ICONS - 1) * TRAY_ICON_GAP + TRAY_PAD)
+
+/* M57: the clock's width is measured, not multiplied. The digits share
+ * one advance (tools/gen-font.c gives every face tabular figures, for
+ * exactly this reason), so this is a constant in practice - but it is a
+ * constant of the *font*, and reading it off any five-character sample
+ * is how it stays right when the font changes. */
+static int32_t clock_text_w(void) {
+    return gfx_text_width(gfx_ui_font(), "00:00");
+}
+
+static int32_t tray_w(void) {
+    return TRAY_ICONS_W + clock_text_w() + TRAY_PAD;
+}
 
 #define REFRESH_INTERVAL_MS 300
 #define PRESS_FLASH_MS      150 /* how long the Start button stays lit after a click - see start_pressed_until_ms */
@@ -182,12 +192,28 @@ static int32_t ctx_overhang; /* what the compositor was last told to raise - onl
  * are unchanged by the overhang rows sitting above it. */
 static gfx_ctx_t bar_gfx;
 
-/* "MM:SS" of uptime - this project has no RTC/wall-clock source (see
- * gui_clock.c for the same note). Minutes wrap at 100 so the field never
- * outgrows CLOCK_TEXT_W. Lived here until M41 moved it to the top menu
- * bar and came back with the clock when M42 deleted that bar - it has
- * never existed in two places at once. */
+/* M59: the time, at last. This read "MM:SS of uptime" for seventeen
+ * milestones, and the reason was never that a clock was hard - it was
+ * that uptime was the only thing this machine could know. A hundred
+ * lines of CMOS RTC (kernel/drivers/rtc.c) changed that, and this is the
+ * most visible place it shows.
+ *
+ * Falls back to uptime on a machine with no readable clock rather than
+ * drawing an empty field or a lie: "how long has this been on" is still
+ * true there, and it is what this bar has always shown. Five characters
+ * either way, which is what keeps the tray's width one measurement (see
+ * clock_text_w) rather than two cases. */
 static void format_clock(long now_ms, char *out) {
+    os_datetime_t t;
+    if (sys_time(&t) > 0 && t.valid) {
+        out[0] = (char)('0' + t.hour / 10);
+        out[1] = (char)('0' + t.hour % 10);
+        out[2] = ':';
+        out[3] = (char)('0' + t.minute / 10);
+        out[4] = (char)('0' + t.minute % 10);
+        out[5] = '\0';
+        return;
+    }
     long total_s = now_ms / 1000;
     long mins = (total_s / 60) % 100;
     long secs = total_s % 60;
@@ -229,7 +255,7 @@ static void refresh_running_slots(wm_window_t *self) {
         running_count = 0;
         return;
     }
-    int32_t boundary = (int32_t)self->width - TRAY_W;
+    int32_t boundary = (int32_t)self->width - tray_w();
     int32_t x = SLOTS_X;
     running_count = 0;
     for (int32_t i = 0; i < q.count && running_count < MAX_RUNNING_SLOTS; i++) {
@@ -296,11 +322,11 @@ static void draw_start_button(int pressed) {
                           START_TILE, START_TILE, glyph);
         }
     }
-    gfx_draw_text(&bar_gfx, START_TEXT_X, BTN_Y + (BTN_H - FONT_HEIGHT) / 2, "Start", LABEL_COLOR);
+    gfx_draw_text(&bar_gfx, START_TEXT_X, BTN_Y + (BTN_H - (int32_t)gfx_ui_font()->height) / 2, "Start", LABEL_COLOR);
 }
 
 static void draw_tray(wm_window_t *self) {
-    int32_t tray_x = (int32_t)self->width - TRAY_W;
+    int32_t tray_x = (int32_t)self->width - tray_w();
     gfx_draw_line(&bar_gfx, tray_x, BTN_Y + 2, tray_x, BTN_Y + BTN_H - 3, TRAY_SEP_COLOR);
 
     int32_t icon_y = (PANEL_HEIGHT - TRAY_ICON) / 2;
@@ -311,8 +337,8 @@ static void draw_tray(wm_window_t *self) {
 
     char clock_text[CLOCK_CHARS + 1];
     format_clock(sys_uptime_ms(), clock_text);
-    gfx_draw_text(&bar_gfx, (int32_t)self->width - TRAY_PAD - CLOCK_TEXT_W,
-                  (PANEL_HEIGHT - FONT_HEIGHT) / 2, clock_text, CLOCK_FG);
+    gfx_draw_text(&bar_gfx, (int32_t)self->width - TRAY_PAD - clock_text_w(),
+                  (PANEL_HEIGHT - (int32_t)gfx_ui_font()->height) / 2, clock_text, CLOCK_FG);
 }
 
 /* M45: how tall the raised region has to be for the menu as currently
@@ -351,7 +377,7 @@ static void draw_ctx_menu(wm_window_t *self) {
         if (i == ctx_hover) {
             gfx_fill_rect_rounded(&self->gfx, ctx_x + 2, ry + 1, CTX_W - 4, CTX_ITEM_H - 2, CTX_HOVER_BG);
         }
-        gfx_draw_text(&self->gfx, ctx_x + 8, ry + (CTX_ITEM_H - FONT_HEIGHT) / 2, ctx_label(i), CTX_TEXT);
+        gfx_draw_text(&self->gfx, ctx_x + 8, ry + (CTX_ITEM_H - (int32_t)gfx_ui_font()->height) / 2, ctx_label(i), CTX_TEXT);
     }
 }
 
@@ -365,7 +391,27 @@ static int ctx_row_at(int32_t x, int32_t y) {
     return (y - ctx_y) / CTX_ITEM_H;
 }
 
+/* bar_gfx is *derived* from the window - its pixels are a row offset into
+ * the window's buffer and its width is the window's width - so it has to
+ * be re-derived whenever either can have changed, which is every time the
+ * client is handed a new buffer.
+ *
+ * It used to be computed once, right after wm_connect_panel. That was a
+ * latent bug from M55 (a client that reconnects to a replacement
+ * compositor gets a different segment) that M58 turned into a certain
+ * one: after a resolution change the panel's buffer is both somewhere
+ * else *and* a different width, so drawing through the old context wrote
+ * into memory this process had just unmapped. Deriving it here, at the
+ * top of the one function that draws, means there is no moment where a
+ * stale copy can be used. */
+static void bar_gfx_bind(const wm_window_t *self) {
+    bar_gfx.pixels = self->gfx.pixels + (int32_t)self->width * PANEL_OVERHANG_MAX;
+    bar_gfx.width = (int32_t)self->width;
+    bar_gfx.height = PANEL_HEIGHT;
+}
+
 static void redraw(wm_window_t *self) {
+    bar_gfx_bind(self);
     gfx_fill_rect(&bar_gfx, 0, 0, (int32_t)self->width, PANEL_HEIGHT, PANEL_BG);
     /* Top edge is otherwise the only thing telling this panel apart from
      * the desktop it's docked to - one line makes it read as a distinct
@@ -486,10 +532,9 @@ int main(void) {
         sys_exit(1);
     }
     /* The bar's own drawing surface: the bottom PANEL_HEIGHT rows of the
-     * buffer, which is where the compositor docks them. */
-    bar_gfx.pixels = win.gfx.pixels + (int32_t)win.width * PANEL_OVERHANG_MAX;
-    bar_gfx.width = (int32_t)win.width;
-    bar_gfx.height = PANEL_HEIGHT;
+     * buffer, which is where the compositor docks them. Re-derived on
+     * every redraw - see bar_gfx_bind. */
+    bar_gfx_bind(&win);
 
     refresh_running_slots(&win);
     redraw(&win);
@@ -499,7 +544,7 @@ int main(void) {
         wm_event_t ev;
         int changed = 0;
         while (wm_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE) {
+            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 changed = 1; /* M55 - see WM_EVENT_EXPOSE */
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
                 /* M45: right-click a running-app button -> its context

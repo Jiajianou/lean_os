@@ -79,6 +79,25 @@ static char hex_digit(uint8_t nibble) {
     return (char)(nibble < 10 ? ('0' + nibble) : ('A' + nibble - 10));
 }
 
+void klog_put_dec_pad(uint32_t value, int width) {
+    char buf[10];
+    int n = 0;
+    do {
+        buf[n++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    } while (value && n < (int)sizeof(buf));
+    for (int pad = n; pad < width; pad++) {
+        klog_putc('0');
+    }
+    while (n > 0) {
+        klog_putc(buf[--n]);
+    }
+}
+
+void klog_put_dec(uint32_t value) {
+    klog_put_dec_pad(value, 1);
+}
+
 void klog_put_hex32(uint32_t value) {
     for (int shift = 28; shift >= 0; shift -= 4) {
         klog_putc(hex_digit((value >> shift) & 0xF));
