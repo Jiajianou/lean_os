@@ -19,11 +19,25 @@
 #
 # Usage:
 #   tools/qemu-input-test.sh                 # every test
+#   tools/qemu-input-test.sh --quick         # the pre-commit subset
+#   tools/qemu-input-test.sh --jobs 2        # fewer guests at once
 #   tools/qemu-input-test.sh alt_tab_cycles_focus [more...]
 #
-# Each test boots its own guest, so a full run takes a few minutes. Run it
-# alongside qemu-serial-test.sh before every milestone from here on -
+# Each test boots its own guest, which is what makes them independent and
+# also what makes a full run slow. Several guests run at once (a third of
+# the machine's cores, capped at four - see default_jobs), which took a
+# full run from about an hour to about twenty minutes; `--quick` is eight
+# tests covering the most ground per minute, for the "did I break the
+# desktop" question you want answered before a commit rather than after.
+#
+# Run the full one alongside qemu-serial-test.sh before every milestone -
 # neither one subsumes the other.
+#
+# A caveat worth knowing before reading a failure: the guests compete for
+# the same cores, and the failure that competition produces is a *boot
+# timeout*, which is this harness giving up rather than a verdict about
+# the desktop. The timeout scales with the job count for that reason. If
+# a run reports one, re-run that test on its own before believing it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

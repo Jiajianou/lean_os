@@ -200,6 +200,7 @@ REQUIRED_MARKERS=(
   "[m61] a minimize animating toward the taskbar - endpoints plus an intermediate"
   "[m62] the PC speaker gated on and off by its own deadline, muted when the volume"
   "[m63] SSE state preserved across task switches, a libc subset checked against"
+  "[m63] icons are files: the desktop wrote them out, an edited palette entry"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

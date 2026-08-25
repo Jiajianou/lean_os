@@ -9,6 +9,7 @@
 #include "drivers/console.h"
 #include "drivers/cursor.h"
 #include "display.h" /* system_api/include/display.h - display_mode_t, M58 */
+#include "icon.h"    /* system_api/include/icon.h - M63: icons are files, and this test edits one */
 #include "drivers/dispi.h"
 #include "drivers/fb.h"
 #include "drivers/font8x16.h" /* M39 self-test reads the glyph tables and the shared metric directly */
@@ -5580,6 +5581,111 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts("[m63] SSE state preserved across task switches, a libc subset checked against "
                    "values that are either right or not, and a 1972 benchmark nobody here wrote "
                    "running to completion and reporting a figure - self-test passed.\n\n");
+    }
+
+    /* M63 stretch goal self-test: icons are files.
+     *
+     * `icon.h` predicted at M56 that the day icons became replaceable,
+     * "the format does not change - only where the bytes are read from".
+     * This is the assertion that the prediction held, and it is made the
+     * only way it can be made honestly: by *replacing an icon* and
+     * looking at the screen.
+     *
+     * A file is written, a process is restarted, and a pixel changes.
+     * Nothing here checks that desktop_icons.c read a file - it checks
+     * that editing one changed the desktop, which is the thing a person
+     * would actually be doing.
+     */
+    {
+        int all_ok = 1;
+
+        size_t comp_bytes = 0;
+        uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+        size_t icons_bytes = 0;
+        uint8_t *icons_image = read_program(PATH_BIN_DIR "desktop_icons", &icons_bytes);
+
+        task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+        kfree(comp_image);
+        pit_sleep_ms(300);
+        task_t *icons_task = process_spawn("desktop_icons", icons_image, icons_bytes, "");
+        pit_sleep_ms(1200);
+
+        /* The first icon's box: ICON_MARGIN in from the top-left corner,
+         * ICON_SIZE across (desktop_icons.c). Scanned as a region rather
+         * than probed at a point, because where inside its own 48 pixels
+         * a given icon puts a given colour is a property of the picture,
+         * not of this test. */
+        static const uint32_t MAGENTA = 0x00FF00FFu;
+        uint32_t before_magenta = 0;
+        for (uint32_t y = 32; y < 80; y += 2) {
+            for (uint32_t x = 32; x < 80; x += 2) {
+                if (fb_get_pixel(x, y) == MAGENTA) {
+                    before_magenta++;
+                }
+            }
+        }
+
+        static uint8_t blob[512];
+        int64_t n = vfs_read(PATH_ICONS_DIR "Terminal.icn", blob, sizeof(blob));
+        int wrote = 0;
+        if (n < ICON_HEADER_BYTES || !icon_valid(blob)) {
+            klog_puts("[m63] the desktop did not write its icons out as files\n");
+            all_ok = 0;
+        } else {
+            /* Palette entry 1 - the first non-transparent colour, and
+             * the one this icon's body is drawn in. */
+            blob[ICON_HEADER_BYTES + 3] = 0xFF;
+            blob[ICON_HEADER_BYTES + 4] = 0x00;
+            blob[ICON_HEADER_BYTES + 5] = 0xFF;
+            if (vfs_write(PATH_ICONS_DIR "Terminal.icn", blob, (size_t)n) != 0) {
+                klog_puts("[m63] could not write the edited icon back\n");
+                all_ok = 0;
+            } else {
+                wrote = 1;
+            }
+        }
+
+        uint32_t after_magenta = 0;
+        if (wrote) {
+            selftest_reap(icons_task);
+            icons_task = process_spawn("desktop_icons", icons_image, icons_bytes, "");
+            pit_sleep_ms(1200);
+            for (uint32_t y = 32; y < 80; y += 2) {
+                for (uint32_t x = 32; x < 80; x += 2) {
+                    if (fb_get_pixel(x, y) == MAGENTA) {
+                        after_magenta++;
+                    }
+                }
+            }
+        }
+        kfree(icons_image);
+
+        selftest_reap(icons_task);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        if (before_magenta != 0) {
+            klog_puts("[m63] the desktop was already showing the colour this test edits in\n");
+            all_ok = 0;
+        }
+        if (wrote && after_magenta == 0) {
+            klog_puts("[m63] editing an icon file changed nothing on screen\n");
+            all_ok = 0;
+        }
+
+        /* And put it back, so the desktop a person sees after boot is
+         * the one that shipped rather than the one this test defaced. */
+        if (wrote) {
+            vfs_unlink(PATH_ICONS_DIR "Terminal.icn");
+        }
+
+        if (!all_ok) {
+            panic("M63 icon self-test: icons are not files, or editing one changes nothing");
+        }
+        klog_puts("[m63] icons are files: the desktop wrote them out, an edited palette entry "
+                   "changed what is on screen after a restart, and the format and loader did not "
+                   "change at all - self-test passed.\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

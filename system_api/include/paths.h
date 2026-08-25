@@ -28,6 +28,7 @@
 #define PATH_BIN  "/bin"
 #define PATH_HOME "/home"
 #define PATH_ETC  "/etc"
+#define PATH_ICONS "/icons" /* M63 stretch goal: icon blobs, one file each - see system_api/include/icon.h */
 #define PATH_TMP  "/tmp"
 
 /* The trailing-slash forms, for building a path by concatenation. Spelled
@@ -35,6 +36,7 @@
 #define PATH_BIN_DIR  "/bin/"
 #define PATH_HOME_DIR "/home/"
 #define PATH_ETC_DIR  "/etc/"
+#define PATH_ICONS_DIR "/icons/"
 #define PATH_TMP_DIR  "/tmp/"
 
 #define PATH_SETTINGS PATH_ETC_DIR "settings.conf"

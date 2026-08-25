@@ -4106,19 +4106,47 @@ that had only checked `sin(0)` and `cos(0)` would have passed throughout.
       its own programs" half of that sentence**, so this should be
       revisited the moment a ported program is something a person
       downloads rather than something this repo builds
-- [ ] **An AML parser**, or enough of one to read `\_S5` instead of
-      guessing it. Named in every gaps list since M47 and still the honest
-      description of what shutdown does
-- [ ] **Icons as files rather than compiled in.** M56 built the format so
-      that this day changes only where the bytes are read from, not the
-      format or the loader. Waiting on a reason - "install an icon"
-      meaning "rebuild" has not cost anyone anything yet, though M63's
-      ported program is the first thing that would plausibly want to ship
-      its own
-- [ ] **A faster interactive suite.** 41 tests, a fresh guest each, about
-      45 minutes, and boots measured past 300 seconds late in a long run
-      that take 73 on an idle machine. Batching tests that do not need a
-      fresh machine, running guests in parallel, and a five-minute tier
-      for pre-commit would all pay for themselves. Not scheduled because
-      it is a tax on the author rather than on the product - but every
-      milestone above adds tests, and the trend only goes one way
+- [x] **An AML parser**, or enough of one to read `\_S5` instead of
+      guessing it. Named in every gaps list since M47 - and "enough of
+      one" is exactly what got written, which is the part worth being
+      precise about. `acpi_find_s5` scans the DSDT for the encoding of a
+      `Name (\_S5_, Package)` and decodes the small integers in it. It
+      does not evaluate anything, has no namespace, and would miss an
+      `_S5` defined inside a method. On QEMU it reads SLP_TYPa=0,
+      SLP_TYPb=0 - which is exactly the value power.c had been guessing,
+      so the guess was right and is now *known* to be right, which is the
+      whole difference. The guess stays as the fallback, because a DSDT
+      this cannot read is still a machine that should switch off, and the
+      boot log says which one was used
+- [x] **Icons as files rather than compiled in.** M56 predicted that this
+      day would change only where the bytes are read from, not the format
+      or the loader - and that is precisely what it cost: `icon.h` gained
+      one function (`icon_bytes`, because a file has a length and a
+      compiled-in array had `sizeof`), and `desktop_icons.c` gained a
+      forty-line `load_icons`. Nothing in the loader changed.
+      The compiled-in blobs stay as the *seed*, for the same reason the
+      kernel seeds `/bin` from blobs inside `kernel.bin`: a fresh disk has
+      no icons on it and something has to put them there. Everything is
+      read back from `/icons/NAME.icn` afterwards, so replacing an icon
+      is replacing a file. Asserted by a self-test that does exactly that
+      - writes a magenta palette entry into `/icons/Terminal.icn`,
+      restarts the desktop, and requires the pixels to change
+- [x] **A faster interactive suite.** By M63 it was 44 tests, a fresh
+      guest each, and a full run had reached an hour and a half - which
+      is a tax that gets paid on every commit, and the trend only ever
+      went one way. Two of the three things this entry asked for landed;
+      the third turned out to be the wrong idea.
+      **Guests run in parallel** - a third of the machine's cores, capped
+      at four - which took a full run to about twenty minutes. **A quick
+      tier** (`--quick`): eight tests covering launching, closing,
+      z-order, the editor, the terminal, the filesystem, settings
+      persistence and crash recovery, in **5 minutes 38 seconds**
+      measured. **Batching tests into one guest** was deliberately not
+      done: a test that inherits eight open windows from the previous one
+      is not testing what it says it is, and window/fd/shm exhaustion is
+      exactly the class of bug this suite was written to catch.
+      One thing learned in the doing and written into the runner: the
+      failure parallelism produces is a *boot timeout*, which is the
+      harness giving up rather than a verdict about the desktop. The
+      allowance now scales with the job count, and the script's header
+      says to re-run a timed-out test alone before believing it

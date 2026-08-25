@@ -14,15 +14,23 @@ static int power_info_valid;
 
 /* The sleep type S5 ("soft off") wants written into PM1_CNT's SLP_TYP
  * field. Properly this comes from the `\_S5` object in the DSDT, which is
- * AML - and writing an AML parser is not in scope for this project (see
- * acpi.h's own note). So these are the well-known values instead, tried
- * in order: 0 is what QEMU's own tables define and is by far the most
- * likely to be right on the one platform this OS is actually tested on,
- * and 5 is the value most physical chipsets historically used. Writing a
- * wrong SLP_TYP is harmless - the machine simply doesn't sleep - so
- * trying both costs nothing but two port writes. */
+ * AML - and for sixteen milestones this said writing a parser for that
+ * was out of scope and used the well-known values instead.
+ *
+ * M63's stretch goals ended that: acpi_find_s5 reads the real values out
+ * of the DSDT (see its own comment for the narrow sense in which it is a
+ * parser). These stay as the fallback, and the fallback is not
+ * ceremonial - a machine whose DSDT defines `_S5` inside a method is a
+ * machine this cannot read, and it should still switch off. 0 is what
+ * QEMU's own tables define; 5 is what most physical chipsets
+ * historically used. Writing a wrong SLP_TYP is harmless - the machine
+ * simply does not sleep - so trying both costs two port writes. */
 static const uint16_t S5_SLEEP_TYPES[] = {0, 5};
 #define S5_SLEEP_TYPE_COUNT ((int)(sizeof(S5_SLEEP_TYPES) / sizeof(S5_SLEEP_TYPES[0])))
+
+/* M63: what the DSDT said, if it said anything. */
+static int s5_from_aml;
+static uint8_t s5_slp_a, s5_slp_b;
 
 #define PM1_SLP_TYP_SHIFT 10
 #define PM1_SLP_EN        (1u << 13)
@@ -43,6 +51,11 @@ static const uint16_t S5_SLEEP_TYPES[] = {0, 5};
 
 void power_init(void) {
     power_info_valid = acpi_find_power(&power_info);
+    /* M63: asked once, at boot, rather than on the way down. A shutdown
+     * path is the worst possible place to discover that a table walk
+     * faults - and this way the boot log records what the firmware said
+     * about S5 whether or not anybody ever powers the machine off. */
+    s5_from_aml = acpi_find_s5(&s5_slp_a, &s5_slp_b);
 }
 
 /* Hands the PM registers from firmware to the OS, if this platform says
@@ -78,6 +91,25 @@ static void write_sleep(uint16_t port, uint16_t slp_typ) {
  * on afterwards, which for a successful S5 it never does. */
 static void power_off_now(void) {
     acpi_enable_if_needed();
+
+    if (power_info_valid && power_info.pm1a_cnt != 0 && s5_from_aml) {
+        /* The values the firmware itself declared, tried first and on
+         * their own - if the DSDT said what S5 is, guessing afterwards
+         * would only be writing wrong values to a machine that has
+         * already been told the right ones. The well-known list below
+         * still runs if this did not switch the machine off, because a
+         * DSDT that parsed is not a DSDT that was necessarily right. */
+        klog_puts("[power] S5 via the FADT's PM1a_CNT (port 0x");
+        klog_put_hex32(power_info.pm1a_cnt);
+        klog_puts(", SLP_TYP ");
+        klog_put_hex32(s5_slp_a);
+        klog_puts(" - read from the DSDT's own AML).\n");
+        write_sleep((uint16_t)power_info.pm1a_cnt, s5_slp_a);
+        if (power_info.pm1b_cnt != 0) {
+            write_sleep((uint16_t)power_info.pm1b_cnt, s5_slp_b);
+        }
+        pit_sleep_ms(50);
+    }
 
     if (power_info_valid && power_info.pm1a_cnt != 0) {
         for (int i = 0; i < S5_SLEEP_TYPE_COUNT; i++) {

@@ -34,6 +34,7 @@
  * press/hover redraw) is the same per-icon logic the single hardcoded
  * icon already had, just indexed now instead of hardcoded to one.
  */
+#include "icon.h" /* system_api/include/icon.h - icon_bytes/icon_valid, M63: icons are files now */
 #include "icons.h" /* user_space/lib/icons.h - M56: real icons, from a real format */
 #include "children.h" /* M54: this process launches things and must reap them - see children.h */
 #include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
@@ -146,6 +147,73 @@ static const icon_def_t ICONS[] = {
 
 static int32_t icon_x[ICON_COUNT], icon_y[ICON_COUNT]; /* filled by layout_icons from the window's own actual geometry */
 
+/* ---- M63 stretch goal: icons are files ------------------------------
+ *
+ * icon.h predicted this at M56 and said what it would cost: "the day
+ * icons are user-replaceable, the format does not change - only where
+ * the bytes are read from". That turned out to be exactly true - the
+ * format and the loader are untouched, and this is the whole change.
+ *
+ * The compiled-in blobs stay, as the *seed*. A fresh disk has no icons
+ * on it and something has to put them there, which is the same reason
+ * kernel.c seeds /bin from blobs inside kernel.bin. This writes each one
+ * out once and then reads every one back from disk, so what is on screen
+ * is always what is in the file - which is what makes replacing an icon
+ * a matter of replacing a file rather than of rebuilding the OS.
+ *
+ * A file that is missing or malformed falls back to the blob it was
+ * seeded from. An icon is decoration; a desktop that refused to start
+ * because somebody wrote nonsense into /icons would be a worse outcome
+ * than one that shows the picture it shipped with. */
+#define ICON_FILE_MAX 512 /* a 24x24 16-colour blob is 344 bytes; this is the format's own ceiling for one that size */
+static uint8_t icon_file_data[ICON_COUNT][ICON_FILE_MAX];
+static const uint8_t *icon_image[ICON_COUNT];
+
+static int icon_path_for(int i, char *out) {
+    int n = 0;
+    for (const char *s = PATH_ICONS_DIR; *s; s++) {
+        out[n++] = *s;
+    }
+    for (const char *s = ICONS[i].label; *s; s++) {
+        if (n >= PATH_MAX_LEN - 5) {
+            return -1;
+        }
+        out[n++] = *s;
+    }
+    static const char ext[] = ".icn";
+    for (int k = 0; ext[k]; k++) {
+        out[n++] = ext[k];
+    }
+    out[n] = '\0';
+    return 0;
+}
+
+static void load_icons(void) {
+    /* The directory first. Missing is the ordinary case on a fresh disk;
+     * "already there" is an error from sys_mkdir rather than a no-op
+     * (see leanfs.h), so this asks before creating. */
+    os_stat_t st;
+    if (sys_stat(PATH_ICONS, &st) != 0) {
+        sys_mkdir(PATH_ICONS);
+    }
+    for (int i = 0; i < ICON_COUNT; i++) {
+        icon_image[i] = ICONS[i].image; /* the fallback, until a file replaces it */
+        char path[PATH_MAX_LEN];
+        if (icon_path_for(i, path) != 0) {
+            continue;
+        }
+        if (sys_stat(path, &st) != 0) {
+            sys_writefile(path, ICONS[i].image, (size_t)icon_bytes(ICONS[i].image));
+        }
+        long n = sys_readfile(path, icon_file_data[i], ICON_FILE_MAX);
+        if (n >= ICON_HEADER_BYTES && n <= ICON_FILE_MAX &&
+            icon_valid(icon_file_data[i]) &&
+            icon_bytes(icon_file_data[i]) <= (int)n) {
+            icon_image[i] = icon_file_data[i];
+        }
+    }
+}
+
 /* Top-to-bottom columns: place icons one under another until the next one
  * wouldn't clear PANEL_MARGIN above the bottom edge, then start a new
  * column back at the top - the same wrapping shape a real desktop's icon
@@ -186,7 +254,7 @@ static void redraw_icon(wm_window_t *self, int i, int pressed) {
      * written as the arithmetic rather than as zero so changing either
      * number keeps working. */
     {
-        const uint8_t *blob = ICONS[i].image;
+        const uint8_t *blob = icon_image[i];
         int32_t drawn = 24 * ICON_IMAGE_SCALE;
         icon_draw(&self->gfx, icon_x[i] + (ICON_SIZE - drawn) / 2,
                    icon_y[i] + (ICON_SIZE - drawn) / 2, blob, ICON_IMAGE_SCALE);
@@ -211,6 +279,13 @@ static void redraw(wm_window_t *self, int pressed_icon) {
 }
 
 int main(void) {
+    /* Before the window: the icons come off disk, and on a fresh disk
+     * they go onto it first. Doing this before connecting means the very
+     * first frame this process draws is already the one the files
+     * describe, rather than the compiled-in pictures replaced a moment
+     * later. */
+    load_icons();
+
     wm_window_t win;
     if (wm_connect_desktop(&win) != 0) {
         /* M56: loud. A desktop client that cannot get a window used to

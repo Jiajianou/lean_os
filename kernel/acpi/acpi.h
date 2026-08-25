@@ -41,10 +41,13 @@ int acpi_find_madt(acpi_madt_info_t *out);
  * because kernel/power/power.c is built to fall through to its next tier
  * rather than to require any of it.
  *
- * The `\_S5` sleep type properly lives in AML in the DSDT, and writing an
- * AML parser is not in scope for this project - so slp_typ_a/b are NOT
- * from the firmware. power.c supplies the well-known values instead and
- * says so in the log; see acpi_find_power's own comment. */
+ * M63 stretch goal: the `\_S5` sleep type lives in AML in the DSDT, and
+ * for sixteen milestones this said "writing an AML parser is not in
+ * scope" and power.c guessed. It reads it now - see acpi_find_s5, and
+ * see its own comment for the precise, narrow sense in which that is a
+ * parser at all. The guess remains as the fallback, because a machine
+ * whose DSDT this cannot read is a machine that should still switch
+ * off. */
 typedef struct {
     uint32_t pm1a_cnt;    /* PM1a control register port, or 0 */
     uint32_t pm1b_cnt;    /* PM1b control register port, or 0 if the platform has only one */
@@ -59,3 +62,19 @@ typedef struct {
  * "a legitimate platform state, not corruption" contract acpi_find_madt
  * has. */
 int acpi_find_power(acpi_power_info_t *out);
+
+/* M63 stretch goal: the S5 sleep-type values, read out of the DSDT's AML
+ * rather than guessed.
+ *
+ * Returns 1 and fills *slp_a / *slp_b if the `\_S5_` package was found
+ * and understood, 0 otherwise - and 0 is an ordinary answer that
+ * power.c's own well-known-values fallback exists for.
+ *
+ * "An AML parser" overstates it and the overstatement matters: this
+ * finds one named object by scanning for its encoding and decodes the
+ * integer package that follows. It does not evaluate anything, has no
+ * namespace, and would not survive a `_S5` defined inside a method or
+ * behind an `If`. That covers every firmware this project has met and is
+ * honestly less than the name suggests - which is why the fallback stays
+ * and why the boot log says which one it used. */
+int acpi_find_s5(uint8_t *slp_a, uint8_t *slp_b);

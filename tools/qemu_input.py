@@ -185,7 +185,7 @@ class Ppm:
 class Machine:
     """One booted guest, driven through its HMP monitor."""
 
-    def __init__(self, extra_args=(), quiet=False):
+    def __init__(self, extra_args=(), quiet=False, boot_timeout=None):
         if not os.path.exists(IMAGE):
             raise RuntimeError("no image at %s - run 'make' first" % IMAGE)
         if not os.path.exists(OVMF_CODE):
@@ -198,6 +198,13 @@ class Machine:
         self._mon_path = os.path.join(self._dir, "mon.sock")
         self.log_path = os.path.join(self._dir, "serial.log")
         self._quiet = quiet
+        # M63 stretch goal (a faster suite): how long this guest is
+        # allowed to take to reach the desktop. Set by the runner rather
+        # than fixed, because it depends on how many other guests are
+        # competing for the same cores - see qemu_input_suite.py's own
+        # note on why a boot timeout is the harness giving up rather than
+        # a verdict about the desktop.
+        self.boot_timeout = boot_timeout
         vars_rt = os.path.join(self._dir, "OVMF_VARS.fd")
         shutil.copyfile(OVMF_VARS, vars_rt)
 

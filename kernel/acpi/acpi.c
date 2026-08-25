@@ -206,6 +206,142 @@ int acpi_find_power(acpi_power_info_t *out) {
     return 1;
 }
 
+/* ---- M63 stretch goal: reading \_S5 out of the DSDT --------------------
+ *
+ * AML is a bytecode with a namespace, methods, and control flow, and a
+ * real interpreter for it is a subsystem. This is not that, and the
+ * header says so: it looks for one specific encoding and decodes the
+ * package that follows it.
+ *
+ * What a `\_S5` definition compiles to is:
+ *
+ *     08              NameOp
+ *     5C 5F 53 35 5F  the name, "\_S5_" (the leading 5C - a RootChar -
+ *                     is optional; both spellings appear in the wild)
+ *     12              PackageOp
+ *     <pkglen>        1-4 bytes, the top two bits of the first saying how
+ *                     many more follow
+ *     <count>         number of elements
+ *     <elem> ...      SLP_TYPa, SLP_TYPb, and two the OS does not use
+ *
+ * Each element is a small integer: ZeroOp, OneOp, or a BytePrefix and a
+ * byte. Anything else here is a definition this cannot read, which is
+ * reported as "not found" rather than guessed at - a wrong SLP_TYP is a
+ * machine that does not switch off, and the fallback is a better guess
+ * than a misparse.
+ */
+#define AML_NAME_OP    0x08
+#define AML_PACKAGE_OP 0x12
+#define AML_ZERO_OP    0x00
+#define AML_ONE_OP     0x01
+#define AML_BYTE_PREFIX 0x0A
+#define AML_WORD_PREFIX 0x0B
+#define AML_ROOT_CHAR  0x5C
+
+#define FADT_DSDT   40  /* 32-bit physical address of the DSDT */
+#define FADT_X_DSDT 140 /* 64-bit, ACPI 2.0+ - preferred when the table is long enough to have one */
+
+/* One package element as an integer, advancing *at. Returns 0 if the
+ * element is not one of the small-integer encodings this understands. */
+static int aml_read_int(const uint8_t *p, uint32_t len, uint32_t *at, uint8_t *out) {
+    if (*at >= len) {
+        return 0;
+    }
+    uint8_t op = p[(*at)++];
+    if (op == AML_ZERO_OP) {
+        *out = 0;
+        return 1;
+    }
+    if (op == AML_ONE_OP) {
+        *out = 1;
+        return 1;
+    }
+    if (op == AML_BYTE_PREFIX && *at < len) {
+        *out = p[(*at)++];
+        return 1;
+    }
+    if (op == AML_WORD_PREFIX && *at + 1 < len) {
+        *out = p[*at]; /* SLP_TYP is three bits; the high byte cannot matter */
+        *at += 2;
+        return 1;
+    }
+    return 0;
+}
+
+int acpi_find_s5(uint8_t *slp_a, uint8_t *slp_b) {
+    const acpi_sdt_header_t *fadt = find_table("FACP");
+    if (!fadt) {
+        return 0;
+    }
+    const uint8_t *f = (const uint8_t *)fadt;
+    uint64_t dsdt_phys = 0;
+    if (fadt->length > FADT_X_DSDT + 8) {
+        dsdt_phys = *(const uint64_t *)(f + FADT_X_DSDT);
+    }
+    if (dsdt_phys == 0 && fadt->length > FADT_DSDT + 4) {
+        dsdt_phys = (uint64_t)*(const uint32_t *)(f + FADT_DSDT);
+    }
+    const acpi_sdt_header_t *dsdt = table_at(dsdt_phys);
+    if (!dsdt || !sig_eq(dsdt->signature, "DSDT", 4) ||
+        dsdt->length <= sizeof(acpi_sdt_header_t)) {
+        return 0;
+    }
+
+    const uint8_t *aml = (const uint8_t *)dsdt + sizeof(acpi_sdt_header_t);
+    uint32_t len = dsdt->length - (uint32_t)sizeof(acpi_sdt_header_t);
+
+    for (uint32_t i = 0; i + 6 < len; i++) {
+        if (aml[i] != AML_NAME_OP) {
+            continue;
+        }
+        uint32_t n = i + 1;
+        if (aml[n] == AML_ROOT_CHAR) {
+            n++;
+        }
+        if (n + 4 > len || aml[n] != '_' || aml[n + 1] != 'S' ||
+            aml[n + 2] != '5' || aml[n + 3] != '_') {
+            continue;
+        }
+        n += 4;
+        if (n >= len || aml[n++] != AML_PACKAGE_OP) {
+            continue;
+        }
+        /* PkgLength: the top two bits of the lead byte say how many more
+         * bytes it occupies. The value itself is not needed - the element
+         * count that follows bounds the read - but the bytes have to be
+         * stepped over. */
+        if (n >= len) {
+            continue;
+        }
+        uint32_t extra = (uint32_t)(aml[n] >> 6);
+        n += 1 + extra;
+        if (n >= len) {
+            continue;
+        }
+        uint8_t count = aml[n++];
+        if (count < 1) {
+            continue;
+        }
+        uint8_t a = 0, b = 0;
+        if (!aml_read_int(aml, len, &n, &a)) {
+            continue;
+        }
+        if (count < 2 || !aml_read_int(aml, len, &n, &b)) {
+            b = a; /* a single-element package means both registers take the same value */
+        }
+        *slp_a = (uint8_t)(a & 0x07);
+        *slp_b = (uint8_t)(b & 0x07);
+        klog_puts("[acpi] \\_S5 read from the DSDT: SLP_TYPa=0x");
+        klog_put_hex32(*slp_a);
+        klog_puts(", SLP_TYPb=0x");
+        klog_put_hex32(*slp_b);
+        klog_puts(" - no longer a guess.\n");
+        return 1;
+    }
+    klog_puts("[acpi] no readable \\_S5 in the DSDT - power off will try the well-known values.\n");
+    return 0;
+}
+
 int acpi_find_madt(acpi_madt_info_t *out) {
     const acpi_sdt_header_t *madt = find_table("APIC");
     if (!madt) {

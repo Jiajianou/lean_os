@@ -23,8 +23,10 @@ import os
 import shutil
 import signal
 import sys
+import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 from qemu_input import BOOT_MARKER, Machine
 
@@ -32,7 +34,17 @@ from qemu_input import BOOT_MARKER, Machine
 # assertion that fails without showing you the pixels is a bad trade when
 # saving them costs one file copy.
 ARTIFACT_DIR = os.environ.get("LEANOS_INPUT_ARTIFACTS", "/tmp/leanos-input-failures")
-CURRENT_TEST = "unknown"
+
+# Which test this thread is running. Thread-local rather than a plain
+# global because tests run in parallel now (see main's --jobs): a global
+# would name whichever test happened to start most recently, which is
+# exactly the wrong answer on the one path that uses it - saving the
+# screenshot a *failing* test gave up on.
+_current = threading.local()
+
+
+def current_test():
+    return getattr(_current, "name", "unknown")
 
 # ---------------------------------------------------------------------
 # Geometry and colors, all mirrored from the source that draws them. Kept
@@ -620,7 +632,7 @@ def desktop_is_painted(shot):
             shot.px(*START_PROBE) in START_COLORS)
 
 
-def boot(machine, timeout=300):
+def boot(machine, timeout=None):
     """M51-M56: 90 -> 300. The same growth tools/qemu-serial-test.sh's own
     SECONDS_TO_RUN took, and for the same reason - six new boot
     self-tests, several of which have to wait on real processes. 90 was
@@ -636,7 +648,7 @@ def boot(machine, timeout=300):
     and keeps a slow host from being reported as a bug in whatever change
     is under test, which is the most expensive kind of test failure
     there is."""
-    machine.boot_to_desktop(settle=0.0, timeout=timeout)
+    machine.boot_to_desktop(settle=0.0, timeout=timeout or machine.boot_timeout or 300)
     deadline = time.time() + 30
     shot = None
     while time.time() < deadline:
@@ -660,7 +672,7 @@ def boot(machine, timeout=300):
     raise Failure("the desktop never finished painting after boot - %s; "
                   "screendump %s, guest log %s"
                   % (wrong or "every probe matched on the last look",
-                     save_failure_shot(machine, CURRENT_TEST),
+                     save_failure_shot(machine, current_test()),
                      machine.save_log("desktop-never-painted")))
 
 
@@ -685,7 +697,7 @@ def wait_for(machine, predicate, what, timeout=12.0):
     raise Failure("%s (last screenshot showed %d app window(s), focus on slot "
                   "%d; screendump saved to %s)"
                   % (what, count_app_windows(shot), focused_slot(shot),
-                     save_failure_shot(machine, CURRENT_TEST)))
+                     save_failure_shot(machine, current_test())))
 
 
 def wait_for_windows(machine, n, timeout=12.0):
@@ -2289,40 +2301,138 @@ def _die_on_signal(signum, _frame):
     raise KeyboardInterrupt("received signal %d" % signum)
 
 
+# ---------------------------------------------------------------------
+# Running them
+# ---------------------------------------------------------------------
+
+# The subset that covers the most ground per minute: one test each for
+# launching, closing, focus and z-order, the two apps people live in, the
+# filesystem, the settings that persist, and crash recovery. Meant as a
+# pre-commit tier - it is not a substitute for the full run and is not
+# supposed to be, but "did I break the desktop" is a question worth being
+# able to ask in five minutes rather than an hour.
+QUICK_TESTS = [
+    "double_click_launches_every_icon",
+    "titlebar_close_button",
+    "clicking_a_window_raises_it",
+    "editor_undo_restores_the_buffer",
+    "terminal_scrollback_scrolls_with_the_wheel",
+    "file_manager_navigates_directories",
+    "settings_persist_across_a_reboot",
+    "a_crashing_program_only_takes_itself_down",
+]
+
+
+def default_jobs():
+    """How many guests to run at once.
+
+    Each one is a whole QEMU with a core's worth of work in it, so this is
+    about cores rather than about tests. A third of them, capped at four:
+    the cap is not arithmetic but experience - the failures this suite
+    reports most often on a loaded machine are *boot timeouts*, which are
+    the harness giving up rather than the desktop being wrong, and every
+    extra parallel guest makes one more likely."""
+    try:
+        n = os.cpu_count() or 2
+    except Exception:
+        n = 2
+    return max(1, min(4, n // 3))
+
+
+def run_one(name, fn, boot_timeout):
+    """One test, in its own guest, with its output collected rather than
+    printed - parallel tests interleaving their lines would make the
+    result unreadable, so each one's report is emitted whole by the
+    caller."""
+    _current.name = name
+    started = time.time()
+    try:
+        with Machine(boot_timeout=boot_timeout) as m:
+            fn(m)
+    except Failure as exc:
+        return (name, str(exc), "   FAIL (%.0fs): %s" % (time.time() - started, exc))
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        detail = "harness error:\n" + traceback.format_exc()
+        return (name, detail, "   ERROR (%.0fs):\n%s" % (time.time() - started,
+                                                          traceback.format_exc()))
+    return (name, None, "   pass (%.0fs)" % (time.time() - started))
+
+
+def usage():
+    print("usage: qemu_input_suite.py [--jobs N] [--quick] [test ...]")
+    print()
+    print("  --jobs N   run N guests at once (default: %d here)" % default_jobs())
+    print("  --quick    the pre-commit subset (%d tests)" % len(QUICK_TESTS))
+    print()
+    print("known tests:")
+    for n, _ in TESTS:
+        print("  %s" % n)
+
+
 def main(argv):
     signal.signal(signal.SIGTERM, _die_on_signal)
     signal.signal(signal.SIGINT, _die_on_signal)
 
-    wanted = argv[1:]
+    jobs = int(os.environ.get("LEANOS_INPUT_JOBS", "0")) or default_jobs()
+    wanted = []
+    args = argv[1:]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--jobs" and i + 1 < len(args):
+            jobs = max(1, int(args[i + 1]))
+            i += 2
+        elif a.startswith("--jobs="):
+            jobs = max(1, int(a.split("=", 1)[1]))
+            i += 1
+        elif a == "--quick":
+            wanted.extend(QUICK_TESTS)
+            i += 1
+        elif a in ("-h", "--help"):
+            usage()
+            return 0
+        else:
+            wanted.append(a)
+            i += 1
+
     selected = [(n, f) for n, f in TESTS if not wanted or n in wanted]
     if not selected:
-        print("no test matched %r; known tests: %s"
-              % (wanted, ", ".join(n for n, _ in TESTS)))
+        print("no test matched %r" % (wanted,))
+        usage()
         return 2
 
-    failures = []
-    global CURRENT_TEST
-    for name, fn in selected:
-        CURRENT_TEST = name
-        print("== %s" % name, flush=True)
-        started = time.time()
-        try:
-            with Machine() as m:
-                fn(m)
-        except Failure as exc:
-            failures.append((name, str(exc)))
-            print("   FAIL (%.0fs): %s" % (time.time() - started, exc), flush=True)
-        except KeyboardInterrupt:
-            print("   interrupted - stopping", flush=True)
-            raise
-        except Exception:  # a harness/QEMU problem, not a guest verdict
-            failures.append((name, "harness error:\n" + traceback.format_exc()))
-            print("   ERROR (%.0fs):\n%s" % (time.time() - started,
-                                             traceback.format_exc()), flush=True)
-        else:
-            print("   pass (%.0fs)" % (time.time() - started), flush=True)
+    jobs = min(jobs, len(selected))
+    # Every parallel guest is competing for the same cores, so a boot that
+    # takes 110 seconds alone can take three times that with four of them
+    # running - and a boot timeout is the harness giving up, not a
+    # verdict. The allowance grows with the job count for exactly that
+    # reason.
+    boot_timeout = 300 + 90 * (jobs - 1)
 
+    print("running %d test(s), %d at a time" % (len(selected), jobs), flush=True)
+    started_all = time.time()
+    results = []
+
+    if jobs == 1:
+        for name, fn in selected:
+            print("== %s" % name, flush=True)
+            r = run_one(name, fn, boot_timeout)
+            print(r[2], flush=True)
+            results.append(r)
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = [(n, pool.submit(run_one, n, f, boot_timeout)) for n, f in selected]
+            for name, fut in futures:
+                r = fut.result()
+                print("== %s" % name, flush=True)
+                print(r[2], flush=True)
+                results.append(r)
+
+    failures = [(n, d) for n, d, _ in results if d is not None]
     print()
+    print("%d test(s) in %.0fs" % (len(selected), time.time() - started_all))
     if failures:
         print("FAIL: %d/%d interactive test(s) failed:" % (len(failures), len(selected)))
         for name, detail in failures:

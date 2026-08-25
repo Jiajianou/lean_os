@@ -28,10 +28,17 @@
  *
  * Deliberately *not* a file on disk yet. The loader (user_space/lib/
  * icons.h) takes a pointer to these bytes and does not care where they
- * came from; today they are compiled in, which costs a client no file
- * I/O on every redraw and no failure path for "the icon is missing". The
- * day icons are user-replaceable, the format does not change - only where
- * the bytes are read from.
+ * came from. That promise was tested at M63: icons are files now
+ * (/icons/NAME.icn), and the format did not change and the loader did
+ * not change - only where the bytes are read from, which is what the
+ * paragraph above predicted.
+ *
+ * They are still compiled in as well, and that is not a hedge: a fresh
+ * disk has no icons on it and something has to put them there, exactly
+ * as the kernel seeds /bin from blobs compiled into kernel.bin.
+ * desktop_icons.c writes each one out on first run and reads every one
+ * back from disk afterwards - so replacing an icon is replacing a file,
+ * and no rebuild is involved.
  */
 #pragma once
 
@@ -48,6 +55,20 @@
 static inline int icon_width(const uint8_t *blob) { return blob[4]; }
 static inline int icon_height(const uint8_t *blob) { return blob[5]; }
 static inline int icon_palette_count(const uint8_t *blob) { return blob[6]; }
+
+/* How many bytes a whole blob occupies: the header, the palette, and two
+ * 4-bit indices to a byte. Nothing needed this while icons were compiled
+ * in - `sizeof` answered it - and everything needs it the moment they are
+ * files, because a file has to be written with a length and read back
+ * into a buffer with one. */
+static inline int icon_bytes(const uint8_t *blob) {
+    int pixels = blob[4] * blob[5];
+    return ICON_HEADER_BYTES + 3 * blob[6] + (pixels + 1) / 2;
+}
+
+/* The largest a blob can be, for a caller sizing a buffer before it has
+ * seen one: 255x255 is what the header's single-byte dimensions allow. */
+#define ICON_MAX_BYTES (ICON_HEADER_BYTES + 3 * ICON_MAX_PALETTE + (255 * 255 + 1) / 2)
 
 static inline int icon_valid(const uint8_t *blob) {
     return blob && blob[0] == ICON_MAGIC_0 && blob[1] == ICON_MAGIC_1 &&
