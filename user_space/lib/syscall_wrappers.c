@@ -16,6 +16,24 @@ static long do_syscall(long num, long a1, long a2, long a3) {
     return ret;
 }
 
+/* M64: the same trap with the three argument registers the kernel's
+ * dispatcher has always passed and nothing had ever used. SYS_sendto is
+ * the first call here with five arguments, and packing them into a
+ * struct to keep a three-argument wrapper would have been a second ABI
+ * to describe rather than a smaller one. rcx is safe to pass in because
+ * this is `int`/`iret`, not `syscall`/`sysret` - only the latter
+ * commandeers it for the return address. */
+static long do_syscall6(long num, long a1, long a2, long a3, long a4, long a5, long a6) {
+    long ret;
+    register long r8 __asm__("r8") = a5;
+    register long r9 __asm__("r9") = a6;
+    __asm__ volatile("int $0x80"
+                      : "=a"(ret)
+                      : "a"(num), "D"(a1), "S"(a2), "d"(a3), "c"(a4), "r"(r8), "r"(r9)
+                      : "memory");
+    return ret;
+}
+
 long sys_raw(long num, long a1, long a2, long a3) {
     return do_syscall(num, a1, a2, a3);
 }
@@ -143,6 +161,70 @@ long sys_rmdir(const char *path) {
 
 long sys_time(os_datetime_t *out) {
     return do_syscall(SYS_time, (long)out, 0, 0);
+}
+
+/* ---- M65: capabilities ----------------------------------------------- */
+
+long sys_getcaps(void) {
+    return do_syscall(SYS_getcaps, 0, 0, 0);
+}
+
+long sys_dropcaps(uint32_t keep) {
+    return do_syscall(SYS_dropcaps, (long)keep, 0, 0);
+}
+
+/* ---- M64: the network ------------------------------------------------ */
+
+long sys_socket(int type) {
+    return do_syscall(SYS_socket, type, 0, 0);
+}
+
+long sys_listen(int fd) {
+    return do_syscall(SYS_listen, fd, 0, 0);
+}
+
+long sys_connect(int fd, uint32_t ip, uint16_t port) {
+    return do_syscall(SYS_connect, fd, (long)ip, port);
+}
+
+long sys_connstat(int fd) {
+    return do_syscall(SYS_connstat, fd, 0, 0);
+}
+
+long sys_accept(int fd, os_sockaddr_t *from) {
+    return do_syscall(SYS_accept, fd, (long)from, 0);
+}
+
+long sys_send(int fd, const void *data, uint32_t len) {
+    return do_syscall(SYS_send, fd, (long)data, (long)len);
+}
+
+long sys_recv(int fd, void *data, uint32_t max) {
+    return do_syscall(SYS_recv, fd, (long)data, (long)max);
+}
+
+long sys_bind(int fd, uint16_t port) {
+    return do_syscall(SYS_bind, fd, port, 0);
+}
+
+long sys_sendto(int fd, uint32_t ip, uint16_t port, const void *data, uint32_t len) {
+    return do_syscall6(SYS_sendto, fd, (long)ip, port, (long)data, (long)len, 0);
+}
+
+long sys_recvfrom(int fd, void *data, uint32_t max, os_sockaddr_t *from) {
+    return do_syscall6(SYS_recvfrom, fd, (long)data, (long)max, (long)from, 0, 0);
+}
+
+long sys_sockpoll(int fd) {
+    return do_syscall(SYS_sockpoll, fd, 0, 0);
+}
+
+long sys_netconf(os_netconf_t *out) {
+    return do_syscall(SYS_netconf, (long)out, 0, 0);
+}
+
+long sys_settime(uint32_t unix_seconds) {
+    return do_syscall(SYS_settime, (long)unix_seconds, 0, 0);
 }
 
 long sys_audio_claim(void) {

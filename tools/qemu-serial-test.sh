@@ -101,7 +101,7 @@ set -euo pipefail
 # and is therefore the one most worth a test. Same unavoidable shape as
 # M48's toast deadline: proving something happened *on its own* means
 # waiting for it.
-SECONDS_TO_RUN="${1:-480}"
+SECONDS_TO_RUN="${1:-740}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -201,6 +201,10 @@ REQUIRED_MARKERS=(
   "[m62] the PC speaker gated on and off by its own deadline, muted when the volume"
   "[m63] SSE state preserved across task switches, a libc subset checked against"
   "[m63] icons are files: the desktop wrote them out, an edited palette entry"
+  "[m63] four virtual desktops: a window hidden by switching away, back when"
+  "[m64] the network reached user space: a DHCP lease rather than a"
+  "[m65] capabilities: a manifest the kernel applies rather than a launcher,"
+  "[m66] TCP: a handshake, 16 KiB through a 4 KiB buffer arriving byte for"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

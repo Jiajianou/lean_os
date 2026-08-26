@@ -228,11 +228,27 @@ typedef struct {
      * here. Windows the query skips (dead slots) leave no gap: this is a
      * dense rank over what the response actually contains. */
     int32_t z_index;
+    /* M63 stretch goal: which virtual desktop this window is on, or -1
+     * for the two kinds of surface that are on all of them (a panel and
+     * the desktop background are chrome, not windows you put somewhere).
+     * A taskbar filters on this so its buttons describe the desktop you
+     * are looking at; a task manager deliberately does not, because a
+     * process you cannot see is exactly the one you might be looking
+     * for. */
+    int32_t workspace;
     char title[WM_TITLE_MAX]; /* echo of wm_create_request_t.title - may be empty */
 } wm_window_info_t;
 
+/* M63 stretch goal: how many virtual desktops there are. Four, which is
+ * the number every desktop that ships this feature seems to settle on -
+ * enough to be worth switching between, few enough to hold in your head
+ * without a map. */
+#define WM_WORKSPACE_COUNT 4
+
 typedef struct {
     int32_t count;
+    /* Which workspace is on screen right now, so a panel can say so. */
+    int32_t current_workspace;
     wm_window_info_t windows[WM_MAX_ROUTABLE_WINDOWS];
 } wm_query_response_t;
 

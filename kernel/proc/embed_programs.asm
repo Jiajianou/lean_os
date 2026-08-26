@@ -56,6 +56,42 @@ libctest_elf_start:
     incbin "build/libctest.elf"
 libctest_elf_end:
 
+global netconf_elf_start
+global netconf_elf_end
+netconf_elf_start:
+    incbin "build/netconf.elf"
+netconf_elf_end:
+
+global nettime_elf_start
+global nettime_elf_end
+nettime_elf_start:
+    incbin "build/nettime.elf"
+nettime_elf_end:
+
+global tcptest_elf_start
+global tcptest_elf_end
+tcptest_elf_start:
+    incbin "build/tcptest.elf"
+tcptest_elf_end:
+
+global caps_elf_start
+global caps_elf_end
+caps_elf_start:
+    incbin "build/caps.elf"
+caps_elf_end:
+
+global captest_elf_start
+global captest_elf_end
+captest_elf_start:
+    incbin "build/captest.elf"
+captest_elf_end:
+
+global nettest_elf_start
+global nettest_elf_end
+nettest_elf_start:
+    incbin "build/nettest.elf"
+nettest_elf_end:
+
 global whetstone_elf_start
 global whetstone_elf_end
 whetstone_elf_start:

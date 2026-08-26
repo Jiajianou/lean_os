@@ -103,10 +103,14 @@
  * and what a real status indicator would slot into. */
 #define CLOCK_CHARS   5 /* "MM:SS" */
 #define TRAY_PAD      10
-#define TRAY_ICON     8
-#define TRAY_ICON_GAP 6
-#define TRAY_ICONS    2
-#define TRAY_ICONS_W  (TRAY_PAD + TRAY_ICONS * TRAY_ICON + (TRAY_ICONS - 1) * TRAY_ICON_GAP + TRAY_PAD)
+/* M63: four virtual-desktop dots where M42's two decorative tray icons
+ * were. Same footprint, and unlike those this one is telling the truth
+ * about something. */
+#define WS_DOT      8
+#define WS_DOT_GAP  5
+#define WS_DOT_ON   0x004C99E6u
+#define WS_DOT_OFF  0x00506070u
+#define TRAY_ICONS_W  (TRAY_PAD + WM_WORKSPACE_COUNT * WS_DOT + (WM_WORKSPACE_COUNT - 1) * WS_DOT_GAP + TRAY_PAD)
 
 /* M57: the clock's width is measured, not multiplied. The digits share
  * one advance (tools/gen-font.c gives every face tabular figures, for
@@ -142,7 +146,6 @@ static int32_t tray_w(void) {
 #define START_GLYPH_FG  0x004C99E6u
 #define START_PRESS_GLYPH_FG 0x00FFFFFFu
 #define TRAY_SEP_COLOR  0x00303C4Eu
-#define TRAY_ICON_COLOR 0x006C8098u
 #define CLOCK_FG        0x00C8D4E4u
 
 /* What the cursor is currently over. Ordinary running-app slots are their
@@ -197,6 +200,12 @@ static int32_t ctx_overhang; /* what the compositor was last told to raise - onl
  * function that draws the bar takes this, so the bar's own coordinates
  * are unchanged by the overhang rows sitting above it. */
 static gfx_ctx_t bar_gfx;
+
+/* M63: which virtual desktop the compositor last said is on screen.
+ * Read in refresh_running_slots, drawn in draw_tray - the query already
+ * happens once per refresh and this rides along on it rather than asking
+ * again. */
+static int shown_workspace;
 
 /* M59: the time, at last. This read "MM:SS of uptime" for seventeen
  * milestones, and the reason was never that a clock was hard - it was
@@ -261,12 +270,22 @@ static void refresh_running_slots(wm_window_t *self) {
         running_count = 0;
         return;
     }
+    shown_workspace = q.current_workspace;
     int32_t boundary = (int32_t)self->width - tray_w();
     int32_t x = SLOTS_X;
     running_count = 0;
     for (int32_t i = 0; i < q.count && running_count < MAX_RUNNING_SLOTS; i++) {
         const wm_window_info_t *info = &q.windows[i];
         if (info->is_panel || info->is_desktop || info->window_id == self->window_id) {
+            continue;
+        }
+        /* M63: only what is on the desktop you are looking at. A taskbar
+         * that listed every window on every virtual desktop would be a
+         * taskbar that says nothing about the screen in front of you,
+         * which is the one thing it is for. (The task manager
+         * deliberately does the opposite - a process you cannot see is
+         * exactly the one you might be hunting.) */
+        if (info->workspace >= 0 && info->workspace != q.current_workspace) {
             continue;
         }
         if (x + SLOT_W > boundary) {
@@ -314,6 +333,9 @@ static void refresh_running_slots(wm_window_t *self) {
             if (info->is_panel || info->is_desktop || info->window_id == self->window_id) {
                 continue;
             }
+            if (info->workspace >= 0 && info->workspace != q.current_workspace) {
+                continue;
+            }
             if (running_slots[k].window_id == info->window_id && !info->minimized &&
                 info->z_index > best_z) {
                 best_z = info->z_index;
@@ -354,10 +376,20 @@ static void draw_tray(wm_window_t *self) {
     int32_t tray_x = (int32_t)self->width - tray_w();
     gfx_draw_line(&bar_gfx, tray_x, BTN_Y + 2, tray_x, BTN_Y + BTN_H - 3, TRAY_SEP_COLOR);
 
-    int32_t icon_y = (PANEL_HEIGHT - TRAY_ICON) / 2;
-    for (int i = 0; i < TRAY_ICONS; i++) {
-        gfx_draw_rect(&bar_gfx, tray_x + TRAY_PAD + i * (TRAY_ICON + TRAY_ICON_GAP), icon_y,
-                      TRAY_ICON, TRAY_ICON, TRAY_ICON_COLOR);
+    /* M63: the two static indicators M42 drew here are gone, and what
+     * replaced them is the one thing in the tray that has ever had
+     * something to say - which virtual desktop you are on. That entry's
+     * own note said drawing an indicator that never changes is drawing a
+     * lie; this one changes, and it is the only cue that a window has not
+     * vanished but merely moved. */
+    int32_t dot_y = (PANEL_HEIGHT - WS_DOT) / 2;
+    for (int i = 0; i < WM_WORKSPACE_COUNT; i++) {
+        int32_t dx = tray_x + TRAY_PAD + i * (WS_DOT + WS_DOT_GAP);
+        if (i == shown_workspace) {
+            gfx_fill_rect(&bar_gfx, dx, dot_y, WS_DOT, WS_DOT, WS_DOT_ON);
+        } else {
+            gfx_draw_rect(&bar_gfx, dx, dot_y, WS_DOT, WS_DOT, WS_DOT_OFF);
+        }
     }
 
     char clock_text[CLOCK_CHARS + 1];

@@ -33,6 +33,7 @@
 #include "mm/vmm.h"
 #include "net/icmp.h"
 #include "net/net.h"
+#include "net/tcp.h"
 #include "panic.h"
 #include "paths.h"   /* system_api/include/paths.h - M53's filesystem layout, shared with user space */
 #include "proc.h"      /* system_api/include/proc.h - task_info_t, M45's SYS_taskinfo self-test. Resolves to the system_api header, not kernel/proc/proc.h - see syscall.c's own note on the search order. */
@@ -59,6 +60,12 @@
     X(cp)                            \
     X(audiograb)                     \
     X(libctest)                      \
+    X(netconf)                       \
+    X(nettime)                       \
+    X(nettest)                       \
+    X(tcptest)                       \
+    X(caps)                          \
+    X(captest)                       \
     X(whetstone)                     \
     X(ls)                            \
     X(init)                          \
@@ -1991,7 +1998,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     if (net_init()) {
         /* Self-test: a real ICMP echo request/reply round trip against
          * QEMU's usermode-networking gateway (10.0.2.2, net.h's
-         * NET_GATEWAY_IP) - exercises the whole stack end to end (NIC
+         * net_gateway_ip()) - exercises the whole stack end to end (NIC
          * TX/RX, ARP resolution via ip_send's neighbor lookup, ICMP
          * request/reply matching) against a real peer, not a kernel-side
          * loopback stand-in, the same "prove it against something real"
@@ -2004,7 +2011,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         uint8_t ping_payload[4] = {0xDE, 0xAD, 0xBE, 0xEF};
         uint16_t ping_id = 0x1EA5;
         uint16_t ping_seq = 1;
-        icmp_send_echo_request(NET_GATEWAY_IP, ping_id, ping_seq, ping_payload, sizeof(ping_payload));
+        icmp_send_echo_request(net_gateway_ip(), ping_id, ping_seq, ping_payload, sizeof(ping_payload));
 
         int got_reply = 0;
         uint64_t deadline = pit_get_ticks() + 3 * PIT_HZ;
@@ -2019,7 +2026,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("net self-test: no ICMP echo reply from the gateway within 3s");
         }
         klog_puts("[net] ICMP echo request/reply self-test passed (ping to gateway 0x");
-        klog_put_hex32(NET_GATEWAY_IP);
+        klog_put_hex32(net_gateway_ip());
         klog_puts(" round-tripped).\n\n");
     } else {
         klog_puts("[net] no RTL8139 NIC found - networking untested this boot "
@@ -2113,13 +2120,14 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         uint32_t above_panel_px = fb_get_pixel(512, 700);
         uint32_t start_btn_px = fb_get_pixel(71, 742);
         uint32_t running_slot_px = fb_get_pixel(168, 752);
-        /* M57: 932 -> 937. The tray is right-aligned and its width now
-         * includes a *measured* clock ("00:00" in the proportional UI
-         * face, 35px) rather than five fixed 8px cells, so the separator
-         * moved five pixels right. Exactly the class of breakage
-         * gfx_text_width exists to make visible - this test caught it
-         * on the first boot after the font landed. */
-        uint32_t tray_sep_px = fb_get_pixel(937, 750);
+        /* M57: 932 -> 937, when the tray's width started including a
+         * *measured* clock ("00:00" in the proportional UI face, 35px)
+         * rather than five fixed 8px cells. M63: 937 -> 912, when M42's
+         * two decorative tray icons were replaced by four virtual-desktop
+         * indicators. The tray is right-aligned, so anything that changes
+         * its width moves this - which is exactly what a pixel test is
+         * for, and both times this is the check that noticed. */
+        uint32_t tray_sep_px = fb_get_pixel(912, 750);
 
         int action_fds[2];
         if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
@@ -5686,6 +5694,371 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts("[m63] icons are files: the desktop wrote them out, an edited palette entry "
                    "changed what is on screen after a restart, and the format and loader did not "
                    "change at all - self-test passed.\n\n");
+    }
+
+    /* M63 stretch goal self-test: virtual desktops.
+     *
+     * Four claims, and each is a pixel rather than a protocol reply,
+     * because "the window is on workspace 2" is only interesting if it
+     * also means "the window is not on the screen":
+     *
+     *   1. A window is visible on the desktop it was opened on.
+     *   2. Switching away hides it - and hides it *completely*, so what
+     *      is left is bare desktop rather than a stale rectangle.
+     *   3. Switching back brings it back.
+     *   4. Moving it takes it with you: after Ctrl+Shift+Alt+Right the
+     *      window is still on screen, and after switching back to where
+     *      it used to be, it is not.
+     *
+     * Driven with real injected chords through a real compositor, so what
+     * is being tested is the binding as much as the mechanism - the same
+     * reason M56 taught keyboard_inject to carry a modifier mask.
+     */
+    {
+        int all_ok = 1;
+
+        size_t comp_bytes = 0;
+        uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+        size_t clock_bytes = 0;
+        uint8_t *clock_image = read_program(PATH_BIN_DIR "gui_clock", &clock_bytes);
+
+        task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+        kfree(comp_image);
+        pit_sleep_ms(300);
+        task_t *clock_task = process_spawn("gui_clock", clock_image, clock_bytes, "");
+        kfree(clock_image);
+        pit_sleep_ms(900);
+
+        /* gui_clock connects at (100, 100), 200x120 - the placement every
+         * other self-test here relies on. (150, 150) is inside its
+         * content; (500, 500) is bare desktop, and is what "gone" has to
+         * look like. */
+        uint32_t desktop = fb_get_pixel(500, 500);
+        uint32_t on_home = fb_get_pixel(150, 150);
+
+        keyboard_inject((char)KBD_KEY_RIGHT, KBD_MOD_CTRL | KBD_MOD_SHIFT);
+        pit_sleep_ms(500);
+        uint32_t after_switch = fb_get_pixel(150, 150);
+
+        keyboard_inject((char)KBD_KEY_LEFT, KBD_MOD_CTRL | KBD_MOD_SHIFT);
+        pit_sleep_ms(500);
+        uint32_t back_home = fb_get_pixel(150, 150);
+
+        /* And take it with us. */
+        keyboard_inject((char)KBD_KEY_RIGHT, KBD_MOD_CTRL | KBD_MOD_SHIFT | KBD_MOD_ALT);
+        pit_sleep_ms(500);
+        uint32_t moved_with = fb_get_pixel(150, 150);
+
+        keyboard_inject((char)KBD_KEY_LEFT, KBD_MOD_CTRL | KBD_MOD_SHIFT);
+        pit_sleep_ms(500);
+        uint32_t left_behind = fb_get_pixel(150, 150);
+
+        selftest_reap(clock_task);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        if (on_home == desktop) {
+            klog_puts("[m63] the window was not on screen to begin with - this test can see nothing\n");
+            all_ok = 0;
+        }
+        if (after_switch != desktop) {
+            klog_puts("[m63] switching to the next virtual desktop left the window on screen\n");
+            all_ok = 0;
+        }
+        if (back_home != on_home) {
+            klog_puts("[m63] switching back did not bring the window back\n");
+            all_ok = 0;
+        }
+        if (moved_with != on_home) {
+            klog_puts("[m63] moving a window to the next desktop did not take it there\n");
+            all_ok = 0;
+        }
+        if (left_behind != desktop) {
+            klog_puts("[m63] the moved window is still on the desktop it came from\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M63 workspace self-test: virtual desktops do not hide, show or carry windows");
+        }
+        klog_puts("[m63] four virtual desktops: a window hidden by switching away, back when "
+                   "switching returns, and carried along when it is sent - self-test passed.\n\n");
+    }
+
+    /* M64 self-test: a network user space can reach.
+     *
+     * The stretch-goal entry that asked for this named the problem
+     * precisely: M27 shipped Ethernet, ARP, IPv4 and ICMP, and for
+     * thirty-six milestones the only thing that ever used any of it was
+     * one boot self-test pinging the gateway. That test is still above
+     * this one and still passes; what it could never show is whether a
+     * *program* could do anything with the network, because there was no
+     * call for one to make.
+     *
+     * Three claims, in the order they stop being about the kernel and
+     * start being about a person:
+     *
+     *   1. **DHCP got a real lease.** Asserted explicitly, and it has to
+     *      be: on QEMU the leased configuration is byte-for-byte the
+     *      fallback one, so a DHCP client that did nothing at all would
+     *      produce an identical `[net]` line. net_config_is_leased() is
+     *      the only thing that can tell the two apart.
+     *   2. **The syscall surface works and fails correctly.** In user
+     *      space, in `nettest`, for the same reason M52's pointer matrix
+     *      lives in badptr.c: what is new here is the syscall boundary,
+     *      and a test that called socket_sendto() directly would prove
+     *      the layer underneath it. Fourteen checks, five of them about
+     *      failing properly - including sending to an address nothing
+     *      answers ARP for, which until this milestone was a panic().
+     *   3. **A program that asks the network for something real.**
+     *      `nettime` is an SNTP client, and the honest thing to assert
+     *      about it here is not that it gets an answer - the gateway on
+     *      this network does not run NTP - but that it *fails cleanly
+     *      and says so*, in bounded time, which is what almost every
+     *      network program spends most of its life doing.
+     */
+    {
+        int all_ok = 1;
+
+        if (net_have_nic()) {
+            if (!net_config_is_leased()) {
+                klog_puts("[m64] no DHCP lease - the address is the fallback constant, "
+                           "which is what this milestone existed to stop being the answer\n");
+                all_ok = 0;
+            }
+
+            size_t bytes = 0;
+            uint8_t *image = read_program(PATH_BIN_DIR "nettest", &bytes);
+            task_t *t = process_spawn("nettest", image, bytes, "");
+            kfree(image);
+            if (do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) != 0) {
+                klog_puts("[m64] the socket self-test program reported a failure\n");
+                all_ok = 0;
+            }
+
+            /* nettime against a gateway that does not answer NTP. What
+             * is being asserted is the *shape* of a failure: it must
+             * come back, it must come back non-zero, and it must do both
+             * inside the second its own deadline promises. A program
+             * that hung here would hang every desktop that ever shipped
+             * it. Read back through a pipe, so "it exited 1" cannot be
+             * confused with "it exited 1 having printed nothing". */
+            int out_fds[2];
+            if (do_syscall(SYS_pipe, (uint64_t)out_fds, 0, 0) != 0) {
+                panic("M64 self-test: could not make a pipe for nettime's output");
+            }
+            do_syscall(SYS_dup2, (uint64_t)out_fds[1], 1, 0);
+
+            image = read_program(PATH_BIN_DIR "nettime", &bytes);
+            task_t *nt = process_spawn("nettime", image, bytes, "");
+            kfree(image);
+
+            uint64_t started = pit_get_ticks();
+            long nettime_rc = do_syscall(SYS_wait, (uint64_t)nt->id, 0, 0);
+            uint64_t elapsed_ms = (pit_get_ticks() - started) * 1000 / PIT_HZ;
+
+            static char nettime_out[256];
+            long got = do_syscall(SYS_read, (uint64_t)out_fds[0],
+                                  (uint64_t)nettime_out, sizeof(nettime_out) - 1);
+            nettime_out[got > 0 ? got : 0] = '\0';
+            do_syscall(SYS_close, (uint64_t)out_fds[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)out_fds[1], 0, 0);
+            /* fd 1 back to the console by hand, exactly as the M63 block
+             * above does and for the same reason - see its comment. */
+            fd_release(&sched_current()->fds[1]);
+            sched_current()->fds[1].type = FD_STDOUT;
+
+            /* Either outcome is legitimate - a machine whose gateway
+             * *does* run NTP would get a time - so this asserts what is
+             * true of both: it came back, it came back quickly, and it
+             * said something. */
+            if (elapsed_ms > 5000) {
+                klog_puts("[m64] nettime took longer than its own deadline to give up\n");
+                all_ok = 0;
+            }
+            if (got <= 0) {
+                klog_puts("[m64] nettime printed nothing at all\n");
+                all_ok = 0;
+            }
+            if (nettime_rc == 0 && !k_strstr(nettime_out, "says")) {
+                klog_puts("[m64] nettime reported success without reporting a time\n");
+                all_ok = 0;
+            }
+            if (nettime_rc != 0 && !k_strstr(nettime_out, "no reply") &&
+                !k_strstr(nettime_out, "unreachable")) {
+                klog_puts("[m64] nettime failed without saying why\n");
+                all_ok = 0;
+            }
+
+            if (!all_ok) {
+                panic("M64 network self-test: user space cannot use the network correctly");
+            }
+
+            klog_puts("[m64] the network reached user space: a DHCP lease rather than a "
+                       "hardcoded address, UDP sockets in the fd table that round-trip a "
+                       "datagram and refuse six kinds of wrong, and an SNTP client that "
+                       "gives up cleanly - self-test passed. nettime said: ");
+            klog_puts(nettime_out);
+            klog_putc('\n');
+        } else {
+            klog_puts("[m64] no NIC on this machine - the socket layer is present but "
+                       "untested this boot.\n\n");
+        }
+    }
+
+    /* M65 self-test: a permission model that is not a fake check.
+     *
+     * This project declined to build one several times, in writing, and
+     * each refusal was right at the time - `SYS_shutdown`'s own comment
+     * calls a check with nothing behind it exactly what it would have
+     * been. What changed is not the argument but the machine: M63 made
+     * it possible to run a program nobody here wrote, and M64 made it
+     * possible for that program to open a socket and talk to anything.
+     * The stretch-goal entry said to revisit this "the moment a ported
+     * program is something a person downloads", and both halves of the
+     * sentence it was waiting on have now happened.
+     *
+     * Three claims:
+     *
+     *   1. **The manifest is applied by the kernel, not by launchers.**
+     *      Asserted by reading the capability set of a process spawned
+     *      here, in kernel_main, which holds CAP_ALL - if the grant
+     *      table were consulted by the compositor rather than by
+     *      process_spawnv, this child would have inherited everything.
+     *   2. **An ordinary application is refused.** `captest` is granted
+     *      nothing beyond CAP_APP_DEFAULT on purpose, and thirteen of
+     *      its checks are things it tried and could not do.
+     *   3. **init survived it trying to kill init.** The one assertion
+     *      here whose failure mode is loud rather than a return code:
+     *      a kernel that let an unprivileged process signal PID 1 would
+     *      have this self-test take the desktop down as it ran.
+     */
+    {
+        int all_ok = 1;
+
+        /* A plain program with no entry in the grant table, spawned by
+         * the most privileged thing on the machine. */
+        size_t bytes = 0;
+        uint8_t *image = read_program(PATH_BIN_DIR "hello", &bytes);
+        task_t *plain = process_spawn("hello", image, bytes, "");
+        kfree(image);
+        uint32_t plain_caps = plain->caps;
+        do_syscall(SYS_wait, (uint64_t)plain->id, 0, 0);
+
+        if (plain_caps != CAP_APP_DEFAULT) {
+            klog_puts("[m65] a program with no manifest entry did not get the default "
+                       "capability set - the grant table is not being applied at spawn\n");
+            all_ok = 0;
+        }
+        if (sched_current()->caps != CAP_ALL) {
+            klog_puts("[m65] kernel_main is not the root of the capability model\n");
+            all_ok = 0;
+        }
+
+        /* And the compositor, which is the one entry that is broad -
+         * because it is the trusted launcher, and a compositor that
+         * could not paint would be a black screen. */
+        image = read_program(PATH_BIN_DIR "compositor", &bytes);
+        task_t *comp = process_spawn("compositor", image, bytes, "");
+        kfree(image);
+        if (comp->caps != CAP_ALL) {
+            klog_puts("[m65] the compositor did not get the capabilities it owns the screen with\n");
+            all_ok = 0;
+        }
+        selftest_reap(comp);
+        console_init();
+        klog_use_console();
+
+        image = read_program(PATH_BIN_DIR "captest", &bytes);
+        task_t *ct = process_spawn("captest", image, bytes, "");
+        kfree(image);
+        if (do_syscall(SYS_wait, (uint64_t)ct->id, 0, 0) != 0) {
+            klog_puts("[m65] the capability self-test program reported a failure\n");
+            all_ok = 0;
+        }
+
+        /* PID 1, still there. captest asked the kernel to kill it. */
+        task_t *pid1 = sched_task_by_id(1);
+        if (!pid1 || pid1->state == TASK_TERMINATED) {
+            klog_puts("[m65] init did not survive an unprivileged process asking to kill it\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M65 capability self-test: the permission model does not hold");
+        }
+        klog_puts("[m65] capabilities: a manifest the kernel applies rather than a launcher, "
+                   "an ordinary program refused the screen, the clipboard, the process list, "
+                   "a socket, the clock and init's life, and a set that only ever shrinks - "
+                   "self-test passed.\n\n");
+    }
+
+    /* M66 self-test: TCP.
+     *
+     * The stretch-goal entry refused to let this be a footnote -
+     * "retransmission, congestion control and an eleven-state machine
+     * are not a bullet on somebody else's list" - and the test is shaped
+     * by the same judgement. What it asserts is not "a connection
+     * worked" but the three things that are hard about TCP and easy to
+     * ship broken:
+     *
+     *   1. **A transfer bigger than any buffer involved.** 16 KiB
+     *      through a 4 KiB send buffer at a 1460-byte MSS, checked byte
+     *      for byte. That exercises the window, the congestion window,
+     *      buffer compaction on every ACK, and a sender that has to stop
+     *      and resume - none of which a one-segment "hello" touches.
+     *   2. **Retransmission, on a link that never loses anything.**
+     *      Loopback is a perfect network, which makes it the worst place
+     *      to find out whether the retransmission path works - and "the
+     *      retransmission path is untested" is true of most from-scratch
+     *      TCP stacks and never written down. So the kernel is told to
+     *      drop the next segments outright, after they have been built
+     *      and after the sequence numbers have advanced, and the
+     *      transfer has to complete anyway.
+     *   3. **A refused connection, quickly.** An RST must be told apart
+     *      from silence, or every mistyped port becomes a ten-second
+     *      pause.
+     */
+    if (net_have_nic()) {
+        int all_ok = 1;
+
+        /* Two data segments into the void, armed before the program
+         * starts. They land on the first short message in each
+         * direction, so both ends of the connection have to recover -
+         * and they land in go-back-N rather than on the handshake, which
+         * is where the interesting code is. */
+        tcp_debug_drop_next(2);
+        int retransmits_before = tcp_debug_retransmits();
+
+        size_t bytes = 0;
+        uint8_t *image = read_program(PATH_BIN_DIR "tcptest", &bytes);
+        task_t *t = process_spawn("tcptest", image, bytes, "");
+        kfree(image);
+        if (do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) != 0) {
+            klog_puts("[m66] the TCP self-test program reported a failure\n");
+            all_ok = 0;
+        }
+
+        int retransmits = tcp_debug_retransmits() - retransmits_before;
+        if (retransmits <= 0) {
+            klog_puts("[m66] three segments were dropped and nothing was ever retransmitted - "
+                       "the recovery path did not run, so the transfer that succeeded proves "
+                       "less than it appears to\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M66 TCP self-test: the connection, the transfer or the recovery does not work");
+        }
+
+        klog_puts("[m66] TCP: a handshake, 16 KiB through a 4 KiB buffer arriving byte for "
+                   "byte, an end of stream a reader can tell from a pause, a refusal that "
+                   "arrives as an RST rather than a timeout, and a transfer that survived ");
+        klog_put_dec((uint32_t)retransmits);
+        klog_puts(" deliberately dropped segment(s) - self-test passed.\n\n");
+    } else {
+        klog_puts("[m66] no NIC on this machine - TCP is present but untested this boot.\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

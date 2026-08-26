@@ -30,6 +30,15 @@ typedef enum {
     SHORTCUT_SNAP_RIGHT,      /* Ctrl+Alt+Right */
     SHORTCUT_MAXIMIZE,        /* Ctrl+Alt+Up */
     SHORTCUT_MINIMIZE,        /* Ctrl+Alt+Down */
+    /* M63 stretch goal: virtual desktops, and the natural payoff for
+     * this table existing. Ctrl+Shift+arrow moves *you*; adding Alt moves
+     * the window with you - which is the one thing that makes a second
+     * desktop useful for something already open rather than only for
+     * something about to be started. */
+    SHORTCUT_WORKSPACE_PREV,  /* Ctrl+Shift+Left */
+    SHORTCUT_WORKSPACE_NEXT,  /* Ctrl+Shift+Right */
+    SHORTCUT_WINDOW_TO_PREV,  /* Ctrl+Shift+Alt+Left */
+    SHORTCUT_WINDOW_TO_NEXT,  /* Ctrl+Shift+Alt+Right */
 } shortcut_id_t;
 
 typedef struct {
@@ -51,10 +60,22 @@ static const shortcut_t SHORTCUTS[] = {
     {SHORTCUT_LAUNCHER,       KBD_MOD_CTRL,                0,            ' ',                  "Ctrl+Space",     "Open the launcher"},
     {SHORTCUT_TASK_MANAGER,   KBD_MOD_CTRL | KBD_MOD_SHIFT, 0,           27,                   "Ctrl+Shift+Esc", "Task manager"},
     {SHORTCUT_CLOSE_WINDOW,   KBD_MOD_ALT,                 0,            (char)KBD_KEY_FN(4),  "Alt+F4",         "Close window"},
-    {SHORTCUT_SNAP_LEFT,      KBD_MOD_CTRL | KBD_MOD_ALT,  0,            (char)KBD_KEY_LEFT,   "Ctrl+Alt+Left",  "Snap left"},
-    {SHORTCUT_SNAP_RIGHT,     KBD_MOD_CTRL | KBD_MOD_ALT,  0,            (char)KBD_KEY_RIGHT,  "Ctrl+Alt+Right", "Snap right"},
-    {SHORTCUT_MAXIMIZE,       KBD_MOD_CTRL | KBD_MOD_ALT,  0,            (char)KBD_KEY_UP,     "Ctrl+Alt+Up",    "Maximize"},
-    {SHORTCUT_MINIMIZE,       KBD_MOD_CTRL | KBD_MOD_ALT,  0,            (char)KBD_KEY_DOWN,   "Ctrl+Alt+Down",  "Minimize"},
+    /* M63: the four-modifier chords come *before* the snap ones they
+     * extend, for exactly the reason Shift+Alt+Tab comes before Alt+Tab -
+     * the matcher takes the first row that fits. Getting this wrong is
+     * not subtle to debug and was not subtle here: Ctrl+Shift+Alt+Right
+     * matched "Snap right" and snapped the window instead of sending it
+     * to the next desktop, which the self-test caught on the first boot.
+     * The forbidden mask on the snap rows says the same thing a second
+     * way, so a future reordering cannot reintroduce it. */
+    {SHORTCUT_WINDOW_TO_PREV, KBD_MOD_CTRL | KBD_MOD_SHIFT | KBD_MOD_ALT, 0, (char)KBD_KEY_LEFT,  "Ctrl+Shift+Alt+Left",  "Window to previous desktop"},
+    {SHORTCUT_WINDOW_TO_NEXT, KBD_MOD_CTRL | KBD_MOD_SHIFT | KBD_MOD_ALT, 0, (char)KBD_KEY_RIGHT, "Ctrl+Shift+Alt+Right", "Window to next desktop"},
+    {SHORTCUT_WORKSPACE_PREV, KBD_MOD_CTRL | KBD_MOD_SHIFT, KBD_MOD_ALT,   (char)KBD_KEY_LEFT,  "Ctrl+Shift+Left",      "Previous desktop"},
+    {SHORTCUT_WORKSPACE_NEXT, KBD_MOD_CTRL | KBD_MOD_SHIFT, KBD_MOD_ALT,   (char)KBD_KEY_RIGHT, "Ctrl+Shift+Right",     "Next desktop"},
+    {SHORTCUT_SNAP_LEFT,      KBD_MOD_CTRL | KBD_MOD_ALT,  KBD_MOD_SHIFT, (char)KBD_KEY_LEFT,   "Ctrl+Alt+Left",  "Snap left"},
+    {SHORTCUT_SNAP_RIGHT,     KBD_MOD_CTRL | KBD_MOD_ALT,  KBD_MOD_SHIFT, (char)KBD_KEY_RIGHT,  "Ctrl+Alt+Right", "Snap right"},
+    {SHORTCUT_MAXIMIZE,       KBD_MOD_CTRL | KBD_MOD_ALT,  KBD_MOD_SHIFT, (char)KBD_KEY_UP,     "Ctrl+Alt+Up",    "Maximize"},
+    {SHORTCUT_MINIMIZE,       KBD_MOD_CTRL | KBD_MOD_ALT,  KBD_MOD_SHIFT, (char)KBD_KEY_DOWN,   "Ctrl+Alt+Down",  "Minimize"},
 };
 
 #define SHORTCUT_COUNT ((int)(sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0])))

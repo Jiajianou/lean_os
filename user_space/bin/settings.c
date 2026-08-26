@@ -42,8 +42,13 @@
  * once, not a control you return to. */
 /* M58: 520 -> 632, for the Resolution pane. The Shortcuts list moves
  * down rather than shrinking - it is reference material and the whole
- * point of it is that it is complete. */
-#define WIN_H 632
+ * point of it is that it is complete.
+ *
+ * M63: 632 -> 680, for the four virtual-desktop chords. Same reasoning
+ * and the same answer: a shortcuts pane that stopped listing some of
+ * them would be exactly the drifting second copy shortcuts.h exists to
+ * prevent. */
+#define WIN_H 680
 
 #define BG_COLOR      0x00202430u
 #define TEXT_COLOR    0x00E0E0E0u
@@ -123,7 +128,7 @@
  * is drawn in. */
 #define SHORTCUT_ROW_H   15
 #define SHORTCUT_FONT    ui_font_small
-#define SHORTCUT_DESC_X  (GFX_PAD + 124) /* clears the longest chord ("Ctrl+Shift+Esc", 14 glyphs) */
+#define SHORTCUT_DESC_X  (GFX_PAD + 124) /* M63: clears the longest chord, which is now "Ctrl+Shift+Alt+Right" in the 12-row face */
 
 #define DEFAULT_BG_COLOR     0x001A1A2Eu /* mirrors compositor.c's own compile-time default - see this file's header comment */
 #define DEFAULT_ACCENT_COLOR 0x004C99E6u

@@ -352,6 +352,11 @@ typedef struct {
      * moment the client has provably let go of the old one, which is the
      * request it sends after unmapping. */
     uint8_t needs_rebuffer;
+    /* M63 stretch goal: which virtual desktop this window is on, or -1
+     * for a panel and the desktop background - both are chrome and are
+     * on all of them. Set from whichever workspace was on screen when
+     * the window connected, which is what "open it here" means. */
+    int8_t workspace;
     uint8_t alive; /* M29: 0 once this slot has been reclaimed (owning client died or closed) - excluded from redraw/hit-test/query, and eligible for accept_pending_window to hand to the next connecting client. Slots below window_count that are !alive are exactly the "holes" reap_dead_clients leaves behind. */
     /* M48: this window's client was asked to stop - a titlebar close, a
      * context menu, an external WM_ACTION_CLOSE/KILL. It is what keeps
@@ -525,6 +530,23 @@ static long anim_run_start_ms; /* when the current run of animations began */
  * minimize aim at the bottom of the screen instead. */
 static int32_t slot_x[MAX_WINDOWS];
 static int32_t slot_w[MAX_WINDOWS];
+
+/* ---- M63 stretch goal: virtual desktops ----------------------------
+ *
+ * "Cheap once the compositor tracks a workspace id per window" is exactly
+ * what it turned out to be. Everything that walks the window table -
+ * compositing, hit-testing, focus, Alt+Tab - already asks whether a
+ * window is alive and not minimized; asking whether it is *here* is one
+ * more term in the same condition, and window_here() is that term.
+ *
+ * A panel and the desktop background are on every workspace, because
+ * they are chrome rather than windows you put somewhere. That is the
+ * whole special case. */
+static int current_workspace;
+
+static int window_here(const window_t *win) {
+    return win->workspace < 0 || win->workspace == current_workspace;
+}
 
 /* M61: when the launcher's fade began, or 0 when it is not fading. */
 static long launcher_fade_start_ms;
@@ -1174,8 +1196,11 @@ static int z_hit_test(int32_t px, int32_t py, unsigned classes, hit_region_t reg
     for (int z = z_count - 1; z >= 0; z--) {
         int idx = zorder[z];
         const window_t *w = &windows[idx];
-        if (!w->alive || w->minimized) {
-            continue; /* nothing there to click and nothing there to hide what's under it */
+        if (!w->alive || w->minimized || !window_here(w)) {
+            /* Nothing there to click and nothing there to hide what is
+             * under it - which is true of a minimized window and equally
+             * true (M63) of one on another virtual desktop. */
+            continue;
         }
         if ((window_class_bit(w) & classes) &&
             hit_region_matches(w, px, py, region, out_detail)) {
@@ -1758,8 +1783,11 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
     for (int z = 0; z < z_count; z++) {
         int i = zorder[z];
         const window_t *win = &windows[i];
-        if (!win->alive || win->minimized || win->is_panel) {
-            continue; /* panels are the top band and are drawn below, after the snap preview */
+        if (!win->alive || win->minimized || win->is_panel || !window_here(win)) {
+            /* Panels are the top band and are drawn below, after the snap
+             * preview; a window on another virtual desktop (M63) is not
+             * drawn at all, which is what a virtual desktop is. */
+            continue;
         }
         if (win->is_desktop) {
             blit_window(win); /* no border/titlebar - a desktop background is its own chrome, same as a panel */
@@ -1942,6 +1970,58 @@ static int cursor_over_titlebar(void) {
 
 static void send_event(const window_t *win, const wm_event_t *ev) {
     sys_write(win->evt_write_fd, ev, sizeof(*ev));
+}
+
+static void set_focus(int idx);
+
+/* M63 stretch goal: switching virtual desktops.
+ *
+ * Wraps rather than stopping at the ends - four desktops in a ring is
+ * one chord to reach any of them, where four in a line makes the far one
+ * three presses away and gives no feedback for the press that did
+ * nothing.
+ *
+ * Focus has to move with the view: a focused window on a desktop you are
+ * no longer looking at would keep receiving every keystroke, which is
+ * the single most confusing thing a workspace implementation can do. */
+static void switch_workspace(int to) {
+    to = ((to % WM_WORKSPACE_COUNT) + WM_WORKSPACE_COUNT) % WM_WORKSPACE_COUNT;
+    if (to == current_workspace) {
+        return;
+    }
+    current_workspace = to;
+
+    if (focused_window >= 0 && !window_here(&windows[focused_window])) {
+        set_focus(-1);
+    }
+    /* Whatever is topmost here takes focus, so arriving on a desktop
+     * with windows on it means arriving able to type. */
+    if (focused_window < 0) {
+        for (int z = z_count - 1; z >= 0; z--) {
+            window_t *w = &windows[zorder[z]];
+            if (w->alive && !w->minimized && !w->is_panel && !w->is_desktop && window_here(w)) {
+                set_focus(zorder[z]);
+                break;
+            }
+        }
+    }
+    dirty = 1;
+}
+
+/* And taking a window with you. Every implementation of this either
+ * follows the window or stays put; following is the useful one - you
+ * moved it because you want to keep working on it somewhere else, and
+ * staying behind would mean two chords for one intention. */
+static void move_window_to_workspace(int idx, int to) {
+    window_t *win = &windows[idx];
+    if (win->workspace < 0) {
+        return; /* chrome is on every desktop; there is nowhere to send it */
+    }
+    to = ((to % WM_WORKSPACE_COUNT) + WM_WORKSPACE_COUNT) % WM_WORKSPACE_COUNT;
+    win->workspace = (int8_t)to;
+    switch_workspace(to);
+    set_focus(idx);
+    dirty = 1;
 }
 
 static void set_focus(int idx) {
@@ -2460,6 +2540,9 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     if (!req.panel && !req.desktop) {
         anim_window_open(idx);
     }
+    /* M63: on whichever desktop is showing. A panel and the desktop
+     * background get -1, which is every desktop - they are chrome. */
+    win->workspace = (req.panel || req.desktop) ? (int8_t)-1 : (int8_t)current_workspace;
     slot_x[idx] = 0;
     slot_w[idx] = -1; /* until the panel says otherwise - see taskbar_target */
     int ti = 0;
@@ -2510,6 +2593,7 @@ static void accept_pending_query(int query_read_fd, int query_resp_write_fd) {
 
     wm_query_response_t resp;
     resp.count = 0;
+    resp.current_workspace = current_workspace;
     for (int i = 0; i < window_count; i++) {
         const window_t *win = &windows[i];
         if (!win->alive) { /* M29: a reclaimed slot is gone, not a "running app" - skip it */
@@ -2533,6 +2617,7 @@ static void accept_pending_query(int query_read_fd, int query_resp_write_fd) {
          * z_count and resp.count are the same number and the ranks run
          * 0..count-1 with no gaps. */
         resp.windows[out].z_index = z_position_of(i);
+        resp.windows[out].workspace = win->workspace;
         memcpy(resp.windows[out].title, win->title, WM_TITLE_MAX);
         resp.count++;
     }
@@ -2550,6 +2635,14 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
     window_t *win = &windows[idx];
     if (action == WM_ACTION_FOCUS) {
         win->minimized = 0;
+        /* M63: focusing a window on another virtual desktop goes to it.
+         * The alternative - focusing something invisible - is the worst
+         * of the three options, and refusing outright would make a
+         * taskbar button that lists every window (or a task manager's
+         * Force Quit target) unusable across desktops. */
+        if (win->workspace >= 0 && win->workspace != current_workspace) {
+            switch_workspace(win->workspace);
+        }
         set_focus(idx); /* M51: which raises it - see set_focus */
     } else if (action == WM_ACTION_TOGGLE_MINIMIZE) {
         /* M61: the animation is started from the pre-change geometry
@@ -3910,7 +4003,12 @@ static void alt_tab_cycle(int direction) {
             z += z_count;
         }
         int idx = zorder[z];
-        if (windows[idx].alive && !windows[idx].is_panel && !windows[idx].is_desktop) {
+        /* M63: Alt+Tab is about the desktop you are looking at. Cycling
+         * onto a window on another one would either show nothing or
+         * switch desktops out from under you, and neither is what the
+         * chord means. */
+        if (windows[idx].alive && !windows[idx].is_panel && !windows[idx].is_desktop &&
+            window_here(&windows[idx])) {
             apply_window_action(idx, WM_ACTION_FOCUS, 0);
             return;
         }
@@ -3932,6 +4030,12 @@ static void run_shortcut(int id) {
         return;
     case SHORTCUT_LAUNCHER:
         launcher_set_open(!launcher_open);
+        return;
+    case SHORTCUT_WORKSPACE_PREV:
+        switch_workspace(current_workspace - 1);
+        return;
+    case SHORTCUT_WORKSPACE_NEXT:
+        switch_workspace(current_workspace + 1);
         return;
     case SHORTCUT_TASK_MANAGER: {
         /* An ordinary program on disk, so this is one spawn and nothing
@@ -3969,6 +4073,12 @@ static void run_shortcut(int id) {
         break;
     case SHORTCUT_MAXIMIZE:
         apply_window_action(idx, WM_ACTION_MAXIMIZE, 0);
+        break;
+    case SHORTCUT_WINDOW_TO_PREV:
+        move_window_to_workspace(idx, current_workspace - 1);
+        break;
+    case SHORTCUT_WINDOW_TO_NEXT:
+        move_window_to_workspace(idx, current_workspace + 1);
         break;
     case SHORTCUT_MINIMIZE:
         /* Restore-then-minimize: from maximized this puts the window

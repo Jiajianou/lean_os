@@ -13,6 +13,13 @@
 #include <stddef.h>
 
 void *k_memcpy(void *dst, const void *src, size_t n);
+
+/* M66: the overlapping-safe copy. k_memcpy copies forward, which is
+ * wrong exactly when a buffer is being compacted toward its own start -
+ * which is what TCP's send and receive buffers do on every ACK and every
+ * read. Added when that was needed rather than speculatively, which is
+ * why it took sixty-six milestones. */
+void *k_memmove(void *dst, const void *src, size_t n);
 void *k_memset(void *dst, int c, size_t n);
 size_t k_strlen(const char *s);
 int k_strcmp(const char *a, const char *b);

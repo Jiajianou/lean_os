@@ -166,7 +166,7 @@ SLOT_GAP = 4
 START_X = 4
 START_W = 72
 SLOTS_X = START_X + START_W + 8
-TRAY_W = 87   # M57: TRAY_ICONS_W(42) + a *measured* "00:00"(35) + TRAY_PAD(10)
+TRAY_W = 112  # M63: TRAY_ICONS_W(67, four workspace dots) + a *measured* "00:00"(35) + TRAY_PAD(10)
 
 # Every button in the bar is read at one of two rows, so the blend is
 # resolved once here rather than at each call site.
@@ -330,7 +330,7 @@ BORDER = 2
 BORDER_COLOR = 0x444466
 
 # settings.c's window and the two rows of it this suite clicks.
-SETTINGS_W, SETTINGS_H = 320, 632
+SETTINGS_W, SETTINGS_H = 320, 680
 WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H = 258, 68, 22
 
 # M61: settings.c's Motion switch - one button whose fill says which way

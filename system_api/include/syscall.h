@@ -125,6 +125,62 @@
 #define SYS_display_modes 38 /* (display_mode_t *out, max_entries) -> how many modes exist (may exceed max_entries; same "caller sizes the buffer" contract as SYS_taskinfo), or -1. M58: a *curated and validated* list, not an enumeration - kernel/drivers/dispi.h's own comment explains why there is nothing to enumerate. Zero modes is the honest answer on any machine without a Bochs/QEMU DISPI adapter, which is every real one. */
 #define SYS_display_set_mode 39 /* (width, height) -> 0 or -1. M58: reprograms the display adapter and re-maps the kernel's framebuffer, right now, with no reboot - see kernel/drivers/dispi.h for why this has to be a native driver rather than a call back into UEFI GOP. Refuses any geometry not in SYS_display_modes' list. Everything downstream of "the screen is a different size now" is the caller's problem and is deliberately not attempted here: the compositor owns the screen, so the compositor reallocates window buffers, re-spans the panels, clamps windows and the cursor back on-screen, and tells its clients. Not restricted to any caller, for the same reason SYS_shutdown isn't. */
 
+/* M64: the network, reachable at last.
+ *
+ * M27 shipped Ethernet, ARP, IPv4 and ICMP and then nothing used any of
+ * it for thirty-six milestones, because there was no way for a program
+ * to ask. These five calls are that way, and they are shaped like the
+ * fd table rather than like a new namespace: a socket is an fd, it is
+ * inherited across spawn, it is closed by SYS_close, and it costs the
+ * kernel one refcounted table entry - all of which M59's open-file work
+ * had already built and none of which had to be built again.
+ *
+ * UDP only. TCP is its own milestone and says so in milestones.md: an
+ * eleven-state machine with retransmission and congestion control is not
+ * a bullet on somebody else's list.
+ */
+#define SYS_socket   50 /* (type) -> an fd for a new unbound socket, or -1 if the table is full. os_net.h's OS_SOCK_DGRAM (0) or OS_SOCK_STREAM (1). M64 shipped this with no parameters at all and argued for that in writing: "three parameters that only ever take one value each are three ways to be wrong about an API that has no choices in it". That argument was right for as long as its premise held, and M66's TCP ends it - there is a real choice now, so there is one real parameter and not three. OS_SOCK_DGRAM is 0, so every call written before M66 still means what it meant. */
+#define SYS_bind     51 /* (fd, port) -> the bound port, or -1 if the port is taken, the fd is not a socket, or it is already bound. Port 0 asks for an ephemeral one and returns which - so a client that only sends still gets a source port replies can come back to, without having to invent a number and hope. */
+#define SYS_sendto   52 /* (fd, ip, port, const void *data, len) -> bytes sent, or -1. `ip` is host-order (10.0.2.2 is 0x0A000202), the same convention kernel/net/net.h uses and for the same reason: this OS never byte-swaps an address into a register, so an on-wire order here would be a second representation to get wrong. Binds an ephemeral source port if the socket has none. An unreachable destination is -1, not a panic - see kernel/net/ip.h on why that had to change. -1 is also the honest answer for the very first datagram to a neighbour nobody has ARPed yet: it is dropped while the request goes out, exactly as it is on any BSD-derived stack, and a caller that cares sends again. */
+#define SYS_recvfrom 53 /* (fd, void *data, max, os_sockaddr_t *from) -> bytes copied, or -1 if nothing is queued. Never blocks. A datagram larger than `max` is truncated and the rest discarded, which is what UDP recvfrom does everywhere; `from` (may be NULL) says who sent it, which is the entire difference between this and a read. */
+#define SYS_sockpoll 54 /* (fd) -> how many datagrams are queued, or -1. The counterpart to SYS_pipe_poll and the reason a non-blocking recvfrom is usable: it turns "nothing yet" and "nothing ever" into two different answers a caller can wait on with a deadline. */
+#define SYS_netconf  55 /* (os_netconf_t *out) -> 0, or -1 with no NIC. This machine's address, mask, gateway and DNS server, and whether they came from a DHCP lease or from the fallback constants. A program that wants to reach a name server needs to be told where one is, and hardcoding 10.0.2.3 in user space would put back exactly the fiction M64 removed from the kernel. */
+#define SYS_settime  56 /* (seconds since 1970) -> 0, or -1 for an implausible time. The write half of SYS_time, and it exists because SNTP without it is a program that knows the time and cannot say so. Sets the kernel's own offset rather than the CMOS RTC: writing the hardware clock is a thing a boot-time utility does with the machine's consent, and nothing here has that consent to give. */
+
+/* M66: TCP.
+ *
+ * A stream socket is the same fd as a datagram one and closes the same
+ * way - but `close` on a connected stream is an *active close*, not a
+ * discard: the peer gets the FIN and whatever is still queued, and the
+ * kernel runs the connection down through FIN_WAIT and TIME_WAIT after
+ * the descriptor is gone.
+ *
+ * Everything here is non-blocking, including connect. A blocking connect
+ * would need the wait-queue machinery this kernel has never had, and
+ * building one for TCP alone would be a scheduler change hiding inside a
+ * networking milestone - so `connect` starts the handshake and
+ * `SYS_connstat` says how it went, which is the same poll-with-a-deadline
+ * shape every other network call in this OS has.
+ */
+#define SYS_listen   59 /* (fd) -> 0 or -1. Binds an ephemeral port first if the socket has none, so a server that forgot to bind gets a working socket on a port it can then ask for rather than an error. */
+#define SYS_connect  60 /* (fd, ip, port) -> 0 once the SYN is away, or -1 if it could not be sent. NOT "connected" - poll SYS_connstat. Gives up after ten seconds or six retransmissions, whichever comes first, so a program that forgets its own deadline still gets an answer. */
+#define SYS_connstat 61 /* (fd) -> 1 established, 0 still trying, -1 failed (refused, unreachable, or timed out). The three answers a caller can act on, out of eleven states it has no business knowing about. */
+#define SYS_accept   62 /* (fd, os_sockaddr_t *from) -> a new fd for a completed connection, or -1 if none is waiting. Never blocks; SYS_sockpoll on a listening socket says how many are ready. `from` (may be NULL) is who connected. */
+#define SYS_send     63 /* (fd, buf, len) -> bytes queued, which may be less than len and may be 0 when the send buffer is full. Partial writes are the honest answer for a non-blocking send, and a caller loops. -1 once the connection is gone. */
+#define SYS_recv     64 /* (fd, buf, max) -> bytes copied, 0 if none are waiting right now, or -1 at end of stream - the peer closed and the buffer is drained, or the connection was reset. 0 and -1 are different answers and a reader that conflates them either spins forever or stops early. */
+
+/* M65: capabilities.
+ *
+ * The two calls a program makes about its own authority. There is no
+ * third one, and the absence is the design: nothing anywhere grants a
+ * capability to a running process. A process is given a set when it is
+ * spawned - the kernel applies system_api/include/caps.h's manifest, so
+ * no launcher can opt out of it - and from then on the set can only get
+ * smaller.
+ */
+#define SYS_getcaps  57 /* () -> this process's capability bitmask (caps.h's CAP_*). Never fails; a program is always entitled to know what it may do, and one that has to discover its own limits by being refused is a program that reports confusing errors. */
+#define SYS_dropcaps 58 /* (mask_to_keep) -> the resulting mask. Intersects; it cannot add. A program that has finished the privileged part of its work drops the rest, which is the one thing a program can do about its own blast radius. Irreversible for the life of the process, and inherited in its reduced form by anything it spawns afterwards. */
+
 /* M56: how many bytes a pipe holds. Part of the ABI because a caller
  * genuinely needs it: SYS_write to a full pipe *blocks*, and a client
  * that cannot afford to block forever - one whose peer may not exist yet,
@@ -135,4 +191,4 @@
  * drift; this is the copy user space is allowed to see. */
 #define SYS_PIPE_CAPACITY 1024
 
-#define SYSCALL_COUNT 50
+#define SYSCALL_COUNT 65

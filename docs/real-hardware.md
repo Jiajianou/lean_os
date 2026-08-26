@@ -90,7 +90,14 @@ neither is something a real machine can be assumed to have:
   not a failure. If the target machine genuinely has an RTL8139-compatible
   PCI NIC (some old desktops, certain PCI expansion cards), the same ICMP
   echo self-test QEMU runs will run for real against whatever's on the
-  wire.
+  wire. **M64 makes that machine's behaviour more interesting and not
+  less predictable**: it runs a real DHCP exchange rather than assuming
+  QEMU's addresses, so a real NIC on a real segment gets a real lease -
+  and `[m64] ... no DHCP lease` is a genuine failure there rather than a
+  quirk, because on a real network the fallback constants are wrong. On a
+  machine with no NIC the whole M64 block logs "the socket layer is
+  present but untested this boot" and moves on, the same degradation
+  every other optional device here uses.
 - **Keyboard/mouse** (M6/M18): PS/2, not USB HID - most modern laptops
   have no physical PS/2 controller. Firmware USB legacy support usually
   makes a USB keyboard look like a PS/2 one to boot-time code like this,

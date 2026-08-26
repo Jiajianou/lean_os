@@ -1,5 +1,7 @@
 #include "proc.h"
 
+#include "caps.h" /* system_api/include/caps.h - caps_for_program, M65 */
+
 #include "arch/x86_64/gdt.h"
 #include "elf.h"
 #include "lib/libk.h"
@@ -181,7 +183,29 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
 
 task_t *process_spawnv(const char *name, const uint8_t *image, size_t image_size,
                         const char *const *argv) {
-    return spawn_common(name, image, image_size, argv);
+    return process_spawnv_capped(name, image, image_size, argv,
+                                 caps_for_program(name ? name : ""));
+}
+
+task_t *process_spawnv_capped(const char *name, const uint8_t *image, size_t image_size,
+                              const char *const *argv, uint32_t caps) {
+    task_t *t = spawn_common(name, image, image_size, argv);
+    if (t) {
+        /* M65: intersected, never assigned. spawn_common already gave the
+         * child the caller's set; this can only clear bits. A caller
+         * asking for more than it holds silently gets less, which is the
+         * right failure - the alternative is a spawn that fails for a
+         * reason the launcher cannot do anything about.
+         *
+         * And note where this is: *every* spawn in this OS goes through
+         * here, so the manifest in caps.h is applied by the kernel rather
+         * than by the goodwill of whichever program did the launching.
+         * A launcher that forgot to ask would be a way around the whole
+         * model, and the way to not have that problem is to not give
+         * launchers the choice. */
+        t->caps &= caps;
+    }
+    return t;
 }
 
 /* M60: the one-argument form, kept because almost every caller in this

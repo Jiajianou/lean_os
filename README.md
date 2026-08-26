@@ -20,7 +20,7 @@ UEFI firmware
 - **A desktop.** Overlapping windows with a real z-order, titlebars with
   traffic-light buttons, drag and resize, snapping, minimize/restore with
   motion, a taskbar, a Spotlight-style launcher, context menus, toasts,
-  drag and drop, and keyboard chords.
+  drag and drop, four virtual desktops, and keyboard chords.
 - **Applications.** A terminal with a real shell (arguments, quoting,
   `>`/`>>`, a pipe, tab completion, `cd`), a text editor (undo, redo,
   find, paste), a file manager (columns, sorting, rename/copy/delete), a
@@ -29,10 +29,21 @@ UEFI firmware
   cores, a per-process address space, a custom filesystem with
   directories and files up to 8 MiB, pipes, shared memory, signals,
   an orderly shutdown, and a clock that knows the date.
+- **A network.** An RTL8139 driver, Ethernet, ARP, IPv4, ICMP, UDP and
+  **TCP** - the eleven-state machine, retransmission with a measured
+  timeout and Reno congestion control - plus a DHCP client, and sockets
+  programs open as ordinary file descriptors. `netconf` and an SNTP
+  client (`nettime`) use them. See
+  [docs/networking.md](docs/networking.md).
 - **Settings that stick.** Wallpaper, colours, **screen resolution**
   (changed live, with a countdown that puts it back if you do not
   confirm), motion, and volume.
 - **Sound.** A PC-speaker beep on errors and an AC'97 output stream.
+- **A boundary around a program.** Every process carries a capability
+  set the kernel assigns from a manifest at spawn time, and that set can
+  only ever shrink. An ordinary application cannot paint on the screen,
+  read the clipboard, list processes, open a socket or switch the machine
+  off. See [docs/capabilities.md](docs/capabilities.md).
 - **Somebody else's program.** The 1972 Whetstone benchmark, ported
   unmodified, running on an SSE-enabled kernel against a libc written
   here. See [docs/third-party-programs.md](docs/third-party-programs.md).

@@ -4031,6 +4031,340 @@ near zero and wrong by 5e-8 near pi. Reducing to quadrants puts the
 argument under pi/4 where the same eight terms are good to 1e-16. A test
 that had only checked `sin(0)` and `cos(0)` would have passed throughout.
 
+## M64 — A network user space can reach ✅
+
+M27 shipped a NIC driver, Ethernet, ARP, IPv4 and ICMP. For the
+thirty-six milestones after it, the only thing that ever used any of it
+was one boot self-test pinging the gateway. `sock` appeared nowhere in
+`syscall.h`. This is the milestone that makes the whole subsystem
+reachable from a program, and the shape of it was decided by work that
+was already done for other reasons.
+
+- [x] **UDP** (`kernel/net/udp.c`) - a length, two ports, and the
+      checksum over RFC 768's pseudo-header. Computed on send and
+      *verified* on receive rather than accepted, because the
+      pseudo-header is the single easiest thing for a from-scratch stack
+      to get wrong and a wrong checksum nobody checks is a bug that only
+      appears on somebody else's machine
+- [x] **Sockets as file descriptors**, not as a handle namespace of their
+      own. `fd_slot_t` was already a tagged union with refcounting, a
+      working `SYS_close` and inheritance across `spawn` - all four built
+      in M59 for open files, and all four exactly what a socket needs.
+      `FD_SOCKET` is one enum value, one union member and two `case`
+      labels. A socket is closed by the `close` that already existed,
+      inherited by the `spawn` that already existed, and duplicated by
+      the `dup2` that already existed
+- [x] Received datagrams queue in the kernel, eight per socket, because
+      they arrive in the NIC's IRQ handler and the program that wants
+      them is asleep. Each keeps its source address and port - that is
+      the entire difference between `recv` and `recvfrom`, and a client
+      that cannot tell who answered cannot check that the right server did
+- [x] **Loopback**, three lines in `ip_send`: anything addressed to us or
+      to 127-anything is handed straight back up instead of put on the
+      wire. It builds a *real* header rather than taking a shortcut
+      around one, so the path a loopback datagram takes is the path a
+      real one takes. This is what makes the socket layer testable on a
+      machine with no network at all
+- [x] **A DHCP client** (`kernel/net/dhcp.c`) - DISCOVER, OFFER, REQUEST,
+      ACK, and an xid that ties a reply to *this* exchange so another
+      client's ACK on the same segment cannot configure us. `net.h`'s
+      constants become the fallback rather than the answer. It does not
+      renew, and that is stated in its own header rather than hidden: a
+      machine that runs for a week on a two-hour lease loses its address,
+      and this OS has never run for a week
+- [x] `SYS_socket`, `SYS_bind`, `SYS_sendto`, `SYS_recvfrom`,
+      `SYS_sockpoll`, `SYS_netconf`, `SYS_settime`. No
+      domain/type/protocol arguments on `socket`: there is one kind of
+      socket here, and three parameters that each take exactly one value
+      are three ways to be wrong about an API with no choices in it
+- [x] **SNTP, in user space** (`user_space/lib/sntp.c` and `nettime`) -
+      "the second way to know the time", next to M59's CMOS clock. In
+      user space deliberately: a kernel SNTP client would be a kernel
+      parsing replies off the network, which is a far larger trusted
+      surface than a sixty-line program needs, and the entire point of
+      this milestone is that the ordinary syscalls are now enough
+- [x] `SYS_settime` stores an offset applied on every clock read rather
+      than reprogramming the CMOS registers. Rewriting a machine's
+      hardware clock is something its owner asks a boot utility to do,
+      and a program that got the network working is not the same thing as
+      that owner's consent
+- [x] `netconf`, which prints the configuration and says whether it came
+      from a lease or a fallback. That last line is the whole reason the
+      program exists: on QEMU the two configurations are byte-for-byte
+      identical, so a DHCP client that did nothing at all would produce
+      an indistinguishable `[net]` log line
+
+### Progress notes
+
+*This milestone found two ways to stop the machine, in the same eight
+lines of M27 code, and both were invisible for thirty-six milestones for
+the same reason.* `ip_send` called `panic("ip_send: ARP resolution timed
+out")`. That was defensible for thirty-six milestones:
+the only caller was a boot self-test pinging a gateway guaranteed to
+answer. The moment `SYS_sendto` exists, "the destination is unreachable"
+becomes an ordinary thing a program does by typing an address wrong - and
+M52's rule is that user space does not get to halt the machine. M52 could
+not have caught this, because in M52 there was no way for user space to
+reach `kernel/net` at all. **A subsystem with no consumers has no
+user-facing failure modes, and therefore no bugs, right up until it has
+one consumer.** `nettest` asserts that specific call returns -1.
+
+**And then the fixed version hung the machine anyway.** The bounded wait
+that `panic` came after was a `hlt` loop - correct for every caller it
+had, all of which ran in kernel context with interrupts on. `int 0x80`
+goes through an *interrupt* gate, so IF is clear for the entire syscall:
+a `hlt` there halts the CPU with nothing able to wake it, and the timer
+that would advance the deadline is precisely the interrupt that cannot
+fire. The boot log ended mid-self-test with no panic, no output and no
+clue - which is a worse failure than the panic it replaced, and it is the
+one that would never have been found by reading the code, because the
+loop is obviously correct right up until you notice which gate it is
+reached through. A `schedule()` instead of the `hlt` would have deadlocked
+the same way for the same reason.
+
+The fix is what BSD has always done with a packet whose neighbour is
+unknown: send the ARP request, drop this packet, let the caller send
+again. `resolve_neighbor` waits only when `IF` is actually set, and
+otherwise returns immediately. **The real fix is a trap gate on vector
+0x80** so interrupts stay enabled through a syscall, which is what every
+production kernel does - and which is deliberately not being done inside
+a networking milestone, because it makes every syscall in the system
+preemptible at once.
+
+*Five of `nettest`'s fourteen checks are about failing correctly*, which
+is the right ratio for a surface that has just become reachable for the
+first time: a bound port refusing a second bind, `sendto` on a
+descriptor that is a pipe, `recvfrom` on stdout, an oversized datagram
+refused rather than truncated, and the unreachable send above. And one is
+about a table: open and close a hundred sockets in a loop, because
+`MAX_SOCKETS` is 32 and M50's lesson was that an entry allocated and
+never freed looks perfect until the thirty-third caller.
+
+*The self-test asserts `net_config_is_leased()` explicitly, and that is
+the one assertion here that took real thought.* QEMU's SLIRP hands out
+10.0.2.15 with 10.0.2.2 as the gateway - which is precisely the fallback
+this kernel has hardcoded since M27. So a DHCP client that never sent a
+packet would produce an identical configuration, an identical log line,
+and an identical successful ping. The only way to tell "we got a lease"
+from "we fell back" on this network is to ask which one happened, so the
+kernel tracks it and the test demands the first.
+
+*What `nettime` asserts is a failure, on purpose.* The gateway on this
+network does not run NTP, so the self-test's real claim is that the
+program comes back, comes back non-zero, comes back inside the second its
+own deadline promises, and says why - because failing cleanly against an
+unreachable server is what almost every network program spends most of
+its life doing, and a program that hung there would hang any desktop that
+shipped it.
+
+*Still not here, and deliberately: TCP, DNS, and a permission model.* TCP
+has its own entry below and keeps it. DNS is why `nettime` takes an
+address rather than a name, and why `netconf` prints the DNS server it
+was handed instead of pretending to use it. And a network is exactly the
+thing that makes the permission-model entry below stop being theoretical
+- any process can now open a socket and talk to anything.
+
+## M65 — A permission model, finally worth having ✅
+
+This project declined to build one four times, in writing, and was right
+each time. `SYS_shutdown`'s own comment names what the alternative would
+have been: "the same fake check the task manager's own desktop-process
+guard is careful not to make". For a single-user desktop running only
+programs from this repo, "any process can do anything" is a defensible
+position and saying so beats decorating it.
+
+What changed is not the argument, it is the machine. **M63** made it
+possible to run a program nobody here wrote. **M64** made it possible for
+that program to open a socket and talk to anything. The stretch-goal
+entry said to revisit this "the moment a ported program is something a
+person downloads rather than something this repo builds", and both halves
+of the sentence it was waiting on have now happened.
+
+- [x] **A capability model, not a permission one**, because there are no
+      users here. No login, no uid, no owner on a file - and inventing
+      one would have been a far larger lie than the one being fixed, since
+      a uid nothing sets and nothing checks is decoration. What this OS
+      genuinely has is *a process has a parent, and the parent chose to
+      start it*, and the whole model rests on that one relationship
+- [x] **The set only ever shrinks.** `init` starts with everything; a
+      child gets its parent's set minus what the manifest withholds; a
+      process can drop its own and can never get them back. There is no
+      call anywhere that sets a bit that was clear - `sys_dropcaps` is an
+      `AND` and the spawn path is an `AND`. That single property is what
+      makes this checkable rather than merely present: no code path has to
+      be *trusted* to hand a capability back, because none can
+- [x] **The manifest is applied by the kernel, in `process_spawnv`.** Ten
+      capabilities, and a table in `system_api/include/caps.h` naming
+      every shipped program that needs more than the default. Putting it
+      in the kernel rather than in the compositor is the difference
+      between a rule and a suggestion: a launcher that forgot to consult
+      it would be a way around the entire model, and the way to not have
+      that problem is to not give launchers the choice. The shell launches
+      programs too
+- [x] `CAP_APP_DEFAULT` is `CAP_FS_WRITE` and nothing else. An ordinary
+      windowed program cannot paint on the screen, read the clipboard,
+      enumerate processes, open a socket, change the resolution, set the
+      clock, claim the speaker or switch the machine off
+- [x] **Ten gates, and the ones that are deliberately absent.** Reading a
+      file is not a capability - this OS has no secrets on disk, and
+      claiming a read boundary nothing enforces would be exactly the fake
+      check this milestone exists to stop making. Neither is `SYS_fb_info`
+      (how big is the screen) or `SYS_netconf` (what is this machine's
+      address): those are facts, and gating a fact is the kind of check
+      that looks like security and is not
+- [x] `SYS_kill` is the one gate with a relationship in it. **A parent may
+      always end what it started**, capability or not, walking the whole
+      parent chain rather than one level - a shell that spawned a program
+      that spawned a program is still the reason all three are running.
+      Anything else needs `CAP_KILL_ANY`, which two programs on this
+      machine have
+- [x] A denial is **logged once per process per capability**. Silent
+      refusal is how a permission model becomes an unexplained bug: the
+      program sees -1 from a call with ten other reasons to return -1, and
+      whoever is debugging it has nothing to go on
+- [x] `caps` and `caps -a` on the command line, for the same reason
+      `netconf` exists: a rule nobody can see is a rule nobody can check
+
+### Progress notes
+
+*The grant table got shorter as it was written, and that is the finding.*
+The first draft gave `desktop_shell` `CAP_POWER` - it has "Shut down" on
+the Start menu, so obviously it needs to switch the machine off. It does
+not. It asks the compositor to, over the WM protocol, and it turned out
+that **almost every program on this desktop is already built that way**:
+the taskbar, the file manager, the editor, the paint program and the
+clock hold nothing beyond writing files, because everything they do to
+the screen they do by asking another process rather than by doing it.
+Fifteen years of "capabilities are hard to retrofit" and the retrofit was
+small here for a reason that had nothing to do with capabilities - the WM
+protocol had already drawn the line, and this milestone only wrote it
+down. **The programs that needed a grant are the ones that talk to
+hardware or to other processes directly, and there are eleven of them.**
+
+*The pattern from M52 held again.* M52's rule was "no user-triggerable
+panic", and it could only be applied to what user space could reach. M64
+made `kernel/net` reachable and immediately found a `panic()` in it. M65
+is the same shape one level up: `SYS_fb_map` was open to every process
+for forty-five milestones and nothing was wrong with that, because every
+process was one of ours. **A boundary is worth exactly as much as the
+population it separates, and both of the milestones that changed that
+population were the two immediately before this one.**
+
+*What this is not.* It is not a defence against a kernel exploit, and the
+header says so. Nothing here stops a process writing to a page it should
+not have; that is `vmm`'s job and M52's. What it stops is a program doing
+something its launcher never intended - which is the failure a downloaded
+program actually presents, and the only one a model with no users can
+honestly claim to address.
+
+## M66 — TCP ✅
+
+The stretch-goal entry that asked for this is one sentence long and it
+set the terms: *"Retransmission, congestion control and an eleven-state
+machine are not a bullet on somebody else's milestone."* So this is its
+own milestone, and what got built is a TCP that would work against
+somebody else's - not a loopback toy with the interesting parts left out.
+
+- [x] **The eleven states of RFC 793's figure 6**, driven by segment
+      arrival and by a 100 ms clock: CLOSED, LISTEN, SYN_SENT,
+      SYN_RECEIVED, ESTABLISHED, FIN_WAIT_1, FIN_WAIT_2, CLOSE_WAIT,
+      CLOSING, LAST_ACK, TIME_WAIT. Including the two that get skipped in
+      half of the from-scratch implementations on the internet -
+      CLOSING, for a simultaneous close, and TIME_WAIT, which actually
+      expires here rather than being a state nothing ever leaves
+- [x] **Sequence arithmetic that wraps.** Every comparison is a
+      subtraction cast to `int32_t`, never a comparison of the numbers -
+      `a < b` on sequence numbers is wrong for exactly the connection
+      that has run long enough for it to matter, which is the one that
+      will be hardest to debug
+- [x] **Retransmission with a measured timeout.** Jacobson/Karels per
+      RFC 6298: `srtt` pre-scaled by 8 and `rttvar` by 4 so the estimator
+      is shifts and no division, `rto = srtt + 4*rttvar` clamped to a
+      one-second floor, exponential backoff, and Karn's rule that a
+      retransmitted segment is never measured
+- [x] **Reno congestion control** - slow start, congestion avoidance,
+      fast retransmit on the third duplicate ACK, and fast recovery with
+      the window inflated per departing segment and deflated on exit. A
+      timeout resets `cwnd` to one segment because a timeout means
+      congestion; three duplicate ACKs halve it because they mean one
+      segment was unlucky and the rest arrived
+- [x] **A window that means something.** Advertised from the space left
+      in the 4 KiB receive buffer, re-advertised the moment a reader
+      drains it, and respected by a sender that takes the smaller of it
+      and `cwnd`
+- [x] **MSS from the option on SYN**, clamped to what a 1500-byte MTU can
+      carry, with the initial congestion window sized from it once known
+- [x] `SYS_listen`, `SYS_connect`, `SYS_connstat`, `SYS_accept`,
+      `SYS_send`, `SYS_recv` - and `SYS_socket` grows its first parameter
+- [x] Closing the last descriptor on a connected socket is an **active
+      close**, not a discard: the peer gets the FIN and whatever is still
+      queued, and the kernel runs the connection down through FIN_WAIT
+      and TIME_WAIT after the fd is gone
+- [x] TCP's 100 ms clock is a **kernel thread**, not a second PIT hook.
+      The scheduler owns that hook, and a networking milestone reaching
+      into the scheduler to get a timer is a networking milestone with a
+      scheduler change hidden in it
+
+### Progress notes
+
+*M64 argued in writing against a `type` parameter on `SYS_socket` -
+"three parameters that only ever take one value each are three ways to be
+wrong about an API that has no choices in it" - and that argument was
+correct for exactly as long as its premise held.* TCP ends it: there is a
+real choice now, so there is **one** real parameter and not three, and
+`OS_SOCK_DGRAM` is 0 so every call written before this milestone still
+means what it meant. Worth recording because the temptation was to
+either defend the old decision or pretend it had always been provisional,
+and it was neither - it was right, and then the world changed.
+
+*The hardest thing to test here was the thing loopback makes impossible.*
+Loopback never loses a segment. That makes it a superb place to test the
+state machine - both ends of every connection in `tcptest` are this
+stack, so every path runs twice per connection - and the worst possible
+place to find out whether **retransmission** works. And "the
+retransmission path is untested" is true of most from-scratch TCP
+implementations and is essentially never written down, because the
+transfer succeeds and the test passes. So `tcp_debug_drop_next()` throws
+away the next N segments *after* they are built and after the sequence
+numbers have advanced - so the stack believes exactly what it would
+believe if the wire had eaten them - and the self-test asserts both that
+the 16 KiB transfer completes anyway **and that a retransmission actually
+happened**. The second half is the one that matters: without it, a stack
+that silently never dropped anything would pass.
+
+*The transfer is 16 KiB through a 4 KiB send buffer on purpose.* A
+"hello world" over TCP proves the handshake and nothing else - not the
+window, not the congestion window, not buffer compaction on ACK, not a
+sender that has to stop when the buffer fills and resume when it drains.
+Four times the buffer, at eleven segments per bufferful, with
+position-dependent content compared byte for byte, is the smallest test
+that touches all of them.
+
+*The loopback shortcut M64 wrote was correct for UDP and wrong for TCP,
+and the difference is one sentence.* M64's `ip_send` handed a packet
+addressed to this machine straight back up the stack with a direct call -
+fine for a protocol where delivering a datagram cannot produce another
+one. TCP is not that protocol: a data segment delivered makes the
+receiver ACK, the ACK delivered lets the sender send more, and the whole
+16 KiB transfer would have run inside **one recursive call chain**, dozens
+of frames deep on a kernel stack with no room for it, every level
+overwriting the single static buffer the level below was still reading
+out of. The fix is a queue and a draining flag: recursion becomes
+iteration, stack depth is two no matter how much traffic one send sets
+off, and a full queue drops a packet - which is what a congested
+interface does and what every protocol above it already handles. Found by
+reading the code with TCP in mind rather than by a test, which is worth
+noting because the symptom would have been an intermittent stack
+overflow, and that is the kind of bug a passing test suite hides.
+
+*Deliberately absent, and each for a stated reason:* window scaling, SACK,
+timestamps, PAWS, Nagle, urgent data - performance features on a stack
+that has no consumer whose performance anyone has measured. And
+**out-of-order reassembly**: a segment arriving ahead of a gap is dropped
+rather than held, which RFC 793 explicitly permits, costs one round trip
+when it happens, halves the size of the receive path, and is the reason
+go-back-N retransmission is the right match for the receiver this has.
+
 ## Stretch goals (unordered, orthogonal to the desktop path)
 
 - [x] SMP (multi-core) support
@@ -4081,31 +4415,49 @@ that had only checked `sin(0)` and `cos(0)` would have passed throughout.
       **M61**, where the missing piece turned out to be exactly what this
       entry always said it was: a frame clock the compositor drives
       independently of input
-- [ ] Multiple virtual desktops - cheap once the compositor tracks a
-      workspace id per window, and the natural payoff for M49's chords.
-      Left unscheduled only because it competes with M61 for the same
-      compositor attention and loses on how often it is felt
-- [ ] **A network user space can reach.** M27 shipped Ethernet, ARP, IPv4
-      and ICMP, and in the twenty-nine milestones since, the only thing
-      that has ever used any of it is one boot self-test pinging the
-      gateway - `sock` appears nowhere in `syscall.h`. UDP, a socket
-      surface in the fd table M59 makes real, a DHCP client so the
-      hardcoded 10.0.2.15 stops being a fiction on any other network, and
-      SNTP as the second way to know the time. Unscheduled because it is
-      breadth rather than depth, and this arc is depth - but it is the one
-      whole subsystem in the project with no consumers
-- [ ] **TCP**, separately and later. Retransmission, congestion control
-      and an eleven-state machine are not a bullet on somebody else's
-      milestone. Worth doing the day something here wants a stream
-- [ ] **A permission model.** Any process can map the framebuffer, kill
-      any task, power off the machine, or read the clipboard. This project
-      has declined to pretend otherwise several times in writing -
-      `SYS_shutdown`'s own comment calls a fake check here exactly that -
-      and for a single-user desktop running only its own programs that is
-      a defensible deferral. **M63 is the milestone that ends the "only
-      its own programs" half of that sentence**, so this should be
-      revisited the moment a ported program is something a person
-      downloads rather than something this repo builds
+- [x] Multiple virtual desktops - done, and the entry's own prediction
+      held on both halves. It *was* cheap: an `int8_t workspace` on
+      `window_t`, a `window_here()` predicate at the four places that
+      already walked the z-order, and a `-1` for chrome that means "on
+      every desktop" so the taskbar and the desktop background did not
+      need a special case. And it *was* the payoff for M49's chords -
+      four new rows in `shortcuts.h` and the Shortcuts pane listed them
+      without being told, which is the whole reason that table exists.
+      The one thing it cost was a bug the shape of the table itself:
+      `Ctrl+Shift+Alt+Right` matched **Snap right** first, because the
+      matcher takes the first row that fits and the snap rows did not
+      forbid Shift. So a window sent to the next desktop snapped to the
+      right half of this one instead - visible, wrong, and caught by the
+      self-test's fourth assertion on the first boot. Fixed twice over:
+      the four-modifier rows moved above the ones they extend, *and* the
+      snap rows now forbid Shift, so re-sorting the table cannot bring it
+      back. The self-test is pixels rather than protocol replies - a
+      window's own pixel at (150,150) against bare desktop at (500,500) -
+      because "the window is on workspace 2" is only interesting if it
+      also means the window is not on the screen, and a stale rectangle
+      left behind by a bad redraw would pass any reply-based check
+- [x] **A network user space can reach** - done as **M64**, and every
+      one of the four things this entry asked for landed: UDP, a socket
+      surface in the fd table M59 made real, a DHCP client, and SNTP as
+      the second way to know the time. The entry's own diagnosis was the
+      useful part - "the one whole subsystem in the project with no
+      consumers" - and it turned out to understate the consequence: a
+      subsystem with no consumers also has no *bugs*, because nothing can
+      reach its failure modes. The first thing that reached them found a
+      `panic()` on an unreachable address
+- [x] **TCP** - done as **M66**, separately and later exactly as this
+      entry insisted. The sentence held up as a specification: the
+      eleven-state machine, retransmission with a measured RTO, and Reno
+      congestion control are what got built, and each one took the space
+      the entry said it would need
+- [x] **A permission model** - done as **M65**, on exactly the trigger
+      this entry named. M63 ended the "only its own programs" half of the
+      sentence and M64 gave those programs a network, so the deferral
+      stopped being defensible and the milestone came next. What the
+      entry did not predict is how *small* it turned out to be: the WM
+      protocol had already made almost every program on this desktop ask
+      another process for anything it could not do itself, so writing the
+      boundary down was mostly a matter of noticing where it already was
 - [x] **An AML parser**, or enough of one to read `\_S5` instead of
       guessing it. Named in every gaps list since M47 - and "enough of
       one" is exactly what got written, which is the part worth being

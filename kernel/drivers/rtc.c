@@ -161,6 +161,11 @@ int rtc_available(void) {
     return available;
 }
 
+/* M64: how far the CMOS clock is from the truth, in seconds, as told to
+ * us by something that knows better (SNTP, via SYS_settime). Applied on
+ * every read rather than written back to the hardware - see rtc.h. */
+static int32_t correction;
+
 void rtc_read(os_datetime_t *out) {
     if (!available || !sample(out)) {
         out->year = 0;
@@ -170,7 +175,31 @@ void rtc_read(os_datetime_t *out) {
         out->minute = 0;
         out->second = 0;
         out->valid = 0;
+        return;
     }
+    if (correction != 0) {
+        os_civil_from_unix((uint32_t)((int64_t)os_unix_time(out) + correction), out);
+        out->valid = 1;
+    }
+}
+
+int rtc_set_unix(uint32_t seconds) {
+    /* Refuse anything before this project existed or absurdly far ahead:
+     * a bad SNTP reply or a typo'd argument that moved every file's mtime
+     * to 1904 is a much worse outcome than a clock that stays wrong, and
+     * the check costs two comparisons. 2020-01-01 to 2100-01-01. */
+    if (seconds < 1577836800u || seconds > 4102444800u) {
+        return -1;
+    }
+    if (!available) {
+        return -1;
+    }
+    os_datetime_t hw;
+    if (!sample(&hw)) {
+        return -1;
+    }
+    correction = (int32_t)((int64_t)seconds - (int64_t)os_unix_time(&hw));
+    return 0;
 }
 
 uint32_t rtc_now(void) {

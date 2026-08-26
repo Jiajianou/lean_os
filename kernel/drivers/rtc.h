@@ -37,5 +37,15 @@ void rtc_read(os_datetime_t *out);
  * the same way, which is the honest outcome for both. */
 uint32_t rtc_now(void);
 
+/* M64: corrects the clock to `seconds` since 1970 - what SYS_settime is
+ * for and what an SNTP client produces. Stores an offset applied on every
+ * subsequent read rather than writing the CMOS registers: reprogramming
+ * the hardware clock is something a machine's owner asks a boot utility
+ * to do, and a program that happened to get the network working is not
+ * the same thing as that owner's consent. The offset lasts until reboot,
+ * which is the honest scope for a correction nothing persisted. Returns
+ * 0, or -1 for an implausible time or a machine with no readable clock. */
+int rtc_set_unix(uint32_t seconds);
+
 /* 1 if the boot-time probe found a plausible clock. */
 int rtc_available(void);

@@ -100,3 +100,12 @@ task_t *process_spawnv(const char *name, const uint8_t *image, size_t image_size
  * self-tests (which read it via vfs_read) are the two callers that
  * actually know it. May be NULL. */
 task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size, const char *arg);
+
+/* M65: spawn with an explicit capability set, which is intersected with
+ * the caller's rather than assigned - a process cannot hand out
+ * authority it does not hold, and that is enforced here rather than
+ * asked of callers, because a rule a caller can get wrong is a rule.
+ * `caps` is what the child should keep; system_api/include/caps.h's
+ * caps_for_program() is what every launcher in this OS passes. */
+task_t *process_spawnv_capped(const char *name, const uint8_t *image, size_t image_size,
+                              const char *const *argv, uint32_t caps);

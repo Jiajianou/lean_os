@@ -31,6 +31,11 @@
 #include "syscall.h" /* system_api/include/syscall.h - the shared ABI, on the include path via Makefile's -Isystem_api/include */
 #include "display.h" /* system_api/include/display.h - display_mode_t, M58 */
 #include "os_time.h" /* system_api/include/os_time.h - os_datetime_t, M59 */
+#include "os_net.h"  /* system_api/include/os_net.h - os_sockaddr_t/os_netconf_t, M64 */
+#include "caps.h"    /* system_api/include/caps.h - CAP_*, M65 */
+#include "net/net.h"
+#include "net/socket.h"
+#include "net/tcp.h"
 #include "wm.h"      /* system_api/include/wm.h - wm_fb_info_t, M20 */
 
 /* Every syscall implementation shares one signature regardless of how
@@ -146,6 +151,22 @@ static int copy_to_user(uint64_t dst, const void *src, uint64_t len) {
     return 0;
 }
 
+/* M64: the mirror of copy_to_user, for a buffer whose length the caller
+ * chose. Every earlier syscall that read user memory either read a
+ * string (below) or read into a fixed-size struct, so this is the first
+ * one that needed it - SYS_sendto's payload. */
+static int copy_from_user(void *dst, uint64_t src, uint64_t len) {
+    if (!user_range_ok(src, len, 0)) {
+        return -1;
+    }
+    const uint8_t *s = (const uint8_t *)src;
+    uint8_t *d = (uint8_t *)dst;
+    for (uint64_t i = 0; i < len; i++) {
+        d[i] = s[i];
+    }
+    return 0;
+}
+
 /* A NUL-terminated string whose length nobody knows yet - a path, a pipe
  * name. Validated a page at a time as the copy crosses into each one,
  * because "how long is it" is precisely the question that cannot be
@@ -169,6 +190,42 @@ static int copy_str_from_user(char *dst, uint64_t src, uint64_t max) {
         }
     }
     return -1;
+}
+
+/* ---- M65: capabilities -----------------------------------------------
+ *
+ * One predicate, used at every gate. Deliberately a plain function
+ * rather than a macro that returns: the call sites read better as an
+ * ordinary `if`, and every one of them wants to answer with that
+ * syscall's own idea of failure (-1, or a SPAWN_ERR_, or 0) rather than
+ * with a shared one.
+ *
+ * A denial is logged once per process per capability. Silent refusal is
+ * how a permission model turns into an unexplained bug: the program sees
+ * -1 from a call that has ten other reasons to return -1, and whoever is
+ * looking at it has nothing to go on. */
+static uint32_t cap_denials_logged[MAX_TASKS];
+
+static int has_cap(uint32_t cap) {
+    task_t *self = sched_current();
+    if (self->caps & cap) {
+        return 1;
+    }
+    int slot = PID_SLOT(self->id);
+    if (slot >= 0 && slot < MAX_TASKS && !(cap_denials_logged[slot] & cap)) {
+        cap_denials_logged[slot] |= cap;
+        klog_puts("[caps] ");
+        klog_puts(self->name);
+        klog_puts(" was refused '");
+        for (int i = 0; i < CAP_NAME_COUNT; i++) {
+            if (CAP_NAMES[i].bit == cap) {
+                klog_puts(CAP_NAMES[i].name);
+                break;
+            }
+        }
+        klog_puts("' - see system_api/include/caps.h\n");
+    }
+    return 0;
 }
 
 static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -503,6 +560,9 @@ static long sys_readfile(uint64_t name_ptr, uint64_t buf, uint64_t maxlen, uint6
  * comment (system_api/include/syscall.h) for why this hadn't been needed
  * until now. */
 static long sys_writefile(uint64_t name_ptr, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1; /* M65 */
+    }
     (void)a4;
     (void)a5;
     (void)a6;
@@ -521,6 +581,9 @@ static long sys_writefile(uint64_t name_ptr, uint64_t buf, uint64_t len, uint64_
  * next to your text files. */
 /* M56 - see SYS_unlink's contract. */
 static long sys_unlink(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1; /* M65 */
+    }
     (void)a2;
     (void)a3;
     (void)a4;
@@ -536,6 +599,9 @@ static long sys_unlink(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
 /* M56 - see SYS_rename's contract. Two user strings, both copied in
  * before either is used, for the same reason every other path is. */
 static long sys_rename(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1; /* M65 */
+    }
     (void)a3;
     (void)a4;
     (void)a5;
@@ -566,6 +632,9 @@ static long sys_listdir(uint64_t path_ptr, uint64_t buf, uint64_t maxlen, uint64
 
 /* M53: one directory, whose parent must already exist. */
 static long sys_mkdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1; /* M65 */
+    }
     (void)a2;
     (void)a3;
     (void)a4;
@@ -594,6 +663,29 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
     }
     task_t *t = sched_task_by_id((int)pid);
     if (!t || t->state == TASK_TERMINATED) {
+        return -1;
+    }
+    /* M65: a parent may always kill its own children, with or without
+     * CAP_KILL_ANY - the relationship that gave you the pid is the one
+     * that entitles you to use it, and a launcher that cannot stop what
+     * it started is not a launcher. Anything else needs the capability.
+     *
+     * Walked up the parent chain rather than checked one level, because
+     * a shell that spawned a program that spawned a program is still the
+     * reason all three are running. The walk is bounded by MAX_TASKS:
+     * parent ids are never reassigned to form a cycle, but a bound costs
+     * one comparison and a kernel that loops here hangs the machine. */
+    task_t *self = sched_current();
+    int mine = 0;
+    task_t *up = t;
+    for (int depth = 0; up && depth < MAX_TASKS; depth++) {
+        if (up->parent_id == self->id) {
+            mine = 1;
+            break;
+        }
+        up = up->parent_id >= 0 ? sched_task_by_id(up->parent_id) : (task_t *)0;
+    }
+    if (!mine && !has_cap(CAP_KILL_ANY)) {
         return -1;
     }
     t->pending_signal = (int)sig;
@@ -844,6 +936,9 @@ static long sys_fb_info(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
  * convention only the compositor calls this - nothing enforces that
  * yet, matching this project's existing no-permission-model trust level. */
 static long sys_fb_map(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_FRAMEBUFFER)) {
+        return (long)(uint64_t)-1; /* M65: the compositor owns the screen; nothing it launches may paint on it */
+    }
     (void)a1;
     (void)a2;
     (void)a3;
@@ -1170,6 +1265,9 @@ static long sys_kbd_modifiers(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
  * snapshot, and strictly better than a count that grows under the
  * bounds check. */
 static long sys_taskinfo(uint64_t buf, uint64_t max_entries, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_PROCESS_LIST)) {
+        return -1; /* M65 */
+    }
     (void)a3;
     (void)a4;
     (void)a5;
@@ -1223,6 +1321,9 @@ static long sys_taskinfo(uint64_t buf, uint64_t max_entries, uint64_t a3, uint64
 }
 
 static long sys_clipboard_set(uint64_t buf, uint64_t len, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_CLIPBOARD)) {
+        return -1; /* M65 */
+    }
     (void)a3;
     (void)a4;
     (void)a5;
@@ -1235,6 +1336,9 @@ static long sys_clipboard_set(uint64_t buf, uint64_t len, uint64_t a3, uint64_t 
 }
 
 static long sys_clipboard_get(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_CLIPBOARD)) {
+        return -1; /* M65: read is the half that matters - a clipboard any program may read at will is a keylogger with a delay */
+    }
     (void)a3;
     (void)a4;
     (void)a5;
@@ -1249,6 +1353,9 @@ static long sys_clipboard_get(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64
  * kernel doesn't recognize; on POWER_OFF/POWER_REBOOT power_shutdown
  * never comes back, so the caller's own return value is unobservable. */
 static long sys_shutdown(uint64_t mode, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_POWER)) {
+        return -1; /* M65 - and this is the check SYS_shutdown's own comment refused to fake until there was something behind it */
+    }
     (void)a2;
     (void)a3;
     (void)a4;
@@ -1286,6 +1393,15 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
         return -1;
     }
     int writable = (flags & OPEN_WRITE) != 0;
+    /* M65: gated on the *flags*, not on the call. Reading is not a
+     * capability in this OS - there are no secrets on the disk and
+     * claiming a read boundary that nothing enforces would be exactly
+     * the fake check caps.h exists to avoid - but creating, truncating
+     * and writing are. Checked before vfs_open so an OPEN_CREATE that
+     * will be refused does not leave the file behind. */
+    if ((flags & (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)) && !has_cap(CAP_FS_WRITE)) {
+        return -1;
+    }
     int handle = vfs_open(path, (flags & OPEN_CREATE) != 0);
     if (handle < 0) {
         return -1;
@@ -1358,6 +1474,9 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
 }
 
 static long sys_rmdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1; /* M65 */
+    }
     (void)a2;
     (void)a3;
     (void)a4;
@@ -1382,6 +1501,241 @@ static long sys_time(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, ui
         return -1;
     }
     return now.valid ? (long)os_unix_time(&now) : 0;
+}
+
+static long sys_getcaps(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    return (long)sched_current()->caps;
+}
+
+static long sys_dropcaps(uint64_t keep, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    task_t *self = sched_current();
+    self->caps &= (uint32_t)keep; /* the only assignment to caps outside a spawn, and it is an AND */
+    return (long)self->caps;
+}
+
+/* ---- M64: sockets ----------------------------------------------------
+ *
+ * Five calls and no new bookkeeping: a socket lives in the fd table
+ * beside pipes and open files, is refcounted by the same fd_retain/
+ * fd_release M59 wrote, and is closed by the SYS_close that already
+ * exists. The only thing these functions do that the file syscalls do
+ * not is validate a user pointer for a *variable* length the caller
+ * chose, which copy_from_user was already built for in M52.
+ */
+static struct socket *socket_for_fd(uint64_t fd) {
+    task_t *self = sched_current();
+    if (fd >= MAX_FDS || self->fds[fd].type != FD_SOCKET) {
+        return (struct socket *)0;
+    }
+    return self->fds[fd].sock;
+}
+
+/* M66: hands `s` to a fresh descriptor in the caller's table, or -1 and
+ * releases it. Shared by sys_socket and sys_accept, which are the two
+ * calls in this kernel that create a descriptor out of nothing. */
+static long install_socket_fd(struct socket *s) {
+    task_t *self = sched_current();
+    int fd = alloc_fd(self);
+    if (fd < 0) {
+        socket_unref(s);
+        return -1;
+    }
+    self->fds[fd].type = FD_SOCKET;
+    self->fds[fd].sock = s;
+    return fd;
+}
+
+static long sys_socket(uint64_t type, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_NETWORK)) {
+        return -1; /* M65: gated at socket() rather than at sendto(), so a program without the capability cannot even get a handle to fail with */
+    }
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    if (type != SOCK_DGRAM && type != SOCK_STREAM) {
+        return -1;
+    }
+    struct socket *s = socket_alloc((int)type);
+    if (!s) {
+        return -1;
+    }
+    return install_socket_fd(s);
+}
+
+/* ---- M66: streams ----------------------------------------------------- */
+
+static long sys_listen(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    struct socket *s = socket_for_fd(fd);
+    return s ? socket_listen(s) : -1;
+}
+
+static long sys_connect(uint64_t fd, uint64_t ip, uint64_t port, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4; (void)a5; (void)a6;
+    struct socket *s = socket_for_fd(fd);
+    if (!s || port == 0 || port > 0xFFFF) {
+        return -1;
+    }
+    return socket_connect(s, (uint32_t)ip, (uint16_t)port);
+}
+
+static long sys_connstat(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    struct socket *s = socket_for_fd(fd);
+    struct tcpcb *tcb = s ? socket_tcb(s) : (struct tcpcb *)0;
+    if (!tcb) {
+        return -1;
+    }
+    if (!tcp_connect_settled(tcb)) {
+        return 0;
+    }
+    /* Established, or gone. tcp.c frees the control block on a refused
+     * or timed-out connection, so "the tcb is closed" is exactly the
+     * failure case - which is why this asks tcp_state rather than
+     * consulting a flag that would have been freed with it. */
+    return tcp_state(tcb) == TCP_ESTABLISHED ? 1 : -1;
+}
+
+static long sys_accept(uint64_t fd, uint64_t from_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    struct socket *listener = socket_for_fd(fd);
+    if (!listener) {
+        return -1;
+    }
+    struct socket *conn = socket_accept(listener);
+    if (!conn) {
+        return -1;
+    }
+    if (from_ptr) {
+        struct tcpcb *tcb = socket_tcb(conn);
+        os_sockaddr_t from = {tcp_remote_ip(tcb), tcp_remote_port(tcb), 0};
+        if (copy_to_user(from_ptr, &from, sizeof(from)) != 0) {
+            /* The connection is already accepted and cannot be put back,
+             * so it is aborted rather than leaked - the peer learns the
+             * truth, which is that this machine took the connection and
+             * then could not keep it. */
+            socket_unref(conn);
+            return -1;
+        }
+    }
+    return install_socket_fd(conn);
+}
+
+static long sys_send(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4; (void)a5; (void)a6;
+    struct socket *s = socket_for_fd(fd);
+    struct tcpcb *tcb = s ? socket_tcb(s) : (struct tcpcb *)0;
+    if (!tcb || len > TCP_MAX_MSS) {
+        /* Capped at one segment per call rather than at the buffer size:
+         * a partial write is already the contract, so the only thing a
+         * larger staging buffer would buy is a larger staging buffer. */
+        if (!tcb) {
+            return -1;
+        }
+        len = TCP_MAX_MSS;
+    }
+    static uint8_t staging[TCP_MAX_MSS];
+    if (len && copy_from_user(staging, buf, (size_t)len) != 0) {
+        return -1;
+    }
+    return tcp_send(tcb, staging, (uint16_t)len);
+}
+
+static long sys_recv(uint64_t fd, uint64_t buf, uint64_t max, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4; (void)a5; (void)a6;
+    struct socket *s = socket_for_fd(fd);
+    struct tcpcb *tcb = s ? socket_tcb(s) : (struct tcpcb *)0;
+    if (!tcb) {
+        return -1;
+    }
+    if (max > TCP_MAX_MSS) {
+        max = TCP_MAX_MSS;
+    }
+    static uint8_t staging[TCP_MAX_MSS];
+    int n = tcp_recv(tcb, staging, (uint16_t)max);
+    if (n <= 0) {
+        return n; /* 0 = nothing right now, -1 = end of stream; both mean nothing to copy */
+    }
+    return copy_to_user(buf, staging, (size_t)n) == 0 ? n : -1;
+}
+
+static long sys_bind(uint64_t fd, uint64_t port, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    struct socket *s = socket_for_fd(fd);
+    if (!s || port > 0xFFFF) {
+        return -1;
+    }
+    return socket_bind(s, (uint16_t)port);
+}
+
+static long sys_sendto(uint64_t fd, uint64_t ip, uint64_t port, uint64_t buf, uint64_t len, uint64_t a6) {
+    (void)a6;
+    struct socket *s = socket_for_fd(fd);
+    if (!s || port > 0xFFFF || len > UDP_MAX_PAYLOAD) {
+        return -1;
+    }
+    static uint8_t staging[UDP_MAX_PAYLOAD];
+    if (len && copy_from_user(staging, buf, (size_t)len) != 0) {
+        return -1;
+    }
+    return socket_sendto(s, (uint32_t)ip, (uint16_t)port, staging, (uint16_t)len);
+}
+
+static long sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t max, uint64_t from_ptr, uint64_t a5, uint64_t a6) {
+    (void)a5; (void)a6;
+    struct socket *s = socket_for_fd(fd);
+    if (!s || max > SOCKET_MAX_DATAGRAM) {
+        return -1;
+    }
+    static uint8_t staging[SOCKET_MAX_DATAGRAM];
+    os_sockaddr_t from = {0, 0, 0};
+    int n = socket_recvfrom(s, staging, (uint16_t)max, &from.ip, &from.port);
+    if (n < 0) {
+        return -1;
+    }
+    /* The datagram is already off the queue by the time the copy can
+     * fail, and there is nowhere to put it back. A caller that passes a
+     * bad pointer loses that one datagram, which is a strictly better
+     * outcome than a kernel that keeps a partial copy around to hand
+     * out twice - and is the same trade sys_read already makes. */
+    if (n && copy_to_user(buf, staging, (size_t)n) != 0) {
+        return -1;
+    }
+    if (from_ptr && copy_to_user(from_ptr, &from, sizeof(from)) != 0) {
+        return -1;
+    }
+    return n;
+}
+
+static long sys_sockpoll(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    struct socket *s = socket_for_fd(fd);
+    return s ? socket_pending(s) : -1;
+}
+
+static long sys_netconf(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    if (!net_have_nic()) {
+        return -1;
+    }
+    os_netconf_t conf;
+    conf.ip = net_local_ip();
+    conf.mask = net_subnet_mask();
+    conf.gateway = net_gateway_ip();
+    conf.dns = net_dns_ip();
+    conf.leased = net_config_is_leased();
+    return copy_to_user(out_ptr, &conf, sizeof(conf)) == 0 ? 0 : -1;
+}
+
+static long sys_settime(uint64_t seconds, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_SET_TIME)) {
+        return -1; /* M65 */
+    }
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    if (seconds > 0xFFFFFFFFu) {
+        return -1;
+    }
+    return rtc_set_unix((uint32_t)seconds);
 }
 
 /* ---- M62: sound ------------------------------------------------------
@@ -1411,6 +1765,9 @@ static int audio_owner_is_caller(void) {
 }
 
 static long sys_audio_claim(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_AUDIO)) {
+        return -1; /* M65 */
+    }
     (void)a1;
     (void)a2;
     (void)a3;
@@ -1527,6 +1884,9 @@ static long sys_display_modes(uint64_t out_ptr, uint64_t max_entries, uint64_t a
 }
 
 static long sys_display_set_mode(uint64_t width, uint64_t height, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (!has_cap(CAP_DISPLAY_MODE)) {
+        return -1; /* M65: reconfiguring the display hardware is authority over every other program on the machine, not just this one */
+    }
     (void)a3;
     (void)a4;
     (void)a5;
@@ -1593,6 +1953,21 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_audio_play] = sys_audio_play,
     [SYS_display_modes] = sys_display_modes,
     [SYS_display_set_mode] = sys_display_set_mode,
+    [SYS_socket] = sys_socket,
+    [SYS_bind] = sys_bind,
+    [SYS_sendto] = sys_sendto,
+    [SYS_recvfrom] = sys_recvfrom,
+    [SYS_sockpoll] = sys_sockpoll,
+    [SYS_netconf] = sys_netconf,
+    [SYS_settime] = sys_settime,
+    [SYS_getcaps] = sys_getcaps,
+    [SYS_dropcaps] = sys_dropcaps,
+    [SYS_listen] = sys_listen,
+    [SYS_connect] = sys_connect,
+    [SYS_connstat] = sys_connstat,
+    [SYS_accept] = sys_accept,
+    [SYS_send] = sys_send,
+    [SYS_recv] = sys_recv,
 };
 
 void syscall_handler(isr_regs_t *regs) {

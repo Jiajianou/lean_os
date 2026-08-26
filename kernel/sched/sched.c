@@ -9,6 +9,7 @@
 #include "arch/x86_64/smp.h"
 #include "drivers/pit.h"
 #include "fs/openfile.h"
+#include "net/socket.h"
 #include "ipc/pipe.h"
 #include "ipc/shm.h" /* shm_free_by_owner - see task_exit_with_code */
 #include "lib/spinlock.h"
@@ -147,6 +148,10 @@ void sched_init(void) {
     tasks[0].fds[1].type = FD_STDOUT;
     tasks[0].parent_id = -1;
     tasks[0].pgid = 0;
+    /* M65: the root of the whole model. Every capability any process on
+     * this machine will ever hold is a subset of this one, arrived at by
+     * a chain of spawns that can only narrow. */
+    tasks[0].caps = CAP_ALL;
     set_task_name(&tasks[0], "kernel");
     task_count = 1;
     current_task[0] = &tasks[0];
@@ -173,6 +178,7 @@ void sched_init_ap(int cpu_id) {
     t->pgid = 0;
     t->pending_signal = 0;
     t->reaped = 0;
+    t->caps = CAP_ALL; /* M65: a kernel idle identity, which never enters ring 3 and never makes a syscall */
     set_task_name(t, "cpu-idle");
     current_task[cpu_id] = t;
     loaded_pml4_phys[cpu_id] = t->pml4_phys;
@@ -240,6 +246,12 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->pgid = caller->pgid;
     t->pending_signal = 0;
     t->reaped = 0;
+    /* M65: inherited by default, and the spawn path narrows it
+     * immediately afterward - see process_spawn_capped. Inheriting first
+     * and narrowing second, rather than the other way round, means a
+     * caller that forgets gets the *old* behaviour rather than a process
+     * with no capabilities that fails in a confusing way. */
+    t->caps = caller->caps;
     /* M63: a clean FPU, not an inherited one. Deliberately *not* copied
      * from the caller the way the fd table above is: descriptors are
      * something a child is meant to inherit and floating-point registers
@@ -535,6 +547,7 @@ void sched_reap_slot(task_t *t) {
     t->pending_signal = 0;
     t->reaped = 0;
     t->parent_id = -1;
+    t->caps = 0; /* M65: a free slot holds no authority, so a stale pointer to one cannot lend any */
     sched_reset_fds_to_std(t);
     t->fds[0].type = FD_NONE; /* a free slot holds nothing at all, not even stdin/stdout */
     t->fds[1].type = FD_NONE;
@@ -563,6 +576,9 @@ void fd_release(fd_slot_t *slot) {
     case FD_FILE:
         openfile_unref(slot->file);
         break;
+    case FD_SOCKET:
+        socket_unref(slot->sock);
+        break;
     default:
         break;
     }
@@ -582,6 +598,9 @@ void fd_retain(const fd_slot_t *slot) {
         break;
     case FD_FILE:
         openfile_ref(slot->file);
+        break;
+    case FD_SOCKET:
+        socket_ref(slot->sock);
         break;
     default:
         break;

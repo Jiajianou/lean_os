@@ -14,6 +14,8 @@
 
 #include "display.h" /* system_api/include/display.h - display_mode_t, M58 */
 #include "os_time.h" /* system_api/include/os_time.h - os_datetime_t/os_stat_t, M59 */
+#include "os_net.h"  /* system_api/include/os_net.h - os_sockaddr_t/os_netconf_t, M64 */
+#include "caps.h"    /* system_api/include/caps.h - CAP_*, M65 */
 #include "syscall.h" /* system_api/include/syscall.h - M59: the OPEN_ and SEEK_ flags belong to the ABI, not to this wrapper layer */
 #include "input.h" /* system_api/include/input.h - mouse_event_t */
 #include "power_mode.h" /* system_api/include/power_mode.h - POWER_OFF/POWER_REBOOT, M47 */
@@ -146,6 +148,47 @@ long sys_rmdir(const char *path);
  * what an un-timestamped file carries, so "no clock" and "no timestamp"
  * print the same way. */
 long sys_time(os_datetime_t *out);
+
+/* ---- M65: capabilities -----------------------------------------------
+ *
+ * What this process is allowed to do (system_api/include/caps.h), and
+ * the one thing it can do about that: give some of it up. There is no
+ * call that grants anything, on purpose - see caps.h. */
+long sys_getcaps(void);
+long sys_dropcaps(uint32_t keep);
+
+/* ---- M64: the network ------------------------------------------------
+ *
+ * UDP, as file descriptors. A socket is closed with sys_close, inherited
+ * by a child across sys_spawn, and duplicated by sys_dup2, because it is
+ * an ordinary fd and not a handle of its own kind - see SYS_socket.
+ *
+ * Addresses are host-order uint32_t (system_api/include/os_net.h has the
+ * OS_IPV4 macro and the two string conversions); there is no htons in
+ * this OS and there does not need to be one. */
+/* M66: `type` is os_net.h's OS_SOCK_DGRAM or OS_SOCK_STREAM. */
+long sys_socket(int type);
+
+/* M66: TCP. Every one of these is non-blocking, including connect -
+ * sys_connect starts the handshake and sys_connstat says how it went.
+ * sys_send returns how much it took, which may be less than offered.
+ * sys_recv returns 0 for "nothing right now" and -1 for end of stream,
+ * and those are different answers. */
+long sys_listen(int fd);
+long sys_connect(int fd, uint32_t ip, uint16_t port);
+long sys_connstat(int fd);
+long sys_accept(int fd, os_sockaddr_t *from);
+long sys_send(int fd, const void *data, uint32_t len);
+long sys_recv(int fd, void *data, uint32_t max);
+long sys_bind(int fd, uint16_t port);
+long sys_sendto(int fd, uint32_t ip, uint16_t port, const void *data, uint32_t len);
+long sys_recvfrom(int fd, void *data, uint32_t max, os_sockaddr_t *from);
+long sys_sockpoll(int fd);
+long sys_netconf(os_netconf_t *out);
+
+/* M64: corrects the clock, which is the half of "know the time" SNTP
+ * needs and M59 had no reason to add. Lasts until reboot. */
+long sys_settime(uint32_t unix_seconds);
 
 /* ---- M62: sound ------------------------------------------------------
  *

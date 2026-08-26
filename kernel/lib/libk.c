@@ -9,6 +9,27 @@ void *k_memcpy(void *dst, const void *src, size_t n) {
     return dst;
 }
 
+void *k_memmove(void *dst, const void *src, size_t n) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    if (d == s || n == 0) {
+        return dst;
+    }
+    /* Copy backwards only when the destination starts inside the source,
+     * which is the one direction a forward copy would overwrite bytes it
+     * has not read yet. */
+    if (d > s && d < s + n) {
+        for (size_t i = n; i > 0; i--) {
+            d[i - 1] = s[i - 1];
+        }
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            d[i] = s[i];
+        }
+    }
+    return dst;
+}
+
 void *k_memset(void *dst, int c, size_t n) {
     unsigned char *d = (unsigned char *)dst;
     for (size_t i = 0; i < n; i++) {

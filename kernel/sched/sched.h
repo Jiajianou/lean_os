@@ -12,6 +12,8 @@
 #pragma once
 
 #include <stdint.h>
+
+#include "caps.h" /* system_api/include/caps.h - CAP_*, M65 */
 #include "arch/x86_64/fpu.h" /* M63: FPU_STATE_SIZE/ALIGN - a task carries its own SSE state now */
 
 #include "proc.h" /* system_api/include/proc.h - TASK_INFO_MAX, which *is* MAX_TASKS below. Resolves to the system_api header: a quoted include searches this file's own directory first (kernel/sched/, no proc.h), then -Ikernel (no kernel/proc.h), then -Isystem_api/include. */
@@ -46,6 +48,10 @@ typedef enum {
      * same: two fds produced by SYS_dup2 have to share one offset, or
      * "append to the same file through both" quietly interleaves. */
     FD_FILE,
+    /* M64: a UDP socket (kernel/net/socket.h). Refcounted exactly like
+     * the other two, which is the whole reason a socket is an fd here
+     * and not its own handle namespace. */
+    FD_SOCKET,
 } fd_type_t;
 
 /* M21: bumped from 8 - a compositor juggling several windows needs
@@ -173,6 +179,7 @@ typedef struct {
     union {
         struct pipe *pipe;
         struct openfile *file;
+        struct socket *sock;
     };
 } fd_slot_t;
 
@@ -197,6 +204,13 @@ typedef struct task {
     uint8_t fpu_state[FPU_STATE_SIZE] __attribute__((aligned(FPU_STATE_ALIGN)));
     fd_slot_t fds[MAX_FDS]; /* fd 0/1 default to FD_STDIN/FD_STDOUT; a spawned task inherits its parent's whole table (M14) so pipe fds set up before SYS_spawn carry over */
     int parent_id; /* -1 for task 0 (nothing spawned it) */
+    /* M65: what this process is allowed to do (system_api/include/caps.h).
+     * Monotonically non-increasing for the life of the task: a child is
+     * given a subset at spawn, a process can drop its own, and there is
+     * no code path anywhere that sets a bit that was clear. That single
+     * property is what makes the model checkable rather than merely
+     * present - it means nothing has to be trusted to hand one back. */
+    uint32_t caps;
     int pgid; /* process group: a process's own id if it's a group leader, otherwise inherited from whoever spawned it - read-only (SYS_getpgid), no job control to ever need changing it yet */
     int pending_signal; /* 0 = none, else SIGKILL/SIGTERM (system_api/include/signal.h) - checked at the next syscall entry or scheduler tick, see syscall.c/sched.c */
     int reaped; /* SYS_wait(-1) sets this once it's returned this task's id, so a later wait(-1) call doesn't hand back the same dead child twice */
