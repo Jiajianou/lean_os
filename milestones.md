@@ -4683,7 +4683,7 @@ they are measuring. A self-test that had merely *slept* for a fixed
 interval instead would have been the fragile one.
 
 
-## M68 — Wait queues, and the end of the busy loop [ ]
+## M68 — Wait queues, and the end of the busy loop [~] attempted, reverted
 
 The foundational milestone of this arc, and the one everything after it
 gets cheaper because of. It needs M67 first: blocking correctly means
@@ -4726,13 +4726,97 @@ the compositor could meet a deadline. It cannot meaningfully meet one
 while every other process on the machine is permanently runnable and
 round-robin gives each of them 50 ms. M69 is not possible without this.
 
-## M69 — Latency you can feel [ ]
+### Attempt notes — what was built, what it found, and why it is not here
 
-With M68 done, most of the machine is asleep most of the time, and the
-scheduler's job changes from "share the CPU fairly among things that all
-want it forever" to "get the right task running fast when something
-happens". That is a different algorithm and a different number to
-optimise.
+**Status: implemented in full, verified as a mechanism, and reverted.**
+The work is preserved in a git stash rather than deleted. This entry is
+the useful output, and it is longer than the milestone because what the
+attempt learned is worth more than what it shipped.
+
+*What was built and did work.* `TASK_BLOCKED` as a fifth task state; a
+sleep/wakeup channel primitive of the V6/xv6 shape (an address used as an
+identity, a 128-entry scan, no allocation); absolute-deadline wakeups
+swept from the timer tick; a sequence counter closing the lost-wakeup
+race for the three waiters that have no condition lock to hold;
+`SYS_waitfds` and `SYS_idle_ticks`; per-CPU idle tasks; and a
+`pit_sleep_ms` that leaves the run queue instead of halting inside it.
+Every one of those was exercised and correct in isolation.
+
+*Three real bugs, each of which only exists once something can sleep.*
+
+1. **A deadlock that needs both sides asleep.** `pipe_write` parking on a
+   full pipe woke nobody - its wake is at the *end* of the function,
+   unreachable from the middle. So a compositor filling a client's event
+   pipe slept holding a pipe full of events the client had never been
+   told about, while that client slept waiting for them. Invisible before
+   M68 because neither side could sleep.
+2. **A `noreturn` under a lock.** Folding the fatal-signal check into
+   `sched_block_on` quietly moved it to *before* the caller's lock was
+   released. `sched_deliver_pending_signal` does not return when a signal
+   is pending, so a task killed at that instant died holding `pipe_lock`,
+   with interrupts off, and every pipe on the machine then spun on a lock
+   whose owner no longer existed. **The bug is invisible in the diff** -
+   both versions "check for a signal before sleeping", and only one
+   survives the check finding something.
+3. **A spin inside an interrupt handler.** Refusing to return from
+   `schedule()` until something was runnable looked like the safe way to
+   avoid running a blocked task. It is reachable from the timer tick,
+   where `irq_restore` puts back `IF=0` - so it spun with interrupts off,
+   waiting for a run queue that only an interrupt could change. A dead
+   machine, no panic, no output, about one boot in two, and it *moved
+   when anything changed the timing, including the klog added to
+   diagnose it*. The fix is to return: a task that is BLOCKED and still
+   running is on its way to `schedule()` and will park there.
+
+*Why it was reverted, and this is the finding that matters.* With the
+mechanism correct, the boot suite still failed - and the failures
+**wandered**. M36's close handshake on one run, M55's crash recovery on
+the next, `wm_demo`'s window creation on the one after. A failure that
+moves between runs is not a bug in the thing being tested; it is a whole
+suite's timing assumption being wrong at once.
+
+**Roughly fifty boot self-tests are written against fixed
+`pit_sleep_ms` budgets measured on a desktop where nothing ever
+blocked.** The window-manager protocol *is* pipes - a window is created,
+drawn, focused, closed and torn down through them - so any change to how
+promptly a pipe write reaches its reader changes the timing of every one
+of those tests at once. Narrowing the scope did not help: the failures
+persisted with the client loops reverted, and again with pipe blocking
+itself reverted, which says the perturbation is not one call site.
+
+*The order was wrong, and that is the lesson.* This file put M68 before
+M69 on the reasoning that you cannot tune latency you cannot leave the
+run queue for. That is true and it is beside the point: **M69's first
+bullet is "measure input-to-photon before changing anything", and
+without that number there is no way to tell a scheduling change that
+helped from one that broke fifty timing assumptions.** The attempt had
+no before, so every after was a guess. M69 should come first, its
+measurement should replace the fixed `pit_sleep_ms` budgets in the boot
+suite with something that waits for a condition rather than a duration,
+and M68 should follow - at which point it is a change with evidence
+either side of it rather than a wander through somebody else's timeouts.
+
+*Kept from the attempt, in M67 and already landed:* nothing of M68
+itself. The stash holds the whole thing and is worth re-reading rather
+than re-deriving - the three bugs above are the expensive part, and they
+will all be waiting again.
+
+
+## M69 — Latency you can feel [ ] — **now the next milestone, before M68**
+
+**Reordered after M68's attempt.** This entry used to open "with M68
+done"; it now goes first, and M68's attempt notes above explain why in
+detail. The short version: M68 could not tell a scheduling change that
+helped from one that broke fifty timing assumptions, because it had no
+measurement to compare against - and the first bullet below is exactly
+that measurement. Doing this first also gives the boot suite a way to
+wait for a *condition* rather than a *duration*, which is the thing that
+has to change before anything can safely alter how promptly a pipe write
+reaches its reader.
+
+The scheduler's job is to get the right task running fast when something
+happens. That is a different number to optimise from "share the CPU
+fairly", and nobody has ever measured it here.
 
 The number this milestone owns: **input-to-photon** — the wall-clock
 milliseconds from a keypress or click landing in the driver to the
