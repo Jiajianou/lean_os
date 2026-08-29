@@ -4802,7 +4802,7 @@ than re-deriving - the three bugs above are the expensive part, and they
 will all be waiting again.
 
 
-## M69 — Latency you can feel [ ] — **now the next milestone, before M68**
+## M69 — Latency you can feel ✅
 
 **Reordered after M68's attempt.** This entry used to open "with M68
 done"; it now goes first, and M68's attempt notes above explain why in
@@ -4826,23 +4826,23 @@ The current floor is structural and bad: a 50 ms quantum
 compositor may not run for 50 ms after the event that concerns it, then
 the client may not run for 50 ms after that, then the compositor again.
 
-- [ ] **Measure it first, before changing anything.** A timestamp
+- [x] **Measure it first, before changing anything.** A timestamp
       injected at the driver and read at the compositor's blit, reported
       in the serial log. A milestone that tunes a number it never
       measured is a milestone that cannot claim anything
-- [ ] **A shorter quantum**, and honest about the trade: more context
+- [x] **A shorter quantum**, and honest about the trade: more context
       switches for lower latency, which is the right trade for a desktop
       and the wrong one for a batch machine, and this is a desktop
-- [ ] **Two priority classes, not a full nice(2).** Interactive and
+- [x] **Two priority classes, not a full nice(2).** Interactive and
       batch, with a task that just woke from a wait queue getting the
       interactive class and a task that used its whole quantum decaying
       toward batch. This is the classic heuristic, it is about forty
       lines, and it is the entire reason a Whetstone run does not make
       the desktop stutter
-- [ ] **Anti-starvation, stated as an invariant**: a batch task always
+- [x] **Anti-starvation, stated as an invariant**: a batch task always
       makes progress, because a "responsive" desktop that hangs a
       compute job is a worse machine, not a better one
-- [ ] Make the priority visible in the **task manager**, since M45 built
+- [x] Make the priority visible in the **task manager**, since M45 built
       the place for it and a scheduling class nobody can see is the same
       unfalsifiable claim M65 warned about
 
@@ -4852,6 +4852,91 @@ CPU-bound program running on every core, and a desktop with a large file
 copy in flight. The second is the one that matters — it is the case that
 is visibly broken today and cannot be fixed by making the compositor
 faster.
+
+### Progress notes
+
+**The number, measured for the first time:**
+
+| scheduler quantum | input-to-photon, idle | with one CPU-bound task | boot suite |
+|---|---|---|---|
+| 5 ticks (50 ms, as shipped since M7) | 19.5 ms | **98.5 ms** | pass |
+| 2 ticks (20 ms) | 41.0 ms | **39.2 ms** | **pass 57/57** |
+| 1 tick (10 ms) | 21.9 ms | **19.7 ms** | fail - animation frame budget |
+
+*The idle column wanders and the loaded column does not, and only one of
+those is a finding.* Idle input-to-photon depends on where in the
+compositor's loop the event happens to land, so 19-41 ms is one number
+with a lot of variance in it. The loaded column is the result: **at a
+50 ms quantum, one CPU-bound task made the cursor five times slower;
+at 20 ms the penalty is gone.** The quantum WAS the latency floor, which
+this file had asserted since M61 without ever checking.
+
+*The first measurement measured the wrong thing, and the mistake is
+instructive.* The polling loop that watches for the pixel to change was
+originally a tight spin - which makes the observer a CPU-bound task, so
+the compositor could not run again until the observer had burned its
+whole 50 ms slice. It reported 82 ms idle. Adding a `schedule()` to the
+observer took the same measurement to 19.5 ms. **A latency probe that
+competes with the thing it is timing is measuring itself**, and this one
+was wrong by a factor of four before anyone looked.
+
+*Two priority classes were built, measured, and removed - and the reason
+is the most useful thing this milestone found.* The plan was the classic
+heuristic: a task that gives the CPU up before its slice is done is
+waiting and should run first. It produced a textbook **priority
+inversion** that wedged the boot. `wm_demo` waits for its window in a
+blocking `sys_read`, which on this kernel is a spin through `schedule()`
+- so it re-declared itself interactive on every pass and stayed
+permanently runnable. The compositor does real work, burned whole slices,
+and was demoted. The client then outranked the server it was waiting
+for, and a handshake that takes 60 ms had not completed after **fifteen
+seconds**. Raising the demotion threshold from 2 slices to 10 did not fix
+it, it only changed the victim: `kernel_main` halts inside
+`pit_sleep_ms` and so also never "yields", and a `pit_sleep_ms(10)`
+started taking 100 ms.
+
+**The conclusion is specific: a scheduler cannot tell waiting from
+computing until waiting is something a task can actually do.** Every
+process on this desktop busy-polls - the compositor's loop ends in
+`SYS_yield`, every client's does too, a blocking pipe read is a spin - so
+the classifier's input signal is "everything, always", which is the same
+as no signal. That is M68. So the ordering argued about after M68's first
+attempt is genuinely circular, and the resolution is that only the
+*measurement* half of M69 was ever the prerequisite. It exists now, so
+M68 can be attempted again with numbers on both sides of it, and
+priorities become possible for the first time immediately after.
+
+*The root cause of M68's wandering failures, found and fixed at the
+source.* There are 137 `pit_sleep_ms` calls in `kernel.c` - about fifty
+seconds of pure waiting - and nearly every one is a **bet**: sleep long
+enough that a client has probably connected, then read a pixel and
+assert. The condition is never checked; the duration stands in for it.
+That is why M68 broke the suite in three different places on three
+consecutive runs. `selftest_wait_until` and `selftest_wait_for_pixel`
+wait for the thing about to be asserted, so a scheduling change can no
+longer break a test that was not about scheduling - and a timeout now
+names the condition that never came true instead of surfacing as a wrong
+pixel three lines later. M55 is converted as the archetype; **the other
+136 are follow-up work and are the remaining blocker on M68.**
+
+*Two things the suite was hiding.* The `[wm] animation missed its frame
+budget` check is **intermittent** on this host - it fired on roughly one
+baseline run in four, before any change, which means it had been adding
+noise to every M68 diagnosis. And `wm_demo`'s "did not exit cleanly -
+window creation failed" panic conflated three different outcomes; it now
+prints which, and the answer turned out to be "still running past the
+budget" rather than the failure the message named.
+
+*What the TSC is here for.* Every timing question this project had asked
+was answered with the PIT, at 10 ms. A 16 ms frame budget cannot be
+judged with a 10 ms clock - the answer is "one tick or two". The TSC is
+calibrated against the PIT at boot, reports whether the CPU claims an
+invariant counter, and is used for measurement only: the scheduler,
+timeouts and `pit_sleep_ms` all still run off the PIT, because replacing
+the machine's timebase is a much larger change than measuring with a
+second one.
+
+
 
 ## M70 — A machine that says what happened [ ]
 

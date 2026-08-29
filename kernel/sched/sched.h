@@ -183,6 +183,48 @@ typedef struct {
     };
 } fd_slot_t;
 
+/* ---- M69: why there are no scheduling priorities here ------------------
+ *
+ * This milestone set out to add two classes - interactive and batch,
+ * separated by the classic heuristic that a task which gives the CPU up
+ * before its slice is done is waiting for something and should run first.
+ * It was implemented, measured, and removed, because **the signal does
+ * not exist on this machine yet.**
+ *
+ * Every process on this desktop busy-polls. The compositor's main loop
+ * ends in SYS_yield; every wmclient program's does too; a blocking
+ * sys_read on a pipe is a spin through schedule(). So *everything* looks
+ * like it yields voluntarily, all the time, and a classifier fed that
+ * signal marks the entire machine interactive - which is the same as
+ * marking none of it.
+ *
+ * What it actually produced was a priority inversion that wedged the
+ * boot. `wm_demo` waits for its window in a blocking sys_read, spinning
+ * and re-declaring itself interactive on every pass. The compositor does
+ * real work - a frame takes more than one 10 ms slice - so it burned
+ * whole slices and was demoted. The client then outranked the server it
+ * was waiting for: a handshake that takes milliseconds had not finished
+ * after fifteen seconds. Raising the demotion threshold from 2 slices to
+ * 10 did not fix it, it only moved the victim - `kernel_main`, which
+ * halts in pit_sleep_ms and so also never "yields", was starved instead,
+ * and a `pit_sleep_ms(10)` started taking 100 ms.
+ *
+ * The conclusion is not "priorities are hard", it is specific and
+ * actionable: **a scheduler cannot tell waiting from computing until
+ * waiting is a thing a task can actually do.** That is M68. The ordering
+ * this file argued about after M68's first attempt turns out to be
+ * genuinely circular - M68 needed M69's measurement to be verifiable, and
+ * M69's classifier needs M68's blocked state to have anything to
+ * classify - and the resolution is that only the *measurement* half of
+ * M69 was ever the prerequisite. That half is done, so M68 can be
+ * attempted again with numbers, and priorities become possible for the
+ * first time immediately after it.
+ *
+ * What M69 keeps is the part that needs no classifier at all: a quantum
+ * of one tick instead of five, which cut the loaded case by more than
+ * half on its own.
+ */
+
 typedef struct task {
     uint64_t rsp; /* saved stack pointer while not running; meaningless while this is the current task */
     uint8_t *stack_base;

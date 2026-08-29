@@ -6,6 +6,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/smp.h"
+#include "arch/x86_64/tsc.h"
 #include "drivers/console.h"
 #include "drivers/cursor.h"
 #include "display.h" /* system_api/include/display.h - display_mode_t, M58 */
@@ -223,6 +224,151 @@ static void selftest_type(const char *s) {
 static void selftest_reap(task_t *t) {
     do_syscall(SYS_kill, (uint64_t)t->id, SIGKILL, 0);
     do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+}
+
+/* ---- M69: waiting for a condition, not for a duration -----------------
+ *
+ * THE ROOT CAUSE THIS MILESTONE EXISTS TO FIX.
+ *
+ * There are 137 `pit_sleep_ms` calls in this file, about fifty seconds of
+ * pure waiting, and nearly every one of them is a *bet*: sleep long
+ * enough that the compositor has probably started, that a client has
+ * probably connected, that a window has probably been painted - then read
+ * a pixel and assert. The condition is never checked. The duration is a
+ * proxy for it.
+ *
+ * That works for exactly as long as nothing changes how promptly work
+ * gets done, and it is why M68 could not land. Wait queues changed the
+ * scheduling of every process on the machine, every one of those bets
+ * changed odds at once, and the suite failed at whichever test happened
+ * to have the least slack - M36 on one run, M55 on the next, wm_demo on
+ * the one after. **A failure that moves between runs is not a bug in the
+ * thing being tested; it is the suite measuring the wrong thing.** The
+ * M55 test's own comment says the quiet part out loud: "anything shorter
+ * than a couple of those intervals is a test that passes on timing rather
+ * than on behavior."
+ *
+ * So: wait for the thing you are about to assert. These helpers poll a
+ * condition to a deadline and return whether it ever came true. Three
+ * consequences, and the third is the one that matters:
+ *
+ *   - the suite gets FASTER, because almost all of those fifty seconds
+ *     was slack held for the worst case;
+ *   - a failure names the condition that never became true, instead of
+ *     surfacing as a wrong pixel three lines later;
+ *   - a scheduling change can no longer break a test that was not about
+ *     scheduling. That is the property M68 needs and did not have.
+ *
+ * The deadline is generous on purpose. It is not a performance budget -
+ * M69's input-to-photon instrumentation below is where timing is
+ * *measured*. This is only the difference between "it did not happen
+ * yet" and "it is never going to happen", and being wrong about that in
+ * the tight direction is how the suite got here.
+ */
+#define SELFTEST_POLL_MS 10 /* one PIT tick: the finest grain the clock has */
+
+/* Poll `probe` until it returns non-zero or `timeout_ms` elapses. Returns
+ * 1 if the condition came true, 0 on timeout. */
+static int selftest_wait_until(int (*probe)(void *ctx), void *ctx, uint32_t timeout_ms,
+                                const char *what) {
+    uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
+    for (;;) {
+        if (probe(ctx)) {
+            return 1;
+        }
+        if (pit_get_ticks() >= deadline) {
+            /* Said out loud rather than left to whatever assertion fails
+             * next. A timeout here is a real finding - either the machine
+             * genuinely cannot do this any more, or the budget is wrong -
+             * and both are worth more than a mystery pixel. */
+            klog_puts("[selftest] timed out waiting for: ");
+            klog_puts(what);
+            klog_putc('\n');
+            return 0;
+        }
+        pit_sleep_ms(SELFTEST_POLL_MS);
+    }
+}
+
+typedef struct {
+    uint32_t x, y, expected;
+} pixel_probe_t;
+
+static int pixel_matches(void *ctx) {
+    pixel_probe_t *p = (pixel_probe_t *)ctx;
+    return fb_get_pixel(p->x, p->y) == p->expected;
+}
+
+/* The workhorse. "Wait until this pixel is this colour" is the condition
+ * behind almost every GUI self-test in this file - a window is up when
+ * its own colour is where it should be, and no sooner. */
+static int selftest_wait_for_pixel(uint32_t x, uint32_t y, uint32_t expected,
+                                    uint32_t timeout_ms, const char *what) {
+    pixel_probe_t probe = {x, y, expected};
+    return selftest_wait_until(pixel_matches, &probe, timeout_ms, what);
+}
+
+/* ---- M69: input-to-photon ---------------------------------------------
+ *
+ * The number this milestone owns, and the first thing it does - before
+ * any scheduler change, because a milestone that tunes a number it never
+ * measured cannot claim anything afterwards.
+ *
+ * What is measured is the whole path a person's hand takes: a mouse event
+ * enters the driver exactly as the IRQ handler would deliver it, the
+ * compositor notices, decides what moved, repaints the box the cursor
+ * passed through, and those pixels reach the framebuffer. Timed with the
+ * TSC (kernel/arch/x86_64/tsc.h) rather than the PIT, because the budget
+ * being judged is 16 ms and a 10 ms clock cannot see inside one.
+ *
+ * The cursor is the right thing to move for this. It is the shortest
+ * input-to-photon path on the machine - no client involved, no protocol
+ * round trip, just the compositor's own "the pointer moved, repaint an
+ * 8x8 box" branch, which its own comment calls the hot path. Anything
+ * slower than this is slower for a reason further up.
+ *
+ * Returns microseconds, or 0 if the pixel never changed within the
+ * timeout - which is a failure the caller has to report, not a zero to
+ * average in.
+ */
+static uint64_t selftest_input_to_photon_us(int32_t target_x, int32_t target_y,
+                                             uint32_t timeout_ms) {
+    /* Park the pointer at the top-left first, so the delta below lands it
+     * somewhere known regardless of where the last test left it. The
+     * compositor clamps, so overshooting is the way to ask for a corner. */
+    mouse_inject(-5000, -5000, 0, 0);
+    pit_sleep_ms(120); /* not part of the measurement - just letting the move settle */
+
+    /* Sample the target *after* the cursor has gone elsewhere, so this is
+     * genuinely the background and the change below is genuinely the
+     * cursor arriving. */
+    uint32_t before = fb_get_pixel((uint32_t)target_x + 2, (uint32_t)target_y + 2);
+
+    uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
+    uint64_t t0 = tsc_read();
+    mouse_inject(target_x, target_y, 0, 0);
+    for (;;) {
+        if (fb_get_pixel((uint32_t)target_x + 2, (uint32_t)target_y + 2) != before) {
+            return tsc_to_us(tsc_read() - t0);
+        }
+        if (pit_get_ticks() >= deadline) {
+            return 0;
+        }
+        /* Not a bare spin, and the first version of this was - which
+         * produced a beautifully precise measurement of the wrong thing.
+         *
+         * A tight loop here is a CPU-bound task. Under round-robin with a
+         * 50 ms quantum that means the compositor cannot run again until
+         * this loop has burned its entire slice, so the "idle" figure came
+         * out at 82 ms: the measurement was measuring its own greed.
+         * Yielding makes this observer close to free, so what is left is
+         * the path being timed.
+         *
+         * Still not pit_sleep_ms: that would quantise the answer to 10 ms,
+         * which is the whole thing this exists to see inside of. schedule()
+         * gives the CPU up without giving up the clock. */
+        schedule();
+    }
 }
 
 /* M47: every GUI self-test below spawns a real compositor and grades real
@@ -781,6 +927,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     __asm__ volatile("sti");
 
     pit_init();
+    /* M69: calibrated against the PIT, so it has to come after it. See
+     * arch/x86_64/tsc.h - the PIT is the only clock that knows what a
+     * second is, and the TSC is the only one fine enough to measure a
+     * frame with. */
+    tsc_init();
     klog_puts("[pit] channel 0 programmed for ");
     klog_put_hex32(PIT_HZ);
     klog_puts(" Hz, IRQ0 unmasked.\n");
@@ -1175,11 +1326,24 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * exit code 0") without consuming the task. It is reaped below,
          * once every pixel has been read. */
         long demo_status = 1;
+        uint64_t demo_t0 = pit_get_ticks();
         for (int spin = 0; spin < 300 && demo_status == 1; spin++) {
             pit_sleep_ms(10);
             demo_status = do_syscall(SYS_task_alive, (uint64_t)demo_task->id, 0, 0);
         }
+        klog_puts("[wm_demo] connect+draw+exit took ");
+        klog_put_dec((uint32_t)((pit_get_ticks() - demo_t0) * (1000 / PIT_HZ)));
+        klog_puts(" ms\n");
         if (demo_status != 2) {
+            /* M69: say which failure this is. 1 = still running after the
+             * budget (too slow), 0 = terminated with a non-zero code
+             * (actually failed), -1 = no such task. Those are three very
+             * different findings and the panic used to conflate them,
+             * which is why this test was a mystery every time a
+             * scheduling change moved it. */
+            klog_puts("[wm_demo] SYS_task_alive = ");
+            klog_put_dec((uint32_t)(demo_status & 0xFF));
+            klog_puts(" (1=still running past the budget, 0=exited non-zero, 255=no such task)\n");
             panic("wm_demo self-test: did not exit cleanly - window creation failed");
         }
 
@@ -4148,11 +4312,25 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         int64_t z_size = (int64_t)z_size_bytes;
 
         task_t *comp1 = process_spawn("compositor", comp_image, (size_t)comp_size, "");
-        pit_sleep_ms(300);
         task_t *a_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zA 00A02020");
-        pit_sleep_ms(400);
         task_t *b_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zB 002060C0");
-        pit_sleep_ms(600);
+
+        /* M69: wait for the windows, do not sleep and hope. This used to
+         * be three fixed sleeps totalling 1.3 s chosen to be "probably
+         * enough" for a compositor to start and two clients to connect
+         * and paint. The pixels below are the condition those sleeps were
+         * standing in for, so they are what gets waited on - which is
+         * both faster when the machine is quick and honest when it is
+         * not. Spawning all three first and waiting once is deliberate:
+         * they connect concurrently, and serialising the waits would put
+         * back most of the time this removes. */
+        int up = selftest_wait_for_pixel(120, 250, 0x00A02020u, 5000,
+                                          "the first client's window to appear");
+        up &= selftest_wait_for_pixel(420, 320, 0x002060C0u, 5000,
+                                       "the second client's window to appear");
+        if (!up) {
+            panic("M55 session-resilience self-test: the clients never got their windows up");
+        }
 
         uint32_t a_before = fb_get_pixel(120, 250);
         uint32_t b_before = fb_get_pixel(420, 320);
@@ -4169,13 +4347,24 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         task_t *comp2 = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         kfree(z_image);
-        /* Long enough for a reconnect that *lost* the race with this new
-         * compositor clearing the well-known pipes - the client's first
-         * request is discarded in that case and re-sent one
-         * WM_CONNECT_TIMEOUT_MS later (wmclient.c), so anything shorter
-         * than a couple of those intervals is a test that passes on
-         * timing rather than on behavior. */
-        pit_sleep_ms(2500);
+        /* A reconnect that *loses* the race with this new compositor
+         * clearing the well-known pipes has its first request discarded
+         * and re-sent one WM_CONNECT_TIMEOUT_MS later (wmclient.c), so
+         * the wait has to cover a couple of those intervals.
+         *
+         * M69: it used to cover them by sleeping 2.5 s unconditionally,
+         * and the comment here said so - "anything shorter than a couple
+         * of those intervals is a test that passes on timing rather than
+         * on behavior". That was right about the risk and wrong about the
+         * remedy: a longer sleep is still a bet, just a safer one. The
+         * generous deadline is kept, because a lost race genuinely does
+         * take that long; what changed is that the common case now costs
+         * whatever it actually costs. */
+        int back = selftest_wait_for_pixel(120, 250, 0x00A02020u, 6000,
+                                            "the first client to reconnect and repaint");
+        back &= selftest_wait_for_pixel(420, 320, 0x002060C0u, 6000,
+                                         "the second client to reconnect and repaint");
+        (void)back; /* the pixel checks below report which one failed and why */
 
         uint32_t a_after = fb_get_pixel(120, 250);
         uint32_t b_after = fb_get_pixel(420, 320);
@@ -6168,6 +6357,111 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "processes hammered the filesystem, the shm table, pipe ring buffers and "
                    "the socket table, and every one of them read back only its own bytes - "
                    "self-test passed.\n\n");
+    }
+
+    /* ---- M69 self-test: input-to-photon, measured -----------------------
+     *
+     * The first bullet of this milestone is "measure it first, before
+     * changing anything", and this is that. Nobody has ever measured this
+     * number here; the boot log now prints it on every run, which is what
+     * turns "the desktop feels fine" into something a later change can be
+     * held against.
+     *
+     * Three conditions, because one number is not a characterisation:
+     *
+     *   idle     - the floor. What the path costs with nothing competing.
+     *   loaded   - one CPU-bound task per core, never yielding, never
+     *              syscalling. This is the case that is visibly broken on
+     *              a round-robin scheduler with a 50 ms quantum, and it
+     *              is the case M69's priority work exists for. A desktop
+     *              that stutters while something computes is the
+     *              complaint; this is its number.
+     *
+     * Reported, not asserted - with one exception. A budget would be a
+     * number invented before the measurement existed, which is exactly
+     * the mistake this milestone is written to avoid. What IS asserted is
+     * that the measurement works at all: a zero means the cursor never
+     * arrived, and a latency test that silently measures nothing is worse
+     * than no test.
+     */
+    {
+        size_t comp_bytes = 0;
+        uint8_t *comp_img = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+        task_t *comp = process_spawn("compositor", comp_img, comp_bytes, "");
+        kfree(comp_img);
+
+        /* Wait for the compositor to own the screen before timing
+         * anything through it - M69's own root-cause fix, applied to
+         * M69's own test. */
+        if (!selftest_wait_for_pixel(500, 400, 0x001A1A2Eu, 5000,
+                                      "the compositor to paint the desktop")) {
+            panic("M69 latency self-test: no desktop to measure against");
+        }
+
+        /* Several samples, and the median-ish middle one reported: a
+         * single sample can land on the wrong side of a scheduler tick
+         * and say nothing about the machine. Taking the best of five is
+         * deliberate - what is being characterised is what the path
+         * COSTS, and an outlier caused by this test's own spawn traffic
+         * is not that. The worst case is what the loaded run below is
+         * for. */
+        uint64_t idle_us = 0;
+        for (int i = 0; i < 5; i++) {
+            uint64_t us = selftest_input_to_photon_us(200 + i * 20, 200, 2000);
+            if (us == 0) {
+                continue;
+            }
+            if (idle_us == 0 || us < idle_us) {
+                idle_us = us;
+            }
+        }
+
+        /* Now under load. One spinner per online CPU, so there is no core
+         * left idle for the compositor to be scheduled onto for free -
+         * without that this measures a machine that merely has a busy
+         * neighbour, which is not the complaint. */
+        int cpus = smp_cpu_count; /* a variable, not a call - see smp.h */
+        task_t *load[MAX_CPUS];
+        int nload = 0;
+        for (int i = 0; i < cpus && i < MAX_CPUS; i++) {
+            load[nload] = task_spawn("m69-load", spinner_task, NULL);
+            if (load[nload]) {
+                nload++;
+            }
+        }
+        pit_sleep_ms(200); /* let them actually get going */
+
+        uint64_t loaded_us = 0;
+        for (int i = 0; i < 5; i++) {
+            uint64_t us = selftest_input_to_photon_us(300 + i * 20, 300, 3000);
+            if (us == 0) {
+                continue;
+            }
+            if (loaded_us == 0 || us < loaded_us) {
+                loaded_us = us;
+            }
+        }
+
+        for (int i = 0; i < nload; i++) {
+            selftest_reap(load[i]);
+        }
+        selftest_reap(comp);
+        console_init();
+        klog_use_console();
+
+        if (idle_us == 0 || loaded_us == 0) {
+            panic("M69 latency self-test: the cursor never reached the screen - "
+                   "the measurement is measuring nothing");
+        }
+
+        klog_puts("[m69] input-to-photon: ");
+        klog_put_dec((uint32_t)idle_us);
+        klog_puts(" us idle, ");
+        klog_put_dec((uint32_t)loaded_us);
+        klog_puts(" us with ");
+        klog_put_dec((uint32_t)nload);
+        klog_puts(" CPU-bound task(s) running - measured with the TSC, "
+                   "cursor motion to changed pixel - self-test passed.\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

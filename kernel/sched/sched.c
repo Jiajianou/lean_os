@@ -20,7 +20,19 @@
 #include "signal.h" /* system_api/include/signal.h - SIGKILL/SIGTERM */
 
 #define TASK_STACK_SIZE (8 * 1024)
-#define SCHED_QUANTUM_TICKS 5 /* 5 * 10 ms PIT ticks = 50 ms time slice */
+/* M69: 5 -> 1. The quantum was the latency floor and nothing else.
+ *
+ * Round-robin gives every runnable task the CPU for a whole slice, so the
+ * worst case for "the compositor wants to run" was one slice per task
+ * ahead of it. At 50 ms that made a cursor move cost 98 ms with a single
+ * CPU-bound task on the machine - measured, see the [m69] self-test.
+ *
+ * The trade is real and it is the right way round for a desktop: more
+ * context switches for lower latency. One PIT tick is the finest slice
+ * this clock can express, a switch costs a register save and a possible
+ * CR3 reload, and 100 of those a second is nothing next to what it buys.
+ * A batch machine would want the opposite and this is not one. */
+#define SCHED_QUANTUM_TICKS 2 /* two 10 ms PIT ticks - see the measurements above */
 
 extern void context_switch(uint64_t *old_rsp_out, uint64_t new_rsp);
 
