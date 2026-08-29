@@ -431,6 +431,106 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
         return SPAWN_ERR_NOT_FOUND;
     }
 
+    /* ---- M72: `#!` ------------------------------------------------------
+     *
+     * The one change that makes a script a program. A file starting with
+     * `#!` is not an image to load - it names an interpreter, and what
+     * actually gets spawned is that interpreter with this file's path as
+     * its first argument.
+     *
+     * Done here, at the syscall, rather than in process_spawn: this is
+     * the layer that has a *path* to hand to the interpreter, and the
+     * whole mechanism is "run something else, and tell it about this
+     * file". process_spawn takes an image and could not name it.
+     *
+     * The effect is that every launcher on this machine gets scripts for
+     * free - the shell, the compositor's Spotlight, a desktop icon, the
+     * file manager - because none of them has to know. That is the same
+     * reason M65 put the capability manifest in the kernel rather than in
+     * the compositor: a rule only one launcher consults is a rule with a
+     * way around it.
+     *
+     * Deliberately bounded and unclever: one level of indirection (an
+     * interpreter that is itself a script is refused, not recursed into,
+     * because a cycle here is an unkillable spawn loop), no arguments
+     * after the interpreter path on the `#!` line, and the original
+     * argv is preserved after the script path. */
+    if (size >= 2 && image[0] == '#' && image[1] == '!') {
+        char interp[LEANFS_MAX_PATH];
+        int n = 0;
+        int64_t i = 2;
+        while (i < size && (image[i] == ' ' || image[i] == '\t')) {
+            i++;
+        }
+        while (i < size && image[i] != '\n' && image[i] != '\r' &&
+               image[i] != ' ' && n < (int)sizeof(interp) - 1) {
+            interp[n++] = (char)image[i++];
+        }
+        interp[n] = '\0';
+
+        kfree(image);
+        if (n == 0) {
+            kfree(arg);
+            return SPAWN_ERR_BAD_IMAGE; /* "#!" with no interpreter names nothing */
+        }
+
+        /* Rebuild the vector. process_spawnv takes a COMPLETE argv -
+         * sys_spawn above builds argv[0] itself and hands the whole thing
+         * over - so argv[0] here must be the interpreter's own path, and
+         * the script becomes argv[1].
+         *
+         * Getting this wrong is not a subtle failure: /bin/sh treats
+         * "given a path" as "run this script" and "given nothing" as
+         * "read stdin", so an off-by-one here makes every script spawn an
+         * interactive shell that blocks forever on a keyboard nobody is
+         * typing at. Which is exactly what the first version of this did,
+         * and it presented as a boot that stopped with no message. */
+        const char *shifted[SPAWN_MAX_ARGS + 2];
+        int sc = 0;
+        shifted[sc++] = interp; /* argv[0]: the interpreter, as any program expects */
+        shifted[sc++] = path;   /* argv[1]: the script it was asked to run */
+        for (int a = 1; a < argc && sc < SPAWN_MAX_ARGS; a++) {
+            shifted[sc++] = argv[a];
+        }
+        shifted[sc] = (const char *)0;
+
+        leanfs_stat_t ist;
+        if (vfs_stat(interp, &ist) != 0 || ist.is_dir) {
+            kfree(arg);
+            return SPAWN_ERR_NOT_FOUND;
+        }
+        uint8_t *iimage = (uint8_t *)kmalloc(ist.size ? ist.size : 1);
+        if (!iimage) {
+            kfree(arg);
+            return SPAWN_ERR_NO_MEMORY;
+        }
+        int64_t isize = vfs_read(interp, iimage, ist.size);
+        /* One level only: an interpreter that is itself a script would
+         * need this whole block again, and a `#!` cycle would spawn
+         * forever. Refusing is the answer with no failure mode. */
+        if (isize < 2 || (iimage[0] == '#' && iimage[1] == '!') ||
+            !elf_validate(iimage, (size_t)isize)) {
+            kfree(iimage);
+            kfree(arg);
+            return SPAWN_ERR_BAD_IMAGE;
+        }
+        if (!sched_has_free_task_slot()) {
+            kfree(iimage);
+            kfree(arg);
+            return SPAWN_ERR_NO_TASK_SLOT;
+        }
+        const char *iname = interp;
+        for (const char *c = interp; *c; c++) {
+            if (*c == '/') {
+                iname = c + 1;
+            }
+        }
+        task_t *it = process_spawnv(iname, iimage, (size_t)isize, shifted);
+        kfree(iimage);
+        kfree(arg);
+        return it ? (long)it->id : SPAWN_ERR_NO_MEMORY;
+    }
+
     /* M48: process_spawn makes both of these checks itself and answers
      * NULL either way, which is precisely the ambiguity this milestone is
      * removing - so they are asked here too, where the answers can still

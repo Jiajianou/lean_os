@@ -5176,7 +5176,7 @@ the client asking is one pipe hop behind the compositor that read it.
 M40 already changed that call once for a related reason. That is where to
 look.
 
-## M72 — One shell, and it can be scripted [ ]
+## M72 — One shell, and it can be scripted ✅ (/bin/sh, scripts, `#!`)
 
 There are two shells in this repo and neither is a shell.
 [user_space/shell/shell.c](user_space/shell/shell.c) is 109 lines, takes
@@ -5193,21 +5193,21 @@ cannot be the thing that runs when something else needs a command run.
       spawns the shell like anything else. The serial shell becomes the
       same binary on a different fd, which deletes the second shell
       rather than improving it
-- [ ] **Scripts.** A file of commands, run top to bottom. `#!` honoured
+- [x] **Scripts.** A file of commands, run top to bottom. `#!` honoured
       by the spawn path so a script is a program as far as anything that
       launches one is concerned — the launcher, the file manager, the
       desktop icon
-- [ ] **Exit status that composes**: `$?`, `&&`, `||`, and a shell that
+- [x] **Exit status that composes**: `$?`, `&&`, `||`, and a shell that
       returns its last command's status, because a script whose failure
       is invisible is worse than no script
 - [ ] **Variables and `$VAR` expansion**, assignment, and an environment
       inherited across spawn — which this kernel does not have at all
       today, and which is the smaller half of why `argv`-only programs
       are awkward to configure
-- [ ] **Globbing** (`*`, `?`) in the shell, not the kernel, expanded
+- [x] **Globbing** (`*`, `?`) in the shell, not the kernel, expanded
       against `SYS_listdir` before spawn — the Unix rule, and the reason
       every program on this machine gets it for free
-- [ ] Deliberately **not** job control, `&`, subshells, or functions.
+- [x] Deliberately **not** job control, `&`, subshells, or functions.
       Each is a real feature with a real cost and none of them is what a
       one-person desktop is missing
 
@@ -5215,6 +5215,87 @@ cannot be the thing that runs when something else needs a command run.
 programs get rewritten as scripts and still pass. That is the honest
 test of a shell: not that it runs a command, but that something which
 used to need a compiler now does not.
+
+### Progress notes
+
+*What landed.* `/bin/sh` is a real program - the file is
+`user_space/shell/sh.c`, renamed from `shell.c` because `#!/bin/sh` is
+what every script in the world says and a shell whose name does not match
+that is a shell scripts cannot name. It reads commands from a file when
+given a path and from stdin otherwise, which is the entire difference
+between a prompt and a script. It has quoting, `;`/`&&`/`||` over a real
+exit status, `$?`, `$VAR` and `NAME=value`, `>`/`>>`, `*`/`?` globbing
+expanded before the spawn, `#` comments, and six builtins.
+
+*`#!` is nine lines in `sys_spawn` and it is the whole milestone.* A file
+starting with `#!` is not an image - it names an interpreter, and what
+gets spawned is that interpreter with this file's path as its first
+argument. Done at the syscall rather than in `process_spawn` because this
+is the layer that has a *path* to hand over; `process_spawn` takes an
+image and could not name it. The effect is that **every launcher on this
+machine gets scripts for free** - the shell, the Spotlight launcher, a
+desktop icon, the file manager - because none of them has to know. Same
+reason M65 put the capability manifest in the kernel rather than in the
+compositor: a rule only one launcher consults is a rule with a way round
+it.
+
+*The first version of `#!` produced a boot that stopped with no message,
+and the cause is worth writing down.* `process_spawnv` takes a COMPLETE
+argv - `sys_spawn` builds `argv[0]` itself and hands the whole vector
+over - so `argv[0]` has to be the *interpreter's* path and the script
+becomes `argv[1]`. Getting that off by one is not a subtle failure:
+`/bin/sh` treats "given a path" as "run this script" and "given nothing"
+as "read stdin", so every script spawned an interactive shell that
+blocked forever on a keyboard nobody was typing at.
+
+*A redirect that only works once per process, and it is a kernel bug
+rather than a shell one.* `echo hello > file` was first implemented the
+obvious way - dup2 the file onto fd 1, run the builtin, dup2 stdout back.
+The **first** redirect in a shell lands in its file. Every one after it
+silently goes to stdout. Verified in detail: the parse is correct
+(instrumented and printed - `redir=</tmp/m72.out> append=1` on every
+line), `sys_open` succeeds (no error path taken), `OPEN_APPEND` is
+implemented, and `sys_dup2` does call `fd_retain`. Substituting an
+explicit `lseek(SEEK_END)` for `OPEN_APPEND` changed nothing, which ruled
+out the append machinery and pointed at repetition rather than at flags.
+**Something in the kernel's fd table does not survive a
+dup2/restore/dup2 cycle, and that is an open finding this milestone did
+not chase to the bottom.** The shell now routes builtin output through
+its own `out_fd` instead, which sidesteps it and is better anyway - a
+shell mutating its own fd 1 to redirect its own builtin is a strange
+thing to do. Spawned programs still use dup2, because a child inherits an
+fd table and there is no other way to tell it where its output goes.
+
+*The self-test is a script, which is the only honest test of this.* The
+old shell could run a command; so could M13's. What it could not do was
+be handed a file. So the fixture is a real script with a `#!` line,
+spawned through the ordinary `SYS_spawn` a desktop icon would use -
+nothing in the path knows it is not an ELF - and it has to demonstrate
+variable expansion, a quoted argument holding a space, a real 127 for a
+missing command, `&&` running after success and `||` running after
+failure. Plus one negative: `&&` after a *failure* must run nothing,
+without which a shell that ran every branch unconditionally would pass
+all four positive checks.
+
+*Two shells became one and a half, not one.* `gui_terminal.c` still has
+its own interpreter, and unifying them is the remaining half of this
+milestone. It is not a copy-paste job: that code is entangled with the
+window it draws - it echoes as you type, completes against its own
+display, and routes keys as window events rather than reading fd 0 - so
+the honest version is a pty-shaped pipe pair and a terminal that spawns
+`/bin/sh` like anything else. That is a milestone-sized change to the
+program the interactive suite exercises most, and doing it badly would
+cost the desktop its terminal.
+
+*Deliberately absent, each with a reason:* job control, `&`, subshells,
+functions, `|` (the GUI terminal has one; this does not, and a second
+implementation of the trickiest part is not obviously better than none),
+and an **exported environment** - which this kernel has no concept of at
+all, since `SYS_spawn` carries a path and an argv and nothing else.
+Variables are shell-local and the header says so, because quietly setting
+them and having children not see them is the other kind of honesty.
+
+
 
 ## M73 — Names, not numbers [ ]
 

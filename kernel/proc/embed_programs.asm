@@ -122,11 +122,11 @@ init_elf_start:
     incbin "build/init.elf"
 init_elf_end:
 
-global shell_elf_start
-global shell_elf_end
-shell_elf_start:
-    incbin "build/shell.elf"
-shell_elf_end:
+global sh_elf_start
+global sh_elf_end
+sh_elf_start:
+    incbin "build/sh.elf"
+sh_elf_end:
 
 global memtest_elf_start
 global memtest_elf_end

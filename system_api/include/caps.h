@@ -190,7 +190,11 @@ static const cap_grant_t CAP_GRANTS[] = {
      * anything - it re-applies this same table to each program it
      * launches, so what it holds is a ceiling rather than a grant to the
      * things it starts. */
-    {"shell",         CAP_ALL},
+    /* M72: renamed from "shell". The program is /bin/sh now, because
+     * that is what a `#!` line says and a shell whose name does not match
+     * the convention every script in the world uses is a shell scripts
+     * cannot name. */
+    {"sh",            CAP_ALL},
     {"gui_terminal",  CAP_ALL},
     /* The network programs, and the reason CAP_NETWORK is worth having:
      * these two are the entire list of things on this machine that may

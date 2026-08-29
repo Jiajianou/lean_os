@@ -72,7 +72,7 @@
     X(whetstone)                     \
     X(ls)                            \
     X(init)                          \
-    X(shell)                         \
+    X(sh)                            \
     X(memtest)                       \
     X(fonttest)                      \
     X(compositor)                    \
@@ -6761,6 +6761,129 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "so the name never stops resolving, a plain rename that still refuses to "
                    "overwrite, and an unclean mount whose orphaned blocks are found and "
                    "reclaimed - self-test passed.\n\n");
+    }
+
+    /* ---- M72 self-test: a shell, and a script that is a program --------
+     *
+     * The honest test of a shell is not that it runs a command - the old
+     * 109-line one did that. It is that **something which used to need a
+     * compiler now does not**: a file of commands, spawned like any other
+     * program, producing a result this test can read.
+     *
+     * So the fixture is a real script with a `#!` line, spawned through
+     * the ordinary SYS_spawn that a desktop icon or the launcher would
+     * use - nothing here knows it is not an ELF - and it is required to
+     * exercise the things that separate a shell from a command splitter:
+     * variables, quoting, `&&`/`||` gated on a real exit status, and a
+     * redirect whose output is what gets checked.
+     */
+    {
+        int all_ok = 1;
+        const char *script = PATH_TMP_DIR "m72.sh";
+        const char *result = PATH_TMP_DIR "m72.out";
+
+        /* `false` is not a program on this machine, so `command-not-found`
+         * is how the script produces a non-zero status - which is exactly
+         * the 127 a shell is supposed to report, and makes the `||` below
+         * a test of the status rather than of the parser. */
+        static const char SCRIPT[] =
+            "#!/bin/sh\n"
+            "# a comment, which must not be run\n"
+            "GREETING=hello\n"
+            "NAME='lean os'\n"
+            "echo $GREETING \"$NAME\" > " PATH_TMP_DIR "m72.out\n"
+            "notaprogram\n"
+            "echo status=$? >> " PATH_TMP_DIR "m72.out\n"
+            /* `cd`, not `true`: there is no /bin/true on this machine,
+             * and a test whose success case depends on a program that
+             * does not exist is a test that passes for the wrong reason
+             * or fails for one. `cd` is a builtin and returns 0. */
+            "cd " PATH_TMP_DIR " && echo and-ran >> " PATH_TMP_DIR "m72.out\n"
+            "notaprogram || echo or-ran >> " PATH_TMP_DIR "m72.out\n"
+            "notaprogram && echo must-not-run >> " PATH_TMP_DIR "m72.out\n";
+
+        if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                        sizeof(SCRIPT) - 1) != 0) {
+            panic("M72 self-test: could not write the script fixture");
+        }
+
+        /* Spawned by path, with no argument and nothing told about it
+         * being a script. If `#!` works, this loads /bin/sh instead. */
+        long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+        if (pid < 0) {
+            klog_puts("[m72] a #! script could not be spawned as a program\n");
+            all_ok = 0;
+        } else {
+            do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+        }
+
+        static char produced[256];
+        k_memset(produced, 0, sizeof(produced));
+        int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+        if (n <= 0) {
+            klog_puts("[m72] the script produced no output at all\n");
+            all_ok = 0;
+        } else {
+            produced[n] = '\0';
+            /* Each of these is a different claim, so each is checked
+             * separately rather than by comparing the whole blob - a
+             * single mismatch then names which feature is broken. */
+            static const struct { const char *needle; const char *what; } EXPECT[] = {
+                {"hello lean os", "variable expansion and a quoted argument holding a space"},
+                {"status=127",    "a real exit status for a command that does not exist"},
+                {"and-ran",       "&& running its right side after a success"},
+                {"or-ran",        "|| running its right side after a failure"},
+            };
+            for (size_t e = 0; e < sizeof(EXPECT) / sizeof(EXPECT[0]); e++) {
+                int found = 0;
+                for (int64_t i = 0; i < n && !found; i++) {
+                    int j = 0;
+                    while (EXPECT[e].needle[j] && produced[i + j] == EXPECT[e].needle[j]) {
+                        j++;
+                    }
+                    found = (EXPECT[e].needle[j] == '\0');
+                }
+                if (!found) {
+                    klog_puts("[m72] the script did not demonstrate ");
+                    klog_puts(EXPECT[e].what);
+                    klog_putc('\n');
+                    all_ok = 0;
+                }
+            }
+            /* And the negative: `&&` after a failure must run nothing.
+             * Without this, a shell that ran every branch unconditionally
+             * would pass all four checks above. */
+            for (int64_t i = 0; i + 12 < n; i++) {
+                int j = 0;
+                static const char NEVER[] = "must-not-run";
+                while (NEVER[j] && produced[i + j] == NEVER[j]) {
+                    j++;
+                }
+                if (NEVER[j] == '\0') {
+                    klog_puts("[m72] && ran its right side after a failure\n");
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+
+        do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+
+        if (!all_ok) {
+            /* The bytes, but only on failure. A test that says which
+             * expectation was missed makes you guess at the shell; the
+             * actual output says what it did. On a passing run it is
+             * noise, so it is not printed. */
+            klog_puts("[m72] what the script actually wrote:\n");
+            klog_puts(produced);
+            klog_puts("[m72] ---- end\n");
+            panic("M72 self-test: scripts do not run, or the shell is not one");
+        }
+
+        klog_puts("[m72] a script is a program: `#!` resolved by the ordinary spawn path, "
+                   "variables, quoting, a redirect, and && / || gated on a real exit status "
+                   "- self-test passed.\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
