@@ -22,8 +22,21 @@ typedef struct __attribute__((packed)) {
     uint32_t bitmap_sectors;
     uint32_t data_lba;
     uint32_t data_blocks;
-    uint32_t reserved;
+    /* M71: was `reserved`. Set to LEANFS_STATE_DIRTY on mount and back to
+     * LEANFS_STATE_CLEAN by leanfs_sync (which the orderly shutdown path
+     * calls). A filesystem found DIRTY on mount was not unmounted - the
+     * machine lost power, panicked, or was killed - and gets checked
+     * before it is trusted. Reusing the reserved word rather than bumping
+     * the magic on purpose: an old disk reads 0 here, which is exactly
+     * LEANFS_STATE_CLEAN, so every existing filesystem is treated as
+     * cleanly unmounted the first time this runs. That is the right
+     * default - it was, by construction, written by a kernel that had no
+     * way to leave it otherwise. */
+    uint32_t state;
 } leanfs_superblock_t;
+
+#define LEANFS_STATE_CLEAN 0u
+#define LEANFS_STATE_DIRTY 0x4449525Au /* "DIRZ" - a value no zeroed disk produces by accident */
 
 /* M53: no name field any more. A name lives in exactly one place - the
  * records of the directory that holds it - which is what makes two
@@ -193,7 +206,7 @@ static void format(void) {
     sb.bitmap_sectors = BITMAP_SECTORS;
     sb.data_lba = sb.bitmap_lba + BITMAP_SECTORS;
     sb.data_blocks = LEANFS_DATA_BLOCKS;
-    sb.reserved = 0;
+    sb.state = LEANFS_STATE_CLEAN;
 
     k_memset(inodes, 0, sizeof(inodes));
     k_memset(bitmap, 0, sizeof(bitmap));
@@ -250,8 +263,20 @@ void leanfs_init(void) {
         if (inodes[ROOT_INODE].type != LEANFS_TYPE_DIR) {
             klog_puts("[fs] leanfs root inode is not a directory - reformatting\n");
             format();
+        } else if (sb.state == LEANFS_STATE_DIRTY) {
+            /* M71: this filesystem was never unmounted. Check it before
+             * trusting it - see leanfs_check. */
+            klog_puts("[fs] leanfs was not cleanly unmounted - checking\n");
+            leanfs_check();
         }
     }
+
+    /* M71: mark it in use. From here until leanfs_sync says otherwise,
+     * a disk read of this superblock says "the machine was still running
+     * when this was written", which is the only way a filesystem with no
+     * journal can tell a clean shutdown from a power cut. */
+    sb.state = LEANFS_STATE_DIRTY;
+    save_superblock();
 
     klog_puts("[fs] leanfs ready: data_lba=0x");
     klog_put_hex32(sb.data_lba);
@@ -450,6 +475,101 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
  * disagree with the allocator about where a block lives; the tables
  * themselves are freed afterwards, because freeing one first would leave
  * nothing to read the blocks it names out of. */
+/* ---- M71: the consistency check ---------------------------------------
+ *
+ * Runs on mount when the superblock says this filesystem was never
+ * unmounted - the machine lost power, panicked, or was killed. It is not
+ * a journal replay, because there is no journal: leanfs has one writer
+ * and write-through metadata, so what a crash can leave behind is not a
+ * torn transaction but a *leak* - blocks the bitmap says are in use that
+ * no live inode points at.
+ *
+ * That is the failure this filesystem actually has. Every write allocates
+ * blocks, then updates the inode, then updates the directory; a crash
+ * between the first and second steps leaves allocated blocks nothing
+ * refers to, and nothing had ever reclaimed them. They are invisible -
+ * the filesystem works perfectly - right up until the disk is full of
+ * blocks belonging to files that never existed.
+ *
+ * So the check rebuilds the bitmap from the inodes rather than trusting
+ * it. Anything the rebuild says is free and the old bitmap said was used
+ * is an orphan, and gets counted and reclaimed. Anything the rebuild says
+ * is USED and the bitmap said was free is far more serious - two files
+ * could be handed the same block - and is reported loudly, though the
+ * rebuild fixes it by construction.
+ *
+ * Deliberately not attempted: cross-checking directory entries against
+ * inodes, which would find an inode nothing names. That needs somewhere
+ * to put what it finds (a lost+found), and inventing one is a bigger
+ * decision than this milestone should make quietly.
+ */
+static uint8_t check_bitmap[BITMAP_SECTORS * LEANFS_BLOCK_SIZE];
+
+static void check_mark(uint32_t block) {
+    if (block_valid(block)) {
+        check_bitmap[block / 8] |= (uint8_t)(1u << (block % 8));
+    }
+}
+
+void leanfs_check(void) {
+    k_memset(check_bitmap, 0, sizeof(check_bitmap));
+    /* Block 0 is the never-allocated sentinel and the bitmap has always
+     * held it - see alloc_block. Marking it here keeps it from being
+     * reported as an orphan on every single check. */
+    check_mark(0);
+
+    uint32_t table[LEANFS_INDIRECT_POINTERS];
+    for (int idx = 0; idx < LEANFS_MAX_INODES; idx++) {
+        leanfs_inode_t *inode = &inodes[idx];
+        if (inode->type == LEANFS_TYPE_FREE) {
+            continue;
+        }
+        uint32_t nblocks = (inode->size + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
+        for (uint32_t b = 0; b < nblocks; b++) {
+            int64_t blk = map_block(idx, b, 0);
+            if (blk >= 0) {
+                check_mark((uint32_t)blk);
+            }
+        }
+        if (block_present(inode->indirect)) {
+            check_mark(inode->indirect);
+        }
+        if (block_present(inode->dindirect)) {
+            check_mark(inode->dindirect);
+            ata_read_sectors(sb.data_lba + inode->dindirect, 1, (uint8_t *)table);
+            for (int i = 0; i < LEANFS_INDIRECT_POINTERS; i++) {
+                if (block_present(table[i])) {
+                    check_mark(table[i]);
+                }
+            }
+        }
+    }
+
+    uint32_t orphans = 0, missing = 0;
+    for (uint32_t b = 0; b < LEANFS_DATA_BLOCKS; b++) {
+        int was_used = (bitmap[b / 8] >> (b % 8)) & 1u;
+        int is_used = (check_bitmap[b / 8] >> (b % 8)) & 1u;
+        if (was_used && !is_used) {
+            orphans++;
+        } else if (!was_used && is_used) {
+            missing++;
+        }
+    }
+
+    if (orphans || missing) {
+        k_memcpy(bitmap, check_bitmap, sizeof(bitmap));
+        mark_all_blocks();
+        save_meta();
+    }
+
+    klog_puts("[fs] leanfs check: ");
+    klog_put_dec(orphans);
+    klog_puts(" orphaned block(s) reclaimed, ");
+    klog_put_dec(missing);
+    klog_puts(" block(s) were in use but marked free");
+    klog_puts(orphans || missing ? " - bitmap rebuilt from the inodes\n" : " - nothing to fix\n");
+}
+
 static void free_inode_blocks(int idx) {
     leanfs_inode_t *inode = &inodes[idx];
     uint32_t nblocks = (inode->size + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
@@ -677,6 +797,31 @@ static int dir_add(int dir, const char *name, int inode_idx) {
     k_strlcpy(dirent_scratch[slot].name, name, sizeof(dirent_scratch[slot].name));
     dirent_scratch[slot].inode = (uint32_t)inode_idx;
     return dir_store(dir, count);
+}
+
+/* M71: point an EXISTING directory entry at a different inode, in place.
+ *
+ * The difference from remove-then-add is the only thing that matters
+ * here: this changes one record from one inode number to another, so
+ * there is no instant at which the name does not resolve. That is what
+ * makes write-temp-then-rename an atomic replace rather than a slightly
+ * shorter version of the same window SYS_writefile has always had.
+ *
+ * Returns 0 if the name existed and now points at `inode_idx`, -1 if
+ * there was no such entry (which is not an error to the caller - it means
+ * "this is a plain rename into a free name", and dir_add handles that). */
+static int dir_repoint(int dir, const char *name, int inode_idx) {
+    int count = dir_load(dir);
+    if (count < 0) {
+        return -1;
+    }
+    for (int i = 0; i < count; i++) {
+        if (dirent_scratch[i].name[0] && k_strcmp(dirent_scratch[i].name, name) == 0) {
+            dirent_scratch[i].inode = (uint32_t)inode_idx;
+            return dir_store(dir, count);
+        }
+    }
+    return -1;
 }
 
 /* ---- paths ----------------------------------------------------------- */
@@ -985,6 +1130,104 @@ int leanfs_rename(const char *old_path, const char *new_path) {
      * duplicate name is recoverable; an unreachable inode is not. */
     if (dir_add(new_parent, new_leaf, idx) != 0) {
         return -1;
+    }
+    if (dir_remove(old_parent, old_leaf) < 0) {
+        return -1;
+    }
+    save_meta();
+    return 0;
+}
+
+/* M71: simulate, exactly, what a crash between "allocate the blocks" and
+ * "record who owns them" leaves behind.
+ *
+ * Removes the directory entry and frees the INODE, but deliberately does
+ * NOT free the blocks - so the bitmap still says they are in use and
+ * nothing in the filesystem refers to them any more. That is the leak,
+ * and it is the one a crash actually produces here: leanfs is
+ * write-through with a single writer, so what a power cut interrupts is
+ * not a torn transaction but the sequence of separate writes that make up
+ * an allocation.
+ *
+ * A debug hook rather than a real operation, in the same spirit as M66's
+ * tcp_debug_drop_next: the failure being tested is one the machine
+ * cannot be asked to produce on demand, so it is produced honestly here
+ * rather than approximated by a test that checks something easier. */
+void leanfs_debug_orphan(const char *path) {
+    int parent;
+    char leaf[LEANFS_MAX_NAME + 1];
+    if (resolve_parent(path, &parent, leaf) != 0) {
+        return;
+    }
+    int idx = dir_lookup(parent, leaf);
+    if (!inode_valid(idx)) {
+        return;
+    }
+    dir_remove(parent, leaf);
+    inodes[idx].type = LEANFS_TYPE_FREE;
+    inodes[idx].size = 0;
+    for (int b = 0; b < LEANFS_DIRECT_BLOCKS; b++) {
+        inodes[idx].direct[b] = 0;
+    }
+    inodes[idx].indirect = 0;
+    inodes[idx].dindirect = 0;
+    mark_inode(idx);
+    save_meta();
+}
+
+/* M71: see leanfs.h. */
+void leanfs_sync(void) {
+    sb.state = LEANFS_STATE_CLEAN;
+    save_superblock();
+}
+
+int leanfs_rename_replace(const char *old_path, const char *new_path) {
+    int old_parent, new_parent;
+    char old_leaf[LEANFS_MAX_NAME + 1];
+    char new_leaf[LEANFS_MAX_NAME + 1];
+    if (resolve_parent(old_path, &old_parent, old_leaf) != 0 ||
+        resolve_parent(new_path, &new_parent, new_leaf) != 0) {
+        return -1;
+    }
+    int idx = dir_lookup(old_parent, old_leaf);
+    if (!inode_valid(idx)) {
+        return -1;
+    }
+    int victim = dir_lookup(new_parent, new_leaf);
+    if (inode_valid(victim)) {
+        if (inodes[victim].type == LEANFS_TYPE_DIR) {
+            return -1; /* replacing a directory with a file is not a rename, it is a mistake */
+        }
+        if (victim == idx) {
+            return 0; /* renaming a file onto itself - nothing to do, and unlinking would lose it */
+        }
+    }
+
+    /* THE ORDER IS THE WHOLE POINT, and it is the opposite of
+     * leanfs_rename's.
+     *
+     * The dance this exists for is: write the new contents to a temp
+     * name, then rename it over the real one. What must never happen is
+     * a moment where the real name does not resolve - that is precisely
+     * the window in which a crash loses the document, and it is the
+     * window SYS_writefile's truncate-then-write has always had.
+     *
+     * So the directory entry is REPOINTED rather than removed and re-
+     * added: one record changes from the old inode to the new one, and
+     * there is no instant at which the name is absent. The old inode is
+     * released afterwards, because a leaked inode is recoverable (M71's
+     * own check reclaims its blocks) and a missing file is not. */
+    if (dir_repoint(new_parent, new_leaf, idx) != 0) {
+        /* No existing entry to repoint - this is a plain rename into a
+         * free name, which is what dir_add is for. */
+        if (dir_add(new_parent, new_leaf, idx) != 0) {
+            return -1;
+        }
+    } else if (inode_valid(victim)) {
+        free_inode_blocks(victim);
+        inodes[victim].type = LEANFS_TYPE_FREE;
+        inodes[victim].size = 0;
+        mark_inode(victim);
     }
     if (dir_remove(old_parent, old_leaf) < 0) {
         return -1;

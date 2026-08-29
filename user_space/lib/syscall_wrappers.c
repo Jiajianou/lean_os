@@ -276,6 +276,11 @@ long sys_klog_total(void) {
     return do_syscall(SYS_klog_total, 0, 0, 0);
 }
 
+/* M71 */
+long sys_rename_replace(const char *old_path, const char *new_path) {
+    return do_syscall(SYS_rename_replace, (long)old_path, (long)new_path, 0);
+}
+
 long sys_dup2(int oldfd, int newfd) {
     return do_syscall(SYS_dup2, oldfd, newfd, 0);
 }

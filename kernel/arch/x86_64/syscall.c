@@ -1939,6 +1939,26 @@ static long sys_klog_total(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
     return (long)klog_written_total();
 }
 
+/* M71: see SYS_rename_replace. Same shape as sys_rename, and gated the
+ * same way - it writes, so it needs CAP_FS_WRITE. */
+static long sys_rename_replace(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
+                                uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1;
+    }
+    char old_path[LEANFS_MAX_PATH];
+    char new_path[LEANFS_MAX_PATH];
+    if (copy_str_from_user(old_path, old_ptr, sizeof(old_path)) != 0 ||
+        copy_str_from_user(new_path, new_ptr, sizeof(new_path)) != 0) {
+        return -1;
+    }
+    return vfs_rename_replace(old_path, new_path);
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -2007,6 +2027,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_recv] = sys_recv,
     [SYS_klog] = sys_klog,
     [SYS_klog_total] = sys_klog_total,
+    [SYS_rename_replace] = sys_rename_replace,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

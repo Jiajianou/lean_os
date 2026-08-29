@@ -111,13 +111,38 @@ size_t vfs_list(const char *path, char *buf, size_t maxlen) {
 }
 
 void vfs_sync(void) {
-    /* See vfs.h. Nothing to write back: leanfs_write_file's own
-     * ata_write_sectors calls are synchronous, so a file is on the
-     * platter by the time vfs_write returns to its caller. */
-    klog_puts("[vfs] sync: leanfs is write-through, nothing buffered to flush.\n");
+    /* Nothing to write back: leanfs_write_file's own ata_write_sectors
+     * calls are synchronous, so a file is on the platter by the time
+     * vfs_write returns to its caller.
+     *
+     * M71: what this DOES do now is mark the superblock cleanly
+     * unmounted. That is not a flush and the distinction matters - it is
+     * a record that the machine reached this point on purpose, which is
+     * the only way a filesystem with no journal can tell an orderly
+     * shutdown from a power cut on the next mount. A disk that never gets
+     * here is checked before it is trusted. */
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    leanfs_sync();
+    spin_unlock_irqrestore(&fs_lock, f);
+    klog_puts("[vfs] sync: leanfs is write-through; superblock marked cleanly unmounted.\n");
 }
 
 /* M59 */
+/* M71 */
+int vfs_rename_replace(const char *old_path, const char *new_path) {
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    int r = leanfs_rename_replace(old_path, new_path);
+    spin_unlock_irqrestore(&fs_lock, f);
+    return r;
+}
+
+int vfs_check(void) {
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    leanfs_check();
+    spin_unlock_irqrestore(&fs_lock, f);
+    return 0;
+}
+
 int vfs_rmdir(const char *path) {
     uint64_t f = spin_lock_irqsave(&fs_lock);
     int r = leanfs_rmdir(path);

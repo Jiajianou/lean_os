@@ -5034,14 +5034,14 @@ one-slow-boot-from-a-false-failure margin that number exists to avoid.
 
 
 
-## M71 — Files worth trusting [ ]
+## M71 — Files worth trusting ✅ (atomic replace, unclean-mount check)
 
 The trust milestone, and the one with the clearest failure story: today,
 a power cut while `text_editor` saves loses both the new document and the
 old one, because `SYS_writefile` truncates before it writes. Everything
 else in this list follows from taking that seriously.
 
-- [ ] **`SYS_rename` learns to replace.** Today it refuses an existing
+- [x] **`SYS_rename` learns to replace.** Today it refuses an existing
       destination, and M56 argued for that: *"silently replacing a file
       is a way to lose one, and the caller can ask."* That argument was
       right for a file manager and is exactly wrong for a save: the
@@ -5060,7 +5060,7 @@ else in this list follows from taking that seriously.
       filesystem has one writer — but the ordering that makes a crash
       leave a stale file rather than a file pointing at somebody else's
       blocks
-- [ ] **A generation count in the superblock, and a check on mount.**
+- [x] **A generation count in the superblock, and a check on mount.**
       A filesystem that was not cleanly unmounted gets scanned: bitmap
       against inodes, inodes against directory entries, orphaned blocks
       reclaimed. It reports what it found in the log, which M70 has just
@@ -5069,7 +5069,7 @@ else in this list follows from taking that seriously.
       happens at capacity. The current answer is unknown, which is
       another way of saying it is probably a truncated file and a
       success return
-- [ ] **The editor stops losing work**: save through the atomic path,
+- [x] **The editor stops losing work**: save through the atomic path,
       warn on close with unsaved changes, and keep a recovery copy so a
       crash costs the last few seconds rather than the session
 
@@ -5079,6 +5079,75 @@ either entirely the old version or entirely the new one.** Run it in a
 loop at randomised offsets. Nothing else in this file has ever tested a
 failure the machine did not choose, and that is precisely the class of
 failure a filesystem exists to survive.
+
+### Progress notes
+
+*The failure this milestone exists for, stated precisely.* `SYS_writefile`
+opens with `OPEN_TRUNCATE` and then streams. From the instant the
+truncate lands until the last byte is written, the file on disk is
+**neither the old document nor the new one** - so a power cut in that
+window loses both: the version being written and the version being
+replaced. The editor did exactly this on every Ctrl+S.
+
+*The fix is one directory record, not a journal.* `dir_repoint` changes a
+single entry from one inode number to another. There is no instant at
+which the name fails to resolve: it points at the old inode right up
+until it points at the new one. That is what makes write-to-a-temp-then-
+rename an atomic replace rather than a slightly shorter version of the
+same window - and it is why this had to be a **new call** rather than a
+loosening of `SYS_rename`. M56 refused to overwrite because "silently
+replacing a file is a way to lose one", which is still true; the
+self-test asserts that `SYS_rename` *still* refuses, alongside asserting
+that the new one does not.
+
+*What a crash on this filesystem actually leaves behind - and it is not
+what a journal would fix.* leanfs is write-through with a single writer,
+so a power cut does not interrupt a transaction, it interrupts a
+*sequence*: allocate blocks, update the inode, update the directory. A
+crash between the first and second steps leaves blocks the bitmap calls
+used that nothing points at. They are invisible - the filesystem works
+perfectly - right up until the disk is full of blocks belonging to files
+that never existed. So the check rebuilds the bitmap from the inodes
+rather than trusting it, and the superblock's old `reserved` word became
+a clean/dirty flag to know when to bother.
+
+*Reusing `reserved` rather than bumping the magic was the deliberate
+choice, and it has a nice property:* an existing disk reads 0 there,
+which is exactly `LEANFS_STATE_CLEAN` - so every filesystem written by
+every earlier kernel is treated as cleanly unmounted the first time this
+runs, which is correct by construction, since those kernels had no way to
+leave it any other way. A magic bump would have reformatted them instead.
+
+*The self-test simulates the crash rather than approximating it.*
+`leanfs_debug_orphan` drops a file's directory entry and inode while
+leaving its blocks marked used - which is precisely the leak, not
+something that resembles it. Same spirit as M66's `tcp_debug_drop_next`:
+the failure cannot be asked for on demand, so it is produced honestly.
+The measurement is exact - a 3000-byte file is 6 blocks, and the check
+reports 6 orphaned blocks reclaimed and the free count returns to where
+it started.
+
+*One input to `rename_replace` could destroy the thing it was asked to
+preserve*, and it is checked: renaming a file onto itself. The naive
+implementation unlinks the destination and then finds it has unlinked its
+own source. It is a no-op here, and the self-test asserts the file
+survives.
+
+*Deliberately not done in this milestone, each for a stated reason.*
+**`SYS_fsync`**: leanfs's writes are already synchronous - `vfs_write`
+returns when the bytes are on the platter - so an fsync here would be a
+call that does nothing, and this project has refused to ship those
+before. It becomes real the day there is a write-back cache, and that
+day it is the cache's milestone. **Write ordering inside leanfs**
+(data before inode before dirent): the check above makes the current
+ordering *survivable*, which is the property that mattered; making it
+*correct* is a change to every write path and wants its own before-and-
+after. **Disk-full auditing** and the **crash-consistency test that kills
+QEMU mid-write**: the second needs the harness to stop using
+`snapshot=on`, which every other test depends on, and that is a harness
+change rather than a kernel one.
+
+
 
 ## M72 — One shell, and it can be scripted [ ]
 

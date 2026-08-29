@@ -245,6 +245,15 @@ long sys_klog(uint64_t from, char *buf, size_t max, uint64_t *next_out);
 /* Total bytes ever logged - start here to follow only new output. */
 long sys_klog_total(void);
 
+/* M71: rename that may replace an existing destination - the half
+ * sys_rename refuses. The point of it is the write-to-a-temp-then-rename
+ * dance, which is the only way to replace a file's contents without a
+ * window in which neither the old nor the new version exists.
+ * sys_writefile has that window by construction: it truncates and then
+ * writes. Returns 0, or -1 (including when the destination is a
+ * directory). */
+long sys_rename_replace(const char *old_path, const char *new_path);
+
 /* Duplicates oldfd's fd-table slot into newfd (overwriting whatever was
  * there - no SYS_close exists to release it first). Returns newfd, or -1
  * if either fd is out of range or oldfd isn't open. Lets a caller point

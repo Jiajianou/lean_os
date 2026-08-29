@@ -236,3 +236,30 @@ int leanfs_handle_truncate(int handle);
  * of PIO sector writes - rather than how long it took, which is a
  * property of the host and not of this code. See save_meta. */
 uint32_t leanfs_meta_writes(void);
+
+/* M71: rebuild the free-block bitmap from the inodes and reclaim anything
+ * nothing points at. Called automatically on mount when the superblock
+ * says the filesystem was never unmounted; exposed so a self-test can
+ * drive it directly. See leanfs.c for what it does and does not check. */
+void leanfs_check(void);
+
+/* M71: mark this filesystem cleanly unmounted. Everything leanfs writes
+ * is already write-through, so this flushes nothing - what it does is
+ * record that the machine got here on purpose, which is the only way a
+ * filesystem with no journal can tell a shutdown from a power cut. */
+void leanfs_sync(void);
+
+/* M71: rename that is allowed to replace an existing destination.
+ *
+ * leanfs_rename refuses one, and M56 was right about why: silently
+ * replacing a file is a way to lose one. But that makes the
+ * write-to-a-temp-then-rename dance impossible, and that dance is the
+ * only way to replace a file's contents without a window in which
+ * neither version exists. So the safe default keeps the refusal and the
+ * save path gets this. */
+int leanfs_rename_replace(const char *old_path, const char *new_path);
+
+/* M71: a test hook - drop a file's directory entry and inode while
+ * leaving its blocks marked used, which is exactly the leak a crash
+ * between allocating blocks and recording them produces. See leanfs.c. */
+void leanfs_debug_orphan(const char *path);

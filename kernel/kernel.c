@@ -6631,6 +6631,138 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "nobody is holding - self-test passed.\n\n");
     }
 
+    /* ---- M71 self-test: files worth trusting ---------------------------
+     *
+     * Three claims, and each is about a way this filesystem could lose
+     * something rather than about a feature working.
+     *
+     *   1. **an atomic replace exists.** SYS_writefile truncates and then
+     *      writes, so from the truncate until the last byte the file on
+     *      disk is neither the old document nor the new one - a crash
+     *      there loses both. SYS_rename_replace repoints one directory
+     *      record instead, so the name resolves to the old inode right up
+     *      until it resolves to the new one.
+     *   2. **the name never stops resolving.** Checked by doing the
+     *      replace and requiring the target to be readable with the right
+     *      contents at every point a caller could look - which is the
+     *      property, stated as a test rather than as a comment.
+     *   3. **an unclean mount is survivable.** A crash between allocating
+     *      blocks and pointing an inode at them leaks them: the bitmap
+     *      says used, nothing refers to them, and nothing ever reclaimed
+     *      them. Simulated exactly - allocate a file, then orphan its
+     *      blocks the way a crash would by clearing the inode without
+     *      freeing them - and leanfs_check has to find and reclaim them.
+     */
+    {
+        int all_ok = 1;
+        static const char OLD_TEXT[] = "the version that was already there";
+        static const char NEW_TEXT[] = "the version being written over it";
+        static char readback[128];
+
+        const char *target = PATH_TMP_DIR "m71target";
+        const char *temp   = PATH_TMP_DIR "m71target.tmp~";
+
+        /* ---- 1 & 2: the replace, and what is readable across it ------ */
+        if (do_syscall(SYS_writefile, (uint64_t)target, (uint64_t)OLD_TEXT,
+                        sizeof(OLD_TEXT) - 1) != 0 ||
+            do_syscall(SYS_writefile, (uint64_t)temp, (uint64_t)NEW_TEXT,
+                        sizeof(NEW_TEXT) - 1) != 0) {
+            panic("M71 self-test: could not set up the replace fixture");
+        }
+
+        /* Before: the target reads as the old contents. */
+        k_memset(readback, 0, sizeof(readback));
+        do_syscall(SYS_readfile, (uint64_t)target, (uint64_t)readback, sizeof(readback) - 1);
+        if (k_strcmp(readback, OLD_TEXT) != 0) {
+            klog_puts("[m71] the fixture did not read back as itself\n");
+            all_ok = 0;
+        }
+
+        /* SYS_rename would refuse this - the destination exists, which is
+         * M56's deliberate safety and the reason the replacing variant
+         * had to be a separate call rather than a loosening of that one. */
+        if (do_syscall(SYS_rename, (uint64_t)temp, (uint64_t)target, 0) == 0) {
+            klog_puts("[m71] SYS_rename replaced an existing file - M56's guarantee is gone\n");
+            all_ok = 0;
+        }
+
+        if (do_syscall(SYS_rename_replace, (uint64_t)temp, (uint64_t)target, 0) != 0) {
+            klog_puts("[m71] SYS_rename_replace failed on an existing destination\n");
+            all_ok = 0;
+        }
+
+        /* After: the target reads as the NEW contents, and the temp name
+         * is gone. Both halves matter - a replace that left the temp
+         * behind would be a copy, not a rename. */
+        k_memset(readback, 0, sizeof(readback));
+        do_syscall(SYS_readfile, (uint64_t)target, (uint64_t)readback, sizeof(readback) - 1);
+        if (k_strcmp(readback, NEW_TEXT) != 0) {
+            klog_puts("[m71] after the replace the target is not the new contents\n");
+            all_ok = 0;
+        }
+        if (vfs_exists(temp)) {
+            klog_puts("[m71] the temporary file survived the rename - that is a copy, not a replace\n");
+            all_ok = 0;
+        }
+
+        /* Replacing a file with itself must be a no-op, not an unlink -
+         * the one input to this call that could destroy the very thing it
+         * was asked to preserve. */
+        if (do_syscall(SYS_rename_replace, (uint64_t)target, (uint64_t)target, 0) != 0 ||
+            !vfs_exists(target)) {
+            klog_puts("[m71] renaming a file onto itself destroyed it\n");
+            all_ok = 0;
+        }
+
+        /* ---- 3: an unclean mount, and the blocks a crash leaks ------- */
+        uint32_t free_before = vfs_free_blocks();
+
+        /* A file big enough to need several blocks, then orphaned the way
+         * a crash between "allocate" and "record" orphans one: the
+         * directory entry goes, but the blocks stay marked used because
+         * nothing walked the inode to free them. vfs_unlink would free
+         * them properly, which is exactly what must NOT happen here. */
+        static char filler[3000];
+        k_memset(filler, 'z', sizeof(filler));
+        const char *doomed = PATH_TMP_DIR "m71orphan";
+        if (do_syscall(SYS_writefile, (uint64_t)doomed, (uint64_t)filler, sizeof(filler)) != 0) {
+            panic("M71 self-test: could not write the orphan fixture");
+        }
+        uint32_t free_with_file = vfs_free_blocks();
+        if (free_with_file >= free_before) {
+            klog_puts("[m71] writing a 3 KiB file consumed no blocks - the fixture is wrong\n");
+            all_ok = 0;
+        }
+
+        leanfs_debug_orphan(doomed); /* the crash, simulated precisely */
+
+        uint32_t free_orphaned = vfs_free_blocks();
+        if (free_orphaned != free_with_file) {
+            klog_puts("[m71] orphaning did not leave the blocks allocated - nothing to reclaim\n");
+            all_ok = 0;
+        }
+
+        vfs_check();
+        uint32_t free_after = vfs_free_blocks();
+        if (free_after != free_before) {
+            klog_puts("[m71] the check did not reclaim every orphaned block (");
+            klog_put_dec(free_before - free_after);
+            klog_puts(" still missing)\n");
+            all_ok = 0;
+        }
+
+        do_syscall(SYS_unlink, (uint64_t)target, 0, 0);
+
+        if (!all_ok) {
+            panic("M71 self-test: this filesystem can still lose a file");
+        }
+
+        klog_puts("[m71] files worth trusting: a replace that repoints one directory record "
+                   "so the name never stops resolving, a plain rename that still refuses to "
+                   "overwrite, and an unclean mount whose orphaned blocks are found and "
+                   "reclaimed - self-test passed.\n\n");
+    }
+
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
      * exactly where a user program would reach them. Before this
      * milestone the middle case here didn't fail at all - it panicked the

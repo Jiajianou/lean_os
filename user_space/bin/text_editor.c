@@ -218,9 +218,41 @@ static void save_file(void) {
                sizeof("File is longer than this editor holds - use Save As."));
         return;
     }
-    /* M60: streamed out a line at a time, so what this can save is what
-     * it can hold rather than what fits in a second whole-file buffer. */
-    long fd = sys_open(filename, OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE);
+    /* ---- M71: save to a temp, then rename over the original -----------
+     *
+     * This used to open the real file with OPEN_TRUNCATE and stream into
+     * it, which means that from the instant the truncate lands until the
+     * last line is written, the file on disk is neither the old document
+     * nor the new one. A power cut in that window - or a crash, or the
+     * machine being switched off - loses BOTH: the version being written
+     * and the version being replaced. For an editor, which is one of the
+     * two programs on this desktop people actually keep things in, that
+     * is the worst failure the machine has.
+     *
+     * So: write the whole thing to a sibling temp name, then ask the
+     * kernel to repoint the directory entry (SYS_rename_replace, M71).
+     * The rename changes one record, so the real filename resolves to the
+     * old inode right up until it resolves to the new one and never to
+     * nothing. A crash before the rename leaves the old document intact
+     * and a stray temp file; a crash after it leaves the new one. There
+     * is no third outcome, which is the entire point.
+     *
+     * The temp name is derived from the target rather than fixed, so two
+     * editors saving at once cannot collide, and it lives in the same
+     * directory because a rename across directories is a different
+     * operation with different failure modes. */
+    char tmpname[PATH_MAX_LEN];
+    int t = 0;
+    for (; filename[t] && t < PATH_MAX_LEN - 8; t++) {
+        tmpname[t] = filename[t];
+    }
+    static const char suffix[] = ".tmp~";
+    for (int k = 0; suffix[k] && t < PATH_MAX_LEN - 1; k++, t++) {
+        tmpname[t] = suffix[k];
+    }
+    tmpname[t] = '\0';
+
+    long fd = sys_open(tmpname, OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE);
     int ok = fd >= 0;
     for (int r = 0; ok && r < line_count; r++) {
         int n = line_len[r];
@@ -231,6 +263,15 @@ static void save_file(void) {
     }
     if (fd >= 0) {
         sys_close((int)fd);
+    }
+    if (ok) {
+        ok = (sys_rename_replace(tmpname, filename) == 0);
+    }
+    if (!ok) {
+        /* Whatever went wrong, do not leave the temp behind - it would
+         * show up in the file manager next to the real document looking
+         * like something the person made. */
+        sys_unlink(tmpname);
     }
     int i = 0;
     const char *prefix = ok ? "saved " : "SAVE FAILED ";

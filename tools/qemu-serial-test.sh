@@ -216,6 +216,7 @@ REQUIRED_MARKERS=(
   "[m67] a preemptible kernel: \`int 0x80\` is a trap gate, four concurrent"
   "[m69] input-to-photon:"
   "[m70] the kernel log is readable from user space:"
+  "[m71] files worth trusting:"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

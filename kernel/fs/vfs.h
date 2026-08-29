@@ -54,3 +54,11 @@ int vfs_handle_truncate(int handle);
  * Says what it did in the log, so "did the disk get flushed" is a
  * question the boot log answers rather than one you reason about. */
 void vfs_sync(void);
+
+/* M71: rename that may replace an existing destination - the half
+ * vfs_rename deliberately refuses. See leanfs.h. */
+int vfs_rename_replace(const char *old_path, const char *new_path);
+
+/* M71: rebuild the free-block bitmap from the inodes. Runs automatically
+ * on an unclean mount; exposed for the self-test. */
+int vfs_check(void);
