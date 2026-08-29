@@ -45,6 +45,12 @@
 #define VAR_NAME_MAX 24
 #define VAR_VAL_MAX  128
 
+/* Where stdout is parked while a redirect is in force. Any number works
+ * as long as it is claimed BEFORE the redirect target is opened - see
+ * the ordering note in run_command, which is the bug this constant's
+ * placement exists to prevent. */
+#define SH_PARK_FD   9
+
 /* Bounded copy/append. This project's libc has strcpy/strcat and no
  * strlcpy/strlcat, and a shell is exactly the program where an unbounded
  * copy of user-supplied text is a bad idea. Two small helpers beat
@@ -127,19 +133,13 @@ static void var_unset(const char *name) {
 
 /* Where a builtin's output goes. 1 unless a redirect is in force.
  *
- * M72: the obvious implementation of `echo hello > file` is to dup2 the
- * file onto fd 1, run the builtin, and dup2 stdout back - which is what
- * this did first, and it worked exactly once per process. The FIRST
- * redirect in a shell landed in its file; every one after it silently
- * went to stdout, with the parse verifiably correct, the open succeeding
- * and no error anywhere. Whatever is wrong there is in the kernel's fd
- * table rather than here, and it is written up in the milestone notes as
- * an open finding.
- *
- * This sidesteps it, and is better anyway: a shell mutating its own fd 1
- * to redirect its own builtin is a strange thing to do. Spawned programs
- * still get the real dup2 treatment, because a child has to inherit the
- * redirect through its fd table and there is no other way to say so. */
+ * M72: a builtin writes here rather than having fd 1 dup2'd out from
+ * under it. Not a workaround - the original bug was the parking-order
+ * one described in run_command and is fixed there - but a shell mutating
+ * its own fd 1 to redirect its own `echo` is a strange thing to do when
+ * it can simply write somewhere else. Spawned programs still get the
+ * real dup2 treatment, because a child inherits an fd table and there is
+ * no other way to tell it where its output goes. */
 static int out_fd = 1;
 
 static void out(const char *s) {
@@ -508,16 +508,48 @@ static int run_command(const char *cmd_text) {
      * failure that looks like the redirect working right up until you
      * read the file. Builtins write to fd 1 like everything else, so
      * pointing fd 1 somewhere else covers them for free. */
-    /* Open the redirect target once, whichever kind of command this turns
-     * out to be - the file has to be created even if the command then
-     * fails, which is what `> out` doing nothing but truncating means. */
+    /* ---- the redirect, and the ordering that took a day to find --------
+     *
+     * STDOUT IS PARKED **BEFORE** THE FILE IS OPENED, AND THAT ORDER IS
+     * THE WHOLE FIX.
+     *
+     * There is no way to say "make fd 1 be the console again" from user
+     * space - stdout is an implicit descriptor type every task starts
+     * with, not an object anything can name - so restoring it means
+     * copying fd 1 somewhere first and copying it back afterwards.
+     * Parking it at a fixed number looks harmless. It is not: sys_open
+     * hands back the LOWEST free descriptor, and after one redirect has
+     * been set up and torn down, the parking slot is exactly the lowest
+     * free descriptor. So the next command's file lands *on* the parking
+     * slot, `dup2(1, PARK)` then overwrites that freshly-opened file with
+     * stdout, and `dup2(rfd=PARK, 1)` copies stdout onto stdout. The
+     * redirect silently becomes a no-op.
+     *
+     * The symptom was beautifully misleading: the FIRST redirect in a
+     * process worked and every one after it went to the terminal, with
+     * the parse verifiably correct, the open succeeding and no error
+     * anywhere - which reads exactly like a kernel fd-table bug, and was
+     * blamed on one until a kernel-side repro of the same dup2 cycle
+     * passed twice in a row.
+     *
+     * Opening after the park makes the collision impossible, because the
+     * parking slot is occupied by the time sys_open looks for a free one.
+     */
     long rfd = -1;
+    int saved_out = -1;
     if (redir[0]) {
+        saved_out = (int)sys_dup2(1, SH_PARK_FD);
+        if (saved_out < 0) {
+            out("sh: cannot save stdout\n");
+            return 1;
+        }
         char rpath[PATH_MAX_LEN];
         resolve(redir, rpath);
         uint32_t flags = OPEN_WRITE | OPEN_CREATE | (append ? 0u : OPEN_TRUNCATE);
         rfd = sys_open(rpath, flags);
         if (rfd < 0) {
+            sys_dup2(saved_out, 1);
+            sys_close(saved_out);
             out("sh: cannot open ");
             out(rpath);
             out("\n");
@@ -539,6 +571,13 @@ static int run_command(const char *cmd_text) {
         if (rfd >= 0) {
             sys_close((int)rfd);
         }
+        if (saved_out >= 0) {
+            /* fd 1 was never touched on this path, but the parking slot
+             * was claimed and has to go back or every redirect leaks a
+             * descriptor - which at MAX_FDS = 128 is a shell that stops
+             * being able to redirect after a hundred commands. */
+            sys_close(saved_out);
+        }
         return rc;
     }
 
@@ -552,11 +591,10 @@ static int run_command(const char *cmd_text) {
         cat(path, words[0], PATH_MAX_LEN);
     }
 
-    int saved_out = -1;
     if (rfd >= 0) {
         /* A child inherits its parent's fd table, so pointing fd 1 at the
-         * file here is the only way to tell it where its output goes. */
-        saved_out = (int)sys_dup2(1, 9);
+         * file is the only way to tell it where its output goes. stdout
+         * is already parked - see the ordering note above. */
         sys_dup2((int)rfd, 1);
     }
 

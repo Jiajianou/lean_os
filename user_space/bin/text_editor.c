@@ -1132,7 +1132,12 @@ int main(int argc, char **argv) {
                 sel_dragging = 0;
                 sel_active = (sel_anchor_row != sel_end_row || sel_anchor_col != sel_end_col);
             } else if (ev.type == WM_EVENT_KEY) {
-                long mods = sys_kbd_modifiers();
+                /* M-fix: from the event, not from the kernel's global
+                 * "most recently read" state - see wm_event_t.mods. The
+                 * keystroke this handler is holding was decoded before
+                 * the compositor forwarded it, so asking now is asking
+                 * about somebody else's key. */
+                long mods = ev.mods;
                 if ((mods & KBD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
                     if (sel_active) {
                         copy_selection_to_clipboard();

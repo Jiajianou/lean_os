@@ -151,6 +151,27 @@ typedef struct {
      * measuring its own scheduling latency. Zero for key/focus events,
      * which nothing times. */
     uint32_t time_ms;
+    /* M-fix: the modifiers held when THIS key was decoded, carried in the
+     * event for exactly the reason time_ms above is.
+     *
+     * A client used to ask SYS_kbd_modifiers itself, which reports the
+     * modifiers of the character the *kernel* most recently handed out -
+     * and the kernel handed that character to the compositor, one pipe
+     * hop and an unknown number of scheduler quanta before this client
+     * reads the event. So a client asking is asking about a keystroke
+     * that may not be its own. M40 already made exactly this correction
+     * for timing ("a client timing a gesture has to use this rather than
+     * calling SYS_uptime_ms itself, or it ends up measuring its own
+     * scheduling latency") and the same argument was never applied to
+     * modifiers.
+     *
+     * The symptom was Ctrl+C in the terminal sometimes typing a 'c'
+     * instead of copying, which left the clipboard empty and made paste
+     * in the editor look broken - a bug that had outlived several
+     * milestones because it presents in a different program from the one
+     * that causes it. input.h's KBD_MOD_* values. Zero for mouse and
+     * focus events. */
+    uint8_t mods;
     /* M49: wheel detents for a WM_EVENT_MOUSE_WHEEL, carried straight
      * through from input.h's mouse_event_t.wheel. Zero for every other
      * event type, and zero forever on hardware without a wheel. */

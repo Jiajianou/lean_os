@@ -1839,6 +1839,62 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M33 self-test: SYS_writefile/SYS_readfile round trip mismatch");
         }
         klog_puts("[vfs] SYS_writefile/SYS_readfile self-test passed.\n\n");
+
+    /* ---- fd-table self-test: a redirect, twice ---------------------------
+     *
+     * M72 spent a long time believing this was broken in the kernel. It
+     * is not, and the test exists to keep saying so - the bug was a shell
+     * that opened its redirect target BEFORE parking stdout, so the
+     * second redirect's file landed on the parking descriptor and the
+     * dup2 that followed quietly overwrote it. See run_command in
+     * user_space/shell/sh.c.
+     *
+     * What is asserted here is the contract the shell now depends on:
+     * the park / point-fd-1-at-a-file / write / restore cycle survives
+     * being done more than once, and the bytes from both rounds are in
+     * the file in order. Driven from kernel_main with no shell involved,
+     * so a future failure names the kernel rather than the program that
+     * happens to use it.
+     */
+    {
+        const char *FDT = PATH_TMP_DIR "fdcycle";
+        int fd_ok = 1;
+        for (int round = 0; round < 2; round++) {
+            /* Park FIRST, exactly as the shell now does - which is also
+             * what stops the open below from being handed this slot. */
+            long saved = do_syscall(SYS_dup2, 1, 9, 0);
+            long fd = do_syscall(SYS_open, (uint64_t)FDT,
+                                  round == 0 ? (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)
+                                             : (OPEN_WRITE | OPEN_CREATE | OPEN_APPEND), 0);
+            if (saved < 0 || fd < 0 || fd == saved) {
+                fd_ok = 0;
+                break;
+            }
+            do_syscall(SYS_dup2, (uint64_t)fd, 1, 0);
+            if (do_syscall(SYS_write, 1, (uint64_t)(round == 0 ? "AAAA\n" : "BBBB\n"), 5) != 5) {
+                fd_ok = 0;
+            }
+            do_syscall(SYS_dup2, (uint64_t)saved, 1, 0);
+            do_syscall(SYS_close, (uint64_t)saved, 0, 0);
+            do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+        }
+        static char fdt_buf[64];
+        k_memset(fdt_buf, 0, sizeof(fdt_buf));
+        int64_t fdt_n = vfs_read(FDT, fdt_buf, sizeof(fdt_buf) - 1);
+        if (fdt_n != 10 || k_strcmp(fdt_buf, "AAAA\nBBBB\n") != 0) {
+            klog_puts("[fd] a second redirect in one process did not reach its file - got ");
+            klog_put_dec((uint32_t)(fdt_n < 0 ? 0 : fdt_n));
+            klog_puts(" byte(s)\n");
+            fd_ok = 0;
+        }
+        do_syscall(SYS_unlink, (uint64_t)FDT, 0, 0);
+        if (!fd_ok) {
+            panic("fd self-test: the dup2 redirect cycle does not survive being repeated");
+        }
+        klog_puts("[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore) "
+                   "survives being done twice, and both rounds' bytes are in the file - "
+                   "self-test passed.\n\n");
+    }
     }
 
     /* M33 self-test: settings.c's live desktop-background-color control,

@@ -1916,6 +1916,7 @@ def test_editor_undo_restores_the_buffer(m):
     m.double_click(ICON_X, ICONS[0][2])  # Terminal
     wait_for_windows(m, 1)
     m.type_text("HELLO")
+
     time.sleep(0.5)
     m.sendkey("ctrl-c")   # clipboard := the input line
     time.sleep(0.5)

@@ -5149,32 +5149,71 @@ change rather than a kernel one.
 
 
 
-## Known defect (pre-existing, found during M67) — the editor cannot paste
+## Fixed — the editor could not paste, and the manifest was dead letter
 
-`editor_undo_restores_the_buffer` fails in the interactive suite, and has
-failed on every run since M67 began. **It is not a regression** - it
-reproduces identically on `7311549`, the commit this arc started from,
-and was verified there by stashing all M67 work and rebuilding.
+Reported as "Ctrl+V does nothing in the text editor", failing on every
+interactive run since M67 began and reproducing on `7311549`. The cause
+was four programs away from the symptom, and the first two diagnoses were
+both wrong - which is the part worth keeping.
 
-What has been ruled out, so the next person does not repeat it:
+**The actual bug: `desktop_icons` was not in the capability manifest.**
+It launches programs the same way a shell does - a plain `SYS_spawn` -
+and M65's rule is that a child's set is *its parent's set intersected
+with the manifest*. Absent from the table, it held `CAP_APP_DEFAULT`. So
+**every program launched by double-clicking a desktop icon was capped at
+`CAP_FS_WRITE`, whatever the manifest said about it.** The editor could
+not read the clipboard, the task manager could not list processes,
+Settings could not change the resolution. The manifest was decoration for
+the entire desktop.
 
-- **Not a capability denial.** M65 logs every refusal once per process
-  per capability, and no `[caps] text_editor was refused 'clipboard'`
-  line appears in any boot log. The manifest does grant `text_editor`
-  `CAP_CLIPBOARD`, and the compositor (which spawns it) holds `CAP_ALL`
-  and never calls `sys_dropcaps`.
-- **Not the editor's paste path.** `paste_from_clipboard` is correct: it
-  reads, checks `n <= 0`, opens an undo group and inserts.
+*Why nothing caught it for five milestones.* The boot self-tests spawn
+from `kernel_main`, which holds everything. The Start menu goes through
+the compositor's launcher, which also holds everything. Only the icon
+grid was affected - and the one test that used it did so to set up a
+*different* assertion, so the failure appeared as a missing paste rather
+than as a capability problem.
 
-Which leaves: `sys_clipboard_get` returns 0, i.e. **the clipboard is
-genuinely empty**, so the failure is on the *copy* side. The test loads
-the clipboard from `gui_terminal` (Ctrl+C with nothing selected copies
-the input line, M32), so the suspects are that terminal's `line_len`
-being 0 when Ctrl+C arrives, or `sys_kbd_modifiers()` - which reports the
-modifiers of the character *most recently returned by the kernel*, while
-the client asking is one pipe hop behind the compositor that read it.
-M40 already changed that call once for a related reason. That is where to
-look.
+*Two wrong diagnoses, and why each was wrong.* First: "not a capability
+denial, because no `[caps]` line appears in the boot log". The denial is
+logged - it just never appears in the **serial** log, because that boot
+never launches an editor. I checked the wrong artifact and wrote the
+conclusion down as fact. Second: a genuine race in `sys_kbd_modifiers`,
+which reports the modifiers of the character the *kernel* last handed
+out - to the compositor, one pipe hop earlier - so a client asking is
+asking about a keystroke that may not be its own. That is real, and is
+fixed below, and it was not this. What settled it was instrumenting
+`clipboard_get` and saving the guest's serial log from inside the failing
+test, which said `text_editor was refused 'clipboard'` in one line.
+
+**Fix:** `desktop_icons` joins `sh`, `gui_terminal` and `compositor` in
+the manifest. What a launcher holds is a *ceiling*, not a grant to what
+it starts - the kernel still applies the table to every child - so this
+lets it hand out what the table already allows and nothing more. The
+honest cost is that it can now call privileged syscalls itself, the same
+widening already accepted for the shells. **The cleaner shape is for a
+launch to be a request to the compositor**, the way the Start menu and
+shutdown already are; that is a WM-protocol change and is the right
+follow-up.
+
+### Also fixed: modifiers now travel in the event
+
+`wm_event_t` carried `time_ms` with a comment explaining exactly why - "a
+client timing a gesture has to use this rather than calling
+`SYS_uptime_ms` itself, or it ends up measuring its own scheduling
+latency" - and carried no modifiers, so every client asked
+`SYS_kbd_modifiers` about global state that had already moved on. The
+same argument, never applied. It now carries `mods`, filled by the
+compositor at the instant it read the key, and `gui_terminal` and
+`text_editor` read it from the event.
+
+### Also fixed: a redirect that only worked once per process
+
+See M72's notes. `sys_open` returns the lowest free descriptor, and the
+shell parked stdout *after* opening its redirect target - so the second
+redirect's file landed on the parking slot and was immediately
+overwritten. Parking first makes it impossible. The kernel-side cycle is
+now a permanent self-test (`[fd]` marker), because this was blamed on the
+kernel first and the test is what makes that blame checkable.
 
 ## M72 — One shell, and it can be scripted ✅ (/bin/sh, scripts, `#!`)
 
@@ -5248,23 +5287,42 @@ becomes `argv[1]`. Getting that off by one is not a subtle failure:
 as "read stdin", so every script spawned an interactive shell that
 blocked forever on a keyboard nobody was typing at.
 
-*A redirect that only works once per process, and it is a kernel bug
-rather than a shell one.* `echo hello > file` was first implemented the
-obvious way - dup2 the file onto fd 1, run the builtin, dup2 stdout back.
-The **first** redirect in a shell lands in its file. Every one after it
-silently goes to stdout. Verified in detail: the parse is correct
-(instrumented and printed - `redir=</tmp/m72.out> append=1` on every
-line), `sys_open` succeeds (no error path taken), `OPEN_APPEND` is
-implemented, and `sys_dup2` does call `fd_retain`. Substituting an
-explicit `lseek(SEEK_END)` for `OPEN_APPEND` changed nothing, which ruled
-out the append machinery and pointed at repetition rather than at flags.
-**Something in the kernel's fd table does not survive a
-dup2/restore/dup2 cycle, and that is an open finding this milestone did
-not chase to the bottom.** The shell now routes builtin output through
-its own `out_fd` instead, which sidesteps it and is better anyway - a
-shell mutating its own fd 1 to redirect its own builtin is a strange
-thing to do. Spawned programs still use dup2, because a child inherits an
-fd table and there is no other way to tell it where its output goes.
+*A redirect that only worked once per process - and the diagnosis was
+wrong the first time, which is the part worth keeping.*
+
+`echo hello > file` was first implemented the obvious way: dup2 the file
+onto fd 1, run the command, dup2 stdout back. The **first** redirect in a
+shell landed in its file; every one after it silently went to the
+terminal, with the parse verifiably correct, the open succeeding and no
+error anywhere. That reads exactly like a kernel fd-table bug, and this
+file said so - **incorrectly**.
+
+The fix for that mistake was a kernel-side repro: the same
+park / dup2 / write / restore cycle, driven twice from `kernel_main` with
+no shell involved. It passed, both rounds, bytes in order. So the kernel
+was fine and the bug was in the shell.
+
+**It was an ordering bug, and a nasty one.** `sys_open` returns the
+LOWEST free descriptor. The shell opened its redirect target and *then*
+parked stdout at a fixed descriptor - and after one redirect had been set
+up and torn down, that parking descriptor was the lowest free one. So the
+second command's file was handed the parking slot, `dup2(1, PARK)` then
+overwrote that freshly-opened file with stdout, and `dup2(rfd, 1)` copied
+stdout onto stdout. The redirect became a silent no-op, and only from the
+second one onward, which is exactly the shape that made it look like
+state the kernel was failing to restore.
+
+Parking **before** opening makes the collision impossible, because the
+slot is occupied by the time `sys_open` looks for a free one. The
+kernel-side cycle is now a permanent self-test (`[fd]` marker) so that
+this stays a shell question if it ever comes back.
+
+*The lesson is about diagnosis, not descriptors.* "The first one works
+and the rest do not" is a shape that points hard at the layer holding the
+state, and the layer holding the state was innocent. What settled it was
+reproducing the mechanism *without* the program that found it - which
+took one short kernel self-test and should have been the first move
+rather than the last.
 
 *The self-test is a script, which is the only honest test of this.* The
 old shell could run a command; so could M13's. What it could not do was

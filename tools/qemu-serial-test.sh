@@ -218,6 +218,7 @@ REQUIRED_MARKERS=(
   "[m70] the kernel log is readable from user space:"
   "[m71] files worth trusting:"
   "[m72] a script is a program:"
+  "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

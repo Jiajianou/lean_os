@@ -196,6 +196,38 @@ static const cap_grant_t CAP_GRANTS[] = {
      * cannot name. */
     {"sh",            CAP_ALL},
     {"gui_terminal",  CAP_ALL},
+    /* ---- the desktop's icon grid, and the bug its absence caused -------
+     *
+     * Same argument as the two above, missed for five milestones with a
+     * real consequence. `desktop_icons` launches programs the same way a
+     * shell does - a plain SYS_spawn - and a child's set is its parent's
+     * set intersected with this table. It was absent here, so it held
+     * CAP_APP_DEFAULT, so **every program launched by double-clicking a
+     * desktop icon was capped at CAP_FS_WRITE no matter what this table
+     * said about it.** The manifest was dead letter for the whole
+     * desktop: the editor could not read the clipboard, the task manager
+     * could not list processes, Settings could not change the resolution.
+     *
+     * The boot self-tests never saw it because they spawn from
+     * kernel_main, which holds everything, and the Start menu never saw it
+     * because that goes through the compositor's launcher. Only the icon
+     * grid was affected, and it surfaced as "Ctrl+V does nothing in the
+     * editor" - four programs away from the cause.
+     *
+     * What it holds is a CEILING, not a grant to what it starts: the
+     * kernel still applies this table to every child, so this lets it
+     * hand out what the table already allows and nothing more. The honest
+     * cost is that this process can itself call privileged syscalls -
+     * a real widening, and the same one already accepted for `sh` and
+     * `gui_terminal`.
+     *
+     * The cleaner shape is for a launch to be a *request to the
+     * compositor*, the way desktop_shell's Start menu already works and
+     * the way it asks for a shutdown - the compositor is the trusted
+     * launcher and this program would then need nothing at all. That is a
+     * WM-protocol change rather than a table entry, and it is the right
+     * follow-up. */
+    {"desktop_icons", CAP_ALL},
     /* The network programs, and the reason CAP_NETWORK is worth having:
      * these two are the entire list of things on this machine that may
      * talk to anything. `netconf` is deliberately *not* one of them -

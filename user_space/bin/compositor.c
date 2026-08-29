@@ -4126,6 +4126,11 @@ static void handle_keyboard(void) {
             wm_event_t ev = {0};
             ev.type = WM_EVENT_KEY;
             ev.ch = ch;
+            /* `mods` was read at the top of this loop, immediately after
+             * the sys_kbd_read that produced `ch`, so it belongs to this
+             * keystroke. Carrying it means the client does not have to
+             * ask about global state that has moved on - see wm.h. */
+            ev.mods = (uint8_t)mods;
             send_event(&windows[focused_window], &ev);
         }
     }

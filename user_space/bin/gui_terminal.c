@@ -937,7 +937,12 @@ int main(void) {
                  * flag. Paste still inserts at the end of the input line,
                  * silently dropping whatever wouldn't fit - same
                  * truncation behavior ordinary typing already has. */
-                long mods = sys_kbd_modifiers();
+                /* M-fix: from the event, not from the kernel's global
+                 * "most recently read" state - see wm_event_t.mods. The
+                 * keystroke this handler is holding was decoded before
+                 * the compositor forwarded it, so asking now is asking
+                 * about somebody else's key. */
+                long mods = ev.mods;
                 if ((mods & KBD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
                     if (sel_active) {
                         copy_selection_to_clipboard();
