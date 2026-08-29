@@ -5149,6 +5149,33 @@ change rather than a kernel one.
 
 
 
+## Known defect (pre-existing, found during M67) — the editor cannot paste
+
+`editor_undo_restores_the_buffer` fails in the interactive suite, and has
+failed on every run since M67 began. **It is not a regression** - it
+reproduces identically on `7311549`, the commit this arc started from,
+and was verified there by stashing all M67 work and rebuilding.
+
+What has been ruled out, so the next person does not repeat it:
+
+- **Not a capability denial.** M65 logs every refusal once per process
+  per capability, and no `[caps] text_editor was refused 'clipboard'`
+  line appears in any boot log. The manifest does grant `text_editor`
+  `CAP_CLIPBOARD`, and the compositor (which spawns it) holds `CAP_ALL`
+  and never calls `sys_dropcaps`.
+- **Not the editor's paste path.** `paste_from_clipboard` is correct: it
+  reads, checks `n <= 0`, opens an undo group and inserts.
+
+Which leaves: `sys_clipboard_get` returns 0, i.e. **the clipboard is
+genuinely empty**, so the failure is on the *copy* side. The test loads
+the clipboard from `gui_terminal` (Ctrl+C with nothing selected copies
+the input line, M32), so the suspects are that terminal's `line_len`
+being 0 when Ctrl+C arrives, or `sys_kbd_modifiers()` - which reports the
+modifiers of the character *most recently returned by the kernel*, while
+the client asking is one pipe hop behind the compositor that read it.
+M40 already changed that call once for a related reason. That is where to
+look.
+
 ## M72 — One shell, and it can be scripted [ ]
 
 There are two shells in this repo and neither is a shell.
