@@ -101,7 +101,15 @@ set -euo pipefail
 # and is therefore the one most worth a test. Same unavoidable shape as
 # M48's toast deadline: proving something happened *on its own* means
 # waiting for it.
-SECONDS_TO_RUN="${1:-740}"
+# M69/M70: 740 -> 820. Two new self-tests, and the M69 one is
+# deliberately slow: it takes ten input-to-photon samples, half of them
+# with a CPU-bound task per core running, and a latency measurement that
+# hurried would be measuring the hurry. 740 was measured with only
+# "[init] PID 1 spawned" - the very last marker - missing, i.e. the boot
+# was finishing just past the capture window, which is exactly the
+# one-slow-boot-from-a-false-failure margin this number exists to keep
+# away from.
+SECONDS_TO_RUN="${1:-820}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -207,6 +215,7 @@ REQUIRED_MARKERS=(
   "[m66] TCP: a handshake, 16 KiB through a 4 KiB buffer arriving byte for"
   "[m67] a preemptible kernel: \`int 0x80\` is a trap gate, four concurrent"
   "[m69] input-to-photon:"
+  "[m70] the kernel log is readable from user space:"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

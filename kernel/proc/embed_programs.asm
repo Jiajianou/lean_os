@@ -80,6 +80,12 @@ racetest_elf_start:
     incbin "build/racetest.elf"
 racetest_elf_end:
 
+global console_elf_start
+global console_elf_end
+console_elf_start:
+    incbin "build/console.elf"
+console_elf_end:
+
 global caps_elf_start
 global caps_elf_end
 caps_elf_start:

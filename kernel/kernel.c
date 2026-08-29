@@ -66,6 +66,7 @@
     X(nettest)                       \
     X(tcptest)                       \
     X(racetest)                      \
+    X(console)                       \
     X(caps)                          \
     X(captest)                       \
     X(whetstone)                     \
@@ -123,6 +124,19 @@ static long do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
                       : "=a"(ret)
                       : "a"(num), "D"(a1), "S"(a2), "d"(a3)
                       : "rcx", "r8", "r9", "memory");
+    return (long)ret;
+}
+
+/* M70: the four-argument form. SYS_klog is the first syscall a kernel-side
+ * self-test drives that needs a fourth (the cursor it writes back), and
+ * the convention is already defined - rcx is arg 4, see syscall.h - so
+ * this is the same wrapper with one more register bound. */
+static long do_syscall4(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
+    uint64_t ret;
+    __asm__ volatile("int $0x80"
+                      : "=a"(ret)
+                      : "a"(num), "D"(a1), "S"(a2), "d"(a3), "c"(a4)
+                      : "r8", "r9", "memory");
     return (long)ret;
 }
 
@@ -6462,6 +6476,159 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_put_dec((uint32_t)nload);
         klog_puts(" CPU-bound task(s) running - measured with the TSC, "
                    "cursor motion to changed pixel - self-test passed.\n\n");
+    }
+
+    /* ---- M70 self-test: the machine says what happened ------------------
+     *
+     * Three claims, and the first one is the milestone:
+     *
+     *   1. the kernel log can be read back from user space at all. For
+     *      seventy milestones it could not - klog wrote to a serial port
+     *      and to a console the compositor paints over, so every driver
+     *      message, every spawn failure and every capability denial went
+     *      somewhere nobody on the machine could reach.
+     *   2. reading it is gated. The log describes what every other
+     *      process is doing, so CAP_SYSLOG is a real boundary and an
+     *      ordinary program has to be refused - checked the way M65
+     *      checks everything, by having a program try and fail.
+     *   3. a cursor follows rather than re-reads. A viewer that showed
+     *      the same lines again on every pass would be useless, and the
+     *      cursor is the whole difference.
+     *
+     * The panic-paints half of M70 cannot be asserted from inside a
+     * self-test - a panic stops the machine, so a test that triggered one
+     * could not then report anything. It is verified by the input
+     * harness instead, which screenshots a deliberately faulted guest
+     * with no serial device attached; see tools/qemu-input-test.sh.
+     */
+    {
+        int all_ok = 1;
+
+        /* A marker only this test could have written, so finding it back
+         * proves the ring holds what klog emitted rather than merely
+         * returning plausible bytes. */
+        static const char MARKER[] = "[m70] marker-cafebabe";
+        klog_puts(MARKER);
+        klog_putc('\n');
+
+        static char logbuf[1024];
+        uint64_t cursor = 0;
+        uint64_t next = 0;
+        int found = 0;
+        /* Walk the whole ring looking for the marker. Bounded by the
+         * number of reads it takes to cross 64 KiB, not by a timeout:
+         * this is a memory copy, not a wait. */
+        for (int pass = 0; pass < 128 && !found; pass++) {
+            long n = do_syscall4(SYS_klog, cursor, (uint64_t)logbuf, sizeof(logbuf) - 1,
+                                  (uint64_t)&next);
+            if (n <= 0) {
+                break;
+            }
+            logbuf[n] = '\0';
+            for (long i = 0; i + (long)sizeof(MARKER) - 1 <= n; i++) {
+                int j = 0;
+                while (MARKER[j] && logbuf[i + j] == MARKER[j]) {
+                    j++;
+                }
+                if (!MARKER[j]) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (next == cursor) {
+                break; /* no progress - the cursor is not advancing */
+            }
+            cursor = next;
+        }
+        if (!found) {
+            klog_puts("[m70] the kernel log does not contain what klog just wrote to it\n");
+            all_ok = 0;
+        }
+
+        /* The cursor follows: a read from the end returns nothing until
+         * something new is logged, and then returns exactly that. */
+        uint64_t end = klog_written_total();
+        long none = do_syscall4(SYS_klog, end, (uint64_t)logbuf, sizeof(logbuf) - 1,
+                                 (uint64_t)&next);
+        if (none != 0) {
+            klog_puts("[m70] a read from the end of the log returned bytes that were not "
+                       "written yet\n");
+            all_ok = 0;
+        }
+        klog_puts("x\n");
+        long some = do_syscall4(SYS_klog, end, (uint64_t)logbuf, sizeof(logbuf) - 1,
+                                 (uint64_t)&next);
+        if (some <= 0) {
+            klog_puts("[m70] the log did not advance after something was written to it\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M70 self-test: the kernel cannot report its own log");
+        }
+
+        /* ---- the panic band, painted and read back ---------------------
+         *
+         * A panic used to reach a serial port and a framebuffer console
+         * the compositor had painted over, which on a machine with no
+         * serial cable is a frozen screen and nothing else. It now takes
+         * the screen back. Checked by painting it and reading the pixels,
+         * because a test that caused a real panic could not report what
+         * it found - see panic.h on why the rendering and the halting are
+         * separate functions.
+         *
+         * Two assertions, and the second is the one with teeth: the band
+         * is there (something was painted at all), AND there are glyph
+         * pixels inside it (the message was actually rendered rather than
+         * a coloured rectangle drawn over the screen). */
+        {
+            const uint32_t BAND = 0x00800000u;
+            uint32_t h = fb_height();
+            uint32_t band_h = 8 * FONT_HEIGHT;
+            uint32_t band_y = (h > band_h) ? (h - band_h) / 2 : 0;
+
+            panic_render("m70 paint check - the machine is fine, this is a test");
+
+            int band_ok = (fb_get_pixel(4, band_y + band_h - 3) == BAND);
+
+            /* Glyph pixels: scan the row the title is drawn on for
+             * anything that is not the band colour. The title starts at
+             * x=16 and is white. */
+            int glyph_pixels = 0;
+            for (uint32_t gx = 16; gx < 16 + 20 * FONT_WIDTH && gx < fb_width(); gx++) {
+                for (uint32_t gy = band_y + FONT_HEIGHT; gy < band_y + 2 * FONT_HEIGHT; gy++) {
+                    if (fb_get_pixel(gx, gy) != BAND) {
+                        glyph_pixels++;
+                    }
+                }
+            }
+
+            /* Put the console back before logging anything, or the next
+             * klog line lands on top of the band. */
+            console_init();
+            klog_use_console();
+
+            if (!band_ok) {
+                klog_puts("[m70] a panic painted nothing to the framebuffer\n");
+                all_ok = 0;
+            }
+            if (glyph_pixels < 50) {
+                klog_puts("[m70] the panic band was painted but the message was not drawn "
+                           "into it (");
+                klog_put_dec((uint32_t)glyph_pixels);
+                klog_puts(" glyph pixels)\n");
+                all_ok = 0;
+            }
+            if (!all_ok) {
+                panic("M70 self-test: a panic cannot put its message on the screen");
+            }
+        }
+
+        klog_puts("[m70] the kernel log is readable from user space: a marker written and "
+                   "found again, a cursor that follows rather than repeats, a gate "
+                   "(CAP_SYSLOG) an ordinary program does not hold, and a panic that paints "
+                   "its own message onto the framebuffer rather than into a serial port "
+                   "nobody is holding - self-test passed.\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

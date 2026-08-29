@@ -22,6 +22,9 @@
  */
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include <stdint.h>
 
 void klog_init(void);
@@ -66,3 +69,19 @@ static inline void klog_error(const char *s) { klog_log(KLOG_ERROR, s); }
  * only ever reached VGA text mode; serial output is unaffected either
  * way, so nothing is lost from tools/qemu-serial-test.sh's perspective. */
 void klog_use_console(void);
+
+/* ---- M70 ---------------------------------------------------------------
+ *
+ * Read the kernel log back. Until this milestone there was no way to:
+ * klog wrote to a serial port and to a console the compositor paints
+ * over, so on a machine with no serial cable the log did not exist.
+ *
+ * `from` is an absolute byte position (0 for "the beginning of what is
+ * still held"); `*next` comes back as the position to pass next time.
+ * Returns how many bytes were copied. See klog.c for what happens to a
+ * reader that falls behind the ring. */
+size_t klog_read(uint64_t from, char *out, size_t max, uint64_t *next);
+
+/* Total bytes ever logged - a reader that wants only new output starts
+ * here rather than at 0. */
+uint64_t klog_written_total(void);

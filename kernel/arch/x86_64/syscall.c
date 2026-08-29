@@ -1902,6 +1902,43 @@ static long sys_display_set_mode(uint64_t width, uint64_t height, uint64_t a3, u
     return 0;
 }
 
+/* ---- M70: reading the kernel's own account of itself ------------------- */
+
+static long sys_klog(uint64_t from, uint64_t buf, uint64_t max, uint64_t next_out,
+                      uint64_t a5, uint64_t a6) {
+    (void)a5;
+    (void)a6;
+    if (!has_cap(CAP_SYSLOG)) {
+        return -1;
+    }
+    if (max == 0 || !user_range_ok(buf, max, 1)) {
+        return -1;
+    }
+    if (next_out && !user_range_ok(next_out, sizeof(uint64_t), 1)) {
+        return -1;
+    }
+    uint64_t next = 0;
+    size_t n = klog_read(from, (char *)buf, (size_t)max, &next);
+    if (next_out) {
+        *(uint64_t *)next_out = next;
+    }
+    return (long)n;
+}
+
+static long sys_klog_total(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                            uint64_t a5, uint64_t a6) {
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    /* Not gated - see SYS_klog_total's own comment. How much has been
+     * logged is a length, and gating a length is the kind of check M65
+     * warned looks like security and is not. */
+    return (long)klog_written_total();
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -1968,6 +2005,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_accept] = sys_accept,
     [SYS_send] = sys_send,
     [SYS_recv] = sys_recv,
+    [SYS_klog] = sys_klog,
+    [SYS_klog_total] = sys_klog_total,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

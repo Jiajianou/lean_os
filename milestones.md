@@ -4938,22 +4938,22 @@ second one.
 
 
 
-## M70 — A machine that says what happened [ ]
+## M70 — A machine that says what happened ✅ (log, Console, painting panic)
 
 Cheap, and it unblocks the debugging of everything after it. This is the
 milestone that stops the desktop being a machine you can only diagnose
 with a serial cable attached.
 
-- [ ] **`SYS_klog`** — read the kernel ring buffer from user space.
+- [x] **`SYS_klog`** — read the kernel ring buffer from user space.
       Read-only, with a cursor so a reader can follow rather than
       re-read. Gated on a capability (`CAP_SYSLOG`), because the log
       contains driver addresses and other processes' failures, and M65's
       whole argument is that the gate goes where the boundary really is
-- [ ] **A Console app** in `user_space/bin` — the log, live, filterable,
+- [x] **A Console app** in `user_space/bin` — the log, live, filterable,
       with the capability denials M65 already emits shown as what they
       are. This is where M65's *"a rule nobody can see is a rule nobody
       can check"* finally becomes true rather than aspirational
-- [ ] **A panic that paints.** Currently a panic on a machine with no
+- [x] **A panic that paints.** Currently a panic on a machine with no
       serial port is a black screen — named in the stretch-goal list
       above as a hardware prerequisite, but it is not hardware work and
       it does not need hardware to test. Panic takes back the
@@ -4974,6 +4974,65 @@ in a QEMU guest with *no serial device attached*, screenshots the
 framebuffer, and asserts the panic text is on it — because the entire
 point is the case where the log has nowhere else to go. And a second one
 that reboots afterward and finds the crash record.
+
+### Progress notes
+
+*What landed:* a 64 KiB ring in `klog.c` written under the lock that
+already serialised the serial port and the console, so the ring can never
+hold a half-line the serial capture does not; `SYS_klog` with an absolute
+cursor and `SYS_klog_total`; `CAP_SYSLOG` and a `console` program that is
+the only thing on the machine holding it; and a `panic_render` that takes
+the screen back and writes on it.
+
+*The capability argument, applied one more time and coming out the other
+way.* M65 declined to gate `SYS_fb_info` and `SYS_netconf` because how
+big the screen is and what address this machine has are **facts**, and
+gating a fact is the check that looks like security and is not. The log
+is not a fact about the hardware - it is a running account of what every
+other process on the machine is doing, including the arguments of their
+failed syscalls and every capability denial. So it gets a gate, and
+`SYS_klog_total` deliberately does not: how *much* has been logged is a
+length, not a content.
+
+*Splitting the panic in two is what made half of it testable.* A test
+that triggered a real panic could not report what it found - the machine
+is stopped, which is the entire point of a panic. So `panic_render` paints
+and returns, `panic` calls it and then halts, and the boot self-test
+paints a band and reads the pixels back. It asserts two things, and the
+second is the one with teeth: that the band is there **and** that there
+are glyph pixels inside it, because a coloured rectangle with no message
+in it would pass the first check and be worth nothing. The halt-and-
+broadcast half stays exercised only by real panics, where it always was -
+but one of the two is now checked instead of neither.
+
+*The constraints on `panic_render` are unusual enough to be worth stating,
+and they ruled out the obvious implementation.* It cannot allocate (the
+heap may be why it is running), cannot take a lock (a lock may be held by
+a task that will never release it - a panic that deadlocks is strictly
+worse than one that prints nothing), and cannot use `console.c`, which
+does both. So it is `fb_fill_rect` plus the raw 8x16 font and nothing
+else. It paints a band rather than the whole screen: a full clear at
+1024x768 is three megabytes through a possibly-uncached mapping, and
+leaving the desktop visible around the band makes it unmistakably a
+takeover rather than a repaint.
+
+*Deliberately not done, and each is a real piece of work rather than an
+oversight:* **symbolised stack traces**, which need a symbol table emitted
+at link time and embedded in `kernel.bin` - a build-system change, and the
+panic screen is legible without it; and **a crash record that survives the
+reboot**, which needs M71's durable write path to be worth anything (a
+crash record written through a filesystem with no write ordering is a
+crash record that may not be there). Both are listed in M71's and the
+stretch list's terms rather than half-built here.
+
+*One number moved:* the serial harness's capture budget, 740 -> 820
+seconds. M69's latency self-test is deliberately slow - ten
+input-to-photon samples, half of them with a CPU-bound task per core -
+and a latency measurement that hurried would be measuring the hurry. 740
+was measured with only the very last marker missing, which is exactly the
+one-slow-boot-from-a-false-failure margin that number exists to avoid.
+
+
 
 ## M71 — Files worth trusting [ ]
 

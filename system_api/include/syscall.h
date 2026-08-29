@@ -191,4 +191,7 @@
  * drift; this is the copy user space is allowed to see. */
 #define SYS_PIPE_CAPACITY 1024
 
-#define SYSCALL_COUNT 65
+#define SYS_klog 65 /* (from_position, char *buf, max, uint64_t *next_out) -> bytes copied, or -1. M70: read the kernel log back. There has never been a way to - klog writes to a serial port and to a console the compositor paints over, so on a machine with no serial cable this kernel's entire diagnostic surface was a black screen, including every capability denial M65 was careful to emit. `from` is an absolute byte position and `*next_out` (may be NULL) comes back as where to resume, so a reader follows the log rather than re-reading it; a reader that has fallen further behind than the ring holds is advanced to the oldest surviving byte and can tell, because the cursor jumps. Gated on CAP_SYSLOG: the log describes what every other process on the machine is doing, which is authority rather than a fact about the hardware - see caps.h on why SYS_fb_info and SYS_netconf are deliberately not gated and this is. */
+#define SYS_klog_total 66 /* () -> total bytes ever logged. A reader that wants only what happens from now on starts here instead of at 0, without having to drain everything first. Not gated: it is a length, not a content. */
+
+#define SYSCALL_COUNT 67

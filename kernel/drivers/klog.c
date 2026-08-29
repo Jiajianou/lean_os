@@ -1,5 +1,8 @@
 #include "klog.h"
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "arch/x86_64/io.h" /* irq_save_disable/irq_restore */
 #include "console.h"
 #include "lib/spinlock.h"
@@ -40,6 +43,34 @@ void klog_use_console(void) {
  * a critical section it already holds" reason. */
 static spinlock_t klog_lock;
 
+/* ---- M70: the ring buffer ---------------------------------------------
+ *
+ * Everything klog emits has always gone to two places: a serial port and
+ * the screen. Both are write-only and both are gone the moment the
+ * compositor paints over the console - so on any machine without a serial
+ * cable attached, this kernel's entire diagnostic surface was a black
+ * screen. Every capability denial M65 was careful to log, every driver
+ * message, every spawn failure: written down where nobody on the machine
+ * could read them.
+ *
+ * This is the third destination, and the first one that survives being
+ * written to. A plain byte ring, because that is exactly what klog
+ * produces - there are no records here, no levels to filter on the way
+ * in, just the characters that were already going to the wire.
+ *
+ * 64 KiB holds a whole boot's worth of log on this machine, which is the
+ * size that makes "what happened during startup" answerable after the
+ * desktop is up. It costs a fixed 64 KiB of kernel image and never grows.
+ *
+ * `written` is the total ever emitted and never wraps in practice at
+ * 64 bits - it is what gives a reader a cursor that means something
+ * across wraps. A reader that falls more than KLOG_RING_SIZE behind has
+ * missed bytes, and can tell, which beats silently reading a hole. */
+#define KLOG_RING_SIZE 65536u
+
+static char klog_ring[KLOG_RING_SIZE];
+static uint64_t klog_written; /* total bytes ever emitted */
+
 /* also_console decides whether this byte reaches the screen; serial always
  * gets it either way (nothing klog emits is ever lost from serial capture,
  * per the header's fan-out guarantee). klog_putc and the leveled path in
@@ -61,6 +92,11 @@ static void klog_emit(char c, int also_console) {
         }
     }
     serial_putc(c);
+    /* M70: and into the ring, under the same lock that already serialises
+     * the other two destinations - so the ring can never contain a
+     * half-written line that the serial capture does not. */
+    klog_ring[klog_written % KLOG_RING_SIZE] = c;
+    klog_written++;
     spin_unlock(&klog_lock);
     irq_restore(flags);
 }
@@ -136,4 +172,45 @@ void klog_log_hex64(klog_level_t level, uint64_t value) {
     for (int shift = 60; shift >= 0; shift -= 4) {
         klog_log_putc(level, hex_digit((value >> shift) & 0xF));
     }
+}
+
+/* M70: see klog.h. Copies out at most `max` bytes starting at absolute
+ * position `from`, and returns how many. `*next` is set to the position
+ * to ask for next time, which is how a reader follows the log rather than
+ * re-reading it.
+ *
+ * A `from` older than the ring can still reach is silently advanced to
+ * the oldest byte still held, and *next tells the caller where it
+ * actually resumed - so a reader that fell behind sees a jump in the
+ * cursor rather than a seamless stream with a hole in it. */
+size_t klog_read(uint64_t from, char *out, size_t max, uint64_t *next) {
+    uint64_t flags = irq_save_disable();
+    spin_lock(&klog_lock);
+
+    uint64_t total = klog_written;
+    uint64_t oldest = total > KLOG_RING_SIZE ? total - KLOG_RING_SIZE : 0;
+    if (from < oldest) {
+        from = oldest;
+    }
+    size_t n = 0;
+    while (from + n < total && n < max) {
+        out[n] = klog_ring[(from + n) % KLOG_RING_SIZE];
+        n++;
+    }
+    if (next) {
+        *next = from + n;
+    }
+
+    spin_unlock(&klog_lock);
+    irq_restore(flags);
+    return n;
+}
+
+uint64_t klog_written_total(void) {
+    uint64_t flags = irq_save_disable();
+    spin_lock(&klog_lock);
+    uint64_t v = klog_written;
+    spin_unlock(&klog_lock);
+    irq_restore(flags);
+    return v;
 }

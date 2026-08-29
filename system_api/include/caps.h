@@ -95,7 +95,14 @@
 /* Set the system clock (SYS_settime). */
 #define CAP_SET_TIME      (1u << 9)
 
-#define CAP_ALL           0x3FFu
+/* M70: read the kernel log. Gated, and the reasoning is M65's own: the
+ * log carries driver addresses, the arguments of other processes' failed
+ * syscalls, and every capability denial on the machine - which is a
+ * description of what everybody else is doing. Reading it is authority,
+ * not a fact about the machine, so unlike SYS_fb_info and SYS_netconf it
+ * gets a gate. */
+#define CAP_SYSLOG        (1u << 10)
+#define CAP_ALL           0x7FFu
 
 /* What an ordinary desktop application gets: it can read and write
  * files, and that is nearly all. No screen, no other processes' lives,
@@ -124,6 +131,7 @@ static const cap_name_t CAP_NAMES[] = {
     {CAP_PROCESS_LIST, "process-list"},
     {CAP_FS_WRITE,     "fs-write"},
     {CAP_SET_TIME,     "set-time"},
+    {CAP_SYSLOG,       "syslog"},
 };
 
 #define CAP_NAME_COUNT ((int)(sizeof(CAP_NAMES) / sizeof(CAP_NAMES[0])))
@@ -218,6 +226,10 @@ static const cap_grant_t CAP_GRANTS[] = {
     /* The self-test program for this milestone. It is granted nothing
      * beyond the default *on purpose*: what it asserts is that the
      * things it is not allowed to do fail. */
+    /* M70: the log viewer. The one program on this machine that reads the
+     * kernel's own account of itself - which is why it is the only entry
+     * here with CAP_SYSLOG, and why the capability exists at all. */
+    {"console",       CAP_APP_DEFAULT | CAP_SYSLOG},
     {"captest",       CAP_APP_DEFAULT},
 };
 

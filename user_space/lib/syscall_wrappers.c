@@ -267,6 +267,15 @@ long sys_uptime_ms(void) {
     return do_syscall(SYS_uptime_ms, 0, 0, 0);
 }
 
+/* M70 */
+long sys_klog(uint64_t from, char *buf, size_t max, uint64_t *next_out) {
+    return do_syscall6(SYS_klog, (long)from, (long)buf, (long)max, (long)next_out, 0, 0);
+}
+
+long sys_klog_total(void) {
+    return do_syscall(SYS_klog_total, 0, 0, 0);
+}
+
 long sys_dup2(int oldfd, int newfd) {
     return do_syscall(SYS_dup2, oldfd, newfd, 0);
 }

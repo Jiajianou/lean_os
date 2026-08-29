@@ -228,6 +228,23 @@ long sys_pipe_poll(int fd);
  * redraws that have nothing to do with input arriving. */
 long sys_uptime_ms(void);
 
+/* ---- M70 --------------------------------------------------------------
+ *
+ * Read the kernel log. `from` is an absolute byte position, `*next_out`
+ * (may be NULL) comes back as where to resume. Returns bytes copied, or
+ * -1 without CAP_SYSLOG.
+ *
+ * Until M70 there was no way to see any of this from user space: klog
+ * writes to a serial port and to a console the compositor paints over, so
+ * every driver message, every spawn failure and every capability denial
+ * the kernel logged was written where nobody on the machine could read
+ * it. M65 shipped "a rule nobody can see is a rule nobody can check" and
+ * then logged its denials there. */
+long sys_klog(uint64_t from, char *buf, size_t max, uint64_t *next_out);
+
+/* Total bytes ever logged - start here to follow only new output. */
+long sys_klog_total(void);
+
 /* Duplicates oldfd's fd-table slot into newfd (overwriting whatever was
  * there - no SYS_close exists to release it first). Returns newfd, or -1
  * if either fd is out of range or oldfd isn't open. Lets a caller point
