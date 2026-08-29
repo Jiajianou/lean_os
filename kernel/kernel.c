@@ -322,6 +322,25 @@ static int selftest_wait_for_pixel(uint32_t x, uint32_t y, uint32_t expected,
     return selftest_wait_until(pixel_matches, &probe, timeout_ms, what);
 }
 
+/* M69: "wait until the compositor owns the screen", which is what all
+ * ~35 `process_spawn("compositor"); pit_sleep_ms(N)` pairs in this file
+ * were really saying. The desktop background at a point no window covers
+ * is the condition; the sleep was a guess at how long it takes.
+ *
+ * DELIBERATELY DOES NOT FAIL ON TIMEOUT, and that is what makes replacing
+ * a sleep with it safe to do mechanically across dozens of call sites: if
+ * the desktop appears, this returns in tens of milliseconds instead of
+ * hundreds; if it does not, this has waited at least as long as the sleep
+ * it replaced and the caller's own assertions then fail exactly as they
+ * did before. It can make the suite faster. It cannot make it fail.
+ *
+ * (500,400) is bare desktop in every self-test here - well right of the
+ * icon column, well above the taskbar, and no self-test opens a window
+ * over it before checking the compositor is up. */
+static void selftest_wait_for_compositor(void) {
+    selftest_wait_for_pixel(500, 400, 0x001A1A2Eu, 5000, "the compositor to paint the desktop");
+}
+
 /* ---- M69: input-to-photon ---------------------------------------------
  *
  * The number this milestone owns, and the first thing it does - before
@@ -1451,7 +1470,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200); /* let the compositor map the fb and open its request/response pipes before any client tries to connect */
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         /* Spawned one at a time, each given room to finish its whole
          * connect handshake (several pipe round trips, each needing
@@ -1564,7 +1583,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
         kfree(shell_image);
@@ -1668,7 +1687,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
         kfree(clock_image);
@@ -1908,7 +1927,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         int64_t comp_size = (int64_t)comp_size_bytes;
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(300);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         int settings_fds[2];
         if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
@@ -1974,7 +1993,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         task_t *editor_task = process_spawn("text_editor", editor_image, (size_t)editor_size, "");
         kfree(editor_image);
@@ -2070,7 +2089,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
         kfree(clock_image);
@@ -2320,7 +2339,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
         kfree(shell_image);
@@ -2475,7 +2494,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
         kfree(shell_image);
         pit_sleep_ms(400); /* connects as window 0, the taskbar */
@@ -2609,7 +2628,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         task_t *icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
         kfree(icons_image);
         pit_sleep_ms(500);
@@ -2747,7 +2766,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         uint64_t frames_before_victim = pmm_free_frame_count();
         task_t *victim = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
@@ -2935,7 +2954,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
         kfree(clock_image);
         pit_sleep_ms(700); /* connects as window 0, focused, and draws */
@@ -3085,7 +3104,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         int64_t icons_size = (int64_t)icons_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         task_t *icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
         pit_sleep_ms(700);
         uint32_t saved_pixel = fb_get_pixel(600, 400);
@@ -3103,7 +3122,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
         kfree(icons_image);
         pit_sleep_ms(700);
@@ -3221,7 +3240,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(400);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         int notify_fds[2];
         if (do_syscall(SYS_pipe_open, (uint64_t)WM_NOTIFY_PIPE, (uint64_t)notify_fds, 0) != 0) {
@@ -3385,7 +3404,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         int64_t comp_size = (int64_t)comp_size_bytes;
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(400);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         int drag_fds[2];
         if (do_syscall(SYS_pipe_open, (uint64_t)WM_DRAG_PIPE, (uint64_t)drag_fds, 0) != 0) {
@@ -3527,7 +3546,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(400);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         /* Baseline taken with the compositor already up, so what is
          * measured is the churn and not the compositor's own back buffer. */
@@ -3948,7 +3967,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         task_t *a_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zA 00A02020");
         pit_sleep_ms(500);
@@ -4105,7 +4124,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(300);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
 
         uint64_t frames_before = pmm_free_frame_count();
         task_t *victim = process_spawn("wm_faulter", fault_image, (size_t)fault_size, "");
@@ -4645,7 +4664,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         vfs_unlink(PATH_TMP_DIR "m56undo");
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
-        pit_sleep_ms(300);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         task_t *ed_task = process_spawn("text_editor", ed_image, (size_t)ed_size,
                                          PATH_TMP_DIR "m56undo");
         kfree(ed_image);
@@ -4829,7 +4848,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         int64_t shell_size = (int64_t)shell_size_bytes;
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
-        pit_sleep_ms(200);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
         kfree(shell_image);
         pit_sleep_ms(700);
@@ -5268,7 +5287,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
             task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
             kfree(comp_image);
-            pit_sleep_ms(300);
+            selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
             task_t *term_task = process_spawn("gui_terminal", term_image, term_bytes, "");
             kfree(term_image);
             pit_sleep_ms(900);
@@ -5345,7 +5364,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
             task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
             kfree(comp_image);
-            pit_sleep_ms(300);
+            selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
             task_t *ed_task = process_spawn("text_editor", ed_image, ed_bytes, PATH_TMP_DIR "m60para");
             kfree(ed_image);
             pit_sleep_ms(900);
@@ -5461,7 +5480,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         uint8_t *clock_image = read_program(PATH_BIN_DIR "gui_clock", &clock_bytes);
 
         task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
-        pit_sleep_ms(300);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         task_t *clock_task = process_spawn("gui_clock", clock_image, clock_bytes, "");
         pit_sleep_ms(800);
 
@@ -5874,7 +5893,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
         kfree(comp_image);
-        pit_sleep_ms(300);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         task_t *icons_task = process_spawn("desktop_icons", icons_image, icons_bytes, "");
         pit_sleep_ms(1200);
 
@@ -5984,7 +6003,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
         kfree(comp_image);
-        pit_sleep_ms(300);
+        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         task_t *clock_task = process_spawn("gui_clock", clock_image, clock_bytes, "");
         kfree(clock_image);
         pit_sleep_ms(900);
@@ -7074,6 +7093,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     process_spawn("init", init_image, (size_t)init_size, "");
     kfree(init_image);
 
+    /* M69: how long the boot actually took, in seconds. The serial
+     * harness captures for a fixed budget and then grades, so the only
+     * way to know whether that budget is generous or one slow boot from a
+     * false failure is for the boot to say. It is also the number that
+     * tells you whether replacing fixed sleeps with condition waits is
+     * paying for itself. */
+    klog_puts("[boot] reached the desktop handoff in ");
+    klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ) / 1000));
+    klog_puts(" s\n");
     klog_puts("[init] PID 1 spawned - handing off to the desktop shell.\n\n");
 
     for (;;) {

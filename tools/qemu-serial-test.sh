@@ -101,15 +101,28 @@ set -euo pipefail
 # and is therefore the one most worth a test. Same unavoidable shape as
 # M48's toast deadline: proving something happened *on its own* means
 # waiting for it.
-# M69/M70: 740 -> 820. Two new self-tests, and the M69 one is
-# deliberately slow: it takes ten input-to-photon samples, half of them
-# with a CPU-bound task per core running, and a latency measurement that
-# hurried would be measuring the hurry. 740 was measured with only
-# "[init] PID 1 spawned" - the very last marker - missing, i.e. the boot
-# was finishing just past the capture window, which is exactly the
-# one-slow-boot-from-a-false-failure margin this number exists to keep
-# away from.
-SECONDS_TO_RUN="${1:-820}"
+# M69: 820 -> 240, and this is the first time this number has been
+# *measured* rather than bumped.
+#
+# It has only ever gone up - 24, 34, 40, 50, 56, ... 740, 820 - each time
+# a milestone added a self-test and the capture ran out before the last
+# marker. Nobody ever asked how long the boot actually took, because
+# nothing said. It says now ("[boot] reached the desktop handoff in N s")
+# and the answer was **140 seconds against an 820-second budget**: every
+# run spent eleven minutes waiting for a machine that had finished.
+#
+# Two things made it 140. Most of the fixed pit_sleep_ms calls that
+# preceded a compositor startup are now selftest_wait_for_compositor,
+# which returns when the desktop is painted instead of after a guessed
+# interval. And the boot was never as slow as the budget implied - the
+# budget was slack piled on slack.
+#
+# 240 is 70% headroom over a measured 140, which is the same
+# not-one-slow-boot-from-a-false-failure margin this number has always
+# been chosen for - it is just measured against something real now. The
+# boot prints its own time, so the next person to see this fail knows
+# immediately whether the machine got slower or the budget got tight.
+SECONDS_TO_RUN="${1:-240}"
 shift || true
 EXTRA_ARGS=("$@")
 
