@@ -221,5 +221,10 @@ task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size,
         argv[n++] = arg;
     }
     argv[n] = (const char *)0;
-    return spawn_common(name, image, image_size, argv);
+    /* Through process_spawnv, not spawn_common: the manifest lookup in
+     * process_spawnv_capped is only "applied by the kernel at *every*
+     * spawn" if this form takes the same door - going straight to
+     * spawn_common here would hand every one-argument spawn the caller's
+     * whole capability set. */
+    return process_spawnv(name, image, image_size, argv);
 }

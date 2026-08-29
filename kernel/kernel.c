@@ -5929,10 +5929,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      *   2. **An ordinary application is refused.** `captest` is granted
      *      nothing beyond CAP_APP_DEFAULT on purpose, and thirteen of
      *      its checks are things it tried and could not do.
-     *   3. **init survived it trying to kill init.** The one assertion
-     *      here whose failure mode is loud rather than a return code:
-     *      a kernel that let an unprivileged process signal PID 1 would
-     *      have this self-test take the desktop down as it ran.
+     *   3. **A process it did not start survived it trying.** The one
+     *      assertion whose failure mode is loud rather than a return
+     *      code. The victim is a task spawned right here and handed to
+     *      captest by pid - it cannot be init, because init does not
+     *      exist yet: PID 1 belonged to the first task this boot ever
+     *      spawned (pids are slot+generation, sched.h), and the real
+     *      init only starts after the self-test phase ends. A check
+     *      against pid 1 here would pass vacuously against a stale pid,
+     *      which is the fake check this milestone exists to not make.
      */
     {
         int all_ok = 1;
@@ -5970,28 +5975,48 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         console_init();
         klog_use_console();
 
+        /* The victim: a task captest did not start and must therefore
+         * not be able to signal. spinner_task because it never exits on
+         * its own (the same reason M47's orderly-stop test uses it), so
+         * "still running afterwards" can only mean the kill was refused. */
+        task_t *victim = task_spawn("cap-victim", spinner_task, NULL);
+        char victim_pid[12];
+        {
+            int v = victim->id, n = 0;
+            char tmp[12];
+            do {
+                tmp[n++] = (char)('0' + (v % 10));
+                v /= 10;
+            } while (v);
+            int m = 0;
+            while (n) {
+                victim_pid[m++] = tmp[--n];
+            }
+            victim_pid[m] = '\0';
+        }
+
         image = read_program(PATH_BIN_DIR "captest", &bytes);
-        task_t *ct = process_spawn("captest", image, bytes, "");
+        task_t *ct = process_spawn("captest", image, bytes, victim_pid);
         kfree(image);
         if (do_syscall(SYS_wait, (uint64_t)ct->id, 0, 0) != 0) {
             klog_puts("[m65] the capability self-test program reported a failure\n");
             all_ok = 0;
         }
 
-        /* PID 1, still there. captest asked the kernel to kill it. */
-        task_t *pid1 = sched_task_by_id(1);
-        if (!pid1 || pid1->state == TASK_TERMINATED) {
-            klog_puts("[m65] init did not survive an unprivileged process asking to kill it\n");
+        /* Still there. captest asked the kernel to kill it. */
+        if (victim->state == TASK_TERMINATED) {
+            klog_puts("[m65] the victim task did not survive an unprivileged process asking to kill it\n");
             all_ok = 0;
         }
+        selftest_reap(victim);
 
         if (!all_ok) {
             panic("M65 capability self-test: the permission model does not hold");
         }
         klog_puts("[m65] capabilities: a manifest the kernel applies rather than a launcher, "
                    "an ordinary program refused the screen, the clipboard, the process list, "
-                   "a socket, the clock and init's life, and a set that only ever shrinks - "
-                   "self-test passed.\n\n");
+                   "a socket, the clock and another process's life, and a set that only ever "
+                   "shrinks - self-test passed.\n\n");
     }
 
     /* M66 self-test: TCP.

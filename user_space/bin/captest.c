@@ -39,7 +39,7 @@ static void check(int ok, const char *what) {
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     uint32_t mine = (uint32_t)sys_getcaps();
 
     /* ---- the manifest was applied at all ------------------------------ */
@@ -71,13 +71,25 @@ int main(void) {
     check((mine & CAP_POWER) == 0, "an ordinary program holds the power capability");
 
     /* ---- who you may signal -------------------------------------------- */
-    /* PID 1 is init, which is emphatically not one of this program's
-     * children. Without CAP_KILL_ANY this must be refused - and the
-     * consequence of getting it wrong is not subtle, which is why this
-     * is the assertion worth having: a kernel that let this through
-     * would have this test take the whole desktop down with it, and the
-     * boot self-test checks that init is still running afterwards. */
-    check(sys_kill(1, SIGKILL) < 0, "an ordinary program killed init");
+    /* argv[1] is the pid of a task the boot self-test spawned just for
+     * this: something alive that is emphatically not one of this
+     * program's children. (It cannot be init - init does not exist yet
+     * when this runs, and a pid nothing holds would make this check pass
+     * vacuously.) Without CAP_KILL_ANY the kill must be refused - and
+     * the return code is only half the assertion: the boot self-test
+     * checks that the victim is still running afterwards. */
+    int victim = 0;
+    if (argc > 1) {
+        for (const char *p = argv[1]; *p >= '0' && *p <= '9'; p++) {
+            victim = victim * 10 + (*p - '0');
+        }
+    }
+    if (victim > 0) {
+        check(sys_kill(victim, SIGKILL) < 0,
+              "an ordinary program killed a process that is not its child");
+    } else {
+        check(0, "no victim pid on the command line - nothing to prove the kill refusal against");
+    }
 
     /* But a parent may always end what it started, capability or not -
      * the relationship that gave you the pid is what entitles you to use

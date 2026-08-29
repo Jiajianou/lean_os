@@ -41,7 +41,6 @@ static void write_be32(uint8_t *p, uint32_t v) {
  * sequence numbers wrap at 2^32 and `a < b` is wrong for exactly the
  * connection that has been running long enough to matter. RFC 793
  * section 3.3. */
-static int seq_lt(uint32_t a, uint32_t b)  { return (int32_t)(a - b) < 0; }
 static int seq_leq(uint32_t a, uint32_t b) { return (int32_t)(a - b) <= 0; }
 static int seq_gt(uint32_t a, uint32_t b)  { return (int32_t)(a - b) > 0; }
 static int seq_geq(uint32_t a, uint32_t b) { return (int32_t)(a - b) >= 0; }
@@ -926,17 +925,20 @@ void tcp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uin
      * makes the peer retransmit the right thing.
      *
      * The exception is a segment carrying no sequence space at all: a
-     * bare ACK's sequence number is about the *sender's* stream, and a
-     * peer with its own data still in flight will legitimately send one
-     * from ahead of where our receive stream has got to. RFC 793 accepts
-     * a zero-length segment anywhere in the window, and rejecting one
-     * here would mean discarding the acknowledgement it carries - which
-     * in a transfer running in both directions at once is a stall that
-     * only appears under load. */
+     * bare ACK's sequence number is about the *sender's* stream, and it
+     * is accepted at *any* seq - not merely anywhere in the window.
+     * Go-back-N can legitimately put a peer's snd_nxt behind our rcv_nxt
+     * (its retransmission regressed) or beyond our advertised window
+     * (its data outran what we have taken), and either way its bare ACK
+     * still carries the one thing that resynchronizes the two ends.
+     * Windowing it was a livelock: each side judged the other's ACK
+     * unacceptable, discarded the acknowledgement it carried, and
+     * answered with a challenge ACK the other side judged unacceptable
+     * in turn - which on the loopback queue, where every send is
+     * delivered synchronously, is an infinite ACK war inside one
+     * syscall that wedges the whole machine. */
     int carries_no_sequence = (data_len == 0) && !(flags & (TCP_SYN | TCP_FIN));
-    int in_window = seq_geq(seq, t->rcv_nxt) &&
-                    seq_lt(seq, t->rcv_nxt + window_of(t));
-    if (seq != t->rcv_nxt && !(carries_no_sequence && in_window)) {
+    if (seq != t->rcv_nxt && !carries_no_sequence) {
         if (t->state == TCP_ESTABLISHED || t->state == TCP_FIN_WAIT_1 ||
             t->state == TCP_FIN_WAIT_2 || t->state == TCP_CLOSE_WAIT) {
             send_ack(t);
