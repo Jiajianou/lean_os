@@ -1070,7 +1070,7 @@ static long sys_pipe_poll(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, ui
     if (slot->type != FD_PIPE_READ) {
         return -1;
     }
-    return (long)slot->pipe->count;
+    return (long)pipe_buffered(slot->pipe); /* M67: under pipe.c's lock, not a reach into the struct */
 }
 
 /* M21: milliseconds since pit_init() - just a unit conversion over the
@@ -1970,6 +1970,32 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_recv] = sys_recv,
 };
 
+/* M67: which syscall numbers reach kernel/net. Enumerated rather than
+ * derived from a range, because the numbers are not contiguous (M64 took
+ * 50-56, M66 took 59-64, and 57/58 are the capability calls in between)
+ * and a range that silently grew to include the wrong neighbour would be
+ * a lock held over something that does not need it or - far worse - not
+ * held over something that does. */
+static int syscall_touches_net(uint64_t num) {
+    switch (num) {
+    case SYS_socket:
+    case SYS_bind:
+    case SYS_sendto:
+    case SYS_recvfrom:
+    case SYS_sockpoll:
+    case SYS_netconf:
+    case SYS_listen:
+    case SYS_connect:
+    case SYS_connstat:
+    case SYS_accept:
+    case SYS_send:
+    case SYS_recv:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 void syscall_handler(isr_regs_t *regs) {
     /* Deliver a pending fatal signal before servicing the syscall the
      * caller actually asked for - this is the "next syscall entry"
@@ -1987,6 +2013,27 @@ void syscall_handler(isr_regs_t *regs) {
         regs->rax = (uint64_t)-1;
         return;
     }
+
+    /* M67 boundary 3 of 3: the net syscalls run under net_lock. See
+     * kernel/net/net.h for what it protects and why the bracket is here,
+     * at dispatch, rather than inside each of the thirteen handlers -
+     * one place with no early-return paths to get wrong, and it makes the
+     * whole compound operation atomic (socket_for_fd followed by tcp_send
+     * is two lookups that have to agree about the same socket).
+     *
+     * Every one of these is non-blocking by construction, so nothing
+     * under this bracket calls schedule() and the interrupts-off window
+     * is bounded by a buffer copy. SYS_settime is deliberately not in the
+     * set: it is the clock, reached from a network program but not itself
+     * touching a byte of kernel/net. */
+    if (syscall_touches_net(num)) {
+        net_lock_acquire();
+        regs->rax = (uint64_t)syscall_table[num](regs->rdi, regs->rsi, regs->rdx,
+                                                  regs->rcx, regs->r8, regs->r9);
+        net_lock_release();
+        return;
+    }
+
     regs->rax = (uint64_t)syscall_table[num](regs->rdi, regs->rsi, regs->rdx,
                                               regs->rcx, regs->r8, regs->r9);
 }

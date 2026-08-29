@@ -194,6 +194,10 @@ static const cap_grant_t CAP_GRANTS[] = {
      * looks like security and is not. */
     {"nettest",       CAP_APP_DEFAULT | CAP_NETWORK},
     {"tcptest",       CAP_APP_DEFAULT | CAP_NETWORK},
+    /* M67: needs the socket table to hammer, and nothing else beyond the
+     * default - the other three subsystems it races (fs, shm, pipes) are
+     * ungated, which is itself the manifest saying something true. */
+    {"racetest",      CAP_APP_DEFAULT | CAP_NETWORK},
     {"nettime",       CAP_APP_DEFAULT | CAP_NETWORK | CAP_SET_TIME},
     /* Claims the sound devices directly - the one program that does,
      * and the one that demonstrates the claim being refused. */

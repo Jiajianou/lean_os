@@ -63,6 +63,7 @@ void socket_set_raw_handler(uint16_t port, socket_raw_handler_t handler) {
 }
 
 struct socket *socket_alloc(int type) {
+    net_lock_acquire();
     for (int i = 0; i < MAX_SOCKETS; i++) {
         if (!sockets[i].in_use) {
             k_memset(&sockets[i], 0, sizeof(sockets[i]));
@@ -73,12 +74,15 @@ struct socket *socket_alloc(int type) {
                 sockets[i].tcb = tcp_open();
                 if (!sockets[i].tcb) {
                     sockets[i].in_use = 0;
+                    net_lock_release();
                     return (struct socket *)0;
                 }
             }
+            net_lock_release();
             return &sockets[i];
         }
     }
+    net_lock_release();
     return (struct socket *)0;
 }
 
@@ -90,14 +94,28 @@ struct tcpcb *socket_tcb(struct socket *s) {
     return (s && s->in_use && s->type == SOCK_STREAM) ? s->tcb : (struct tcpcb *)0;
 }
 
+/* M67: net_lock, not because a net syscall reaches these - those are
+ * already bracketed at dispatch - but because SYS_close, SYS_spawn's fd
+ * table copy and task_exit_with_code all do, and none of them is a net
+ * entry point. The lock is recursive precisely so that these three can
+ * take it unconditionally without anyone having to know whether they
+ * were called from inside a net syscall that already holds it. */
 void socket_ref(struct socket *s) {
-    if (s) {
-        s->refs++;
+    if (!s) {
+        return;
     }
+    net_lock_acquire();
+    s->refs++;
+    net_lock_release();
 }
 
 void socket_unref(struct socket *s) {
-    if (!s || !s->in_use) {
+    if (!s) {
+        return;
+    }
+    net_lock_acquire();
+    if (!s->in_use) {
+        net_lock_release();
         return;
     }
     if (--s->refs <= 0) {
@@ -119,6 +137,7 @@ void socket_unref(struct socket *s) {
         s->port = 0;
         s->in_use = 0;
     }
+    net_lock_release();
 }
 
 static int port_taken(uint16_t port) {

@@ -74,6 +74,12 @@ tcptest_elf_start:
     incbin "build/tcptest.elf"
 tcptest_elf_end:
 
+global racetest_elf_start
+global racetest_elf_end
+racetest_elf_start:
+    incbin "build/racetest.elf"
+racetest_elf_end:
+
 global caps_elf_start
 global caps_elf_end
 caps_elf_start:

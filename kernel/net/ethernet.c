@@ -29,6 +29,9 @@ void eth_receive(const uint8_t *frame, uint16_t len) {
     if (len < ETH_HEADER_LEN) {
         return;
     }
+    /* M67 boundary 1 of 3: inbound from the wire, in the NIC's interrupt
+     * handler. See net.h. */
+    net_lock_acquire();
     uint16_t ethertype = (uint16_t)((frame[12] << 8) | frame[13]);
     const uint8_t *payload = frame + ETH_HEADER_LEN;
     uint16_t payload_len = (uint16_t)(len - ETH_HEADER_LEN);
@@ -38,4 +41,5 @@ void eth_receive(const uint8_t *frame, uint16_t len) {
     } else if (ethertype == ETH_TYPE_IPV4) {
         ip_handle_packet(frame + ETH_ADDR_LEN, payload, payload_len);
     }
+    net_lock_release();
 }

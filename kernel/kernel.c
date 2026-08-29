@@ -64,6 +64,7 @@
     X(nettime)                       \
     X(nettest)                       \
     X(tcptest)                       \
+    X(racetest)                      \
     X(caps)                          \
     X(captest)                       \
     X(whetstone)                     \
@@ -6084,6 +6085,89 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts(" deliberately dropped segment(s) - self-test passed.\n\n");
     } else {
         klog_puts("[m66] no NIC on this machine - TCP is present but untested this boot.\n\n");
+    }
+
+    /* ---- M67 self-test: a kernel that can be interrupted ---------------
+     *
+     * The milestone flipped vector 0x80 from an interrupt gate to a trap
+     * gate, so interrupts now stay enabled for the whole of a syscall.
+     * That one bit removed this kernel's only mutual exclusion - IF=0,
+     * never written down, relied on by every syscall handler written
+     * since M8 - and the rest of M67 is the six locks that replace it.
+     *
+     * This is the test that would have noticed. Four processes, spawned
+     * without waiting so they are genuinely concurrent, each hammering
+     * the four subsystems that had shared mutable state and no lock:
+     * leanfs (fs_lock), the shm segment table (shm_lock), pipe ring
+     * buffers (pipe_lock) and the socket table (net_lock). Every check
+     * inside racetest.c is "read back the pattern only this process could
+     * have written", which is the only kind of assertion that can tell a
+     * race from a busy machine - see that file's header.
+     *
+     * Four rather than two: with two, an interleaving has to be unlucky
+     * twice to be visible, and on a machine with more than two cores two
+     * processes can run without ever contending at all.
+     *
+     * The resource comparison around it is the second half. A lock that
+     * is taken and not released on some error path does not corrupt
+     * anything - it hangs, which this test would catch by never
+     * finishing - but a *slot* leaked under contention (a shm segment
+     * whose failed create left `used` set, a socket that lost its
+     * refcount decrement) is silent, survives the test, and is exactly
+     * the class of bug M50 was written about. So the segment table and
+     * the frame count both have to come back to where they started.
+     */
+    {
+        int frames_before = (int)pmm_free_frame_count();
+
+        static const int RACERS = 4;
+        task_t *racers[4];
+        int spawned = 0;
+
+        size_t rbytes = 0;
+        uint8_t *rimage = read_program(PATH_BIN_DIR "racetest", &rbytes);
+        for (int i = 0; i < RACERS; i++) {
+            /* Spawned back to back with no wait between them - the whole
+             * point is that all four are runnable at once. process_spawn
+             * copies the image, so one read serves all four. */
+            racers[i] = process_spawn("racetest", rimage, rbytes, "");
+            if (racers[i]) {
+                spawned++;
+            }
+        }
+        kfree(rimage);
+
+        int all_ok = (spawned == RACERS);
+        if (!all_ok) {
+            klog_puts("[m67] could not spawn four concurrent racers\n");
+        }
+        for (int i = 0; i < RACERS; i++) {
+            if (!racers[i]) {
+                continue;
+            }
+            if (do_syscall(SYS_wait, (uint64_t)racers[i]->id, 0, 0) != 0) {
+                klog_puts("[m67] a racer reported corrupted state - a lock M67 added is "
+                           "missing, wrong, or not covering what it claims to\n");
+                all_ok = 0;
+            }
+        }
+
+        int frames_after = (int)pmm_free_frame_count();
+        if (frames_after < frames_before) {
+            klog_puts("[m67] frames leaked across the race - ");
+            klog_put_dec((uint32_t)(frames_before - frames_after));
+            klog_puts(" not returned\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M67 concurrency self-test: syscalls are preemptible and the locks do not hold");
+        }
+
+        klog_puts("[m67] a preemptible kernel: `int 0x80` is a trap gate, four concurrent "
+                   "processes hammered the filesystem, the shm table, pipe ring buffers and "
+                   "the socket table, and every one of them read back only its own bytes - "
+                   "self-test passed.\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

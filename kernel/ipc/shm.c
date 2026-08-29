@@ -4,6 +4,7 @@
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "lib/spinlock.h"
 
 #define PAGE_SIZE 4096ULL
 /* M41: 16 -> 32. One segment per window plus the compositor's own back
@@ -32,6 +33,30 @@ typedef struct {
 
 static shm_segment_t segments[MAX_SHM_SEGMENTS];
 
+/* ---- M67: shm_lock ---------------------------------------------------
+ *
+ * What it protects: the `segments` table above - the `used` flag that
+ * makes find_free_slot's answer meaningful, and the frame array behind
+ * each live entry.
+ *
+ * Against whom: two tasks calling SYS_shm_create at the same moment.
+ * Before M67 that could not happen, because IF was clear for the whole
+ * of `int 0x80`; find_free_slot could return a slot and the caller could
+ * fill it in with no possibility of anyone looking in between. With a
+ * trap gate, two callers can both see the same slot free and both claim
+ * it - and the loser's frames are then leaked and the winner's window is
+ * silently shared with a stranger.
+ *
+ * Interrupts off, same reasoning as fs_lock: shm_free_by_owner is on the
+ * task-exit path, and the task-exit path is reachable from a timer tick
+ * delivering SIGKILL. A lock a dying task can be interrupted while
+ * holding is a lock nobody ever unlocks.
+ *
+ * The pmm/vmm calls made while holding this take their own locks, and
+ * always in that order (shm -> pmm, shm -> vmm), never the reverse -
+ * neither pmm nor vmm has any reason to know shm exists. */
+static spinlock_t shm_lock;
+
 static int find_free_slot(void) {
     for (int i = 0; i < MAX_SHM_SEGMENTS; i++) {
         if (!segments[i].used) {
@@ -45,14 +70,23 @@ int shm_create(size_t size, int owner_task_id) {
     if (size == 0) {
         return -1;
     }
+    uint64_t flags = spin_lock_irqsave(&shm_lock);
     int id = find_free_slot();
     if (id < 0) {
+        spin_unlock_irqrestore(&shm_lock, flags);
         return -1;
     }
+    /* Claim the slot before dropping into the allocation loop below, so a
+     * second caller arriving mid-allocation cannot pick the same one.
+     * Everything else about the entry is filled in at the bottom; `used`
+     * alone is what find_free_slot consults. */
+    segments[id].used = 1;
 
     uint64_t page_count = ((uint64_t)size + PAGE_SIZE - 1) / PAGE_SIZE;
     uint64_t *frames = (uint64_t *)kmalloc(page_count * sizeof(uint64_t));
     if (!frames) {
+        segments[id].used = 0;
+        spin_unlock_irqrestore(&shm_lock, flags);
         return -1;
     }
 
@@ -71,21 +105,24 @@ int shm_create(size_t size, int owner_task_id) {
                 pmm_free_frame(frames[j]);
             }
             kfree(frames);
+            segments[id].used = 0;
+            spin_unlock_irqrestore(&shm_lock, flags);
             return -1;
         }
         k_memset((void *)phys, 0, PAGE_SIZE);
         frames[i] = phys;
     }
 
-    segments[id].used = 1;
     segments[id].owner_task_id = owner_task_id;
     segments[id].size = (uint64_t)size;
     segments[id].page_count = page_count;
     segments[id].frames = frames;
+    spin_unlock_irqrestore(&shm_lock, flags);
     return id;
 }
 
 void shm_free_by_owner(int owner_task_id) {
+    uint64_t flags = spin_lock_irqsave(&shm_lock);
     for (int i = 0; i < MAX_SHM_SEGMENTS; i++) {
         if (!segments[i].used || segments[i].owner_task_id != owner_task_id) {
             continue;
@@ -97,16 +134,20 @@ void shm_free_by_owner(int owner_task_id) {
         segments[i].used = 0;
         segments[i].frames = (uint64_t *)0;
     }
+    spin_unlock_irqrestore(&shm_lock, flags);
 }
 
 int shm_free(int id, int owner_task_id) {
+    uint64_t flags = spin_lock_irqsave(&shm_lock);
     if (id < 0 || id >= MAX_SHM_SEGMENTS || !segments[id].used) {
+        spin_unlock_irqrestore(&shm_lock, flags);
         return -1;
     }
     if (segments[id].owner_task_id != owner_task_id) {
         /* Not a permission model - this project has none - but the one
          * check that keeps "exactly one owner is responsible for
          * releasing it" true rather than aspirational. */
+        spin_unlock_irqrestore(&shm_lock, flags);
         return -1;
     }
     for (uint64_t p = 0; p < segments[id].page_count; p++) {
@@ -115,40 +156,52 @@ int shm_free(int id, int owner_task_id) {
     kfree(segments[id].frames);
     segments[id].used = 0;
     segments[id].frames = (uint64_t *)0;
+    spin_unlock_irqrestore(&shm_lock, flags);
     return 0;
 }
 
 int64_t shm_page_count(int id) {
-    if (id < 0 || id >= MAX_SHM_SEGMENTS || !segments[id].used) {
-        return -1;
+    uint64_t flags = spin_lock_irqsave(&shm_lock);
+    int64_t r = -1;
+    if (id >= 0 && id < MAX_SHM_SEGMENTS && segments[id].used) {
+        r = (int64_t)segments[id].page_count;
     }
-    return (int64_t)segments[id].page_count;
+    spin_unlock_irqrestore(&shm_lock, flags);
+    return r;
 }
 
 int shm_count_by_owner(int owner_task_id) {
+    uint64_t flags = spin_lock_irqsave(&shm_lock);
     int n = 0;
     for (int i = 0; i < MAX_SHM_SEGMENTS; i++) {
         if (segments[i].used && segments[i].owner_task_id == owner_task_id) {
             n++;
         }
     }
+    spin_unlock_irqrestore(&shm_lock, flags);
     return n;
 }
 
 int64_t shm_get_size(int id) {
-    if (id < 0 || id >= MAX_SHM_SEGMENTS || !segments[id].used) {
-        return -1;
+    uint64_t flags = spin_lock_irqsave(&shm_lock);
+    int64_t r = -1;
+    if (id >= 0 && id < MAX_SHM_SEGMENTS && segments[id].used) {
+        r = (int64_t)segments[id].size;
     }
-    return (int64_t)segments[id].size;
+    spin_unlock_irqrestore(&shm_lock, flags);
+    return r;
 }
 
 int shm_map_into(int id, uint64_t pml4_phys, uint64_t vaddr, uint64_t flags) {
+    uint64_t irqf = spin_lock_irqsave(&shm_lock);
     if (id < 0 || id >= MAX_SHM_SEGMENTS || !segments[id].used) {
+        spin_unlock_irqrestore(&shm_lock, irqf);
         return -1;
     }
     shm_segment_t *seg = &segments[id];
     for (uint64_t i = 0; i < seg->page_count; i++) {
         vmm_map_page_in(pml4_phys, vaddr + i * PAGE_SIZE, seg->frames[i], flags);
     }
+    spin_unlock_irqrestore(&shm_lock, irqf);
     return 0;
 }

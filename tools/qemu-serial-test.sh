@@ -205,6 +205,7 @@ REQUIRED_MARKERS=(
   "[m64] the network reached user space: a DHCP lease rather than a"
   "[m65] capabilities: a manifest the kernel applies rather than a launcher,"
   "[m66] TCP: a handshake, 16 KiB through a 4 KiB buffer arriving byte for"
+  "[m67] a preemptible kernel: \`int 0x80\` is a trap gate, four concurrent"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"
   "[smp] self-test passed."

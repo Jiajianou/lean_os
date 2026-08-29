@@ -80,6 +80,13 @@ void pipe_unref_write(pipe_t *p);
  * has open on it keeps working, just against an emptied buffer. */
 void pipe_reset(pipe_t *p);
 
+/* M67: how many bytes are buffered right now, read under pipe.c's own
+ * lock. SYS_pipe_poll used to reach into `p->count` directly from
+ * syscall.c, which was fine while a syscall could not be preempted and
+ * is exactly the kind of reach-through that stops being fine when it
+ * can. -1 for a NULL pipe. */
+int pipe_buffered(pipe_t *p);
+
 /* Blocks while the buffer is full, unless the read end has already
  * closed (returns -1 immediately, or however many bytes got written
  * before that happened). */

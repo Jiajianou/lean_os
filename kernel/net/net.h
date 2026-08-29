@@ -76,3 +76,41 @@ void net_set_config(uint32_t ip, uint32_t mask, uint32_t gateway, uint32_t dns);
  * for both the loopback shortcut on send and the accept check on
  * receive, so the two can never disagree about what "for us" means. */
 int net_is_local_ip(uint32_t ip);
+
+/* ---- M67: net_lock ---------------------------------------------------
+ *
+ * What it protects: the whole of kernel/net - the socket table, every
+ * TCB and its send/receive buffers, the ARP cache, the IP loopback queue
+ * and the RTL8139's own rx cursor. One lock for the subsystem rather
+ * than one per table, because a single inbound segment walks all of them
+ * in one go (eth -> ip -> tcp -> the socket's receive buffer) and
+ * anything finer would be four acquisitions in a fixed order pretending
+ * to be four independent things.
+ *
+ * Against whom: the NIC's interrupt handler, which has always been able
+ * to run at any instant, versus a syscall, which until M67 could not be
+ * interrupted at all. `int 0x80` with an interrupt gate meant SYS_recv
+ * could walk a socket's datagram queue with a hardware guarantee that
+ * rtl8139_irq would not be appending to it half-way through. A trap gate
+ * removes that guarantee, and this lock replaces it.
+ *
+ * Taken at exactly THREE places, all of them boundaries where control
+ * enters kernel/net from outside it:
+ *
+ *   1. eth_receive        - inbound from the wire, in IRQ context
+ *   2. tcp_tick           - the 100 ms retransmission clock, its own thread
+ *   3. the net syscalls   - dispatched under it in syscall_handler
+ *
+ * and NOWHERE inside. That is what keeps it a plain spinlock rather than
+ * a recursive one: M66's loopback drain re-enters the receive path from
+ * inside a send, so a lock taken per-function would deadlock on itself
+ * the first time a program talked to its own machine. The rule is
+ * "acquire on the way in, never below" - if a new entry point appears,
+ * it locks; if a new internal helper appears, it must not.
+ *
+ * Every net syscall is non-blocking by construction (SYS_connect returns
+ * once the SYN is away, SYS_recv returns 0 rather than waiting), so
+ * holding this with interrupts off for a whole syscall is bounded by a
+ * buffer copy - there is no path under it that calls schedule(). */
+void net_lock_acquire(void);
+void net_lock_release(void);

@@ -1012,6 +1012,10 @@ void tcp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uin
 /* ---- the clock --------------------------------------------------------- */
 
 void tcp_tick(void) {
+    /* M67 boundary 2 of 3: the retransmission clock's own thread. See
+     * net.h - without this the 100 ms tick walks every TCB while a
+     * syscall on another core is inside one of them. */
+    net_lock_acquire();
     tick_count++;
 
     for (int i = 0; i < TCP_MAX_TCBS; i++) {
@@ -1093,4 +1097,5 @@ void tcp_tick(void) {
             t->rtx_deadline = tick_count + t->rto;
         }
     }
+    net_lock_release();
 }

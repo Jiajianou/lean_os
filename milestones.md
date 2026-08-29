@@ -4502,3 +4502,499 @@ go-back-N retransmission is the right match for the receiver this has.
       harness giving up rather than a verdict about the desktop. The
       allowance now scales with the job count, and the script's header
       says to re-run a timed-out test alone before believing it
+
+---
+
+# Where this is, and what M67+ is for
+
+Sixty-six milestones answered one question over and over: *can this be
+built from scratch?* Bootloader, long mode, paging, SMP, a filesystem
+with directories, a compositor, fifteen applications, a TCP stack with
+Reno congestion control, a capability model, and somebody else's program
+running in a window. The answer is yes, repeatedly and in writing.
+
+**The next arc answers a different question: would you leave this
+machine switched on?** That is not the same question, and the gap
+between them is not features. It is three things this project has never
+had to face, each one invisible for exactly the reason M64's `panic()`
+was invisible for thirty-six milestones — nothing has yet been in a
+position to notice.
+
+**One: nothing in this system ever waits.** `task_state_t` has four
+values and none of them is blocked. A shell parked at a prompt is a
+`while` loop in `sys_read` calling `schedule()` forever
+([kernel/arch/x86_64/syscall.c:280-292](kernel/arch/x86_64/syscall.c#L280-L292)).
+The compositor's main loop ends in `sys_yield()`
+([user_space/bin/compositor.c:4408](user_space/bin/compositor.c#L4408)),
+and so does every one of the eleven programs that link `wmclient`. An
+idle desktop on this OS runs every core flat out, forever. In QEMU that
+is a warm laptop and nobody notices. It is also the reason the 50 ms
+quantum is a latency floor rather than a ceiling, and the reason there
+is no honest thing to say about power.
+
+**Two: the machine cannot tell you what happened.** There is no
+`SYS_klog`. Every capability denial M65 was careful to log, every driver
+message, every spawn failure, and the panic handler's last words all go
+to a serial port and to a framebuffer console that the compositor paints
+over the moment the desktop starts. On any machine without a serial
+cable, this OS's entire diagnostic surface is a black screen. M65 wrote
+that "a rule nobody can see is a rule nobody can check" and then shipped
+its denials into a log user space cannot read.
+
+**Three: nothing on this disk is crash-safe.** `vfs_flush` is called by
+exactly one caller, the orderly shutdown path. There is no `fsync`, no
+write ordering, no generation count, nothing that checks a filesystem on
+mount. `SYS_writefile` truncates and then writes, so a power cut in the
+middle of saving a document loses the document *and* the version it was
+replacing. `SYS_rename` refuses an existing destination, which means the
+one atomic-replace trick every editor uses is not available. This is
+fine while the only files are test fixtures. M60 called the editor and
+the file manager "the two apps people live in", and the moment that is
+true, this is the thing that will cost someone their work.
+
+M67–M74 close those three, in that order of foundation, and then spend
+what they unlock. Nothing below needs a physical machine.
+
+## The arcs
+
+| | Milestones | The claim it earns |
+|---|---|---|
+| **Foundation** | M67–M69 | The machine rests when idle and stays responsive when busy |
+| **Trust** | M70–M71 | It tells you what happened, and it does not lose your work |
+| **Reach** | M72–M74 | It can be automated, it can reach a name, and it remembers |
+
+---
+
+## M67 — A kernel that can be interrupted ✅
+
+M64 found this, named it, and deliberately refused to fix it inside a
+networking milestone: *"The real fix is a trap gate on vector 0x80 so
+interrupts stay enabled through a syscall, which is what every
+production kernel does — and which is deliberately not being done inside
+a networking milestone, because it makes every syscall in the system
+preemptible at once."* That sentence is a milestone description. This is
+it.
+
+[kernel/arch/x86_64/idt.c:62](kernel/arch/x86_64/idt.c#L62) installs
+`SYSCALL_VECTOR` as `IDT_GATE_INTERRUPT_RING3` (0xEE), so `IF` is clear
+from the `int 0x80` until the `iretq`. That has been load-bearing in a
+way nothing wrote down: **`IF=0` is currently the kernel's only mutual
+exclusion.** Every syscall handler has been written, for sixty-six
+milestones, against an implicit guarantee that no interrupt and no other
+task can observe it half-done. This milestone removes that guarantee,
+which is why it is a milestone on its own and not a one-line diff.
+
+- [x] Change vector 0x80 to a **trap gate** (0xEF), so `IF` survives into
+      the handler. One line, and then the entire milestone is the audit
+      it forces
+- [x] **Audit every syscall handler for re-entrancy**, one at a time,
+      against the question "what breaks if a timer tick lands here and
+      another task enters this same function". The known shapes:
+      - static/global scratch buffers shared across callers (the TCP
+        loopback queue in M66 already found one of these the hard way)
+      - the fd table, mutated without a lock while another task on
+        another core may be reading it
+      - `sched_*` bookkeeping reached from both the tick and a syscall
+      - the shm segment table, the socket table, the pipe ring buffers
+      - `leanfs`/`vfs` state, which is the one where a race costs a file
+        rather than a frame
+- [x] Take a real lock where the audit finds one is needed, and **say in
+      the comment what it protects and against whom** — a lock with no
+      stated invariant is the next person's mystery
+- [x] The bounded waits M64 had to make `IF`-conditional
+      (`resolve_neighbor`) can stop being conditional and go back to
+      being ordinary waits
+- [x] SMP is not new here but it stops being theoretical: the audit must
+      assume two cores, because M-something-ago it already was two cores
+      and only `IF=0` was hiding it on the syscall path
+
+**How we'll know.** A new serial self-test that runs several CPU-bound
+tasks alongside a syscall-heavy one across cores and asserts no
+corruption — plus the existing 50 boot self-tests and 44 interactive
+tests, both of which are now testing something they were not testing
+before, because every one of them was previously running against a
+kernel with a global implicit lock.
+
+**Explicitly not here:** `syscall`/`sysret` instead of `int 0x80`. That
+is a performance change, and this project has never measured syscall
+cost. Changing the entry mechanism and the interrupt discipline in the
+same milestone would leave neither one bisectable.
+
+### Progress notes
+
+*The one-line half took one line, and the audit it forces found that most
+of the work had already been done - by SMP, years of milestones ago, for
+a different reason.* `pmm`, `vmm`, `heap`, `klog` and the scheduler
+already had locks, because a second core had already forced the question
+for the state those five own. What SMP never forced was the state only a
+*syscall* touches, because a syscall could not be preempted and two cores
+rarely land in the same handler at the same instant. So the six locks
+this milestone adds - `fs_lock`, `pipe_lock`, `shm_lock`,
+`openfile_lock`, `clipboard_lock`, `net_lock` - are precisely the
+subsystems that are reached from ring 3 and nowhere else. **The boundary
+that had no lock was exactly the boundary that had a hardware one.**
+
+*`net_lock` is recursive and every other lock here is not, and the
+difference is a real finding rather than a preference.* The rule for the
+other five is "one subsystem, one lock, taken at its own entry points".
+That does not work for `kernel/net`, because M66's loopback drain
+re-enters the receive path from inside a send - so a lock taken
+per-function deadlocks on itself the first time a program talks to its
+own machine. The alternative to recursion was to prove that no path ever
+nests, which is a proof that has to be redone every time anyone adds a
+caller. Worse, the socket table is *also* reached from three places that
+are not net entry points at all - `SYS_close`, `SYS_spawn`'s fd-table
+copy, and `task_exit_with_code` - and none of them can know whether it
+was called from inside a net syscall that already holds the lock. Owner
+tracked by CPU rather than by task, which is only sound because the lock
+is always held with interrupts off.
+
+*Every new lock disables interrupts while held, and that is a deliberate
+cost with a named successor.* The reason is M56's, which was written
+about `vmm_lock` and turns out to be general: **a fatal signal is
+delivered from the timer tick, so a task preempted while holding a lock
+can be torn down by `task_exit_with_code` and never release it.** That is
+a permanent deadlock, not a slow spin. Interrupts off for the duration is
+the smallest thing that makes it impossible. It is also the wrong answer
+for `fs_lock` specifically, where "the duration" is a run of synchronous
+ATA PIO transfers - and the right answer is a lock a task can *sleep* on,
+which is M68's, because there is no blocked state to sleep in until then.
+
+*The self-test is four processes, not two, and every assertion is a
+pattern read back rather than a call that returned.* The temptation with
+a race is to write a timing loop and call "ran for N seconds without
+crashing" a pass. That test is worth nothing: it fails intermittently on
+a broken kernel and passes intermittently on one, so it can never be
+believed in either direction. `racetest.c` writes a byte derived from its
+own pid, the round number and the offset, and demands all three back -
+so a process that read another's bytes has a deterministic failure with
+a name. Four racers rather than two because with two an interleaving has
+to be unlucky twice to be visible, and on a machine with more than two
+cores two processes can run without ever contending at all.
+
+*The thing that did not break is worth recording too.* All 55 pre-existing
+boot markers passed on the first run after the gate flipped. The
+prediction going in was that the resource-counting self-tests - which
+compare a frame count before and after and assume nothing else is running
+- would start failing intermittently now that `kernel_main` itself is
+preemptible. They did not, and the reason is that those tests spawn a
+child and `SYS_wait` for it, so the only other runnable task is the one
+they are measuring. A self-test that had merely *slept* for a fixed
+interval instead would have been the fragile one.
+
+
+## M68 — Wait queues, and the end of the busy loop [ ]
+
+The foundational milestone of this arc, and the one everything after it
+gets cheaper because of. It needs M67 first: blocking correctly means
+being confident about what a task can observe half-way through.
+
+- [ ] **`TASK_BLOCKED`** in `task_state_t`, and a scheduler that does not
+      consider a blocked task runnable. Four states became five; the
+      fifth is the one the other four have been faking since M7
+- [ ] **A wait queue primitive** — a list a task parks on and something
+      else wakes. One mechanism, used by everything, rather than a
+      bespoke spin per subsystem
+- [ ] Convert every spin the kernel currently calls waiting:
+      `sys_read` on stdin, `SYS_wait`, pipe reads on an empty pipe,
+      `SYS_recv`/`SYS_recvfrom` on an empty socket, and the TCP
+      connect/accept paths
+- [ ] **An idle task that `hlt`s.** The `cpu-idle` identity already
+      exists per-core ([kernel/sched/sched.c:182](kernel/sched/sched.c#L182));
+      it just never gets to sleep, because there is always something
+      runnable. This is the payoff line: on an idle desktop, every core
+      halts until an interrupt arrives
+- [ ] **A blocking multi-wait for user space** — the thing the GUI stack
+      actually needs. Every `wmclient` program and the compositor itself
+      polls *n* pipes and then yields; what they want is "sleep until any
+      of these has something, or until this deadline". One syscall
+      (`SYS_waitfds` or similar) over fds and a timeout, replacing the
+      `sys_yield()` at the bottom of eleven main loops
+- [ ] Keep `SYS_yield` and the non-blocking `*_poll` calls. They are the
+      right primitive for a compositor mid-frame, and removing them to
+      prove a point would be a regression dressed as cleanup
+
+**How we'll know.** An idle-CPU self-test: boot to the desktop, touch
+nothing for five seconds, and assert accumulated idle time is above a
+threshold — a number that is currently zero on every core, and which no
+amount of reading the code would have told you. The interactive suite
+must pass unchanged: a desktop that sleeps correctly is indistinguishable
+from one that spins, right up until you measure it or touch the case.
+
+**Why this before anything else in the arc.** M61 built a frame clock so
+the compositor could meet a deadline. It cannot meaningfully meet one
+while every other process on the machine is permanently runnable and
+round-robin gives each of them 50 ms. M69 is not possible without this.
+
+## M69 — Latency you can feel [ ]
+
+With M68 done, most of the machine is asleep most of the time, and the
+scheduler's job changes from "share the CPU fairly among things that all
+want it forever" to "get the right task running fast when something
+happens". That is a different algorithm and a different number to
+optimise.
+
+The number this milestone owns: **input-to-photon** — the wall-clock
+milliseconds from a keypress or click landing in the driver to the
+changed pixel reaching the framebuffer. Nobody has ever measured it here.
+The current floor is structural and bad: a 50 ms quantum
+([kernel/sched/sched.c:23](kernel/sched/sched.c#L23)) means the
+compositor may not run for 50 ms after the event that concerns it, then
+the client may not run for 50 ms after that, then the compositor again.
+
+- [ ] **Measure it first, before changing anything.** A timestamp
+      injected at the driver and read at the compositor's blit, reported
+      in the serial log. A milestone that tunes a number it never
+      measured is a milestone that cannot claim anything
+- [ ] **A shorter quantum**, and honest about the trade: more context
+      switches for lower latency, which is the right trade for a desktop
+      and the wrong one for a batch machine, and this is a desktop
+- [ ] **Two priority classes, not a full nice(2).** Interactive and
+      batch, with a task that just woke from a wait queue getting the
+      interactive class and a task that used its whole quantum decaying
+      toward batch. This is the classic heuristic, it is about forty
+      lines, and it is the entire reason a Whetstone run does not make
+      the desktop stutter
+- [ ] **Anti-starvation, stated as an invariant**: a batch task always
+      makes progress, because a "responsive" desktop that hangs a
+      compute job is a worse machine, not a better one
+- [ ] Make the priority visible in the **task manager**, since M45 built
+      the place for it and a scheduling class nobody can see is the same
+      unfalsifiable claim M65 warned about
+
+**How we'll know.** Input-to-photon under three conditions, asserted with
+budgets rather than eyeballed: an idle desktop, a desktop with a
+CPU-bound program running on every core, and a desktop with a large file
+copy in flight. The second is the one that matters — it is the case that
+is visibly broken today and cannot be fixed by making the compositor
+faster.
+
+## M70 — A machine that says what happened [ ]
+
+Cheap, and it unblocks the debugging of everything after it. This is the
+milestone that stops the desktop being a machine you can only diagnose
+with a serial cable attached.
+
+- [ ] **`SYS_klog`** — read the kernel ring buffer from user space.
+      Read-only, with a cursor so a reader can follow rather than
+      re-read. Gated on a capability (`CAP_SYSLOG`), because the log
+      contains driver addresses and other processes' failures, and M65's
+      whole argument is that the gate goes where the boundary really is
+- [ ] **A Console app** in `user_space/bin` — the log, live, filterable,
+      with the capability denials M65 already emits shown as what they
+      are. This is where M65's *"a rule nobody can see is a rule nobody
+      can check"* finally becomes true rather than aspirational
+- [ ] **A panic that paints.** Currently a panic on a machine with no
+      serial port is a black screen — named in the stretch-goal list
+      above as a hardware prerequisite, but it is not hardware work and
+      it does not need hardware to test. Panic takes back the
+      framebuffer, paints the message, the vector, the faulting address
+      and a stack trace, and does it without allocating or taking any
+      lock, because the reason it is running is that something is already
+      wrong
+- [ ] **Symbolised stack traces** — a symbol table emitted at link time
+      and embedded in `kernel.bin`, so a panic names functions rather
+      than addresses. The panic screen is the one UI in this project a
+      person reads under stress, and hexadecimal is not a message
+- [ ] **A crash record that survives the reboot.** Write the panic to
+      disk before halting, and have the desktop offer it on next boot.
+      The bug you cannot reproduce is the one worth keeping
+
+**How we'll know.** A self-test that triggers a deliberate kernel fault
+in a QEMU guest with *no serial device attached*, screenshots the
+framebuffer, and asserts the panic text is on it — because the entire
+point is the case where the log has nowhere else to go. And a second one
+that reboots afterward and finds the crash record.
+
+## M71 — Files worth trusting [ ]
+
+The trust milestone, and the one with the clearest failure story: today,
+a power cut while `text_editor` saves loses both the new document and the
+old one, because `SYS_writefile` truncates before it writes. Everything
+else in this list follows from taking that seriously.
+
+- [ ] **`SYS_rename` learns to replace.** Today it refuses an existing
+      destination, and M56 argued for that: *"silently replacing a file
+      is a way to lose one, and the caller can ask."* That argument was
+      right for a file manager and is exactly wrong for a save: the
+      write-temp-then-rename dance is the *only* way to replace a file
+      without a window in which neither version exists. An explicit
+      replacing variant, so the default keeps M56's safety and the save
+      path gets its atomicity
+- [ ] **`SYS_fsync`** and a `vfs` that means it. There is currently no
+      way for a program to ask that its bytes be on the disk rather than
+      in a cache, and `vfs_flush` has exactly one caller — the shutdown
+      path. A save that returns success before the data is durable is a
+      save that lies
+- [ ] **Write ordering in leanfs**: data blocks before the inode that
+      points at them, inode before the directory entry that names it.
+      Not a journal — a journal is a much larger milestone and this
+      filesystem has one writer — but the ordering that makes a crash
+      leave a stale file rather than a file pointing at somebody else's
+      blocks
+- [ ] **A generation count in the superblock, and a check on mount.**
+      A filesystem that was not cleanly unmounted gets scanned: bitmap
+      against inodes, inodes against directory entries, orphaned blocks
+      reclaimed. It reports what it found in the log, which M70 has just
+      made visible
+- [ ] **Disk full, handled everywhere.** Audit every write path for what
+      happens at capacity. The current answer is unknown, which is
+      another way of saying it is probably a truncated file and a
+      success return
+- [ ] **The editor stops losing work**: save through the atomic path,
+      warn on close with unsaved changes, and keep a recovery copy so a
+      crash costs the last few seconds rather than the session
+
+**How we'll know.** The test this milestone exists for: **kill the QEMU
+process mid-write, reboot the same disk image, and assert the file is
+either entirely the old version or entirely the new one.** Run it in a
+loop at randomised offsets. Nothing else in this file has ever tested a
+failure the machine did not choose, and that is precisely the class of
+failure a filesystem exists to survive.
+
+## M72 — One shell, and it can be scripted [ ]
+
+There are two shells in this repo and neither is a shell.
+[user_space/shell/shell.c](user_space/shell/shell.c) is 109 lines, takes
+one argument, and has no quoting. The one the README describes —
+arguments, quoting, `>`, `>>`, a pipe, `cd`, tab completion — is roughly
+four hundred lines living *inside*
+[user_space/bin/gui_terminal.c](user_space/bin/gui_terminal.c), which
+means it is not a program, cannot be spawned, cannot read a file, and
+cannot be the thing that runs when something else needs a command run.
+
+- [ ] **Extract the interpreter into `/bin/sh`**, a real program. The
+      GUI terminal becomes what a terminal actually is — a window that
+      draws a grid of characters and owns a pty-shaped pipe pair — and
+      spawns the shell like anything else. The serial shell becomes the
+      same binary on a different fd, which deletes the second shell
+      rather than improving it
+- [ ] **Scripts.** A file of commands, run top to bottom. `#!` honoured
+      by the spawn path so a script is a program as far as anything that
+      launches one is concerned — the launcher, the file manager, the
+      desktop icon
+- [ ] **Exit status that composes**: `$?`, `&&`, `||`, and a shell that
+      returns its last command's status, because a script whose failure
+      is invisible is worse than no script
+- [ ] **Variables and `$VAR` expansion**, assignment, and an environment
+      inherited across spawn — which this kernel does not have at all
+      today, and which is the smaller half of why `argv`-only programs
+      are awkward to configure
+- [ ] **Globbing** (`*`, `?`) in the shell, not the kernel, expanded
+      against `SYS_listdir` before spawn — the Unix rule, and the reason
+      every program on this machine gets it for free
+- [ ] Deliberately **not** job control, `&`, subshells, or functions.
+      Each is a real feature with a real cost and none of them is what a
+      one-person desktop is missing
+
+**How we'll know.** The boot self-test fixtures that are currently C
+programs get rewritten as scripts and still pass. That is the honest
+test of a shell: not that it runs a command, but that something which
+used to need a compiler now does not.
+
+## M73 — Names, not numbers [ ]
+
+M64 shipped `SYS_netconf` returning a DNS server address and wrote,
+carefully, that it prints *"the DNS server it was handed instead of
+pretending to use it"*. M66 shipped a TCP that would work against
+somebody else's stack. What is missing between those two and anything a
+person would do is a resolver, and after that, one program that proves
+the whole column.
+
+- [ ] **A DNS resolver in user space**, in `user_space/lib` — following
+      M64's own precedent and its stated reason: SNTP went to user space
+      because *"a kernel parsing replies off the network is a far larger
+      trusted surface than a sixty-line program needs"*, and a DNS
+      response parser is a strictly nastier piece of untrusted input than
+      an SNTP reply. A queries, CNAME following with a hop limit, a small
+      cache honouring TTL, and the message-compression pointer loop that
+      every from-scratch resolver gets wrong on the first try
+- [ ] **`nslookup`**, for the same reason `netconf` and `caps` exist:
+      the thing that makes a subsystem checkable is a program that prints
+      what it did
+- [ ] **An HTTP/1.1 client** — `fetch URL`. `Host:` header, status line,
+      headers, `Content-Length` and chunked bodies, a redirect limit, and
+      a hard cap on response size. Deliberately no TLS: a from-scratch
+      TLS 1.3 is a project, not a bullet, and an `https://` that quietly
+      wasn't would be a lie of exactly the kind this file keeps refusing
+      to tell
+- [ ] **The first inbound path.** `fetch` writing to a file is the first
+      time in sixty-odd milestones that something arrives on this machine
+      without being compiled into its disk image. That is what makes M63
+      ("somebody else's program") and M65 (a capability model, built
+      because a downloaded program is a real category) stop being
+      hypothetical about each other
+- [ ] `CAP_NET` already gates the socket, so a downloaded thing does not
+      get a network by default. Check that this is actually true once
+      there is a downloaded thing
+
+**How we'll know.** A self-test resolving a name against a DNS server
+QEMU's SLIRP provides and fetching a file from a server run on the host —
+asserting the bytes match, and asserting the failure paths, which is
+where M64 got its ratio right: a name that does not exist, a server that
+refuses, a redirect loop, a body that exceeds the cap, and a truncated
+response.
+
+## M74 — The session that remembers [ ]
+
+The last one, and the only one on this list that is purely about how the
+machine feels. It is last because it depends on M71 being trustworthy —
+a session file is just another file that must survive a bad shutdown —
+and because it is the payoff rather than the foundation.
+
+- [ ] **Windows come back.** Position, size, workspace and z-order,
+      restored on next boot for the apps that were open. M47 built
+      persistent settings and M53 built somewhere to put them; this is
+      the same mechanism pointed at the compositor's own state
+- [ ] **Unsaved work blocks a shutdown.** M47's shutdown SIGTERMs
+      everything and gives it a second. An editor with unsaved changes
+      should be able to say "wait, ask the person" — which means the
+      shutdown path needs one veto with a timeout, not a longer grace
+      period
+- [ ] **Recently opened**, in the launcher and the file manager. The
+      single highest-value-per-line feature on any desktop, and this one
+      has never had it
+- [ ] **The desktop survives a settings mistake.** M58's resolution
+      countdown is exactly the right pattern; apply it to anything else
+      that can make the machine unusable from inside the Settings pane
+- [ ] **A first-boot state that is not empty.** A fresh disk currently
+      boots to a desktop with seeded icons and nothing else. A README on
+      the desktop, the sample files the file manager is worth opening —
+      the difference between a demo and a machine somebody just got
+
+**How we'll know.** An interactive test that opens three windows across
+two workspaces, moves them, restarts the machine, and asserts the pixels
+come back where they were — the same pixels-not-protocol discipline the
+virtual-desktop test used, and for the same reason: a compositor that
+*says* it restored a window and did not paint it has failed.
+
+---
+
+## Deliberately not next, and why
+
+- **A GPU driver, or real mode-setting.** Already argued in the
+  stretch-goal list: it is a driver per vendor, and it is not a thing
+  this project will do. M58's Display pane showing only the firmware's
+  mode on real hardware is the honest outcome.
+- **A browser.** Everyone's instinct after M73, and it is a decade of
+  work — HTML, CSS, a layout engine, a JS runtime and TLS. `fetch` is
+  the right size of the same idea.
+- **Multi-user, logins, uids.** M65 argued this exactly right: there are
+  no users here, and inventing one would be a larger lie than the one it
+  fixed. It becomes real if and when two people share a machine, and not
+  before.
+- **A journalling filesystem.** M71 buys most of the safety with write
+  ordering and a mount check. A journal is worth it when there are
+  multiple writers or when a full scan gets slow, and neither is true of
+  an 8 MiB-file filesystem on a 36 MiB image.
+- **Self-hosting (a compiler on the machine).** The romantic end state,
+  and genuinely out of reach — but M72 moves the line: after it, some of
+  what needed a cross-compiler needs a script instead.
+- **`syscall`/`sysret`, window scaling, SACK, Nagle.** Performance work
+  on paths whose performance nobody has measured. M69 establishes that
+  measuring first is how this project decides; these come back when a
+  measurement asks for them.
+- **The USB boot** (M28's one open box). Unchanged and still open — it
+  needs hands. M70's painting panic and M71's mount check both make the
+  day it happens go better, which is a nice side effect and not a reason
+  to reorder anything.
