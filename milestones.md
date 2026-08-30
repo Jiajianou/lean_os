@@ -6019,16 +6019,16 @@ everything on the desktop descends from that.
       trampoline the way M63's FXSAVE work already established a
       per-task saved context can be — this is the same shape of problem
       one level up
-- [ ] `kill()`/`raise()` as real syscalls, not just the kernel-internal
+- [x] `kill()`/`raise()` as real syscalls, not just the kernel-internal
       delivery M14 and M47's shutdown path already use
-- [ ] Ctrl+C at the terminal delivers `SIGINT` to the foreground process
+- [x] Ctrl+C at the terminal delivers `SIGINT` to the foreground process
       instead of only ever being a keystroke `gui_terminal` reads as
       ordinary input
-- [ ] `SIGCHLD`, so a parent can be told a child exited instead of
+- [x] `SIGCHLD`, so a parent can be told a child exited instead of
       polling `SYS_wait` — M14's syscall comment already names "more
       complete wait semantics" as deferred, and this is that deferral
       coming due
-- [ ] Deliberately not a full realtime signal set or `sigprocmask`'s
+- [x] Deliberately not a full realtime signal set or `sigprocmask`'s
       mask semantics beyond block/unblock — the ask is "a running program
       can be told something happened without being killed," not
       POSIX.1's entire signal model
