@@ -194,7 +194,39 @@ typedef struct {
     };
 } fd_slot_t;
 
-/* ---- M69: why there are no scheduling priorities here ------------------
+/* ---- M69: why there are still no scheduling priorities, twice over -----
+ *
+ * Tried again after M68 gave tasks a real blocked state, on the theory
+ * that "this task was BLOCKED and something woke it" is a signal a
+ * spinning task cannot fake - which is true, and was still not enough.
+ * It broke the M30 window-chrome self-test on the first run.
+ *
+ * The inversion came back by the opposite route. The wake-based signal
+ * stops a *spinning client* from claiming to be interactive; it does
+ * nothing about the compositor, which also never blocks - it busy-polls
+ * its request pipes and ends its loop in SYS_yield - and therefore burns
+ * whole slices and gets **demoted**. A client that blocks on a pipe then
+ * outranks the compositor it is waiting for, which is exactly the shape
+ * that wedged the first attempt.
+ *
+ * So the conclusion is sharper than "the signal was wrong", and it is the
+ * same one both attempts reached from different directions:
+ *
+ *   **The compositor is the one process on this machine that must never
+ *   be classified as batch, and it is the one process that never blocks.
+ *   No behavioural classifier can work until it does.**
+ *
+ * That is not a scheduler change. It is converting the compositor's main
+ * loop - and every wmclient program's - from a poll-and-yield loop to
+ * SYS_waitfds, which changes the latency of every message on the WM
+ * protocol and belongs with the terminal/pty work in M72's remaining
+ * half. Priorities become possible the moment that lands, and not
+ * before. The measurement to judge them by already exists (the [m69]
+ * input-to-photon self-test), which is the part that was missing the
+ * first time.
+ */
+
+/* ---- M69 (first attempt): why there were no scheduling priorities -----
  *
  * This milestone set out to add two classes - interactive and batch,
  * separated by the classic heuristic that a task which gives the CPU up

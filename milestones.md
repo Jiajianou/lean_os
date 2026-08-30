@@ -4913,6 +4913,33 @@ copy in flight. The second is the one that matters — it is the case that
 is visibly broken today and cannot be fixed by making the compositor
 faster.
 
+### Second attempt at priorities, after M68 — and the sharper conclusion
+
+Retried once M68 gave tasks a real blocked state, on the theory that
+**"this task was BLOCKED and something woke it"** is a signal a spinning
+task cannot fake. That is true, and it was still not enough: it broke the
+M30 window-chrome self-test on the first run.
+
+The inversion came back by the *opposite* route. The wake-based signal
+stops a spinning client from claiming to be interactive. It does nothing
+about the **compositor**, which also never blocks - it busy-polls its
+request pipes and ends its loop in `SYS_yield` - so it burns whole slices
+and gets **demoted**. A client that blocks on a pipe then outranks the
+compositor it is waiting for, which is exactly the shape that wedged the
+first attempt.
+
+So the conclusion is sharper than "the signal was wrong", and both
+attempts reached it from opposite directions:
+
+> **The compositor is the one process on this machine that must never be
+> classified as batch, and it is the one process that never blocks. No
+> behavioural classifier can work until it does.**
+
+That is not a scheduler change. It is converting the compositor's main
+loop - and every wmclient program's - from poll-and-yield to
+`SYS_waitfds`. Priorities become possible the moment that lands and not
+before, and the measurement to judge them by now exists.
+
 ### Progress notes
 
 **The number, measured for the first time:**
