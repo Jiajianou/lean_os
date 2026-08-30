@@ -2216,11 +2216,18 @@ def test_display_resolution_changes_and_persists(m):
 
     sx, sy = app_origin(FIRST_APP_IDX, SETTINGS_H)
     m.click(*mode_btn_center(sx, sy, SMALL_MODE_INDEX))
-    shot = wait_for(m, lambda s: (s.width, s.height) == SMALL_MODE,
-                    "clicking a resolution did not change the display size")
-    check(_bar_spans(shot),
-          "the taskbar does not span the new %dx%d display - its buffer was not reallocated"
-          % SMALL_MODE)
+    wait_for(m, lambda s: (s.width, s.height) == SMALL_MODE,
+             "clicking a resolution did not change the display size")
+    # Waited for rather than checked on the first shot at the new size.
+    # The framebuffer changes size the instant SYS_display_set_mode
+    # returns; the taskbar re-spans one round trip later, when its client
+    # has been handed a new buffer and redrawn into it. Reading the very
+    # first shot at the new geometry was asserting that those two happen
+    # in the same frame, which nothing promises and which only held
+    # because the round trip usually beat the screenshot.
+    wait_for(m, _bar_spans,
+             "the taskbar does not span the new %dx%d display - its buffer was not reallocated"
+             % SMALL_MODE, timeout=20.0)
 
     # The Settings window was clamped back on screen by the change (a
     # 632-tall window does not fit under a 600-row display), so the Keep

@@ -5801,6 +5801,55 @@ machine and reopen Settings to read its switches back; Settings now comes
 back by itself, so reopening it would put a second window on top of the
 first. It reads the restored one, which is a better test than it was.
 
+**What turning it on actually cost, and what it found.** The feature
+itself went in cleanly. Making the interactive suite green again took
+four more rounds, and three of the four were bugs that had nothing to do
+with a session - which is the argument for the suite existing, made
+again.
+
+*A handshake race fifty milestones old.* Every reboot test began failing
+on its SECOND boot, panicking in the `[m20]` self-test with "wm_demo
+still running past the budget". The chain took six instrumented runs to
+walk: the scheduler dump said wm_demo was blocked on a pipe and the
+compositor was alive and polling; a probe of both rendezvous pipes said
+neither held anything; and a log line in `accept_pending_window` said the
+compositor had never seen a create request at all.
+
+The cause: a compositor *clears* the rendezvous pipes when it starts
+(M55, and rightly - a dead compositor's leftovers are not the new one's
+business). `wmclient.c`'s `connect_common` has had a retry for exactly
+that since M55, with a comment saying so. `wm_demo` is the one client in
+this project that hand-rolls the handshake instead of using wmclient -
+deliberately, so the raw protocol is exercised by something - and
+hand-rolling it meant hand-rolling the missing retry too. It was
+invisible for fifty milestones because on a first boot the compositor
+always won the race; it appeared the moment a second boot skipped the
+"seeding disk" step and moved the timing by a few seconds.
+
+*A self-test that ate the thing it was testing.* The `[m74]` self-test
+writes its own `session.conf` fixture and deletes it afterwards, which is
+correct for a fixture and catastrophic for the file a person's desktop
+wrote before the machine was switched off. Every boot began by forgetting
+what was open - and the self-test passed throughout, because from inside
+it everything worked. `selftest_settings_install_defaults` has had to
+preserve `settings.conf` for the same reason since M47; this now does the
+same for `session.conf`.
+
+*Two tests were asserting things a desktop that remembers is no longer
+allowed to assume.* `boot()` checks that (500, 500) is bare wallpaper,
+which was true of every desktop this suite had ever seen and is not true
+of one with a restored window on it. And the new test compared a
+*titlebar* pixel across the reboot - a colour that depends on which
+window has focus, which is precisely the thing this milestone
+deliberately does not restore. Both now grade window *content*, which is
+a fact about the window rather than about the stack it is in.
+
+*And one stale number.* `behaviour_settings_persist` allowed 120 seconds
+for a restart on a machine that takes 146 to boot - a deadline a healthy
+machine could not meet, which had simply never been run against a boot
+this long. The boot prints its own time now, so the replacement is
+measured rather than guessed.
+
 
 
 ## The next arc: Unix-shaped enough to run somebody else's software

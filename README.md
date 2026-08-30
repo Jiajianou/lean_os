@@ -75,7 +75,7 @@ EFI app), `mtools` and `qemu-system-x86_64`. See
 Two harnesses, and neither subsumes the other. Run both.
 
 ```sh
-./tools/qemu-serial-test.sh  # boots headless, grades the serial log: 70 boot markers
+./tools/qemu-serial-test.sh  # boots headless, grades the serial log: 69 boot markers
 ./tools/qemu-input-test.sh   # drives real clicks and keys, grades real pixels: 45 tests
 ```
 
