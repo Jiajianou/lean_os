@@ -5908,6 +5908,13 @@ errors ask for" and M63's "deliberately no struct tm... a program that
 needs them will say so at link time" were both written as deferrals and
 both were collected by the same program, milestones apart.
 
+*How the arc was verified.* 69 of 69 boot markers, which is the 63 this
+arc started with plus one per milestone including M74's; and 45 of 45
+interactive tests, one of which needed re-running on its own after a boot
+timeout under three concurrent guests - which is what the input harness's
+own header says to do before believing a timeout, and which was right
+here: it passes in 157 seconds alone.
+
 *Letting the program name the surface produced a better libc than a
 standard would have.* Thirteen headers and several hundred lines were
 added, and not one of them was guessed: each exists because CPython's
