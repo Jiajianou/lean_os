@@ -8,20 +8,25 @@ struct FILE {
     int fd;
     int eof;
     int used;
+    /* M80 groundwork: a sticky error flag, so that `ferror` has
+     * something to report. Set by a read or write whose syscall came
+     * back negative; cleared only by `clearerr`, which is what "sticky"
+     * means and what a caller checking it once at the end relies on. */
+    int err;
 };
 
 /* stdin/stdout/stderr are the three descriptors every process here starts
  * with (or, for stdin in a GUI terminal's child, does not - see
  * gui_terminal.c, which closes fd 0 deliberately). Static rather than
  * allocated so they exist before main does. */
-static FILE std_files[3] = {{0, 0, 1}, {1, 0, 1}, {2, 0, 1}};
+static FILE std_files[3] = {{0, 0, 1, 0}, {1, 0, 1, 0}, {2, 0, 1, 0}};
 FILE *stdin = &std_files[0];
 FILE *stdout = &std_files[1];
 /* fd 2 has never existed in this OS - a process gets stdin and stdout and
  * nothing else (sched.h's fd table). Pointing stderr at fd 1 is the
  * honest mapping: a ported program's diagnostics go where its output
  * goes, which on this desktop is the terminal window that launched it. */
-static FILE stderr_file = {1, 0, 1};
+static FILE stderr_file = {1, 0, 1, 0};
 FILE *stderr = &stderr_file;
 
 #define FOPEN_MAX_FILES 16
@@ -46,6 +51,7 @@ FILE *fopen(const char *path, const char *mode) {
         if (!open_files[i].used) {
             open_files[i].fd = (int)fd;
             open_files[i].eof = 0;
+            open_files[i].err = 0;
             open_files[i].used = 1;
             return &open_files[i];
         }
@@ -105,6 +111,96 @@ int fflush(FILE *f) {
 
 int feof(FILE *f) {
     return f ? f->eof : 1;
+}
+
+/* ---- M80 groundwork: the rest of what a ported program expects -------
+ *
+ * Each of these is here because CPython's own source stopped the build
+ * without it - M63's rule ("let the program name the surface") producing
+ * its list at this layer rather than at the syscall one.
+ */
+int ferror(FILE *f) {
+    return f ? f->err : 1;
+}
+
+void clearerr(FILE *f) {
+    if (f) {
+        f->eof = 0;
+        f->err = 0;
+    }
+}
+
+int fileno(FILE *f) {
+    return f ? f->fd : -1;
+}
+
+void rewind(FILE *f) {
+    if (f) {
+        sys_lseek(f->fd, 0, SEEK_SET);
+        f->eof = 0;
+        f->err = 0;
+    }
+}
+
+/* Accepted and ignored, because there is nothing to configure: this
+ * stdio does not buffer at all - every fwrite is a write syscall. That
+ * is a real property rather than a stub, and it is why fflush already
+ * had nothing to do. A program that calls setvbuf to get *unbuffered*
+ * behaviour already has it; one that asks for full buffering gets
+ * unbuffered, which is slower and never wrong. */
+int setvbuf(FILE *f, char *buf, int mode, size_t size) {
+    (void)f;
+    (void)buf;
+    (void)mode;
+    (void)size;
+    return 0;
+}
+
+void setbuf(FILE *f, char *buf) {
+    (void)f;
+    (void)buf;
+}
+
+/* A one-character pushback, which is all the standard guarantees. Kept
+ * per-FILE rather than as a global so two streams cannot steal each
+ * other's - and implemented by seeking back rather than by a buffer,
+ * because this stdio has no buffer to put it in and a descriptor here
+ * has a real position (M59). A stream with no position - stdin, a pipe -
+ * cannot take one back, and says so. */
+int ungetc(int c, FILE *f) {
+    if (!f || c == EOF) {
+        return EOF;
+    }
+    long pos = sys_lseek(f->fd, 0, SEEK_CUR);
+    if (pos <= 0) {
+        return EOF; /* not seekable, or already at the start */
+    }
+    if (sys_lseek(f->fd, pos - 1, SEEK_SET) < 0) {
+        return EOF;
+    }
+    f->eof = 0;
+    return c;
+}
+
+/* Writes `s`, a colon, and this system's one honest description of what
+ * went wrong. There is no errno string table here because there is
+ * barely an errno (see <errno.h>): a syscall that failed said -1 and
+ * nothing else, so inventing "No such file or directory" for it would be
+ * a guess printed as a fact. */
+void perror(const char *s) {
+    if (s && s[0]) {
+        fputs(s, stderr);
+        fputs(": ", stderr);
+    }
+    fputs("failed\n", stderr);
+}
+
+int remove(const char *path) {
+    return (int)sys_unlink(path);
+}
+
+int rename(const char *from, const char *to) {
+    return (int)sys_rename(from, to);
 }
 
 int fgetc(FILE *f) {
@@ -513,4 +609,39 @@ int snprintf(char *out, size_t n, const char *fmt, ...) {
 void __assert_fail(const char *expr, const char *file, int line) {
     fprintf(stderr, "assertion failed: %s at %s:%d\n", expr, file, line);
     abort();
+}
+
+/* M80 groundwork. Real functions rather than the macros they are
+ * elsewhere: a macro exists to skip a call on the buffered fast path,
+ * and this stdio has no buffer to make one. */
+int getc(FILE *f) {
+    return fgetc(f);
+}
+
+int putc(int c, FILE *f) {
+    return fputc(c, f);
+}
+
+int getchar(void) {
+    return fgetc(stdin);
+}
+
+/* M80 groundwork - see <stdio.h>. The FILE takes over the descriptor:
+ * fclose on the result closes it, which is what every implementation
+ * does and what a caller has to know. */
+FILE *fdopen(int fd, const char *mode) {
+    (void)mode; /* the descriptor's access was decided when it was opened */
+    if (fd < 0) {
+        return (FILE *)0;
+    }
+    for (int i = 0; i < FOPEN_MAX_FILES; i++) {
+        if (!open_files[i].used) {
+            open_files[i].fd = fd;
+            open_files[i].eof = 0;
+            open_files[i].err = 0;
+            open_files[i].used = 1;
+            return &open_files[i];
+        }
+    }
+    return (FILE *)0;
 }

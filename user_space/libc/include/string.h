@@ -33,7 +33,16 @@ char *strncpy(char *dst, const char *src, size_t n);
 char *strcat(char *dst, const char *src);
 char *strncat(char *dst, const char *src, size_t n);
 char *strchr(const char *s, int c);
+
+/* M80 groundwork. Returns the E* name rather than a sentence, because a
+ * sentence would be describing a failure this system did not report -
+ * see <errno.h> on why errno here is coarse. "EINVAL" is true and
+ * useful; "Invalid argument" would be a translation of a guess. */
+char *strerror(int errnum);
 char *strrchr(const char *s, int c);
 char *strstr(const char *haystack, const char *needle);
 size_t strspn(const char *s, const char *accept);
 size_t strcspn(const char *s, const char *reject);
+/* M80 groundwork. */
+char *strpbrk(const char *s, const char *accept);
+char *strdup(const char *s);

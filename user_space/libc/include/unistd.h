@@ -49,6 +49,22 @@ int unlink(const char *path);
 long read(int fd, void *buf, size_t count);
 long write(int fd, const void *buf, size_t count);
 int close(int fd);
+/* M80 groundwork. `isatty` answers from what this system actually knows:
+ * fd 0 and 1 are the implicit stdin/stdout every task starts with
+ * (kernel/sched/sched.h's fd table), and everything else is a pipe, a
+ * socket or a file. There is no terminal device here to ask, so this is
+ * the honest approximation and not a stub - it is right for every use a
+ * ported program puts it to (deciding whether to prompt). */
+int isatty(int fd);
+long lseek(int fd, long offset, int whence);
+int dup2(int oldfd, int newfd);
+/* No ftruncate. leanfs can truncate an open handle to zero
+ * (leanfs_handle_truncate) and there is no syscall that exposes it, and
+ * a declaration with no implementation would be worse than its absence:
+ * a program that probes for it at configure time would find it and then
+ * fail to link. It arrives the day something asks. */
+int unlink(const char *path);
+int pipe(int fds[2]);
 
 /* Runs `path` with `argv` and, for the `e` form, `envp`; returns the new
  * process's pid rather than replacing this one. NOT execve: there is no

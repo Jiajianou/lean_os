@@ -4843,14 +4843,44 @@ int main(void) {
          * which on this machine's PIO driver is a desktop that stutters
          * because it is remembering itself. */
         if (session_enabled) {
+            /* Written when the layout has SETTLED, not when it has
+             * changed - which is one comparison more and a real
+             * difference. A drag moves a window every frame and a
+             * resolution change moves every window at once; saving on
+             * the first pass that noticed would put a disk write in the
+             * middle of both, and a leanfs write that creates a file
+             * rewrites the inode table and the bitmap (M59's note on the
+             * thirty-one metadata sectors). The compositor is the one
+             * process on this machine that must not stall.
+             *
+             * So a changed signature is only remembered on the first
+             * pass and written on the second, half a second later, if it
+             * has stopped moving. The cost is that a session saved and
+             * then immediately power-cut loses the last half second of
+             * rearranging; the benefit is that nothing rearranges while
+             * the screen is waiting for it. */
             static uint32_t last_sig;
+            static uint32_t settling_sig;
             static long next_session_check;
-            if (now >= next_session_check) {
+            /* And never while the screen is moving. M61 gave this
+             * compositor a 16 ms frame budget and a self-test that fails
+             * on any frame that misses it; a leanfs write is tens of
+             * milliseconds of PIO and would miss it every time. The
+             * layout is changing during an animation anyway, so there is
+             * nothing here worth writing yet - which makes this both the
+             * cheap answer and the correct one. */
+            if (anim_any_active()) {
+                next_session_check = now + 500;
+            } else if (now >= next_session_check) {
                 next_session_check = now + 500;
                 uint32_t sig = session_signature();
                 if (sig != last_sig) {
-                    last_sig = sig;
-                    session_save();
+                    if (sig == settling_sig) {
+                        last_sig = sig;
+                        session_save();
+                    } else {
+                        settling_sig = sig; /* changed just now - give it one more pass */
+                    }
                 }
             }
         }

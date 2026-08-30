@@ -168,15 +168,42 @@ before adding to it:
   from the terminal.
 - **Files: yes** (M59) — `fopen`/`fread`/`fseek` over real descriptors,
   and files up to 8 MiB.
-- **Memory: `SYS_sbrk`, growth-only.** A process's address-space layout
-  is fixed in `kernel/proc/proc.h`; the heap grows on demand and is never
-  handed back to the kernel. A program that needs tens of megabytes is a
-  program to check the budget for *before* starting the port, not
-  half-way through.
+- **Memory: `SYS_sbrk`, and since M78 an `mmap`/`munmap` arena too.** A
+  process's address-space layout is still fixed in `kernel/proc/proc.h`,
+  but a mapping can now be *given back*, and `malloc` routes anything
+  over 64 KiB through one so that a large allocation freed is a page
+  freed. Every mapping is backed by a real frame at the moment of the
+  call - there is no page-fault handler that could fill one in later -
+  so a program that needs tens of megabytes is still a program to check
+  the budget for *before* starting the port, not half-way through.
 - **A window: through `wmclient.h`, like everything else.** Whetstone is
   a console program and runs in the terminal, which is a window on this
   desktop - the claim being made is "this desktop runs somebody else's
   program alongside its own", not "this program took over the screen".
-- **`scanf`, `struct tm`, `localtime`, threads, signals, sockets: no.**
-  Each is absent because nothing has asked. A program that wants one says
-  so at link time, which is the specification.
+- **Threads: yes** (M79) — `<pthread.h>` with create/join/detach, a
+  mutex, a condition variable, `pthread_once` and thread-specific
+  storage, over two of the scheduler's tasks sharing one page table.
+  Threads share memory and share the descriptors that were open when
+  they were created; one opened afterwards is not visible to them.
+- **Signals: yes** (M76) — `<signal.h>`'s `signal`, `sigaction`, `kill`,
+  `raise` and a block/unblock mask, with handlers invoked in ring 3
+  through a frame the kernel writes onto the process's own stack. A
+  caught signal is delivered on the way back from a syscall, so a
+  program in a pure compute loop that never syscalls does not run its
+  handler until it does.
+- **`struct tm`, `localtime`, `strftime`: yes** (M80 groundwork), with
+  one honest caveat: `localtime` and `gmtime` are the same function,
+  because this machine keeps UTC and knows of no other zone.
+- **Sockets: yes** (M64/M66) — as ordinary file descriptors, gated on
+  `CAP_NETWORK`. There is no `<sys/socket.h>`; the interface is
+  `system_api/include/os_net.h`, which is a different spelling of the
+  same idea and would be a thin header away from the POSIX one.
+- **`scanf`: no.** Still absent because nothing has asked. A program
+  that wants one says so at link time, which is the specification - and
+  that rule is what produced the whole M80 list: thirteen headers and
+  several hundred lines of libc, every one of them named by CPython's
+  own source refusing to compile rather than guessed at in advance.
+- **`fork`, `exec`, `dlopen`: no, and not coming soon.** `SYS_spawn` is
+  a combined fork+exec by design (M13) and there is no dynamic loader
+  (see "Deliberately not next" in milestones.md). A program built around
+  `fork` needs a decision, not a header.

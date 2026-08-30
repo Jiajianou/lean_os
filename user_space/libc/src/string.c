@@ -1,6 +1,7 @@
 /* Only what user_space/lib/str.c does not already provide - see
  * string.h's header comment on why these are not two sets. */
 #include <string.h>
+#include <stdlib.h> /* malloc - strdup, M80 groundwork */
 
 void *memmove(void *dst, const void *src, size_t n) {
     unsigned char *d = (unsigned char *)dst;
@@ -159,4 +160,61 @@ size_t strcspn(const char *s, const char *reject) {
         }
     }
     return n;
+}
+
+/* ---- M80 groundwork: strerror -----------------------------------------
+ *
+ * The E* *name*, not a sentence. See <errno.h> for why: this kernel
+ * returns -1 without a reason for almost everything, so a libc that
+ * printed "No such file or directory" would be describing a failure
+ * nothing actually reported. A name is exactly as much as is known.
+ *
+ * A code with no entry comes back as "error", which is also true.
+ */
+char *strerror(int errnum) {
+    static const struct {
+        int code;
+        const char *name;
+    } NAMES[] = {
+        {1, "EPERM"},   {2, "ENOENT"},  {3, "ESRCH"},   {4, "EINTR"},
+        {5, "EIO"},     {9, "EBADF"},   {10, "ECHILD"}, {11, "EAGAIN"},
+        {12, "ENOMEM"}, {13, "EACCES"}, {14, "EFAULT"}, {16, "EBUSY"},
+        {17, "EEXIST"}, {20, "ENOTDIR"},{21, "EISDIR"}, {22, "EINVAL"},
+        {23, "ENFILE"}, {24, "EMFILE"}, {28, "ENOSPC"}, {29, "ESPIPE"},
+        {32, "EPIPE"},  {33, "EDOM"},   {34, "ERANGE"}, {36, "ENAMETOOLONG"},
+        {38, "ENOSYS"}, {39, "ENOTEMPTY"},
+    };
+    for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
+        if (NAMES[i].code == errnum) {
+            return (char *)NAMES[i].name;
+        }
+    }
+    return (char *)"error";
+}
+
+char *strpbrk(const char *s, const char *accept) {
+    for (; *s; s++) {
+        for (const char *a = accept; *a; a++) {
+            if (*s == *a) {
+                return (char *)s;
+            }
+        }
+    }
+    return (char *)0;
+}
+
+/* Allocates, which is why it lives here rather than in str.c with the
+ * copies that do not: a program that calls strdup has already accepted
+ * that it owns the result and must free it. */
+char *strdup(const char *s) {
+    if (!s) {
+        return (char *)0;
+    }
+    size_t n = strlen(s) + 1;
+    char *out = (char *)malloc(n);
+    if (!out) {
+        return (char *)0;
+    }
+    memcpy(out, s, n);
+    return out;
 }

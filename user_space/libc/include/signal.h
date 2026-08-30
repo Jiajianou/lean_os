@@ -45,3 +45,47 @@ int raise(int sig);
  * 32-bit word with bit N meaning signal N, not POSIX's opaque sigset_t -
  * see system_api/include/signal.h for why. `old` may be NULL. */
 int sigprocmask(int how, unsigned int mask, unsigned int *old);
+
+/* ---- the POSIX spelling -----------------------------------------------
+ *
+ * `sigaction` over the same SYS_sigaction `signal` uses. It exists
+ * because a program written elsewhere calls it - CPython's own
+ * Python/pylifecycle.c does, which is where this project first needed
+ * one - and because it is the call that lets a program *read back* what
+ * a handler currently is.
+ *
+ * `sigset_t` is a plain 32-bit word, the same one SYS_sigprocmask takes.
+ * POSIX makes it opaque so an implementation can carry more than 32
+ * signals; this one has 31 (SIG_MAX) and will not grow, so an opaque
+ * struct would be a wrapper around a number for the sake of a
+ * possibility that is not coming.
+ *
+ * `sa_flags` is accepted and ignored, with one exception worth naming:
+ * SA_RESTART asks that an interrupted syscall be restarted rather than
+ * returning short, and this kernel always returns short (see M76's note
+ * on interruptible blocking). A program that sets it and does not loop
+ * is broken here; one that loops - which is what every program that
+ * handles EINTR correctly already does - works either way.
+ */
+typedef unsigned int sigset_t;
+
+struct sigaction {
+    sighandler_t sa_handler;
+    sigset_t     sa_mask;   /* accepted; the handler's own signal is blocked regardless */
+    int          sa_flags;
+    void       (*sa_sigaction)(int, void *, void *); /* never called - SA_SIGINFO is not supported */
+};
+
+#define SA_RESTART   0x10000000
+#define SA_NODEFER   0x40000000
+#define SA_SIGINFO   0x00000004
+#define SA_ONSTACK   0x08000000
+#define SA_RESETHAND 0x80000000
+
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
+
+int sigemptyset(sigset_t *set);
+int sigfillset(sigset_t *set);
+int sigaddset(sigset_t *set, int sig);
+int sigdelset(sigset_t *set, int sig);
+int sigismember(const sigset_t *set, int sig);

@@ -40,3 +40,39 @@ double exp(double x);
 double log(double x);
 double log10(double x);
 double pow(double x, double y);
+
+/* ---- M80 groundwork --------------------------------------------------
+ *
+ * The classification macros and the decomposition functions, which are
+ * what a program doing arithmetic on doubles actually reaches for and
+ * which this header did not have. The macros are the compiler's own
+ * builtins rather than hand-written bit tests: GCC knows this target's
+ * double layout and generates the right comparison, and a bit test
+ * written here would be a second opinion about it.
+ */
+#define isnan(x)      __builtin_isnan(x)
+#define isinf(x)      __builtin_isinf(x)
+#define isfinite(x)   __builtin_isfinite(x)
+#define signbit(x)    __builtin_signbit(x)
+#define isnormal(x)   __builtin_isnormal(x)
+#define fpclassify(x) __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, x)
+
+#define FP_NAN       0
+#define FP_INFINITE  1
+#define FP_ZERO      2
+#define FP_SUBNORMAL 3
+#define FP_NORMAL    4
+
+double frexp(double x, int *exp);
+double ldexp(double x, int exp);
+double modf(double x, double *ipart);
+double trunc(double x);
+double round(double x);
+double copysign(double x, double y);
+double hypot(double x, double y);
+double log2(double x);
+double sinh(double x);
+double cosh(double x);
+double tanh(double x);
+double fmax(double a, double b);
+double fmin(double a, double b);

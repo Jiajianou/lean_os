@@ -5838,6 +5838,38 @@ and nothing on this machine has ever loaded code it did not statically
 link. Each of the next five milestones closes exactly one of those
 gaps, in the order a real interpreter would actually hit them.
 
+**What the arc turned out to be worth, written after it.** All five of
+M75-M79 landed, and the sixth did not - but the way it did not is the
+useful part. M80's attempt notes have the detail; the headline is that
+every one of CPython 3.11.9's 113 core translation units now compiles
+against this OS's own libc, unmodified, with a cross-compiler and
+`-ffreestanding`. Nothing links, and `posixmodule.c` - which is where
+`fork` and `exec` live, and which this OS does not have - has not been
+attempted at all.
+
+Two things about the arc are worth recording because neither was
+planned:
+
+*The milestones paid each other back out of order.* M75 was written for
+`getenv`, and what it actually bought first was M74 - a milestone from
+the *previous* arc that had been reverted, in part, for a change it only
+needed because there was no environment to gate on. M79's "deliberately
+not condition variables, beyond whatever the next real program's link
+errors ask for" and M63's "deliberately no struct tm... a program that
+needs them will say so at link time" were both written as deferrals and
+both were collected by the same program, milestones apart.
+
+*Letting the program name the surface produced a better libc than a
+standard would have.* Thirteen headers and several hundred lines were
+added, and not one of them was guessed: each exists because CPython's
+own source refused to compile without it. That also meant every one of
+them had to answer a real question honestly rather than plausibly -
+`nl_langinfo(CODESET)` says ASCII rather than UTF-8, `localtime` is
+`gmtime`, `fcntl` refuses to *set* a flag it cannot honour, and
+`<wchar.h>` writes down that it is Latin-1 and wrong above U+00FF.
+A header written from a standard would have said the comfortable thing
+in all four places.
+
 ### M75 — Environment, and a place to stand ✅
 
 - [x] `SYS_spawn` carries an `envp` alongside M60's `argv`, inherited by
@@ -6226,7 +6258,7 @@ real change to every path that touches a descriptor, and nothing has
 asked for it yet. `<pthread.h>` says so at the top rather than leaving it
 to be discovered.
 
-### M80 — Somebody else's language
+### M80 — Somebody else's language [~] attempted; every core file compiles, nothing links
 
 - [ ] Pick the program and let it decide the surface, M63's rule at a
       larger scale: CPython, and whatever `./configure` and the link
@@ -6258,6 +6290,123 @@ interpreter that runs an ordinary program someone else wrote.
 **Expect this to be a multi-attempt milestone, like M74.** It is
 written as one milestone because the goal is one thing, not because
 landing it in one pass is the likely outcome.
+
+#### Attempt notes — the specification, and how far it got
+
+**Status: `python3 -c "print(1+1)"` does not run. What was reached is
+that every one of CPython 3.11.9's 113 core translation units — all of
+`Objects/`, `Python/` and `Parser/` — compiles against this OS's own
+libc, with an `x86_64-elf` cross-compiler, `-ffreestanding`, and no
+change to a single line of CPython's source. Nothing has been linked.**
+
+*The method was the milestone's own, and it worked exactly as advertised.*
+"Pick the program and let it decide the surface... not a module list
+guessed beforehand." So the attempt started with a four-line file
+containing `#include "Python.h"`, a near-empty `pyconfig.h`, and the
+compiler's own error messages as the specification. What came back, in
+the order it came back:
+
+| what CPython asked for | what it got |
+|---|---|
+| `<wchar.h>` | a real one — see below on what it is honestly wrong about |
+| `<inttypes.h>` | `<stdint.h>` plus the `PRI*` macros |
+| `NATIVE_TSS_KEY_T` | `pthread_key_*`, thread-specific storage |
+| `pthread_cond_t` | condition variables — M79's own deferred item, asked for |
+| `<locale.h>`, `<langinfo.h>` | the C locale, and `CODESET` = ASCII |
+| `<fcntl.h>`, `<sys/time.h>`, `<setjmp.h>`, `<errno.h>` | four new headers |
+| `struct tm`, `localtime_r`, `mktime`, `strftime` | the calendar M63 declined |
+| `struct sigaction`, `sigset_t`, `sigemptyset`... | M76's POSIX spelling |
+| `getc`, `ferror`, `clearerr`, `fileno`, `ungetc`, `fdopen`, `perror` | the rest of stdio |
+| `isnan`, `isinf`, `frexp`, `ldexp`, `modf`, `hypot`, `copysign`... | the rest of math |
+| `strtoul`, `strtoll`, `qsort`, `bsearch`, `strpbrk`, `strdup`, `strerror` | the rest of stdlib/string |
+| `isatty`, `lseek`, `dup2`, `open`, `fcntl` | the rest of unistd |
+| `clock_gettime`, `clock_getres`, `gettimeofday` | the clocks, at their real resolution |
+
+Every one of those is a genuine gap this libc had, and every one is now
+filled by something that says what it can and cannot honestly do. Three
+are worth singling out because the honest answer is *not* the obvious
+one:
+
+- **`wchar.h` converts as Latin-1, and says so at the top.** There is no
+  multibyte encoding anywhere in this OS — the font is one glyph per
+  byte (M39/M57) — so "one byte is one character" is not an
+  approximation here, it is the truth. It is wrong above U+00FF, and
+  that is written down rather than discovered.
+- **`nl_langinfo(CODESET)` returns `ANSI_X3.4-1968`, not UTF-8.** A
+  program told UTF-8 would encode above U+007F and produce bytes nothing
+  here can draw. Told ASCII, it either stays in range or reports that it
+  cannot represent something — which is the truth.
+- **`fcntl` answers `F_GETFD` and `F_GETFL` with 0 and refuses to *set*
+  anything.** There is no exec on this machine, so `FD_CLOEXEC` has
+  nothing to mean and is genuinely not set; `O_NONBLOCK` is 0 for the
+  same kind of reason. Accepting a flag that will not be honoured is the
+  failure mode the whole header is written to avoid.
+
+*And two of the demands were milestones cashing cheques they had
+written.* M79's "deliberately not the rest of the pthread surface —
+condition variables... beyond whatever the next real program's link
+errors ask for" was answered by `Include/internal/pycore_condvar.h`
+refusing to compile: the GIL is a lock and a condition variable, and
+there is no smaller version of CPython that skips it. M63's "deliberately
+no struct tm, no strftime, no localtime... a program that needs them will
+say so at link time, which is the specification" was answered by
+`Python/pytime.c`. Both notes were written years of milestones apart and
+both turned out to be exactly right about what would ask.
+
+*The condition variable is a counter and a yield, and that trade is the
+interesting part.* There is no futex here — a blocking wait keyed on a
+user address is a real kernel feature — so a waiter samples a sequence
+counter, drops the mutex, and spins on `SYS_yield` until it moves. That
+makes `pthread_cond_signal` wake every waiter rather than one, which is
+a legal implementation rather than a corner cut: POSIX permits spurious
+wakeups precisely so a correct program re-tests its predicate in a loop.
+What it costs is a burned time slice per waiting thread, and on a
+scheduler whose quantum is one tick (M69) that is a slice, not a core.
+
+*What is left is not more of the same, and it is worth being precise
+about why.* The 113 files that compile are the interpreter's *core* —
+the object model, the evaluator, the parser. They are also the part with
+almost no operating system in them. Everything still ahead is the part
+that is nothing but operating system:
+
+1. **`Modules/posixmodule.c` has not been attempted at all**, and it is
+   where the platform surface actually bites: `fork`, `execv`,
+   `waitpid`, `pipe2`, `select`, `poll`, `sysconf`, `getuid`, `chmod`,
+   `symlink`, `readlink`, `utime`, `statvfs`, `sched_yield`. This OS has
+   no `fork` and never will (`SYS_spawn` is a combined fork+exec by
+   design, M13), so that file needs real decisions rather than more
+   headers — which is a different kind of work from everything above.
+2. **Nothing has been linked**, and a compile is a much lower bar than a
+   link. Every `-Wimplicit-function-declaration` that is now a
+   declaration is a symbol that has to exist.
+3. **The build needs a host CPython of the same version** to run
+   `Programs/_freeze_module` and `Tools/build/deepfreeze.py` and to
+   generate `Python/frozen_modules/*.h`. A cross-build of CPython starts
+   with a native build of CPython, which is a prerequisite this attempt
+   never reached.
+4. **The standard library still has nowhere to live**, and M80's own
+   bullet says the choice between frozen-in and `.py` files on leanfs is
+   one the port should make rather than one to guess at. It has not been
+   made.
+5. **The memory budget is still unknown**, which M80's own last bullet
+   warned about explicitly: "the memory budget known before starting,
+   not discovered halfway". M78's arena is 128 MiB of *address space*,
+   but every mapping here is backed by a real frame at the moment of the
+   call — there is no page-fault handler that could fill one in later —
+   so the ceiling is physical, and nobody has measured it against
+   CPython's tens of megabytes of startup footprint.
+
+*Why this is written as a stop rather than as a step.* M74's first
+attempt was reverted with a note saying it was "one bisect step from
+being understood, and that step is worth taking with a clear head" — and
+that turned out to be true and to be worth the wait. This is the same
+judgement at a much larger scale: the next thing to do is a native build
+of CPython and then `posixmodule.c`, and starting either of those badly
+is how a port acquires the local modifications M63's rule exists to
+prevent. The libc that came out of this attempt is not provisional -
+it is thirteen headers and several hundred lines that this project
+needed anyway, every one of them named by a real program rather than
+guessed, and every one of them checked by `libctest`.
 
 
 

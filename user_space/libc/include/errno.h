@@ -60,8 +60,25 @@ extern int errno;
 #define EROFS   30
 #define EMLINK  31
 #define EPIPE   32
+#define EDOM    33
 #define ERANGE  34
 #define ENAMETOOLONG 36
 #define ENOSYS  38
 #define ENOTEMPTY 39
 #define ELOOP   40
+/* The socket and blocking-operation codes. Present because a program
+ * that compares errno against them has to compile; nothing on this
+ * machine sets them yet, for the reason at the top of this file. */
+#define ENOTSOCK 88
+#define EOPNOTSUPP 95
+#define EADDRINUSE 98
+#define ECONNREFUSED 111
+#define ETIMEDOUT 110
+#define EINPROGRESS 115
+#define EALREADY 114
+#define ECONNRESET 104
+#define ECONNABORTED 103
+#define ENOTSUP EOPNOTSUPP
+#define EHOSTUNREACH 113
+#define ENETUNREACH 101
+#define EWOULDBLOCK EAGAIN

@@ -300,3 +300,137 @@ double pow(double x, double y) {
     }
     return exp(y * log(x));
 }
+
+/* ---- M80 groundwork ----------------------------------------------------
+ *
+ * The decomposition and classification helpers, in the same style as
+ * everything above: plain C over doubles, no lookup tables, and no
+ * pretence at last-bit accuracy. What each one promises is stated where
+ * it differs from the textbook.
+ */
+
+/* Exact, and deliberately so: frexp is the one function here that has to
+ * be, because it is how a program takes a double apart to print it or to
+ * convert it to an integer type, and an approximate answer there is a
+ * wrong digit rather than a rounding error. Done by scaling in powers of
+ * two, which is exact in binary floating point at every step. */
+double frexp(double x, int *exp) {
+    int e = 0;
+    if (x == 0.0 || isnan(x) || isinf(x)) {
+        if (exp) {
+            *exp = 0;
+        }
+        return x;
+    }
+    double m = x < 0 ? -x : x;
+    while (m >= 1.0) {
+        m *= 0.5;
+        e++;
+    }
+    while (m < 0.5) {
+        m *= 2.0;
+        e--;
+    }
+    if (exp) {
+        *exp = e;
+    }
+    return x < 0 ? -m : m;
+}
+
+double ldexp(double x, int exp) {
+    /* Repeated multiplication rather than a bit-twiddle on the exponent
+     * field: multiplying by 2 is exact, so this is exact too, and it
+     * handles overflow and subnormals by simply producing what the
+     * hardware produces. */
+    double r = x;
+    while (exp > 0) {
+        r *= 2.0;
+        exp--;
+    }
+    while (exp < 0) {
+        r *= 0.5;
+        exp++;
+    }
+    return r;
+}
+
+double trunc(double x) {
+    return x < 0 ? ceil(x) : floor(x);
+}
+
+double modf(double x, double *ipart) {
+    double i = trunc(x);
+    if (ipart) {
+        *ipart = i;
+    }
+    return x - i;
+}
+
+double round(double x) {
+    /* Away from zero on a tie, which is what C's round() specifies -
+     * and differs from the nearest-even a bare cast or the hardware's
+     * default rounding would give. */
+    return x < 0 ? ceil(x - 0.5) : floor(x + 0.5);
+}
+
+double copysign(double x, double y) {
+    double m = x < 0 ? -x : x;
+    return signbit(y) ? -m : m;
+}
+
+double hypot(double x, double y) {
+    /* Scaled, so that a large x does not overflow on the way to a
+     * perfectly representable answer - the whole reason hypot exists
+     * rather than sqrt(x*x + y*y). */
+    double ax = x < 0 ? -x : x;
+    double ay = y < 0 ? -y : y;
+    if (ax < ay) {
+        double t = ax;
+        ax = ay;
+        ay = t;
+    }
+    if (ax == 0.0) {
+        return 0.0;
+    }
+    double r = ay / ax;
+    return ax * sqrt(1.0 + r * r);
+}
+
+double log2(double x) {
+    return log(x) * 1.4426950408889634074; /* 1 / ln 2 */
+}
+
+double sinh(double x) {
+    double e = exp(x);
+    return (e - 1.0 / e) * 0.5;
+}
+
+double cosh(double x) {
+    double e = exp(x);
+    return (e + 1.0 / e) * 0.5;
+}
+
+double tanh(double x) {
+    double e = exp(2.0 * x);
+    return (e - 1.0) / (e + 1.0);
+}
+
+double fmax(double a, double b) {
+    if (isnan(a)) {
+        return b;
+    }
+    if (isnan(b)) {
+        return a;
+    }
+    return a > b ? a : b;
+}
+
+double fmin(double a, double b) {
+    if (isnan(a)) {
+        return b;
+    }
+    if (isnan(b)) {
+        return a;
+    }
+    return a < b ? a : b;
+}

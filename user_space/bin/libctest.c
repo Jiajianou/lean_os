@@ -16,11 +16,23 @@
  * stated (1e-10) rather than "close enough", because math.h claims an
  * accuracy and this is where that claim can fail.
  */
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <locale.h>
+#include <langinfo.h>
 #include <math.h>
+#include <pthread.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
+#include <wchar.h>
 
 static int failures;
 
@@ -50,6 +62,55 @@ static void same(const char *what, const char *got, const char *want) {
         printf("[libctest] FAIL: %s: got \"%s\" want \"%s\"\n", what, got, want);
         failures++;
     }
+}
+
+/* ---- M80 groundwork: the helpers the new checks below need -----------
+ *
+ * At file scope because a comparison function, a thread body and a
+ * signal handler cannot be locals - which is also why they are here
+ * rather than inline in main with the checks they belong to. */
+static int cmp_int(const void *a, const void *b) {
+    int x = *(const int *)a;
+    int y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+
+static pthread_mutex_t cv_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cv_cond = PTHREAD_COND_INITIALIZER;
+static volatile int cv_ready;
+static volatile int handed_over;
+
+static void *cv_signaller(void *arg) {
+    (void)arg;
+    /* A short spin first, so the main thread is genuinely inside
+     * pthread_cond_wait when the signal arrives rather than having
+     * raced past it - which would make this check pass without the
+     * condition variable doing anything. */
+    for (volatile int i = 0; i < 400000; i++) {
+    }
+    pthread_mutex_lock(&cv_lock);
+    handed_over = 0x5A5A;
+    cv_ready = 1;
+    pthread_cond_signal(&cv_cond);
+    pthread_mutex_unlock(&cv_lock);
+    return 0;
+}
+
+static pthread_key_t tss_key;
+static void *tss_other;
+
+static void *tss_worker(void *arg) {
+    (void)arg;
+    pthread_setspecific(tss_key, (void *)0x2222);
+    tss_other = pthread_getspecific(tss_key);
+    return 0;
+}
+
+static volatile int usr_seen;
+
+static void usr_handler(int sig) {
+    (void)sig;
+    usr_seen++;
 }
 
 int main(void) {
@@ -172,6 +233,365 @@ int main(void) {
             printf("[libctest] FAIL: a float loop across scheduler quanta lost state: %.12f vs %.12f\n",
                    sum, want);
             failures++;
+        }
+    }
+
+    /* ---- M80 groundwork: everything the CPython probe asked for -------
+     *
+     * Each block below checks a function this libc gained because
+     * CPython's own source would not compile without it. They are
+     * checked here rather than left to a future port for the reason this
+     * project keeps rediscovering: a header that compiles and a function
+     * that works are different claims, and the second one is the one
+     * anybody will rely on.
+     */
+
+    /* setjmp/longjmp - the one pair that cannot be written in C, and the
+     * one whose failure mode is a jump into nothing rather than a wrong
+     * number. Both directions are checked: that setjmp returns 0 the
+     * first time, that longjmp's value comes back, and that
+     * longjmp(buf, 0) is turned into 1 as the standard requires. */
+    {
+        static jmp_buf env;
+        volatile int stage = 0;
+        int r = setjmp(env);
+        if (r == 0) {
+            if (stage != 0) {
+                fail("setjmp: a local was clobbered before the first return");
+            }
+            stage = 1;
+            longjmp(env, 42);
+            fail("longjmp returned");
+        } else if (r == 42) {
+            if (stage != 1) {
+                fail("setjmp: a volatile local did not survive longjmp");
+            }
+            stage = 2;
+            longjmp(env, 0); /* must arrive as 1, not 0 */
+        } else if (r == 1) {
+            if (stage != 2) {
+                fail("longjmp(buf, 0) arrived out of order");
+            }
+        } else {
+            fail("longjmp delivered the wrong value");
+        }
+        if (stage != 2) {
+            fail("longjmp(buf, 0) did not arrive as 1");
+        }
+    }
+
+    /* strtoul / strtoll, including the base-0 prefixes and the endptr
+     * contract that a caller uses to tell "no digits" from "zero". */
+    {
+        char *end;
+        if (strtoul("0x1f", &end, 0) != 31 || *end != '\0') {
+            fail("strtoul: base-0 hex");
+        }
+        if (strtoul("0755", &end, 0) != 493 || *end != '\0') {
+            fail("strtoul: base-0 octal");
+        }
+        if (strtoul("  42abc", &end, 10) != 42 || *end != 'a') {
+            fail("strtoul: endptr after the last digit");
+        }
+        if (strtoul("zzz", &end, 10) != 0 || end != (char *)0 + 0) {
+            /* No digits: the standard says endptr comes back as the
+             * ORIGINAL pointer, which is the only way a caller can tell
+             * this from a genuine zero. */
+        }
+        const char *none = "zzz";
+        if (strtoul(none, &end, 10) != 0 || end != none) {
+            fail("strtoul: no-digits must hand back the original pointer");
+        }
+        if (strtoll("-9000000000", &end, 10) != -9000000000LL) {
+            fail("strtoll: a value past 32 bits");
+        }
+    }
+
+    /* qsort / bsearch over a type big enough that a byte-wise swap is
+     * doing real work. */
+    {
+        int a[9] = {5, 3, 9, 1, 7, 3, 8, 0, 2};
+        qsort(a, 9, sizeof(int), cmp_int);
+        for (int i = 1; i < 9; i++) {
+            if (a[i - 1] > a[i]) {
+                fail("qsort did not sort");
+                break;
+            }
+        }
+        int key = 7;
+        int *hit = (int *)bsearch(&key, a, 9, sizeof(int), cmp_int);
+        if (!hit || *hit != 7) {
+            fail("bsearch did not find a present key");
+        }
+        key = 6;
+        if (bsearch(&key, a, 9, sizeof(int), cmp_int)) {
+            fail("bsearch found a key that is not there");
+        }
+    }
+
+    /* strpbrk / strdup / strerror. */
+    {
+        const char *hay = "abc:def";
+        if (strpbrk(hay, ":=") != hay + 3) {
+            fail("strpbrk");
+        }
+        char *dup = strdup("copied");
+        if (!dup || strcmp(dup, "copied") != 0) {
+            fail("strdup");
+        }
+        free(dup);
+        if (strcmp(strerror(ENOENT), "ENOENT") != 0) {
+            fail("strerror does not name the code");
+        }
+    }
+
+    /* The maths additions. frexp is the one that has to be exact - it is
+     * how a program takes a double apart - so it is checked as an
+     * identity rather than against a tolerance. */
+    {
+        int e = 0;
+        double m = frexp(3072.0, &e);
+        if (m != 0.75 || e != 12) {
+            printf("[libctest] FAIL: frexp(3072) = %g x 2^%d\n", m, e);
+            failures++;
+        }
+        if (ldexp(m, e) != 3072.0) {
+            fail("ldexp did not invert frexp exactly");
+        }
+        double ip = 0.0;
+        if (modf(-3.25, &ip) != -0.25 || ip != -3.0) {
+            fail("modf");
+        }
+        if (trunc(-2.7) != -2.0 || round(-2.5) != -3.0 || round(2.5) != 3.0) {
+            fail("trunc/round");
+        }
+        if (copysign(3.0, -0.5) != -3.0) {
+            fail("copysign");
+        }
+        near("hypot(3,4)", hypot(3.0, 4.0), 5.0);
+        near("log2(1024)", log2(1024.0), 10.0);
+        near("tanh(0)", tanh(0.0), 0.0);
+        if (!isnan(0.0 / 0.0) || !isinf(1.0 / 0.0) || !isfinite(1.0)) {
+            fail("isnan/isinf/isfinite");
+        }
+        if (fmax(1.0, 2.0) != 2.0 || fmin(1.0, 2.0) != 1.0) {
+            fail("fmax/fmin");
+        }
+    }
+
+    /* The calendar. A round trip through a known instant, so that a
+     * wrong epoch, a wrong month base or a wrong weekday all show up. */
+    {
+        struct tm tm;
+        time_t t = 1000000000; /* 2001-09-09T01:46:40Z, a Sunday */
+        gmtime_r(&t, &tm);
+        if (tm.tm_year + 1900 != 2001 || tm.tm_mon != 8 || tm.tm_mday != 9 ||
+            tm.tm_hour != 1 || tm.tm_min != 46 || tm.tm_sec != 40 || tm.tm_wday != 0) {
+            printf("[libctest] FAIL: gmtime gave %04d-%02d-%02d %02d:%02d:%02d wday=%d\n",
+                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                   tm.tm_hour, tm.tm_min, tm.tm_sec, tm.tm_wday);
+            failures++;
+        }
+        if (timegm(&tm) != t) {
+            fail("timegm did not invert gmtime");
+        }
+        char buf[64];
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %a", &tm);
+        same("strftime", buf, "2001-09-09 01:46:40 Sun");
+        strftime(buf, sizeof(buf), "%F %T", &tm);
+        same("strftime %F %T", buf, "2001-09-09 01:46:40");
+    }
+
+    /* The wide-character subset, including the Latin-1 conversion this
+     * system is honest about being. */
+    {
+        wchar_t w[16];
+        if (mbstowcs(w, "wide", 16) != 4 || wcslen(w) != 4 || w[0] != L'w') {
+            fail("mbstowcs");
+        }
+        char back[16];
+        if (wcstombs(back, w, 16) != 4 || strcmp(back, "wide") != 0) {
+            fail("wcstombs did not round-trip");
+        }
+        if (wcscmp(w, L"wide") != 0 || wcschr(w, L'd') != w + 2 ||
+            wcsrchr(w, L'e') != w + 3) {
+            fail("wcscmp/wcschr/wcsrchr");
+        }
+        wchar_t nums[] = L"0x2a rest";
+        wchar_t *wend;
+        if (wcstol(nums, &wend, 0) != 42 || *wend != L' ') {
+            fail("wcstol");
+        }
+        /* Above U+00FF is deliberately not representable - checked so
+         * that the limit <wchar.h> documents is a limit rather than a
+         * silent truncation. */
+        wchar_t big[2] = {0x1F600, 0};
+        if (wcstombs(back, big, 16) != (size_t)-1) {
+            fail("wcstombs accepted a code point it cannot represent");
+        }
+    }
+
+    /* The locale, which has exactly one honest answer. */
+    {
+        if (strcmp(setlocale(LC_ALL, "C"), "C") != 0) {
+            fail("setlocale(\"C\")");
+        }
+        if (setlocale(LC_ALL, "en_US.UTF-8") != (char *)0) {
+            fail("setlocale accepted a locale this system does not have");
+        }
+        if (strcmp(localeconv()->decimal_point, ".") != 0) {
+            fail("localeconv");
+        }
+        if (strcmp(nl_langinfo(CODESET), "ANSI_X3.4-1968") != 0) {
+            fail("nl_langinfo(CODESET) is not ASCII");
+        }
+    }
+
+    /* The clocks. Monotonic has to actually be monotonic, which is the
+     * only property a caller names it for. */
+    {
+        struct timespec a, b;
+        if (clock_gettime(CLOCK_MONOTONIC, &a) != 0) {
+            fail("clock_gettime(CLOCK_MONOTONIC)");
+        }
+        for (volatile int i = 0; i < 200000; i++) {
+            /* Real work between two clock reads, so that "monotonic"
+             * is being asked about an interval rather than about two
+             * samples the compiler could have folded together. */
+        }
+        if (clock_gettime(CLOCK_MONOTONIC, &b) != 0 ||
+            b.tv_sec < a.tv_sec ||
+            (b.tv_sec == a.tv_sec && b.tv_nsec < a.tv_nsec)) {
+            fail("CLOCK_MONOTONIC went backwards");
+        }
+        struct timespec res;
+        if (clock_getres(CLOCK_MONOTONIC, &res) != 0 || res.tv_nsec != 1000000L) {
+            fail("clock_getres does not report a millisecond");
+        }
+        struct timeval tv;
+        if (gettimeofday(&tv, 0) != 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000) {
+            fail("gettimeofday");
+        }
+    }
+
+    /* mmap through <sys/mman.h>, which is M78 reached by its POSIX name
+     * rather than by sys_mmap. */
+    {
+        void *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (p == MAP_FAILED) {
+            fail("mmap through <sys/mman.h>");
+        } else {
+            ((char *)p)[0] = 'x';
+            ((char *)p)[8191] = 'y';
+            if (((char *)p)[0] != 'x' || ((char *)p)[8191] != 'y') {
+                fail("an mmap'd page did not hold what was written to it");
+            }
+            if (munmap(p, 8192) != 0) {
+                fail("munmap");
+            }
+        }
+        /* addr and fd are refused rather than ignored - see <sys/mman.h> */
+        if (mmap((void *)0x8000000000UL, 4096, PROT_READ | PROT_WRITE,
+                  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0) != MAP_FAILED) {
+            fail("mmap accepted an address hint it cannot honour");
+        }
+    }
+
+    /* A condition variable, which is M79's deferred item and the thing
+     * CPython's GIL is built from. The wait has to actually wait: the
+     * signal comes from a second thread, so a cond_wait that returned
+     * immediately would leave `handed_over` still zero. */
+    {
+        if (pthread_mutex_init(&cv_lock, 0) != 0 || pthread_cond_init(&cv_cond, 0) != 0) {
+            fail("pthread_cond_init");
+        }
+        pthread_t th;
+        if (pthread_create(&th, 0, cv_signaller, 0) != 0) {
+            fail("pthread_create for the condition-variable check");
+        } else {
+            pthread_mutex_lock(&cv_lock);
+            while (!cv_ready) {
+                pthread_cond_wait(&cv_cond, &cv_lock);
+            }
+            int seen = handed_over;
+            pthread_mutex_unlock(&cv_lock);
+            pthread_join(th, 0);
+            if (seen != 0x5A5A) {
+                fail("a condition variable did not carry the other thread's write");
+            }
+        }
+        pthread_cond_destroy(&cv_cond);
+        pthread_mutex_destroy(&cv_lock);
+    }
+
+    /* Thread-specific storage, which is what CPython's headers refused to
+     * compile without. Two threads must see two different values through
+     * the same key - which is the entire claim. */
+    {
+        if (pthread_key_create(&tss_key, 0) != 0) {
+            fail("pthread_key_create");
+        } else {
+            pthread_setspecific(tss_key, (void *)0x1111);
+            pthread_t th;
+            if (pthread_create(&th, 0, tss_worker, 0) != 0) {
+                fail("pthread_create for the TSS check");
+            } else {
+                pthread_join(th, 0);
+                if (tss_other != (void *)0x2222) {
+                    fail("a thread did not see its own TSS value");
+                }
+            }
+            if (pthread_getspecific(tss_key) != (void *)0x1111) {
+                fail("TSS: this thread's value was overwritten by another's");
+            }
+            pthread_key_delete(tss_key);
+        }
+    }
+
+    /* <fcntl.h>'s open, and the fcntl that refuses what it cannot do. */
+    {
+        int fd = open("/tmp/libctest.tmp", O_WRONLY | O_CREAT | O_TRUNC);
+        if (fd < 0) {
+            fail("open through <fcntl.h>");
+        } else {
+            if (write(fd, "ok", 2) != 2) {
+                fail("write to an fd from open()");
+            }
+            if (fcntl(fd, F_GETFD) != 0 || fcntl(fd, F_GETFL) != 0) {
+                fail("fcntl: a flag that is not set should read as 0");
+            }
+            if (fcntl(fd, F_SETFD, FD_CLOEXEC) == 0) {
+                fail("fcntl accepted a flag it cannot honour");
+            }
+            close(fd);
+            unlink("/tmp/libctest.tmp");
+        }
+        if (!isatty(1)) {
+            fail("isatty(1) should be true - fd 1 is the implicit stdout");
+        }
+    }
+
+    /* sigaction, which is M76 reached by its POSIX name. Installing and
+     * reading back is the whole surface a ported program uses. */
+    {
+        struct sigaction sa, old;
+        sa.sa_handler = usr_handler;
+        sa.sa_flags = 0;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_sigaction = 0;
+        if (sigaction(SIGUSR1, &sa, &old) != 0) {
+            fail("sigaction could not install a handler");
+        }
+        raise(SIGUSR1);
+        (void)getpid(); /* a syscall, so the handler is delivered on the way out */
+        if (usr_seen != 1) {
+            fail("a handler installed with sigaction did not run");
+        }
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGUSR2);
+        if (!sigismember(&set, SIGUSR2) || sigismember(&set, SIGUSR1)) {
+            fail("sigaddset/sigismember");
         }
     }
 

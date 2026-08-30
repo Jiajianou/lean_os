@@ -29,6 +29,12 @@ extern FILE *stderr;
 #define SEEK_END 2
 
 FILE *fopen(const char *path, const char *mode);
+/* M80 groundwork. Wraps an already-open descriptor in a FILE; `mode` is
+ * accepted and ignored, because the descriptor's own access was decided
+ * when it was opened and this cannot change it. The FILE does not own
+ * the descriptor: fclose on it closes the fd, which is what every
+ * implementation does and what a caller has to know. */
+FILE *fdopen(int fd, const char *mode);
 int fclose(FILE *f);
 size_t fread(void *buf, size_t size, size_t count, FILE *f);
 size_t fwrite(const void *buf, size_t size, size_t count, FILE *f);
@@ -36,8 +42,32 @@ int fseek(FILE *f, long offset, int whence);
 long ftell(FILE *f);
 int fflush(FILE *f);
 int feof(FILE *f);
+/* M80 groundwork - see the implementations for what each one can and
+ * cannot honestly do on this system. */
+int ferror(FILE *f);
+void clearerr(FILE *f);
+int fileno(FILE *f);
+void rewind(FILE *f);
+int setvbuf(FILE *f, char *buf, int mode, size_t size);
+void setbuf(FILE *f, char *buf);
+int ungetc(int c, FILE *f);
+void perror(const char *s);
+int remove(const char *path);
+int rename(const char *from, const char *to);
+
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+#define BUFSIZ 1024
+#define FOPEN_MAX 16
+#define FILENAME_MAX 128
 
 int fgetc(FILE *f);
+/* M80 groundwork. Functions rather than macros, because this stdio has
+ * no buffer for the fast path a macro exists to take. */
+int getc(FILE *f);
+int putc(int c, FILE *f);
+int getchar(void);
 char *fgets(char *buf, int n, FILE *f);
 int fputc(int c, FILE *f);
 int fputs(const char *s, FILE *f);

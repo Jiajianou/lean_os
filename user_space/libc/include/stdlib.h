@@ -19,6 +19,13 @@ int atoi(const char *s);
 long atol(const char *s);
 double atof(const char *s);
 long strtol(const char *s, char **end, int base);
+/* M80 groundwork. */
+unsigned long strtoul(const char *s, char **end, int base);
+long long strtoll(const char *s, char **end, int base);
+unsigned long long strtoull(const char *s, char **end, int base);
+void qsort(void *base, size_t count, size_t size, int (*cmp)(const void *, const void *));
+void *bsearch(const void *key, const void *base, size_t count, size_t size,
+               int (*cmp)(const void *, const void *));
 double strtod(const char *s, char **end);
 
 /* M75: the environment. `getenv` returns a pointer into the environment

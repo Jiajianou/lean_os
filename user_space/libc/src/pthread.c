@@ -9,6 +9,7 @@
  * and that is the entirety of what the kernel knows.
  */
 #include <pthread.h>
+#include <time.h>
 #include <string.h>
 #include <sys/mman.h>
 
@@ -127,6 +128,85 @@ int pthread_once(pthread_once_t *once, void (*init)(void)) {
     return 0;
 }
 
+/* ---- condition variables - see <pthread.h> for what this trades ------ */
+
+int pthread_cond_init(pthread_cond_t *c, const void *attr) {
+    (void)attr;
+    if (!c) {
+        return 22;
+    }
+    c->seq = 0;
+    return 0;
+}
+
+int pthread_cond_destroy(pthread_cond_t *c) {
+    (void)c;
+    return 0; /* nothing was allocated */
+}
+
+int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
+    if (!c || !m) {
+        return 22;
+    }
+    /* Sampled BEFORE the mutex is dropped, which is the whole
+     * correctness argument: a signal that arrives in the window between
+     * the unlock and the first read of the counter still moves it past
+     * the value sampled here, so it cannot be missed. Sampling after the
+     * unlock is the classic lost-wakeup bug. */
+    unsigned observed = c->seq;
+    pthread_mutex_unlock(m);
+    while (c->seq == observed) {
+        sys_yield();
+    }
+    pthread_mutex_lock(m);
+    return 0;
+}
+
+int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
+                            const struct timespec *abstime) {
+    if (!c || !m || !abstime) {
+        return 22;
+    }
+    /* The deadline is absolute wall-clock, and this machine's wall clock
+     * is SYS_time (seconds). Converted to an uptime deadline once, here,
+     * so a clock that is stepped mid-wait (SYS_settime, which the SNTP
+     * client does) cannot turn a one-second wait into an hour. */
+    long now_s = sys_time(0);
+    long remaining_ms = (abstime->tv_sec - now_s) * 1000 + abstime->tv_nsec / 1000000;
+    if (remaining_ms < 0) {
+        remaining_ms = 0;
+    }
+    long deadline = sys_uptime_ms() + remaining_ms;
+
+    unsigned observed = c->seq;
+    pthread_mutex_unlock(m);
+    while (c->seq == observed) {
+        if (sys_uptime_ms() >= deadline) {
+            pthread_mutex_lock(m);
+            return 110; /* ETIMEDOUT */
+        }
+        sys_yield();
+    }
+    pthread_mutex_lock(m);
+    return 0;
+}
+
+int pthread_cond_signal(pthread_cond_t *c) {
+    if (!c) {
+        return 22;
+    }
+    /* Wakes every waiter, not one - see <pthread.h>. An atomic exchange
+     * rather than an increment so that the write is also a barrier:
+     * everything the signalling thread did before this is visible to a
+     * waiter that sees the new value. */
+    atomic_xchg((volatile int *)&c->seq, (int)(c->seq + 1u));
+    return 0;
+}
+
+int pthread_cond_broadcast(pthread_cond_t *c) {
+    return pthread_cond_signal(c); /* identical here, and honestly so */
+}
+
 int pthread_attr_init(pthread_attr_t *attr) {
     if (!attr) {
         return 22;
@@ -226,6 +306,29 @@ int pthread_create(pthread_t *out, const pthread_attr_t *attr,
     return 0;
 }
 
+int pthread_detach(pthread_t thread) {
+    /* Releases the join slot. The stack stays mapped - a detached thread
+     * is one nobody will collect, and there is no hook here that runs
+     * after its last instruction to unmap the stack it is standing on.
+     * That is a leak of one mapping per detached thread and it is said
+     * out loud rather than hidden: a program that detaches in a loop
+     * will run out of arena, and the fix is a kernel-side "free this
+     * mapping after the task is gone", which is a real piece of work
+     * nothing has asked for yet. */
+    pthread_mutex_lock(&registry_lock);
+    int found = 0;
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (registry[i].block && registry[i].tid == thread) {
+            registry[i].block = 0;
+            registry[i].tid = 0;
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&registry_lock);
+    return found ? 0 : 3; /* ESRCH */
+}
+
 int pthread_join(pthread_t thread, void **retval) {
     thread_block_t *tb = 0;
     int slot = -1;
@@ -263,6 +366,112 @@ int pthread_join(pthread_t thread, void **retval) {
      * thread cannot unmap the stack it is standing on. This is the whole
      * reason pthread_join exists in every implementation of it. */
     munmap(base, bytes);
+    return 0;
+}
+
+/* ---- thread-specific storage - see <pthread.h> ------------------------
+ *
+ * One slot per (key, thread), found by a linear scan of the same
+ * registry pthread_join uses plus a row for the main thread. Linear
+ * because PTHREAD_KEYS_MAX is 32 and MAX_THREADS is 32: the scan is a
+ * handful of comparisons and it needs no allocation, which matters for a
+ * function a runtime may call on a path where allocation is exactly what
+ * it is trying to avoid.
+ */
+static struct {
+    int in_use;
+} tss_keys[PTHREAD_KEYS_MAX];
+
+static struct {
+    pthread_t tid;
+    const void *value[PTHREAD_KEYS_MAX];
+    int used;
+} tss_rows[MAX_THREADS + 1]; /* +1 for the thread that was never created by pthread_create */
+
+static pthread_mutex_t tss_lock = PTHREAD_MUTEX_INITIALIZER;
+
+int pthread_key_create(pthread_key_t *key, void (*destructor)(void *)) {
+    (void)destructor; /* accepted and never called - see <pthread.h> */
+    if (!key) {
+        return 22;
+    }
+    pthread_mutex_lock(&tss_lock);
+    for (int i = 0; i < PTHREAD_KEYS_MAX; i++) {
+        if (!tss_keys[i].in_use) {
+            tss_keys[i].in_use = 1;
+            /* Every thread's value for a freshly created key must be
+             * NULL, including a thread that used this slot under a
+             * previous key. */
+            for (int r = 0; r < MAX_THREADS + 1; r++) {
+                tss_rows[r].value[i] = 0;
+            }
+            pthread_mutex_unlock(&tss_lock);
+            *key = i;
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&tss_lock);
+    return 11; /* EAGAIN - out of keys, which is what POSIX says this is */
+}
+
+int pthread_key_delete(pthread_key_t key) {
+    if (key < 0 || key >= PTHREAD_KEYS_MAX) {
+        return 22;
+    }
+    pthread_mutex_lock(&tss_lock);
+    tss_keys[key].in_use = 0;
+    pthread_mutex_unlock(&tss_lock);
+    return 0;
+}
+
+/* The caller's row, created on first use. NULL only if the table is
+ * full, which is a process with more threads than MAX_THREADS. */
+static int tss_row_for_self(int create) {
+    pthread_t self = pthread_self();
+    for (int r = 0; r < MAX_THREADS + 1; r++) {
+        if (tss_rows[r].used && tss_rows[r].tid == self) {
+            return r;
+        }
+    }
+    if (!create) {
+        return -1;
+    }
+    for (int r = 0; r < MAX_THREADS + 1; r++) {
+        if (!tss_rows[r].used) {
+            tss_rows[r].used = 1;
+            tss_rows[r].tid = self;
+            for (int i = 0; i < PTHREAD_KEYS_MAX; i++) {
+                tss_rows[r].value[i] = 0;
+            }
+            return r;
+        }
+    }
+    return -1;
+}
+
+void *pthread_getspecific(pthread_key_t key) {
+    if (key < 0 || key >= PTHREAD_KEYS_MAX) {
+        return 0;
+    }
+    pthread_mutex_lock(&tss_lock);
+    int r = tss_row_for_self(0);
+    const void *v = (r >= 0) ? tss_rows[r].value[key] : 0;
+    pthread_mutex_unlock(&tss_lock);
+    return (void *)v;
+}
+
+int pthread_setspecific(pthread_key_t key, const void *value) {
+    if (key < 0 || key >= PTHREAD_KEYS_MAX) {
+        return 22;
+    }
+    pthread_mutex_lock(&tss_lock);
+    int r = tss_row_for_self(1);
+    if (r < 0) {
+        pthread_mutex_unlock(&tss_lock);
+        return 11;
+    }
+    tss_rows[r].value[key] = value;
+    pthread_mutex_unlock(&tss_lock);
     return 0;
 }
 
