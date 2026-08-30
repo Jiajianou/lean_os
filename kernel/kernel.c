@@ -457,6 +457,21 @@ static const char SELFTEST_SETTINGS_CONF[] =
     "wallpaper=0x00000001\n" /* WALLPAPER_GRADIENT, its wallpaper_id default */
     "animations=0x00000001\n"; /* M61: on, which is also the default - stated rather than left to the fallback, because this file is the whole point of "the self-tests run against known settings" */
 
+/* M74: the same, with motion off. This milestone's self-test starts a
+ * compositor and two clients and then kills them; what it asserts is
+ * where a window came back, and nothing about how it got there. M61's
+ * frame-budget check is global to a compositor process and fails the
+ * whole boot on any animated frame that overruns 16 ms - which is the
+ * right assertion for the test that is *about* motion, and the wrong one
+ * to apply to a compositor competing with two clients over something
+ * else entirely. So this one does not animate, and M61's own self-test
+ * keeps the budget honest. */
+static const char SELFTEST_SETTINGS_NO_ANIM[] =
+    "bg=0x001a1a2e\n"
+    "accent=0x004c99e6\n"
+    "wallpaper=0x00000001\n"
+    "animations=0x00000000\n";
+
 static void selftest_settings_install_defaults(void) {
     saved_user_settings_len = vfs_read(PATH_SETTINGS, saved_user_settings, sizeof(saved_user_settings));
     if (saved_user_settings_len > (int64_t)sizeof(saved_user_settings)) {
@@ -7226,7 +7241,16 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * to kill. */
         size_t hd_bytes = 0;
         uint8_t *hd_img = read_program(PATH_BIN_DIR "httpd", &hd_bytes);
-        const char *hd_argv[] = {PATH_BIN_DIR "httpd", "8080", 0};
+        /* M74-M79: 8080 -> 8081, and it is a real bug rather than a
+         * tidy-up. tcptest (M66's self-test, a few blocks above) binds
+         * 8080 too, and a TCP port is not free the moment its owner
+         * exits - a closed connection sits in TIME_WAIT. On a quiet host
+         * the gap between the two tests is long enough that nobody ever
+         * noticed; on a machine running three guests at once it is not,
+         * and this test panicked with "httpd: cannot listen on 8080" -
+         * which reads as a networking failure and is really two
+         * self-tests sharing a number. */
+        const char *hd_argv[] = {PATH_BIN_DIR "httpd", "8081", 0};
         task_t *hd = process_spawnv("httpd", hd_img, hd_bytes, hd_argv);
         kfree(hd_img);
         pit_sleep_ms(300); /* long enough to bind and listen */
@@ -7235,7 +7259,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         size_t ft_bytes = 0;
         uint8_t *ft_img = read_program(PATH_BIN_DIR "fetch", &ft_bytes);
         const char *ft_argv[] = {PATH_BIN_DIR "fetch",
-                                  "http://127.0.0.1:8080/hello", FETCHED, 0};
+                                  "http://127.0.0.1:8081/hello", FETCHED, 0};
         task_t *ft = process_spawnv("fetch", ft_img, ft_bytes, ft_argv);
         kfree(ft_img);
         if (!ft || do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) != 0) {
@@ -7314,6 +7338,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M74 self-test: could not write the session fixture");
         }
 
+        /* Motion off for this one - see SELFTEST_SETTINGS_NO_ANIM. Put
+         * back at the end of the block, so every self-test after this
+         * one runs against the same known settings as every test before
+         * it. */
+        vfs_write(PATH_SETTINGS, SELFTEST_SETTINGS_NO_ANIM,
+                   sizeof(SELFTEST_SETTINGS_NO_ANIM) - 1);
+
         size_t comp_bytes = 0;
         uint8_t *comp_img = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
         const char *comp_argv[] = {PATH_BIN_DIR "compositor", 0};
@@ -7389,6 +7420,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             }
         }
         do_syscall(SYS_unlink, (uint64_t)SESSION, 0, 0);
+        vfs_write(PATH_SETTINGS, SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
         console_init();
         klog_use_console();
 
