@@ -86,6 +86,24 @@ console_elf_start:
     incbin "build/console.elf"
 console_elf_end:
 
+global nslookup_elf_start
+global nslookup_elf_end
+nslookup_elf_start:
+    incbin "build/nslookup.elf"
+nslookup_elf_end:
+
+global fetch_elf_start
+global fetch_elf_end
+fetch_elf_start:
+    incbin "build/fetch.elf"
+fetch_elf_end:
+
+global httpd_elf_start
+global httpd_elf_end
+httpd_elf_start:
+    incbin "build/httpd.elf"
+httpd_elf_end:
+
 global caps_elf_start
 global caps_elf_end
 caps_elf_start:

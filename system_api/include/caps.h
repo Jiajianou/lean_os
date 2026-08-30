@@ -243,6 +243,15 @@ static const cap_grant_t CAP_GRANTS[] = {
      * ungated, which is itself the manifest saying something true. */
     {"racetest",      CAP_APP_DEFAULT | CAP_NETWORK},
     {"nettime",       CAP_APP_DEFAULT | CAP_NETWORK | CAP_SET_TIME},
+    /* M73: names and bytes. `fetch` is the first program on this machine
+     * that can bring in something nobody here compiled, which is the
+     * category M65 built this whole model for while nothing could yet do
+     * it - so it holds CAP_NETWORK and, because it writes what it
+     * fetches, the default's CAP_FS_WRITE and nothing else. `httpd` is
+     * the self-test's loopback fixture. */
+    {"nslookup",      CAP_APP_DEFAULT | CAP_NETWORK},
+    {"fetch",         CAP_APP_DEFAULT | CAP_NETWORK},
+    {"httpd",         CAP_APP_DEFAULT | CAP_NETWORK},
     /* Claims the sound devices directly - the one program that does,
      * and the one that demonstrates the claim being refused. */
     {"audiograb",     CAP_APP_DEFAULT | CAP_AUDIO},

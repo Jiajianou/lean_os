@@ -5493,7 +5493,7 @@ them and having children not see them is the other kind of honesty.
 
 
 
-## M73 — Names, not numbers [ ]
+## M73 — Names, not numbers ✅
 
 M64 shipped `SYS_netconf` returning a DNS server address and wrote,
 carefully, that it prints *"the DNS server it was handed instead of
@@ -5502,7 +5502,7 @@ somebody else's stack. What is missing between those two and anything a
 person would do is a resolver, and after that, one program that proves
 the whole column.
 
-- [ ] **A DNS resolver in user space**, in `user_space/lib` — following
+- [x] **A DNS resolver in user space**, in `user_space/lib` — following
       M64's own precedent and its stated reason: SNTP went to user space
       because *"a kernel parsing replies off the network is a far larger
       trusted surface than a sixty-line program needs"*, and a DNS
@@ -5510,22 +5510,22 @@ the whole column.
       an SNTP reply. A queries, CNAME following with a hop limit, a small
       cache honouring TTL, and the message-compression pointer loop that
       every from-scratch resolver gets wrong on the first try
-- [ ] **`nslookup`**, for the same reason `netconf` and `caps` exist:
+- [x] **`nslookup`**, for the same reason `netconf` and `caps` exist:
       the thing that makes a subsystem checkable is a program that prints
       what it did
-- [ ] **An HTTP/1.1 client** — `fetch URL`. `Host:` header, status line,
+- [x] **An HTTP/1.1 client** — `fetch URL`. `Host:` header, status line,
       headers, `Content-Length` and chunked bodies, a redirect limit, and
       a hard cap on response size. Deliberately no TLS: a from-scratch
       TLS 1.3 is a project, not a bullet, and an `https://` that quietly
       wasn't would be a lie of exactly the kind this file keeps refusing
       to tell
-- [ ] **The first inbound path.** `fetch` writing to a file is the first
+- [x] **The first inbound path.** `fetch` writing to a file is the first
       time in sixty-odd milestones that something arrives on this machine
       without being compiled into its disk image. That is what makes M63
       ("somebody else's program") and M65 (a capability model, built
       because a downloaded program is a real category) stop being
       hypothetical about each other
-- [ ] `CAP_NET` already gates the socket, so a downloaded thing does not
+- [x] `CAP_NET` already gates the socket, so a downloaded thing does not
       get a network by default. Check that this is actually true once
       there is a downloaded thing
 
@@ -5535,6 +5535,63 @@ asserting the bytes match, and asserting the failure paths, which is
 where M64 got its ratio right: a name that does not exist, a server that
 refuses, a redirect loop, a body that exceeds the cap, and a truncated
 response.
+
+### Progress notes
+
+*The whole thing passed on the first boot it was run on*, which is worth
+recording because almost nothing in this arc did - and the reason is that
+every layer underneath it had already been made to work and to say so.
+The path a fetched byte takes is TCP's handshake (M66), the loopback
+queue M66 had to add when it discovered a recursive receive, the socket
+fd table from M64, and M71's filesystem at the end. None of that needed
+touching.
+
+*The self-test does not need the internet, and that is the design.* A
+test that reaches out to a real name reports on whether the machine
+running QEMU has a network, which is the weather rather than the code. So
+it is split in two:
+
+- **The parser** is fed responses built by hand, because a DNS reply is
+  just bytes and that is where a resolver actually goes wrong. The cases
+  are specific hostile shapes rather than variations on "it works": a
+  **compression pointer** (which every real reply uses and a naive parser
+  cannot read at all), a **CNAME chain**, a **pointer that points at
+  itself** (a hang rather than an error - the nastiest thing a malicious
+  reply can do, and the reason there is a jump budget), somebody else's
+  reply arriving with the **wrong id**, an answer to a **different
+  question**, **NXDOMAIN**, and a **truncated message**.
+- **The fetch** runs against `httpd`, a fixture that serves one canned
+  response on loopback and exits. Same reasoning M66 used for TCP: check
+  this machine's client against a server whose every byte is known.
+
+*Five distinct failure codes, not one.* "The name does not exist", "the
+server never answered", "the reply was malformed" and "there is no DNS
+server configured" want different things from a caller, and a resolver
+that returns one error for all of them makes every one of them
+undiagnosable. `nslookup` prints a different sentence for each, which is
+the same reason `netconf` and `caps` exist.
+
+*In user space, following M64's own precedent* - "a kernel parsing
+replies off the network is a far larger trusted surface than a sixty-line
+program needs". A DNS response is strictly nastier input than the SNTP
+reply that argument was made about: length-prefixed labels, a pointer
+format that can jump backwards into the message, and a record count the
+sender chooses. It is exactly the parser that should not be in the
+kernel.
+
+*`https://` is refused by name rather than downgraded.* A from-scratch
+TLS 1.3 is a project, not a bullet, and an `https` that quietly was not
+encrypted would be the kind of lie this file keeps declining to tell.
+
+**What this actually unlocks.** M63 ran somebody else's program and M65
+built a capability model on the argument that a *downloaded* program is a
+real category - both reasoning about something that could not yet happen
+here. `fetch` writing a file is the first time anything has arrived on
+this machine's filesystem without being compiled into its disk image. The
+model was waiting for this, and `fetch` holds `CAP_NETWORK` while an
+ordinary program does not.
+
+
 
 ## M74 — The session that remembers [ ]
 

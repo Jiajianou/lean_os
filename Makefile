@@ -122,7 +122,7 @@ USER_LD   := user_space/lib/user.ld
 USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/malloc.o \
                 $(UOBJ)/gfx.o $(UOBJ)/font8x16.o $(UOBJ)/wmclient.o $(UOBJ)/wallpaper.o \
                 $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o \
-                $(UOBJ)/uifont.o $(UOBJ)/sntp.o \
+                $(UOBJ)/uifont.o $(UOBJ)/sntp.o $(UOBJ)/dns.o $(UOBJ)/http.o \
                 $(UOBJ)/libc_string.o $(UOBJ)/libc_stdlib.o $(UOBJ)/libc_stdio.o \
                 $(UOBJ)/libc_math.o $(UOBJ)/libc_time.o
 
@@ -140,7 +140,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # alongside its own" is only true if there is no special path for them.
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 

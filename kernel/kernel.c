@@ -67,6 +67,9 @@
     X(tcptest)                       \
     X(racetest)                      \
     X(console)                       \
+    X(nslookup)                      \
+    X(fetch)                         \
+    X(httpd)                         \
     X(caps)                          \
     X(captest)                       \
     X(whetstone)                     \
@@ -7101,6 +7104,95 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_put_dec((uint32_t)sched_total_ticks(0));
         klog_puts(" so far - a count that did not exist before this milestone - "
                    "self-test passed.\n\n");
+    }
+
+    /* ---- M73 self-test: names, and the first inbound byte ---------------
+     *
+     * Two halves, and neither of them depends on the machine running QEMU
+     * having internet - which is the whole trick, because a test that
+     * needs the weather is a test that reports on the weather.
+     *
+     *   1. **The DNS parser**, fed responses built by hand. That is where
+     *      a resolver actually goes wrong, and none of it needs a server:
+     *      a reply is just bytes. The cases are the specific ways a real
+     *      or hostile server ruins a naive parser - a compression pointer
+     *      (which every real reply uses and a naive parser cannot read at
+     *      all), a CNAME chain, a pointer that points at itself, somebody
+     *      else's reply arriving with the wrong id, an answer to a
+     *      different question, NXDOMAIN, and a truncated message.
+     *   2. **A real HTTP GET over loopback.** `httpd` serves one canned
+     *      response on a port; `fetch` retrieves it and writes it to a
+     *      file; this test reads the file and compares it byte for byte.
+     *      Every layer this project built is in that path - TCP's
+     *      handshake, the loopback queue M66 had to add, the socket fd
+     *      table from M64 - and the bytes at the end are the proof.
+     *
+     * That second half is the first time anything has arrived on this
+     * machine's filesystem without being compiled into its disk image.
+     */
+    if (net_have_nic()) {
+        int all_ok = 1;
+
+        size_t ns_bytes = 0;
+        uint8_t *ns_img = read_program(PATH_BIN_DIR "nslookup", &ns_bytes);
+        const char *ns_argv[] = {PATH_BIN_DIR "nslookup", "-s", 0};
+        task_t *ns = process_spawnv("nslookup", ns_img, ns_bytes, ns_argv);
+        kfree(ns_img);
+        if (!ns || do_syscall(SYS_wait, (uint64_t)ns->id, 0, 0) != 0) {
+            klog_puts("[m73] the DNS parser self-test reported a failure\n");
+            all_ok = 0;
+        }
+
+        /* The server first, so it is listening before anything connects.
+         * It serves one request and exits, which is what a fixture should
+         * do - a loop would be a process this test then has to remember
+         * to kill. */
+        size_t hd_bytes = 0;
+        uint8_t *hd_img = read_program(PATH_BIN_DIR "httpd", &hd_bytes);
+        const char *hd_argv[] = {PATH_BIN_DIR "httpd", "8080", 0};
+        task_t *hd = process_spawnv("httpd", hd_img, hd_bytes, hd_argv);
+        kfree(hd_img);
+        pit_sleep_ms(300); /* long enough to bind and listen */
+
+        const char *FETCHED = PATH_TMP_DIR "m73.txt";
+        size_t ft_bytes = 0;
+        uint8_t *ft_img = read_program(PATH_BIN_DIR "fetch", &ft_bytes);
+        const char *ft_argv[] = {PATH_BIN_DIR "fetch",
+                                  "http://127.0.0.1:8080/hello", FETCHED, 0};
+        task_t *ft = process_spawnv("fetch", ft_img, ft_bytes, ft_argv);
+        kfree(ft_img);
+        if (!ft || do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) != 0) {
+            klog_puts("[m73] fetch could not retrieve over loopback\n");
+            all_ok = 0;
+        }
+        if (hd) {
+            selftest_reap(hd);
+        }
+
+        static const char EXPECT[] = "lean_os fetched this over loopback\n";
+        static char fetched[128];
+        k_memset(fetched, 0, sizeof(fetched));
+        int64_t fn = vfs_read(FETCHED, fetched, sizeof(fetched) - 1);
+        if (fn != (int64_t)sizeof(EXPECT) - 1 || k_strcmp(fetched, EXPECT) != 0) {
+            klog_puts("[m73] the fetched file is not what the server sent - got ");
+            klog_put_dec((uint32_t)(fn < 0 ? 0 : fn));
+            klog_puts(" byte(s)\n");
+            all_ok = 0;
+        }
+        do_syscall(SYS_unlink, (uint64_t)FETCHED, 0, 0);
+
+        if (!all_ok) {
+            panic("M73 self-test: this machine cannot resolve a name or fetch a byte");
+        }
+
+        klog_puts("[m73] names, not numbers: a DNS parser that follows compression "
+                   "pointers and CNAMEs and refuses a pointer loop, a wrong id and a "
+                   "truncated reply - and an HTTP GET over loopback whose bytes reached "
+                   "the filesystem, the first thing here that was not compiled in - "
+                   "self-test passed.\n\n");
+    } else {
+        klog_puts("[m73] no NIC on this machine - DNS and HTTP are present but untested "
+                   "this boot.\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
