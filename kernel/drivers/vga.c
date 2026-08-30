@@ -53,24 +53,3 @@ void vga_putc(char c) {
     }
 }
 
-void vga_puts(const char *s) {
-    while (*s) {
-        vga_putc(*s++);
-    }
-}
-
-static char hex_digit(uint8_t nibble) {
-    return (char)(nibble < 10 ? ('0' + nibble) : ('A' + nibble - 10));
-}
-
-void vga_put_hex32(uint32_t value) {
-    for (int shift = 28; shift >= 0; shift -= 4) {
-        vga_putc(hex_digit((value >> shift) & 0xF));
-    }
-}
-
-void vga_put_hex64(uint64_t value) {
-    for (int shift = 60; shift >= 0; shift -= 4) {
-        vga_putc(hex_digit((value >> shift) & 0xF));
-    }
-}

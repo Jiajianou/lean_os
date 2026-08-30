@@ -30,6 +30,42 @@ static inline uint16_t inw(uint16_t port) {
     return ret;
 }
 
+/* ---- block port I/O -------------------------------------------------
+ *
+ * `rep insw`/`rep outsw` move `words` 16-bit units between a port and
+ * memory in one instruction. This is the idiomatic form and it replaced
+ * a hand-written `for (i...) dst[i] = inw(port);` loop in ata.c, so it
+ * is three lines shorter at each of the two call sites and one
+ * instruction instead of 256 per 512-byte sector.
+ *
+ * What it is NOT is a measured speedup, and that is worth writing down
+ * so nobody re-derives it hopefully. The reasoning was that each
+ * discrete `inw` is a VM exit into QEMU's device emulation and a `rep`
+ * string form is one exit for the whole run - which is true, and on a
+ * boot that pushes ~1.5 MB through this port seeding 47 programs onto a
+ * fresh disk it sounded like it would show. It does not: that seed takes
+ * 0.2 s either way, and boot to `[init] PID 1 spawned` measured 148.7 s
+ * before and 148.3 s after, which is noise. Disk I/O is simply not where
+ * this boot's time goes: the network self-tests are, at 34 s of 148 s,
+ * and they are round trips rather than work.
+ * Kept because it is the smaller and more conventional way to write the
+ * same transfer, not because it made anything faster here; it may on
+ * real hardware, where the per-access cost is a real bus cycle rather
+ * than an emulator's.
+ *
+ * `rep` uses ES:RDI / DS:RSI and depends on the direction flag being
+ * clear, which is the ABI's guaranteed state at every function boundary
+ * and which nothing in this kernel ever sets - the only `std` in the
+ * tree would have to be written by hand, and there is none.
+ */
+static inline void insw(uint16_t port, void *buf, uint32_t words) {
+    __asm__ volatile("rep insw" : "+D"(buf), "+c"(words) : "d"(port) : "memory");
+}
+
+static inline void outsw(uint16_t port, const void *buf, uint32_t words) {
+    __asm__ volatile("rep outsw" : "+S"(buf), "+c"(words) : "d"(port) : "memory");
+}
+
 static inline void outl(uint16_t port, uint32_t val) {
     __asm__ volatile("outl %0, %1" : : "a"(val), "Nd"(port));
 }

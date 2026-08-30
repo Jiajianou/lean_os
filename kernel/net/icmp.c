@@ -2,6 +2,7 @@
 
 #include "ip.h"
 #include "lib/libk.h"
+#include "wire.h"
 
 #define ICMP_TYPE_ECHO_REPLY   0
 #define ICMP_TYPE_ECHO_REQUEST 8
@@ -12,20 +13,6 @@
 static volatile uint16_t last_reply_id;
 static volatile uint16_t last_reply_seq;
 static volatile int last_reply_valid;
-
-static uint16_t checksum16(const uint8_t *data, uint16_t len) {
-    uint32_t sum = 0;
-    for (uint16_t i = 0; i + 1 < len; i += 2) {
-        sum += (uint16_t)((data[i] << 8) | data[i + 1]);
-    }
-    if (len & 1) {
-        sum += (uint16_t)(data[len - 1] << 8);
-    }
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    return (uint16_t)~sum;
-}
 
 static void send_icmp(uint32_t dst_ip, uint8_t type, uint16_t id, uint16_t seq, const uint8_t *payload, uint16_t payload_len) {
     static uint8_t packet[ICMP_HEADER_LEN + ICMP_MAX_PAYLOAD];
@@ -46,7 +33,7 @@ static void send_icmp(uint32_t dst_ip, uint8_t type, uint16_t id, uint16_t seq, 
     }
 
     uint16_t total_len = (uint16_t)(ICMP_HEADER_LEN + payload_len);
-    uint16_t csum = checksum16(packet, total_len);
+    uint16_t csum = net_checksum16(packet, total_len);
     packet[2] = (uint8_t)(csum >> 8);
     packet[3] = (uint8_t)(csum & 0xFF);
 

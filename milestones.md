@@ -6510,6 +6510,118 @@ guessed, and every one of them checked by `libctest`.
 
 
 
+## Cleanup pass — duplication, dead code, and one measurement that said no
+
+Not a milestone: a sweep for things that had accumulated, done after M79
+with the same rule the rest of this file follows - a change is kept
+because something measured or verified says to keep it, not because it
+sounded like an improvement.
+
+**Eighteen copies of seven functions, in one header now.** Every
+protocol in `kernel/net/` reads and writes the same two things - integers
+in network byte order and RFC 1071's one's complement sum - and every one
+of them had grown its own private copy: four each of `read_be32` and
+`write_be32`, two each of `read_be16`, `write_be16`, `sum16` and
+`checksum16`, and two more of the checksum fold under two different names
+(`fold` in `tcp.c`, `fold_checksum` in `udp.c`), across `arp.c`,
+`dhcp.c`, `ip.c`, `udp.c`, `tcp.c` and `icmp.c`, all byte for byte
+identical. Nothing had gone wrong, which is the point at which this is
+cheap to fix: eighteen copies of a definition are eighteen places a fix
+has to land, and the fourth gets written by pasting the third. They are now `static inline` in
+`kernel/net/wire.h`: 184 lines deleted from the six protocol files
+against 69 added, plus one 81-line header that is mostly the comment
+explaining itself. The checksum is split into `net_sum16` (accumulate)
+and `net_fold16` (fold and complement), because TCP and UDP need to run
+a pseudo-header, a header and a payload through it in three calls
+without assembling a buffer - which is exactly why `fold` and
+`fold_checksum` existed separately in the first place - while `ip.c` and
+`icmp.c` each wanted the one-shot form. `net_checksum16` is now that
+one-shot spelled in terms of the other two, so there is one copy of the
+arithmetic and no way for the two spellings to disagree.
+
+**`rep insw`, and why it stayed even though it changed nothing.** The
+ATA driver moved its sectors one 16-bit word at a time through a
+`for` loop of `inw`. Each of those is a VM exit into QEMU's device
+emulation and the `rep` string form is one exit for a whole 512-byte
+sector - 256 exits down to one - on a boot that pushes about 1.5 MB
+through that port seeding 47 programs onto a fresh disk. It was an
+obvious win and it is not one: **the seed takes 0.2 s either way, and
+boot to `[init] PID 1 spawned` measured 148.7 s before and 148.3 s
+after.** Kept anyway, but the comment in `io.h` now says plainly that it
+was kept for being the smaller and more conventional way to write the
+same transfer and not for speed, so that nobody re-derives the
+hopeful version of the reasoning later.
+
+**Where the boot's 148 seconds actually go.** Worth recording, since the
+above is the second time an assumption about it has been wrong. Measured
+by timestamping markers as they reach the serial log:
+
+| reached | at |
+| --- | --- |
+| memory, framebuffer, font | 1.5 s |
+| scheduler, syscalls, pipes | 9.6 s |
+| filesystem up, 47 programs seeded | 10.0 s |
+| windowing, clipboard, VFS, ACPI, SMP | 21 s |
+| **network self-tests (m42-m50)** | **21 s -> 55 s** |
+| m55, m59, m60, m63, m65 | 69, 93, 110, 120, 127 s |
+| m67 through m79, init handoff | 139 -> 148.6 s |
+
+Disk I/O is 0.2 s of it. The largest single block is the network
+self-tests, and that time is round trips and timeouts rather than work -
+which is to say the boot is slow because of what it waits for, not
+because of how it computes, and there is no optimisation here worth
+making without changing what the tests assert.
+
+**A function whose comment named a test that did not exist.**
+`openfile_in_use()` in `kernel/fs/openfile.h` carried the comment "for
+the boot self-test that asserts a process's files are given back when it
+exits" - and nothing called it. The intent had been written down and
+then lost, which is worse than not having written it: the table it
+counts is global and holds 64 entries for the whole machine, so a leak
+in it is not one process running out of files, it is every `SYS_open` on
+the machine failing after the sixty-fourth one, presenting as "the
+editor stopped saving" an hour later and pointing nowhere near the cause.
+It is now the M59 self-test's seventh claim - the sibling of claim 3,
+which asserts the *disk* gets its blocks back, on the other side of the
+descriptor - and it was verified the way any new assertion should be:
+by leaking exactly one descriptor on purpose and confirming the boot
+panics with `the open-file table went from 0x00000000 entries to
+0x00000001`.
+
+**Five dead functions removed**, each one superseded rather than merely
+uncalled: `vga_puts`, `vga_put_hex32`, `vga_put_hex64` (klog.h already
+says every message goes through klog and nothing calls `vga_*`
+directly), `serial_puts` (same - klog owns that channel and iterates
+itself), and `sched_is_running` together with the `scheduler_running`
+flag behind it, whose comment named `pit_sleep_ms` as its caller when
+`pit_sleep_ms` had by then grown a comment of its own explaining why it
+deliberately halts instead.
+
+**Six more were left alone deliberately**, because "uncalled" and
+"cruft" are not the same thing: `pic_set_mask` and `klog_log_hex32` are
+each one half of a symmetric pair whose other half is in use, and
+`tsc_cycles_per_us`, `dispi_vram_bytes`, `socket_type` and
+`tcp_send_space` are documented accessors on interfaces that are
+otherwise live. Removing half an API because today's callers happen not
+to need it is its own kind of drift.
+
+*Verified*, and worth stating precisely because two runs in the middle
+of it were red. The serial harness passes 69/69, including every network
+self-test from the handshake through a 16 KiB transfer that survives 17
+deliberately dropped segments - which is what actually checks the
+consolidated checksum code. One serial run, started seconds after a
+full interactive suite finished, reported `[wm] animation missed its
+frame budget`; it passed twice on re-run with the machine idle, which is
+what that assertion has always been sensitive to. The interactive suite
+reported 43/45, and both failures - a boot timeout in
+`soak_desktop_stays_usable` and a window count of 3 where
+`desktop_survives_losing_the_compositor` wanted 2 - passed when re-run
+one guest at a time, at 155 s where the failing run took 171 s. That is
+the contention artifact `qemu-input-test.sh`'s own header warns about
+and tells you to re-run before believing; it is worth noticing that the
+warning was right rather than assuming it was.
+
+
 ## Deliberately not next, and why
 
 - **A GPU driver, or real mode-setting.** Already argued in the

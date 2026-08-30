@@ -3,6 +3,7 @@
 #include "ip.h"
 #include "lib/libk.h"
 #include "net.h"
+#include "wire.h"
 
 /* ---- wire helpers ----------------------------------------------------
  *
@@ -11,23 +12,6 @@
  * offset and nine 1-bit flags packed into two bytes, and a struct
  * overlay of that on a little-endian machine is a bitfield layout the
  * standard does not pin down. */
-static uint16_t read_be16(const uint8_t *p) {
-    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
-}
-static uint32_t read_be32(const uint8_t *p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-}
-static void write_be16(uint8_t *p, uint16_t v) {
-    p[0] = (uint8_t)(v >> 8);
-    p[1] = (uint8_t)v;
-}
-static void write_be32(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
-}
-
 #define TCP_FIN 0x01
 #define TCP_SYN 0x02
 #define TCP_RST 0x04
@@ -140,31 +124,14 @@ int tcp_debug_retransmits(void) { return debug_retransmits; }
  *
  * The same pseudo-header UDP uses, with TCP's protocol number and the
  * whole segment as its length. */
-static uint32_t sum16(uint32_t sum, const uint8_t *data, uint16_t len) {
-    for (uint16_t i = 0; i + 1 < len; i += 2) {
-        sum += (uint32_t)((data[i] << 8) | data[i + 1]);
-    }
-    if (len & 1) {
-        sum += (uint32_t)data[len - 1] << 8;
-    }
-    return sum;
-}
-
-static uint16_t fold(uint32_t sum) {
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    return (uint16_t)~sum;
-}
-
 static uint32_t pseudo_sum(uint32_t src, uint32_t dst, uint16_t seg_len) {
     uint8_t p[12];
-    write_be32(p + 0, src);
-    write_be32(p + 4, dst);
+    net_write_be32(p + 0, src);
+    net_write_be32(p + 4, dst);
     p[8] = 0;
     p[9] = IP_PROTO_TCP;
-    write_be16(p + 10, seg_len);
-    return sum16(0, p, sizeof(p));
+    net_write_be16(p + 10, seg_len);
+    return net_sum16(0, p, sizeof(p));
 }
 
 /* ---- sending ---------------------------------------------------------- */
@@ -190,16 +157,16 @@ static int emit(struct tcpcb *t, uint32_t seq, uint8_t flags,
         payload_len = TCP_MAX_MSS;
     }
 
-    write_be16(seg + 0, t->local_port);
-    write_be16(seg + 2, t->remote_port);
-    write_be32(seg + 4, seq);
-    write_be32(seg + 8, (flags & TCP_ACK) ? t->rcv_nxt : 0);
+    net_write_be16(seg + 0, t->local_port);
+    net_write_be16(seg + 2, t->remote_port);
+    net_write_be32(seg + 4, seq);
+    net_write_be32(seg + 8, (flags & TCP_ACK) ? t->rcv_nxt : 0);
     seg[12] = (uint8_t)((hdr_len / 4) << 4);
     seg[13] = flags;
-    write_be16(seg + 14, window_of(t));
+    net_write_be16(seg + 14, window_of(t));
     seg[16] = 0; /* checksum */
     seg[17] = 0;
-    write_be16(seg + 18, 0); /* urgent pointer */
+    net_write_be16(seg + 18, 0); /* urgent pointer */
 
     if (with_mss) {
         /* Kind 2, length 4, then the value - and nothing else, so the
@@ -207,15 +174,15 @@ static int emit(struct tcpcb *t, uint32_t seq, uint8_t flags,
          * padding. */
         seg[20] = 2;
         seg[21] = 4;
-        write_be16(seg + 22, TCP_MAX_MSS);
+        net_write_be16(seg + 22, TCP_MAX_MSS);
     }
     if (payload_len) {
         k_memcpy(seg + hdr_len, payload, payload_len);
     }
 
     uint16_t total = (uint16_t)(hdr_len + payload_len);
-    uint16_t csum = fold(sum16(pseudo_sum(t->local_ip, t->remote_ip, total), seg, total));
-    write_be16(seg + 16, csum);
+    uint16_t csum = net_fold16(net_sum16(pseudo_sum(t->local_ip, t->remote_ip, total), seg, total));
+    net_write_be16(seg + 16, csum);
 
     /* The self-test's loss injection. Two things about where it is:
      *
@@ -248,33 +215,33 @@ static void send_reset(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uin
     }
     uint8_t out[TCP_HEADER_LEN];
     uint16_t data_off = (uint16_t)((seg[12] >> 4) * 4);
-    uint32_t their_seq = read_be32(seg + 4);
-    uint32_t their_ack = read_be32(seg + 8);
+    uint32_t their_seq = net_read_be32(seg + 4);
+    uint32_t their_ack = net_read_be32(seg + 8);
     uint16_t seg_len = (uint16_t)(len - data_off);
     if (seg[13] & TCP_SYN) { seg_len++; }
     if (seg[13] & TCP_FIN) { seg_len++; }
 
-    write_be16(out + 0, read_be16(seg + 2)); /* their destination is our source */
-    write_be16(out + 2, read_be16(seg + 0));
+    net_write_be16(out + 0, net_read_be16(seg + 2)); /* their destination is our source */
+    net_write_be16(out + 2, net_read_be16(seg + 0));
     out[12] = (uint8_t)((TCP_HEADER_LEN / 4) << 4);
-    write_be16(out + 14, 0);
+    net_write_be16(out + 14, 0);
     out[16] = 0; out[17] = 0;
-    write_be16(out + 18, 0);
+    net_write_be16(out + 18, 0);
 
     if (seg[13] & TCP_ACK) {
         /* They told us a sequence number to use, so use it and do not
          * acknowledge anything. */
-        write_be32(out + 4, their_ack);
-        write_be32(out + 8, 0);
+        net_write_be32(out + 4, their_ack);
+        net_write_be32(out + 8, 0);
         out[13] = TCP_RST;
     } else {
-        write_be32(out + 4, 0);
-        write_be32(out + 8, their_seq + seg_len);
+        net_write_be32(out + 4, 0);
+        net_write_be32(out + 8, their_seq + seg_len);
         out[13] = TCP_RST | TCP_ACK;
     }
 
-    uint16_t csum = fold(sum16(pseudo_sum(dst_ip, src_ip, TCP_HEADER_LEN), out, TCP_HEADER_LEN));
-    write_be16(out + 16, csum);
+    uint16_t csum = net_fold16(net_sum16(pseudo_sum(dst_ip, src_ip, TCP_HEADER_LEN), out, TCP_HEADER_LEN));
+    net_write_be16(out + 16, csum);
     ip_send_from(dst_ip, src_ip, IP_PROTO_TCP, out, TCP_HEADER_LEN);
 }
 
@@ -731,7 +698,7 @@ static void parse_mss(struct tcpcb *t, const uint8_t *seg, uint16_t data_off) {
         uint8_t olen = seg[i + 1];
         if (olen < 2 || i + olen > data_off) { break; }
         if (kind == 2 && olen == 4) {
-            uint16_t mss = read_be16(seg + i + 2);
+            uint16_t mss = net_read_be16(seg + i + 2);
             if (mss > 0) {
                 t->mss = mss < TCP_MAX_MSS ? mss : TCP_MAX_MSS;
                 /* RFC 5681's initial window, now that the MSS is known. */
@@ -835,16 +802,16 @@ void tcp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uin
     if (data_off < TCP_HEADER_LEN || data_off > len) {
         return;
     }
-    if (fold(sum16(pseudo_sum(src_ip, dst_ip, len), seg, len)) != 0) {
+    if (net_fold16(net_sum16(pseudo_sum(src_ip, dst_ip, len), seg, len)) != 0) {
         return; /* a corrupt segment is one that never arrived */
     }
 
-    uint16_t src_port = read_be16(seg + 0);
-    uint16_t dst_port = read_be16(seg + 2);
-    uint32_t seq = read_be32(seg + 4);
-    uint32_t ack = read_be32(seg + 8);
+    uint16_t src_port = net_read_be16(seg + 0);
+    uint16_t dst_port = net_read_be16(seg + 2);
+    uint32_t seq = net_read_be32(seg + 4);
+    uint32_t ack = net_read_be32(seg + 8);
     uint8_t flags = seg[13];
-    uint16_t window = read_be16(seg + 14);
+    uint16_t window = net_read_be16(seg + 14);
     const uint8_t *data = seg + data_off;
     uint16_t data_len = (uint16_t)(len - data_off);
 

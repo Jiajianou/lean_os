@@ -606,11 +606,6 @@ void sched_mark_self_idle(void);
  * this wait is the clock, so there is no event to race with. */
 void sched_sleep_until(uint64_t deadline_ms);
 
-/* Whether the scheduler exists yet. pit_sleep_ms runs long before
- * sched_init - the PIT is up early, on purpose - and a "block this task"
- * call at that point has no task to block. */
-int sched_is_running(void);
-
 void sched_idle_enter(void);
 void sched_idle_exit(void);
 

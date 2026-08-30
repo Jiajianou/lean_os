@@ -2,6 +2,7 @@
 
 #include "lib/libk.h"
 #include "net.h"
+#include "wire.h"
 
 #define ARP_HTYPE_ETHERNET 1
 #define ARP_PTYPE_IPV4     0x0800
@@ -26,17 +27,6 @@ static struct {
 
 void arp_init(void) {
     k_memset(arp_cache, 0, sizeof(arp_cache));
-}
-
-static uint32_t read_be32(const uint8_t *p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-}
-
-static void write_be32(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
 }
 
 void arp_learn(uint32_t ip, const uint8_t mac[ETH_ADDR_LEN]) {
@@ -83,9 +73,9 @@ static void build_and_send(uint16_t op, const uint8_t dst_mac[ETH_ADDR_LEN], uin
     packet[6] = (uint8_t)(op >> 8);
     packet[7] = (uint8_t)(op & 0xFF);
     k_memcpy(packet + 8, net_local_mac(), ETH_ADDR_LEN);   /* sha */
-    write_be32(packet + 14, net_local_ip());                /* spa */
+    net_write_be32(packet + 14, net_local_ip());                /* spa */
     k_memcpy(packet + 18, dst_mac, ETH_ADDR_LEN);            /* tha */
-    write_be32(packet + 24, target_ip);                      /* tpa */
+    net_write_be32(packet + 24, target_ip);                      /* tpa */
 
     eth_send(dst_mac, ETH_TYPE_ARP, packet, ARP_PACKET_LEN);
 }
@@ -105,8 +95,8 @@ void arp_handle_packet(const uint8_t *payload, uint16_t len) {
     }
     uint16_t op = (uint16_t)((payload[6] << 8) | payload[7]);
     const uint8_t *sha = payload + 8;
-    uint32_t spa = read_be32(payload + 14);
-    uint32_t tpa = read_be32(payload + 24);
+    uint32_t spa = net_read_be32(payload + 14);
+    uint32_t tpa = net_read_be32(payload + 24);
 
     arp_learn(spa, sha);
 

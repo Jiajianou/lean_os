@@ -74,9 +74,7 @@ void ata_read_sectors(uint32_t lba, uint8_t count, void *buf) {
     for (uint8_t s = 0; s < count; s++) {
         ata_wait_ready();
         ata_wait_drq();
-        for (int i = 0; i < ATA_SECTOR_SIZE / 2; i++) {
-            dst[i] = inw(ATA_REG_DATA);
-        }
+        insw(ATA_REG_DATA, dst, ATA_SECTOR_SIZE / 2);
         dst += ATA_SECTOR_SIZE / 2;
     }
 }
@@ -90,9 +88,7 @@ void ata_write_sectors(uint32_t lba, uint8_t count, const void *buf) {
     for (uint8_t s = 0; s < count; s++) {
         ata_wait_ready();
         ata_wait_drq();
-        for (int i = 0; i < ATA_SECTOR_SIZE / 2; i++) {
-            outw(ATA_REG_DATA, src[i]);
-        }
+        outsw(ATA_REG_DATA, src, ATA_SECTOR_SIZE / 2);
         src += ATA_SECTOR_SIZE / 2;
     }
 

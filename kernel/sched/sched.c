@@ -169,13 +169,6 @@ void sched_debug_dump(const char *label) {
  * definition not concurrent with itself. */
 static int idle_depth[MAX_CPUS];
 
-/* M68: set once sched_init has turned the running context into task 0. */
-static int scheduler_running;
-
-int sched_is_running(void) {
-    return scheduler_running;
-}
-
 void sched_sleep_until(uint64_t deadline_ms) {
     int cpu = smp_current_cpu();
     uint64_t flags = irq_save_disable();
@@ -441,7 +434,6 @@ void sched_init(void) {
     current_task[0] = &tasks[0];
     loaded_pml4_phys[0] = tasks[0].pml4_phys;
 
-    scheduler_running = 1; /* M68: from here a task can be told to sleep */
     pit_set_tick_hook(scheduler_tick);
 }
 

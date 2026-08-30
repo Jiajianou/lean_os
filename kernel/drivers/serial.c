@@ -41,9 +41,3 @@ void serial_putc(char c) {
     }
     outb(REG_DATA, (uint8_t)c);
 }
-
-void serial_puts(const char *s) {
-    while (*s) {
-        serial_putc(*s++);
-    }
-}

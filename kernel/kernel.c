@@ -24,6 +24,7 @@
 #include "drivers/pit.h"
 #include "drivers/rtc.h"
 #include "fs/leanfs.h"
+#include "fs/openfile.h"
 #include "fs/vfs.h"
 #include "ipc/pipe.h"
 #include "ipc/shm.h" /* M50 - shm_count_by_owner, for the kill storm's segment accounting */
@@ -5135,9 +5136,22 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      *      host and this is a property of the code.
      *   6. SYS_rmdir, including its refusal to remove a directory that
      *      still holds something.
+     *   7. Every open-file-table entry comes back on close. This is
+     *      claim 3's sibling on the other side of the descriptor: claim 3
+     *      asserts the disk gets its blocks back, this asserts the kernel
+     *      gets its open-file descriptions back. openfile.c's table is
+     *      global and holds 64 entries for the whole machine, so a leak
+     *      here is not this process running out of files - it is every
+     *      SYS_open on the machine failing after the sixty-fourth one,
+     *      which is the kind of thing that presents as "the editor
+     *      stopped saving" an hour into a session and points nowhere
+     *      near the code that caused it. This test opens and closes a
+     *      couple of dozen descriptors, so it is the right place to
+     *      notice.
      */
     {
         int all_ok = 1;
+        int openfiles_before = openfile_in_use();
 
         /* 1. descriptors */
         static const char PART_A[] = "hello ";
@@ -5352,13 +5366,27 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59fd"), 0, 0);
 
+        /* 7. the open-file table is back where it started */
+        {
+            int openfiles_after = openfile_in_use();
+            if (openfiles_after != openfiles_before) {
+                klog_puts("[m59] the open-file table went from 0x");
+                klog_put_hex32((uint32_t)openfiles_before);
+                klog_puts(" entries to 0x");
+                klog_put_hex32((uint32_t)openfiles_after);
+                klog_puts(" across a test that closed everything it opened - descriptors leak\n");
+                all_ok = 0;
+            }
+        }
+
         if (!all_ok) {
             panic("M59 self-test: descriptors, large files, timestamps or metadata cost are wrong");
         }
         klog_puts("[m59] descriptors (open/lseek/read/write/close), a 200 KiB file through "
                    "double-indirect blocks read back byte for byte and every block returned, "
-                   "a real mtime, rmdir, and a one-byte save costing one metadata sector "
-                   "instead of thirty-one - self-test passed.\n\n");
+                   "a real mtime, rmdir, an open-file table back where it started, and a "
+                   "one-byte save costing one metadata sector instead of thirty-one - "
+                   "self-test passed.\n\n");
     }
 
     /* M60 self-test: a real argument vector, a real command line, and an

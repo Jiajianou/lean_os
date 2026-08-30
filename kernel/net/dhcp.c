@@ -6,6 +6,7 @@
 #include "net.h"
 #include "socket.h"
 #include "udp.h"
+#include "wire.h"
 
 #define DHCP_SERVER_PORT 67
 #define DHCP_CLIENT_PORT 68
@@ -34,17 +35,6 @@
  * then the magic cookie. 240 bytes before the first option. */
 #define BOOTP_FIXED_LEN 236
 #define DHCP_MIN_LEN    (BOOTP_FIXED_LEN + 4)
-
-static uint32_t read_be32(const uint8_t *p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-}
-
-static void write_be32(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
-}
 
 /* Walks the option block for one code. Returns a pointer to the value
  * and writes its length, or NULL. Bounds-checked at every step: this is
@@ -102,7 +92,7 @@ static void dhcp_receive(uint32_t src_ip, uint16_t src_port, const uint8_t *data
     if (have_reply || len < DHCP_MIN_LEN || len > sizeof(reply)) {
         return;
     }
-    if (data[0] != BOOTREPLY || read_be32(data + 4) != our_xid) {
+    if (data[0] != BOOTREPLY || net_read_be32(data + 4) != our_xid) {
         return;
     }
     k_memcpy(reply, data, len);
@@ -118,7 +108,7 @@ static uint16_t build_message(uint8_t *msg, uint8_t type, uint32_t requested, ui
     msg[1] = 1;  /* htype: Ethernet */
     msg[2] = ETH_ADDR_LEN;
     msg[3] = 0;  /* hops */
-    write_be32(msg + 4, our_xid);
+    net_write_be32(msg + 4, our_xid);
     /* flags: the broadcast bit. We ask the server to broadcast its reply
      * rather than unicast it to an address we do not have yet and could
      * not ARP for - the alternative is a stack that has to accept a
@@ -126,7 +116,7 @@ static uint16_t build_message(uint8_t *msg, uint8_t type, uint32_t requested, ui
      * teach ip_handle_packet. */
     msg[10] = 0x80;
     k_memcpy(msg + 28, net_local_mac(), ETH_ADDR_LEN);
-    write_be32(msg + BOOTP_FIXED_LEN, 0x63825363u); /* the RFC 2131 magic cookie */
+    net_write_be32(msg + BOOTP_FIXED_LEN, 0x63825363u); /* the RFC 2131 magic cookie */
 
     uint16_t i = DHCP_MIN_LEN;
     msg[i++] = OPT_MESSAGE_TYPE;
@@ -136,13 +126,13 @@ static uint16_t build_message(uint8_t *msg, uint8_t type, uint32_t requested, ui
     if (requested) {
         msg[i++] = OPT_REQUESTED_IP;
         msg[i++] = 4;
-        write_be32(msg + i, requested);
+        net_write_be32(msg + i, requested);
         i = (uint16_t)(i + 4);
     }
     if (server) {
         msg[i++] = OPT_SERVER_ID;
         msg[i++] = 4;
-        write_be32(msg + i, server);
+        net_write_be32(msg + i, server);
         i = (uint16_t)(i + 4);
     }
 
@@ -188,7 +178,7 @@ static int exchange(const uint8_t *msg, uint16_t len, uint8_t want, uint32_t ms)
 static uint32_t option_ip(uint8_t code) {
     uint8_t len = 0;
     const uint8_t *v = find_option(reply, reply_len, code, &len);
-    return (v && len >= 4) ? read_be32(v) : 0;
+    return (v && len >= 4) ? net_read_be32(v) : 0;
 }
 
 int dhcp_configure(void) {
@@ -197,7 +187,7 @@ int dhcp_configure(void) {
      * exchanges. The MAC is the only per-machine value available this
      * early, and the tick count is the only varying one. */
     const uint8_t *mac = net_local_mac();
-    our_xid = read_be32(mac + 2) ^ (uint32_t)pit_get_ticks() ^ 0x1EA5F00Du;
+    our_xid = net_read_be32(mac + 2) ^ (uint32_t)pit_get_ticks() ^ 0x1EA5F00Du;
 
     socket_set_raw_handler(DHCP_CLIENT_PORT, dhcp_receive);
 
@@ -206,12 +196,12 @@ int dhcp_configure(void) {
 
     uint16_t len = build_message(msg, DHCP_DISCOVER, 0, 0);
     if (exchange(msg, len, DHCP_OFFER, 2000)) {
-        uint32_t offered = read_be32(reply + 16); /* yiaddr */
+        uint32_t offered = net_read_be32(reply + 16); /* yiaddr */
         uint32_t server = option_ip(OPT_SERVER_ID);
         if (offered) {
             len = build_message(msg, DHCP_REQUEST, offered, server);
             if (exchange(msg, len, DHCP_ACK, 2000)) {
-                uint32_t acked = read_be32(reply + 16);
+                uint32_t acked = net_read_be32(reply + 16);
                 net_set_config(acked ? acked : offered,
                                option_ip(OPT_SUBNET_MASK),
                                option_ip(OPT_ROUTER),

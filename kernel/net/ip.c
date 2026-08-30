@@ -8,35 +8,11 @@
 #include "net.h"
 #include "tcp.h"
 #include "udp.h"
-
-static uint32_t read_be32(const uint8_t *p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-}
-
-static void write_be32(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
-}
+#include "wire.h"
 
 /* Standard Internet checksum (RFC 1071): one's-complement sum of every
  * 16-bit word, folding carries back in, then one's complemented. Called
  * with the checksum field itself zeroed. */
-static uint16_t checksum16(const uint8_t *data, uint16_t len) {
-    uint32_t sum = 0;
-    for (uint16_t i = 0; i + 1 < len; i += 2) {
-        sum += (uint16_t)((data[i] << 8) | data[i + 1]);
-    }
-    if (len & 1) {
-        sum += (uint16_t)(data[len - 1] << 8);
-    }
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    return (uint16_t)~sum;
-}
-
 static void build_header(uint8_t *packet, uint32_t src_ip, uint32_t dst_ip, uint8_t protocol, uint16_t payload_len);
 
 /* M66: the loopback queue - see the comment in ip_send_from. Depth 32 is
@@ -206,10 +182,10 @@ static void build_header(uint8_t *packet, uint32_t src_ip, uint32_t dst_ip, uint
     packet[9] = protocol;
     packet[10] = 0; /* checksum, filled in below */
     packet[11] = 0;
-    write_be32(packet + 12, src_ip);
-    write_be32(packet + 16, dst_ip);
+    net_write_be32(packet + 12, src_ip);
+    net_write_be32(packet + 16, dst_ip);
 
-    uint16_t csum = checksum16(packet, IP_HEADER_LEN);
+    uint16_t csum = net_checksum16(packet, IP_HEADER_LEN);
     packet[10] = (uint8_t)(csum >> 8);
     packet[11] = (uint8_t)(csum & 0xFF);
 }
@@ -229,8 +205,8 @@ void ip_handle_packet(const uint8_t *src_mac, const uint8_t *payload, uint16_t l
     }
 
     uint8_t protocol = payload[9];
-    uint32_t src_ip = read_be32(payload + 12);
-    uint32_t dst_ip = read_be32(payload + 16);
+    uint32_t src_ip = net_read_be32(payload + 12);
+    uint32_t dst_ip = net_read_be32(payload + 16);
 
     if (!net_is_local_ip(dst_ip)) {
         return;
