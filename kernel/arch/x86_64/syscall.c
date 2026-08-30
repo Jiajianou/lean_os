@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include "arch/x86_64/cpu.h" /* MAX_CPUS - M68 */
 #include "drivers/ac97.h"
 #include "drivers/dispi.h"
 #include "drivers/pcspk.h"
@@ -278,6 +279,10 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
     if (slot->type == FD_STDIN) {
         uint64_t n = 0;
         while (n < len) {
+            /* M68: sampled before the read, so a keystroke arriving
+             * between the read and the park below is seen as "the world
+             * moved" rather than lost. */
+            uint64_t seq = sched_event_seq();
             int c = keyboard_read();
             if (c == -1) {
                 if (n > 0) {
@@ -285,9 +290,29 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
                 }
                 /* M42: a shell parked on an empty keyboard buffer is past
                  * this handler's own signal check and gets no timer tick
-                 * while it's current - see sched_deliver_pending_signal. */
-                sched_deliver_pending_signal();
-                schedule();
+                 * while it's current - see sched_deliver_pending_signal.
+                 * sched_block_on makes that check itself, first thing.
+                 *
+                 * M68: this was `schedule()`, which left the task READY -
+                 * so a shell sitting at a prompt was indistinguishable
+                 * from a program that wanted the CPU, forever. It is the
+                 * single clearest example of why no core on this machine
+                 * had ever halted. Now it leaves the run queue and the
+                 * keyboard IRQ wakes it.
+                 *
+                 * There is no condition lock to hand over here the way
+                 * pipe_read has one: the keyboard ring buffer is written
+                 * by an interrupt handler, and the wake happens in that
+                 * same handler *after* the byte is in the buffer. So the
+                 * ordering that matters is the driver's, not this
+                 * caller's - a keystroke that lands between the
+                 * keyboard_read above and the park below leaves this task
+                 * READY again immediately, which costs one extra trip
+                 * round this loop and loses nothing. A dummy lock keeps
+                 * sched_block_on's signature honest rather than growing a
+                 * lockless variant, which closes it with a sequence
+                 * counter instead - see sched.h. */
+                sched_block_on_seq(SCHED_KEYBOARD_CHAN, 0, seq);
                 continue;
             }
             dst[n++] = (char)c;
@@ -603,6 +628,7 @@ static long sys_wait(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, ui
              * walking the table means walking slots - sched_task_by_slot
              * exists precisely so this loop cannot accidentally become a
              * lookup that a recycled generation would answer wrongly. */
+            uint64_t seq = sched_event_seq(); /* M68: before the scan, see sched.h */
             int total = sched_task_count();
             for (int i = 0; i < total; i++) {
                 task_t *t = sched_task_by_slot(i);
@@ -623,8 +649,15 @@ static long sys_wait(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, ui
             if (!any_children) {
                 return -1;
             }
-            sched_deliver_pending_signal();
-            schedule();
+            /* M68: wait(-1) has no single child to park on, so it parks
+             * on the poll channel with a short deadline and re-scans.
+             * That is a compromise and worth naming: a task_exit wakes
+             * the poll channel, so the common case is an immediate
+             * wake-up rather than a timeout, and the deadline is there
+             * only so that a lost wake can cost 50 ms rather than
+             * forever. The alternative - a channel per parent - is real
+             * plumbing for a call this OS makes from one place. */
+            sched_block_on_seq(SCHED_POLL_CHAN, pit_get_ticks() * (1000 / PIT_HZ) + 50, seq);
         }
     }
 
@@ -633,8 +666,14 @@ static long sys_wait(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, ui
         return -1;
     }
     while (t->state != TASK_TERMINATED) {
-        sched_deliver_pending_signal();
-        schedule();
+        /* M68: park on the child itself. task_exit_with_code wakes this
+         * exact address, so a parent waiting on one child is woken by
+         * that child and by nothing else. */
+        uint64_t seq = sched_event_seq();
+        if (t->state == TASK_TERMINATED) {
+            break; /* re-tested after the sample, so the wake cannot be missed */
+        }
+        sched_block_on_seq((const void *)t, pit_get_ticks() * (1000 / PIT_HZ) + 200, seq);
     }
     t->reaped = 1;
     int code = t->exit_code;
@@ -1399,8 +1438,13 @@ static long sys_taskinfo(uint64_t buf, uint64_t max_entries, uint64_t a3, uint64
         e->pid = t->id;
         e->parent_pid = t->parent_id;
         e->pgid = t->pgid;
+        /* M68: TASK_BLOCKED gets its own value rather than falling through
+         * to READY. A task manager that showed every sleeping process as
+         * "ready" would be describing the machine this OS stopped being. */
         e->state = (t->state == TASK_TERMINATED) ? TASK_INFO_TERMINATED
-                                                  : (t->state == TASK_RUNNING ? TASK_INFO_RUNNING : TASK_INFO_READY);
+                 : (t->state == TASK_RUNNING)    ? TASK_INFO_RUNNING
+                 : (t->state == TASK_BLOCKED)    ? TASK_INFO_BLOCKED
+                                                 : TASK_INFO_READY;
         e->exit_code = t->exit_code;
         int fds = 0;
         for (int f = 0; f < MAX_FDS; f++) {
@@ -2002,6 +2046,110 @@ static long sys_display_set_mode(uint64_t width, uint64_t height, uint64_t a3, u
     return 0;
 }
 
+/* ---- M68: SYS_waitfds -------------------------------------------------
+ *
+ * "Is this descriptor ready right now", with no waiting and no side
+ * effects. Split out from the syscall itself because the wait loop below
+ * has to ask it twice per pass - once before parking and once after
+ * waking - and the two answers have to be produced by the same code or
+ * the second one is a different question. */
+static int fd_is_ready(task_t *self, int fd) {
+    if (fd < 0 || fd >= MAX_FDS) {
+        return 0;
+    }
+    fd_slot_t *slot = &self->fds[fd];
+    switch (slot->type) {
+    case FD_STDIN:
+        return keyboard_peek() ? 1 : 0;
+    case FD_PIPE_READ:
+        /* End of stream counts as ready, and this is the line that stops
+         * a blocking wait from becoming a hang. A reader whose writer has
+         * gone away will never get bytes; if that did not wake it, every
+         * pipeline on this machine would stop at its last read instead of
+         * returning 0. */
+        return (pipe_buffered(slot->pipe) > 0 || pipe_write_closed(slot->pipe)) ? 1 : 0;
+    case FD_SOCKET:
+        return socket_pending(slot->sock) > 0 ? 1 : 0;
+    case FD_FILE:
+        /* A regular file is always readable - it is never a reason to
+         * wait. Saying so beats refusing the whole call because one
+         * descriptor in the set happens to be a file. */
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static long sys_waitfds(uint64_t fds_ptr, uint64_t count, uint64_t timeout_ms,
+                         uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (count == 0 || count > MAX_FDS) {
+        return -1;
+    }
+    if (!user_range_ok(fds_ptr, count * sizeof(int), 0)) {
+        return -1;
+    }
+    const int *fds = (const int *)fds_ptr;
+    task_t *self = sched_current();
+
+    long timeout = (long)timeout_ms;
+    uint64_t now = pit_get_ticks() * (1000 / PIT_HZ);
+    /* A negative timeout is "no deadline"; 0 is "poll and return". The
+     * three cases are one expression so that the deadline is computed
+     * once, before the first scan - otherwise a slow scan would extend
+     * its own timeout. */
+    uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
+
+    for (;;) {
+        /* Sampled before the scan, handed back at the park. Anything that
+         * happens during the scan - including a mouse event, which has no
+         * descriptor to be scanned - moves the counter and stops this
+         * task from sleeping through it. */
+        uint64_t seq = sched_event_seq();
+        for (uint64_t i = 0; i < count; i++) {
+            if (fd_is_ready(self, fds[i])) {
+                return (long)i;
+            }
+        }
+        if (timeout == 0) {
+            return -2; /* a pure poll: nothing ready, and no waiting asked for */
+        }
+        if (deadline != 0 && pit_get_ticks() * (1000 / PIT_HZ) >= deadline) {
+            return -2;
+        }
+
+        /* Park on the shared poll channel. Every waker in the kernel -
+         * pipe_write, pipe_close_*, the keyboard and mouse IRQs,
+         * socket_deliver, task_exit - wakes it, so this task is woken by
+         * anything that could possibly have made one of its descriptors
+         * ready, plus a few things that could not. The re-scan at the top
+         * of this loop is what makes those spurious wakes free, and it is
+         * the same re-test sched_block_on's contract requires anyway.
+         *
+         * The deadline is passed down so the timer can wake this task
+         * even if no event ever arrives - which is what makes a frame
+         * clock out of the same call. */
+        sched_block_on_seq(SCHED_POLL_CHAN, deadline, seq);
+    }
+}
+
+/* M68: see SYS_idle_ticks. Not capability-gated, for the reason M65 gave
+ * about SYS_fb_info and SYS_netconf: how busy this machine is, is a fact
+ * about the machine rather than authority over it. */
+static long sys_idle_ticks(uint64_t cpu, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (cpu >= MAX_CPUS) {
+        return -1;
+    }
+    return (long)sched_idle_ticks((int)cpu);
+}
+
 /* ---- M70: reading the kernel's own account of itself ------------------- */
 
 static long sys_klog(uint64_t from, uint64_t buf, uint64_t max, uint64_t next_out,
@@ -2128,6 +2276,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_klog] = sys_klog,
     [SYS_klog_total] = sys_klog_total,
     [SYS_rename_replace] = sys_rename_replace,
+    [SYS_waitfds] = sys_waitfds,
+    [SYS_idle_ticks] = sys_idle_ticks,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

@@ -185,6 +185,8 @@ int wm_wait_event(wm_window_t *win, wm_event_t *out);
  * running even with no input, and can't afford to block on one. */
 int wm_poll_event(wm_window_t *win, wm_event_t *out);
 
+
+
 /* M55: has the compositor serving this window died, and if so, has a new
  * one been connected to?
  *

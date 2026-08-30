@@ -15,6 +15,13 @@ void keyboard_init(void);
  * Never blocks. */
 int keyboard_read(void);
 
+/* M68: is there a keystroke buffered, without consuming it. SYS_waitfds
+ * has to ask "would a read block" about fd 0 without taking the byte away
+ * from whoever actually reads next - which is the whole difference
+ * between a poll and a read, and the reason this could not just call
+ * keyboard_read and push the answer back. */
+int keyboard_peek(void);
+
 /* M56: pushes a synthetic character onto the same ring the IRQ handler
  * feeds, so a reader (SYS_kbd_read, and therefore the compositor) cannot
  * tell it from a real keypress. The counterpart to M51's mouse_inject and

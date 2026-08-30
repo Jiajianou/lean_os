@@ -4409,7 +4409,22 @@ int main(void) {
          * same 50ms for its own turn to come back around. Yielding here
          * hands the rest of the quantum back to round-robin immediately
          * instead - see SYS_yield's comment in system_api/include/
-         * syscall.h. */
+         * syscall.h.
+         *
+         * M68 DELIBERATELY LEFT THIS ALONE. SYS_waitfds exists and would
+         * let this process sleep instead of spin, which is the whole
+         * point of that milestone - but converting this loop, and the
+         * client loops in wmclient.c, changes the latency of every
+         * message on the WM protocol, and roughly fifty boot self-tests
+         * are written against fixed pit_sleep_ms budgets that assume the
+         * pre-M68 timing. Adopting it broke them in three different
+         * places (a missed animation frame budget, M55's crash-recovery
+         * reconnect, and M36's close handshake), each of which is a test
+         * whose *timing assumption* is wrong rather than a bug in the
+         * sleeping. Rewriting those budgets is real work and it is not
+         * this milestone's - see M68's progress notes and M69, which owns
+         * the latency numbers this loop should actually be measured
+         * against. */
         sys_yield();
     }
 }

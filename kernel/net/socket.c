@@ -2,6 +2,7 @@
 
 #include "lib/libk.h"
 #include "net.h"
+#include "sched/sched.h"
 
 typedef struct {
     uint32_t src_ip;
@@ -315,5 +316,10 @@ void socket_deliver(uint16_t dst_port, uint32_t src_ip, uint16_t src_port,
         s->head = (uint16_t)((s->head + 1) % SOCKET_QUEUE_DEPTH);
         s->count++;
         return;
-    }
+    }    /* M68: a datagram or segment arriving is exactly what a program
+     * blocked in SYS_waitfds is waiting for. Called from the NIC's IRQ,
+     * where sched_wake_all is safe: it takes only sched_lock and never
+     * blocks. */
+    sched_wake_all(SCHED_POLL_CHAN);
+
 }

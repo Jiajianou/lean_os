@@ -1,5 +1,7 @@
 #include "mouse.h"
 
+#include "sched/sched.h"
+
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/isr.h"
 #include "arch/x86_64/pic.h"
@@ -104,6 +106,9 @@ static void push_event(mouse_event_t ev) {
     }
     event_buffer[buf_head] = ev;
     buf_head = next;
+    /* M68: a mouse event wakes anything in SYS_waitfds - the compositor,
+     * which is the one process on this machine that cares. */
+    sched_wake_all(SCHED_POLL_CHAN);
 }
 
 static void mouse_irq(isr_regs_t *regs) {

@@ -87,6 +87,12 @@ void pipe_reset(pipe_t *p);
  * can. -1 for a NULL pipe. */
 int pipe_buffered(pipe_t *p);
 
+/* M68: has the last writer gone away. SYS_waitfds needs this because end
+ * of stream is a *readable* event - a reader parked on a pipe whose
+ * writer exited must be woken so it can return 0, and a wait that treated
+ * "no bytes" and "no writer" the same would hang there forever. */
+int pipe_write_closed(pipe_t *p);
+
 /* Blocks while the buffer is full, unless the read end has already
  * closed (returns -1 immediately, or however many bytes got written
  * before that happened). */

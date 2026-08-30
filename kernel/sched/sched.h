@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "caps.h" /* system_api/include/caps.h - CAP_*, M65 */
+#include "lib/spinlock.h"
 #include "arch/x86_64/fpu.h" /* M63: FPU_STATE_SIZE/ALIGN - a task carries its own SSE state now */
 
 #include "proc.h" /* system_api/include/proc.h - TASK_INFO_MAX, which *is* MAX_TASKS below. Resolves to the system_api header: a quoted include searches this file's own directory first (kernel/sched/, no proc.h), then -Ikernel (no kernel/proc.h), then -Isystem_api/include. */
@@ -30,6 +31,16 @@ typedef enum {
     TASK_READY,
     TASK_RUNNING,
     TASK_TERMINATED,
+    /* M68: the state the other four have been faking since M7. A blocked
+     * task is not runnable - pick_next skips it - and stays that way
+     * until something calls sched_wake_all on the channel it parked on,
+     * or its deadline passes. Every "blocking" call in this kernel used
+     * to be a loop calling schedule(), which left the task READY forever:
+     * a shell sitting at a prompt was, as far as the scheduler could
+     * tell, a program that wanted the CPU as much as any other. That is
+     * why no core on this machine had ever halted while a desktop was
+     * running. */
+    TASK_BLOCKED,
 } task_state_t;
 
 /* M14: a minimal per-task descriptor table. FD_STDIN/FD_STDOUT are
@@ -264,6 +275,30 @@ typedef struct task {
     uint64_t heap_brk;        /* current break - SYS_sbrk's return/growth point */
     uint64_t heap_mapped_end; /* one past the last vmm-mapped heap page; heap_brk <= this always */
     uint64_t shm_next_vaddr;  /* next free address for this process's own SYS_shm_map calls */
+    /* ---- M68: what this task is waiting for ---------------------------
+     *
+     * `wait_chan` is an address used purely as an identity - a pipe_t*, a
+     * task_t*, or the address of one of the well-known channels in
+     * sched.h. Nothing dereferences it. This is V6 Unix's sleep/wakeup
+     * and xv6's after it, and it is the right shape here for the same
+     * reason it was there: the task table is fixed and small, so "wake
+     * everyone waiting on X" is a 128-entry scan and needs no per-channel
+     * list, no allocation, and nothing to leak.
+     *
+     * `wake_deadline_ms` is an absolute uptime, or 0 for "no deadline".
+     * The timer tick wakes anything past it, which is what makes a
+     * blocking wait safe to use for something that might never be woken
+     * and what lets one call serve as both a wait and a sleep. */
+    const void *wait_chan;
+    uint64_t wake_deadline_ms;
+    /* M68: this task is a CPU's idle identity - task 0 after it reaches
+     * kernel_main's tail, or an AP's `cpu-idle`. Marked explicitly rather
+     * than inferred from "no stack and no parent", which happened to be
+     * true of exactly these two and is the kind of coincidence that stops
+     * being true the first time somebody adds a third parentless kernel
+     * thread (kernel/net/net.c's tcp-timer is already one). Used only to
+     * decide whether a tick counts as idle time. */
+    uint8_t is_idle;
     char name[TASK_NAME_MAX]; /* M45: what this task was spawned as - the path process_spawn loaded, or a short label for a kernel thread. Always NUL-terminated. Display only: nothing looks a task up by name, and two tasks may freely share one. */
 } task_t;
 
@@ -288,6 +323,149 @@ void sched_init_ap(int cpu_id);
  * CPU, since the 8259 only ever delivers the real timer interrupt to the
  * BSP. */
 void scheduler_tick_cpu(int cpu);
+
+/* ---- M68: sleep and wakeup ---------------------------------------------
+ *
+ * The contract, and it is the whole of the lost-wakeup problem:
+ *
+ *   THE CALLER MUST HOLD THE LOCK THAT GUARDS THE CONDITION, and pass it
+ *   in. sched_block_on releases it only after this task is already marked
+ *   BLOCKED, and reacquires it before returning.
+ *
+ * That ordering is what makes the check and the block one step as far as
+ * any waker is concerned. A waker has to hold the same lock to change the
+ * condition, so it cannot run between "the pipe is empty" and "I am
+ * blocked" - the two states a lost wakeup needs to slip between. After
+ * the lock is dropped a waker may indeed set this task READY before it
+ * ever reaches schedule(); that is harmless, and the task simply gets
+ * scheduled again.
+ *
+ * Callers must re-test their condition in a loop after this returns.
+ * A return means "something may have changed", never "what you wanted
+ * happened" - the deadline may have passed, or another waiter may have
+ * taken the bytes first.
+ *
+ * deadline_ms is an absolute uptime (pit_uptime_ms() + N), or 0 for none.
+ */
+void sched_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, uint64_t *flags);
+
+/* Marks every task blocked on `chan` READY. Safe to call from an
+ * interrupt handler and from a task holding any lock: it touches only the
+ * task table, under sched_lock, and never blocks. Waking a channel nobody
+ * is on is free and is the common case. */
+void sched_wake_all(const void *chan);
+
+/* ---- M68: the sequence counter, and the race it closes ------------------
+ *
+ * sched_block_on's contract works because the caller holds the lock that
+ * guards its condition, so no waker can run between the test and the
+ * park. Three callers have no such lock, and cannot have one:
+ *
+ *   - SYS_waitfds, whose condition is "any of these eight descriptors",
+ *     guarded by four different locks in three subsystems;
+ *   - SYS_read on stdin, whose condition is a ring buffer written by an
+ *     interrupt handler;
+ *   - the mouse, which is the sharp case, because it has no descriptor at
+ *     all - the compositor reads it through SYS_mouse_read, so it cannot
+ *     be named in a waitfds set and its only wake is the IRQ.
+ *
+ * For those, an event arriving between the test and the park is a wake
+ * delivered to a task that is not yet asleep - and then the task sleeps,
+ * with the event already waiting for it. On the compositor that is a
+ * mouse movement the cursor does not follow until the next timeout: not a
+ * hang, but visible lag, and exactly the kind of "sometimes the pointer
+ * sticks" bug that is miserable to find later.
+ *
+ * The fix is the standard one. Every wake bumps a counter. A lockless
+ * waiter samples it *before* testing its condition, and hands the sample
+ * back when it parks; if the counter has moved since, something happened
+ * during the test and the waiter loops instead of sleeping. Sample and
+ * park are both taken under sched_lock, which is what makes the
+ * comparison meaningful.
+ *
+ * Wrapping is not a concern: it is 64 bits at a few thousand events per
+ * second. */
+uint64_t sched_event_seq(void);
+
+/* Like sched_block_on, but for a caller with no condition lock. Does not
+ * block at all if the event counter has moved since `expected_seq` was
+ * sampled. */
+void sched_block_on_seq(const void *chan, uint64_t deadline_ms, uint64_t expected_seq);
+
+/* M68: the one channel every poller shares. A task waiting on several
+ * descriptors at once cannot record several channels, so all of them park
+ * here and any interesting event wakes the lot. With fewer than twenty
+ * processes on this machine the thundering herd costs a scan and a few
+ * needless wakeups, which is a great deal cheaper than the per-object
+ * waiter lists the alternative needs - and every waiter re-tests its own
+ * condition on the way out anyway, which is the loop the contract above
+ * already requires. */
+extern const int sched_poll_channel;
+#define SCHED_POLL_CHAN (&sched_poll_channel)
+
+/* M68: raw keystrokes. Woken by the keyboard IRQ, waited on by a
+ * SYS_read that found the ring buffer empty. */
+extern const int sched_keyboard_channel;
+#define SCHED_SLEEP_CHAN (&sched_sleep_channel)
+extern const int sched_sleep_channel;
+#define SCHED_KEYBOARD_CHAN (&sched_keyboard_channel)
+
+/* M68: how many timer ticks this CPU has spent with nothing to run.
+ * The number this milestone exists to move off zero - see the [m68]
+ * self-test in kernel.c, which is the only honest way to tell a machine
+ * that sleeps from one that spins, since the two are indistinguishable
+ * from the outside. */
+/* M68: the calling task is this CPU's idle identity from here on.
+ * kernel_main calls it once it reaches its `for(;;) hlt` tail - before
+ * that, task 0 is doing the entire boot and its ticks are not idle. */
+/* M68: spawn `cpus` idle tasks - somewhere for schedule() to go when a
+ * task blocks or dies and there is no other work. Called once, after
+ * sched_init, before anything can block. See sched.c for what happened
+ * without them. */
+void sched_spawn_idle_tasks(int cpus);
+
+void sched_mark_self_idle(void);
+
+/* M68: bracket a stretch in which the calling task is contributing
+ * nothing - it is halted, waiting for time to pass. pit_sleep_ms is the
+ * one such stretch in this kernel, and without this the boot's own
+ * measurement is a lie in the *pessimistic* direction: the CPU spends
+ * most of the boot inside `hlt` in pit_sleep_ms, genuinely idle, on a
+ * task 0 that is not the idle identity yet because it has not finished
+ * booting. Counting those ticks as busy would have the machine report
+ * zero idle time at precisely the moments it is doing the least.
+ *
+ * A counter rather than a flag: pit_sleep_ms is not reentrant today, but
+ * "this nests" is cheaper to guarantee than to remember. */
+/* M68: leave the run queue until `deadline_ms` (an absolute uptime).
+ *
+ * The sleep primitive pit_sleep_ms should always have been built on. That
+ * function has spent sixty-seven milestones halting in a loop while
+ * remaining TASK_READY, which means every task in a timed wait - and
+ * kernel/net's tcp-timer thread spends its entire life in one - was still
+ * in the run queue the whole time. It is why the idle measurement read
+ * zero even after everything else in M68 was working: there was always
+ * exactly one runnable task, so no tick ever qualified as idle.
+ *
+ * No sequence check and no channel anyone wakes: the only thing that ends
+ * this wait is the clock, so there is no event to race with. */
+void sched_sleep_until(uint64_t deadline_ms);
+
+/* Whether the scheduler exists yet. pit_sleep_ms runs long before
+ * sched_init - the PIT is up early, on purpose - and a "block this task"
+ * call at that point has no task to block. */
+int sched_is_running(void);
+
+void sched_idle_enter(void);
+void sched_idle_exit(void);
+
+/* M68 debugging aid: every task, its state, and what it is parked on.
+ * A blocked machine says nothing on its own - this is what turns "the
+ * boot stopped" into "these three tasks are waiting on these channels". */
+void sched_debug_dump(const char *label);
+
+uint64_t sched_idle_ticks(int cpu);
+uint64_t sched_total_ticks(int cpu);
 
 /* Allocates a kernel stack and a task_t, marks it READY, and adds it to
  * the round-robin rotation. Runs in the kernel's own (shared) address

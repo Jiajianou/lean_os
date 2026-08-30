@@ -253,6 +253,27 @@ long sys_klog_total(void);
  * writes. Returns 0, or -1 (including when the destination is a
  * directory). */
 long sys_rename_replace(const char *old_path, const char *new_path);
+/* ---- M68 --------------------------------------------------------------
+ *
+ * Sleep until one of `fds` would not block, or until `timeout_ms`.
+ * Returns the index into `fds` of a ready descriptor, -2 on timeout, -1
+ * for a bad argument. timeout_ms of 0 polls; negative waits forever.
+ *
+ * This replaces the `sys_yield()` at the bottom of every event loop in
+ * this project. The difference is not politeness: a task in sys_yield is
+ * READY, so the scheduler has to keep giving it the CPU to discover
+ * there is nothing to do, and no core can ever halt while one of them is
+ * running. A task in sys_waitfds is TASK_BLOCKED and costs nothing at
+ * all until something happens.
+ *
+ * The caller still loops and re-checks: a return means "something may
+ * have changed", never "the thing you wanted". */
+long sys_waitfds(const int *fds, int count, int timeout_ms);
+
+/* How many timer ticks `cpu` has spent with nothing runnable. See
+ * SYS_idle_ticks - it is here so that a program can prove the machine
+ * sleeps, which is not observable any other way. */
+long sys_idle_ticks(int cpu);
 
 /* Duplicates oldfd's fd-table slot into newfd (overwriting whatever was
  * there - no SYS_close exists to release it first). Returns newfd, or -1

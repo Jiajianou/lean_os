@@ -281,6 +281,15 @@ long sys_rename_replace(const char *old_path, const char *new_path) {
     return do_syscall(SYS_rename_replace, (long)old_path, (long)new_path, 0);
 }
 
+/* M68 */
+long sys_waitfds(const int *fds, int count, int timeout_ms) {
+    return do_syscall(SYS_waitfds, (uint64_t)fds, (uint64_t)count, (uint64_t)(long)timeout_ms);
+}
+
+long sys_idle_ticks(int cpu) {
+    return do_syscall(SYS_idle_ticks, (uint64_t)cpu, 0, 0);
+}
+
 long sys_dup2(int oldfd, int newfd) {
     return do_syscall(SYS_dup2, oldfd, newfd, 0);
 }

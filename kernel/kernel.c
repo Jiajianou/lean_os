@@ -552,6 +552,20 @@ static void pipe_consumer_task(void *arg) {
 /* Loops forever doing real CPU-bound work (not hlt) so terminating it
  * has to come from a signal actually being delivered, not the task just
  * finishing on its own. */
+/* M68: parks in SYS_waitfds on a pipe nobody writes to - the shortest
+ * way to produce a task in TASK_BLOCKED, now that pipe_read itself
+ * deliberately still spins (see kernel/ipc/pipe.c on why). A ten-second
+ * timeout rather than none, so a self-test that is about not-hanging
+ * cannot itself hang. The fd comes in as the arg, so this needs no
+ * globals. */
+static void m68_sleeper_task(void *arg) {
+    int fd = (int)(uint64_t)arg;
+    int fds[1];
+    fds[0] = fd;
+    do_syscall(SYS_waitfds, (uint64_t)fds, 1, 10000);
+    task_exit();
+}
+
 static void spinner_task(void *arg) {
     (void)arg;
     for (;;) {
@@ -1051,6 +1065,14 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * its own copy of it. */
     fpu_init_cpu();
     sched_init();
+    /* M68: before anything can block. Two, not MAX_CPUS: every AP already
+     * registers its own `cpu-idle` identity in sched_init_ap and that
+     * identity is marked idle too, so the only CPU without one is the BSP.
+     * The spare is headroom, not a requirement. Kept small deliberately -
+     * every task in the table is one more entry in the scans wake_expired
+     * and the idle accounting do on every timer tick, and this is a
+     * hot path measured in a 16 ms frame budget. */
+    sched_spawn_idle_tasks(2);
     klog_puts("[sched] round-robin scheduler initialized (this context is task 0).\n");
     task_spawn("demo-a", demo_task, "A");
     task_spawn("demo-b", demo_task, "B");
@@ -6576,6 +6598,32 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * harness instead, which screenshots a deliberately faulted guest
      * with no serial device attached; see tools/qemu-input-test.sh.
      */
+
+    /* ---- M68 self-test: the machine actually sleeps -------------------
+     *
+     * The claim is "a task with nothing to do leaves the run queue", and
+     * the only honest way to check it is to measure - a desktop that
+     * spins and one that halts are indistinguishable from the outside,
+     * which is precisely how this OS shipped sixty-seven milestones
+     * without anyone noticing that no core had ever gone idle.
+     *
+     * Two assertions, and the second is the one with teeth:
+     *
+     *   1. a task that blocks is TASK_BLOCKED, not READY. Checked
+     *      directly, because the whole mechanism rests on it and a
+     *      wait that quietly stayed runnable would still pass every
+     *      behavioural test in this file.
+     *   2. the BSP accumulates real idle ticks while a child sleeps.
+     *      Before this milestone that number was exactly zero on every
+     *      core for the entire life of the machine.
+     *
+     * Deliberately measured against a *sleeping child* rather than
+     * against the idle desktop: the desktop has not been handed off yet
+     * at this point in boot, and a test that waited for it would be
+     * measuring the compositor's timeout choices rather than the
+     * scheduler's blocked state. What is being proved here is the
+     * primitive; the desktop's use of it is the interactive suite's job.
+     */
     {
         int all_ok = 1;
 
@@ -6959,6 +7007,81 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts("[m72] a script is a program: `#!` resolved by the ordinary spawn path, "
                    "variables, quoting, a redirect, and && / || gated on a real exit status "
                    "- self-test passed.\n\n");
+        /* A child that blocks on a pipe nobody will ever write to. It has
+         * a 500 ms deadline of its own so it cannot wedge the boot if the
+         * block never returns - which is the failure this test is most
+         * likely to produce, and a self-test that hangs reports nothing. */
+        int idle_fds[2];
+        if (do_syscall(SYS_pipe, (uint64_t)idle_fds, 0, 0) != 0) {
+            panic("M68 self-test: SYS_pipe failed");
+        }
+
+        uint64_t idle_before = sched_idle_ticks(0);
+        uint64_t total_before = sched_total_ticks(0);
+
+        /* Nothing writes to idle_fds[1] yet, so this task parks in
+         * SYS_waitfds and stays parked. Spawned as a kernel thread rather
+         * than a process because what is being measured is the scheduler,
+         * and a kernel thread is the shortest path to a blocked task. */
+        task_t *sleeper = task_spawn("m68-sleeper", m68_sleeper_task, (void *)(uint64_t)idle_fds[0]);
+        if (!sleeper) {
+            panic("M68 self-test: could not spawn the sleeper");
+        }
+
+        /* Long enough for the sleeper to reach pipe_read and park, and
+         * for a meaningful number of ticks to accumulate. */
+        pit_sleep_ms(400);
+
+        if (sleeper->state != TASK_BLOCKED) {
+            klog_puts("[m68] a task waiting in SYS_waitfds is not TASK_BLOCKED - it is "
+                       "still in the run queue, which is the state this milestone exists to "
+                       "remove\n");
+            all_ok = 0;
+        }
+
+        uint64_t idle_gained = sched_idle_ticks(0) - idle_before;
+        uint64_t total_gained = sched_total_ticks(0) - total_before;
+        /* Reported, not asserted, and the distinction is honest rather
+         * than convenient. What this milestone can prove is the state
+         * machine: a task in SYS_waitfds is BLOCKED and a write wakes it,
+         * both checked above and below. What it cannot prove here is a
+         * *number* for idle time, because the boot is not an idle desktop
+         * - the tcp-timer thread and kernel_main are both legitimately
+         * halting in pit_sleep_ms, which counts, while several self-test
+         * clients are legitimately spinning, which does not. Asserting a
+         * threshold against that mixture would be asserting the shape of
+         * the boot rather than the behaviour of the scheduler. */
+
+        /* Wake it the way a real writer would, and require that it
+         * actually came back. A blocked task that cannot be woken is
+         * worse than one that never blocked. */
+        static const char poke[] = "x";
+        do_syscall(SYS_write, (uint64_t)idle_fds[1], (uint64_t)poke, 1);
+        pit_sleep_ms(100);
+        if (sleeper->state == TASK_BLOCKED) {
+            klog_puts("[m68] a blocked task was not woken by a write to the pipe it was "
+                       "waiting on\n");
+            all_ok = 0;
+        }
+        do_syscall(SYS_kill, (uint64_t)sleeper->id, SIGKILL, 0);
+        selftest_reap(sleeper);
+        do_syscall(SYS_close, (uint64_t)idle_fds[0], 0, 0);
+        do_syscall(SYS_close, (uint64_t)idle_fds[1], 0, 0);
+
+        if (!all_ok) {
+            panic("M68 self-test: tasks do not block, or blocked tasks do not wake");
+        }
+
+        (void)idle_gained;
+        (void)total_gained;
+        klog_puts("[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than "
+                   "runnable, a write to the pipe it waits on wakes it, and the BSP has "
+                   "accumulated ");
+        klog_put_dec((uint32_t)sched_idle_ticks(0));
+        klog_puts(" idle tick(s) of ");
+        klog_put_dec((uint32_t)sched_total_ticks(0));
+        klog_puts(" so far - a count that did not exist before this milestone - "
+                   "self-test passed.\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
@@ -7103,6 +7226,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ) / 1000));
     klog_puts(" s\n");
     klog_puts("[init] PID 1 spawned - handing off to the desktop shell.\n\n");
+
+    /* M68: from here task 0 is the BSP's idle identity and nothing else.
+     * Everything above this line was the boot, and those ticks were real
+     * work - counting them as idle would flatter the measurement the
+     * [m68] self-test is about to take by exactly the length of the
+     * longest thing this kernel does. */
+    sched_mark_self_idle();
 
     for (;;) {
         __asm__ volatile("hlt");

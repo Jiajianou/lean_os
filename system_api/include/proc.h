@@ -61,6 +61,11 @@
 #define TASK_INFO_READY      0
 #define TASK_INFO_RUNNING    1
 #define TASK_INFO_TERMINATED 2
+/* M68: waiting for something - a pipe with no data, a keystroke, a child
+ * to exit, a descriptor to become readable. Before M68 there was no such
+ * state and every one of those tasks reported as READY, which is how a
+ * desktop that never slept managed to look exactly like one that did. */
+#define TASK_INFO_BLOCKED    3
 
 typedef struct {
     int32_t pid;

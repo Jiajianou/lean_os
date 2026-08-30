@@ -1,5 +1,7 @@
 #include "pit.h"
 
+#include "sched/sched.h"
+
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/isr.h"
 #include "arch/x86_64/pic.h"
@@ -51,9 +53,42 @@ void pit_sleep_ms(uint32_t ms) {
         needed = 1;
     }
     uint64_t target = ticks + needed;
+    /* M68: this loop is the CPU halted, waiting for the clock. Saying so
+     * is what makes the idle measurement mean anything during boot, when
+     * the machine spends most of its time right here and the task doing
+     * it is not the idle identity yet. */
+    /* ---- M68: this deliberately HALTS rather than blocking -------------
+     *
+     * sched_sleep_until exists and this was the obvious place to use it:
+     * a task waiting for the clock is the definition of a task with
+     * nothing to do, so it should leave the run queue. It was implemented,
+     * measured, and taken back out, and the measurement is the reason.
+     *
+     * A blocked task gives up the CPU and has to **queue to get it back**.
+     * A halted one does not - the timer interrupt resumes it in place. So
+     * blocking adds a full scheduling round-trip to every sleep, and this
+     * kernel's boot performs 138 of them plus polling loops that call
+     * this hundreds of times. Measured: a self-test that polls
+     * `pit_sleep_ms(10)` 300 times took 3 seconds halting and **15.6
+     * seconds blocking**, and the boot failed wherever some other test's
+     * budget ran out first.
+     *
+     * The idle accounting still works, because it never depended on
+     * blocking: sched_idle_enter/exit brackets say "this CPU is halted,
+     * waiting for time to pass", which is exactly what is happening here
+     * and is what the [m68] measurement counts.
+     *
+     * The general lesson, and it is the one M68 kept relearning: **not
+     * every wait should become a sleep.** A wait that is already cheap -
+     * one instruction, resumed by the interrupt it is waiting for - gets
+     * more expensive when you make it a scheduling decision. Blocking
+     * pays when the alternative is spinning through schedule(), which is
+     * what SYS_waitfds and the pipe waits do, and not otherwise. */
+    sched_idle_enter();
     while (ticks < target) {
         __asm__ volatile("hlt");
     }
+    sched_idle_exit();
 }
 
 void pit_set_tick_hook(void (*hook)(void)) {

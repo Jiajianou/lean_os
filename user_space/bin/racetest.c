@@ -199,6 +199,42 @@ int main(int argc, char **argv) {
         if (s2 >= 0) { sys_close(s2); }
     }
 
+    /* ---- M68: SYS_waitfds ---------------------------------------------
+     *
+     * Checked here rather than in a test of its own because this program
+     * is already the one that owns a pipe with a known writer, and the
+     * three answers the call can give are all reachable from that:
+     *
+     *   ready    - a pipe with bytes in it comes back immediately,
+     *              with the index of the fd that was ready
+     *   timeout  - an empty pipe with a deadline comes back -2, and does
+     *              so having actually waited rather than spun
+     *   refused  - a count of zero is an argument error, not an
+     *              indefinite sleep on nothing
+     *
+     * The timeout case is the one that matters: it is the only assertion
+     * here that would fail if the call returned instantly, which is what
+     * a "blocking" wait that forgot to block looks like from user space. */
+    {
+        int wfds[2];
+        check(sys_pipe(wfds) == 0, "pipe for waitfds failed");
+        if (wfds[0] >= 0) {
+            long before = sys_uptime_ms();
+            long r = sys_waitfds(wfds, 1, 60);
+            long waited = sys_uptime_ms() - before;
+            check(r == -2, "waitfds on an empty pipe did not report a timeout");
+            check(waited >= 40, "waitfds returned far too early - it did not wait");
+
+            check(sys_write(wfds[1], "z", 1) == 1, "write for waitfds failed");
+            check(sys_waitfds(wfds, 1, 1000) == 0,
+                  "waitfds did not report a pipe with bytes in it as ready");
+
+            check(sys_waitfds(wfds, 0, 10) == -1, "waitfds accepted a count of zero");
+            sys_close(wfds[0]);
+            sys_close(wfds[1]);
+        }
+    }
+
     sys_unlink(path);
 
     if (failures) {

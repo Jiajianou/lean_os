@@ -1,5 +1,7 @@
 #include "keyboard.h"
 
+#include "sched/sched.h"
+
 #include <stdint.h>
 
 #include "arch/x86_64/io.h"
@@ -96,6 +98,14 @@ static void buffer_push(char c) {
     buffer[buf_head] = c;
     mods_buffer[buf_head] = (uint8_t)current_modifiers();
     buf_head = next;
+    /* M68: a keystroke is the event a blocked SYS_read is waiting for.
+     * Before M68 the reader was spinning and found the byte on its own;
+     * a blocked reader finds nothing until somebody tells it, so the
+     * driver that produced the byte is the one that has to. Cheap when
+     * nobody is waiting: sched_wake_all on an empty channel is one pass
+     * over the task table. */
+    sched_wake_all(SCHED_KEYBOARD_CHAN);
+    sched_wake_all(SCHED_POLL_CHAN);
 }
 
 static void keyboard_irq(isr_regs_t *regs) {
@@ -198,6 +208,18 @@ void keyboard_inject(char ch, int mods) {
     buffer[buf_head] = ch;
     mods_buffer[buf_head] = (uint8_t)mods;
     buf_head = next;
+    /* M68: a keystroke is the event a blocked SYS_read is waiting for.
+     * Before M68 the reader was spinning and found the byte on its own;
+     * a blocked reader finds nothing until somebody tells it, so the
+     * driver that produced the byte is the one that has to. Cheap when
+     * nobody is waiting: sched_wake_all on an empty channel is one pass
+     * over the task table. */
+    sched_wake_all(SCHED_KEYBOARD_CHAN);
+    sched_wake_all(SCHED_POLL_CHAN);
+}
+
+int keyboard_peek(void) {
+    return buf_tail != buf_head;
 }
 
 int keyboard_read(void) {

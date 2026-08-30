@@ -7,6 +7,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/io.h" /* irq_save_disable/irq_restore */
 #include "arch/x86_64/smp.h"
+#include "drivers/klog.h"
 #include "drivers/pit.h"
 #include "fs/openfile.h"
 #include "net/socket.h"
@@ -82,6 +83,162 @@ static uint64_t loaded_pml4_phys[MAX_CPUS]; /* mirrors whatever schedule() last 
  * task resumes, the same way the lock ownership itself does. */
 static spinlock_t sched_lock;
 
+/* See sched.h. Bumped by every wake, sampled by every lockless waiter. */
+static uint64_t event_seq;
+
+/* M68: how many tasks are currently TASK_BLOCKED.
+ *
+ * sched_wake_all is called on every pipe write, every keystroke and every
+ * arriving packet, and a 128-entry scan under a lock with interrupts off
+ * is not free on any of those paths - the compositor writes an event per
+ * mouse move. This makes the overwhelmingly common case ("nobody is
+ * waiting on anything") a single compare. Measured the hard way: without
+ * it, the boot's animation self-test started missing its 16 ms frame
+ * budget, which is the harness noticing a cost that no assertion in this
+ * file would have. */
+static int blocked_count;
+
+static task_t *pick_next(task_t *from);
+static void wake_expired(uint64_t now_ms);
+static void unblock_self(task_t *self);
+
+/* M68: the well-known wait channels. Their *addresses* are the identity;
+ * the values are never read. `const int` rather than a macro so that two
+ * of them can never accidentally be the same address. */
+const int sched_poll_channel = 0;
+const int sched_keyboard_channel = 0;
+/* Nothing ever wakes this one - a timed sleep ends only when its deadline
+ * passes, and giving it its own address keeps a stray sched_wake_all from
+ * cutting somebody's sleep short. */
+const int sched_sleep_channel = 0;
+
+/* M68: per-CPU tick accounting. `idle_ticks` counts the ticks on which
+ * this CPU had nothing runnable but its own idle identity - which is the
+ * measurement this milestone exists to move, and which was exactly zero
+ * on every core before it. Plain uint64_t rather than atomics: each is
+ * written only by its own CPU's tick handler, and a reader that catches a
+ * torn 64-bit read gets a number that is off by one tick out of hundreds. */
+static uint64_t idle_ticks[MAX_CPUS];
+static uint64_t total_ticks[MAX_CPUS];
+
+void sched_debug_dump(const char *label) {
+    klog_puts("[sched-dump] ");
+    klog_puts(label);
+    klog_putc('\n');
+    for (int i = 0; i < task_count; i++) {
+        task_t *t = &tasks[i];
+        if (t->state == TASK_FREE) {
+            continue;
+        }
+        klog_puts("  slot=");
+        klog_put_dec((uint32_t)i);
+        klog_puts(" pid=");
+        klog_put_dec((uint32_t)t->id);
+        klog_puts(" name=");
+        klog_puts(t->name);
+        klog_puts(" state=");
+        klog_put_dec((uint32_t)t->state);
+        klog_puts(" chan=0x");
+        klog_put_hex32((uint32_t)(uint64_t)t->wait_chan);
+        klog_puts(" deadline=");
+        klog_put_dec((uint32_t)t->wake_deadline_ms);
+        klog_putc('\n');
+    }
+}
+
+/* Per-CPU, because "which CPU is halted" is the question - and only the
+ * CPU itself ever writes its own entry, from a context that is by
+ * definition not concurrent with itself. */
+static int idle_depth[MAX_CPUS];
+
+/* M68: set once sched_init has turned the running context into task 0. */
+static int scheduler_running;
+
+int sched_is_running(void) {
+    return scheduler_running;
+}
+
+void sched_sleep_until(uint64_t deadline_ms) {
+    int cpu = smp_current_cpu();
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    task_t *self = current_task[cpu];
+    self->wait_chan = SCHED_SLEEP_CHAN;
+    self->wake_deadline_ms = deadline_ms;
+    self->state = TASK_BLOCKED;
+    blocked_count++;
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+
+    schedule();
+    unblock_self(self);
+}
+
+void sched_idle_enter(void) {
+    uint64_t flags = irq_save_disable();
+    idle_depth[smp_current_cpu()]++;
+    irq_restore(flags);
+}
+
+void sched_idle_exit(void) {
+    uint64_t flags = irq_save_disable();
+    int cpu = smp_current_cpu();
+    if (idle_depth[cpu] > 0) {
+        idle_depth[cpu]--;
+    }
+    irq_restore(flags);
+}
+
+/* M68: one per CPU, and the reason they exist is a bug rather than tidiness.
+ *
+ * Before M68 there was always something runnable - every "blocking" call
+ * was a spin, so the run queue was never empty and pick_next could always
+ * return somebody. Once tasks genuinely leave the run queue, "nothing to
+ * run" becomes an ordinary state, and it arrives at the two worst
+ * possible moments: a task that has just blocked, and a task that has
+ * just terminated. Neither can be handed the CPU back. The second one
+ * panicked - "task_exit: terminated task resumed" - the first time every
+ * other task on the machine happened to be asleep at once.
+ *
+ * `sti` explicitly, rather than trusting the flags a brand-new task
+ * inherits from context_switch: a `hlt` with interrupts off is the
+ * unwakeable halt M64 documented, and this is the one task in the system
+ * whose entire body is a `hlt`. */
+static void idle_task_body(void *arg) {
+    (void)arg;
+    __asm__ volatile("sti");
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+}
+
+void sched_spawn_idle_tasks(int cpus) {
+    for (int i = 0; i < cpus; i++) {
+        task_t *t = task_spawn("idle", idle_task_body, (void *)0);
+        if (!t) {
+            panic("sched: could not spawn an idle task");
+        }
+        t->is_idle = 1;
+        t->parent_id = -1; /* nobody's child - power_orderly_stop exempts these */
+    }
+}
+
+void sched_mark_self_idle(void) {
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    current_task[smp_current_cpu()]->is_idle = 1;
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+}
+
+uint64_t sched_idle_ticks(int cpu) {
+    return (cpu >= 0 && cpu < MAX_CPUS) ? idle_ticks[cpu] : 0;
+}
+
+uint64_t sched_total_ticks(int cpu) {
+    return (cpu >= 0 && cpu < MAX_CPUS) ? total_ticks[cpu] : 0;
+}
+
 /* M45: bounded copy into a task_t's own fixed name buffer. NULL and an
  * over-long name are both ordinary inputs here, not errors - see
  * TASK_NAME_MAX's own comment in sched.h. */
@@ -129,6 +286,51 @@ static void deliver_pending_signal_and_exit(task_t *t) {
  * tick. */
 void scheduler_tick_cpu(int cpu) {
     task_t *t = current_task[cpu];
+
+    /* M68: the measurement. "This CPU had nothing to do on this tick"
+     * means the task it is running is one of the idle identities - task 0
+     * after handoff, or an AP's cpu-idle - and nothing else was READY.
+     * Both halves matter: an idle identity that is running *because* the
+     * run queue is genuinely empty is a sleeping machine, and one running
+     * while real work waits its turn is a scheduling bug.
+     *
+     * Counted here rather than in the idle loop itself because the tick
+     * is the only clock this kernel has that fires whether or not
+     * anything is running. */
+    total_ticks[cpu]++;
+    if (t->is_idle || idle_depth[cpu] > 0) {
+        /* "...and there is no real work waiting" - which needs the lock,
+         * because it walks the table. An idle task running while real
+         * work is queued behind it is not idle time, and counting it as
+         * such would make this the flattering kind of measurement.
+         *
+         * Asked as "is any non-idle task READY" rather than by reusing
+         * pick_next, because pick_next answers a different question:
+         * given several idle tasks it will happily return a *different*
+         * one, so `pick_next(t) == t` is false on an idle machine and the
+         * measurement read zero for exactly that reason. Two functions
+         * that both mean "is there anything to do" and disagree is one
+         * function too many. */
+        uint64_t f = irq_save_disable();
+        spin_lock(&sched_lock);
+        int nothing_else = 1;
+        for (int i = 0; i < task_count; i++) {
+            if (tasks[i].state == TASK_READY && !tasks[i].is_idle) {
+                nothing_else = 0;
+                break;
+            }
+        }
+        spin_unlock(&sched_lock);
+        irq_restore(f);
+        if (nothing_else) {
+            idle_ticks[cpu]++;
+        }
+    }
+
+    /* Deadlines, before the signal check below: a task whose sleep just
+     * expired should be runnable on this tick rather than the next one. */
+    wake_expired(pit_get_ticks() * (1000 / PIT_HZ));
+
     if (t->pending_signal == SIGKILL || t->pending_signal == SIGTERM) {
         deliver_pending_signal_and_exit(t);
     }
@@ -169,6 +371,7 @@ void sched_init(void) {
     current_task[0] = &tasks[0];
     loaded_pml4_phys[0] = tasks[0].pml4_phys;
 
+    scheduler_running = 1; /* M68: from here a task can be told to sleep */
     pit_set_tick_hook(scheduler_tick);
 }
 
@@ -191,6 +394,7 @@ void sched_init_ap(int cpu_id) {
     t->pending_signal = 0;
     t->reaped = 0;
     t->caps = CAP_ALL; /* M65: a kernel idle identity, which never enters ring 3 and never makes a syscall */
+    t->is_idle = 1;    /* M68 */
     set_task_name(t, "cpu-idle");
     current_task[cpu_id] = t;
     loaded_pml4_phys[cpu_id] = t->pml4_phys;
@@ -340,15 +544,217 @@ task_t *task_spawn_in(const char *name, uint64_t pml4_phys, void (*entry)(void *
 static task_t *pick_next(task_t *from) {
     /* M54: from->id is a pid now, not an index - PID_SLOT is where in the
      * table it actually lives. A free slot is skipped for the same reason
-     * a terminated one is: it holds no runnable task. */
+     * a terminated one is: it holds no runnable task.
+     *
+     * M68: TASK_BLOCKED is skipped by the same test, for free - it is not
+     * TASK_READY. That is the whole of "a blocked task does not get the
+     * CPU", and it is why the state had to be a state rather than a flag. */
     int start = PID_SLOT(from->id);
+    task_t *idle = (task_t *)0;
     for (int offset = 1; offset <= task_count; offset++) {
         int i = (start + offset) % task_count;
-        if (tasks[i].state == TASK_READY) {
-            return &tasks[i];
+        if (tasks[i].state != TASK_READY) {
+            continue;
+        }
+        /* M68: an idle task is a last resort, never a peer. It is always
+         * READY by construction, so letting it take its turn in the
+         * rotation would hand it a full quantum's share of the CPU on a
+         * busy machine - it exists to be somewhere to go, not to run. */
+        if (tasks[i].is_idle) {
+            if (!idle) {
+                idle = &tasks[i];
+            }
+            continue;
+        }
+        return &tasks[i];
+    }
+    /* Nothing else has real work. Carry on with the caller if it still
+     * can - that is the original behaviour and the common case. */
+    if (!from->is_idle && (from->state == TASK_RUNNING || from->state == TASK_READY)) {
+        return from;
+    }
+    /* The caller cannot continue (it blocked, or it just terminated) and
+     * there is no other work. This is what the idle tasks are for, and
+     * why they are spawned at all: without one, schedule() would have to
+     * hand the CPU back to a task that has no business running, which is
+     * how M68 first produced "task_exit: terminated task resumed" on a
+     * machine where every other task was asleep. */
+    return idle ? idle : from;
+}
+
+/* M68: wake anything whose deadline has passed. Called from the tick, so
+ * it runs with interrupts already off and with sched_lock NOT held - it
+ * takes it itself. A deadline of 0 means "no deadline" and is the common
+ * case, so the test is one compare for almost every slot. */
+static void wake_expired(uint64_t now_ms) {
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    if (blocked_count == 0) {
+        spin_unlock(&sched_lock);
+        irq_restore(flags);
+        return;
+    }
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_BLOCKED && tasks[i].wake_deadline_ms != 0 &&
+            now_ms >= tasks[i].wake_deadline_ms) {
+            blocked_count--;
+            tasks[i].state = TASK_READY;
+            tasks[i].wait_chan = (const void *)0;
+            tasks[i].wake_deadline_ms = 0;
         }
     }
-    return from; /* nothing else ready - keep running this one */
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+}
+
+
+
+uint64_t sched_event_seq(void) {
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    uint64_t v = event_seq;
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+    return v;
+}
+
+void sched_wake_all(const void *chan) {
+    if (!chan) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    /* Bumped even when nothing is parked on this channel: the whole point
+     * is to tell a waiter that has not managed to fall asleep yet that it
+     * missed something, and such a waiter is by definition not on any
+     * channel to be counted. */
+    event_seq++;
+    if (blocked_count == 0) {
+        /* The counter bump above still has to happen - a waiter that has
+         * not fallen asleep yet is not counted here and is exactly who it
+         * is for. */
+        spin_unlock(&sched_lock);
+        irq_restore(flags);
+        return;
+    }
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_BLOCKED && tasks[i].wait_chan == chan) {
+            blocked_count--;
+            tasks[i].state = TASK_READY;
+            tasks[i].wait_chan = (const void *)0;
+            tasks[i].wake_deadline_ms = 0;
+        }
+    }
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+}
+
+/* See sched.h for the contract. The ordering here is the entire point and
+ * is worth reading in order:
+ *
+ *   1. mark this task BLOCKED, while the caller's condition lock is still
+ *      held - so no waker can have run since the caller tested it;
+ *   2. drop the condition lock - now a waker may run, and may set this
+ *      task back to READY before step 3, which is harmless;
+ *   3. schedule() - which will not pick this task again while it is
+ *      BLOCKED, and will pick it normally if step 2's waker un-blocked it;
+ *   4. retake the condition lock, so the caller's re-test loop sees a
+ *      consistent world.
+ *
+ * A fatal signal is checked before parking. Without that, a task that
+ * blocks forever on a channel nobody wakes is a task SIGKILL cannot
+ * reach - which is precisely the "unkillable process" M42 fixed for the
+ * old spin-based version of this, and it would have come straight back. */
+/* M68: the exit half of a block, and it has to be symmetric with the
+ * entry half or blocked_count drifts.
+ *
+ * schedule() can return with this task STILL marked BLOCKED - that is the
+ * "nothing else was runnable, so carry on" path, which schedule()'s own
+ * comment explains it must take. The caller then re-tests its condition
+ * and, if it is still unmet, blocks again. Without this cleanup that
+ * second block would increment blocked_count a second time against a
+ * single decrement, and the counter would climb until sched_wake_all's
+ * fast path never fired again - a performance bug that looks like
+ * nothing, degrades slowly, and would be miserable to attribute. */
+static void unblock_self(task_t *self) {
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    if (self->state == TASK_BLOCKED) {
+        self->state = TASK_RUNNING;
+        blocked_count--;
+    }
+    self->wait_chan = (const void *)0;
+    self->wake_deadline_ms = 0;
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+}
+
+void sched_block_on_seq(const void *chan, uint64_t deadline_ms, uint64_t expected_seq) {
+    sched_deliver_pending_signal(); /* noreturn if one is pending - see sched_block_on */
+
+    int cpu = smp_current_cpu();
+    uint64_t sflags = irq_save_disable();
+    spin_lock(&sched_lock);
+    if (event_seq != expected_seq) {
+        /* Something happened while the caller was testing its condition.
+         * Do not sleep on a world that has already changed - return and
+         * let the caller test again. */
+        spin_unlock(&sched_lock);
+        irq_restore(sflags);
+        return;
+    }
+    task_t *self = current_task[cpu];
+    self->wait_chan = chan;
+    self->wake_deadline_ms = deadline_ms;
+    self->state = TASK_BLOCKED;
+    blocked_count++;
+    spin_unlock(&sched_lock);
+    irq_restore(sflags);
+
+    schedule();
+    unblock_self(self);
+}
+
+void sched_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, uint64_t *flags) {
+    int cpu = smp_current_cpu();
+    uint64_t sflags = irq_save_disable();
+    spin_lock(&sched_lock);
+    task_t *self = current_task[cpu];
+    self->wait_chan = chan;
+    self->wake_deadline_ms = deadline_ms;
+    self->state = TASK_BLOCKED;
+    blocked_count++;
+    spin_unlock(&sched_lock);
+    irq_restore(sflags);
+
+    spin_unlock_irqrestore(lock, *flags);
+
+    /* THE SIGNAL CHECK GOES HERE, AFTER THE CALLER'S LOCK IS DOWN, AND
+     * THE ORDERING IS NOT A STYLE CHOICE.
+     *
+     * sched_deliver_pending_signal is noreturn when a signal is pending:
+     * it calls task_exit_with_code and this task never comes back. Doing
+     * that one line earlier - while `lock` was still held - meant a task
+     * killed at exactly this point died holding pipe_lock, with
+     * interrupts off, and never released it. Every pipe operation on the
+     * machine then spun on a lock whose owner no longer existed.
+     *
+     * That is precisely what happened, and it wedged the boot in the M36
+     * self-test, which kills a client mid-conversation. The pre-M68 code
+     * in pipe.c had the unlock and the signal check in this order for the
+     * same reason; folding the check into this function quietly reversed
+     * them. Worth recording because the bug is invisible in the diff -
+     * both versions "check for a signal before sleeping", and only one of
+     * them survives the check finding something.
+     *
+     * Marking this task BLOCKED above and then exiting here is harmless:
+     * task_exit_with_code sets TERMINATED, which pick_next skips for its
+     * own reasons. */
+    sched_deliver_pending_signal();
+
+    schedule();
+    unblock_self(self);
+    *flags = spin_lock_irqsave(lock);
 }
 
 void schedule(void) {
@@ -364,6 +770,40 @@ void schedule(void) {
     spin_lock(&sched_lock);
     task_t *prev = current_task[cpu];
     task_t *next = pick_next(prev);
+
+    /* M68: pick_next returns `from` when nothing else is READY. `prev` may
+     * now be TASK_BLOCKED, and the obvious reaction - refuse to return
+     * until something else becomes runnable - is WRONG, in a way that
+     * cost this milestone a day and is worth writing down in full.
+     *
+     * schedule() is reached from two places: a task parking itself
+     * (interrupts on), and scheduler_tick_cpu inside the timer IRQ
+     * (interrupts off). sched_block_on marks the task BLOCKED, drops the
+     * caller's lock, and only then calls schedule() - so there is a
+     * window, a few instructions wide, where a task is BLOCKED and still
+     * running. If the tick lands in that window and nothing else is
+     * READY, a spin-until-something-is-ready loop here spins *inside the
+     * interrupt handler*, where irq_restore puts back IF=0. Interrupts
+     * off, forever, with the timer that would change the run queue being
+     * the exact interrupt that can no longer fire. The machine is dead,
+     * with no panic and no output - the same shape as the `hlt` M64
+     * found, and `pause` instead of `hlt` does not help in the slightest,
+     * because the problem was never the instruction.
+     *
+     * It presented as a boot that hung about one run in two, at whichever
+     * self-test happened to have a task blocked when a tick arrived, and
+     * it moved when anything at all changed the timing - including adding
+     * the klog that was meant to diagnose it.
+     *
+     * So: return, exactly as before. A BLOCKED task that keeps running
+     * for a few more instructions is harmless - it is on its way to
+     * schedule() and will park there - and a BLOCKED task resumed by this
+     * return simply re-tests its condition and blocks again, which is the
+     * loop every caller of sched_block_on already has to have. The state
+     * is transient by construction, and the only thing that could make it
+     * permanent is a machine with genuinely nothing to run, where
+     * spinning in the task's own context with interrupts ON is both
+     * correct and the pre-M68 behaviour. */
     if (next == prev) {
         spin_unlock(&sched_lock);
         irq_restore(flags);
@@ -464,7 +904,15 @@ void task_exit_with_code(int code) {
     }
 
     t->exit_code = code;
+    if (t->state == TASK_BLOCKED) {
+        blocked_count--; /* killed while parked - the count is not a state, it has to be maintained at every edge */
+    }
     t->state = TASK_TERMINATED;
+    /* M68: a parent blocked in SYS_wait parks on this exact task_t, and a
+     * wait(-1) parks on the poll channel. Both are woken here, before the
+     * final schedule() - after it there is no "here" to run in. */
+    sched_wake_all((const void *)t);
+    sched_wake_all(SCHED_POLL_CHAN);
     schedule();
     /* Unreachable: a TERMINATED task is never picked again by pick_next,
      * so the context_switch inside that schedule() call never returns

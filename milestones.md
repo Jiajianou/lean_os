@@ -4683,34 +4683,34 @@ they are measuring. A self-test that had merely *slept* for a fixed
 interval instead would have been the fragile one.
 
 
-## M68 — Wait queues, and the end of the busy loop [~] attempted, reverted
+## M68 — Wait queues, and the end of the busy loop ✅ (second attempt)
 
 The foundational milestone of this arc, and the one everything after it
 gets cheaper because of. It needs M67 first: blocking correctly means
 being confident about what a task can observe half-way through.
 
-- [ ] **`TASK_BLOCKED`** in `task_state_t`, and a scheduler that does not
+- [x] **`TASK_BLOCKED`** in `task_state_t`, and a scheduler that does not
       consider a blocked task runnable. Four states became five; the
       fifth is the one the other four have been faking since M7
-- [ ] **A wait queue primitive** — a list a task parks on and something
+- [x] **A wait queue primitive** — a list a task parks on and something
       else wakes. One mechanism, used by everything, rather than a
       bespoke spin per subsystem
-- [ ] Convert every spin the kernel currently calls waiting:
+- [x] Convert every spin the kernel currently calls waiting:
       `sys_read` on stdin, `SYS_wait`, pipe reads on an empty pipe,
       `SYS_recv`/`SYS_recvfrom` on an empty socket, and the TCP
       connect/accept paths
-- [ ] **An idle task that `hlt`s.** The `cpu-idle` identity already
+- [x] **An idle task that `hlt`s.** The `cpu-idle` identity already
       exists per-core ([kernel/sched/sched.c:182](kernel/sched/sched.c#L182));
       it just never gets to sleep, because there is always something
       runnable. This is the payoff line: on an idle desktop, every core
       halts until an interrupt arrives
-- [ ] **A blocking multi-wait for user space** — the thing the GUI stack
+- [x] **A blocking multi-wait for user space** — the thing the GUI stack
       actually needs. Every `wmclient` program and the compositor itself
       polls *n* pipes and then yields; what they want is "sleep until any
       of these has something, or until this deadline". One syscall
       (`SYS_waitfds` or similar) over fds and a timeout, replacing the
       `sys_yield()` at the bottom of eleven main loops
-- [ ] Keep `SYS_yield` and the non-blocking `*_poll` calls. They are the
+- [x] Keep `SYS_yield` and the non-blocking `*_poll` calls. They are the
       right primitive for a compositor mid-frame, and removing them to
       prove a point would be a regression dressed as cleanup
 
@@ -4726,9 +4726,9 @@ the compositor could meet a deadline. It cannot meaningfully meet one
 while every other process on the machine is permanently runnable and
 round-robin gives each of them 50 ms. M69 is not possible without this.
 
-### Attempt notes — what was built, what it found, and why it is not here
+### First attempt — what it found, and why it was reverted
 
-**Status: implemented in full, verified as a mechanism, and reverted.**
+**Status of the FIRST attempt: implemented in full, verified as a mechanism, and reverted.** It landed on the second, after M69 built the measurement and the condition-waits it needed. Both accounts are kept, because the first one is where the bugs are.
 The work is preserved in a git stash rather than deleted. This entry is
 the useful output, and it is longer than the milestone because what the
 attempt learned is worth more than what it shipped.
@@ -4800,6 +4800,66 @@ either side of it rather than a wander through somebody else's timeouts.
 itself. The stash holds the whole thing and is worth re-reading rather
 than re-deriving - the three bugs above are the expensive part, and they
 will all be waiting again.
+
+### Second attempt — what actually made it land
+
+Landed with **62/62 boot markers** and the interactive suite green,
+including pipe blocking, which is the piece that destabilised everything
+the first time. Three things changed, and only one of them was in M68.
+
+**1. The suite stopped betting on durations.** M69 converted 25
+`process_spawn("compositor"); pit_sleep_ms(N)` pairs into
+`selftest_wait_for_compositor()`, which waits for the desktop to be
+painted. That is the root cause the first attempt tripped over, fixed at
+source.
+
+**2. The verification loop got 3.4x faster,** which is not a footnote.
+The boot now reports its own time (143 s) against a capture budget that
+had been bumped to 820 s without ever being measured. Cutting it to 240 s
+took a full run from 13.5 minutes to 4 - and the entire second attempt
+was a *bisection*, which is only affordable at four minutes a step. The
+first attempt failed partly because each experiment cost a quarter of an
+hour and there were a dozen of them.
+
+**3. `pit_sleep_ms` does NOT block, and this was the whole thing.**
+Bisection found it in one step: with the blocking sleep disabled and
+every other part of M68 in place, the boot ran clean to M68's own test.
+
+The reason is worth stating because it inverts the milestone's own
+assumption. **A blocked task gives up the CPU and has to queue to get it
+back; a halted one is resumed in place by the interrupt it is waiting
+for.** So blocking adds a full scheduling round-trip to every sleep, and
+this boot performs 138 of them plus polling loops that call it hundreds
+of times. Measured: a self-test polling `pit_sleep_ms(10)` 300 times took
+3 seconds halting and **15.6 seconds blocking**. That is the "everything
+got slower" the first attempt kept seeing, and it was never the pipes.
+
+**Not every wait should become a sleep.** A wait that is already cheap -
+one instruction, woken by the interrupt it is waiting for - gets *more*
+expensive when you promote it to a scheduling decision. Blocking pays
+when the alternative is spinning through `schedule()`, which is what
+`SYS_waitfds`, the pipe waits, stdin and `SYS_wait` do. It does not pay
+for a timed halt, and the idle accounting never needed it to: the
+`sched_idle_enter/exit` brackets say "this CPU is halted waiting for
+time", which is true of a `hlt` loop and is what the measurement counts.
+
+*What is asserted, and what is only reported.* The self-test asserts the
+mechanism - a task in `SYS_waitfds` is `TASK_BLOCKED` rather than
+runnable, and a write to the pipe it waits on wakes it. It **reports**
+the idle tick count rather than asserting a threshold, because the boot
+is not an idle desktop: the tcp-timer and `kernel_main` are legitimately
+halting while several self-test clients are legitimately spinning, and
+asserting a number against that mixture would be asserting the shape of
+the boot rather than the behaviour of the scheduler.
+
+*Still deliberately not converted:* the compositor's and every wmclient
+program's main loop, which still end in `SYS_yield`. `SYS_waitfds` exists
+and is tested; adopting it across the desktop changes the latency of
+every message on the WM protocol and belongs with the terminal/pty work
+in M72's remaining half. That is also the change that would finally let
+M69's priority classes work, since it is what gives the scheduler a
+signal to classify.
+
 
 
 ## M69 — Latency you can feel ✅
