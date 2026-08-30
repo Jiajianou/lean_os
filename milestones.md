@@ -5593,7 +5593,7 @@ ordinary program does not.
 
 
 
-## M74 — The session that remembers [ ]
+## M74 — The session that remembers [~] attempted, preserved in a stash
 
 The last one, and the only one on this list that is purely about how the
 machine feels. It is last because it depends on M71 being trustworthy —
@@ -5627,6 +5627,65 @@ virtual-desktop test used, and for the same reason: a compositor that
 *says* it restored a window and did not paint it has failed.
 
 ---
+
+### Attempt notes — built, self-tested, and not shipped
+
+**Status: window save/restore is implemented and its boot self-test
+passes. It is not in the tree, because it breaks seven interactive tests
+by stopping input from reaching windows, and that cause was not isolated.
+The work is preserved in a git stash.**
+
+*What was built and works.* The compositor writes a line per live
+application window - program, geometry, workspace - and on start
+relaunches them and places them. The program name comes from
+`SYS_taskinfo` via the client's pid rather than from the WM protocol,
+because a window knows its *title* (what a person reads) and the task
+table already knows what each process was launched as. The file is
+written only when a cheap signature of the layout changes, so it is
+checked every pass and written almost never. The `[m74]` self-test drives
+the whole path and passes: a hand-written session naming a program and a
+position the cascade would never choose, a compositor started with the
+gate argument, and the window required to appear **at those coordinates**
+- graded on the pixel, so a compositor that read the file and placed the
+window anyway cannot pass - plus a second window changing the layout and
+the session rewritten naming both programs.
+
+*What went wrong.* With the compositor's M74 diff applied, seven of the
+eight interactive tests fail, and they all fail the same way: **input
+does not reach windows.** "Clicking the titlebar close button did not
+close", "clicking the covered window's titlebar did not raise", "nothing
+was typed into the editor". Window *counts* are correct, so the
+compositor is running and compositing; only the acting-on-input is gone.
+
+*What is known, so the next attempt does not repeat it.*
+
+- **It is not the session gate.** `init` was reverted to pass no
+  argument, which leaves `session_enabled` false and every session code
+  path a no-op, and the tests still failed.
+- **It is the compositor's M74 diff specifically.** Stashing it and
+  rebuilding made `titlebar_close_button` pass; restoring it made it fail
+  again. That is a clean bisect to one file's changes.
+- **It is not the size of the task-info array.** Reducing it from 128
+  entries (6 KB of BSS) to 40 changed nothing.
+- Two things in that diff are still unexamined: the `restored` pointer
+  threaded through `accept_pending_window`, and the change of `main(void)`
+  to `main(int argc, char **argv)` in a program that had never taken
+  arguments. One of those, or an interaction with the M69 `SYS_waitfds`
+  loop, is the cause.
+
+*Why it is not shipped anyway.* Every one of those seven failures is
+about a person clicking something and nothing happening, which is the
+worst class of desktop bug there is - and a feature that brings your
+windows back is not worth a desktop that ignores the mouse. It is one
+bisect step from being understood, and that step is worth taking with a
+clear head rather than at the end of a long session.
+
+*Also not attempted, and listed here rather than pretended about:*
+unsaved work vetoing a shutdown, "recently opened", and a non-empty
+first-boot desktop. All three are independent of the restore mechanism
+and none was started.
+
+
 
 ## Deliberately not next, and why
 
