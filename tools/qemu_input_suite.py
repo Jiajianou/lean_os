@@ -1413,8 +1413,12 @@ def test_settings_persist_across_a_reboot(m):
             break
         time.sleep(1.0)
     else:
-        raise Failure("the machine never came back up after `reboot` (log tail: %r)"
-                      % m.read_log()[-400:])
+        # Saved rather than tailed: a second boot that does not finish has
+        # the same "the only evidence is this log" property Machine.save_log
+        # was written for, and 400 characters of tail is not enough to see
+        # which self-test it stopped at or how long the ones before it took.
+        raise Failure("the machine never came back up after `reboot` (log: %s, tail: %r)"
+                      % (m.save_log("reboot-never-finished"), m.read_log()[-400:]))
     check("[power] restarting." in m.read_log(),
           "the machine restarted without going through SYS_shutdown's own path")
 
@@ -1454,9 +1458,17 @@ def test_session_restores_windows_across_a_reboot(m):
     # moves the Clock a long way right and down from both.
     dest_x, dest_y = x + 380, y + 260
     m.drag(x + 100, y - 8, dest_x + 100, dest_y - 8)
-    moved = wait_for(m, lambda s: s.px(dest_x + 4, dest_y - 8) != desktop_px(dest_y - 8),
-                     "the Clock did not move to where it was dragged")
-    titlebar = moved.px(dest_x + 4, dest_y - 8)
+    wait_for(m, lambda s: s.px(dest_x + 4, dest_y - 8) != desktop_px(dest_y - 8),
+             "the Clock did not move to where it was dragged")
+    # The window's own CONTENT, not its titlebar: a titlebar's colour
+    # depends on which window has focus, and focus after a restore
+    # depends on which client happens to connect last - so comparing a
+    # titlebar pixel across a reboot would be asserting an order this
+    # milestone deliberately does not restore (see M74's note on z-order
+    # and focus). The content colour is a fact about the window.
+    content = wait_for(m, lambda s: s.px(dest_x + 4, dest_y + 4) != desktop_px(dest_y + 4),
+                       "the Clock's content is not where it was dragged to")
+    content_px = content.px(dest_x + 4, dest_y + 4)
 
     m.double_click(ICON_X, ICONS[5][2])  # Paint, so the session has two entries
     wait_for_windows(m, 2)
@@ -1479,18 +1491,22 @@ def test_session_restores_windows_across_a_reboot(m):
             break
         time.sleep(1.0)
     else:
-        raise Failure("the machine never came back up after `reboot` (log tail: %r)"
-                      % m.read_log()[-400:])
+        # Saved rather than tailed: a second boot that does not finish has
+        # the same "the only evidence is this log" property Machine.save_log
+        # was written for, and 400 characters of tail is not enough to see
+        # which self-test it stopped at or how long the ones before it took.
+        raise Failure("the machine never came back up after `reboot` (log: %s, tail: %r)"
+                      % (m.save_log("reboot-never-finished"), m.read_log()[-400:]))
 
     # Both windows, and the moved one at its own coordinates. The window
     # count is checked first because "nothing came back" and "the wrong
     # thing came back" are different failures and the first would
     # otherwise be reported as the second.
     wait_for(m, lambda s: count_app_windows(s) >= 2,
-             "the session did not bring both windows back", timeout=90.0)
-    wait_for(m, lambda s: s.px(dest_x + 4, dest_y - 8) == titlebar,
+             "the session did not bring both windows back", timeout=120.0)
+    wait_for(m, lambda s: s.px(dest_x + 4, dest_y + 4) == content_px,
              "a window came back, but not where it was left - the session restored "
-             "the program and let the cascade place it", timeout=30.0)
+             "the program and let the cascade place it", timeout=60.0)
 
 
 def test_launcher_does_not_offer_data_files(m):
@@ -2301,7 +2317,14 @@ def test_behaviour_settings_persist(m):
     m.sendkey("ctrl-spc")
     m.type_text("reboot")
     m.sendkey("ret")
-    deadline = time.time() + 120
+    # 120 -> 300, matching settings_persist_across_a_reboot's own budget
+    # for the same wait. A boot on this machine reaches "[init] PID 1
+    # spawned" in about 145 seconds (the kernel prints its own time -
+    # "[boot] reached the desktop handoff in N s"), so 120 was a deadline
+    # a healthy machine could not meet and had been quietly relying on
+    # nobody running this test on a slow host. The number is measured
+    # against something the boot itself reports now, rather than guessed.
+    deadline = time.time() + 300
     while time.time() < deadline and m.read_log().count(BOOT_MARKER) <= boots_before:
         time.sleep(1.0)
     check(m.read_log().count(BOOT_MARKER) > boots_before, "the machine never restarted")
@@ -2313,11 +2336,17 @@ def test_behaviour_settings_persist(m):
     # would open a *second* Settings window on top of the restored one.
     # That the window is here at all is a second assertion this test now
     # makes for free.
-    boot(m)
+    #
+    # And boot() is deliberately not called: its "the desktop finished
+    # painting" check includes a bare-wallpaper probe at (500, 500),
+    # which was true of every desktop this suite had ever seen and is not
+    # true of one that brings your windows back - the restored Settings
+    # window's own border lands on it. Waiting for the switch itself is
+    # the same wait with none of that assumption in it.
     shot = wait_for(m, lambda s: count_app_windows(s) >= 1 and
                                  s.px(*probe) in (SETTINGS_BTN_ON, SETTINGS_BTN_OFF),
                     "Settings did not come back with a readable Motion switch",
-                    timeout=60.0)
+                    timeout=120.0)
     check(shot.px(*probe) == SETTINGS_BTN_OFF,
           "the Motion switch forgot it had been turned off across a restart")
     check(shot.px(*volume_probe(sx, sy, 0)) == SETTINGS_BTN_ON,

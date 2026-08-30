@@ -4571,7 +4571,25 @@ static void session_save(void) {
         n += wrote;
         saved++;
     }
-    sys_writefile(SESSION_PATH, buf, (size_t)n);
+    /* Said out loud, because a session is a feature whose whole
+     * behaviour is invisible until the next boot - and the first
+     * question anybody debugging it asks is "was anything written". A
+     * line per save rather than per frame: the signature check above
+     * means this fires when the layout settles, which on a desktop
+     * somebody is using is a few times a minute. */
+    int ok = sys_writefile(SESSION_PATH, buf, (size_t)n) == 0;
+    char msg[64];
+    int m = 0;
+    static const char pre[] = "[wm] session: ";
+    for (int i = 0; pre[i]; i++) {
+        msg[m++] = pre[i];
+    }
+    m += format_uint((uint32_t)saved, msg + m);
+    const char *tail = ok ? " window(s) saved\n" : " window(s) could not be saved\n";
+    for (int i = 0; tail[i]; i++) {
+        msg[m++] = tail[i];
+    }
+    sys_write(1, msg, (size_t)m);
 }
 
 /* Reads the file, relaunches each program, and remembers where its window
@@ -4584,6 +4602,8 @@ static void session_restore(void) {
     static char buf[512];
     long n = sys_readfile(SESSION_PATH, buf, sizeof(buf) - 1);
     if (n <= 0) {
+        static const char none[] = "[wm] session: nothing saved from last time\n";
+        sys_write(1, none, sizeof(none) - 1);
         return;
     }
     buf[n] = '\0';
@@ -4608,6 +4628,18 @@ static void session_restore(void) {
         e.claimed = 0;
         session_pending[session_pending_count++] = e;
     }
+    char msg[64];
+    int m = 0;
+    static const char pre[] = "[wm] session: ";
+    for (int i = 0; pre[i]; i++) {
+        msg[m++] = pre[i];
+    }
+    m += format_uint((uint32_t)session_pending_count, msg + m);
+    static const char post[] = " window(s) relaunched\n";
+    for (int i = 0; post[i]; i++) {
+        msg[m++] = post[i];
+    }
+    sys_write(1, msg, (size_t)m);
 }
 
 /* Does this newly-connected window match something the session said

@@ -1494,6 +1494,37 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             klog_puts("[wm_demo] SYS_task_alive = ");
             klog_put_dec((uint32_t)(demo_status & 0xFF));
             klog_puts(" (1=still running past the budget, 0=exited non-zero, 255=no such task)\n");
+            /* Every task, its state and what it is parked on. "Still
+             * running past the budget" says the client did not finish
+             * and nothing else; whether it is blocked, and on whose
+             * channel, is the difference between a client that never got
+             * an answer and a compositor that never asked. Printed
+             * before the panic because after it there is nothing. */
+            sched_debug_dump("wm_demo overran its budget");
+            /* And what is actually sitting in the two rendezvous pipes.
+             * "wm_demo is blocked on a pipe" does not say WHICH pipe or
+             * which side of it: a request nobody read and a response
+             * nobody wrote are opposite bugs with the same symptom, and
+             * this is the one place both are visible at once. Opening
+             * them here adds a reader and a writer to each, which would
+             * matter if this were not about to panic. */
+            {
+                int probe[2];
+                if (do_syscall(SYS_pipe_open, (uint64_t)WM_REQUEST_PIPE, (uint64_t)probe, 0) == 0) {
+                    klog_puts("[wm_demo] WM_REQUEST_PIPE holds ");
+                    klog_put_dec((uint32_t)do_syscall(SYS_pipe_poll, (uint64_t)probe[0], 0, 0));
+                    klog_puts(" byte(s), a request is ");
+                    klog_put_dec((uint32_t)sizeof(wm_create_request_t));
+                    klog_putc('\n');
+                }
+                if (do_syscall(SYS_pipe_open, (uint64_t)WM_RESPONSE_PIPE, (uint64_t)probe, 0) == 0) {
+                    klog_puts("[wm_demo] WM_RESPONSE_PIPE holds ");
+                    klog_put_dec((uint32_t)do_syscall(SYS_pipe_poll, (uint64_t)probe[0], 0, 0));
+                    klog_puts(" byte(s), a response is ");
+                    klog_put_dec((uint32_t)sizeof(wm_create_response_t));
+                    klog_putc('\n');
+                }
+            }
             panic("wm_demo self-test: did not exit cleanly - window creation failed");
         }
 
@@ -7325,6 +7356,25 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     {
         int all_ok = 1;
         const char *SESSION = PATH_ETC_DIR "session.conf";
+        /* ---- the user's own session, preserved across this test -------
+         *
+         * This block writes a session file of its own and deletes it
+         * afterwards, which is exactly what a self-test should do with a
+         * fixture - and exactly the wrong thing to do to the file a
+         * person's desktop wrote before the machine was last switched
+         * off. Deleting it meant every boot began by forgetting what was
+         * open, which is the feature this milestone exists to add, and
+         * the failure was invisible from inside the self-test because
+         * the self-test passed.
+         *
+         * Same shape as selftest_settings_install_defaults/restore, which
+         * has had to do this for settings.conf since M47, and for the
+         * same reason. */
+        static char saved_session[512];
+        int64_t saved_session_len = vfs_read(SESSION, saved_session, sizeof(saved_session));
+        if (saved_session_len > (int64_t)sizeof(saved_session)) {
+            saved_session_len = -1; /* larger than session_save ever writes - not ours to preserve */
+        }
         const uint32_t CLOCK_BG = 0x00122438u;
         /* Far from the cascade (which starts at 100,100), so a freshly
          * placed window cannot land here by accident. */
@@ -7419,7 +7469,14 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                 selftest_reap(o);
             }
         }
-        do_syscall(SYS_unlink, (uint64_t)SESSION, 0, 0);
+        /* The person's session back, exactly as it was - or gone, if
+         * there was not one, which is what this test's own fixture must
+         * not be mistaken for. */
+        if (saved_session_len >= 0) {
+            vfs_write(SESSION, saved_session, (size_t)saved_session_len);
+        } else {
+            do_syscall(SYS_unlink, (uint64_t)SESSION, 0, 0);
+        }
         vfs_write(PATH_SETTINGS, SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
         console_init();
         klog_use_console();
