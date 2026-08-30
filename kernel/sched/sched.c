@@ -48,6 +48,24 @@ static int task_count;
  * same instant. */
 static task_t *current_task[MAX_CPUS];
 static uint32_t ticks_in_slice[MAX_CPUS];
+static uint32_t aging_ticks; /* M69: BSP-only counter driving the anti-starvation pass */
+
+/* M69: "somebody more urgent than the running task became runnable".
+ *
+ * Priorities alone did not move input-to-photon at all under load, and
+ * this is why: waking a task makes it READY, but nothing reschedules
+ * until the running task's quantum expires. So the compositor could be
+ * woken by a mouse interrupt, outrank all four CPU-bound tasks, and still
+ * wait out somebody else's slice before running - which is precisely the
+ * latency the classes were supposed to remove.
+ *
+ * Set by a wake that promotes somebody above the current task, honoured
+ * by the very next timer tick. A flag rather than a schedule() call
+ * inside sched_wake_all, because that function is called from interrupt
+ * handlers and from inside other subsystems' locks, and rescheduling
+ * from there would be re-entering the scheduler at an arbitrary point.
+ * The cost of the indirection is at most one tick. */
+static volatile int need_resched[MAX_CPUS];
 static uint64_t loaded_pml4_phys[MAX_CPUS]; /* mirrors whatever schedule() last loaded into this CPU's own CR3, so same-address-space switches (the common case: plain kernel tasks) skip a needless TLB-flushing reload */
 
 /* Guards `tasks`/`task_count` and the pick-next/state-transition half of
@@ -334,10 +352,46 @@ void scheduler_tick_cpu(int cpu) {
     if (t->pending_signal == SIGKILL || t->pending_signal == SIGTERM) {
         deliver_pending_signal_and_exit(t);
     }
-    if (++ticks_in_slice[cpu] < SCHED_QUANTUM_TICKS) {
+    /* M69: aging. Nothing stays batch for more than a second without
+     * another chance to prove itself; a genuinely CPU-bound task
+     * re-demotes within SCHED_BATCH_THRESHOLD slices, so the promise
+     * costs about 2% of a core. BSP only - one cadence for one property. */
+    if (cpu == 0 && ++aging_ticks >= SCHED_AGING_TICKS) {
+        aging_ticks = 0;
+        uint64_t af = irq_save_disable();
+        spin_lock(&sched_lock);
+        for (int i = 0; i < task_count; i++) {
+            tasks[i].prio = PRIO_INTERACTIVE;
+            tasks[i].full_slices = 0;
+            tasks[i].last_block_tick = pit_get_ticks();
+            need_resched[smp_current_cpu()] = 1;
+        }
+        spin_unlock(&sched_lock);
+        irq_restore(af);
+    }
+
+    /* M69: an interactive task became runnable while somebody else held
+     * the CPU. Cut the slice short rather than making it wait - that
+     * wait was the whole of the load penalty the classes did not fix. */
+    int preempt = need_resched[cpu] && t->prio == PRIO_BATCH;
+    need_resched[cpu] = 0;
+    if (!preempt && ++ticks_in_slice[cpu] < SCHED_QUANTUM_TICKS) {
         return;
     }
     ticks_in_slice[cpu] = 0;
+
+    /* Preempted rather than woken: this task wanted its whole slice. */
+    if (t->full_slices < 255) {
+        t->full_slices++;
+    }
+    /* Demote only a task that has burned its slices AND has not blocked
+     * recently. The second half is what keeps the compositor interactive
+     * through an animation, during which it spins on purpose - see
+     * task_t.last_block_tick. */
+    if (t->full_slices >= SCHED_BATCH_THRESHOLD &&
+        pit_get_ticks() - t->last_block_tick > SCHED_AGING_TICKS) {
+        t->prio = PRIO_BATCH;
+    }
     schedule();
 }
 
@@ -551,9 +605,18 @@ static task_t *pick_next(task_t *from) {
      * CPU", and it is why the state had to be a state rather than a flag. */
     int start = PID_SLOT(from->id);
     task_t *idle = (task_t *)0;
+    task_t *batch = (task_t *)0;
     for (int offset = 1; offset <= task_count; offset++) {
         int i = (start + offset) % task_count;
         if (tasks[i].state != TASK_READY) {
+            continue;
+        }
+        /* M69: batch is remembered as a fallback, not returned.
+         * Round-robin order is preserved within each class. */
+        if (tasks[i].prio == PRIO_BATCH && !tasks[i].is_idle) {
+            if (!batch) {
+                batch = &tasks[i];
+            }
             continue;
         }
         /* M68: an idle task is a last resort, never a peer. It is always
@@ -570,6 +633,9 @@ static task_t *pick_next(task_t *from) {
     }
     /* Nothing else has real work. Carry on with the caller if it still
      * can - that is the original behaviour and the common case. */
+    if (batch) {
+        return batch; /* nothing interactive wants the CPU - compute away */
+    }
     if (!from->is_idle && (from->state == TASK_RUNNING || from->state == TASK_READY)) {
         return from;
     }
@@ -599,6 +665,10 @@ static void wake_expired(uint64_t now_ms) {
             now_ms >= tasks[i].wake_deadline_ms) {
             blocked_count--;
             tasks[i].state = TASK_READY;
+            tasks[i].prio = PRIO_INTERACTIVE; /* M69 - see sched_wake_all */
+            tasks[i].full_slices = 0;
+            tasks[i].last_block_tick = pit_get_ticks();
+            need_resched[smp_current_cpu()] = 1;
             tasks[i].wait_chan = (const void *)0;
             tasks[i].wake_deadline_ms = 0;
         }
@@ -641,6 +711,10 @@ void sched_wake_all(const void *chan) {
         if (tasks[i].state == TASK_BLOCKED && tasks[i].wait_chan == chan) {
             blocked_count--;
             tasks[i].state = TASK_READY;
+            /* M69: THE signal - see prio_class_t. A spinning task never
+             * reaches this line; a blocking one always does. */
+            tasks[i].prio = PRIO_INTERACTIVE;
+            tasks[i].full_slices = 0;
             tasks[i].wait_chan = (const void *)0;
             tasks[i].wake_deadline_ms = 0;
         }

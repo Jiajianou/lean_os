@@ -194,37 +194,41 @@ typedef struct {
     };
 } fd_slot_t;
 
-/* ---- M69: why there are still no scheduling priorities, twice over -----
+/* ---- M69: two scheduling classes, third attempt and the one that works --
  *
- * Tried again after M68 gave tasks a real blocked state, on the theory
- * that "this task was BLOCKED and something woke it" is a signal a
- * spinning task cannot fake - which is true, and was still not enough.
- * It broke the M30 window-chrome self-test on the first run.
+ * The first two attempts are written up below and both failed the same
+ * way, from opposite directions: whatever signal was used, **the
+ * compositor was misclassified**, because it never blocked. It
+ * busy-polled its request pipes and ended its loop in SYS_yield, so a
+ * yield-based classifier called everything interactive and a wake-based
+ * one demoted the compositor and let the clients waiting on it win.
  *
- * The inversion came back by the opposite route. The wake-based signal
- * stops a *spinning client* from claiming to be interactive; it does
- * nothing about the compositor, which also never blocks - it busy-polls
- * its request pipes and ends its loop in SYS_yield - and therefore burns
- * whole slices and gets **demoted**. A client that blocks on a pipe then
- * outranks the compositor it is waiting for, which is exactly the shape
- * that wedged the first attempt.
+ * What changed is not the classifier. It is that the compositor now
+ * *blocks* - its main loop ends in SYS_waitfds (M68's call, adopted here)
+ * rather than in a spin. So the signal below finally describes it
+ * correctly, and it describes everything else correctly too:
  *
- * So the conclusion is sharper than "the signal was wrong", and it is the
- * same one both attempts reached from different directions:
+ *   **a task that was TASK_BLOCKED and got woken is waiting on the
+ *   world**, and should run the moment it can. A task that burns whole
+ *   slices without ever blocking is computing.
  *
- *   **The compositor is the one process on this machine that must never
- *   be classified as batch, and it is the one process that never blocks.
- *   No behavioural classifier can work until it does.**
+ * A spinning task cannot claim the first however often it polls, and a
+ * blocking one cannot be denied it - which is what makes this immune to
+ * both inversions rather than to one of them.
  *
- * That is not a scheduler change. It is converting the compositor's main
- * loop - and every wmclient program's - from a poll-and-yield loop to
- * SYS_waitfds, which changes the latency of every message on the WM
- * protocol and belongs with the terminal/pty work in M72's remaining
- * half. Priorities become possible the moment that lands, and not
- * before. The measurement to judge them by already exists (the [m69]
- * input-to-photon self-test), which is the part that was missing the
- * first time.
+ * Demotion needs 10 consecutive whole slices (100 ms of uninterrupted
+ * CPU), well clear of the largest burst of honest work an interactive
+ * task does in one go - a compositor frame is ~16 ms. Aging returns
+ * everything to interactive once a second, so "a batch task always makes
+ * progress" is true by construction rather than by argument.
  */
+typedef enum {
+    PRIO_INTERACTIVE = 0, /* was blocked and got woken - runs first */
+    PRIO_BATCH = 1,       /* burned whole slices without ever blocking */
+} prio_class_t;
+
+#define SCHED_BATCH_THRESHOLD 10  /* 100 ms of uninterrupted CPU */
+#define SCHED_AGING_TICKS     100 /* 1 s: nothing stays batch longer than this */
 
 /* ---- M69 (first attempt): why there were no scheduling priorities -----
  *
@@ -323,6 +327,20 @@ typedef struct task {
      * and what lets one call serve as both a wait and a sleep. */
     const void *wait_chan;
     uint64_t wake_deadline_ms;
+    /* M69: scheduler-owned. Nothing outside sched.c writes them and no
+     * syscall can ask for a class - a flag a program sets is a flag every
+     * program sets. */
+    uint8_t prio;
+    uint8_t full_slices;
+    /* M69: when this task last came out of TASK_BLOCKED, in PIT ticks.
+     * A task that blocked recently is waiting-driven even if it happens
+     * to be spinning right now - which the compositor does deliberately
+     * while an animation is running, to meet a 16 ms frame budget a
+     * 10 ms timer cannot. Without this it demoted itself during exactly
+     * the 140 ms when it most needed the CPU, and M61's animation
+     * self-test caught it. Still a signal a spinner cannot fake: it has
+     * to have actually blocked to set it. */
+    uint64_t last_block_tick;
     /* M68: this task is a CPU's idle identity - task 0 after it reaches
      * kernel_main's tail, or an AP's `cpu-idle`. Marked explicitly rather
      * than inferred from "no stack and no parent", which happened to be

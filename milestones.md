@@ -4913,6 +4913,57 @@ copy in flight. The second is the one that matters — it is the case that
 is visibly broken today and cannot be fixed by making the compositor
 faster.
 
+### Priorities: three attempts, and what finally made them work
+
+**They landed on the third, and the fix was not in the scheduler.**
+
+The first two attempts are below. Both failed the same way from opposite
+directions - whatever signal was used, **the compositor was
+misclassified, because it never blocked.** So the third attempt started
+by changing that: the compositor's main loop now ends in `SYS_waitfds`
+(M68's call) instead of `SYS_yield`. That had been deferred twice as "a
+WM-protocol change belonging with the pty work"; it turned out to be a
+thirty-line change once M69 had already converted the suite off fixed
+sleeps, and it is the thing everything else was waiting on.
+
+With the compositor genuinely blocking, the signal works: **a task that
+was `TASK_BLOCKED` and got woken is waiting on the world.** A spinning
+task cannot claim it however often it polls, and a blocking one cannot be
+denied it - immune to both inversions rather than to one.
+
+*One more thing was needed, and M61 found it.* The compositor spins **on
+purpose** while an animation runs, because a 16 ms frame budget cannot be
+met by a 10 ms timer - so it burned its slices and demoted itself during
+exactly the 140 ms when it most needed the CPU. The fix is
+`last_block_tick`: demotion requires burned slices **and** no block
+within the last second. Still unfakeable by a spinner - it has to have
+actually blocked to set it - and now robust to a burst of honest work.
+
+*And `need_resched`, because priorities alone changed nothing.* Waking a
+task makes it READY; nothing reschedules until the running task's quantum
+expires. So the compositor could be woken by a mouse interrupt, outrank
+everything, and still wait out somebody else's slice - which is precisely
+the latency the classes were meant to remove. A flag set by a promoting
+wake and honoured by the next tick, rather than a `schedule()` inside
+`sched_wake_all`, which is called from interrupt handlers and from inside
+other subsystems' locks.
+
+**What the numbers say, and what they cannot.** Input-to-photon is
+essentially unchanged (39-41 ms idle, 38-41 ms loaded) - because the
+2-tick quantum had already removed the load penalty, which was the large
+effect. Raising the load to four CPU-bound tasks gave 99 ms *both with
+and without* priorities, and that turned out to be **the probe reporting
+on itself**: the observer polls a pixel through `schedule()`, never
+blocks, is correctly classified batch, and with five batch tasks it runs
+about every fifth slice. Measuring a genuinely loaded desktop needs a
+probe that blocks rather than polls, and that is a different instrument -
+recorded in the self-test rather than papered over.
+
+So priorities are kept on correctness grounds, with the honest caveat
+that this milestone's instrument cannot show them paying off. The
+mechanism is right, the classification is now unfakeable in both
+directions, and the measurement to judge a better probe against exists.
+
 ### Second attempt at priorities, after M68 — and the sharper conclusion
 
 Retried once M68 gave tasks a real blocked state, on the theory that

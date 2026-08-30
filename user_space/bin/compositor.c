@@ -4411,20 +4411,44 @@ int main(void) {
          * instead - see SYS_yield's comment in system_api/include/
          * syscall.h.
          *
-         * M68 DELIBERATELY LEFT THIS ALONE. SYS_waitfds exists and would
-         * let this process sleep instead of spin, which is the whole
-         * point of that milestone - but converting this loop, and the
-         * client loops in wmclient.c, changes the latency of every
-         * message on the WM protocol, and roughly fifty boot self-tests
-         * are written against fixed pit_sleep_ms budgets that assume the
-         * pre-M68 timing. Adopting it broke them in three different
-         * places (a missed animation frame budget, M55's crash-recovery
-         * reconnect, and M36's close handshake), each of which is a test
-         * whose *timing assumption* is wrong rather than a bug in the
-         * sleeping. Rewriting those budgets is real work and it is not
-         * this milestone's - see M68's progress notes and M69, which owns
-         * the latency numbers this loop should actually be measured
-         * against. */
-        sys_yield();
+         * M69 (after M68): this loop now SLEEPS when there is nothing to
+         * do, and that is what makes the compositor classifiable at all.
+         *
+         * It stayed a spin for two milestones because converting it
+         * changes the latency of every message on the WM protocol, and
+         * the boot self-tests were written against fixed pit_sleep_ms
+         * budgets that assumed the old timing. M69 fixed that at source -
+         * twenty-five of those budgets are now condition waits - so the
+         * suite no longer has an opinion about how long a handshake
+         * takes, only about whether it happens.
+         *
+         * The timeout is the whole design and it is deliberately SHORT.
+         * The event path does not use it: a client writing to a request
+         * pipe wakes this process immediately, because pipe_write wakes
+         * the poll channel. What the timeout bounds is everything the
+         * wake path does not cover - the mouse, which has no descriptor
+         * to wait on, plus toast expiry and the resolution countdown. One
+         * PIT tick is five times faster than the 50 ms quantum a
+         * sys_yield handed back, so this is not a latency regression by
+         * construction.
+         *
+         * While something is animating it still spins, because a 16 ms
+         * frame budget cannot be met by a 10 ms-granularity timer and a
+         * machine mid-animation is busy by definition. */
+        if (anim_any_active() || launcher_fading() || snap_fading()) {
+            sys_yield();
+        } else {
+            int wait_fds[10];
+            int nwait = 0;
+            wait_fds[nwait++] = 0; /* keystrokes */
+            wait_fds[nwait++] = req_fds[0];
+            wait_fds[nwait++] = query_fds[0];
+            wait_fds[nwait++] = action_fds[0];
+            wait_fds[nwait++] = settings_fds[0];
+            wait_fds[nwait++] = settings_query_fds[0];
+            wait_fds[nwait++] = notify_fds[0];
+            wait_fds[nwait++] = drag_fds[0];
+            sys_waitfds(wait_fds, nwait, 10);
+        }
     }
 }
