@@ -50,13 +50,22 @@ void process_destroy_address_space(uint64_t pml4_phys) {
      * Deliberately *not* [USER_SHM_BASE, ...) or USER_FB_BASE - see this
      * function's declaration in proc.h. */
     static const vmm_range_t OWNED[] = {
-        {USER_IMAGE_BASE, USER_ARG_ADDR + PAGE_SIZE},
+        {USER_IMAGE_BASE, USER_ARG_ADDR + USER_ARG_BYTES},
         {USER_HEAP_START, USER_HEAP_LIMIT},
+        /* M78: the mmap arena. Anonymous and private by construction -
+         * there is no file-backed or MAP_SHARED mapping in this kernel -
+         * so every frame in it belongs to this process alone and can be
+         * given straight back, exactly like the sbrk heap above it. That
+         * is precisely why the "deliberately not MAP_SHARED" line in the
+         * milestone is not a limitation being apologised for: a shared
+         * mapping here would make this list wrong. */
+        {USER_MMAP_BASE, USER_MMAP_LIMIT},
     };
     vmm_destroy_address_space(pml4_phys, OWNED, (int)(sizeof(OWNED) / sizeof(OWNED[0])));
 }
 
-static task_t *spawn_common(const char *name, const uint8_t *image, size_t image_size, const char *const *argv) {
+static task_t *spawn_common(const char *name, const uint8_t *image, size_t image_size,
+                             const char *const *argv, const char *const *envp) {
     /* M40: checked up front, before anything is allocated. The
      * task-table-full check further down still exists (it has to - it's
      * the one that runs under sched_lock and is therefore the
@@ -100,13 +109,46 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
         vmm_map_page_in(pml4_phys, va, phys, VMM_FLAG_WRITABLE | VMM_FLAG_USER);
     }
 
-    /* M60: a real argument vector, built into the one page this has
-     * always mapped at USER_ARG_ADDR. See proc.h for the layout and for
-     * why it lives in a page rather than on the stack - RDI pointing at
-     * USER_ARG_ADDR is unchanged, so enter_user_mode and the iretq frame
-     * did not have to learn anything. */
-    uint64_t arg_phys = pmm_alloc_frame();
-    k_memset((void *)arg_phys, 0, PAGE_SIZE);
+    /* ---- M60/M75: the argument region ---------------------------------
+     *
+     * argc, then argv, then envp, then every string - one virtually
+     * contiguous USER_ARG_BYTES block at USER_ARG_ADDR. See proc.h for
+     * the exact layout and for why envp sits immediately after argv's
+     * NULL rather than somewhere of its own.
+     *
+     * It is built in a scratch buffer and then copied page by page into
+     * freshly allocated frames, rather than written straight into
+     * physical memory the way the one-page version could: the region is
+     * two pages now, and two pmm frames are not guaranteed to be
+     * adjacent - so a string that straddles the page boundary would be
+     * written into the wrong place by exactly one frame's worth. The
+     * scratch buffer is where "virtually contiguous" is made true before
+     * anything depends on it.
+     */
+    uint64_t arg_frames[USER_ARG_PAGES];
+    for (int i = 0; i < USER_ARG_PAGES; i++) {
+        arg_frames[i] = pmm_alloc_frame();
+        if (arg_frames[i] == 0) {
+            /* Out of frames partway through. Give back whatever was
+             * taken and fail the spawn - the address space goes with it
+             * below, and a process with half an argument region is a
+             * process whose argv[0] may not exist. */
+            for (int j = 0; j < i; j++) {
+                pmm_free_frame(arg_frames[j]);
+            }
+            process_destroy_address_space(pml4_phys);
+            return (task_t *)0;
+        }
+    }
+    char *block = (char *)kmalloc(USER_ARG_BYTES);
+    if (!block) {
+        for (int i = 0; i < USER_ARG_PAGES; i++) {
+            pmm_free_frame(arg_frames[i]);
+        }
+        process_destroy_address_space(pml4_phys);
+        return (task_t *)0;
+    }
+    k_memset(block, 0, USER_ARG_BYTES);
     {
         int argc = 0;
         if (argv) {
@@ -114,30 +156,74 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
                 argc++;
             }
         }
-        uint64_t *header = (uint64_t *)arg_phys;
-        /* The pointer array sits between argc and the strings, so where
-         * the strings start depends on how many there are. */
-        size_t strings_off = sizeof(uint64_t) * (size_t)(argc + 2);
+        int envc = 0;
+        if (envp) {
+            while (envp[envc]) {
+                envc++;
+            }
+        }
+        uint64_t *header = (uint64_t *)block;
+        /* Both pointer arrays sit between argc and the strings, so where
+         * the strings start depends on how many of each there are. Two
+         * NULL terminators, one per vector. */
+        size_t strings_off = sizeof(uint64_t) * (size_t)(1 + argc + 1 + envc + 1);
         size_t at = strings_off;
+        if (at > USER_ARG_BYTES) {
+            /* More pointers than the region holds, before a single string
+             * has been copied. Nothing sane produces this - SPAWN_MAX_ARGS
+             * is 16 - but the arithmetic below would index past the
+             * buffer, so it is checked rather than assumed. */
+            at = USER_ARG_BYTES;
+            argc = 0;
+            envc = 0;
+            strings_off = sizeof(uint64_t) * 3;
+            at = strings_off;
+        }
         int stored = 0;
         for (int i = 0; i < argc; i++) {
             size_t len = k_strlen(argv[i]) + 1;
-            if (at + len > PAGE_SIZE) {
+            if (at + len > USER_ARG_BYTES) {
                 /* Truncated at the last whole argument that fits. Half an
                  * argument names something else, so the vector simply
                  * ends here - and the program sees a shorter argc rather
                  * than a corrupt string. */
                 break;
             }
-            k_memcpy((char *)arg_phys + at, argv[i], len);
+            k_memcpy(block + at, argv[i], len);
             header[1 + (size_t)stored] = USER_ARG_ADDR + at;
             at += len;
             stored++;
         }
         header[0] = (uint64_t)stored;
         header[1 + (size_t)stored] = 0; /* the NULL every argv ends with */
+
+        /* envp starts one slot past argv's NULL - the SysV convention,
+         * which is what lets crt0 compute it from argc alone. Note the
+         * index is written against `stored`, not `argc`: if arguments
+         * were truncated, the environment moves up with them rather than
+         * leaving a hole full of zeros that a runtime would read as an
+         * empty environment. */
+        size_t env_base = 1 + (size_t)stored + 1;
+        int env_stored = 0;
+        for (int i = 0; i < envc; i++) {
+            size_t len = k_strlen(envp[i]) + 1;
+            if (at + len > USER_ARG_BYTES ||
+                (env_base + (size_t)env_stored + 1) * sizeof(uint64_t) > strings_off) {
+                break;
+            }
+            k_memcpy(block + at, envp[i], len);
+            header[env_base + (size_t)env_stored] = USER_ARG_ADDR + at;
+            at += len;
+            env_stored++;
+        }
+        header[env_base + (size_t)env_stored] = 0;
     }
-    vmm_map_page_in(pml4_phys, USER_ARG_ADDR, arg_phys, VMM_FLAG_WRITABLE | VMM_FLAG_USER);
+    for (int i = 0; i < USER_ARG_PAGES; i++) {
+        k_memcpy((void *)arg_frames[i], block + (size_t)i * PAGE_SIZE, PAGE_SIZE);
+        vmm_map_page_in(pml4_phys, USER_ARG_ADDR + (uint64_t)i * PAGE_SIZE, arg_frames[i],
+                         VMM_FLAG_WRITABLE | VMM_FLAG_USER);
+    }
+    kfree(block);
 
     /* This kmalloc runs in the caller's (kernel) context, but the
      * resulting pointer stays valid once the new task starts running
@@ -183,14 +269,81 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
 
 task_t *process_spawnv(const char *name, const uint8_t *image, size_t image_size,
                         const char *const *argv) {
-    return process_spawnv_capped(name, image, image_size, argv,
-                                 caps_for_program(name ? name : ""));
+    return process_spawnve(name, image, image_size, argv, (const char *const *)0);
+}
+
+task_t *process_spawnve(const char *name, const uint8_t *image, size_t image_size,
+                        const char *const *argv, const char *const *envp) {
+    return process_spawnve_capped(name, image, image_size, argv, envp,
+                                   caps_for_program(name ? name : ""));
 }
 
 task_t *process_spawnv_capped(const char *name, const uint8_t *image, size_t image_size,
                               const char *const *argv, uint32_t caps) {
-    task_t *t = spawn_common(name, image, image_size, argv);
+    return process_spawnve_capped(name, image, image_size, argv, (const char *const *)0, caps);
+}
+
+/* M75: `envp == NULL` means "inherit", and the inheriting is done here
+ * rather than in spawn_common because this is the layer that can see the
+ * caller. The block is read *before* the child exists so that the two
+ * cases - a supplied vector and an inherited block - converge on one
+ * code path that lays strings into the child's argument region.
+ *
+ * The inherited form is copied straight from the parent's packed block
+ * into a temporary pointer vector, which costs one small allocation and
+ * keeps spawn_common with exactly one input shape rather than two. */
+task_t *process_spawnve_capped(const char *name, const uint8_t *image, size_t image_size,
+                               const char *const *argv, const char *const *envp, uint32_t caps) {
+    /* M79: through the address space's owner - a thread's own env_block
+     * is empty (it was never given one), and a child spawned from a
+     * thread must inherit the process's environment rather than nothing. */
+    task_t *self = sched_vm_owner(sched_current());
+    const char *inherited[USER_ENV_MAX_VARS + 1];
+    const char *const *effective = envp;
+    uint32_t inherited_len = 0;
+    uint32_t inherited_count = 0;
+
+    if (!envp && self && self->env_block && self->env_count) {
+        uint32_t n = 0;
+        uint32_t off = 0;
+        while (off < self->env_len && n < USER_ENV_MAX_VARS) {
+            inherited[n++] = self->env_block + off;
+            while (off < self->env_len && self->env_block[off]) {
+                off++;
+            }
+            off++; /* past the NUL */
+        }
+        inherited[n] = (const char *)0;
+        effective = inherited;
+    }
+
+    task_t *t = spawn_common(name, image, image_size, argv, effective);
     if (t) {
+        /* Record what the child actually got, so that *its* children can
+         * inherit in turn. Packed from the same vector spawn_common laid
+         * out, which is what keeps the two representations from being two
+         * different environments.
+         *
+         * kmalloc'd rather than a static scratch buffer: two CPUs can be
+         * inside a spawn at once (this kernel is preemptible and SMP -
+         * M67), and a shared buffer would hand one child the other's
+         * environment. */
+        char *packed = (char *)kmalloc(USER_ENV_MAX_BYTES);
+        if (packed) {
+            if (effective) {
+                for (int i = 0; effective[i] && inherited_count < USER_ENV_MAX_VARS; i++) {
+                    uint32_t len = (uint32_t)k_strlen(effective[i]) + 1;
+                    if (inherited_len + len > USER_ENV_MAX_BYTES) {
+                        break;
+                    }
+                    k_memcpy(packed + inherited_len, effective[i], len);
+                    inherited_len += len;
+                    inherited_count++;
+                }
+            }
+            sched_set_env(t, packed, inherited_len, inherited_count);
+            kfree(packed);
+        }
         /* M65: intersected, never assigned. spawn_common already gave the
          * child the caller's set; this can only clear bits. A caller
          * asking for more than it holds silently gets less, which is the
@@ -204,6 +357,36 @@ task_t *process_spawnv_capped(const char *name, const uint8_t *image, size_t ima
          * model, and the way to not have that problem is to not give
          * launchers the choice. */
         t->caps &= caps;
+    }
+    return t;
+}
+
+/* M79: see proc.h. The launcher is the same one a fresh process uses -
+ * enter_user_mode does not care whether the address space it is dropping
+ * into was made a moment ago or has been running for a while, which is
+ * exactly why a thread needs no new mechanism at the ring-3 boundary. */
+task_t *process_spawn_thread(const char *name, uint64_t entry, uint64_t stack_top,
+                              uint64_t arg) {
+    task_t *self = sched_current();
+    if (!self || self->pml4_phys == vmm_kernel_pml4_phys()) {
+        return (task_t *)0; /* a kernel thread has no ring-3 address space to share */
+    }
+    user_launch_args_t *args = (user_launch_args_t *)kmalloc(sizeof(user_launch_args_t));
+    if (!args) {
+        return (task_t *)0;
+    }
+    args->entry = entry;
+    args->user_stack_top = stack_top;
+    /* RDI at the first ring-3 instruction. For a process this points at
+     * the argument region; for a thread it is the single `void *` its
+     * start routine takes, which is the same register and the same
+     * calling convention with a different thing in it. */
+    args->arg_ptr = arg;
+
+    task_t *t = task_spawn_thread(name, self, user_task_launcher, args);
+    if (!t) {
+        kfree(args);
+        return (task_t *)0;
     }
     return t;
 }

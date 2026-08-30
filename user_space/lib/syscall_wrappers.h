@@ -45,6 +45,46 @@ long sys_spawn(const char *path, const char *arg);
  * every caller in this project has exactly one thing to say ("open this
  * file") and rewriting them all to build an array would say less. */
 long sys_spawnv(const char *path, const char *const *argv);
+
+/* M75: the same, with an explicit environment. `envp` is a
+ * NULL-terminated array of "NAME=value" strings; NULL means "give the
+ * child a copy of my own environment as the kernel recorded it".
+ *
+ * sys_spawnv above passes `environ` rather than NULL, which is the
+ * difference that matters in practice: it is what makes a setenv()
+ * before a spawn visible to the child, since the kernel's record is
+ * whatever *this* process was started with and knows nothing about a
+ * variable set since. */
+long sys_spawnve(const char *path, const char *const *argv, const char *const *envp);
+
+/* M75: the working directory - see SYS_chdir/SYS_getcwd. sys_chdir
+ * returns 0 or -1; sys_getcwd returns the length written, or -1 if the
+ * caller's directory would not fit in maxlen. */
+/* M78: anonymous memory that can be given back - see SYS_mmap/SYS_munmap.
+ * sys_mmap returns the mapped address, or -1. Programs should generally
+ * use <sys/mman.h>'s mmap()/munmap(), or just malloc(), which routes
+ * large allocations through these. */
+/* M79: threads. Programs should use <pthread.h>; these are the raw
+ * calls it is built on. sys_thread_create takes a stack the CALLER
+ * allocated (out of the mmap arena) and an entry that must never return
+ * - <pthread.h>'s trampoline is what makes returning mean
+ * sys_thread_exit. */
+long sys_thread_create(void *entry, void *arg, unsigned long stack_top);
+void sys_thread_exit(int value) __attribute__((noreturn));
+long sys_gettid(void);
+
+long sys_mmap(unsigned long len, int prot, int flags);
+long sys_munmap(void *addr, unsigned long len);
+
+long sys_chdir(const char *path);
+long sys_getcwd(char *buf, size_t maxlen);
+
+/* M76: signals. Programs should use <signal.h>'s signal()/kill()/raise()
+ * rather than these - sys_sigaction in particular takes a `restorer`
+ * that only user_space/lib/crt0.asm can supply, and getting it wrong is
+ * a handler that returns into whatever was on the stack. */
+long sys_sigaction(int signo, void *handler, void (*restorer)(void));
+long sys_sigprocmask(int how, unsigned int mask, unsigned int *old_out);
 /* Blocks (cooperatively) until `pid` has terminated; returns its exit
  * code, or -1 if `pid` was never valid. */
 long sys_wait(long pid);
@@ -141,6 +181,10 @@ long sys_display_set_mode(uint32_t width, uint32_t height);
 long sys_open(const char *path, uint32_t flags);
 long sys_lseek(int fd, long offset, int whence);
 long sys_stat(const char *path, os_stat_t *out);
+
+/* M77: the same three fields for an already-open descriptor. -1 for
+ * anything that is not a file on disk. */
+long sys_fstat(int fd, os_stat_t *out);
 long sys_rmdir(const char *path);
 
 /* M59: what time it is. Fills *out (may be NULL) and returns seconds

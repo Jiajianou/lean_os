@@ -24,24 +24,31 @@
  *     spawn - the Unix rule, and the reason every program on this machine
  *     gets globbing without knowing about it
  *   - `#` comments, so a script can explain itself
- *   - builtins: cd, pwd, exit, echo, set, unset
+ *   - builtins: cd, pwd, exit, echo, set/env, export, unset
  *
- * What it deliberately does not do, each because it is a real feature
- * with a real cost and none of them is what a one-person desktop is
- * missing: job control, `&`, subshells, functions, `|` (gui_terminal has
- * one and this does not - see the milestone notes), and an *exported*
- * environment, which this kernel has no concept of at all: SYS_spawn
- * carries an argv and nothing else. Variables here are shell-local, and
- * saying so beats pretending a child can see them.
+ * M75 removed the last line of that list. Variables here used to be
+ * shell-local, because SYS_spawn carried an argv and nothing else - and
+ * the note where they were declared said so rather than pretending. They
+ * are the real environment now: `NAME=value` calls setenv, `$NAME` reads
+ * getenv, and a program this shell spawns afterwards sees it. `cd` moved
+ * the same way, from a string this program kept to the process-wide
+ * working directory the kernel now tracks, so `cd` and then a command
+ * means what a person typing it expects.
+ *
+ * What it still deliberately does not do, each because it is a real
+ * feature with a real cost and none of them is what a one-person desktop
+ * is missing: job control, `&`, subshells, functions, and `|`
+ * (gui_terminal has one and this does not - see the milestone notes).
  */
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "paths.h"
 #include "syscall_wrappers.h"
 
 #define LINE_MAX    512
 #define MAX_WORDS   32
-#define MAX_VARS    24
 #define VAR_NAME_MAX 24
 #define VAR_VAL_MAX  128
 
@@ -83,50 +90,25 @@ static int exit_code;
 
 /* ---- variables --------------------------------------------------------
  *
- * Shell-local by necessity rather than by choice: this kernel's SYS_spawn
- * takes a path and an argv and there is nowhere to put an environment.
- * Making them local and documenting it is the honest version; quietly
- * setting them and having children not see them would be the other kind.
+ * M75: the process environment, not a table this program keeps. Every
+ * assignment is exported, which is a real choice rather than a shortcut:
+ * a shell with two namespaces needs `export` to move a name between
+ * them, and the reason POSIX has that distinction is subshells and
+ * functions - neither of which exists here. One namespace, with `export`
+ * accepted so a script written elsewhere still runs, is the honest shape
+ * for a shell this size.
  */
-static struct {
-    char name[VAR_NAME_MAX];
-    char value[VAR_VAL_MAX];
-    int used;
-} vars[MAX_VARS];
-
 static const char *var_get(const char *name) {
-    for (int i = 0; i < MAX_VARS; i++) {
-        if (vars[i].used && strcmp(vars[i].name, name) == 0) {
-            return vars[i].value;
-        }
-    }
-    return "";
+    const char *v = getenv(name);
+    return v ? v : "";
 }
 
 static void var_set(const char *name, const char *value) {
-    int free_slot = -1;
-    for (int i = 0; i < MAX_VARS; i++) {
-        if (vars[i].used && strcmp(vars[i].name, name) == 0) {
-            cpy(vars[i].value, value, VAR_VAL_MAX);
-            return;
-        }
-        if (!vars[i].used && free_slot < 0) {
-            free_slot = i;
-        }
-    }
-    if (free_slot >= 0) {
-        cpy(vars[free_slot].name, name, VAR_NAME_MAX);
-        cpy(vars[free_slot].value, value, VAR_VAL_MAX);
-        vars[free_slot].used = 1;
-    }
+    setenv(name, value, 1);
 }
 
 static void var_unset(const char *name) {
-    for (int i = 0; i < MAX_VARS; i++) {
-        if (vars[i].used && strcmp(vars[i].name, name) == 0) {
-            vars[i].used = 0;
-        }
-    }
+    unsetenv(name);
 }
 
 /* ---- output helpers --------------------------------------------------- */
@@ -146,37 +128,25 @@ static void out(const char *s) {
     sys_write(out_fd, s, strlen(s));
 }
 
-/* ---- the current directory -------------------------------------------- */
-
-static char cwd[PATH_MAX_LEN] = PATH_HOME;
-
-/* Joins `name` onto the working directory unless it is already absolute.
- * No "." or ".." - leanfs deliberately does not store them (see
- * next_component in kernel/fs/leanfs.c), so resolving them here would be
- * this shell inventing a namespace the filesystem does not have. ".."
- * is handled textually because a shell can honestly do that much. */
-static void resolve(const char *name, char *out_path) {
-    if (name[0] == '/') {
-        cpy(out_path, name, PATH_MAX_LEN);
-        return;
+/* ---- the current directory --------------------------------------------
+ *
+ * M75: there is no `cwd` variable here any more. The kernel tracks one
+ * per process (SYS_chdir/SYS_getcwd) and resolves every relative path
+ * against it, so a shell keeping its own copy would be keeping a second
+ * answer to a question that now has one - and the two would disagree the
+ * first time a program this shell spawned called chdir itself.
+ *
+ * What that deletes is the whole `resolve()` helper this file carried,
+ * including its hand-rolled ".." handling and the comment apologising
+ * for inventing a namespace leanfs does not have. That apology was
+ * right, and the fix was to move the resolution to where the caller is
+ * known rather than to do it more carefully here.
+ */
+static const char *current_dir(char *buf) {
+    if (getcwd(buf, PATH_MAX_LEN)) {
+        return buf;
     }
-    if (strcmp(name, "..") == 0) {
-        cpy(out_path, cwd, PATH_MAX_LEN);
-        int n = (int)strlen(out_path);
-        while (n > 1 && out_path[n - 1] != '/') {
-            n--;
-        }
-        if (n > 1) {
-            n--; /* drop the trailing slash, unless we are at the root */
-        }
-        out_path[n] = '\0';
-        return;
-    }
-    cpy(out_path, cwd, PATH_MAX_LEN);
-    if (strcmp(out_path, "/") != 0) {
-        cat(out_path, "/", PATH_MAX_LEN);
-    }
-    cat(out_path, name, PATH_MAX_LEN);
+    return "/";
 }
 
 /* ---- globbing ---------------------------------------------------------
@@ -361,8 +331,7 @@ static int tokenise(const char *line, char words[MAX_WORDS][VAR_VAL_MAX],
         if (has_glob(word)) {
             static char listing[4096];
             char dir[PATH_MAX_LEN];
-            cpy(dir, cwd, PATH_MAX_LEN);
-            long n = sys_listdir(dir, listing, sizeof(listing) - 1);
+            long n = sys_listdir(current_dir(dir), listing, sizeof(listing) - 1);
             int matched = 0;
             if (n > 0) {
                 listing[n] = '\0';
@@ -416,20 +385,26 @@ static int run_builtin(int argc, char words[MAX_WORDS][VAR_VAL_MAX], int *handle
         return 0;
     }
     if (strcmp(cmd, "cd") == 0) {
-        char target[PATH_MAX_LEN];
-        resolve(argc > 1 ? words[1] : PATH_HOME, target);
-        os_stat_t st;
-        if (sys_stat(target, &st) != 0 || !st.is_dir) {
+        /* M75: the kernel's directory, and the kernel's resolution. A
+         * bare `cd` goes to $HOME rather than to a compiled-in constant -
+         * which is the whole difference an environment makes, and the
+         * first place in this project where the answer to "where is
+         * home" came from somewhere a person could change. */
+        const char *where = argc > 1 ? words[1] : var_get("HOME");
+        if (!where[0]) {
+            where = PATH_HOME;
+        }
+        if (chdir(where) != 0) {
             out("cd: not a directory: ");
-            out(target);
+            out(where);
             out("\n");
             return 1;
         }
-        cpy(cwd, target, PATH_MAX_LEN);
         return 0;
     }
     if (strcmp(cmd, "pwd") == 0) {
-        out(cwd);
+        char buf[PATH_MAX_LEN];
+        out(current_dir(buf));
         out("\n");
         return 0;
     }
@@ -446,13 +421,34 @@ static int run_builtin(int argc, char words[MAX_WORDS][VAR_VAL_MAX], int *handle
         out("\n");
         return 0;
     }
-    if (strcmp(cmd, "set") == 0) {
-        for (int i = 0; i < MAX_VARS; i++) {
-            if (vars[i].used) {
-                out(vars[i].name);
-                out("=");
-                out(vars[i].value);
-                out("\n");
+    if (strcmp(cmd, "set") == 0 || strcmp(cmd, "env") == 0) {
+        /* M75: the environment itself, which is what `set` was always
+         * printing a private imitation of. `env` accepted as the same
+         * thing, so `env` at this prompt does what it does everywhere
+         * even though /bin/env is a real program a script can pipe. */
+        for (int i = 0; environ && environ[i]; i++) {
+            out(environ[i]);
+            out("\n");
+        }
+        return 0;
+    }
+    if (strcmp(cmd, "export") == 0) {
+        /* Every assignment here is already exported (see the note above
+         * var_get), so `export NAME` has nothing left to do - but a
+         * script written for a real shell says it, and refusing would
+         * fail that script for a distinction this shell does not draw.
+         * `export NAME=value` still has to *assign*. */
+        for (int i = 1; i < argc; i++) {
+            const char *eq = strchr(words[i], '=');
+            if (eq && eq != words[i]) {
+                char name[VAR_NAME_MAX];
+                int n = (int)(eq - words[i]);
+                if (n > VAR_NAME_MAX - 1) {
+                    n = VAR_NAME_MAX - 1;
+                }
+                memcpy(name, words[i], (size_t)n);
+                name[n] = '\0';
+                var_set(name, eq + 1);
             }
         }
         return 0;
@@ -543,8 +539,9 @@ static int run_command(const char *cmd_text) {
             out("sh: cannot save stdout\n");
             return 1;
         }
-        char rpath[PATH_MAX_LEN];
-        resolve(redir, rpath);
+        /* M75: handed straight to the kernel, relative or not - it
+         * resolves against this process's directory now. */
+        const char *rpath = redir;
         uint32_t flags = OPEN_WRITE | OPEN_CREATE | (append ? 0u : OPEN_TRUNCATE);
         rfd = sys_open(rpath, flags);
         if (rfd < 0) {
@@ -583,11 +580,20 @@ static int run_command(const char *cmd_text) {
 
     /* Not a builtin: find it. A name with no '/' is looked up in /bin,
      * which is this machine's whole search path. */
+    /* A name with no '/' is looked up in $PATH, which on this machine is
+     * one directory - but reading it from the environment rather than
+     * from PATH_BIN_DIR is the point: M75 is what makes it a thing that
+     * exists to be read. A name WITH a '/' is handed over as written,
+     * relative or absolute, because the kernel resolves it. */
     char path[PATH_MAX_LEN];
     if (strchr(words[0], '/')) {
-        resolve(words[0], path);
+        cpy(path, words[0], PATH_MAX_LEN);
     } else {
-        cpy(path, PATH_BIN_DIR, PATH_MAX_LEN);
+        const char *dir = var_get("PATH");
+        cpy(path, dir[0] ? dir : PATH_BIN, PATH_MAX_LEN);
+        if (path[0] && path[strlen(path) - 1] != '/') {
+            cat(path, "/", PATH_MAX_LEN);
+        }
         cat(path, words[0], PATH_MAX_LEN);
     }
 
@@ -749,8 +755,9 @@ int main(int argc, char **argv) {
     }
 
     char line[LINE_MAX];
+    char dir[PATH_MAX_LEN];
     while (!should_exit) {
-        out(cwd);
+        out(current_dir(dir));
         out(" $ ");
         read_line_from_stdin(line);
         run_line(line);

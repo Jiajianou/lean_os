@@ -4,7 +4,7 @@ A desktop operating system for x86-64, written from scratch: bootloader,
 kernel, drivers, filesystem, window system and applications. No GRUB, no
 libc, no third-party code anywhere in the OS itself.
 
-![63 milestones](https://img.shields.io/badge/milestones-63-informational)
+![79 milestones](https://img.shields.io/badge/milestones-79-informational)
 
 ```
 UEFI firmware
@@ -27,8 +27,20 @@ UEFI firmware
   task manager, a settings panel, a paint toy and a clock.
 - **A system underneath.** Pre-emptive multitasking across multiple
   cores, a per-process address space, a custom filesystem with
-  directories and files up to 8 MiB, pipes, shared memory, signals,
-  an orderly shutdown, and a clock that knows the date.
+  directories and files up to 8 MiB, pipes, shared memory, an orderly
+  shutdown, and a clock that knows the date.
+- **Unix-shaped enough to build against.** An environment inherited
+  across a spawn and a real working directory, so a relative path means
+  something; signals a program can *catch*, delivered through a frame on
+  its own stack; `mmap`/`munmap` that hands pages back and reuses the
+  holes; POSIX threads sharing one address space; and `<dirent.h>`,
+  `<sys/stat.h>`, `<unistd.h>`, `<signal.h>`, `<pthread.h>`,
+  `<sys/mman.h>` and `<setjmp.h>` over the top of it. See M75-M79 in
+  [milestones.md](milestones.md).
+- **A desktop that remembers.** Whatever was open when the machine
+  stopped is open again where it was when it starts; an editor with
+  unsaved changes can veto a shutdown; recently-opened files are in the
+  launcher and the file manager.
 - **A network.** An RTL8139 driver, Ethernet, ARP, IPv4, ICMP, UDP and
   **TCP** - the eleven-state machine, retransmission with a measured
   timeout and Reno congestion control - plus a DHCP client, and sockets
@@ -63,8 +75,8 @@ EFI app), `mtools` and `qemu-system-x86_64`. See
 Two harnesses, and neither subsumes the other. Run both.
 
 ```sh
-./tools/qemu-serial-test.sh  # boots headless, grades the serial log: 50 boot self-tests
-./tools/qemu-input-test.sh   # drives real clicks and keys, grades real pixels: 44 tests
+./tools/qemu-serial-test.sh  # boots headless, grades the serial log: 70 boot markers
+./tools/qemu-input-test.sh   # drives real clicks and keys, grades real pixels: 45 tests
 ```
 
 The first proves every subsystem still works from the inside. The second

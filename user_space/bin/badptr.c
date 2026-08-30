@@ -132,18 +132,29 @@ int main(int argc, char **argv) {
     unsigned long long here = (unsigned long long)(void *)&main;
     unsigned long long region_base = here & ~((1ULL << 39) - 1ULL);
 
-    /* The argument page is exactly one page and the page above it is
-     * never mapped (kernel/proc/proc.c maps one frame at USER_ARG_ADDR
-     * and the stack grows *below* it), which is what makes a read that
-     * starts on its last byte cross into nothing.
+    /* The argument region ends at a page above which nothing is mapped
+     * (kernel/proc/proc.c maps USER_ARG_PAGES frames at USER_ARG_ADDR and
+     * the stack grows *below* it), which is what makes a read that starts
+     * on its last byte cross into nothing.
      *
      * M60: taken from `argv` rather than from a string in it. The vector
-     * itself is at a fixed offset into that page, so this is true even
-     * for a program launched with no arguments at all - where the only
-     * string would have been a .rodata "" that is nowhere near the page
-     * this test is about. */
+     * itself is at a fixed offset into the region's first page, so this
+     * is true even for a program launched with no arguments at all -
+     * where the only string would have been a .rodata "" that is nowhere
+     * near the page this test is about.
+     *
+     * M75: the region became two pages when it grew an environment, and
+     * this number has to move with it or the straddle case straddles into
+     * a page that is now perfectly valid - which is precisely how it
+     * failed, loudly, on the first boot after that change. Kept as a
+     * local constant rather than pulled from a kernel header because
+     * this program deliberately derives everything from where it actually
+     * finds itself; what it cannot derive, it states here next to the
+     * name of the constant it has to agree with. */
+    const unsigned long long ARG_REGION_PAGES = 2; /* kernel/proc/proc.h's USER_ARG_PAGES */
     unsigned long long arg_page =
         (unsigned long long)(void *)argv & ~(unsigned long long)(PAGE_SIZE - 1);
+    unsigned long long arg_region_last_page = arg_page + (ARG_REGION_PAGES - 1) * PAGE_SIZE;
 
     unsigned long long bad_ptr[BAD_COUNT];
     unsigned long long bad_len[BAD_COUNT];
@@ -151,7 +162,8 @@ int main(int argc, char **argv) {
     bad_ptr[BAD_KERNEL]   = 0x100000ULL;                    bad_len[BAD_KERNEL]   = 8;
     bad_ptr[BAD_BELOW]    = region_base - 1ULL;             bad_len[BAD_BELOW]    = 8;
     bad_ptr[BAD_UNMAPPED] = region_base + (1ULL << 38);     bad_len[BAD_UNMAPPED] = 8;
-    bad_ptr[BAD_STRADDLE] = arg_page + PAGE_SIZE - 1ULL;    bad_len[BAD_STRADDLE] = 2;
+    bad_ptr[BAD_STRADDLE] = arg_region_last_page + PAGE_SIZE - 1ULL;
+                                                            bad_len[BAD_STRADDLE] = 2;
     bad_ptr[BAD_OVERFLOW] = arg_page;                       bad_len[BAD_OVERFLOW] = ~0ULL;
 
     int failures = 0;

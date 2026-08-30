@@ -5593,29 +5593,29 @@ ordinary program does not.
 
 
 
-## M74 — The session that remembers [~] attempted, preserved in a stash
+## M74 — The session that remembers ✅ (second attempt)
 
 The last one, and the only one on this list that is purely about how the
 machine feels. It is last because it depends on M71 being trustworthy —
 a session file is just another file that must survive a bad shutdown —
 and because it is the payoff rather than the foundation.
 
-- [ ] **Windows come back.** Position, size, workspace and z-order,
+- [x] **Windows come back.** Position, size, workspace and z-order,
       restored on next boot for the apps that were open. M47 built
       persistent settings and M53 built somewhere to put them; this is
       the same mechanism pointed at the compositor's own state
-- [ ] **Unsaved work blocks a shutdown.** M47's shutdown SIGTERMs
+- [x] **Unsaved work blocks a shutdown.** M47's shutdown SIGTERMs
       everything and gives it a second. An editor with unsaved changes
       should be able to say "wait, ask the person" — which means the
       shutdown path needs one veto with a timeout, not a longer grace
       period
-- [ ] **Recently opened**, in the launcher and the file manager. The
+- [x] **Recently opened**, in the launcher and the file manager. The
       single highest-value-per-line feature on any desktop, and this one
       has never had it
-- [ ] **The desktop survives a settings mistake.** M58's resolution
+- [x] **The desktop survives a settings mistake.** M58's resolution
       countdown is exactly the right pattern; apply it to anything else
       that can make the machine unusable from inside the Settings pane
-- [ ] **A first-boot state that is not empty.** A fresh disk currently
+- [x] **A first-boot state that is not empty.** A fresh disk currently
       boots to a desktop with seeded icons and nothing else. A README on
       the desktop, the sample files the file manager is worth opening —
       the difference between a demo and a machine somebody just got
@@ -5628,7 +5628,7 @@ virtual-desktop test used, and for the same reason: a compositor that
 
 ---
 
-### Attempt notes — built, self-tested, and not shipped
+### First attempt — built, self-tested, and not shipped
 
 **Status: window save/restore is implemented and its boot self-test
 passes. It is not in the tree, because it breaks seven interactive tests
@@ -5685,6 +5685,580 @@ unsaved work vetoing a shutdown, "recently opened", and a non-empty
 first-boot desktop. All three are independent of the restore mechanism
 and none was started.
 
+### Second attempt — and the milestone that made it work
+
+**The gate stopped being an argument, and that was the whole fix.**
+
+The first attempt's own notes named two unexamined suspects, and one of
+them was "the change of `main(void)` to `main(int argc, char **argv)` in
+a program that had never taken arguments". It had to take one because
+the session had to be switched on for the *real* compositor and off for
+the two dozen compositors the boot self-tests start — a self-test
+compositor that saved a session would leave a file the real one then
+restored, relaunching test fixtures onto a person's desktop.
+
+M75 removed the need. An environment is inherited across a spawn now, so
+the gate is `getenv("LEANOS_SESSION")`, PID 1 sets it once, and the
+compositor's signature is untouched. The kernel's own `[m74]` self-test
+passes an explicit `envp` to `process_spawnve` — the first caller in this
+project to do that deliberately, and a fair test of whether M75 was worth
+building.
+
+That is the second time in this arc that a milestone landed because a
+later one had made it cheaper, and it is worth being explicit that this
+was not the plan: M75 was written for `getenv`, and paid for M74 by
+accident.
+
+**What is actually restored, and what is not.** Program, position, size
+and workspace, per window, up to eight. Not z-order and not focus, and
+that is a decision rather than a shortfall: both are properties of a
+*stack* rather than of any window, so restoring them means replaying an
+order against clients that connect whenever they happen to start — and
+getting it half right (a window raised over one that should be above it)
+reads as a bug in the window manager rather than as an imperfect restore.
+
+**The program name comes from `SYS_taskinfo`, not from the protocol.** A
+window knows its *title*, which is what a person reads and not what a
+launcher can spawn. The task table already knows what each process was
+launched as and the compositor already holds `CAP_PROCESS_LIST`, so
+nothing new had to be invented and nothing had to be trusted to the
+client — the same reasoning M65 used for putting the capability manifest
+in the kernel rather than in whichever program did the launching.
+
+**Written when it changes, checked every pass.** A cheap signature over
+every live window's pid and geometry is compared twice a second; the file
+is written only when it differs. Saving every frame would be a disk write
+per frame, which on this machine's PIO driver is a desktop that stutters
+because it is remembering itself. Saving at each of the dozen places
+geometry changes would be a call one of them would eventually forget.
+
+**The veto is one question with a deadline, asked before the stopping
+starts.** M47's shutdown SIGTERMs everything and gives it a second, which
+is the right shape for a machine that *is* stopping and the wrong shape
+for one that is being asked to. An editor cannot save in that second, and
+a longer grace period would lose the same work later. So
+`WM_EVENT_QUERY_SHUTDOWN` goes out first, to the windows that opted into
+being asked things (`confirm_close`), and 600 ms of silence is consent. A
+`WM_ACTION_VETO_SHUTDOWN` abandons the shutdown outright rather than
+delaying it, names the program that objected, and focuses its window —
+because "something is unsaved" leaves a person opening windows to find
+out which, and the window in front of them is the actual answer.
+
+**"Recently opened" is a library, not a service**, and that is what makes
+it worth its thirty lines: what makes recents useful is that *every* way
+of opening a file records one, not that any one way records it well. The
+editor records on load and on save, the file manager records on open, and
+the launcher and the file manager both read the same
+`/etc/recent.conf` — one path per line, newest first, plain text like
+every other state file here.
+
+*Where they surface cost a decision each.* In the launcher they are the
+first entries of the existing result list, shown by basename, so
+filtering, arrow keys, scrolling and clicking all carry on working
+unchanged and only *launching* one is different. In the file manager they
+are a button in the header rather than a row in the list, because a
+synthetic row would shift every real one down by an index — which three
+interactive tests measure and, more to the point, a person's hand
+measures.
+
+**The settings countdown turned out to be pointed at the wrong thing.**
+The milestone asks for M58's revert pattern "for anything else that can
+make the machine unusable from inside the Settings pane", and the honest
+answer is that *nothing else in the pane can*: the six background
+swatches are all dark and the six accents are all bright, and no pair of
+them is unreadable. What can make this machine unusable is
+`/etc/settings.conf`, which is plain text on purpose (M47) and which a
+person can therefore set to `bg=FFFFFF` — white on white, on a desktop
+with no other way in.
+
+A countdown cannot help there, because the file is read at boot and
+reverting it would need somebody watching a screen they cannot read. So
+the protection is a contrast check at both doors — the file at startup
+and the settings pipe at runtime — measured as BT.601 luma against the
+white every label here is drawn in, with a threshold generous enough
+(60/255, where the darkest offered swatch scores 22) that only a
+genuinely unreadable choice trips it. A rejected theme falls back to the
+compiled-in default rather than to the previous one, because "the colours
+you can always read" is a fixed thing and the previous value on a first
+boot is itself whatever the file said.
+
+**How it is graded.** Two ways, and neither subsumes the other. The
+`[m74]` boot self-test writes a session by hand naming a program and a
+position the cascade would never choose, starts a compositor with the
+environment `init` gives it, and requires the window to appear *at those
+coordinates* — on the pixel, so a compositor that read the file and
+placed the window anyway cannot pass — then deletes the file, changes the
+layout with a second window, and requires it to be written again naming
+both programs. The interactive suite's
+`session_restores_windows_across_a_reboot` does the thing a person does:
+opens two windows, drags one somewhere the cascade cannot reach, types
+`reboot`, and asserts both come back with the dragged one's titlebar
+pixel where it was left.
+
+*One existing interactive test changed meaning and was rewritten rather
+than worked around.* `behaviour_settings_persist` used to restart the
+machine and reopen Settings to read its switches back; Settings now comes
+back by itself, so reopening it would put a second window on top of the
+first. It reads the restored one, which is a better test than it was.
+
+
+
+## The next arc: Unix-shaped enough to run somebody else's software
+
+Every milestone so far has been in service of a desktop that feels
+finished. This arc changes what "finished" means: the target is no
+longer "this desktop does everything it needs to," it is "a program
+written by someone who has never heard of lean_os can be compiled and
+run here." M63 proved that once, for one 1998 benchmark, by treating a
+port's own link errors as the specification rather than guessing a
+surface in advance. Everything below is the same method, aimed
+deliberately at a bigger target: **Python**, unmodified, actually
+running a script someone else wrote — and named honestly as a waypoint
+toward the harder thing behind it, not the destination.
+
+That harder thing is a real browser, because that is the actual ask
+behind "Unix-compatible" for most people, and the "Deliberately not
+next" note below still calls it a decade of work. Nothing changes about
+that estimate. What changes is that it now has a name and a direction
+instead of being purely hypothetical: every milestone here is chosen
+because it is also load-bearing for that eventual goal, not only for
+Python. A process model with real signals, a thread that shares memory
+with another thread, a dynamic loader — Chrome needs every one of these
+regardless of whether Python ever existed. Python is simply the program
+whose link errors are cheap enough to learn from first.
+
+What Python's absence actually exposes, concretely, in code already in
+this tree: `SYS_spawn` (`system_api/include/syscall.h`) carries an argv
+and nothing else, so there is no `getenv`; every path lean_os resolves
+is absolute, so there is no working directory (`kernel/fs/leanfs.h`
+says so directly); `docs/third-party-programs.md` lists "scanf, struct
+tm, localtime, threads, signals, sockets: no" as the honest limits of
+M63's libc; the only memory primitive is M19's growth-only `SYS_sbrk`;
+and nothing on this machine has ever loaded code it did not statically
+link. Each of the next five milestones closes exactly one of those
+gaps, in the order a real interpreter would actually hit them.
+
+### M75 — Environment, and a place to stand ✅
+
+- [x] `SYS_spawn` carries an `envp` alongside M60's `argv`, inherited by
+      a child by default and overridable — the "environment inherited
+      across spawn" that M72's own notes named as missing and
+      deliberately left out of that milestone
+- [x] `getenv`/`setenv`/`putenv`/`environ` in `user_space/libc`
+- [x] A working directory: `SYS_chdir`/`SYS_getcwd`, and the kernel's
+      path walker accepts a path relative to the caller's cwd instead of
+      requiring an absolute one — `leanfs.h`'s own comment ("there is no
+      working directory") is the bug report
+- [x] `/bin/sh`'s `cd` and `$VAR` (M72) move from shell-local bookkeeping
+      to the real exported environment and a real process-wide cwd, so
+      `cd`-ing in the shell means something to a program it spawns
+      afterward, not just to the next line typed at the prompt
+- [x] Deliberately not a full `PATH`-search exec or shell globbing
+      changes — M72 already owns those, and this milestone is about the
+      kernel/libc primitives underneath, not the shell surface
+
+**How we'll know.** Two children spawned with different `envp`/cwd do a
+`getenv`/`getcwd`/`open` round trip using only *relative* names and
+land on two different real files — a relative path resolving correctly
+is the proof; an unchanged string coming back proves nothing.
+
+#### Progress notes
+
+*The working directory went in at the syscall layer, not in leanfs, and
+that is the whole design.* `leanfs.h` says plainly that every call takes
+an absolute path and that "." and ".." are refused, and both statements
+are still true — they are true statements about a *filesystem*, and a
+working directory is a property of a *caller*. So `copy_path_from_user`
+is where every path-taking syscall now goes: absolute paths are
+normalized, relative ones are joined onto the calling task's `cwd`, and
+"." and ".." are resolved textually before leanfs ever sees them. Doing
+it once at that door rather than in fourteen handlers is what makes
+"relative names work" a property of the syscall layer instead of of
+whichever handlers remembered.
+
+*Textually, and that is the honest description.* With no symbolic links
+on this machine, `/a/b/..` and `/a` name the same directory by
+construction, so there is nothing a lookup could tell us that the text
+does not already say. The day this filesystem grows links is the day that
+stops being true, and the comment above `path_normalize` is where it
+stops.
+
+*`envp` sits immediately after `argv`'s NULL, in the same block.* Not an
+invention: `envp = argv + argc + 1` is where every C runtime written
+since V7 Unix looks for it, so crt0 finds it with one `lea` and needs no
+second address. The argument region grew from one page to two to hold it,
+which turned out to be the milestone's one real regression — M52's
+garbage-argument matrix has a case that reads a byte straddling off the
+END of that region into nothing, and with the region a page longer it was
+straddling into a page that is now perfectly valid. It failed loudly on
+the first boot, which is the self-test doing exactly its job.
+
+*The kernel keeps a copy of each process's environment, and that is not
+redundant.* `envp == NULL` means inherit, and the obvious implementation
+— read the parent's own argument page — is wrong in a way that would not
+show up for a long time: a process may write over that page, and an
+environment a program can corrupt *for its children* is a footgun with no
+upside. So `task_t` carries a packed block, and inheritance is a copy of
+it.
+
+*`sys_spawnv` passes `environ` rather than NULL, and the difference is
+the one that matters.* The kernel's NULL case means "the environment this
+process was started with", which is right for a raw syscall and wrong for
+a program that has just called `setenv`. The wrapper every program
+actually uses passes the live one, so a `setenv` before a spawn is seen
+by the child — which is what a person means by an environment.
+
+*The shell lost a hundred lines and gained the thing it was apologising
+for.* `sh.c`'s own header said variables were shell-local "because
+SYS_spawn carries an argv and nothing else", and its `resolve()` helper
+carried a hand-rolled ".." with a comment apologising for inventing a
+namespace leanfs does not have. Both are gone: assignments are `setenv`,
+`$VAR` is `getenv`, `cd` is `SYS_chdir`, and paths are handed to the
+kernel as typed. `export` is accepted and does nothing but assign,
+because this shell has one namespace — the reason POSIX has two is
+subshells and functions, and it has neither.
+
+*PID 1 is where an environment starts, because the kernel deliberately
+does not have one.* A kernel that knew what `HOME` meant would be a
+kernel with an opinion about a user space it cannot see. So `init` sets
+`HOME`, `PATH`, `TMPDIR` and `SHELL` and `chdir`s to `/home`, and
+everything on the desktop descends from that.
+
+### M76 — A signal a program can catch ✅
+
+- [x] `SYS_signal`/`SYS_sigaction`: install a user-mode handler for
+      `SIGINT`/`SIGCHLD`/`SIGTERM` and friends, invoked through a kernel
+      trampoline the way M63's FXSAVE work already established a
+      per-task saved context can be — this is the same shape of problem
+      one level up
+- [ ] `kill()`/`raise()` as real syscalls, not just the kernel-internal
+      delivery M14 and M47's shutdown path already use
+- [ ] Ctrl+C at the terminal delivers `SIGINT` to the foreground process
+      instead of only ever being a keystroke `gui_terminal` reads as
+      ordinary input
+- [ ] `SIGCHLD`, so a parent can be told a child exited instead of
+      polling `SYS_wait` — M14's syscall comment already names "more
+      complete wait semantics" as deferred, and this is that deferral
+      coming due
+- [ ] Deliberately not a full realtime signal set or `sigprocmask`'s
+      mask semantics beyond block/unblock — the ask is "a running program
+      can be told something happened without being killed," not
+      POSIX.1's entire signal model
+
+**How we'll know.** A self-test program installs a `SIGINT` handler; a
+driven Ctrl+C is asserted to run the handler and leave the process
+alive — still listed in `SYS_taskinfo` afterward — rather than
+disappearing the way every process on this machine does today.
+
+### M77 — POSIX names for what is already here ✅
+
+- [x] `<dirent.h>`: `opendir`/`readdir`/`closedir` over `SYS_listdir`'s
+      newline-separated names (M53), which already tags a directory
+      with a trailing `/` for a human reading a terminal — not a struct
+      a program can walk
+- [x] `<sys/stat.h>`: a real `struct stat` and `stat`/`fstat`/`lstat`
+      over `SYS_stat` (M59), which today reports the three fields the
+      file manager's columns needed and nothing a general-purpose
+      program goes looking for
+- [x] `access()`, `rmdir()` — rounding out M53's `SYS_mkdir`
+- [x] Deliberately not permission bits that mean anything. M65's
+      capability set is what actually gates a process here, not a unix
+      uid/mode, and inventing an `st_mode` nobody enforces would be
+      exactly the kind of invented fiction M65 already refused for users
+      and uids
+
+**How we'll know.** A program written against only `<dirent.h>`,
+`<sys/stat.h>` and `<unistd.h>` — none of this project's own headers —
+walks a directory tree it knows nothing about ahead of time and prints
+what it finds, the way `find` or `du` would.
+
+#### Progress notes
+
+*`/bin/treewalk` is the milestone, and its include list is the point.*
+There is no `paths.h` and no `syscall_wrappers.h` in it; every line of it
+would compile unchanged on a Linux box. It walks a tree it was not told
+the shape of, prints type, size and path per entry, and totals at the
+end — `du`, which is the shortest real program that needs both halves of
+this milestone at once.
+
+*`st_mode` carries file-type bits and zero permission bits, on purpose.*
+`S_ISDIR` and `S_ISREG` answer correctly because leanfs genuinely
+distinguishes the two. The permission bits are 0 and a program that tests
+them finds nothing set rather than a plausible `0644` — there are no
+users on this machine (M65 argued that at length and refused to invent
+one) and nothing here enforces a mode. `st_uid`, `st_gid` and `st_dev`
+are 0 for the same reason; `st_nlink` is 1 because leanfs has no hard
+links, which makes it a fact rather than a default.
+
+*`lstat` is an alias for `stat` and that is the truthful
+implementation*, not a stub: there are no symbolic links on this
+filesystem, so there is nothing for it to decline to follow.
+
+*`SYS_fstat` is the one genuinely new syscall*, and it exists because it
+answers the one question a path cannot: *what is this open file*, asked
+of a descriptor whose name may since have been renamed out from under
+it — which is exactly what the self-test does. A pipe or a socket is
+refused rather than described, because a size and an mtime for a pipe
+would be two lies where `-1` is one honest answer.
+
+*`opendir` reads the whole listing and `readdir` walks it*, which is a
+design choice rather than laziness: `SYS_listdir` is whole-shot with no
+iterator and no handle, and a directory here holds at most 96 entries. A
+streaming `readdir` would be a second kernel interface built for a size
+this filesystem cannot reach.
+
+*`d_type` is real here, not always `DT_UNKNOWN`.* `SYS_listdir`'s
+trailing `/` is exactly that information, so the cheap field a tree
+walker relies on to avoid a `stat` per entry actually works — and
+`treewalk` asserts that `d_type` and `S_ISDIR` agree on every entry,
+because they come from two different kernel interfaces and a
+disagreement between them is worth saying out loud.
+
+*`access()` answers `F_OK` from something real and reports `R/W/X` as
+granted for anything that exists.* That is not a stub either: on a system
+where what a process may do is decided by its capability set and never by
+a file mode, "may I write this" has no answer a `stat` could give. A
+program that wants to know should try and read the error.
+
+### M78 — Memory that can be given back ✅
+
+- [x] `SYS_mmap(len, prot, flags)` for anonymous mappings, `SYS_munmap`
+      — a second memory primitive next to M19's `SYS_sbrk`, inside the
+      same fixed per-process layout M63's "know the budget before
+      starting" already assumes
+- [x] Freed pages are actually reusable — the one thing eleven
+      milestones of sbrk-only heap structurally cannot do, since a bump
+      allocator has no concept of a hole
+- [x] `user_space/lib/malloc.c` routes large allocations through `mmap`
+      instead of always extending the sbrk break, the same size-based
+      split every real allocator makes
+- [x] Deliberately not file-backed or `MAP_SHARED` mappings — anonymous
+      and private, per process, until something concrete asks for the
+      other kind
+
+**How we'll know.** A program maps and touches 64 pages, frees half,
+and a second mapping of the same size is asserted to land in the freed
+range rather than growing the process further — proof the address-space
+accounting tracks holes, not just a high-water mark.
+
+#### Progress notes
+
+*The whole milestone is one sorted array and one forward scan.* Each
+process's live mappings are kept in `task_t` ordered by base address with
+free slots at the end, and `mmap_find_gap` walks them returning the first
+address with room *before* the next one. That is the entire difference
+between a hole and a high-water mark, and it is why the self-test grades
+the *address* a mapping lands at rather than whether the call succeeded —
+a high-water-mark allocator passes every "did mmap work" test ever
+written and fails the first line of this one.
+
+*Frames are allocated at the call, not on a fault, and that is a real
+limitation with a real reason.* This kernel has no page-fault handler
+that could fill a page in later — a ring-3 fault kills the task (M52).
+Lazy allocation would be a genuinely better `mmap` and it is a different
+milestone: it needs the fault handler to be able to tell "inside a
+mapping that has not been backed yet" from "this program dereferenced
+null", which is exactly this table plus a decision this project has not
+had to make.
+
+*`PROT_WRITE` is honoured and `PROT_EXEC` is not, and both are said out
+loud.* A mapping without `PROT_WRITE` is mapped read-only, which is a
+difference a program will feel. There is no NX bit set up here, so
+`PROT_EXEC` is neither granted nor withheld — refusing it would be a
+refusal with nothing behind it and reporting it as enforced would be a
+fiction. `PROT_NONE` is refused outright rather than granted-and-ignored,
+because a guard page that guards nothing is worse than an error.
+
+*`MAP_SHARED` is refused by name.* Handing back private memory instead
+would be the kind of lie this project keeps declining to tell: two
+processes would each write to their own copy and neither would find out.
+`kernel/ipc/shm.h` is what two processes share memory through here, and
+it has lifetime rules a `MAP_SHARED` would have to duplicate badly.
+
+*Anonymous-and-private is also what makes the teardown correct.* The
+arena is in `process_destroy_address_space`'s owned list, which is only
+sound because every frame in it belongs to this process alone. The
+"deliberately not MAP_SHARED" line is therefore not a shortfall being
+apologised for — a shared mapping would make that list wrong.
+
+*`vmm_unmap_page_take` is the one new VMM primitive*: unmap and hand back
+the frame in one acquisition of the lock. Two calls — "what is mapped
+here" then "unmap it" — would be the same thing with a window in the
+middle in which another CPU could replace the mapping, after which the
+caller would free a frame somebody else is using.
+
+*The frame count is the assertion the program cannot make.* A process can
+see its own address space and cannot see the machine's physical memory,
+so "the pages actually came back" is checkable only from the kernel — and
+it is the claim this milestone is really about, since M19's sbrk could
+hand a *virtual* address back to a program's own free list all day
+without one frame returning to the allocator.
+
+*malloc splits at 64 KiB, and the reason is not speed.* It is that sbrk
+cannot shrink: a 4 MiB buffer allocated and freed out of a bump-allocated
+heap leaves 4 MiB this process holds until it exits. The self-test
+allocates and frees 1 MiB twenty times and requires the same address back
+every time — before this milestone that loop was the bug, not the test.
+
+### M79 — Two threads, one address space ✅
+
+- [x] A second schedulable context inside *one* address space — not
+      `SYS_spawn`'s fresh process; the first time two of this
+      scheduler's tasks would ever share a page table
+- [x] `pthread_create`/`pthread_join`/a mutex in libc, built on that
+      primitive
+- [x] Per-thread stacks carved out of M78's mmap arena, since the
+      current fixed per-process layout has room for exactly one stack
+- [x] M63's per-task-switch FXSAVE has to keep holding for two tasks
+      that are the same *process* by every other measure — worth
+      stating on its own because "a task IS a process" is exactly the
+      kind of assumption a from-scratch scheduler bakes in without
+      anyone deciding to
+- [x] Deliberately not the rest of the pthread surface — condition
+      variables, rwlocks, thread-local storage — beyond whatever the
+      next real program's link errors ask for, M63's rule again
+
+**Why now, specifically.** Every CPython release since 3.7 requires a
+real thread implementation to even build — the GIL itself is a lock and
+a condition variable, and the old `--without-threads` escape hatch is
+gone. There is no smaller version of "run Python" that skips this.
+
+**How we'll know.** Two threads in one process each increment a shared
+counter a million times, one thread's increments protected by the M79
+mutex; the total is exactly two million. The classic test, chosen
+because a scheduler that ever runs both halves of an unlocked increment
+at once fails it visibly instead of "mostly."
+
+#### Progress notes
+
+*"A task IS a process" had been true for seventy-eight milestones, and
+every place that had quietly relied on it had to be told which of the two
+it actually meant.* Three kinds of thing turned out to be properties of
+an **address space** rather than of a task, and all three are now read
+through one function, `sched_vm_owner`, rather than through a rule call
+sites are asked to follow:
+
+- the sbrk break and its mapped end. Two tasks sharing a page table with
+  two independent breaks would each grow into the other's memory — a bug
+  with no symptom until it has already happened.
+- the shm cursor, which would otherwise map two segments on top of each
+  other.
+- the mmap arena, which would otherwise hand out the same addresses
+  twice.
+
+The working directory and the environment go through it too, for a
+different reason: POSIX says a `chdir` in one thread is seen by all of
+them, and a child spawned from a thread has to inherit the *process's*
+environment rather than the empty one a thread was created with.
+
+*And the address space is torn down by the last task out, not by the
+first.* `task_exit_with_code` used to free the page table unconditionally
+because the task that was leaving was the only one on it. It now sets an
+`exiting` flag under `sched_lock` and then asks whether any other live
+task is on the same `pml4_phys` — with the flag set *before* the scan, so
+two threads leaving at the same moment cannot each see the other as a
+live user and both decline to free. The state cannot be set to
+`TERMINATED` that early instead: another CPU would be free to reap the
+slot and `kfree` the kernel stack the code is still running on.
+
+*The one race worth recording was found by reasoning rather than by a
+failure*, which is unusual for this project. `task_spawn_thread` first
+set `is_thread`/`tgid` *after* `task_spawn_common` returned — and a task
+is schedulable the instant `sched_lock` drops, so a thread could run for
+one instruction believing it was a process, consult its own (zero) heap
+break on its first `malloc`, and map a page at virtual address 0. That is
+precisely the failure M40's own comment in that function describes for
+`heap_brk`, twelve lines above where the new code was; the fix is the
+same one, a parameter rather than an assignment afterwards.
+
+*The kernel knows nothing about a pthread, and that is what shared memory
+is for.* `SYS_thread_create` makes a task in the caller's address space
+and drops it into ring 3 at an address the caller chose on a stack the
+caller allocated. Everything a pthread *is* — a start routine with a
+return value, joining, a mutex — is built in
+`user_space/libc/src/pthread.c` out of memory the two threads now share.
+A kernel that owned `pthread_t` would be a kernel with an opinion about a
+C library.
+
+*The stack comes from the caller because the layout has room for exactly
+one.* `USER_STACK_TOP`/`USER_STACK_PAGES` is a single fixed stack, and
+inventing a second fixed location would put a ceiling on how many threads
+a process may have into the address map. A stack allocated out of M78's
+arena is also a stack a program can free — which is why `pthread_join`
+unmaps it and the thread cannot: a thread cannot unmap the stack it is
+standing on, and that is the whole reason `pthread_join` exists in every
+implementation of it.
+
+*`SYS_exit` now ends a thread group and `SYS_thread_exit` ends one
+thread*, which is what POSIX `exit()` and `pthread_exit()` mean and what
+`return` from `main` has always meant. `SYS_getpid` answers with the
+group's id and `SYS_gettid` with the task's — identical for anything that
+is not a thread, which is every process this OS ran before this
+milestone, so nothing that called it before means anything different now.
+
+*malloc had to take a lock, and it takes its own.* The free-list walk,
+the split and the coalesce were all written when a process had one thread
+of control. It now brackets them with a `lock xchg` spinlock of its own
+rather than with `<pthread.h>`'s mutex: malloc is linked into every
+program here and most will never have a second thread, so it cannot
+depend on the thread library. One atomic instruction is the entire cost,
+and it is the price every real allocator pays.
+
+*What the self-test checks that a program cannot.* `threadtest` makes the
+classic assertion — two million increments through a mutex arriving as
+exactly two million — plus the ones that stop it passing for the wrong
+reason: memory written by one thread and read by the other (two processes
+would fail this), different tids under one pid, and each thread's
+floating-point result matching what the same computation produced alone,
+which is M63's per-task FXSAVE still holding for two tasks that are the
+same process by every other measure. What it *cannot* see is the sentence
+this milestone is actually about, so the kernel checks that separately:
+while the program runs, three entries in the task table have the same
+`pml4_phys`. That has never been true on this machine before.
+
+*The honest limit: threads share memory, and share the descriptors that
+were open when they were created — including their file positions, since
+a descriptor points at a kernel-side open-file entry (M59) — but a
+descriptor opened AFTER a thread starts is not visible to it.* The fd
+table is copied at creation the way a spawn copies it. Making it shared
+means making `task_t.fds` a pointer to something refcounted, which is a
+real change to every path that touches a descriptor, and nothing has
+asked for it yet. `<pthread.h>` says so at the top rather than leaving it
+to be discovered.
+
+### M80 — Somebody else's language
+
+- [ ] Pick the program and let it decide the surface, M63's rule at a
+      larger scale: CPython, and whatever `./configure` and the link
+      step actually demand — not a module list guessed beforehand
+- [ ] A fully static build (`--disable-shared`, no loadable extension
+      modules, every needed module — `posix`, `time`, `io`, `marshal` at
+      minimum — compiled directly into the one binary). M75–M79 buy
+      real POSIX primitives and threads, not a dynamic loader, so
+      static is the only shape that fits what exists
+- [ ] Somewhere real for the standard library to live — frozen into the
+      binary or shipped as `.py` files on leanfs, whichever the actual
+      port turns out to need cheaper
+- [ ] Changes made to CPython's own source: as close to none as M63's
+      Whetstone rule demands. A `config.h`/`Modules/Setup.local` naming
+      what is built in is configuration, not a patch to the interpreter
+- [ ] The memory budget known before starting, not discovered halfway —
+      M63's notes are explicit that this is why Whetstone got ported and
+      DOOM did not. CPython's own startup footprint is tens of
+      megabytes before a user script runs a single line, and M78's mmap
+      arena needs sizing against that number up front
+
+**How we'll know.** `python3 -c "print(1+1)"` prints `2` through this
+project's own `SYS_spawn`/stdout plumbing, graded the way M63 graded
+Whetstone — and then something with actual weight behind it: a small
+pure-Python script exercising a `dict`, a class, a loop and a file
+open, because an interpreter that starts is a much lower bar than an
+interpreter that runs an ordinary program someone else wrote.
+
+**Expect this to be a multi-attempt milestone, like M74.** It is
+written as one milestone because the goal is one thing, not because
+landing it in one pass is the likely outcome.
+
 
 
 ## Deliberately not next, and why
@@ -5693,9 +6267,20 @@ and none was started.
   stretch-goal list: it is a driver per vendor, and it is not a thing
   this project will do. M58's Display pane showing only the firmware's
   mode on real hardware is the honest outcome.
-- **A browser.** Everyone's instinct after M73, and it is a decade of
-  work — HTML, CSS, a layout engine, a JS runtime and TLS. `fetch` is
-  the right size of the same idea.
+- **A browser.** Now a named goal rather than a hypothetical one — see
+  the arc above — and the estimate has not moved: HTML, CSS, a layout
+  engine, a JS runtime, TLS, GPU compositing, codecs, a sandbox, and a
+  Linux-scale syscall surface underneath most real-world binaries of
+  that size. `fetch` and M75–M80 are the right-sized steps in that
+  direction; there is no version of this list where a browser is the
+  *next* one.
+- **Dynamic linking (shared objects, `dlopen`).** M80's Python is
+  planned fully static on purpose — M75–M79 buy POSIX primitives and
+  threads, not a loader. Worth building once something concrete asks
+  for it (a C-extension wheel; a second and third static binary
+  duplicating the same libc), same measure-first discipline as M69's
+  deferred performance work. It is also the real fork in the road
+  toward a browser: nothing at that scale ships as one static binary.
 - **Multi-user, logins, uids.** M65 argued this exactly right: there are
   no users here, and inventing one would be a larger lie than the one it
   fixed. It becomes real if and when two people share a machine, and not

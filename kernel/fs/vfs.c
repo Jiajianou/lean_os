@@ -185,6 +185,10 @@ uint32_t vfs_handle_size(int handle) {
     return r;
 }
 
+int vfs_handle_stat(int handle, leanfs_stat_t *out) {
+    return leanfs_handle_stat(handle, out);
+}
+
 int vfs_handle_truncate(int handle) {
     uint64_t f = spin_lock_irqsave(&fs_lock);
     int r = leanfs_handle_truncate(handle);

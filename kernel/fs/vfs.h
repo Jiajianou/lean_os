@@ -40,6 +40,7 @@ int vfs_open(const char *path, int create);
 int64_t vfs_handle_read(int handle, void *buf, size_t len, uint32_t off);
 int64_t vfs_handle_write(int handle, const void *buf, size_t len, uint32_t off);
 uint32_t vfs_handle_size(int handle);
+int vfs_handle_stat(int handle, leanfs_stat_t *out); /* M77 - see leanfs.h */
 int vfs_handle_truncate(int handle);
 
 /* M47: the flush the shutdown path (kernel/power/power.c) calls before

@@ -1280,6 +1280,16 @@ int leanfs_stat(const char *path, leanfs_stat_t *out) {
     return 0;
 }
 
+int leanfs_handle_stat(int handle, leanfs_stat_t *out) {
+    if (!inode_valid(handle)) {
+        return -1;
+    }
+    out->size = inodes[handle].size;
+    out->mtime = inodes[handle].mtime;
+    out->is_dir = inodes[handle].type == LEANFS_TYPE_DIR;
+    return 0;
+}
+
 /* ---- M59: descriptors ------------------------------------------------ */
 
 int leanfs_open(const char *path, int create) {

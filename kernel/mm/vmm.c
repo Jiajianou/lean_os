@@ -140,6 +140,34 @@ int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
     return 0;
 }
 
+uint64_t vmm_unmap_page_take(uint64_t pml4_phys, uint64_t virt) {
+    /* M78: unmap and hand back the frame that was there, in one step and
+     * under one acquisition of the lock. Two calls - "what is mapped
+     * here" then "unmap it" - would be the same thing with a window in
+     * the middle in which another CPU could have replaced the mapping,
+     * and the caller would then free a frame somebody else is using. The
+     * one caller that needs this (SYS_munmap) owns both halves, so
+     * fusing them costs nothing and removes the window entirely. */
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
+    uint64_t *pml4 = phys_to_table(pml4_phys);
+    uint64_t *pdpt = table_walk(pml4, PML4_INDEX(virt), 0, 0);
+    uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(virt), 0, 0) : (uint64_t *)0;
+    if (!pd || (pd[PD_INDEX(virt)] & PTE_HUGE)) {
+        spin_unlock_irqrestore(&vmm_lock, irq_flags);
+        return 0;
+    }
+    uint64_t *pt = table_walk(pd, PD_INDEX(virt), 0, 0);
+    if (!pt || !(pt[PT_INDEX(virt)] & PTE_PRESENT)) {
+        spin_unlock_irqrestore(&vmm_lock, irq_flags);
+        return 0;
+    }
+    uint64_t phys = pt[PT_INDEX(virt)] & PTE_ADDR_MASK;
+    pt[PT_INDEX(virt)] = 0;
+    __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory"); /* see vmm_unmap_page_in on why one CPU is enough */
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
+    return phys;
+}
+
 void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);

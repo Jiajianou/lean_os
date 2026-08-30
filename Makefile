@@ -122,9 +122,14 @@ USER_LD   := user_space/lib/user.ld
 USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/malloc.o \
                 $(UOBJ)/gfx.o $(UOBJ)/font8x16.o $(UOBJ)/wmclient.o $(UOBJ)/wallpaper.o \
                 $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o \
-                $(UOBJ)/uifont.o $(UOBJ)/sntp.o $(UOBJ)/dns.o $(UOBJ)/http.o \
+                $(UOBJ)/uifont.o $(UOBJ)/recent.o $(UOBJ)/sntp.o $(UOBJ)/dns.o $(UOBJ)/http.o \
                 $(UOBJ)/libc_string.o $(UOBJ)/libc_stdlib.o $(UOBJ)/libc_stdio.o \
-                $(UOBJ)/libc_math.o $(UOBJ)/libc_time.o
+                $(UOBJ)/libc_math.o $(UOBJ)/libc_time.o \
+                $(UOBJ)/libc_env.o $(UOBJ)/libc_unistd.o \
+                $(UOBJ)/libc_signal.o \
+                $(UOBJ)/libc_dirent.o $(UOBJ)/libc_stat.o $(UOBJ)/libc_mman.o \
+                $(UOBJ)/libc_pthread.o $(UOBJ)/libc_errno.o \
+                $(UOBJ)/setjmp.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
 # init and shell in their own directories. Each becomes build/NAME.elf,
@@ -140,7 +145,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # alongside its own" is only true if there is no special path for them.
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
@@ -287,16 +292,21 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 	echo $$sectors > $(KERNEL_SECTORS_FILE)
 
 # leanfs (kernel/fs/leanfs.c) starts at sector 2048 (1 MiB) and needs
-# 65560 sectors (1 superblock + 7 inode-table + 16 bitmap + 65536 data,
-# matching leanfs.c/leanfs.h's own layout constants exactly - if those
-# ever change, this has to move with them; M15 grew this from the
-# original 4105 to add indirect-block support and a much bigger data
-# region). The boot image (mbr.bin+kernel.bin) has to stay well clear of
-# that, and the disk file itself has to actually be big enough to hold the
-# whole filesystem region, or QEMU has nothing there for the ATA driver to
-# read/write.
+# 1 superblock + INODE_TABLE_SECTORS + 16 bitmap + 65536 data sectors,
+# matching leanfs.c/leanfs.h's own layout constants (M15 grew this from
+# the original 4105 to add indirect-block support and a much bigger data
+# region; M74-M79's LEANFS_MAX_INODES 96 -> 192 took the inode table from
+# 16 sectors to 32). The boot image (mbr.bin+kernel.bin) has to stay well
+# clear of that, and the disk file itself has to actually be big enough
+# to hold the whole filesystem region, or QEMU has nothing there for the
+# ATA driver to read/write.
+#
+# Only FS_START_LBA is used by a recipe (the boot-image size guard
+# below); the total is here as documentation of what has to fit between
+# it and ESP_START_LBA, and 2048 + 65585 = 67633 leaves the ESP's 69632
+# nearly two thousand sectors of room.
 FS_START_LBA     := 2048
-FS_TOTAL_SECTORS := 65560
+FS_TOTAL_SECTORS := 65585
 # M45: 69632 -> 71680, to make room for the ESP moving past the filesystem
 # (see ESP_START_LBA just below).
 IMAGE_SECTORS    := 71680

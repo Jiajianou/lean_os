@@ -265,3 +265,46 @@ global reboot_elf_end
 reboot_elf_start:
     incbin "build/reboot.elf"
 reboot_elf_end:
+
+; M75: `env` prints what a process inherited, and `envtest` is the
+; self-test fixture that proves it landed somewhere real. Appended at the
+; end of this list rather than beside the other coreutils on purpose -
+; kernel.c seeds files in FOR_EACH_EMBEDDED_PROGRAM order and the M22
+; self-test grades "launcher slot 0 is hello, the first file ever
+; seeded", so an insertion anywhere above shifts an inode this project
+; asserts on.
+global env_elf_start
+global env_elf_end
+env_elf_start:
+    incbin "build/env.elf"
+env_elf_end:
+
+global envtest_elf_start
+global envtest_elf_end
+envtest_elf_start:
+    incbin "build/envtest.elf"
+envtest_elf_end:
+
+global sigtest_elf_start
+global sigtest_elf_end
+sigtest_elf_start:
+    incbin "build/sigtest.elf"
+sigtest_elf_end:
+
+global treewalk_elf_start
+global treewalk_elf_end
+treewalk_elf_start:
+    incbin "build/treewalk.elf"
+treewalk_elf_end:
+
+global mmaptest_elf_start
+global mmaptest_elf_end
+mmaptest_elf_start:
+    incbin "build/mmaptest.elf"
+mmaptest_elf_end:
+
+global threadtest_elf_start
+global threadtest_elf_end
+threadtest_elf_start:
+    incbin "build/threadtest.elf"
+threadtest_elf_end:

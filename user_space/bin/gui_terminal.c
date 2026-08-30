@@ -27,6 +27,8 @@
  * 1 KiB buffer fills, so a real SYS_wait here (which never reads the
  * pipe) would deadlock the moment a command's output exceeded that.
  */
+#include <signal.h> /* SIGINT - M76's Ctrl+C */
+
 #include "paths.h" /* system_api/include/paths.h - M53: /bin is this terminal's search path too */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT - the terminal grid is a fixed cell by definition (M57) */
 #include "str.h"
@@ -130,11 +132,28 @@ static int pipe_pid = -1;
 
 /* M60: a working directory, which this terminal has never had. It is what
  * `cd` changes, what tab completion completes against, and what a
- * relative path is resolved from. There is no working directory in the
- * *kernel* - every path a syscall takes is absolute (leanfs.h) - so this
- * is the terminal's own state and every path it hands over is built
- * absolute from it, exactly as file_manager.c already does. */
+ * relative path is resolved from.
+ *
+ * M75: it is a *cache* of the kernel's now, not the only copy. There is a
+ * real per-process working directory (SYS_chdir/SYS_getcwd), so `cd`
+ * changes that and re-reads it here - which is what makes `cd /tmp` and
+ * then running a program actually run that program in /tmp, instead of
+ * only affecting paths this terminal happened to build itself. The cache
+ * exists because tab completion and the prompt want the string on every
+ * keystroke and a syscall per keystroke would be a syscall per keystroke.
+ * sync_cwd() is the one place it is refilled. */
 static char term_cwd[PATH_MAX_LEN] = PATH_HOME;
+
+static void sync_cwd(void) {
+    char buf[PATH_MAX_LEN];
+    if (sys_getcwd(buf, sizeof(buf)) >= 0) {
+        int i = 0;
+        for (; buf[i] && i < PATH_MAX_LEN - 1; i++) {
+            term_cwd[i] = buf[i];
+        }
+        term_cwd[i] = '\0';
+    }
+}
 
 /* A user-typed path made absolute. Absolute stays absolute; anything else
  * is joined onto the working directory. The rule is one sentence and has
@@ -517,38 +536,17 @@ static void run_line(void) {
      * changing its own idea of where it is would change nothing about
      * this one. */
     if (strcmp(left.argv[0], "cd") == 0) {
-        char target[PATH_MAX_LEN];
+        /* M75: one syscall, and the ".." special case is gone with it -
+         * the kernel resolves "." and ".." now (syscall.c's
+         * path_normalize), so the textual climb this used to do by hand
+         * would be a second implementation of something that has one. */
         const char *where = left.argc > 1 ? left.argv[1] : PATH_HOME;
-        if (strcmp(where, "..") == 0) {
-            /* Textual, like file_manager.c's own ".." - leanfs stores no
-             * parent link and refuses ".." in a path, so climbing here is
-             * being honest about where the knowledge lives. */
-            int n = 0;
-            while (term_cwd[n]) {
-                n++;
-            }
-            while (n > 0 && term_cwd[n - 1] != '/') {
-                n--;
-            }
-            if (n > 1) {
-                n--;
-            }
-            term_cwd[n ? n : 1] = '\0';
-            term_cwd[0] = '/';
-        } else {
-            os_stat_t st;
-            if (resolve_path(where, target) != 0 ||
-                sys_stat(target, &st) != 0 || !st.is_dir) {
-                report(where, ": not a directory\n");
-                start_prompt();
-                return;
-            }
-            int i = 0;
-            for (; target[i] && i < PATH_MAX_LEN - 1; i++) {
-                term_cwd[i] = target[i];
-            }
-            term_cwd[i] = '\0';
+        if (sys_chdir(where) != 0) {
+            report(where, ": not a directory\n");
+            start_prompt();
+            return;
         }
+        sync_cwd();
         start_prompt();
         return;
     }
@@ -861,6 +859,7 @@ int main(void) {
     if (wm_connect(WIN_W, WIN_H, "Terminal", &win) != 0) {
         sys_exit(1);
     }
+    sync_cwd(); /* M75: start where whoever launched this terminal was */
 
     int pipe_fds[2];
     if (sys_pipe(pipe_fds) != 0) {
@@ -914,7 +913,43 @@ int main(void) {
                  * is *back* through history - hence the negation. */
                 view_scroll(-ev.wheel);
                 changed = 1;
-            } else if (ev.type == WM_EVENT_KEY && running_pid < 0 && pipe_pid < 0) {
+            } else if (ev.type == WM_EVENT_KEY && (running_pid >= 0 || pipe_pid >= 0)) {
+                /* ---- M76: Ctrl+C while a program is running ----------
+                 *
+                 * Every keystroke that arrived while a child held this
+                 * terminal used to be dropped on the floor - there was
+                 * nothing a terminal could do with one, because the only
+                 * signals this kernel had were the two that kill and
+                 * neither was reachable from a keystroke. So a program
+                 * that would not finish had to be force-quit from the
+                 * taskbar, which is the desktop equivalent of pulling
+                 * the plug.
+                 *
+                 * Ctrl+C is an interrupt here and a copy at the prompt,
+                 * which is the split every terminal emulator makes and
+                 * for the same reason: while a program is running, the
+                 * keyboard belongs to it. What SIGINT then *does* is the
+                 * program's business - the default action ends it with
+                 * 130, and a program that installed a handler gets to
+                 * decide. That difference is the whole milestone.
+                 *
+                 * Both halves of a pipeline are signalled, because both
+                 * are the foreground job and stopping one would leave the
+                 * other blocked on a pipe nobody will ever fill. */
+                if ((ev.mods & KBD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
+                    if (running_pid >= 0) {
+                        sys_kill(running_pid, SIGINT);
+                    }
+                    if (pipe_pid >= 0) {
+                        sys_kill(pipe_pid, SIGINT);
+                    }
+                    print_str_term("^C\n");
+                    changed = 1;
+                }
+                /* Anything else typed while a child holds the terminal is
+                 * still dropped, exactly as it always was - there is no
+                 * standard input to hand it to (see main's sys_close(0)). */
+            } else if (ev.type == WM_EVENT_KEY) {
                 /* M56: typing snaps back to the live grid. A keystroke
                  * that appeared somewhere off screen would be the worst
                  * possible way to find out you were still scrolled up. */

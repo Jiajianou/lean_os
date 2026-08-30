@@ -23,8 +23,42 @@
 #define USER_STACK_TOP   0x0000008000200000ULL /* 512 GiB + 2 MiB */
 #define USER_STACK_PAGES 4                      /* 16 KiB */
 #define USER_ARG_ADDR    USER_STACK_TOP
+/* M75: the argument region is two pages, not one, because it now holds
+ * an environment as well as an argument vector - and they live in ONE
+ * virtually contiguous block on purpose (see process_spawnve's layout
+ * note in proc.c): the SysV convention every C runtime already knows is
+ * that envp is argv's NULL terminator plus one, so crt0 finds it with an
+ * lea rather than with a second address it would have to be told. One
+ * page held both only until an environment of any size existed. */
+#define USER_ARG_PAGES   2
+#define USER_ARG_BYTES   (USER_ARG_PAGES * PAGE_SIZE)
+
+/* M75: the ceiling on an environment. Both numbers are about the region
+ * above rather than about taste: 8 KiB holds argc, both pointer arrays
+ * and every string, so an environment cannot be allowed to claim all of
+ * it and leave no room for argv. 64 variables and 4 KiB of text is
+ * comfortably more than anything on this machine sets and less than half
+ * the region; past either, the environment is truncated at the last
+ * whole variable that fits - the same rule argv has, and for the same
+ * reason (half a "NAME=value" is a different variable). */
+#define USER_ENV_MAX_VARS  64
+#define USER_ENV_MAX_BYTES 4096
 #define USER_HEAP_START  0x0000008000400000ULL /* 512 GiB + 4 MiB - M19 */
 #define USER_HEAP_LIMIT  0x0000008010000000ULL /* 512 GiB + 256 MiB ceiling - M19 */
+/* M78: the mmap arena - the second memory primitive next to M19's
+ * growth-only sbrk. Placed in the gap the layout already left between
+ * the heap's ceiling and the shm window rather than beside either, for
+ * the same "generous gaps" reason every other constant here is spaced
+ * out: nothing needs it to be dense, and it means neither neighbour has
+ * to be reasoned about precisely.
+ *
+ * 128 MiB of *address space*, which is not 128 MiB of memory - mappings
+ * are backed by real frames at the moment they are made (this kernel has
+ * no page-fault handler that could fill one in later), so the real
+ * ceiling is physical and the arena is only ever the room to arrange
+ * things in. */
+#define USER_MMAP_BASE   0x0000008014000000ULL /* 512 GiB + 320 MiB - M78 */
+#define USER_MMAP_LIMIT  0x000000801C000000ULL /* 512 GiB + 448 MiB */
 #define USER_SHM_BASE    0x0000008020000000ULL /* 512 GiB + 512 MiB - M19 */
 #define USER_FB_BASE     0x0000008040000000ULL /* 512 GiB + 1 GiB - M20, SYS_fb_map's fixed target address */
 
@@ -72,22 +106,43 @@ void process_destroy_address_space(uint64_t pml4_phys);
  * this milestone had to happen before a program nobody here wrote could
  * be run at all.
  *
- * It is copied into a single page mapped at USER_ARG_ADDR, laid out so
- * crt0 can find it with two instructions and without the kernel having to
- * agree with the assembler about a stack frame:
+ * It is copied into the USER_ARG_BYTES region mapped at USER_ARG_ADDR,
+ * laid out so crt0 can find it with a handful of instructions and without
+ * the kernel having to agree with the assembler about a stack frame:
  *
  *     [USER_ARG_ADDR + 0]        uint64_t argc
  *     [USER_ARG_ADDR + 8]        char *argv[argc]   (user addresses)
  *     [.. + 8 + 8*argc]          NULL terminator
+ *     [.. + 8 + 8*(argc+1)]      char *envp[envc]   (M75)
+ *     [.. + NULL terminator]
  *     [after that]               the strings themselves
  *
  * RDI still points at USER_ARG_ADDR, exactly as it did when this was one
  * string - so enter_user_mode is untouched and the change is entirely in
- * what the page holds. A vector that will not fit in one page is
- * truncated at the last whole argument that does, which is refusing
- * rather than corrupting: a half-copied argument names something else. */
+ * what the region holds. A vector that will not fit is truncated at the
+ * last whole argument that does, which is refusing rather than
+ * corrupting: a half-copied argument names something else.
+ *
+ * M75 put envp immediately after argv's NULL rather than in a region of
+ * its own, because that is where every C runtime written since V7 Unix
+ * already looks for it - `envp = argv + argc + 1` is the convention, not
+ * an invention here, and it means crt0 needs no second address. */
 task_t *process_spawnv(const char *name, const uint8_t *image, size_t image_size,
                         const char *const *argv);
+
+/* M75: the same thing, with an environment.
+ *
+ * `envp` is a NULL-terminated array of "NAME=value" strings. NULL means
+ * "give the child a copy of the spawning task's own environment", which
+ * is what makes inheritance the default rather than something every
+ * launcher on this machine has to remember to do - the same argument
+ * process_spawnv_capped makes about the capability manifest.
+ *
+ * The child's environment is also recorded kernel-side (task_t.env_block,
+ * sched.h) so that *its* children can inherit in turn without the kernel
+ * having to read a page a process is free to scribble on. */
+task_t *process_spawnve(const char *name, const uint8_t *image, size_t image_size,
+                        const char *const *argv, const char *const *envp);
 
 /* arg may be NULL (equivalent to an empty string) for a program that
  * doesn't take one.
@@ -109,3 +164,26 @@ task_t *process_spawn(const char *name, const uint8_t *image, size_t image_size,
  * caps_for_program() is what every launcher in this OS passes. */
 task_t *process_spawnv_capped(const char *name, const uint8_t *image, size_t image_size,
                               const char *const *argv, uint32_t caps);
+
+/* M79: a second schedulable context inside the CALLER's address space.
+ *
+ * Not a spawn: there is no image, no ELF, no fresh page table and no
+ * argument region - the thread runs code that is already mapped, on a
+ * stack the caller allocated out of M78's mmap arena and passes in. The
+ * only things this makes are a task and a kernel stack.
+ *
+ * The user stack comes from the caller rather than from here because the
+ * per-process layout has room for exactly one stack (proc.h's
+ * USER_STACK_TOP / USER_STACK_PAGES), and inventing a second fixed
+ * location would put a ceiling on how many threads a process may have
+ * into the address map. A stack a program allocated is also a stack a
+ * program can free.
+ *
+ * Returns the new task, or NULL. */
+task_t *process_spawn_thread(const char *name, uint64_t entry, uint64_t stack_top,
+                              uint64_t arg);
+
+/* M75: the full form - argv, envp and an explicit capability set. Every
+ * other entry point above is this one with a default filled in. */
+task_t *process_spawnve_capped(const char *name, const uint8_t *image, size_t image_size,
+                               const char *const *argv, const char *const *envp, uint32_t caps);

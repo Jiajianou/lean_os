@@ -112,12 +112,19 @@ static int refresh_theme(void) {
  * anywhere for that reason to go. Titled with the icon's own label
  * rather than its program name: the person double-clicked "Editor", not
  * "text_editor". */
-static void launch(const char *label, const char *program) {
-    long rc = sys_spawn(program, "");
+/* M74: `arg` may be NULL or empty, which is what every icon that just
+ * starts a program passes. sys_spawn already treats an empty string as
+ * "no argument", so there is one path rather than two. */
+static void launch_with(const char *label, const char *program, const char *arg) {
+    long rc = sys_spawn(program, arg ? arg : "");
     if (rc < 0) {
         wm_notify(WM_NOTIFY_ERROR, label, spawn_error_message(rc));
     }
     child_track(rc); /* M54: so its task slot comes back when it closes - see children.h */
+}
+
+static void launch(const char *label, const char *program) {
+    launch_with(label, program, "");
 }
 
 /* M56: 24x24 blobs drawn at 2x inside the 48px box. */
@@ -126,6 +133,11 @@ static void launch(const char *label, const char *program) {
 typedef struct {
     const char *label;
     const char *program;
+    /* M74: what to hand the program. Empty for every icon that just
+     * starts something; the README icon is the first thing on this
+     * desktop that opens a *file*, which is the difference between a
+     * desktop that has applications on it and one that has content. */
+    const char *arg;
     const uint8_t *image; /* M56: an icon.h blob - the "no separate icon-image format exists" note this field replaced was in three files */
 } icon_def_t;
 
@@ -135,13 +147,20 @@ typedef struct {
  * icon that stops working the moment somebody creates a file with the
  * same name somewhere else. */
 static const icon_def_t ICONS[] = {
-    {"Terminal", PATH_BIN_DIR "gui_terminal", ICON_TERMINAL},
-    {"Editor",   PATH_BIN_DIR "text_editor",  ICON_EDITOR},
-    {"Files",    PATH_BIN_DIR "file_manager", ICON_FILES},
-    {"Settings", PATH_BIN_DIR "settings",     ICON_SETTINGS},
-    {"Clock",    PATH_BIN_DIR "gui_clock",    ICON_CLOCK},
-    {"Paint",    PATH_BIN_DIR "gui_paint",    ICON_PAINT},
-    {"Tasks",    PATH_BIN_DIR "task_manager", ICON_TASKS},
+    {"Terminal", PATH_BIN_DIR "gui_terminal", "", ICON_TERMINAL},
+    {"Editor",   PATH_BIN_DIR "text_editor",  "", ICON_EDITOR},
+    {"Files",    PATH_BIN_DIR "file_manager", "", ICON_FILES},
+    {"Settings", PATH_BIN_DIR "settings",     "", ICON_SETTINGS},
+    {"Clock",    PATH_BIN_DIR "gui_clock",    "", ICON_CLOCK},
+    {"Paint",    PATH_BIN_DIR "gui_paint",    "", ICON_PAINT},
+    {"Tasks",    PATH_BIN_DIR "task_manager", "", ICON_TASKS},
+    /* M74: the README, on the desktop rather than only in /home. A fresh
+     * machine that boots to seven application icons and nothing to read
+     * is a demo; one that boots with the thing that explains it sitting
+     * in plain sight is a machine somebody just got. It lands in a second
+     * column because the first one is full at this height, which is
+     * layout_icons doing exactly what it was written to do. */
+    {"README",   PATH_BIN_DIR "text_editor",  PATH_HOME_DIR "readme.txt", ICON_EDITOR},
 };
 #define ICON_COUNT ((int)(sizeof(ICONS) / sizeof(ICONS[0])))
 
@@ -375,7 +394,7 @@ int main(void) {
                     pressed_until_ms = sys_uptime_ms() + 150;
                     pressed_icon = i;
                     if (last_click_icon == i && last_click_ms >= 0 && now - last_click_ms <= DOUBLE_CLICK_MS) {
-                        launch(ICONS[i].label, ICONS[i].program);
+                        launch_with(ICONS[i].label, ICONS[i].program, ICONS[i].arg);
                         last_click_icon = -1; /* a third quick click starts a fresh pair, not a third launch */
                         last_click_ms = -1;
                     } else {

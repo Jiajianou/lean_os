@@ -137,6 +137,12 @@ int wm_drag_payload(char *out, uint32_t max);
  * is the only caller. */
 int wm_toggle_launcher(void);
 
+/* M74: "do not switch this machine off - I would lose something". The
+ * answer to WM_EVENT_QUERY_SHUTDOWN, and the only thing a client has to
+ * do to take part: everything else about the veto is the compositor's.
+ * A client that has nothing unsaved simply does not call this. */
+int wm_veto_shutdown(int32_t window_id);
+
 /* M58: ask the compositor to change the display resolution (and then to
  * keep it). Two calls rather than one with a flag, because they happen
  * seconds apart and the gap is the feature: the mode is on trial until

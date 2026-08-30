@@ -21,6 +21,16 @@ double atof(const char *s);
 long strtol(const char *s, char **end, int base);
 double strtod(const char *s, char **end);
 
+/* M75: the environment. `getenv` returns a pointer into the environment
+ * itself, not a copy - the standard contract, and the reason a caller
+ * that wants to keep a value past the next setenv has to copy it. See
+ * user_space/libc/src/env.c, and <unistd.h> for `environ`. */
+char *getenv(const char *name);
+int setenv(const char *name, const char *value, int overwrite);
+int unsetenv(const char *name);
+int putenv(char *entry);
+int clearenv(void);
+
 int abs(int v);
 long labs(long v);
 

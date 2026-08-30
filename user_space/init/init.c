@@ -12,6 +12,9 @@
  * M41 added a fourth client here, a top-docked menu bar; M42 deleted it
  * again in favor of a single bottom taskbar, so this is back to three.
  */
+#include <stdlib.h> /* setenv - M75 */
+#include <unistd.h> /* chdir - M75 */
+
 #include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
 #include "signal.h" /* system_api/include/signal.h - SIGKILL */
 #include "syscall_wrappers.h"
@@ -23,6 +26,44 @@ int main(int argc, char **argv) {
      * what the single-string mechanism this replaced handed over. */
     const char *arg = argc > 1 ? argv[1] : "";
     (void)arg;
+
+    /* ---- M75: the environment every process on this machine descends
+     * from, and the directory it starts in.
+     *
+     * PID 1 is the right place for both. The kernel deliberately does not
+     * invent an environment - a kernel that knew what HOME meant would be
+     * a kernel with an opinion about a user space it cannot see - so
+     * something in user space has to be first, and "first" is exactly
+     * what init is. Everything spawned from here inherits these, which is
+     * what makes `$HOME` mean something in a shell nobody passed it to.
+     *
+     * /home rather than /: a desktop's programs are opened *somewhere*,
+     * and the somewhere a person's files are is the only defensible
+     * default. Every path in this OS was absolute before this milestone,
+     * so nothing existing changes behaviour - the directory only starts
+     * mattering the moment something says a relative name. */
+    setenv("HOME", PATH_HOME, 1);
+    setenv("PATH", PATH_BIN, 1);
+    setenv("TMPDIR", PATH_TMP, 1);
+    setenv("SHELL", PATH_BIN_DIR "sh", 1);
+    /* ---- M74: the session gate ---------------------------------------
+     *
+     * Set here and nowhere else. The compositor saves and restores a
+     * session only when it finds this in its environment, and the boot
+     * self-tests start compositors constantly - each one opening windows
+     * and killing them. A self-test compositor that saved a session would
+     * leave a file the real one then restored, relaunching test fixtures
+     * onto a person's desktop.
+     *
+     * An environment variable rather than an argument, which is the one
+     * thing that changed since this milestone's first attempt: gating on
+     * argv meant giving the compositor's `main` two parameters it had
+     * never had, and that change was one of the two suspects left when
+     * that attempt was reverted. M75 made an inherited environment exist,
+     * so the gate is now a thing PID 1 says once. */
+    setenv("LEANOS_SESSION", "1", 1);
+    chdir(PATH_HOME);
+
     for (;;) {
         long comp_pid = sys_spawn(PATH_BIN_DIR "compositor", "");
         if (comp_pid < 0) {

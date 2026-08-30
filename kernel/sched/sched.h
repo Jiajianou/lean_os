@@ -14,6 +14,8 @@
 #include <stdint.h>
 
 #include "caps.h" /* system_api/include/caps.h - CAP_*, M65 */
+#include "signal.h" /* system_api/include/signal.h - SIG_MAX, the per-task handler table below, M76 */
+#include "paths.h" /* system_api/include/paths.h - PATH_MAX_LEN, M75's cwd */
 #include "lib/spinlock.h"
 #include "arch/x86_64/fpu.h" /* M63: FPU_STATE_SIZE/ALIGN - a task carries its own SSE state now */
 
@@ -102,6 +104,22 @@ typedef enum {
  * back: wm_connect closes the handshake pipes it used to hold forever -
  * see wmclient.c.) */
 #define MAX_FDS 128
+
+/* ---- M78 ------------------------------------------------------------
+ *
+ * How many separate anonymous mappings one process may hold at once. A
+ * program that maps a few large arenas needs a handful; malloc as it is
+ * written here uses one per large allocation. 32 is comfortably past
+ * either and costs 512 bytes a task. Past it, SYS_mmap returns -1 -
+ * which is a thing a caller can report, unlike the alternative of
+ * silently merging two mappings a munmap would then have to guess about.
+ */
+#define MAX_MMAP_REGIONS 32
+
+typedef struct {
+    uint64_t base;  /* page-aligned start; meaningless when pages == 0 */
+    uint32_t pages; /* 0 = this slot is free */
+} mmap_region_t;
 
 /* M45: how long a per-task name may be, NUL included. A process was a
  * number and nothing else until this milestone - only whoever spawned it
@@ -349,6 +367,93 @@ typedef struct task {
      * thread (kernel/net/net.c's tcp-timer is already one). Used only to
      * decide whether a tick counts as idle time. */
     uint8_t is_idle;
+    /* ---- M75: a place to stand, and something to stand there with -----
+     *
+     * `cwd` is this task's working directory - always absolute, always
+     * normalized, never with a trailing slash unless it IS "/". Every
+     * path-taking syscall resolves against it (syscall.c's
+     * resolve_user_path), which is what makes a relative name mean
+     * something on a machine whose filesystem deliberately stores
+     * neither "." nor "..".
+     *
+     * `env_block` is this task's environment, packed as back-to-back
+     * NUL-terminated "NAME=value" strings, with `env_count` of them in
+     * `env_len` bytes. NULL for a task that has none (every kernel
+     * thread, and any process spawned before something put one there).
+     *
+     * Kernel-side rather than "read the child's own argument page when
+     * it spawns": a process may write over that page, and an environment
+     * that a program can corrupt for its *children* is a footgun with no
+     * upside. This copy is what a child inherits. It is kmalloc'd, owned
+     * by exactly this slot, and released in task_exit_with_code beside
+     * the fd table - the other thing a task holds that outlives its last
+     * instruction. */
+    char cwd[PATH_MAX_LEN];
+    char *env_block;
+    uint32_t env_len;
+    uint32_t env_count;
+    /* ---- M76: signals a program can catch ----------------------------
+     *
+     * `pending_signal` above is still what it always was: the *fatal*
+     * one, taken at the next syscall entry or scheduler tick, which ends
+     * the task. These four are the other kind.
+     *
+     * `sig_handler[n]` is SIG_DFL_ADDR, SIG_IGN_ADDR, or a ring-3
+     * function address. `sig_restorer` is where a handler `ret`s to -
+     * supplied by user space at sigaction time rather than assumed,
+     * because the kernel has no business knowing where a program links
+     * its runtime. `sig_pending` and `sig_blocked` are bitmasks over
+     * signal numbers; one bit, so a second SIGINT arriving before the
+     * first is handled is the same bit, which is what every Unix does
+     * for non-realtime signals and is why they are not a queue.
+     *
+     * None of it is inherited across a spawn. A handler address belongs
+     * to the image that installed it, and a fresh image has never seen
+     * it - carrying one over would point ring 3 at somebody else's
+     * program. task_spawn_common zeroes all four for that reason. */
+    uint64_t sig_handler[SIG_MAX + 1];
+    uint64_t sig_restorer;
+    uint32_t sig_pending;
+    uint32_t sig_blocked;
+    /* ---- M78: the mmap arena's bookkeeping ---------------------------
+     *
+     * One entry per live anonymous mapping, kept sorted by base address
+     * with `pages == 0` marking a free slot. Sorted because that is what
+     * makes "find the first gap big enough" a single forward scan - and
+     * finding a *gap* rather than a high-water mark is the entire point
+     * of this milestone. A bump allocator has no concept of a hole; an
+     * ordered list is the smallest thing that does.
+     *
+     * A fixed array rather than a linked structure for the same reason
+     * every table in this kernel is fixed: there is nothing to allocate
+     * and nothing to leak, and MAX_MMAP_REGIONS entries is 512 bytes a
+     * task. The cost is a ceiling on how many *separate* mappings one
+     * process may hold, which is a number a program can be told rather
+     * than a failure it cannot diagnose (SYS_mmap returns -1). */
+    mmap_region_t mmaps[MAX_MMAP_REGIONS];
+    /* ---- M79: threads ------------------------------------------------
+     *
+     * `tgid` is the thread group's id - this task's own for anything
+     * that is not a thread, which is every task that existed before this
+     * milestone. `is_thread` says whether this task was created by
+     * SYS_thread_create rather than by loading an image.
+     *
+     * Both exist because "a task IS a process" was true here for
+     * seventy-eight milestones and stopped being true in one commit.
+     * Everything that had quietly relied on it - the address space being
+     * this task's to tear down, the sbrk break being this task's to
+     * move, "my pid" - had to be told which of the two it actually
+     * meant. sched_vm_owner is where that answer lives for the memory
+     * half, and it is a plain function rather than a rule call sites
+     * follow, because a rule a call site can get wrong is a rule.
+     *
+     * `exiting` is set the instant a task commits to leaving, under
+     * sched_lock, and is what makes "am I the last user of this address
+     * space" answerable without two threads exiting at once each seeing
+     * the other as alive and neither freeing anything. */
+    int tgid;
+    uint8_t is_thread;
+    uint8_t exiting;
     char name[TASK_NAME_MAX]; /* M45: what this task was spawned as - the path process_spawn loaded, or a short label for a kernel thread. Always NUL-terminated. Display only: nothing looks a task up by name, and two tasks may freely share one. */
 } task_t;
 
@@ -594,6 +699,83 @@ task_t *sched_current(void);
  * is what SYS_wait's poll-the-exit-code approach needs. Reaping is also
  * what frees the slot: see sched_reap_slot. */
 task_t *sched_task_by_id(int pid);
+
+/* M75: replaces `t`'s environment with a copy of `block` - `count`
+ * back-to-back NUL-terminated strings occupying `len` bytes. Frees
+ * whatever was there. `block` may be NULL/empty, which clears it.
+ * Returns 0, or -1 if there was no heap for the copy (in which case the
+ * task keeps the environment it had). */
+int sched_set_env(task_t *t, const char *block, uint32_t len, uint32_t count);
+
+/* M75: releases `t`'s environment block. Called from task_exit_with_code;
+ * exposed because sched_reap_slot has to be able to assert it is gone. */
+void sched_release_env(task_t *t);
+
+/* ---- M76 -------------------------------------------------------------
+ *
+ * Posts `sig` to `t`, applying the *target's* disposition rather than
+ * the sender's intent - which is the whole reason this is one function
+ * and not a field assignment at each call site. Four outcomes:
+ *
+ *   SIGKILL, or any signal with no handler and no default but death:
+ *       t->pending_signal, i.e. the existing fatal path, unchanged
+ *   SIG_IGN_ADDR, or SIGCHLD's default:
+ *       dropped
+ *   a handler:
+ *       a bit in t->sig_pending, delivered on the way back to ring 3
+ *
+ * A blocked target is woken, because a signal that arrives while a
+ * process is parked and is not seen until the next unrelated event is a
+ * signal that did not arrive.
+ *
+ * Safe to call from a task other than `t`, and from task_exit_with_code
+ * (SIGCHLD). Not safe from an interrupt handler: it takes sched_lock. */
+void sched_raise_signal(task_t *t, int sig);
+
+/* 1 if the *current* task has a caught signal waiting that is not
+ * blocked. The blocking calls in syscall.c consult it so that a park can
+ * end for a signal rather than only for the event it was waiting on -
+ * without which a handler installed by a program that spends its life in
+ * SYS_waitfds would never run. */
+int sched_signal_pending(void);
+
+/* Wakes one specific task, whatever channel it is parked on. sched_wake_all
+ * is by channel, which is right for "the pipe you were waiting on has
+ * bytes" and wrong for "something happened to *you*". */
+void sched_wake_task(task_t *t);
+
+/* ---- M79 -------------------------------------------------------------
+ *
+ * The task that owns `t`'s address space bookkeeping - `t` itself for a
+ * process, and the thread group's leader for a thread. Every field in
+ * task_t that describes the *address space* rather than the *task* has
+ * to be read and written through this: heap_brk, heap_mapped_end,
+ * shm_next_vaddr and the mmap table. Two tasks sharing one page table
+ * with two independent sbrk breaks would each grow into the other's
+ * memory, which is a bug with no symptom until it has already happened.
+ *
+ * Returns `t` itself if the leader is gone, so a thread outliving its
+ * leader degrades to "my own bookkeeping" rather than to a null
+ * dereference. */
+task_t *sched_vm_owner(task_t *t);
+
+/* M79: makes a new task in `pml4_phys` that is a *thread* of `leader` -
+ * same address space, its own kernel stack, and its own entry. Used only
+ * by kernel/proc/proc.c's process_spawn_thread; declared here because
+ * only sched.c can set the fields that make it a thread. */
+task_t *task_spawn_thread(const char *name, task_t *leader, void (*entry)(void *arg), void *arg);
+
+/* M79: posts SIGKILL to every task in `t`'s thread group except `t`
+ * itself. What SYS_exit does before ending the caller - POSIX exit()
+ * ends a process, and a process is now more than one task. */
+void sched_kill_thread_group(task_t *t);
+
+/* M79: how many live tasks are running on `pml4_phys`. Exists for the
+ * boot self-test, because "two of this scheduler's tasks share a page
+ * table" is the entire claim of this milestone and it is not observable
+ * from inside a program - from in there, a thread and a second process
+ * with a very cooperative parent look identical. */
+int sched_count_sharing_address_space(uint64_t pml4_phys);
 
 /* M54: enumeration by *slot*, for the callers that walk the whole table
  * looking for something (SYS_wait(-1) finding children, SYS_taskinfo,

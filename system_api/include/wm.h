@@ -134,6 +134,19 @@ typedef enum {
     WM_EVENT_DRAG_MOTION = 8,  /* M49: a client-initiated drag is in progress and the cursor is over this window - x/y are in this window's coordinates. For a would-be drop target to highlight itself; ignoring it costs nothing. */
     WM_EVENT_DROP = 9,         /* M49: a drag was released over this window. The payload is NOT in this struct - the compositor has already written it to WM_DRAG_DATA_PIPE, which wmclient.h's wm_drag_payload reads. See WM_DRAG_PIPE for why it isn't carried inline. */
     WM_EVENT_EXPOSE = 10,      /* M55: this window's pixel buffer is new and blank - redraw everything. Sent by wmclient.c itself, not by the compositor, and exactly once after a client reconnects to a *replacement* compositor (see wm_window_t's own M55 note): the pixels a client had were the dead compositor's shm segment and are gone with it, but everything needed to draw them again lives in the client. A client that ignores this comes back as an empty rectangle, which is why every GUI program in this project handles it - it is one line in each, next to whatever already sets its redraw flag. */
+    /* M74: the machine is about to stop, and this window is being asked
+     * whether it minds. A client with nothing unsaved does nothing - the
+     * shutdown proceeds after a short timeout it never notices. A client
+     * that would lose work replies with WM_ACTION_VETO_SHUTDOWN, and the
+     * shutdown is abandoned rather than delayed: a longer grace period
+     * would still lose the work, it would just take longer about it.
+     *
+     * Sent only to windows that set confirm_close, for the same reason
+     * WM_EVENT_CLOSE_REQUEST is - a client that never opted into being
+     * asked anything is a client that has nothing to say here, and asking
+     * every window would mean waiting out the timeout on every desktop
+     * that has a clock open. */
+    WM_EVENT_QUERY_SHUTDOWN = 12,
     WM_EVENT_DISPLAY_CHANGED = 11, /* M58: the screen is a different size, and this window's pixel buffer has been replaced to match. Deliberately shaped so that a client already handling WM_EVENT_EXPOSE handles this by falling into the same code - "your buffer is new and blank, redraw everything from state you still hold" is the exact lesson M55 taught every GUI program in this project, and re-teaching it with a separate resize protocol would have been the wrong kind of new. wmclient.c does the work (it unmaps the old segment and re-runs the create handshake, which the compositor answers with the new one) and then hands this event on, so a client's whole obligation is one more label on its redraw case. A client that ignores it comes back as a stale rectangle at the wrong size. */
     WM_EVENT_CLOSE_REQUEST = 6, /* M36: sent instead of an immediate SIGTERM when this window's own wm_create_request_t.confirm_close was set and a close was requested (a titlebar close button or an external WM_ACTION_CLOSE) - no extra fields. The client decides what to do next; see confirm_close's own comment above. */
 } wm_event_type_t;
@@ -295,6 +308,20 @@ typedef enum {
     WM_ACTION_SET_PANEL_OVERHANG = 10, /* M45: how many rows *above* its docked strip the panel window_id wants composited and click-routed right now (wm_action_request_t.value; 0 to put it away). A panel is 32px tall and clipped to its own buffer, and a three-item context menu is ~72px that has to rise out of the bar - this is that. Originally M41's mechanism for its top-bar dropdowns, removed in M42 along with the menu bar itself, and brought back rather than reinvented: what made it go away was the bar disappearing, not the overhang being wrong. Nothing about the panel's own geometry changes - win->h stays the docked height, so maximize and window placement (which reserve room for a panel) are unaffected by a menu that is up for a second and a half. */
     WM_ACTION_SET_MODE = 11,        /* M58: change the display resolution to wm_action_request_t.value's packed geometry - (width << 16) | height, both of which fit in 16 bits by the DISPI interface's own limits. No window_id (-1 by convention), like WM_ACTION_TOGGLE_LAUNCHER: it acts on the display, not on a window. The compositor performs the whole change - SYS_display_set_mode, re-map its framebuffer, reallocate every window's segment, re-span the panels, clamp windows and the cursor back on-screen - because it is the process that owns the screen; the kernel syscall changes the mode and nothing else. Packed into `value` rather than given two new fields so that every other action's message does not grow eight bytes for one action's sake. */
     WM_ACTION_SET_TASKBAR_SLOT = 13, /* M61: window_id's button on the taskbar occupies wm_action_request_t.value's packed (x << 16) | width, in screen coordinates. Sent by desktop_shell.c whenever its slot layout changes - which is when a window opens or closes, not per frame. The compositor needs it for exactly one thing: a minimize that animates *toward the button it went to*, which is the difference between motion that says where a window went and motion that is decoration. It deliberately does not derive the layout itself - the taskbar's geometry is the taskbar's, and a compositor that recomputed it would be a second copy of it to keep in step. A window the compositor has never been told about animates toward the bottom of the screen at its own x, which is the honest answer when nothing has said better. */
+    /* M74: "do not switch this machine off - I would lose something".
+     * Sent by a client in answer to WM_EVENT_QUERY_SHUTDOWN. window_id is
+     * the vetoing window, so the compositor can say *which* program
+     * objected rather than raising an anonymous "something is unsaved" -
+     * which is the difference between a message that tells you where to
+     * go and one that tells you to go looking.
+     *
+     * One veto with a timeout, and deliberately not a negotiation: there
+     * is no "I have saved it now, carry on" reply, because the person is
+     * right there and can simply press the button again. M47's shutdown
+     * gives everything a second to die and then kills it, which is
+     * correct for a *stopping* machine and is exactly why the question
+     * has to be asked before that path starts rather than inside it. */
+    WM_ACTION_VETO_SHUTDOWN = 14,
     WM_ACTION_CONFIRM_MODE = 12,    /* M58: keep the mode that was just applied. A WM_ACTION_SET_MODE arms a revert timer (roughly ten seconds); this is what disarms it. Every desktop that ships a resolution setting ships this countdown, for the same reason: choosing a mode the display cannot show is how a person loses their machine with no way to get it back - and it matters more here, not less, since there is no second machine to log in from and no config file to edit blind. No window_id, same as WM_ACTION_SET_MODE. */
 } wm_action_type_t;
 

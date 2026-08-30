@@ -55,8 +55,66 @@ long sys_getpid(void) {
     return do_syscall(SYS_getpid, 0, 0, 0);
 }
 
+long sys_spawnve(const char *path, const char *const *argv, const char *const *envp) {
+    return do_syscall(SYS_spawn, (long)path, (long)argv, (long)envp);
+}
+
 long sys_spawnv(const char *path, const char *const *argv) {
-    return do_syscall(SYS_spawn, (long)path, (long)argv, 0);
+    /* M75: `environ`, not NULL. The kernel's NULL case means "the
+     * environment this process was *started* with", which is right for a
+     * raw syscall and wrong for a program that has just called setenv -
+     * so the wrapper every program actually uses passes the live one.
+     * environ is NULL only in a program linked without libc's startup,
+     * which cannot happen here (crt0 calls it), and the kernel treats a
+     * NULL envp as inherit, so even that degrades to the old behaviour
+     * rather than to an empty environment. */
+    extern char **environ;
+    return sys_spawnve(path, argv, (const char *const *)environ);
+}
+
+long sys_sigaction(int signo, void *handler, void (*restorer)(void)) {
+    return do_syscall(SYS_sigaction, signo, (long)handler, (long)restorer);
+}
+
+long sys_sigprocmask(int how, unsigned int mask, unsigned int *old_out) {
+    return do_syscall(SYS_sigprocmask, how, (long)mask, (long)old_out);
+}
+
+long sys_fstat(int fd, os_stat_t *out) {
+    return do_syscall(SYS_fstat, fd, (long)out, 0);
+}
+
+long sys_thread_create(void *entry, void *arg, unsigned long stack_top) {
+    return do_syscall(SYS_thread_create, (long)entry, (long)arg, (long)stack_top);
+}
+
+void sys_thread_exit(int value) {
+    do_syscall(SYS_thread_exit, value, 0, 0);
+    for (;;) {
+        /* Unreachable: SYS_thread_exit ends this thread. Same shape as
+         * sys_exit's own loop, and for the same reason - `noreturn` with
+         * a plain fall-through would warn. */
+    }
+}
+
+long sys_gettid(void) {
+    return do_syscall(SYS_gettid, 0, 0, 0);
+}
+
+long sys_mmap(unsigned long len, int prot, int flags) {
+    return do_syscall(SYS_mmap, (long)len, prot, flags);
+}
+
+long sys_munmap(void *addr, unsigned long len) {
+    return do_syscall(SYS_munmap, (long)addr, (long)len, 0);
+}
+
+long sys_chdir(const char *path) {
+    return do_syscall(SYS_chdir, (long)path, 0, 0);
+}
+
+long sys_getcwd(char *buf, size_t maxlen) {
+    return do_syscall(SYS_getcwd, (long)buf, (long)maxlen, 0);
 }
 
 long sys_spawn(const char *path, const char *arg) {

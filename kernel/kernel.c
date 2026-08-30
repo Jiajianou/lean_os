@@ -95,7 +95,13 @@
     X(wm_crash)                    \
     X(badptr)                      \
     X(shutdown)                    \
-    X(reboot)
+    X(reboot)                      \
+    X(env)                         \
+    X(envtest)                     \
+    X(sigtest)                     \
+    X(treewalk)                    \
+    X(mmaptest)                    \
+    X(threadtest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -236,6 +242,24 @@ static void selftest_type(const char *s) {
         keyboard_inject(*p, 0);
         pit_sleep_ms(25);
     }
+}
+
+/* M75: does `haystack` contain `needle`? Three self-tests had written
+ * their own copy of this loop by the time a fourth wanted one, which is
+ * the point at which a helper stops being premature. Deliberately not in
+ * lib/libk.h: a substring search is not something this kernel needs, it
+ * is something these tests need. */
+static int selftest_contains(const char *haystack, const char *needle) {
+    for (int i = 0; haystack[i]; i++) {
+        int j = 0;
+        while (needle[j] && haystack[i + j] == needle[j]) {
+            j++;
+        }
+        if (needle[j] == '\0') {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void selftest_reap(task_t *t) {
@@ -1254,17 +1278,70 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * "this is broken" rather than "this is new". It also gives the
      * interactive suite a real file to drag, which is a smaller reason
      * but a real one. */
-    if (!vfs_exists(PATH_HOME_DIR "readme.txt")) {
-        static const char welcome[] =
-            "Welcome to lean_os.\n"
-            "\n"
-            "This is /home - your files live here.\n"
-            "Programs live in /bin, settings in /etc.\n"
-            "\n"
-            "Double-click a name in Files to open it,\n"
-            "or .. to go up a directory.\n";
-        if (vfs_write(PATH_HOME_DIR "readme.txt", welcome, sizeof(welcome) - 1) != 0) {
-            panic("vfs_write: failed to seed " PATH_HOME_DIR "readme.txt");
+    /* M74: and more than one of them. A fresh disk used to boot to a
+     * desktop with seeded icons and a single file - which is a demo. The
+     * difference between a demo and a machine somebody just got is that
+     * the second one has something in it: a README that says what this
+     * is, a note to edit, and a directory to open. All three exist so
+     * that the first thing a person does - open Files, open the editor -
+     * lands on something rather than on emptiness.
+     *
+     * Written only when absent, so a person's own edits are never
+     * overwritten by a later boot. That is the same rule the program
+     * seeding above follows and it matters more here: these are the only
+     * files on this machine that a person is expected to change. */
+    {
+        static const struct {
+            const char *path;
+            const char *body;
+        } FIRST_BOOT[] = {
+            {PATH_HOME_DIR "readme.txt",
+             "Welcome to lean_os.\n"
+             "\n"
+             "This is /home - your files live here.\n"
+             "Programs live in /bin, settings in /etc.\n"
+             "\n"
+             "Getting around\n"
+             "  Double-click a name in Files to open it, or .. to go up.\n"
+             "  Ctrl+Space opens the launcher; type a few letters and press Enter.\n"
+             "  Ctrl+Shift+Esc opens the task manager.\n"
+             "  Ctrl+Alt+Left/Right move between the four desktops.\n"
+             "\n"
+             "The terminal\n"
+             "  ls, cat, cp, echo, env, cd, pwd - and > to redirect.\n"
+             "  A file starting with #!/bin/sh is a program: run it by name.\n"
+             "\n"
+             "Your windows come back\n"
+             "  Whatever is open when this machine stops is open again when\n"
+             "  it starts, in the same places. /etc/session.conf is the file\n"
+             "  that remembers, and it is plain text.\n"},
+            {PATH_HOME_DIR "notes.txt",
+             "Scratch file.\n"
+             "\n"
+             "The editor has undo (Ctrl+Z), redo (Ctrl+Y), find (Ctrl+F),\n"
+             "cut/copy/paste, and a File menu that can save somewhere else.\n"
+             "\n"
+             "Nothing here is precious - edit it.\n"},
+            {PATH_HOME_DIR "hello.sh",
+             "#!/bin/sh\n"
+             "# A script is a program here. Run it from the terminal as\n"
+             "#   /home/hello.sh\n"
+             "echo \"hello from $SHELL\"\n"
+             "pwd\n"
+             "echo \"there are these programs:\"\n"
+             "ls /bin\n"},
+        };
+        for (size_t i = 0; i < sizeof(FIRST_BOOT) / sizeof(FIRST_BOOT[0]); i++) {
+            if (vfs_exists(FIRST_BOOT[i].path)) {
+                continue;
+            }
+            size_t len = 0;
+            while (FIRST_BOOT[i].body[len]) {
+                len++;
+            }
+            if (vfs_write(FIRST_BOOT[i].path, FIRST_BOOT[i].body, len) != 0) {
+                panic("vfs_write: failed to seed a first-boot file into " PATH_HOME);
+            }
         }
     }
 
@@ -7193,6 +7270,912 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     } else {
         klog_puts("[m73] no NIC on this machine - DNS and HTTP are present but untested "
                    "this boot.\n\n");
+    }
+
+    /* ---- M74 self-test: the session that remembers ----------------------
+     *
+     * Two halves, tested separately because they fail separately: a
+     * compositor that wrote a perfect session file and ignored it on
+     * startup, and one that restored beautifully from a file it never
+     * updated, are different bugs with the same symptom.
+     *
+     *   RESTORE - a session file is written by hand naming a program and
+     *     a position the default cascade would never choose, a compositor
+     *     is started with the environment init gives it, and the window
+     *     has to appear *there*. Graded on the pixel, so a compositor
+     *     that read the file and placed the window anyway cannot pass.
+     *   SAVE - the file is then deleted out from under the running
+     *     compositor, and it has to write it again, naming the program
+     *     whose window is on screen.
+     *
+     * `gui_clock` is the fixture because it takes no arguments - which is
+     * all a restore can give it - fills a fixed colour, and stays up.
+     *
+     * The gate is an environment variable and this is the first caller in
+     * the project to pass one to process_spawnve deliberately. That is
+     * M75 being load-bearing rather than decorative: the previous attempt
+     * at this milestone gated on argv, which meant giving the
+     * compositor's `main` parameters it had never taken, and that change
+     * was one of the two suspects when the attempt was reverted.
+     */
+    {
+        int all_ok = 1;
+        const char *SESSION = PATH_ETC_DIR "session.conf";
+        const uint32_t CLOCK_BG = 0x00122438u;
+        /* Far from the cascade (which starts at 100,100), so a freshly
+         * placed window cannot land here by accident. */
+        static const char SAVED[] = "gui_clock 520 380 200 90 0\n";
+        /* Window-relative (10, 80): below the clock's text rows, so this
+         * is flat background rather than a glyph. */
+        const uint32_t PROBE_X = 530, PROBE_Y = 460;
+
+        if (do_syscall(SYS_writefile, (uint64_t)SESSION, (uint64_t)SAVED,
+                        sizeof(SAVED) - 1) != 0) {
+            panic("M74 self-test: could not write the session fixture");
+        }
+
+        size_t comp_bytes = 0;
+        uint8_t *comp_img = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+        const char *comp_argv[] = {PATH_BIN_DIR "compositor", 0};
+        const char *comp_envp[] = {"LEANOS_SESSION=1", 0};
+        task_t *comp = process_spawnve("compositor", comp_img, comp_bytes, comp_argv, comp_envp);
+        kfree(comp_img);
+        if (!comp) {
+            panic("M74 self-test: could not spawn a compositor");
+        }
+
+        if (!selftest_wait_for_pixel(PROBE_X, PROBE_Y, CLOCK_BG, 12000,
+                                      "the session to relaunch a window and place it")) {
+            klog_puts("[m74] the saved window was not brought back at its saved position\n");
+            all_ok = 0;
+        }
+
+        /* Now the other half. Delete the file, then CHANGE THE LAYOUT -
+         * a second window - because the compositor deliberately writes
+         * only when what it would write has changed. Deleting the file on
+         * its own is not a change to the session, and a save that fired
+         * anyway would be a save firing on a timer, which is what the
+         * signature exists to avoid. */
+        do_syscall(SYS_unlink, (uint64_t)SESSION, 0, 0);
+
+        size_t z_bytes = 0;
+        uint8_t *z_img = read_program(PATH_BIN_DIR "wm_zorder", &z_bytes);
+        task_t *second = process_spawn("wm_zorder", z_img, z_bytes, "s2 00C08040");
+        kfree(z_img);
+        /* No pixel assertion on this one, deliberately: where a second
+         * window lands depends on the cascade index, which depends on the
+         * restored window already occupying a slot - so a probe here
+         * would assert the cascade's arithmetic rather than the session's
+         * behaviour. Whether it connected at all is covered precisely by
+         * the file check below, which requires it by name. */
+        pit_sleep_ms(3000); /* connect, then the half-second save check */
+
+        static char written[256];
+        k_memset(written, 0, sizeof(written));
+        int64_t wn = vfs_read(SESSION, written, sizeof(written) - 1);
+        if (wn <= 0) {
+            klog_puts("[m74] the compositor did not write a session after the layout changed\n");
+            all_ok = 0;
+        } else {
+            written[wn] = '\0';
+            /* Both programs, because a session that named only the one it
+             * restored would be echoing its input rather than observing
+             * the desktop. */
+            if (!selftest_contains(written, "gui_clock") ||
+                !selftest_contains(written, "wm_zorder")) {
+                klog_puts("[m74] the session it wrote does not name both running programs: ");
+                klog_puts(written);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+
+        if (second) {
+            do_syscall(SYS_kill, (uint64_t)second->id, SIGKILL, 0);
+            selftest_reap(second);
+        }
+        do_syscall(SYS_kill, (uint64_t)comp->id, SIGKILL, 0);
+        selftest_reap(comp);
+        /* The window the restore relaunched is somebody's child too - it
+         * was spawned by the compositor, which has just been killed, so
+         * nothing else will ever reap it. Left for the M40 handoff check
+         * to notice otherwise. */
+        for (int i = 0; i < sched_task_count(); i++) {
+            task_t *o = sched_task_by_slot(i);
+            if (o && o->state != TASK_FREE && o->state != TASK_TERMINATED &&
+                k_strcmp(o->name, "gui_clock") == 0) {
+                do_syscall(SYS_kill, (uint64_t)o->id, SIGKILL, 0);
+                selftest_reap(o);
+            }
+        }
+        do_syscall(SYS_unlink, (uint64_t)SESSION, 0, 0);
+        console_init();
+        klog_use_console();
+
+        if (!all_ok) {
+            panic("M74 self-test: the desktop does not remember what was open");
+        }
+
+        klog_puts("[m74] the session remembers: a saved window relaunched and placed at its "
+                   "own coordinates rather than the cascade's - graded on the pixel, not on "
+                   "the file - and a session written naming both programs once a second "
+                   "window changed the layout - self-test passed.\n\n");
+    }
+
+    /* ---- M75 self-test: environment, and a place to stand --------------
+     *
+     * The milestone's own statement of what would prove this: "Two
+     * children spawned with different envp/cwd do a getenv/getcwd/open
+     * round trip using only *relative* names and land on two different
+     * real files - a relative path resolving correctly is the proof; an
+     * unchanged string coming back proves nothing."
+     *
+     * So nothing here is graded on what a child printed. Each child is
+     * given a different environment and started from a different
+     * directory, and what is checked is which *file* appeared and what is
+     * in it - a thing a broken implementation cannot fake by handing back
+     * the string it was passed.
+     *
+     * The negative is the half that catches the most likely wrong
+     * implementation: M75_ABSENT is set in this task's own environment
+     * and in neither child's. A kernel that ignored envp and handed every
+     * child its parent's environment would pass every positive check
+     * above and fail this one.
+     */
+    {
+        int all_ok = 1;
+        const char *DIR_A = PATH_TMP_DIR "m75a";
+        const char *DIR_B = PATH_TMP_DIR "m75b";
+        do_syscall(SYS_mkdir, (uint64_t)DIR_A, 0, 0);
+        do_syscall(SYS_mkdir, (uint64_t)DIR_B, 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75a/alpha"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75b/beta"), 0, 0);
+
+        /* This task's own environment, so the negative check below has
+         * something to be absent *from*. kernel_main is a kernel thread
+         * and has never had one; setting it here is also the only place
+         * in this project that exercises sched_set_env directly. */
+        static const char SELF_ENV[] = "M75_ABSENT=1\0M75_OUT=wrong\0M75_BODY=wrong";
+        sched_set_env(sched_current(), SELF_ENV, sizeof(SELF_ENV) - 1, 3);
+
+        size_t et_bytes = 0;
+        uint8_t *et_img = read_program(PATH_BIN_DIR "envtest", &et_bytes);
+        if (!et_img) {
+            panic("M75 self-test: /bin/envtest is not on this disk");
+        }
+
+        /* ---- child A: /tmp/m75a, writing "alpha" -------------------- */
+        if (do_syscall(SYS_chdir, (uint64_t)DIR_A, 0, 0) != 0) {
+            panic("M75 self-test: chdir into the fixture directory failed");
+        }
+        {
+            const char *argv[] = {PATH_BIN_DIR "envtest", 0};
+            const char *envp[] = {"M75_OUT=alpha", "M75_BODY=first", 0};
+            task_t *t = process_spawnve("envtest", et_img, et_bytes, argv, envp);
+            long rc = t ? do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) : -1;
+            if (rc != 0) {
+                klog_puts("[m75] the first child exited ");
+                klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+                klog_puts(" - see user_space/bin/envtest.c for what each code means\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- child B: /tmp/m75b, writing "beta", reached with ".." --
+         *
+         * The directory is changed with a *relative* path containing
+         * "..", which leanfs refuses outright (its own header says so) -
+         * so this only works if the syscall layer resolved it before the
+         * filesystem ever saw it. */
+        if (do_syscall(SYS_chdir, (uint64_t)"../m75b", 0, 0) != 0) {
+            klog_puts("[m75] `cd ../m75b` from /tmp/m75a did not resolve - \"..\" is not "
+                       "being normalized before leanfs sees it\n");
+            all_ok = 0;
+        }
+        {
+            char where[PATH_MAX_LEN];
+            k_memset(where, 0, sizeof(where));
+            long n = do_syscall(SYS_getcwd, (uint64_t)where, sizeof(where), 0);
+            if (n < 0 || k_strcmp(where, DIR_B) != 0) {
+                klog_puts("[m75] after `cd ../m75b` the directory is '");
+                klog_puts(where);
+                klog_puts("' rather than ");
+                klog_puts(DIR_B);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        {
+            const char *argv[] = {PATH_BIN_DIR "envtest", 0};
+            const char *envp[] = {"M75_OUT=beta", "M75_BODY=second", 0};
+            task_t *t = process_spawnve("envtest", et_img, et_bytes, argv, envp);
+            long rc = t ? do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) : -1;
+            if (rc != 0) {
+                klog_puts("[m75] the second child exited ");
+                klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        kfree(et_img);
+
+        /* ---- the grading: two files, in two places, with two bodies -- */
+        static const struct {
+            const char *path;
+            const char *expect;
+        } LANDED[] = {
+            {PATH_TMP_DIR "m75a/alpha", PATH_TMP_DIR "m75a first"},
+            {PATH_TMP_DIR "m75b/beta",  PATH_TMP_DIR "m75b second"},
+        };
+        for (size_t i = 0; i < sizeof(LANDED) / sizeof(LANDED[0]); i++) {
+            static char got[PATH_MAX_LEN + 64];
+            k_memset(got, 0, sizeof(got));
+            int64_t n = vfs_read(LANDED[i].path, got, sizeof(got) - 1);
+            if (n <= 0) {
+                klog_puts("[m75] nothing was written to ");
+                klog_puts(LANDED[i].path);
+                klog_puts(" - a relative open did not land in the caller's directory\n");
+                all_ok = 0;
+                continue;
+            }
+            got[n] = '\0';
+            if (k_strcmp(got, LANDED[i].expect) != 0) {
+                klog_puts("[m75] ");
+                klog_puts(LANDED[i].path);
+                klog_puts(" holds '");
+                klog_puts(got);
+                klog_puts("' rather than '");
+                klog_puts(LANDED[i].expect);
+                klog_puts("'\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- the shell, which is where a person meets all of this ----
+         *
+         * `cd` and `$VAR` were shell-local bookkeeping until this
+         * milestone and the shell's own header comment said so. A script
+         * is the shortest proof that they are not any more: it cds with a
+         * relative name, exports a variable, and runs /bin/env - a
+         * separate process - whose output has to contain that variable
+         * and whose file has to appear in the directory the cd chose. */
+        {
+            const char *SCRIPT = PATH_TMP_DIR "m75.sh";
+            const char *RESULT = PATH_TMP_DIR "m75a/fromsh";
+            static const char SH[] =
+                "#!/bin/sh\n"
+                "cd " PATH_TMP_DIR "\n"
+                "cd m75a\n"
+                "M75_SHELL=exported\n"
+                "export M75_SHELL\n"
+                "env > fromsh\n"
+                "pwd >> fromsh\n";
+            if (do_syscall(SYS_writefile, (uint64_t)SCRIPT, (uint64_t)SH,
+                            sizeof(SH) - 1) != 0) {
+                panic("M75 self-test: could not write the shell fixture");
+            }
+            do_syscall(SYS_unlink, (uint64_t)RESULT, 0, 0);
+            long pid = do_syscall(SYS_spawn, (uint64_t)SCRIPT, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m75] the shell fixture could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            static char shout[1024];
+            k_memset(shout, 0, sizeof(shout));
+            int64_t n = vfs_read(RESULT, shout, sizeof(shout) - 1);
+            if (n <= 0) {
+                klog_puts("[m75] `cd m75a` then `env > fromsh` produced nothing at ");
+                klog_puts(RESULT);
+                klog_puts(" - the shell's cd is still its own bookkeeping\n");
+                all_ok = 0;
+            } else {
+                shout[n] = '\0';
+                static const struct { const char *needle; const char *what; } WANT[] = {
+                    {"M75_SHELL=exported", "a shell assignment reaching a spawned program's environment"},
+                    {PATH_TMP_DIR "m75a",  "`pwd` reporting the directory two relative cds arrived at"},
+                };
+                for (size_t w = 0; w < sizeof(WANT) / sizeof(WANT[0]); w++) {
+                    if (!selftest_contains(shout, WANT[w].needle)) {
+                        klog_puts("[m75] the shell did not demonstrate ");
+                        klog_puts(WANT[w].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)SCRIPT, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)RESULT, 0, 0);
+        }
+
+        /* Back where this task started, so nothing after it inherits a
+         * directory it did not ask for - every self-test below spawns
+         * something. */
+        do_syscall(SYS_chdir, (uint64_t)"/", 0, 0);
+        sched_release_env(sched_current());
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75a/alpha"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75b/beta"), 0, 0);
+        do_syscall(SYS_rmdir, (uint64_t)DIR_A, 0, 0);
+        do_syscall(SYS_rmdir, (uint64_t)DIR_B, 0, 0);
+
+        if (!all_ok) {
+            panic("M75 self-test: there is still nowhere to stand and nothing to stand there with");
+        }
+
+        klog_puts("[m75] environment and a place to stand: two children given different "
+                   "environments and started in different directories, each writing a file "
+                   "named only relatively and landing in its own, `..` normalized before "
+                   "leanfs ever saw it, and a shell whose cd and export are the real ones - "
+                   "self-test passed.\n\n");
+    }
+
+    /* ---- M76 self-test: a signal a program can catch --------------------
+     *
+     * The milestone's own statement of proof: "A self-test program
+     * installs a SIGINT handler; a driven Ctrl+C is asserted to run the
+     * handler and leave the process alive - still listed in SYS_taskinfo
+     * afterwards - rather than disappearing the way every process on this
+     * machine does today."
+     *
+     * So the grading here is deliberately two-sided, and the second side
+     * is the one that matters. A test that only checked "the handler ran"
+     * would pass on a kernel that ran the handler and then killed the
+     * process anyway, which is a kernel that has changed nothing. What is
+     * asserted is that the target is *still in the task table, in a
+     * living state, with the signal already handled* - and, right after
+     * it, that a process with no handler is killed by the same signal
+     * with the same 128+sig exit code it always had.
+     */
+    {
+        int all_ok = 1;
+        const char *READY = PATH_TMP_DIR "m76ready";
+        const char *ALIVE = PATH_TMP_DIR "m76alive";
+        do_syscall(SYS_unlink, (uint64_t)READY, 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)ALIVE, 0, 0);
+
+        size_t st_bytes = 0;
+        uint8_t *st_img = read_program(PATH_BIN_DIR "sigtest", &st_bytes);
+        if (!st_img) {
+            panic("M76 self-test: /bin/sigtest is not on this disk");
+        }
+        const char *st_argv[] = {PATH_BIN_DIR "sigtest", 0};
+        task_t *st = process_spawnv("sigtest", st_img, st_bytes, st_argv);
+        if (!st) {
+            panic("M76 self-test: could not spawn sigtest");
+        }
+        int st_pid = st->id;
+
+        /* It says when it is ready by creating a file - everything before
+         * that point (raise, the blocked-signal check, SIGCHLD) has to
+         * have passed for it to get there. A fixed sleep would be a race
+         * in whichever direction this boot happened to be slow. */
+        int ready = 0;
+        for (int i = 0; i < 300 && !ready; i++) {
+            if (vfs_exists(READY)) {
+                ready = 1;
+                break;
+            }
+            if (st->state == TASK_TERMINATED) {
+                break;
+            }
+            pit_sleep_ms(50);
+        }
+        if (!ready) {
+            klog_puts("[m76] sigtest never reached its ready point - it exited ");
+            klog_put_dec((uint32_t)st->exit_code);
+            klog_puts(" (see user_space/bin/sigtest.c for what each code means)\n");
+            all_ok = 0;
+        }
+
+        if (ready) {
+            /* The signal a Ctrl+C sends, sent the way gui_terminal now
+             * sends it: SYS_kill, from the process that started it. */
+            if (do_syscall(SYS_kill, (uint64_t)st_pid, SIGINT, 0) != 0) {
+                klog_puts("[m76] SYS_kill refused SIGINT - only the two that kill are accepted\n");
+                all_ok = 0;
+            }
+            int handled = 0;
+            for (int i = 0; i < 200 && !handled; i++) {
+                if (vfs_exists(ALIVE)) {
+                    handled = 1;
+                    break;
+                }
+                pit_sleep_ms(50);
+            }
+            if (!handled) {
+                klog_puts("[m76] the SIGINT handler never ran, or the process did not "
+                           "survive it - sigtest is ");
+                klog_puts(st->state == TASK_TERMINATED ? "terminated" : "still running");
+                klog_putc('\n');
+                all_ok = 0;
+            }
+
+            /* THE assertion: still listed, still living. Read through
+             * SYS_taskinfo rather than off the task_t, because "still
+             * listed in SYS_taskinfo" is the milestone's own wording and
+             * because it is what a task manager - and a person - would
+             * actually see. */
+            {
+                static task_info_t infos[TASK_INFO_MAX];
+                long n = do_syscall(SYS_taskinfo, (uint64_t)infos, TASK_INFO_MAX, 0);
+                int found_living = 0;
+                for (long i = 0; i < n; i++) {
+                    if (infos[i].pid == st_pid && infos[i].state != TASK_INFO_TERMINATED) {
+                        found_living = 1;
+                    }
+                }
+                if (!found_living) {
+                    klog_puts("[m76] after SIGINT, sigtest is not listed as a living task - "
+                               "a caught signal still killed it\n");
+                    all_ok = 0;
+                }
+            }
+
+            static char alive[64];
+            k_memset(alive, 0, sizeof(alive));
+            int64_t an = vfs_read(ALIVE, alive, sizeof(alive) - 1);
+            if (an <= 0 || !selftest_contains(alive, "handled-and-alive 1")) {
+                klog_puts("[m76] the handler ran a number of times other than once: '");
+                klog_puts(alive);
+                klog_puts("'\n");
+                all_ok = 0;
+            }
+
+            /* Let it finish: a second SIGUSR1 is its "you may go". Which
+             * is also a second delivery through the same trampoline, on a
+             * process that has already been through it once - the case a
+             * one-shot bug in the restorer would survive. */
+            do_syscall(SYS_kill, (uint64_t)st_pid, SIGUSR1, 0);
+            long code = do_syscall(SYS_wait, (uint64_t)st_pid, 0, 0);
+            if (code != 0) {
+                klog_puts("[m76] sigtest exited ");
+                klog_put_dec((uint32_t)code);
+                klog_puts(" - see user_space/bin/sigtest.c for what that code means\n");
+                all_ok = 0;
+            }
+        }
+        selftest_reap(st);
+
+        /* ---- and the other side: no handler, same signal, dead --------
+         *
+         * `hello` installs nothing, so SIGINT's default action applies.
+         * Without this check, a kernel that quietly ignored every signal
+         * it did not have a handler for would pass everything above.
+         *
+         * hello writes a line and exits 0 on its own, so it is signalled
+         * the moment it exists and the exit code is what distinguishes
+         * "killed by SIGINT" (130) from "finished normally" (0). */
+        {
+            size_t h_bytes = 0;
+            uint8_t *h_img = read_program(PATH_BIN_DIR "sh", &h_bytes);
+            /* /bin/sh with no argument reads stdin, which nothing here
+             * will ever write to - so it parks, which is exactly the
+             * process a default-action signal has to be able to reach.
+             * Chosen over a program that exits on its own precisely
+             * because "it was still running" is what makes the exit code
+             * below meaningful. */
+            const char *h_argv[] = {PATH_BIN_DIR "sh", 0};
+            task_t *h = process_spawnv("sh", h_img, h_bytes, h_argv);
+            kfree(h_img);
+            if (!h) {
+                panic("M76 self-test: could not spawn the default-action fixture");
+            }
+            pit_sleep_ms(300); /* long enough to reach its blocking read */
+            do_syscall(SYS_kill, (uint64_t)h->id, SIGINT, 0);
+            long code = do_syscall(SYS_wait, (uint64_t)h->id, 0, 0);
+            if (code != 128 + SIGINT) {
+                klog_puts("[m76] a process with no SIGINT handler exited ");
+                klog_put_dec((uint32_t)code);
+                klog_puts(" rather than 130 - the default action is not being applied\n");
+                all_ok = 0;
+            }
+            selftest_reap(h);
+        }
+        kfree(st_img);
+
+        do_syscall(SYS_unlink, (uint64_t)READY, 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)ALIVE, 0, 0);
+
+        if (!all_ok) {
+            panic("M76 self-test: a signal here is still only a way to end a program");
+        }
+
+        klog_puts("[m76] a signal a program can catch: a handler installed, entered "
+                   "through a frame on the process's own stack and returned from with "
+                   "every register intact, a blocked signal held until it was unblocked, "
+                   "a SIGCHLD that arrived without anyone polling, a SIGINT survived - and "
+                   "the same SIGINT still ending a process that installed nothing - "
+                   "self-test passed.\n\n");
+    }
+
+    /* ---- M77 self-test: POSIX names for what is already here ------------
+     *
+     * The milestone's own statement of proof: "A program written against
+     * only <dirent.h>, <sys/stat.h> and <unistd.h> - none of this
+     * project's own headers - walks a directory tree it knows nothing
+     * about ahead of time and prints what it finds, the way `find` or
+     * `du` would."
+     *
+     * /bin/treewalk is that program, and its include list is the part of
+     * it that matters. What is graded here is its output against a tree
+     * built right below - two levels, two sizes, and one name at each
+     * level, so that a walker which listed only the top or which reported
+     * a size from the wrong entry fails on a specific line rather than on
+     * a total.
+     *
+     * Its stdout is pointed at a file with the same park/dup2/restore
+     * cycle the [fd] self-test above asserts, because the honest way to
+     * grade what a program printed is to read what it printed.
+     */
+    {
+        int all_ok = 1;
+        const char *ROOT = PATH_TMP_DIR "m77";
+        const char *SUB = PATH_TMP_DIR "m77/inner";
+        const char *OUT = PATH_TMP_DIR "m77out";
+
+        /* Torn down first as well as last: a previous boot on a disk this
+         * one did not format would otherwise leave a tree with extra
+         * entries in it, and the counts below are exact. */
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m77/inner/deep.bin"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m77/top.txt"), 0, 0);
+        do_syscall(SYS_rmdir, (uint64_t)SUB, 0, 0);
+        do_syscall(SYS_rmdir, (uint64_t)ROOT, 0, 0);
+
+        if (do_syscall(SYS_mkdir, (uint64_t)ROOT, 0, 0) != 0 ||
+            do_syscall(SYS_mkdir, (uint64_t)SUB, 0, 0) != 0) {
+            panic("M77 self-test: could not build the fixture tree");
+        }
+        static char eleven[11];
+        static char thirty[30];
+        k_memset(eleven, 'a', sizeof(eleven));
+        k_memset(thirty, 'b', sizeof(thirty));
+        if (do_syscall(SYS_writefile, (uint64_t)(PATH_TMP_DIR "m77/top.txt"),
+                        (uint64_t)eleven, sizeof(eleven)) != 0 ||
+            do_syscall(SYS_writefile, (uint64_t)(PATH_TMP_DIR "m77/inner/deep.bin"),
+                        (uint64_t)thirty, sizeof(thirty)) != 0) {
+            panic("M77 self-test: could not write the fixture files");
+        }
+
+        size_t tw_bytes = 0;
+        uint8_t *tw_img = read_program(PATH_BIN_DIR "treewalk", &tw_bytes);
+        if (!tw_img) {
+            panic("M77 self-test: /bin/treewalk is not on this disk");
+        }
+        long saved = do_syscall(SYS_dup2, 1, 9, 0);
+        long outfd = do_syscall(SYS_open, (uint64_t)OUT,
+                                 OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0);
+        if (saved < 0 || outfd < 0) {
+            panic("M77 self-test: could not redirect the walker's output");
+        }
+        do_syscall(SYS_dup2, (uint64_t)outfd, 1, 0);
+        const char *tw_argv[] = {PATH_BIN_DIR "treewalk", ROOT, 0};
+        task_t *tw = process_spawnv("treewalk", tw_img, tw_bytes, tw_argv);
+        long rc = tw ? do_syscall(SYS_wait, (uint64_t)tw->id, 0, 0) : -1;
+        do_syscall(SYS_dup2, (uint64_t)saved, 1, 0);
+        do_syscall(SYS_close, (uint64_t)saved, 0, 0);
+        do_syscall(SYS_close, (uint64_t)outfd, 0, 0);
+        kfree(tw_img);
+        if (rc != 0) {
+            klog_puts("[m77] treewalk exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_putc('\n');
+            all_ok = 0;
+        }
+
+        static char walked[2048];
+        k_memset(walked, 0, sizeof(walked));
+        int64_t wn = vfs_read(OUT, walked, sizeof(walked) - 1);
+        if (wn <= 0) {
+            klog_puts("[m77] the walker printed nothing\n");
+            all_ok = 0;
+        } else {
+            walked[wn] = '\0';
+            static const struct { const char *needle; const char *what; } WANT[] = {
+                {"f       11 " PATH_TMP_DIR "m77/top.txt",
+                 "a file at the top level, with the size <sys/stat.h> reported"},
+                {"d ", "a directory, told apart from a file by S_ISDIR"},
+                {"f       30 " PATH_TMP_DIR "m77/inner/deep.bin",
+                 "a file one level down, found by descending rather than by being told"},
+                {"total 41 byte(s) in 2 file(s), 1 director(ies)",
+                 "a total that adds up - which is what makes this a walk rather than a listing"},
+            };
+            for (size_t w = 0; w < sizeof(WANT) / sizeof(WANT[0]); w++) {
+                if (!selftest_contains(walked, WANT[w].needle)) {
+                    klog_puts("[m77] the walker did not demonstrate ");
+                    klog_puts(WANT[w].what);
+                    klog_putc('\n');
+                    all_ok = 0;
+                }
+            }
+            /* treewalk prints "!!" and keeps going whenever d_type and
+             * st_mode disagree, or a stat fails. Any of those is a real
+             * inconsistency between the two interfaces this milestone
+             * added, and it must not be possible to pass while printing
+             * one. */
+            if (selftest_contains(walked, "!!")) {
+                klog_puts("[m77] the walker reported an inconsistency:\n");
+                klog_puts(walked);
+                all_ok = 0;
+            }
+        }
+
+        /* ---- fstat, which is the one thing a path cannot answer -------
+         *
+         * Checked from here rather than inside treewalk because the case
+         * worth checking is a descriptor whose *name has since changed*,
+         * and building that inside a tree walker would make the walker
+         * about something else. */
+        {
+            const char *A = PATH_TMP_DIR "m77/named.txt";
+            const char *B = PATH_TMP_DIR "m77/renamed.txt";
+            do_syscall(SYS_unlink, (uint64_t)B, 0, 0);
+            do_syscall(SYS_writefile, (uint64_t)A, (uint64_t)thirty, sizeof(thirty));
+            long fd = do_syscall(SYS_open, (uint64_t)A, OPEN_READ, 0);
+            if (fd < 0) {
+                klog_puts("[m77] could not open the fstat fixture\n");
+                all_ok = 0;
+            } else {
+                if (do_syscall(SYS_rename, (uint64_t)A, (uint64_t)B, 0) != 0) {
+                    klog_puts("[m77] could not rename the fstat fixture out from under its fd\n");
+                    all_ok = 0;
+                }
+                os_stat_t st;
+                k_memset(&st, 0, sizeof(st));
+                if (do_syscall(SYS_fstat, (uint64_t)fd, (uint64_t)&st, 0) != 0 ||
+                    st.size != sizeof(thirty) || st.is_dir) {
+                    klog_puts("[m77] SYS_fstat could not describe a descriptor whose name "
+                               "had changed - which is the one question SYS_stat cannot answer\n");
+                    all_ok = 0;
+                }
+                /* And a descriptor that is not a file at all is refused
+                 * rather than described with invented numbers. */
+                int pfds[2];
+                if (do_syscall(SYS_pipe, (uint64_t)pfds, 0, 0) == 0) {
+                    if (do_syscall(SYS_fstat, (uint64_t)pfds[0], (uint64_t)&st, 0) != -1) {
+                        klog_puts("[m77] SYS_fstat invented a size and an mtime for a pipe\n");
+                        all_ok = 0;
+                    }
+                    do_syscall(SYS_close, (uint64_t)pfds[0], 0, 0);
+                    do_syscall(SYS_close, (uint64_t)pfds[1], 0, 0);
+                }
+                do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+            }
+            do_syscall(SYS_unlink, (uint64_t)B, 0, 0);
+        }
+
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m77/inner/deep.bin"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m77/top.txt"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)OUT, 0, 0);
+        do_syscall(SYS_rmdir, (uint64_t)SUB, 0, 0);
+        /* rmdir refuses a directory that is not empty, which is also the
+         * last assertion this block makes: if anything above left a file
+         * behind, this fails and the next boot's fixture would not be
+         * exact. */
+        if (do_syscall(SYS_rmdir, (uint64_t)ROOT, 0, 0) != 0) {
+            klog_puts("[m77] the fixture tree could not be removed - something is still in it\n");
+            all_ok = 0;
+        }
+        if (tw) {
+            selftest_reap(tw);
+        }
+
+        if (!all_ok) {
+            panic("M77 self-test: a program written against POSIX headers cannot walk this filesystem");
+        }
+
+        klog_puts("[m77] POSIX names for what is already here: a program including only "
+                   "<dirent.h>, <sys/stat.h> and <unistd.h> walked a tree it was not told "
+                   "the shape of, S_ISDIR and d_type agreed on every entry, the sizes added "
+                   "up, and fstat described a descriptor whose name had changed - "
+                   "self-test passed.\n\n");
+    }
+
+    /* ---- M78 self-test: memory that can be given back -------------------
+     *
+     * /bin/mmaptest carries the assertions a *program* can make - that a
+     * freed range is the one handed back next, that an interior hole is
+     * found, that fresh pages are zeroed, and that the refusals refuse.
+     * See that file; its exit code names which one failed.
+     *
+     * What is added here, and could not be added there, is the frame
+     * count. A program can see its own address space and cannot see the
+     * machine's physical memory, so "the pages actually came back" is a
+     * claim only the kernel can check - and it is the claim this
+     * milestone is really about. M19's sbrk could hand a *virtual*
+     * address back to a program's own free list all day without a single
+     * frame ever returning to the allocator.
+     */
+    {
+        int all_ok = 1;
+        uint64_t frames_before = pmm_free_frame_count();
+
+        size_t mt_bytes = 0;
+        uint8_t *mt_img = read_program(PATH_BIN_DIR "mmaptest", &mt_bytes);
+        if (!mt_img) {
+            panic("M78 self-test: /bin/mmaptest is not on this disk");
+        }
+        const char *mt_argv[] = {PATH_BIN_DIR "mmaptest", 0};
+        task_t *mt = process_spawnv("mmaptest", mt_img, mt_bytes, mt_argv);
+        long rc = mt ? do_syscall(SYS_wait, (uint64_t)mt->id, 0, 0) : -1;
+        kfree(mt_img);
+        if (rc != 0) {
+            klog_puts("[m78] mmaptest exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_puts(" - see user_space/bin/mmaptest.c for what each code means\n");
+            all_ok = 0;
+        }
+
+        /* Every frame back. Not "roughly" - exactly, because a mapping
+         * that leaked one page per round is the failure this counts, and
+         * an approximate comparison would pass it. The process is gone by
+         * now, so its whole address space has been torn down too; what
+         * this proves together with mmaptest's own address checks is that
+         * munmap released frames at the time it was called, and that the
+         * arena is in process_destroy_address_space's owned list so the
+         * rest came back at exit. */
+        uint64_t frames_after = pmm_free_frame_count();
+        if (frames_after != frames_before) {
+            klog_puts("[m78] ");
+            klog_put_dec((uint32_t)(frames_before > frames_after
+                                     ? frames_before - frames_after : 0));
+            klog_puts(" frame(s) did not come back from a process that mapped 64 pages, "
+                       "freed them, and exited\n");
+            all_ok = 0;
+        }
+
+        /* ---- and the same claim, made from inside the kernel ---------
+         *
+         * A second process that maps and munmaps *without exiting*, so
+         * that "the frames came back" is separated from "the address
+         * space was torn down". Driven as a kernel-side count around a
+         * live process, which is the only place both numbers are
+         * visible at once.
+         *
+         * mmaptest already unmaps everything it made before returning,
+         * so what this measures is precisely the munmap path: if munmap
+         * unmapped without freeing, the count would still be short here
+         * and would only be made whole by the exit above. */
+        if (all_ok) {
+            uint64_t mid_before = pmm_free_frame_count();
+            const char *again[] = {PATH_BIN_DIR "mmaptest", 0};
+            uint8_t *again_img = read_program(PATH_BIN_DIR "mmaptest", &mt_bytes);
+            task_t *m2 = again_img
+                             ? process_spawnv("mmaptest", again_img, mt_bytes, again)
+                             : (task_t *)0;
+            if (m2) {
+                do_syscall(SYS_wait, (uint64_t)m2->id, 0, 0);
+            }
+            kfree(again_img);
+            if (pmm_free_frame_count() != mid_before) {
+                klog_puts("[m78] a second map/free/exit round did not return every frame\n");
+                all_ok = 0;
+            }
+            if (m2) {
+                selftest_reap(m2);
+            }
+        }
+        if (mt) {
+            selftest_reap(mt);
+        }
+
+        if (!all_ok) {
+            panic("M78 self-test: this machine still cannot take a page back");
+        }
+
+        klog_puts("[m78] memory that can be given back: 64 pages mapped and touched, half "
+                   "released and the *same addresses* handed out again rather than the arena "
+                   "growing, an interior hole reused, a shared or file-backed mapping refused "
+                   "by name, malloc routing a repeated 1 MiB allocation through it without "
+                   "growing the process, and every frame back at the end - self-test passed.\n\n");
+    }
+
+    /* ---- M79 self-test: two threads, one address space ------------------
+     *
+     * /bin/threadtest carries the assertions a program can make - the
+     * classic two-threads-one-counter test, that memory really is
+     * shared, that the two report different tids and the same pid, and
+     * that each one's floating-point state survives being interleaved
+     * with the other's. See that file; its exit code names which failed.
+     *
+     * What is added here is the half a program cannot see. From inside,
+     * a "thread" that was quietly a whole second process with its own
+     * page table would pass every check except the shared-memory one -
+     * so the kernel checks the thing that actually defines a thread:
+     * while both are running, two entries in the task table have the
+     * SAME pml4_phys. That has never been true on this machine before,
+     * and it is the one sentence this milestone is about.
+     */
+    {
+        int all_ok = 1;
+        size_t tt_bytes = 0;
+        uint8_t *tt_img = read_program(PATH_BIN_DIR "threadtest", &tt_bytes);
+        if (!tt_img) {
+            panic("M79 self-test: /bin/threadtest is not on this disk");
+        }
+        uint64_t frames_before = pmm_free_frame_count();
+
+        const char *tt_argv[] = {PATH_BIN_DIR "threadtest", 0};
+        task_t *tt = process_spawnv("threadtest", tt_img, tt_bytes, tt_argv);
+        kfree(tt_img);
+        if (!tt) {
+            panic("M79 self-test: could not spawn threadtest");
+        }
+
+        /* Caught while it is running, which is the only time the claim is
+         * observable at all. Polled rather than timed: the threads are
+         * created in the first instants of the program and live for the
+         * whole of it, so a short poll finds them, and a fixed sleep
+         * would be a guess about a machine whose speed varies. */
+        int shared_seen = 0;
+        int max_sharers = 0;
+        for (int i = 0; i < 400 && !shared_seen; i++) {
+            int count = sched_count_sharing_address_space(tt->pml4_phys);
+            if (count > max_sharers) {
+                max_sharers = count;
+            }
+            if (count >= 3) {
+                /* the leader and its two threads */
+                shared_seen = 1;
+                break;
+            }
+            if (tt->state == TASK_TERMINATED) {
+                break;
+            }
+            pit_sleep_ms(25);
+        }
+        if (!shared_seen) {
+            klog_puts("[m79] never saw three tasks sharing one page table - the most that "
+                       "ever did was ");
+            klog_put_dec((uint32_t)max_sharers);
+            klog_puts(", so a 'thread' here is still a process\n");
+            all_ok = 0;
+        }
+
+        long rc = do_syscall(SYS_wait, (uint64_t)tt->id, 0, 0);
+        if (rc != 0) {
+            klog_puts("[m79] threadtest exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_puts(" - see user_space/bin/threadtest.c for what each code means\n");
+            all_ok = 0;
+        }
+        selftest_reap(tt);
+
+        /* Every frame back, which is the assertion the last-one-out rule
+         * in task_exit_with_code exists for. A thread that tore the
+         * address space down when it exited would have taken the leader
+         * with it - a crash, not a leak - but a leader that tore it down
+         * and left the threads' stacks behind, or three tasks each
+         * declining to free because the others looked alive, is exactly
+         * a leak and exactly what this counts.
+         *
+         * Reaping every terminated thread first: their kernel stacks are
+         * heap rather than frames, but their slots have to go back or the
+         * next milestone's self-test starts from a smaller table. */
+        for (int i = 0; i < sched_task_count(); i++) {
+            task_t *o = sched_task_by_slot(i);
+            if (o && o->state == TASK_TERMINATED) {
+                selftest_reap(o);
+            }
+        }
+        uint64_t frames_after = pmm_free_frame_count();
+        if (frames_after != frames_before) {
+            klog_puts("[m79] ");
+            klog_put_dec((uint32_t)(frames_before > frames_after
+                                     ? frames_before - frames_after : 0));
+            klog_puts(" frame(s) did not come back from a process that ran two threads\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M79 self-test: this scheduler still cannot run two tasks in one address space");
+        }
+
+        klog_puts("[m79] two threads, one address space: three tasks on one page table at "
+                   "once, two million increments through a mutex arriving as exactly two "
+                   "million, memory written by one thread read by the other, separate tids "
+                   "under one pid, each thread's floating-point state surviving the other's, "
+                   "and every frame back when the last of them left - self-test passed.\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from

@@ -46,6 +46,16 @@ void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t 
  * difference. */
 int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt);
 
+/* M78: unmap `virt` in `pml4_phys` and return the physical frame that was
+ * mapped there, or 0 if nothing was. One step rather than a lookup
+ * followed by an unmap, so there is no window in which the mapping could
+ * change between the two - see the implementation's own note. The caller
+ * owns the returned frame and is the one that hands it to
+ * pmm_free_frame; this function deliberately does not, because the same
+ * primitive is the right one for a caller that wants to move a frame
+ * rather than release it. */
+uint64_t vmm_unmap_page_take(uint64_t pml4_phys, uint64_t virt);
+
 /* M52: is every page of [virt, virt + len) present, user-accessible and
  * (if need_write) writable in the address space rooted at pml4_phys?
  *

@@ -33,6 +33,7 @@
 #include "display.h" /* system_api/include/display.h - display_mode_t, M58 */
 #include "os_time.h" /* system_api/include/os_time.h - os_datetime_t, M59 */
 #include "os_net.h"  /* system_api/include/os_net.h - os_sockaddr_t/os_netconf_t, M64 */
+#include "mman.h"    /* system_api/include/mman.h - the PROT_ and MAP_ flags, M78 */
 #include "caps.h"    /* system_api/include/caps.h - CAP_*, M65 */
 #include "net/net.h"
 #include "net/socket.h"
@@ -193,6 +194,141 @@ static int copy_str_from_user(char *dst, uint64_t src, uint64_t max) {
     return -1;
 }
 
+/* ---- M75: a path, resolved against the caller's own directory --------
+ *
+ * kernel/fs/leanfs.h says it plainly: "every call below takes an
+ * absolute path", and "anything using '.' or '..' to climb" is refused,
+ * because the format stores neither. That was a true statement about a
+ * filesystem and a false one about an operating system - a working
+ * directory is a property of a *caller*, and leanfs has none, so this is
+ * the layer that owns it.
+ *
+ * Everything a path-taking syscall receives comes through here first:
+ *
+ *   - an absolute path is normalized and passed down
+ *   - a relative one is joined onto the calling task's cwd and normalized
+ *   - "." and ".." are resolved *textually*, here, before leanfs ever
+ *     sees them
+ *
+ * Textually, and that is the honest description rather than a shortcut:
+ * with no symbolic links on this machine, "/a/b/.." and "/a" name the
+ * same directory by construction, so there is nothing a lookup could
+ * tell us that the text does not already say. The day this filesystem
+ * grows links is the day that stops being true, and this comment is
+ * where it stops.
+ *
+ * Refuses rather than truncates when the result will not fit, the same
+ * rule copy_str_from_user follows and for the same reason.
+ */
+static int path_normalize(char *out, const char *in) {
+    /* A stack of component start offsets in `out`, so ".." can pop the
+     * last one without re-scanning. Depth is bounded by the path length,
+     * and LEANFS_MAX_PATH / 2 is the most components a path that short
+     * can hold ("/a/a/a..."). */
+    int starts[LEANFS_MAX_PATH / 2];
+    int depth = 0;
+    int n = 0;
+
+    if (in[0] != '/') {
+        return -1; /* callers join the cwd on first; this half only normalizes */
+    }
+    out[n++] = '/';
+
+    int i = 0;
+    while (in[i]) {
+        while (in[i] == '/') {
+            i++;
+        }
+        if (!in[i]) {
+            break;
+        }
+        /* One component, up to the next '/'. */
+        int c_start = i;
+        while (in[i] && in[i] != '/') {
+            i++;
+        }
+        int c_len = i - c_start;
+
+        if (c_len == 1 && in[c_start] == '.') {
+            continue; /* "." is where we already are */
+        }
+        if (c_len == 2 && in[c_start] == '.' && in[c_start + 1] == '.') {
+            if (depth > 0) {
+                n = starts[--depth];
+                /* Drop the '/' that preceded the component we just
+                 * removed, unless doing so would leave an empty path. */
+                if (n > 1) {
+                    n--;
+                }
+            }
+            /* ".." at the root is the root. Refusing here would make
+             * "cd .." from "/" an error, which no system does. */
+            continue;
+        }
+        if (c_len > LEANFS_MAX_NAME) {
+            return -1;
+        }
+        if (depth >= (int)(sizeof(starts) / sizeof(starts[0]))) {
+            return -1;
+        }
+        if (n > 1) {
+            if (n + 1 >= LEANFS_MAX_PATH) {
+                return -1;
+            }
+            out[n++] = '/';
+        }
+        starts[depth++] = n;
+        if (n + c_len >= LEANFS_MAX_PATH) {
+            return -1;
+        }
+        for (int k = 0; k < c_len; k++) {
+            out[n++] = in[c_start + k];
+        }
+    }
+    out[n] = '\0';
+    return 0;
+}
+
+/* Copies a path in from user space and resolves it. The one entry point
+ * every path-taking syscall below uses, so that "relative names work"
+ * is a property of the syscall layer rather than of whichever handlers
+ * remembered. */
+static int copy_path_from_user(char *out, uint64_t src) {
+    char raw[LEANFS_MAX_PATH];
+    if (copy_str_from_user(raw, src, sizeof(raw)) != 0) {
+        return -1;
+    }
+    if (raw[0] == '/') {
+        return path_normalize(out, raw);
+    }
+    /* Relative: join onto the caller's directory. Built in a second
+     * buffer because the join can be longer than either piece and
+     * path_normalize reads its input while writing its output. */
+    char joined[LEANFS_MAX_PATH * 2];
+    /* M79: the working directory belongs to the process, not the task -
+     * POSIX is explicit that a chdir in one thread is seen by all of
+     * them, and it is the same argument sched_vm_owner makes about the
+     * heap: two answers to a question that has one is a bug waiting. */
+    task_t *self = sched_vm_owner(sched_current());
+    const char *cwd = (self->cwd[0] == '/') ? self->cwd : "/";
+    int n = 0;
+    while (cwd[n] && n < LEANFS_MAX_PATH) {
+        joined[n] = cwd[n];
+        n++;
+    }
+    if (n == 0 || joined[n - 1] != '/') {
+        joined[n++] = '/';
+    }
+    for (int i = 0; raw[i]; i++) {
+        if (n >= (int)sizeof(joined) - 1) {
+            return -1;
+        }
+        joined[n++] = raw[i];
+    }
+    joined[n] = '\0';
+    return path_normalize(out, joined);
+}
+
 /* ---- M65: capabilities -----------------------------------------------
  *
  * One predicate, used at every gate. Deliberately a plain function
@@ -313,6 +449,14 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
                  * lockless variant, which closes it with a sequence
                  * counter instead - see sched.h. */
                 sched_block_on_seq(SCHED_KEYBOARD_CHAN, 0, seq);
+                /* M76: and a caught signal is a reason to stop waiting.
+                 * A shell parked here is exactly the process a Ctrl+C is
+                 * aimed at. Returning 0 rather than -1: every caller of
+                 * a blocking read on this machine already loops on a
+                 * short read, and the handler runs on the way out. */
+                if (sched_signal_pending()) {
+                    return (long)n;
+                }
                 continue;
             }
             dst[n++] = (char)c;
@@ -343,12 +487,32 @@ static long sys_exit(uint64_t code, uint64_t a2, uint64_t a3, uint64_t a4, uint6
     (void)a4;
     (void)a5;
     (void)a6;
+    /* M79: POSIX exit() ends a *process*, and a process is now more than
+     * one task. Every other thread in this group is SIGKILLed before
+     * this one leaves - they die at their next syscall or tick, and
+     * whichever of them is last out is the one that tears the address
+     * space down (see task_exit_with_code). Doing it in the other order
+     * would leave a thread running in an address space that had just
+     * been freed. */
+    sched_kill_thread_group(sched_current());
     task_exit_with_code((int)code); /* noreturn */
 }
 
-/* Task id doubles as pid - there's no process concept distinct from a
- * bare kernel thread. */
+/* M79: the thread GROUP's id. Identical to the task's own for anything
+ * that is not a thread, which is every task that existed before M79 -
+ * so nothing that called this before means anything different now. */
 static long sys_getpid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    return sched_current()->tgid;
+}
+
+static long sys_gettid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5, uint64_t a6) {
     (void)a1;
     (void)a2;
     (void)a3;
@@ -358,14 +522,69 @@ static long sys_getpid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint6
     return sched_current()->id;
 }
 
+/* ---- M79: the two calls that make a thread ----------------------------
+ *
+ * Deliberately small. The kernel makes a task in the caller's address
+ * space and drops it into ring 3 at an address the caller chose, on a
+ * stack the caller allocated; everything a pthread *is* - the start
+ * routine's return value, joining, detaching, a mutex - is built on top
+ * of that in user_space/libc/src/pthread.c, using memory the two threads
+ * now share. That split is not a shortcut: shared memory is exactly what
+ * makes a thread library implementable in user space, and a kernel that
+ * owned pthread_t would be a kernel with an opinion about a C library.
+ */
+static long sys_thread_create(uint64_t entry, uint64_t arg, uint64_t stack_top,
+                               uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    /* Both addresses have to be the caller's own, for the same reason a
+     * signal handler's does (sys_sigaction): the kernel is about to put
+     * them into a ring-3 iretq frame, and one that is not mapped in this
+     * address space is a fault the moment the thread starts, reported
+     * against a program that did nothing wrong at the point it looks
+     * wrong. */
+    if (entry < USER_REGION_BASE || entry >= USER_REGION_LIMIT) {
+        return -1;
+    }
+    if (stack_top < USER_REGION_BASE || stack_top >= USER_REGION_LIMIT) {
+        return -1;
+    }
+    /* The stack top must be 16-byte aligned, because that is what the
+     * SysV ABI requires at a function's entry and there is no `call`
+     * here to have pushed a return address. Checked rather than rounded:
+     * a stack silently moved from where the caller put it is a stack
+     * whose guard page is in the wrong place. */
+    if ((stack_top & 15) != 0) {
+        return -1;
+    }
+    if (!sched_has_free_task_slot()) {
+        return -1;
+    }
+    task_t *self = sched_current();
+    task_t *t = process_spawn_thread(self->name, entry, stack_top, arg);
+    return t ? (long)t->id : -1;
+}
+
+static long sys_thread_exit(uint64_t value, uint64_t a2, uint64_t a3, uint64_t a4,
+                             uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    /* This thread only. The address space outlives it if anybody else is
+     * still using it - see task_exit_with_code's last-one-out rule. */
+    task_exit_with_code((int)value); /* noreturn */
+}
+
 /* Combines fork+exec into one call: reads `path` from the filesystem and
  * loads it as a brand-new process via process_spawn (M9) - a fork/exec
  * "equivalent" (M13's own wording), not literal fork() semantics (no
  * address-space duplication). The child inherits the caller's whole fd
  * table (sched.c's task_spawn_common), so a pipe set up beforehand
  * carries over. */
-static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    (void)a3;
+static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
     (void)a6;
@@ -376,7 +595,12 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
      * this kernel cannot read at all, which is what an unmapped pointer
      * amounts to. */
     char path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
+    /* M75: resolved against the caller's directory like every other path
+     * this kernel is handed. `sh ./script` and a launcher spawning
+     * something out of the directory it is sitting in both depend on it,
+     * and a spawn is the one path-taking call where "it silently did not
+     * exist" is the least useful possible answer. */
+    if (copy_path_from_user(path, path_ptr) != 0) {
         return SPAWN_ERR_NOT_FOUND;
     }
     /* M60: a real argument vector, copied in one string at a time.
@@ -432,6 +656,50 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
     }
     argv[argc] = (const char *)0;
 
+    /* ---- M75: the environment -----------------------------------------
+     *
+     * Copied in exactly the way argv above is, and for exactly the same
+     * reasons: the array is user memory and every pointer in it is a
+     * user pointer, so neither is trusted (M52). A NULL `envp` is the
+     * inherit case and is passed straight through to
+     * process_spawnve_capped, which is the layer that can see the
+     * caller's own block.
+     *
+     * A separate heap buffer rather than more of argv's page: an
+     * environment is the larger of the two by an order of magnitude on
+     * any real system, and sharing one page would make a long PATH
+     * silently truncate the arguments. */
+    char *envbuf = (char *)0;
+    const char *envv[USER_ENV_MAX_VARS + 1];
+    const char *const *envp = (const char *const *)0;
+    if (envp_ptr) {
+        envbuf = (char *)kmalloc(USER_ENV_MAX_BYTES);
+        if (!envbuf) {
+            kfree(arg);
+            return SPAWN_ERR_NO_MEMORY;
+        }
+        int envc = 0;
+        size_t eused = 0;
+        for (int i = 0; envc < USER_ENV_MAX_VARS; i++) {
+            if (!user_range_ok(envp_ptr + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
+                break;
+            }
+            uint64_t slot = ((const uint64_t *)envp_ptr)[i];
+            if (slot == 0) {
+                break;
+            }
+            char *dst = envbuf + eused;
+            size_t room = USER_ENV_MAX_BYTES - eused;
+            if (room < 2 || copy_str_from_user(dst, slot, room) != 0) {
+                break; /* truncated at the last whole variable, as argv is */
+            }
+            envv[envc++] = dst;
+            eused += k_strlen(dst) + 1;
+        }
+        envv[envc] = (const char *)0;
+        envp = envv;
+    }
+
     /* M59: sized from the file rather than from the format's ceiling.
      * That ceiling used to be 72 KiB, which was a fine over-allocation;
      * double indirection made it 8 MiB, at which point "allocate the
@@ -442,17 +710,20 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
     leanfs_stat_t st;
     if (vfs_stat(path, &st) != 0 || st.is_dir) {
         kfree(arg);
+        kfree(envbuf);
         return SPAWN_ERR_NOT_FOUND;
     }
     uint8_t *image = (uint8_t *)kmalloc(st.size ? st.size : 1);
     if (!image) {
         kfree(arg);
+        kfree(envbuf);
         return SPAWN_ERR_NO_MEMORY;
     }
     int64_t size = vfs_read(path, image, st.size);
     if (size < 0) {
         kfree(image);
         kfree(arg);
+        kfree(envbuf);
         return SPAWN_ERR_NOT_FOUND;
     }
 
@@ -496,6 +767,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
         kfree(image);
         if (n == 0) {
             kfree(arg);
+            kfree(envbuf);
             return SPAWN_ERR_BAD_IMAGE; /* "#!" with no interpreter names nothing */
         }
 
@@ -522,11 +794,13 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
         leanfs_stat_t ist;
         if (vfs_stat(interp, &ist) != 0 || ist.is_dir) {
             kfree(arg);
+            kfree(envbuf);
             return SPAWN_ERR_NOT_FOUND;
         }
         uint8_t *iimage = (uint8_t *)kmalloc(ist.size ? ist.size : 1);
         if (!iimage) {
             kfree(arg);
+            kfree(envbuf);
             return SPAWN_ERR_NO_MEMORY;
         }
         int64_t isize = vfs_read(interp, iimage, ist.size);
@@ -537,11 +811,13 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
             !elf_validate(iimage, (size_t)isize)) {
             kfree(iimage);
             kfree(arg);
+            kfree(envbuf);
             return SPAWN_ERR_BAD_IMAGE;
         }
         if (!sched_has_free_task_slot()) {
             kfree(iimage);
             kfree(arg);
+            kfree(envbuf);
             return SPAWN_ERR_NO_TASK_SLOT;
         }
         const char *iname = interp;
@@ -550,9 +826,10 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
                 iname = c + 1;
             }
         }
-        task_t *it = process_spawnv(iname, iimage, (size_t)isize, shifted);
+        task_t *it = process_spawnve(iname, iimage, (size_t)isize, shifted, envp);
         kfree(iimage);
         kfree(arg);
+        kfree(envbuf);
         return it ? (long)it->id : SPAWN_ERR_NO_MEMORY;
     }
 
@@ -566,11 +843,13 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
     if (!elf_validate(image, (size_t)size)) {
         kfree(image);
         kfree(arg);
+        kfree(envbuf);
         return SPAWN_ERR_BAD_IMAGE;
     }
     if (!sched_has_free_task_slot()) {
         kfree(image);
         kfree(arg);
+        kfree(envbuf);
         return SPAWN_ERR_NO_TASK_SLOT;
     }
 
@@ -592,9 +871,10 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t a3, uint64_t
             name = c + 1;
         }
     }
-    task_t *t = process_spawnv(name, image, (size_t)size, argv);
+    task_t *t = process_spawnve(name, image, (size_t)size, argv, envp);
     kfree(image);
     kfree(arg);
+    kfree(envbuf);
     if (!t) {
         /* Everything else was checked above, so the only ways left to
          * fail are running out of frames while mapping the image or out
@@ -688,7 +968,7 @@ static long sys_readfile(uint64_t name_ptr, uint64_t buf, uint64_t maxlen, uint6
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(path, name_ptr, sizeof(path)) != 0 ||
+    if (copy_path_from_user(path, name_ptr) != 0 ||
         !user_range_ok(buf, maxlen, 1)) {
         return -1;
     }
@@ -706,7 +986,7 @@ static long sys_writefile(uint64_t name_ptr, uint64_t buf, uint64_t len, uint64_
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(path, name_ptr, sizeof(path)) != 0 ||
+    if (copy_path_from_user(path, name_ptr) != 0 ||
         !user_range_ok(buf, len, 0)) {
         return -1;
     }
@@ -729,7 +1009,7 @@ static long sys_unlink(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
+    if (copy_path_from_user(path, path_ptr) != 0) {
         return -1;
     }
     return vfs_unlink(path);
@@ -747,8 +1027,8 @@ static long sys_rename(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3, uint64_t
     (void)a6;
     char old_path[LEANFS_MAX_PATH];
     char new_path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(old_path, old_ptr, sizeof(old_path)) != 0 ||
-        copy_str_from_user(new_path, new_ptr, sizeof(new_path)) != 0) {
+    if (copy_path_from_user(old_path, old_ptr) != 0 ||
+        copy_path_from_user(new_path, new_ptr) != 0) {
         return -1;
     }
     return vfs_rename(old_path, new_path);
@@ -759,7 +1039,7 @@ static long sys_listdir(uint64_t path_ptr, uint64_t buf, uint64_t maxlen, uint64
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0 ||
+    if (copy_path_from_user(path, path_ptr) != 0 ||
         !user_range_ok(buf, maxlen, 1)) {
         return -1;
     }
@@ -780,7 +1060,7 @@ static long sys_mkdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, 
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
+    if (copy_path_from_user(path, path_ptr) != 0) {
         return -1;
     }
     return vfs_mkdir(path);
@@ -797,7 +1077,10 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
     (void)a4;
     (void)a5;
     (void)a6;
-    if (sig != SIGKILL && sig != SIGTERM) {
+    /* M76: every signal in signal.h, not the two that kill. sig 0 is the
+     * "does this pid exist and may I signal it" probe every `kill -0`
+     * in the world is, and delivers nothing. */
+    if ((long)sig < 0 || sig > SIG_MAX) {
         return -1;
     }
     task_t *t = sched_task_by_id((int)pid);
@@ -815,9 +1098,16 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
      * parent ids are never reassigned to form a cycle, but a bound costs
      * one comparison and a kernel that loops here hangs the machine. */
     task_t *self = sched_current();
-    int mine = 0;
+    /* M76: a process may always signal itself, with or without
+     * CAP_KILL_ANY. raise() is kill(getpid()) and nothing else, so
+     * without this the most ordinary use of a signal there is - a
+     * program telling itself something - would need the capability to
+     * kill *other people's* processes. The parent walk below answers a
+     * different question and answers it correctly; this one is not a
+     * relationship, it is identity. */
+    int mine = (t == self);
     task_t *up = t;
-    for (int depth = 0; up && depth < MAX_TASKS; depth++) {
+    for (int depth = 0; up && !mine && depth < MAX_TASKS; depth++) {
         if (up->parent_id == self->id) {
             mine = 1;
             break;
@@ -827,7 +1117,15 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
     if (!mine && !has_cap(CAP_KILL_ANY)) {
         return -1;
     }
-    t->pending_signal = (int)sig;
+    if (sig == 0) {
+        return 0; /* the permission probe, answered by getting this far */
+    }
+    /* M76: the *target's* disposition decides what happens, not this
+     * call - see sched_raise_signal. Before this milestone the two lines
+     * "t->pending_signal = sig" were the entire signal model, and they
+     * were correct precisely because the only two signals that existed
+     * both killed. */
+    sched_raise_signal(t, (int)sig);
     return 0;
 }
 
@@ -911,7 +1209,10 @@ static long sys_sbrk(uint64_t increment_u, uint64_t a2, uint64_t a3, uint64_t a4
     if (increment < 0) {
         return -1;
     }
-    task_t *cur = sched_current();
+    /* M79: the *address space's* break, not this task's. A thread shares
+     * a page table with its leader, so two independent breaks would each
+     * grow into the other's memory - see sched_vm_owner. */
+    task_t *cur = sched_vm_owner(sched_current());
     uint64_t old_brk = cur->heap_brk;
     uint64_t new_brk = old_brk + (uint64_t)increment;
     if (new_brk > USER_HEAP_LIMIT || new_brk < old_brk /* overflow */) {
@@ -989,7 +1290,10 @@ static long sys_shm_map(uint64_t id, uint64_t a2, uint64_t a3, uint64_t a4, uint
     if (size < 0) {
         return -1;
     }
-    task_t *cur = sched_current();
+    /* M79: through the address space's owner, for the same reason
+     * SYS_sbrk is - two threads with independent shm cursors would map
+     * two different segments on top of each other. */
+    task_t *cur = sched_vm_owner(sched_current());
     uint64_t vaddr = cur->shm_next_vaddr;
     if (shm_map_into((int)id, cur->pml4_phys, vaddr, VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
         return -1;
@@ -1533,7 +1837,7 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
+    if (copy_path_from_user(path, path_ptr) != 0) {
         return -1;
     }
     int writable = (flags & OPEN_WRITE) != 0;
@@ -1602,7 +1906,7 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
+    if (copy_path_from_user(path, path_ptr) != 0) {
         return -1;
     }
     leanfs_stat_t st;
@@ -1617,6 +1921,269 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
     return copy_to_user(out_ptr, &out, sizeof(out));
 }
 
+/* ---- M78: memory that can be given back --------------------------------
+ *
+ * M19 gave this OS one memory primitive - a growth-only sbrk - and its
+ * own ABI comment argued the case honestly: "a free-list allocator built
+ * on top never needs to give pages back". That was true for as long as
+ * the only allocator was one this project wrote. It stops being true the
+ * moment a program maps something large, uses it, and is finished with
+ * it: a bump allocator has no concept of a hole, so the pages behind a
+ * freed 4 MiB buffer stay this process's forever.
+ *
+ * The arena is a fixed window in the per-process layout (proc.h's
+ * USER_MMAP_BASE/LIMIT) and the bookkeeping is a sorted array in task_t.
+ * Sorted is what makes first-fit a single forward scan, and first fit
+ * over a *sorted* list is what makes "the pages you gave back are the
+ * pages you get next" true rather than accidental.
+ *
+ * Frames are allocated at the moment of the call rather than on a fault,
+ * because this kernel has no page-fault handler that could fill one in -
+ * a fault in ring 3 kills the task (M52). Lazy allocation would be a
+ * genuinely better mmap and it is a different milestone: it needs the
+ * fault handler to be able to tell "this address is inside a mapping
+ * that has not been backed yet" from "this program dereferenced null",
+ * which is exactly the table below plus a decision this project has not
+ * had to make.
+ */
+static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages) {
+    /* Inserts, keeping the array sorted by base with free slots (pages
+     * == 0) pushed to the end. Returns 0, or -1 if the table is full. */
+    int free_slot = -1;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (t->mmaps[i].pages == 0) {
+            free_slot = i;
+            break;
+        }
+    }
+    if (free_slot < 0) {
+        return -1;
+    }
+    /* Find where it belongs and shift the tail up by one. The array is
+     * 32 entries, so a memmove-shaped loop is cheaper than any structure
+     * that would avoid it. */
+    int at = free_slot;
+    for (int i = 0; i < free_slot; i++) {
+        if (t->mmaps[i].base > base) {
+            at = i;
+            break;
+        }
+    }
+    for (int i = free_slot; i > at; i--) {
+        t->mmaps[i] = t->mmaps[i - 1];
+    }
+    t->mmaps[at].base = base;
+    t->mmaps[at].pages = pages;
+    return 0;
+}
+
+static void mmap_slot_remove(task_t *t, int index) {
+    for (int i = index; i < MAX_MMAP_REGIONS - 1; i++) {
+        t->mmaps[i] = t->mmaps[i + 1];
+    }
+    t->mmaps[MAX_MMAP_REGIONS - 1].base = 0;
+    t->mmaps[MAX_MMAP_REGIONS - 1].pages = 0;
+}
+
+/* The first gap in the arena that `pages` will fit into, or 0. THE
+ * function this milestone is about: it walks the live mappings in
+ * address order and returns the first address with enough room *before*
+ * the next one, so a hole left by a munmap is found before the space
+ * past everything. A high-water mark would never look at a hole at all,
+ * which is precisely the difference the self-test grades. */
+static uint64_t mmap_find_gap(task_t *t, uint32_t pages) {
+    uint64_t need = (uint64_t)pages * PAGE_SIZE;
+    uint64_t candidate = USER_MMAP_BASE;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (t->mmaps[i].pages == 0) {
+            break; /* sorted, with free slots at the end - nothing live follows */
+        }
+        uint64_t start = t->mmaps[i].base;
+        uint64_t end = start + (uint64_t)t->mmaps[i].pages * PAGE_SIZE;
+        if (candidate + need <= start) {
+            return candidate;
+        }
+        if (end > candidate) {
+            candidate = end;
+        }
+    }
+    if (candidate + need <= USER_MMAP_LIMIT) {
+        return candidate;
+    }
+    return 0;
+}
+
+static long sys_mmap(uint64_t len, uint64_t prot, uint64_t flags, uint64_t a4,
+                      uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (len == 0) {
+        return -1;
+    }
+    /* Anonymous and private, and refused by name otherwise. A MAP_SHARED
+     * that quietly handed back private memory would be the kind of lie
+     * this project keeps declining to tell - two processes would each
+     * write to their own copy and neither would ever find out. */
+    if ((flags & MAP_ANONYMOUS) == 0 || (flags & MAP_PRIVATE) == 0 ||
+        (flags & MAP_SHARED) != 0 || (flags & MAP_FIXED) != 0) {
+        return -1;
+    }
+    /* PROT_NONE is refused rather than granted-and-ignored: there is no
+     * way to express "mapped but inaccessible" in a page table entry
+     * this kernel sets up, and a caller that asked for a guard page and
+     * got a writable one has a guard page that guards nothing. */
+    if ((prot & (PROT_READ | PROT_WRITE)) == 0) {
+        return -1;
+    }
+    uint64_t pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (pages > (USER_MMAP_LIMIT - USER_MMAP_BASE) / PAGE_SIZE) {
+        return -1;
+    }
+
+    /* M79: the arena belongs to the address space, not to the task -
+     * two threads with separate mmap tables would hand out the same
+     * addresses twice. sched_vm_owner is where that is decided. */
+    task_t *self = sched_vm_owner(sched_current());
+    if (self->pml4_phys == vmm_kernel_pml4_phys()) {
+        return -1; /* a kernel thread has no private region to map into */
+    }
+    uint64_t base = mmap_find_gap(self, (uint32_t)pages);
+    if (base == 0) {
+        return -1;
+    }
+    if (mmap_slot_cmp_insert(self, base, (uint32_t)pages) != 0) {
+        return -1; /* the table is full - see MAX_MMAP_REGIONS */
+    }
+
+    uint64_t page_flags = VMM_FLAG_USER | ((prot & PROT_WRITE) ? VMM_FLAG_WRITABLE : 0);
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t phys = pmm_alloc_frame();
+        if (phys == 0) {
+            /* Out of frames partway through. Undo exactly what was done -
+             * a half-mapped region would be a mapping whose second half
+             * faults, which is worse than no mapping at all. */
+            for (uint64_t j = 0; j < i; j++) {
+                uint64_t p = vmm_unmap_page_take(self->pml4_phys, base + j * PAGE_SIZE);
+                if (p) {
+                    pmm_free_frame(p);
+                }
+            }
+            for (int k = 0; k < MAX_MMAP_REGIONS; k++) {
+                if (self->mmaps[k].base == base && self->mmaps[k].pages == pages) {
+                    mmap_slot_remove(self, k);
+                    break;
+                }
+            }
+            return -1;
+        }
+        /* Zeroed, which is not a nicety - anonymous memory that handed a
+         * process the previous owner's bytes would leak one program's
+         * data into another's, and every mmap on every system promises
+         * zeros for exactly that reason. */
+        k_memset((void *)phys, 0, PAGE_SIZE);
+        vmm_map_page_in(self->pml4_phys, base + i * PAGE_SIZE, phys, page_flags);
+    }
+    return (long)base;
+}
+
+static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
+                        uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if ((addr & (PAGE_SIZE - 1)) != 0 || len == 0) {
+        return -1;
+    }
+    uint64_t end = addr + ((len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+    if (end <= addr) {
+        return -1; /* wrapped */
+    }
+    /* Bounded to the caller's own arena, so this can unmap what SYS_mmap
+     * made and nothing else - not its code, not its stack, not the
+     * framebuffer. Same rule and the same reason as SYS_shm_unmap's. */
+    if (addr < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
+        return -1;
+    }
+    task_t *self = sched_vm_owner(sched_current()); /* M79 - see sys_mmap */
+
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (self->mmaps[i].pages == 0) {
+            break;
+        }
+        uint64_t rstart = self->mmaps[i].base;
+        uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+        uint64_t cut_start = addr > rstart ? addr : rstart;
+        uint64_t cut_end = end < rend ? end : rend;
+        if (cut_start >= cut_end) {
+            continue; /* no overlap with this mapping */
+        }
+        /* The frames first, whatever shape the cut turns out to be. */
+        for (uint64_t at = cut_start; at < cut_end; at += PAGE_SIZE) {
+            uint64_t phys = vmm_unmap_page_take(self->pml4_phys, at);
+            if (phys) {
+                pmm_free_frame(phys);
+            }
+        }
+        if (cut_start == rstart && cut_end == rend) {
+            mmap_slot_remove(self, i);
+            i--; /* the tail shifted down into this index */
+        } else if (cut_start == rstart) {
+            self->mmaps[i].base = cut_end;
+            self->mmaps[i].pages = (uint32_t)((rend - cut_end) / PAGE_SIZE);
+        } else if (cut_end == rend) {
+            self->mmaps[i].pages = (uint32_t)((cut_start - rstart) / PAGE_SIZE);
+        } else {
+            /* An interior range: one mapping becomes two. Needs a free
+             * slot, and a table with none has to refuse - after the
+             * frames are already gone, which is the honest ordering: the
+             * memory the caller asked to release IS released, and what
+             * fails is the bookkeeping for the tail. Reported so the
+             * caller knows the tail is no longer reachable. */
+            self->mmaps[i].pages = (uint32_t)((cut_start - rstart) / PAGE_SIZE);
+            if (mmap_slot_cmp_insert(self, cut_end,
+                                      (uint32_t)((rend - cut_end) / PAGE_SIZE)) != 0) {
+                return -1;
+            }
+            i = -1; /* the array was re-sorted underneath; rescan from the start */
+        }
+    }
+    /* A range that overlapped nothing is a success: the caller asked for
+     * those pages not to be mapped, and they are not. Every Unix answers
+     * this the same way and for the same reason. */
+    return 0;
+}
+
+/* M77: `struct stat` for an open descriptor. The one thing SYS_stat
+ * structurally cannot answer, because it takes a name and a descriptor
+ * outlives one. Only a file has an answer - see the ABI comment on why a
+ * pipe is refused rather than described. */
+static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
+                       uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (fd >= MAX_FDS) {
+        return -1;
+    }
+    fd_slot_t *slot = &sched_current()->fds[fd];
+    if (slot->type != FD_FILE) {
+        return -1;
+    }
+    leanfs_stat_t st;
+    if (vfs_handle_stat(slot->file->handle, &st) != 0) {
+        return -1;
+    }
+    os_stat_t out;
+    out.size = st.size;
+    out.mtime = st.mtime;
+    out.is_dir = st.is_dir;
+    out.reserved = 0;
+    return copy_to_user(out_ptr, &out, sizeof(out)) == 0 ? 0 : -1;
+}
+
 static long sys_rmdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     if (!has_cap(CAP_FS_WRITE)) {
         return -1; /* M65 */
@@ -1627,7 +2194,7 @@ static long sys_rmdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, 
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(path, path_ptr, sizeof(path)) != 0) {
+    if (copy_path_from_user(path, path_ptr) != 0) {
         return -1;
     }
     return vfs_rmdir(path);
@@ -2132,6 +2699,15 @@ static long sys_waitfds(uint64_t fds_ptr, uint64_t count, uint64_t timeout_ms,
          * even if no event ever arrives - which is what makes a frame
          * clock out of the same call. */
         sched_block_on_seq(SCHED_POLL_CHAN, deadline, seq);
+        /* M76: a caught signal ends the park. -2 is "nothing was ready",
+         * which every caller already handles by looping - and the
+         * handler runs before the next call, which is the entire point.
+         * A separate return code would be a third case for every one of
+         * those callers to get right in exchange for information none of
+         * them wants. */
+        if (sched_signal_pending()) {
+            return -2;
+        }
     }
 }
 
@@ -2189,6 +2765,159 @@ static long sys_klog_total(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 
 /* M71: see SYS_rename_replace. Same shape as sys_rename, and gated the
  * same way - it writes, so it needs CAP_FS_WRITE. */
+/* ---- M76: signals a program can catch ---------------------------------
+ *
+ * Three calls and one delivery point. The delivery point is the
+ * interesting one and it is at the bottom of this file, in
+ * syscall_handler, because that is the only place in this kernel that
+ * holds a ring-3 iretq frame it is about to return through *and* can
+ * modify it. An interrupt's return path could do the same and does not:
+ * see SYS_kill's ABI comment for what that costs and why it was not
+ * done here.
+ */
+static long sys_sigaction(uint64_t signo, uint64_t handler, uint64_t restorer,
+                           uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!SIG_IS_CATCHABLE((int)signo)) {
+        return -1;
+    }
+    task_t *self = sched_current();
+    /* A handler address must be inside the caller's own image, or the
+     * kernel would be pointing ring 3 at an address the caller cannot
+     * execute - which faults immediately and looks like a kernel bug.
+     * SIG_DFL_ADDR and SIG_IGN_ADDR are the two values that are not
+     * addresses at all. */
+    if (handler != SIG_DFL_ADDR && handler != SIG_IGN_ADDR) {
+        if (handler < USER_REGION_BASE || handler >= USER_REGION_LIMIT) {
+            return -1;
+        }
+        /* And a restorer, since without one the handler returns to
+         * whatever happens to be on the stack. Required rather than
+         * defaulted: there is no address the kernel could default it to
+         * that would be right for a program it did not link. */
+        if (restorer < USER_REGION_BASE || restorer >= USER_REGION_LIMIT) {
+            return -1;
+        }
+        self->sig_restorer = restorer;
+    }
+    long prev = (long)self->sig_handler[signo];
+    self->sig_handler[signo] = handler;
+    if (handler == SIG_IGN_ADDR || handler == SIG_DFL_ADDR) {
+        /* Anything already queued for a signal that has just stopped
+         * being caught would otherwise be delivered to an address that
+         * is no longer a handler. */
+        self->sig_pending &= ~(1u << signo);
+    }
+    return prev;
+}
+
+/* The mask the kernel will let a ring-3 program put back into RFLAGS.
+ * Carry/parity/adjust/zero/sign/direction/overflow, plus bit 1 which is
+ * architecturally always set, plus IF - which is not negotiable, so it is
+ * forced on below rather than taken from the frame. Everything else
+ * (IOPL, NT, RF, VM, AC, the virtual-interrupt bits) is either privileged
+ * or a way to make the next instruction behave in a way the caller could
+ * not otherwise ask for, and a sigreturn is not the place to grant it. */
+#define USER_RFLAGS_MASK 0x0000000000000CD5ULL
+#define RFLAGS_IF        0x0000000000000200ULL
+
+static long sys_sigreturn(uint64_t frame_ptr, uint64_t a2, uint64_t a3,
+                           uint64_t a4, uint64_t a5, uint64_t a6);
+
+static long sys_sigprocmask(uint64_t how, uint64_t mask, uint64_t old_out,
+                             uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *self = sched_current();
+    uint32_t previous = self->sig_blocked;
+    uint32_t want = (uint32_t)mask;
+    /* Silently cleared rather than refused - a program that asks to block
+     * "everything" is asking for a thing it can have almost all of, and
+     * failing the whole call would leave it with no idea which bit was
+     * the problem. */
+    want &= ~(1u << SIGKILL);
+    want &= ~(1u << SIGSEGV);
+    switch (how) {
+    case SIG_BLOCK:
+        self->sig_blocked |= want;
+        break;
+    case SIG_UNBLOCK:
+        self->sig_blocked &= ~want;
+        break;
+    case SIG_SETMASK:
+        self->sig_blocked = want;
+        break;
+    default:
+        return -1;
+    }
+    if (old_out && copy_to_user(old_out, &previous, sizeof(previous)) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* ---- M75: the working directory ---------------------------------------
+ *
+ * Not gated on a capability, deliberately. A process's own directory is
+ * a fact about itself, not authority over anything else - the same
+ * argument caps.h makes about SYS_fb_info and SYS_netconf, and the
+ * opposite of the one it makes about SYS_klog. Everything a chdir can
+ * then *reach* is still gated exactly as it was: a relative path
+ * resolves to an absolute one and meets CAP_FS_WRITE at the same door
+ * an absolute one always did.
+ */
+static long sys_chdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    char path[LEANFS_MAX_PATH];
+    if (copy_path_from_user(path, path_ptr) != 0) {
+        return -1;
+    }
+    /* Refused unless it is a directory that exists. A cd into a regular
+     * file, or into nothing, has to be an error rather than a quiet
+     * success: every relative path afterwards would resolve against a
+     * place that is not there, and the failure would surface as some
+     * unrelated open failing later. */
+    if (!vfs_is_dir(path)) {
+        return -1;
+    }
+    task_t *self = sched_vm_owner(sched_current()); /* M79 - see copy_path_from_user */
+    int i = 0;
+    for (; path[i] && i < PATH_MAX_LEN - 1; i++) {
+        self->cwd[i] = path[i];
+    }
+    self->cwd[i] = '\0';
+    return 0;
+}
+
+static long sys_getcwd(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64_t a4,
+                        uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *self = sched_vm_owner(sched_current()); /* M79 */
+    const char *cwd = (self->cwd[0] == '/') ? self->cwd : "/";
+    uint64_t len = 0;
+    while (cwd[len]) {
+        len++;
+    }
+    if (maxlen < len + 1) {
+        return -1; /* refused, not truncated - a short path names a different directory */
+    }
+    if (copy_to_user(buf, cwd, len + 1) != 0) {
+        return -1;
+    }
+    return (long)len;
+}
+
 static long sys_rename_replace(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
                                 uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
@@ -2200,8 +2929,8 @@ static long sys_rename_replace(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
     }
     char old_path[LEANFS_MAX_PATH];
     char new_path[LEANFS_MAX_PATH];
-    if (copy_str_from_user(old_path, old_ptr, sizeof(old_path)) != 0 ||
-        copy_str_from_user(new_path, new_ptr, sizeof(new_path)) != 0) {
+    if (copy_path_from_user(old_path, old_ptr) != 0 ||
+        copy_path_from_user(new_path, new_ptr) != 0) {
         return -1;
     }
     return vfs_rename_replace(old_path, new_path);
@@ -2278,6 +3007,17 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_rename_replace] = sys_rename_replace,
     [SYS_waitfds] = sys_waitfds,
     [SYS_idle_ticks] = sys_idle_ticks,
+    [SYS_chdir] = sys_chdir,
+    [SYS_getcwd] = sys_getcwd,
+    [SYS_sigaction] = sys_sigaction,
+    [SYS_sigreturn] = sys_sigreturn,
+    [SYS_sigprocmask] = sys_sigprocmask,
+    [SYS_fstat] = sys_fstat,
+    [SYS_mmap] = sys_mmap,
+    [SYS_munmap] = sys_munmap,
+    [SYS_thread_create] = sys_thread_create,
+    [SYS_thread_exit] = sys_thread_exit,
+    [SYS_gettid] = sys_gettid,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than
@@ -2306,13 +3046,185 @@ static int syscall_touches_net(uint64_t num) {
     }
 }
 
+/* ---- M76: getting into and out of a handler ---------------------------
+ *
+ * `regs` is the ring-3 frame this syscall is about to `iretq` back
+ * through. Both halves of a signal are edits to it:
+ *
+ *   deliver: save it onto the process's own stack, then point RIP at the
+ *            handler and RSP just below the saved copy - at a word
+ *            holding the restorer's address, so an ordinary `ret` out of
+ *            an ordinary C function lands there.
+ *   return:  read it back and put every field where it was.
+ *
+ * On the *process's* stack, not the kernel's, for the reason every Unix
+ * does it that way: a process may already be inside a handler when the
+ * next signal arrives, and one kernel-side saved context would be
+ * overwritten by it. A stack nests for free.
+ */
+static long sys_sigreturn(uint64_t frame_ptr, uint64_t a2, uint64_t a3,
+                           uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)frame_ptr;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    /* Never reached: syscall_handler intercepts SYS_sigreturn before
+     * dispatch, because restoring a context means writing every field of
+     * `regs` and the dispatch table's signature has no `regs` in it. The
+     * entry exists so the table has no hole at this number - a NULL entry
+     * would be a jump through a null pointer for a caller that guessed
+     * the number. */
+    return -1;
+}
+
+/* Returns 1 if a frame was built and `regs` now points at a handler. */
+static int signal_deliver(isr_regs_t *regs) {
+    task_t *self = sched_current();
+    uint32_t ready = self->sig_pending & ~self->sig_blocked;
+    if (ready == 0) {
+        return 0;
+    }
+    /* Only on the way back to ring 3. A kernel thread that called a
+     * syscall directly (kernel.c's self-tests do it constantly) has no
+     * ring-3 frame to build one on, and its "stack" is kernel heap. */
+    if ((regs->cs & 3) != 3) {
+        return 0;
+    }
+
+    int signo = 0;
+    for (int i = 1; i <= SIG_MAX; i++) {
+        if (ready & (1u << i)) {
+            signo = i;
+            break;
+        }
+    }
+    uint64_t handler = self->sig_handler[signo];
+    if (handler == SIG_DFL_ADDR || handler == SIG_IGN_ADDR) {
+        /* The disposition changed between raise and delivery. Drop it -
+         * sched_raise_signal is where a default action is decided, and
+         * re-deciding it here would apply it twice. */
+        self->sig_pending &= ~(1u << signo);
+        return 0;
+    }
+    if (self->sig_restorer == 0) {
+        self->sig_pending &= ~(1u << signo);
+        return 0;
+    }
+
+    /* 128 bytes of clearance below the interrupted RSP before the frame,
+     * then 16-byte alignment for the frame itself, then one word below it
+     * for the return address - which leaves RSP % 16 == 8 at the handler's
+     * first instruction, exactly as it is after a `call`. Getting that
+     * wrong does not fault; it makes any SSE spill inside the handler
+     * fault instead, some arbitrary distance away. */
+    uint64_t sp = regs->rsp;
+    sp -= 128;
+    sp -= sizeof(sig_frame_t);
+    sp &= ~15ULL;
+    uint64_t frame_addr = sp;
+    uint64_t new_rsp = sp - 8;
+
+    sig_frame_t frame;
+    frame.rax = regs->rax;
+    frame.rbx = regs->rbx;
+    frame.rcx = regs->rcx;
+    frame.rdx = regs->rdx;
+    frame.rsi = regs->rsi;
+    frame.rdi = regs->rdi;
+    frame.rbp = regs->rbp;
+    frame.r8 = regs->r8;
+    frame.r9 = regs->r9;
+    frame.r10 = regs->r10;
+    frame.r11 = regs->r11;
+    frame.r12 = regs->r12;
+    frame.r13 = regs->r13;
+    frame.r14 = regs->r14;
+    frame.r15 = regs->r15;
+    frame.rip = regs->rip;
+    frame.rflags = regs->rflags;
+    frame.rsp = regs->rsp;
+    frame.saved_blocked = self->sig_blocked;
+    frame.signo = (uint32_t)signo;
+
+    /* Written through copy_to_user, so a process whose stack has no room
+     * left gets its signal dropped rather than the kernel taking a fault
+     * writing into it. Dropped and *not* delivered as a default action:
+     * turning "your stack is full" into "you are killed by SIGINT" would
+     * report the wrong problem. */
+    if (copy_to_user(frame_addr, &frame, sizeof(frame)) != 0) {
+        self->sig_pending &= ~(1u << signo);
+        return 0;
+    }
+    uint64_t ret_addr = self->sig_restorer;
+    if (copy_to_user(new_rsp, &ret_addr, sizeof(ret_addr)) != 0) {
+        self->sig_pending &= ~(1u << signo);
+        return 0;
+    }
+
+    self->sig_pending &= ~(1u << signo);
+    /* The handler's own signal is blocked while it runs, and put back by
+     * sigreturn. Without this a signal arriving during its own handler
+     * re-enters it, which is a stack that grows until it does not. */
+    self->sig_blocked |= (1u << signo);
+
+    regs->rsp = new_rsp;
+    regs->rip = handler;
+    regs->rdi = (uint64_t)signo; /* void handler(int) - SysV's first argument */
+    regs->rax = 0;
+    return 1;
+}
+
+static int signal_return(isr_regs_t *regs) {
+    task_t *self = sched_current();
+    uint64_t frame_addr = regs->rdi;
+    sig_frame_t frame;
+    if ((regs->cs & 3) != 3) {
+        return -1;
+    }
+    if (copy_from_user(&frame, frame_addr, sizeof(frame)) != 0) {
+        return -1;
+    }
+    if (frame.rip < USER_REGION_BASE || frame.rip >= USER_REGION_LIMIT) {
+        return -1;
+    }
+    if (frame.rsp < USER_REGION_BASE || frame.rsp >= USER_REGION_LIMIT) {
+        return -1;
+    }
+    regs->rax = frame.rax;
+    regs->rbx = frame.rbx;
+    regs->rcx = frame.rcx;
+    regs->rdx = frame.rdx;
+    regs->rsi = frame.rsi;
+    regs->rdi = frame.rdi;
+    regs->rbp = frame.rbp;
+    regs->r8 = frame.r8;
+    regs->r9 = frame.r9;
+    regs->r10 = frame.r10;
+    regs->r11 = frame.r11;
+    regs->r12 = frame.r12;
+    regs->r13 = frame.r13;
+    regs->r14 = frame.r14;
+    regs->r15 = frame.r15;
+    regs->rip = frame.rip;
+    regs->rsp = frame.rsp;
+    /* Only the bits a ring-3 program could have set for itself anyway,
+     * plus IF forced on. A sigreturn is the one call whose argument is a
+     * register file, so this is the one place where "the caller chose
+     * this value" and "the CPU will load it" meet. */
+    regs->rflags = (frame.rflags & USER_RFLAGS_MASK) | RFLAGS_IF;
+    self->sig_blocked = frame.saved_blocked & ~(1u << SIGKILL) & ~(1u << SIGSEGV);
+    return 0;
+}
+
 void syscall_handler(isr_regs_t *regs) {
     /* Deliver a pending fatal signal before servicing the syscall the
      * caller actually asked for - this is the "next syscall entry"
      * checkpoint sys_kill's doc comment promises. A task that never
      * syscalls gets caught by sched.c's scheduler_tick instead. */
     task_t *self = sched_current();
-    if (self->pending_signal == SIGKILL || self->pending_signal == SIGTERM) {
+    if (self->pending_signal != 0) { /* M76 - see sched_deliver_pending_signal */
         int sig = self->pending_signal;
         self->pending_signal = 0;
         task_exit_with_code(128 + sig); /* noreturn */
@@ -2336,14 +3248,36 @@ void syscall_handler(isr_regs_t *regs) {
      * is bounded by a buffer copy. SYS_settime is deliberately not in the
      * set: it is the clock, reached from a network program but not itself
      * touching a byte of kernel/net. */
+    /* M76: intercepted before dispatch, because what it does is write
+     * every field of `regs` - including rax, which the dispatch below
+     * would then overwrite with a return value there is nowhere to put.
+     * A failed restore is -1 in rax and the caller keeps running, which
+     * is the only answer available: there is no context left to return
+     * to and killing the process for a malformed frame it did not
+     * construct would blame the wrong party. */
+    if (num == SYS_sigreturn) {
+        if (signal_return(regs) != 0) {
+            regs->rax = (uint64_t)-1;
+        }
+        return;
+    }
+
     if (syscall_touches_net(num)) {
         net_lock_acquire();
         regs->rax = (uint64_t)syscall_table[num](regs->rdi, regs->rsi, regs->rdx,
                                                   regs->rcx, regs->r8, regs->r9);
         net_lock_release();
+        signal_deliver(regs);
         return;
     }
 
     regs->rax = (uint64_t)syscall_table[num](regs->rdi, regs->rsi, regs->rdx,
                                               regs->rcx, regs->r8, regs->r9);
+    /* M76: the delivery point. After the syscall the caller asked for has
+     * produced its answer, and while `regs` still describes the ring-3
+     * context this is about to return to. A frame built here means the
+     * `iretq` at the end of syscall_common_stub lands in the handler
+     * instead of at the instruction after the caller's `int 0x80` - and
+     * the saved copy is what puts it back. */
+    signal_deliver(regs);
 }

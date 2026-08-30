@@ -73,8 +73,24 @@
  * program you add silently cannot be seeded" is the same shape of bug
  * this project has shipped three times behind an exactly-sized cap (M40,
  * M48, M50). 96 is that plus room for sixty more files, and costs 15
- * sectors of inode table instead of 7. */
-#define LEANFS_MAX_INODES           96
+ * sectors of inode table instead of 7.
+ *
+ * M74-M79: 96 -> 192, and it is the *fourth* time this project has
+ * shipped a bug that was really an exactly-sized cap - which is
+ * remarkable given that the paragraph above says so in as many words.
+ * Six new programs (env, envtest, sigtest, treewalk, mmaptest,
+ * threadtest) and two more seeded files in /home took the count from 56
+ * to 64 before a single self-test fixture existed, and the boot's own
+ * fixtures need the rest. It presented as `writefile failed` from four
+ * concurrent racers in the [m67] self-test - i.e. as a locking bug in a
+ * milestone that had nothing to do with it, which is exactly how a full
+ * inode table looks from the outside.
+ *
+ * 192 costs 32 sectors of inode table instead of 16, which is 8 KiB more
+ * of a 36 MiB image and 16 KiB more kernel BSS. The honest reason for
+ * doubling rather than adding twenty: the last three bumps were each
+ * "enough for what is here now", and each of them ran out. */
+#define LEANFS_MAX_INODES           192
 
 /* Total data region capacity. 65536 blocks = 32 MiB. Must be a multiple
  * of (LEANFS_BLOCK_SIZE * 8) so the bitmap lands on a whole number of
@@ -194,6 +210,12 @@ typedef struct {
 } leanfs_stat_t;
 
 int leanfs_stat(const char *path, leanfs_stat_t *out);
+
+/* M77: the same three fields, for an already-open handle. A handle IS an
+ * inode index here, so this is the path-resolution step of leanfs_stat
+ * with the resolution already done - which is exactly why SYS_fstat can
+ * answer for a file whose name has since changed. */
+int leanfs_handle_stat(int handle, leanfs_stat_t *out);
 
 /* ---- M59: descriptors ------------------------------------------------
  *

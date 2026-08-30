@@ -37,6 +37,7 @@
 #define LIST_FONT_H UI_FONT_SMALL_HEIGHT
 #include "str.h"
 #include "spawn_error.h" /* system_api/include/spawn_error.h - M48 */
+#include "recent.h" /* M74 - the recently-opened list */
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
@@ -116,6 +117,28 @@ static const char *status_text = "";
  * directory in this OS, so this is the app's own state and every path it
  * hands a syscall is built absolute from it. */
 static char cwd[PATH_MAX_LEN] = PATH_HOME;
+
+/* ---- M74: recently opened ---------------------------------------------
+ *
+ * A second thing the list can be showing: not a directory, but the files
+ * this machine was last asked to open (user_space/lib/recent.h). It is a
+ * mode rather than a real directory because it is not one - the entries
+ * come from several places at once and "up" from it means "back to where
+ * I was", not "the parent of a path".
+ *
+ * Reached from a button in the header rather than from a row in the list,
+ * and that is deliberate: a synthetic row would shift every real one down
+ * by an index, which is a thing three interactive tests measure and, more
+ * importantly, a thing a person's muscle memory measures. The header had
+ * no click handler at all before this, so the button costs nothing that
+ * was already there. */
+#define RECENT_BTN_W 62
+#define RECENT_BTN_X (LIST_W - RECENT_BTN_W - 6)
+static int recent_mode;
+static char recent_full[RECENT_MAX][PATH_MAX_LEN];
+/* Where the list was before Recent was opened, so leaving it goes back
+ * rather than to a fixed place. */
+static char recent_return[PATH_MAX_LEN];
 
 /* cwd + '/' + name, into out (PATH_MAX_LEN bytes). Returns 0, or -1 if
  * it would not fit - refused rather than truncated, since a truncated
@@ -311,6 +334,48 @@ static void refresh_list(void) {
     static char buf[LIST_BUF_SIZE];
     file_count = 0;
 
+    /* M74: the recents view. Row 0 is ".." exactly as it is in a real
+     * directory, so leaving is in the same place with the same gesture -
+     * and deliberately NOT sorted, because the order *is* the
+     * information: newest first is the whole point of a recents list, and
+     * a sort by name would throw away the only thing it knows. */
+    if (recent_mode) {
+        names[0][0] = '.';
+        names[0][1] = '.';
+        names[0][2] = '\0';
+        is_dir[0] = 1;
+        sizes[0] = 0;
+        mtimes[0] = 0;
+        file_count = 1;
+        int got = recent_load(recent_full, RECENT_MAX);
+        for (int i = 0; i < got && file_count < MAX_FILES; i++) {
+            const char *base = recent_full[i];
+            for (const char *c = recent_full[i]; *c; c++) {
+                if (*c == '/') {
+                    base = c + 1;
+                }
+            }
+            int col = 0;
+            for (; base[col] && col < MAX_NAME_LEN - 1; col++) {
+                names[file_count][col] = base[col];
+            }
+            names[file_count][col] = '\0';
+            is_dir[file_count] = 0;
+            os_stat_t st;
+            sizes[file_count] = 0;
+            mtimes[file_count] = 0;
+            if (sys_stat(recent_full[i], &st) == 0) {
+                sizes[file_count] = st.size;
+                mtimes[file_count] = st.mtime;
+            }
+            file_count++;
+        }
+        if (selected >= file_count) {
+            selected = file_count - 1;
+        }
+        return;
+    }
+
     /* M53: ".." first, and always at row 0, so leaving a directory is in
      * the same place every time rather than wherever it happened to sort.
      * Not present in the root, which has nowhere to go. */
@@ -402,6 +467,28 @@ static void open_selected(void) {
     if (selected < 0 || selected >= file_count) {
         return;
     }
+    /* M74: in the recents view every row but ".." is a file, and its path
+     * is the one recent_load handed back rather than anything built from
+     * a directory this window is standing in. */
+    if (recent_mode) {
+        if (is_dir[selected]) {
+            recent_mode = 0;
+            selected = -1;
+            scroll_top = 0;
+            status_text = "";
+            for (int i = 0; i < PATH_MAX_LEN; i++) {
+                cwd[i] = recent_return[i];
+            }
+            refresh_list();
+            return;
+        }
+        long rc = sys_spawn(PATH_BIN_DIR "text_editor", recent_full[selected - 1]);
+        status_text = rc < 0 ? spawn_error_message(rc) : "";
+        if (rc >= 0) {
+            recent_add(recent_full[selected - 1]);
+        }
+        return;
+    }
     if (is_dir[selected]) {
         /* M53: entering a directory, not launching anything. */
         if (names[selected][0] == '.' && names[selected][1] == '.') {
@@ -431,6 +518,14 @@ static void open_selected(void) {
      * opened looked exactly like a double-click that didn't register. */
     long rc = sys_spawn(PATH_BIN_DIR "text_editor", full);
     status_text = rc < 0 ? spawn_error_message(rc) : "";
+    if (rc >= 0) {
+        /* M74: recorded by whichever program did the opening, not by the
+         * editor alone - the whole value of a recents list is that every
+         * route into a file feeds it. The editor records it too, and
+         * recent_add moves rather than duplicates, so the two agreeing is
+         * free. */
+        recent_add(full);
+    }
 }
 
 /* The selected row's full path, or -1 if there is no ordinary file
@@ -449,6 +544,17 @@ static int selected_file_path(char *out) {
      * and nothing has asked for one. ".." is this window's own invention
      * and is never a target for anything. */
     if (names[selected][0] == '.' && names[selected][1] == '.' && names[selected][2] == '\0') {
+        return -1;
+    }
+    /* M74: the recents view is a list of files from all over the
+     * filesystem, so nothing here is "in" the directory this window would
+     * otherwise be showing - and rename, copy and delete all build their
+     * target from that directory. Refused rather than made to work: a
+     * recents list is for reopening things, and a delete that appeared to
+     * act on the row you were looking at while actually naming a
+     * different file would be the worst possible outcome. The row can
+     * still be opened, which is what it is for. */
+    if (recent_mode) {
         return -1;
     }
     return path_in_cwd(names[selected], out);
@@ -567,8 +673,8 @@ static void redraw(wm_window_t *win) {
          * proportional advance, "how many characters" is a property of
          * *which* characters. Trimming the head is the same walk from
          * the other end: drop leading characters until the rest fits. */
-        const char *shown = cwd;
-        int32_t avail = LIST_W - 12;
+        const char *shown = recent_mode ? "Recent" : cwd;
+        int32_t avail = RECENT_BTN_X - 12; /* M74: leave the header's Recent button room */
         if (gfx_text_width(gfx_ui_font(), shown) > avail) {
             avail -= gfx_char_advance(gfx_ui_font(), UI_G_ELLIPSIS);
             while (*shown && gfx_text_width(gfx_ui_font(), shown) > avail) {
@@ -580,6 +686,15 @@ static void redraw(wm_window_t *win) {
         } else {
             gfx_draw_text(&win->gfx, 6, 4, shown, LABEL_COLOR);
         }
+    }
+
+    /* M74: the Recent button, in the header's own right-hand end. Lit
+     * while the recents view is showing, so it reads as a place you are
+     * rather than only as a place you can go. */
+    {
+        uint32_t btn_bg = recent_mode ? SELECT_COLOR : COLS_BG;
+        gfx_fill_rect(&win->gfx, RECENT_BTN_X, 3, RECENT_BTN_W, HEADER_H - 6, btn_bg);
+        gfx_draw_text(&win->gfx, RECENT_BTN_X + 7, 4, "Recent", LABEL_COLOR);
     }
 
     /* M59: the column headings, and the sort control. The heading you
@@ -821,7 +936,28 @@ int main(void) {
                  * click on the same one reverses it. Same convention as
                  * every file list anywhere, and the reason the arrow
                  * glyph is drawn there. */
-                if (ev.y >= HEADER_H && ev.y < LIST_Y) {
+                if (ev.y < HEADER_H) {
+                    /* M74: the header's only clickable thing. Anywhere
+                     * else in it is the path bar, which is text. */
+                    if (ev.x >= RECENT_BTN_X && ev.x < RECENT_BTN_X + RECENT_BTN_W) {
+                        if (!recent_mode) {
+                            for (int i = 0; i < PATH_MAX_LEN; i++) {
+                                recent_return[i] = cwd[i];
+                            }
+                            recent_mode = 1;
+                        } else {
+                            recent_mode = 0;
+                            for (int i = 0; i < PATH_MAX_LEN; i++) {
+                                cwd[i] = recent_return[i];
+                            }
+                        }
+                        selected = -1;
+                        scroll_top = 0;
+                        status_text = "";
+                        refresh_list();
+                        changed = 1;
+                    }
+                } else if (ev.y >= HEADER_H && ev.y < LIST_Y) {
                     fm_sort_t want = SORT_NAME;
                     if (ev.x >= COL_DATE_X) {
                         want = SORT_DATE;

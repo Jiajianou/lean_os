@@ -349,7 +349,13 @@ void scheduler_tick_cpu(int cpu) {
      * expired should be runnable on this tick rather than the next one. */
     wake_expired(pit_get_ticks() * (1000 / PIT_HZ));
 
-    if (t->pending_signal == SIGKILL || t->pending_signal == SIGTERM) {
+    /* M76: any nonzero pending_signal at all, not just the two that used
+     * to be the only ones SYS_kill would accept. sched_raise_signal is
+     * now the only thing that sets this field, and it only ever sets it
+     * for a signal whose *disposition on this task* is death - a caught
+     * one goes in sig_pending instead. So "there is a fatal signal
+     * pending" and "pending_signal != 0" became the same statement. */
+    if (t->pending_signal != 0) {
         deliver_pending_signal_and_exit(t);
     }
     /* M69: aging. Nothing stays batch for more than a second without
@@ -420,6 +426,16 @@ void sched_init(void) {
      * this machine will ever hold is a subset of this one, arrived at by
      * a chain of spawns that can only narrow. */
     tasks[0].caps = CAP_ALL;
+    /* M75: the root of the other inheritance chain. Everything spawned on
+     * this machine descends from task 0, so its directory is what "/" as
+     * a default actually means - and BSS would otherwise leave it the
+     * empty string, which is not a path. */
+    tasks[0].tgid = tasks[0].id; /* M79: a process is its own thread group, and task 0 is a process */
+    tasks[0].cwd[0] = '/';
+    tasks[0].cwd[1] = '\0';
+    tasks[0].env_block = NULL;
+    tasks[0].env_len = 0;
+    tasks[0].env_count = 0;
     set_task_name(&tasks[0], "kernel");
     task_count = 1;
     current_task[0] = &tasks[0];
@@ -449,6 +465,12 @@ void sched_init_ap(int cpu_id) {
     t->reaped = 0;
     t->caps = CAP_ALL; /* M65: a kernel idle identity, which never enters ring 3 and never makes a syscall */
     t->is_idle = 1;    /* M68 */
+    t->tgid = t->id;   /* M79 */
+    t->cwd[0] = '/';   /* M75: never used - an idle identity makes no syscalls - but not left as the empty string */
+    t->cwd[1] = '\0';
+    t->env_block = NULL;
+    t->env_len = 0;
+    t->env_count = 0;
     set_task_name(t, "cpu-idle");
     current_task[cpu_id] = t;
     loaded_pml4_phys[cpu_id] = t->pml4_phys;
@@ -457,8 +479,17 @@ void sched_init_ap(int cpu_id) {
     irq_restore(flags);
 }
 
+/* M79: `thread_of` is NULL for everything that is not a thread, which is
+ * every caller that existed before this milestone. It is a parameter
+ * rather than something the one thread-creating caller sets afterwards
+ * for exactly the reason the M40 note further down gives about
+ * heap_brk: this task is schedulable the instant sched_lock drops, and a
+ * thread that ran for one instruction believing it was a process would
+ * consult its own (zero) heap break the first time it called malloc -
+ * a mapping at virtual address 0 and an immediate panic. Publishing a
+ * fully-initialised task is the only version of this that is correct. */
 static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
-                                  uint64_t heap_start, uint64_t shm_base) {
+                                  uint64_t heap_start, uint64_t shm_base, task_t *thread_of) {
     /* kmalloc takes its own lock (heap.c) - done before sched_lock so the
      * two are never nested in the reverse order anywhere in this kernel
      * (see heap.c's own note on lock ordering). */
@@ -516,6 +547,55 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->pgid = caller->pgid;
     t->pending_signal = 0;
     t->reaped = 0;
+    /* M75: the working directory is inherited exactly the way the fd
+     * table above is, and for the same reason - a child is launched *in*
+     * a place, and a launcher that had to pass one as an argument would
+     * be a launcher every program had to agree with. The environment is
+     * NOT copied here: it is set by process_spawnve after this returns,
+     * because that is the layer that knows whether the caller asked for
+     * inheritance or supplied one, and a kmalloc under sched_lock would
+     * invert this kernel's one lock ordering rule (heap before sched -
+     * see the note at the top of this function). */
+    for (int i = 0; i < PATH_MAX_LEN; i++) {
+        t->cwd[i] = caller->cwd[i];
+        if (!caller->cwd[i]) {
+            break;
+        }
+    }
+    if (!t->cwd[0]) {
+        t->cwd[0] = '/';
+        t->cwd[1] = '\0';
+    }
+    t->env_block = NULL;
+    t->env_len = 0;
+    t->env_count = 0;
+    /* M76: signal dispositions are reset, not inherited - a handler
+     * address belongs to the image that installed it, and this task is
+     * about to be given a different one. Done HERE, inside the same
+     * critical section that publishes the task as TASK_READY, for the
+     * same reason heap_brk is (see the M40 note below): the task is
+     * schedulable the instant the lock drops, and a slot whose previous
+     * occupant terminated without being reaped still holds that
+     * occupant's handler table. Doing it only in sched_reap_slot covers
+     * the recycled case and misses exactly that one. */
+    for (int i = 0; i <= SIG_MAX; i++) {
+        t->sig_handler[i] = SIG_DFL_ADDR;
+    }
+    t->sig_restorer = 0;
+    t->sig_pending = 0;
+    t->sig_blocked = 0;
+    /* M78: an empty arena. Not inherited for the same reason the heap
+     * cursor above is not: this is a fresh address space, so every
+     * address the parent had mapped means nothing here. */
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        t->mmaps[i].base = 0;
+        t->mmaps[i].pages = 0;
+    }
+    /* M79: a process is its own thread group; a thread belongs to the
+     * group of whoever created it. */
+    t->tgid = thread_of ? thread_of->tgid : t->id;
+    t->is_thread = thread_of ? 1 : 0;
+    t->exiting = 0;
     /* M65: inherited by default, and the spawn path narrows it
      * immediately afterward - see process_spawn_capped. Inheriting first
      * and narrowing second, rather than the other way round, means a
@@ -582,12 +662,12 @@ task_t *task_spawn(const char *name, void (*entry)(void *arg), void *arg) {
      * ring-3-only paths), so its user-VM cursors stay zero - the same
      * "meaningless, left zeroed" contract task_t's own field comments
      * already describe. */
-    return task_spawn_common(name, vmm_kernel_pml4_phys(), entry, arg, 0, 0);
+    return task_spawn_common(name, vmm_kernel_pml4_phys(), entry, arg, 0, 0, (task_t *)0);
 }
 
 task_t *task_spawn_in(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
                        uint64_t heap_start, uint64_t shm_base) {
-    return task_spawn_common(name, pml4_phys, entry, arg, heap_start, shm_base);
+    return task_spawn_common(name, pml4_phys, entry, arg, heap_start, shm_base, (task_t *)0);
 }
 
 /* Round-robin: scan forward from `from`, wrapping, for the next READY
@@ -928,7 +1008,19 @@ void schedule(void) {
 
 void sched_deliver_pending_signal(void) {
     task_t *t = current_task[smp_current_cpu()];
-    if (t->pending_signal == SIGKILL || t->pending_signal == SIGTERM) {
+    /* M76: any nonzero pending_signal, not just the two SYS_kill used to
+     * accept. sched_raise_signal only ever sets this field for a signal
+     * whose disposition on *this* task is death, so "a fatal signal is
+     * pending" and "pending_signal != 0" are now the same statement.
+     *
+     * Leaving the old pair of name comparisons here is what made a
+     * SIGINT sent to a process parked on the keyboard vanish: the task
+     * was woken, came back round to this check, matched neither name,
+     * and parked again - forever, and taking the boot with it. Worth
+     * recording because the symptom (a machine that stops with no
+     * message) is a long way from the cause (two enum values in a
+     * condition that had been correct for sixty milestones). */
+    if (t->pending_signal != 0) {
         deliver_pending_signal_and_exit(t); /* noreturn */
     }
 }
@@ -951,6 +1043,13 @@ void task_exit_with_code(int code) {
      * reader that the last writer went away, which is the whole point of
      * the refcount. */
     sched_release_fds(t);
+    /* M75: and its environment. Here rather than in sched_reap_slot for
+     * the same reason the fd table is here: this is the one place
+     * guaranteed to run exactly once per task, and a TERMINATED task that
+     * nobody ever reaps would otherwise hold a page of heap for the life
+     * of the machine. Nothing can read it after this point - a spawn is
+     * something a *running* task does. */
+    sched_release_env(t);
 
     /* M54: and the address space, which nothing has ever reclaimed - M29
      * documented the leak, M50 measured it at ~15 frames per dead
@@ -968,13 +1067,45 @@ void task_exit_with_code(int code) {
      * CR3 reload for the next task on the belief that its address space
      * was already loaded. pml4_phys itself is repointed at the kernel's
      * so nothing can later try to switch to a table that has been freed. */
+    /* ---- M79: whose address space is this, exactly? -------------------
+     *
+     * Until this milestone the answer was "this task's", because a task
+     * was a process. A thread shares a page table with the task that
+     * created it, so tearing it down here would pull the memory out from
+     * under whichever of them happened to exit first.
+     *
+     * The rule is last-one-out, and `exiting` is what makes it safe: it
+     * is set under sched_lock *before* the scan, so two threads leaving
+     * at the same moment cannot each see the other as a live user and
+     * both decline to free. The state cannot be set to TERMINATED this
+     * early instead - another CPU would be free to reap the slot and
+     * kfree the kernel stack this code is still running on. */
     if (t->pml4_phys != vmm_kernel_pml4_phys()) {
         int cpu = smp_current_cpu();
         uint64_t dead = t->pml4_phys;
+        int others = 0;
+        uint64_t eflags = irq_save_disable();
+        spin_lock(&sched_lock);
+        t->exiting = 1;
+        for (int i = 0; i < task_count; i++) {
+            task_t *o = &tasks[i];
+            if (o == t || o->state == TASK_FREE || o->state == TASK_TERMINATED || o->exiting) {
+                continue;
+            }
+            if (o->pml4_phys == dead) {
+                others = 1;
+                break;
+            }
+        }
+        spin_unlock(&sched_lock);
+        irq_restore(eflags);
+
         t->pml4_phys = vmm_kernel_pml4_phys();
         vmm_switch_address_space(t->pml4_phys);
         loaded_pml4_phys[cpu] = t->pml4_phys;
-        process_destroy_address_space(dead);
+        if (!others) {
+            process_destroy_address_space(dead);
+        }
     }
 
     t->exit_code = code;
@@ -987,6 +1118,24 @@ void task_exit_with_code(int code) {
      * final schedule() - after it there is no "here" to run in. */
     sched_wake_all((const void *)t);
     sched_wake_all(SCHED_POLL_CHAN);
+    /* M76: and tell whoever spawned this task that it is gone. SYS_wait's
+     * own ABI comment has named "more complete wait semantics" as
+     * deferred since M14, and this is that deferral coming due: a parent
+     * can now be *told* rather than having to poll SYS_task_alive on a
+     * quarter-second timer the way init.c still does.
+     *
+     * Raised here rather than at reap time on purpose - the fact worth
+     * reporting is "your child ended", and a parent that never reaps
+     * would otherwise never hear it. sched_raise_signal drops it if the
+     * parent installed no handler, which is SIGCHLD's default action and
+     * therefore what every process on this machine that predates this
+     * milestone gets: nothing at all. */
+    if (t->parent_id >= 0) {
+        task_t *parent = sched_task_by_id(t->parent_id);
+        if (parent && parent != t) {
+            sched_raise_signal(parent, SIGCHLD);
+        }
+    }
     schedule();
     /* Unreachable: a TERMINATED task is never picked again by pick_next,
      * so the context_switch inside that schedule() call never returns
@@ -1083,6 +1232,29 @@ void sched_reap_slot(task_t *t) {
     t->parent_id = -1;
     t->caps = 0; /* M65: a free slot holds no authority, so a stale pointer to one cannot lend any */
     sched_reset_fds_to_std(t);
+    /* M75: released at exit already; cleared here so a recycled slot can
+     * never start life pointing at freed heap even if some future exit
+     * path forgets. */
+    t->env_block = NULL;
+    t->env_len = 0;
+    t->env_count = 0;
+    t->sig_pending = 0;
+    t->sig_blocked = 0;
+    t->sig_restorer = 0;
+    for (int i = 0; i <= SIG_MAX; i++) {
+        t->sig_handler[i] = SIG_DFL_ADDR;
+    }
+    /* M78: the frames themselves went back with the address space in
+     * task_exit_with_code; this is the bookkeeping that described them. */
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        t->mmaps[i].base = 0;
+        t->mmaps[i].pages = 0;
+    }
+    t->is_thread = 0;
+    t->exiting = 0;
+    t->tgid = 0;
+    t->cwd[0] = '/';
+    t->cwd[1] = '\0';
     t->fds[0].type = FD_NONE; /* a free slot holds nothing at all, not even stdin/stdout */
     t->fds[1].type = FD_NONE;
     set_task_name(t, "");
@@ -1091,6 +1263,176 @@ void sched_reap_slot(task_t *t) {
     if (stack) {
         kfree(stack);
     }
+}
+
+void sched_wake_task(task_t *t) {
+    if (!t) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    event_seq++;
+    if (t->state == TASK_BLOCKED) {
+        blocked_count--;
+        t->state = TASK_READY;
+        t->prio = PRIO_INTERACTIVE;
+        t->full_slices = 0;
+        t->wait_chan = (const void *)0;
+        t->wake_deadline_ms = 0;
+    }
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+}
+
+task_t *sched_vm_owner(task_t *t) {
+    if (!t || !t->is_thread) {
+        return t;
+    }
+    task_t *leader = sched_task_by_id(t->tgid);
+    /* A thread that has outlived its leader keeps its own bookkeeping
+     * rather than dereferencing nothing. That state is then wrong in the
+     * sense that a second thread would disagree with it - but a wrong
+     * break is a bug in one program, and a null dereference here is the
+     * machine. */
+    return leader ? leader : t;
+}
+
+task_t *task_spawn_thread(const char *name, task_t *leader, void (*entry)(void *arg), void *arg) {
+    /* Same page table as the leader - which is the whole milestone in
+     * one argument. Heap and shm cursors are passed as zero because a
+     * thread does not have its own: every one of those fields is read
+     * through sched_vm_owner, which sends it to the leader's. */
+    return task_spawn_common(name, leader->pml4_phys, entry, arg, 0, 0, leader);
+}
+
+int sched_count_sharing_address_space(uint64_t pml4_phys) {
+    int n = 0;
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_FREE || tasks[i].state == TASK_TERMINATED) {
+            continue;
+        }
+        if (tasks[i].pml4_phys == pml4_phys) {
+            n++;
+        }
+    }
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+    return n;
+}
+
+void sched_kill_thread_group(task_t *t) {
+    if (!t) {
+        return;
+    }
+    int group = t->tgid;
+    /* Collected under the lock and signalled after it: sched_raise_signal
+     * takes sched_lock itself (through sched_wake_task), and this
+     * kernel's one rule about that lock is that it is never taken twice. */
+    task_t *victims[MAX_TASKS];
+    int n = 0;
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    for (int i = 0; i < task_count; i++) {
+        task_t *o = &tasks[i];
+        if (o == t || o->state == TASK_FREE || o->state == TASK_TERMINATED) {
+            continue;
+        }
+        if (o->tgid == group) {
+            victims[n++] = o;
+        }
+    }
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+    for (int i = 0; i < n; i++) {
+        sched_raise_signal(victims[i], SIGKILL);
+    }
+}
+
+void sched_raise_signal(task_t *t, int sig) {
+    if (!t || t->state == TASK_TERMINATED || t->state == TASK_FREE) {
+        return;
+    }
+    if (sig <= 0 || sig > SIG_MAX) {
+        return;
+    }
+    if (!SIG_IS_CATCHABLE(sig)) {
+        /* SIGKILL, and SIGSEGV if anything ever sends one. No handler,
+         * no mask, no argument. */
+        t->pending_signal = sig;
+        sched_wake_task(t);
+        return;
+    }
+    uint64_t h = t->sig_handler[sig];
+    if (h == SIG_IGN_ADDR) {
+        return;
+    }
+    if (h == SIG_DFL_ADDR) {
+        /* The default action, which is death for everything here except
+         * SIGCHLD. Being explicit about the one exception rather than
+         * carrying a table: this kernel has one signal whose default is
+         * to be ignored, and a table of one row is a table nobody reads. */
+        if (sig == SIGCHLD) {
+            return;
+        }
+        t->pending_signal = sig;
+        sched_wake_task(t);
+        return;
+    }
+    t->sig_pending |= (1u << sig);
+    /* Woken even if the signal is currently blocked: the mask decides
+     * when the handler *runs*, not whether the task should stop sleeping
+     * - and a task that unblocks the signal a moment later would
+     * otherwise sleep through it. */
+    sched_wake_task(t);
+}
+
+int sched_signal_pending(void) {
+    task_t *t = current_task[smp_current_cpu()];
+    return (t->sig_pending & ~t->sig_blocked) != 0;
+}
+
+/* ---- M75: the environment a task hands to its children --------------
+ *
+ * Stored packed - `count` back-to-back NUL-terminated strings in `len`
+ * bytes - rather than as an array of pointers, because that is the shape
+ * both of its consumers want: proc.c walks it once to lay strings into
+ * the child's argument region, and this function copies it wholesale.
+ * An array of pointers would be a second allocation and a second thing
+ * to free.
+ */
+void sched_release_env(task_t *t) {
+    char *block = t->env_block;
+    t->env_block = NULL;
+    t->env_len = 0;
+    t->env_count = 0;
+    if (block) {
+        kfree(block);
+    }
+}
+
+int sched_set_env(task_t *t, const char *block, uint32_t len, uint32_t count) {
+    if (!block || len == 0 || count == 0) {
+        sched_release_env(t);
+        return 0;
+    }
+    /* Allocated before the old one is dropped, so a failed copy leaves
+     * the task with the environment it already had rather than with
+     * none - the same "a failure should not also destroy what worked"
+     * rule the rest of this kernel's replace paths follow. */
+    char *copy = (char *)kmalloc(len);
+    if (!copy) {
+        return -1;
+    }
+    for (uint32_t i = 0; i < len; i++) {
+        copy[i] = block[i];
+    }
+    sched_release_env(t);
+    t->env_block = copy;
+    t->env_len = len;
+    t->env_count = count;
+    return 0;
 }
 
 /* M59: the one place a descriptor stops being held. Before this

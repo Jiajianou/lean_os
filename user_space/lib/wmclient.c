@@ -395,6 +395,10 @@ int wm_set_panel_overhang(int32_t window_id, int32_t rows) {
     return wm_send_action_value(window_id, WM_ACTION_SET_PANEL_OVERHANG, rows);
 }
 
+int wm_veto_shutdown(int32_t window_id) {
+    return wm_send_action(window_id, WM_ACTION_VETO_SHUTDOWN);
+}
+
 int wm_toggle_launcher(void) {
     /* -1 rather than a real id: this action never looks at one (see
      * WM_ACTION_TOGGLE_LAUNCHER), and passing the caller's own window

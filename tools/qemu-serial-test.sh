@@ -122,7 +122,17 @@ set -euo pipefail
 # been chosen for - it is just measured against something real now. The
 # boot prints its own time, so the next person to see this fail knows
 # immediately whether the machine got slower or the budget got tight.
-SECONDS_TO_RUN="${1:-240}"
+#
+# M75-M77: 240 -> 400. Three new self-tests, and two of them are the slow
+# kind for the reason every slow one here is slow: they spawn a real
+# program and wait for it. M75 runs two children and a shell script, M76
+# waits for a process to reach a ready point it announces by creating a
+# file (a fixed sleep would be a race in whichever direction the machine
+# was slow that boot) and then waits out a second process's death, and
+# M77 spawns a tree walker. 240 was measured *failing* mid-M76 at exactly
+# the point the boot printed its last line, which is the "one slow boot
+# from a false failure" case this number is always chosen to avoid.
+SECONDS_TO_RUN="${1:-400}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -233,6 +243,12 @@ REQUIRED_MARKERS=(
   "[m72] a script is a program:"
   "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m73] names, not numbers:"
+  "[m74] the session remembers:"
+  "[m75] environment and a place to stand:"
+  "[m76] a signal a program can catch:"
+  "[m77] POSIX names for what is already here:"
+  "[m78] memory that can be given back:"
+  "[m79] two threads, one address space:"
   "[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"

@@ -98,6 +98,9 @@
 #include "settings_file.h" /* M47: the desktop's three settings on disk - read once, below, before any client connects */
 #include "shortcuts.h" /* system_api/include/shortcuts.h - M49's one table of window-manager chords, shared with settings.c */
 #include "signal.h" /* system_api/include/signal.h - SIGTERM, M30's WM_ACTION_CLOSE */
+#include <stdlib.h> /* getenv - M74's session gate */
+
+#include "recent.h" /* M74 - the recently-opened list the launcher offers */
 #include "str.h"
 #include "syscall_wrappers.h"
 #include "wm.h"
@@ -742,6 +745,14 @@ static void z_raise(int idx) {
 static int launcher_open;
 static char launcher_entries[LAUNCHER_MAX_ENTRIES][LAUNCHER_NAME_MAX];
 static int launcher_entry_count;
+/* M74: the first `launcher_recent_count` entries are recently-opened
+ * FILES rather than programs, and `launcher_recent_path[i]` is the whole
+ * path each of them names. Kept as a prefix of the same list rather than
+ * as a second one, so filtering, arrow keys, scrolling and clicking all
+ * carry on working unchanged - the only place the difference matters is
+ * what launching one does. */
+static char launcher_recent_path[RECENT_MAX][PATH_MAX_LEN];
+static int launcher_recent_count;
 static int launcher_matches[LAUNCHER_MAX_ENTRIES];
 static int launcher_match_count;
 static int launcher_selected; /* index into launcher_matches, not into launcher_entries */
@@ -750,6 +761,30 @@ static char launcher_query[LAUNCHER_QUERY_MAX];
 static int launcher_query_len;
 /* M47: -1, POWER_OFF or POWER_REBOOT - see POWER_CONFIRM_NONE. */
 static int power_confirm = POWER_CONFIRM_NONE;
+/* ---- M74: one veto, with a timeout -------------------------------------
+ *
+ * M47's shutdown SIGTERMs everything and gives it a second. That is the
+ * right shape for a machine that is stopping and the wrong shape for a
+ * machine that is being *asked* to stop: an editor with unsaved changes
+ * cannot save in that second, and a longer grace period would not help -
+ * it would lose the same work later.
+ *
+ * So the question is asked before the stopping starts.
+ * `shutdown_pending_mode` is the mode that is waiting on an answer,
+ * `shutdown_deadline_ms` is when the silence counts as consent, and
+ * `shutdown_vetoed_by` is the window that objected. One veto is enough
+ * and the first one wins: the person is being told to go and look at
+ * something, and a list of three things to look at is not three times as
+ * useful. */
+static int shutdown_pending_mode = POWER_CONFIRM_NONE;
+static long shutdown_deadline_ms;
+static int shutdown_vetoed_by = -1;
+/* Long enough for a client to see the event, notice it has unsaved work
+ * and answer - which is one trip round its event loop, and every GUI
+ * program here runs one at least every 16 ms. Short enough that a
+ * desktop with nothing unsaved does not visibly hesitate when you ask it
+ * to switch off. */
+#define SHUTDOWN_QUERY_MS 600
 static int power_hover = POWER_CONFIRM_NONE; /* which Power button the cursor is over */
 
 /* M48: the live toasts, oldest first. A fixed array compacted on removal
@@ -2371,6 +2406,17 @@ static int rebuffer_window(int idx) {
  * SYS_pipe_poll already confirmed a full request is buffered) when a
  * whole wm_create_request_t is actually waiting. A brand-new window
  * takes focus immediately, same as most real window managers. */
+/* M74: the session type, and the one call the window-placement path makes
+ * into it. The implementations live further down next to the rest of the
+ * session module; only the shape has to be visible here. */
+typedef struct {
+    char program[24];
+    int32_t x, y, w, h;
+    int8_t workspace;
+    uint8_t claimed; /* a restored entry is used by the first window that matches it */
+} session_entry_t;
+static session_entry_t *session_claim(int client_pid);
+
 static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     if (sys_pipe_poll(req_read_fd) < (long)sizeof(wm_create_request_t)) {
         return;
@@ -2485,6 +2531,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
      * wm_create_request_t.panel_dock_h). Clamped rather than trusted:
      * 0 (every panel before M45) and anything past the buffer both mean
      * "dock the whole thing". */
+    session_entry_t *restored = 0; /* M74 - see the placement branch below */
     int32_t dock_h = (int32_t)height;
     if (req.panel && req.panel_dock_h > 0 && req.panel_dock_h < height) {
         dock_h = (int32_t)req.panel_dock_h;
@@ -2513,6 +2560,19 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
         int32_t cascade_y = 100 + idx * 40;
         int32_t bottom_fit = content_bottom_limit() - (int32_t)height;
         win->y = max_i32(min_i32(cascade_y, bottom_fit), content_top_limit());
+
+        /* M74: unless the last session said where this program's window
+         * was, in which case put it back. Clamped through the same limits
+         * the cascade uses, so a session saved at one resolution cannot
+         * place a window off a smaller screen - which is exactly the
+         * mistake a restore is most likely to make and the one that
+         * leaves a person with a window they cannot reach. */
+        restored = session_claim(req.client_pid);
+        if (restored) {
+            win->x = max_i32(min_i32(restored->x, (int32_t)fb_info.width - 40), 0);
+            int32_t rb = content_bottom_limit() - (int32_t)height;
+            win->y = max_i32(min_i32(restored->y, rb), content_top_limit());
+        }
     }
     win->w = (int32_t)width;
     win->h = req.panel ? dock_h : (int32_t)height;
@@ -2542,7 +2602,13 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     }
     /* M63: on whichever desktop is showing. A panel and the desktop
      * background get -1, which is every desktop - they are chrome. */
-    win->workspace = (req.panel || req.desktop) ? (int8_t)-1 : (int8_t)current_workspace;
+    /* M74: a restored window goes back to the desktop it was on, not to
+     * whichever one happens to be showing when it reconnects. Applied
+     * here rather than beside the geometry above because this line would
+     * otherwise overwrite it - the workspace is assigned after placement,
+     * and the restore has to win. */
+    win->workspace = (req.panel || req.desktop) ? (int8_t)-1
+                   : (restored ? restored->workspace : (int8_t)current_workspace);
     slot_x[idx] = 0;
     slot_w[idx] = -1; /* until the panel says otherwise - see taskbar_target */
     int ti = 0;
@@ -2876,6 +2942,27 @@ static void launcher_apply_filter(void) {
 static void launcher_reload(void) {
     static char buf[LAUNCHER_LIST_BUF];
     launcher_entry_count = 0;
+    /* M74: recents first, because "the thing I was just working on" is
+     * what a launcher opened with an empty query should be offering. They
+     * are shown by basename, which is both what a person recognises and
+     * what they will type - a launcher that made you type "/home/" to
+     * reach your own notes would be a file manager with a worse
+     * interface. */
+    launcher_recent_count = recent_load(launcher_recent_path, RECENT_MAX);
+    for (int i = 0; i < launcher_recent_count; i++) {
+        const char *base = launcher_recent_path[i];
+        for (const char *c = launcher_recent_path[i]; *c; c++) {
+            if (*c == '/') {
+                base = c + 1;
+            }
+        }
+        int col = 0;
+        for (; base[col] && col < LAUNCHER_NAME_MAX - 1; col++) {
+            launcher_entries[launcher_entry_count][col] = base[col];
+        }
+        launcher_entries[launcher_entry_count][col] = '\0';
+        launcher_entry_count++;
+    }
     long n = sys_listdir(PATH_BIN, buf, sizeof(buf));
     if (n <= 0) {
         return;
@@ -2928,7 +3015,22 @@ static void launcher_launch_selected(void) {
          * a path before it can be spawned. M48's error message stays -
          * a /bin entry can still fail to load (a truncated image, a full
          * task table), and that is now the only reason it ever will. */
-        const char *name = launcher_entries[launcher_matches[launcher_selected]];
+        int entry = launcher_matches[launcher_selected];
+        const char *name = launcher_entries[entry];
+        /* M74: a recent FILE opens in the editor; everything else is a
+         * program in /bin. Which one an entry is, is decided by where it
+         * sits in the list rather than by looking at the name - a program
+         * called "notes" and a file called "notes" would otherwise be the
+         * same string and the launcher would have to guess. */
+        if (entry < launcher_recent_count) {
+            long rc = sys_spawn(PATH_BIN_DIR "text_editor", launcher_recent_path[entry]);
+            if (rc < 0) {
+                toast_post(WM_NOTIFY_ERROR, name, spawn_error_message(rc));
+            }
+            child_track(rc);
+            launcher_set_open(0);
+            return;
+        }
         char path[PATH_MAX_LEN];
         if (path_join(path, PATH_BIN_DIR, name) != 0) {
             toast_post(WM_NOTIFY_ERROR, name, "Name too long to launch.");
@@ -2943,6 +3045,70 @@ static void launcher_launch_selected(void) {
     launcher_set_open(0);
 }
 
+/* ---- M74: asking before stopping ---------------------------------------
+ *
+ * Sends WM_EVENT_QUERY_SHUTDOWN to every window that opted into being
+ * asked things (confirm_close), and arms a deadline. If nothing opted in,
+ * there is nothing to wait for and the machine stops immediately, which
+ * is what every desktop with no editor open should do.
+ */
+static void shutdown_begin(int mode) {
+    int asked = 0;
+    wm_event_t ev;
+    ev.type = WM_EVENT_QUERY_SHUTDOWN;
+    ev.ch = 0;
+    ev.x = 0;
+    ev.y = 0;
+    ev.buttons = 0;
+    ev.wheel = 0;
+    ev.mods = 0;
+    ev.time_ms = (uint32_t)sys_uptime_ms();
+    for (int i = 0; i < window_count; i++) {
+        window_t *w = &windows[i];
+        if (!w->alive || !w->confirm_close) {
+            continue;
+        }
+        send_event(w, &ev);
+        asked++;
+    }
+    if (asked == 0) {
+        sys_shutdown(mode);
+        return; /* only reached if the kernel refused the mode, which it cannot for these two */
+    }
+    shutdown_pending_mode = mode;
+    shutdown_vetoed_by = -1;
+    shutdown_deadline_ms = sys_uptime_ms() + SHUTDOWN_QUERY_MS;
+}
+
+/* Called once per pass while a shutdown is waiting on an answer. */
+static void shutdown_tick(long now) {
+    if (shutdown_pending_mode == POWER_CONFIRM_NONE) {
+        return;
+    }
+    if (shutdown_vetoed_by >= 0) {
+        int idx = shutdown_vetoed_by;
+        const char *who = (idx >= 0 && idx < window_count && windows[idx].alive)
+                              ? windows[idx].title : "A program";
+        shutdown_pending_mode = POWER_CONFIRM_NONE;
+        shutdown_vetoed_by = -1;
+        /* Named, and focused. A message saying "something is unsaved"
+         * leaves a person opening windows to find out which; putting the
+         * window in front of them is the actual answer to the question
+         * the message raises. */
+        if (idx >= 0 && idx < window_count && windows[idx].alive) {
+            apply_window_action(idx, WM_ACTION_FOCUS, 0);
+        }
+        toast_post(WM_NOTIFY_WARN, who, "Unsaved changes - not shutting down.");
+        dirty = 1;
+        return;
+    }
+    if (now >= shutdown_deadline_ms) {
+        int mode = shutdown_pending_mode;
+        shutdown_pending_mode = POWER_CONFIRM_NONE;
+        sys_shutdown(mode);
+    }
+}
+
 /* Every keystroke while the launcher is up belongs to it - the one place
  * in this project where the compositor takes the keyboard away from the
  * focused window, and the reason a compositor-owned surface was justified
@@ -2955,10 +3121,11 @@ static void launcher_key(char ch) {
      * system that cannot be undone. */
     if (power_confirm != POWER_CONFIRM_NONE) {
         if (ch == 'y' || ch == 'Y' || ch == '\n' || ch == '\r') {
-            sys_shutdown(power_confirm);
-            /* Only reached if the kernel refused the mode, which it
-             * cannot for these two - fall through to cancelling rather
-             * than leaving a box up that did nothing. */
+            /* M74: ask before stopping. shutdown_begin either calls
+             * SYS_shutdown itself (nothing to ask) or arms the query and
+             * returns, in which case the main loop finishes the job when
+             * the deadline passes or a veto arrives. */
+            shutdown_begin(power_confirm);
         }
         power_confirm = POWER_CONFIRM_NONE;
         dirty = 1;
@@ -3422,10 +3589,71 @@ static void accept_pending_action(int action_read_fd) {
         mode_revert_at_ms = 0;
         return;
     }
+    /* M74: a client answering WM_EVENT_QUERY_SHUTDOWN. Ignored unless a
+     * shutdown is actually pending - a veto arriving at any other time
+     * names nothing and would otherwise arm a state nobody asked for. */
+    if (req.action == WM_ACTION_VETO_SHUTDOWN) {
+        if (shutdown_pending_mode != POWER_CONFIRM_NONE && shutdown_vetoed_by < 0) {
+            shutdown_vetoed_by = req.window_id;
+        }
+        return;
+    }
     if (req.window_id < 0 || req.window_id >= window_count || !windows[req.window_id].alive) {
         return;
     }
     apply_window_action(req.window_id, req.action, req.value);
+}
+
+/* ---- M74: the desktop survives a settings mistake ----------------------
+ *
+ * M58 gave the one setting that can genuinely make this machine
+ * unreachable - the resolution - a countdown that puts it back if nobody
+ * confirms. This milestone asks for the same protection "for anything
+ * else that can make the machine unusable from inside the Settings pane",
+ * and the honest answer to *what else* turned out not to be a pane
+ * control at all.
+ *
+ * Every colour the Settings pane offers is safe by construction: the
+ * swatches are six dark backgrounds and six bright accents, and no pair
+ * of them is unreadable. What is not safe is /etc/settings.conf, which is
+ * a plain text file on purpose (M47) and which a person can therefore set
+ * to `bg=FFFFFF` - white text on white, on a desktop with no other way in
+ * and no second machine to fix it from. A countdown cannot help there:
+ * the file is read at boot, and reverting it would need somebody to be
+ * watching a screen they cannot read.
+ *
+ * So the protection is a check rather than a timer, applied at BOTH doors
+ * - the file at startup and the pipe at runtime - and a rejected theme
+ * falls back to the compiled-in default rather than to the previous one:
+ * "the colours you can always read" is a fixed thing, and the previous
+ * value on a first boot is itself whatever the file said.
+ *
+ * The measure is ITU-R BT.601 luma, integer-only like everything else
+ * here, against the white this compositor draws every label and every
+ * window title in. 60 out of 255 is generous - the darkest offered
+ * swatch scores 22 against white's 255, and a background would have to be
+ * most of the way to white before it fails.
+ */
+static uint32_t luma_of(uint32_t rgb) {
+    uint32_t r = (rgb >> 16) & 0xFFu;
+    uint32_t g = (rgb >> 8) & 0xFFu;
+    uint32_t b = rgb & 0xFFu;
+    return (77u * r + 150u * g + 29u * b) >> 8; /* 0.299/0.587/0.114 in 8.8 fixed point */
+}
+
+#define THEME_MIN_CONTRAST 60u
+
+static int theme_is_readable(uint32_t bg, uint32_t accent) {
+    uint32_t white = luma_of(0x00FFFFFFu);
+    uint32_t lb = luma_of(bg);
+    uint32_t la = luma_of(accent);
+    uint32_t d_bg = white > lb ? white - lb : lb - white;
+    uint32_t d_ac = white > la ? white - la : la - white;
+    /* Both, because they carry text independently: the background is
+     * behind desktop icon labels and the accent is behind a focused
+     * window's title. A theme that fails either one has a piece of the
+     * desktop nobody can read. */
+    return d_bg >= THEME_MIN_CONTRAST && d_ac >= THEME_MIN_CONTRAST;
 }
 
 /* M33/M38: the compositor's two global (non-per-window) settings - see
@@ -3440,8 +3668,20 @@ static void accept_pending_settings(int settings_read_fd) {
     if (read_exact(settings_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
         return;
     }
-    bg_color = req.bg_color;
-    accent_color = req.accent_color;
+    /* M74: a theme nobody could read is refused rather than applied.
+     * Nothing the Settings pane offers can fail this - see
+     * theme_is_readable - so in practice this fires for a hand-written
+     * settings.conf and for a program driving the pipe directly, which
+     * are exactly the two callers with nobody watching. */
+    if (theme_is_readable(req.bg_color, req.accent_color)) {
+        bg_color = req.bg_color;
+        accent_color = req.accent_color;
+    } else {
+        bg_color = DEFAULT_BG_COLOR;
+        accent_color = TITLEBAR_FOCUS_COLOR;
+        toast_post(WM_NOTIFY_WARN, "Colours",
+                    "Those colours are unreadable - the defaults are back.");
+    }
     wallpaper_id = req.wallpaper;
     animations_enabled = req.animations != 0;
     audio_volume = req.volume > 100 ? 100 : req.volume;
@@ -4136,7 +4376,281 @@ static void handle_keyboard(void) {
     }
 }
 
+/* ---- M74: the session that remembers -----------------------------------
+ *
+ * Windows come back where they were. The compositor writes a line per
+ * live application window - program, geometry, workspace - and on the
+ * next start relaunches them and places them.
+ *
+ * GATED ON AN ENVIRONMENT VARIABLE, and that is not fussiness. This
+ * process is spawned constantly by the boot self-tests, each of which
+ * opens windows and kills them; a compositor that saved a session during
+ * those would leave a file the *real* one then restores, relaunching half
+ * a dozen test fixtures onto a person's desktop. So only a compositor
+ * whose environment says so saves or restores anything, and a self-test
+ * compositor is deliberately amnesiac.
+ *
+ * The environment rather than an argument, and that is the one change
+ * from the attempt this milestone made before M75 existed. That attempt
+ * gated on argv, which meant changing `int main(void)` to `int main(int,
+ * char **)` in a program that had never taken an argument - one of the
+ * two suspects its own notes left unexamined when it was reverted. M75
+ * gave this machine an environment that is inherited across a spawn, so
+ * the gate is now a thing init sets once and the compositor's signature
+ * is untouched. A milestone that made a later one cheaper is the whole
+ * shape of this file.
+ *
+ * The program name comes from SYS_taskinfo via the client's own pid,
+ * rather than from the WM protocol. A window knows its *title*, which is
+ * what a person reads and not what a launcher can spawn; the task table
+ * already knows what each process was launched as, and the compositor
+ * already holds CAP_PROCESS_LIST. Nothing new had to be invented and
+ * nothing had to be trusted to the client - the same reasoning M65 used
+ * for putting the capability manifest in the kernel.
+ *
+ * Deliberately NOT restored: z-order and which window had focus. Both are
+ * properties of a *stack* rather than of any window, so restoring them
+ * means replaying an order against clients that connect whenever they
+ * happen to start - and getting it half right (a window raised over one
+ * that should be above it) looks like a bug in the window manager rather
+ * than an imperfect restore. Position, size and workspace are each a fact
+ * about one window and come back exactly or not at all.
+ */
+#define SESSION_PATH   PATH_ETC_DIR "session.conf"
+#define SESSION_MAX    8
+
+static int session_enabled;
+
+static session_entry_t session_pending[SESSION_MAX];
+static int session_pending_count;
+
+/* One session line - "program x y w h workspace\n". Plain text for the
+ * same reason settings.conf is: a person with `cat` can read it when
+ * something is wrong, which is worth more than the bytes a binary layout
+ * would save on a file that holds eight rows. */
+static int format_session_line(char *out, int cap, const char *prog,
+                                int32_t x, int32_t y, int32_t w, int32_t h,
+                                int8_t workspace) {
+    int n = 0;
+    for (const char *c = prog; *c; c++) {
+        if (n >= cap - 1) { return -1; }
+        out[n++] = *c;
+    }
+    const int32_t vals[5] = {x, y, w, h, (int32_t)workspace};
+    for (int i = 0; i < 5; i++) {
+        if (n >= cap - 1) { return -1; }
+        out[n++] = ' ';
+        int32_t v = vals[i];
+        if (v < 0) {
+            if (n >= cap - 1) { return -1; }
+            out[n++] = '-';
+            v = -v;
+        }
+        char tmp[12];
+        int t = 0;
+        if (v == 0) { tmp[t++] = '0'; }
+        while (v > 0) { tmp[t++] = (char)('0' + v % 10); v /= 10; }
+        while (t > 0) {
+            if (n >= cap - 1) { return -1; }
+            out[n++] = tmp[--t];
+        }
+    }
+    if (n >= cap - 1) { return -1; }
+    out[n++] = '\n';
+    return n;
+}
+
+/* Parses one line. Returns bytes consumed, or -1. A malformed line ends
+ * the restore rather than being skipped: a session file this cannot read
+ * is one written by a different version, and guessing at the rest of it
+ * is how half a desktop comes back. */
+static int parse_session_line(const char *in, int len, session_entry_t *out) {
+    int p = 0;
+    int n = 0;
+    while (p < len && in[p] != ' ' && in[p] != '\n' && n < (int)sizeof(out->program) - 1) {
+        out->program[n++] = in[p++];
+    }
+    out->program[n] = '\0';
+    if (n == 0) { return -1; }
+    int32_t vals[5];
+    for (int i = 0; i < 5; i++) {
+        while (p < len && in[p] == ' ') { p++; }
+        int neg = 0;
+        if (p < len && in[p] == '-') { neg = 1; p++; }
+        if (p >= len || in[p] < '0' || in[p] > '9') { return -1; }
+        int32_t v = 0;
+        while (p < len && in[p] >= '0' && in[p] <= '9') {
+            v = v * 10 + (in[p++] - '0');
+        }
+        vals[i] = neg ? -v : v;
+    }
+    while (p < len && in[p] != '\n') { p++; }
+    if (p < len) { p++; }
+    out->x = vals[0];
+    out->y = vals[1];
+    out->w = vals[2];
+    out->h = vals[3];
+    out->workspace = (int8_t)vals[4];
+    return p;
+}
+
+/* The program a pid was launched as, or "" if the task table has no such
+ * pid any more.
+ *
+ * The scan is capped well below TASK_INFO_MAX on purpose: a full
+ * 128-entry task_info_t array is six kilobytes of BSS in the largest
+ * process on this machine, and this only ever looks for pids belonging to
+ * windows - of which there are at most WM_MAX_ROUTABLE_WINDOWS. */
+#define SESSION_TASKS 40
+static void session_program_for_pid(int pid, char *out, int cap) {
+    static task_info_t infos[SESSION_TASKS];
+    out[0] = '\0';
+    long n = sys_taskinfo(infos, SESSION_TASKS);
+    for (long i = 0; i < n; i++) {
+        if (infos[i].pid == pid) {
+            int j = 0;
+            for (; infos[i].name[j] && j < cap - 1; j++) {
+                out[j] = infos[i].name[j];
+            }
+            out[j] = '\0';
+            return;
+        }
+    }
+}
+
+/* A cheap summary of "what the session looks like right now". Saving on
+ * every loop pass would write a file a hundred times a second; saving at
+ * every place geometry changes would mean a call at each of a dozen sites
+ * and one of them would eventually be forgotten. A signature compared
+ * once per pass costs a few multiplications and cannot be forgotten
+ * anywhere. */
+static uint32_t session_signature(void) {
+    uint32_t sig = 0;
+    for (int i = 0; i < window_count; i++) {
+        window_t *w = &windows[i];
+        if (!w->alive || w->is_panel || w->is_desktop) {
+            continue;
+        }
+        sig = sig * 31u + (uint32_t)w->client_pid;
+        sig = sig * 31u + (uint32_t)w->x;
+        sig = sig * 31u + (uint32_t)w->y;
+        sig = sig * 31u + (uint32_t)w->w;
+        sig = sig * 31u + (uint32_t)w->h;
+        sig = sig * 31u + (uint32_t)w->workspace;
+        sig = sig * 31u + (uint32_t)(w->minimized ? 1 : 0);
+    }
+    return sig;
+}
+
+/* Written whole on every change rather than appended to. Eight lines is
+ * nothing, and a file that is only ever replaced cannot be half-updated
+ * by a crash - the same argument M71 makes about the editor, applied to
+ * something much smaller. */
+static void session_save(void) {
+    if (!session_enabled) {
+        return;
+    }
+    char buf[512];
+    int n = 0;
+    int saved = 0;
+    for (int i = 0; i < window_count && saved < SESSION_MAX; i++) {
+        window_t *w = &windows[i];
+        if (!w->alive || w->is_panel || w->is_desktop) {
+            continue; /* chrome is not part of a session - init starts it */
+        }
+        char prog[24];
+        session_program_for_pid(w->client_pid, prog, sizeof(prog));
+        if (!prog[0]) {
+            continue;
+        }
+        int wrote = format_session_line(buf + n, (int)sizeof(buf) - n, prog,
+                                         w->x, w->y, w->w, w->h, w->workspace);
+        if (wrote <= 0) {
+            break;
+        }
+        n += wrote;
+        saved++;
+    }
+    sys_writefile(SESSION_PATH, buf, (size_t)n);
+}
+
+/* Reads the file, relaunches each program, and remembers where its window
+ * should go. The placement is applied when the client connects, because
+ * that is the only moment the compositor has a window to place. */
+static void session_restore(void) {
+    if (!session_enabled) {
+        return;
+    }
+    static char buf[512];
+    long n = sys_readfile(SESSION_PATH, buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        return;
+    }
+    buf[n] = '\0';
+
+    int pos = 0;
+    while (pos < n && session_pending_count < SESSION_MAX) {
+        session_entry_t e;
+        int used = parse_session_line(buf + pos, (int)(n - pos), &e);
+        if (used <= 0) {
+            break;
+        }
+        pos += used;
+        char path[PATH_MAX_LEN];
+        if (path_join(path, PATH_BIN_DIR, e.program) != 0) {
+            continue;
+        }
+        long pid = sys_spawn(path, "");
+        if (pid < 0) {
+            continue; /* the program is gone - drop the entry rather than fail the session */
+        }
+        child_track(pid); /* M54: so its slot comes back when it closes */
+        e.claimed = 0;
+        session_pending[session_pending_count++] = e;
+    }
+}
+
+/* Does this newly-connected window match something the session said
+ * should come back? Matched by program name and claimed once, so two
+ * copies of the same program restore into the two saved places rather
+ * than both into the first. */
+static session_entry_t *session_claim(int client_pid) {
+    if (!session_enabled || session_pending_count == 0) {
+        return 0;
+    }
+    char prog[24];
+    session_program_for_pid(client_pid, prog, sizeof(prog));
+    if (!prog[0]) {
+        return 0;
+    }
+    for (int i = 0; i < session_pending_count; i++) {
+        if (session_pending[i].claimed) {
+            continue;
+        }
+        int same = 1;
+        for (int j = 0;; j++) {
+            if (session_pending[i].program[j] != prog[j]) {
+                same = 0;
+                break;
+            }
+            if (!prog[j]) {
+                break;
+            }
+        }
+        if (same) {
+            session_pending[i].claimed = 1;
+            return &session_pending[i];
+        }
+    }
+    return 0;
+}
+
 int main(void) {
+    /* M74: only a compositor whose environment says so remembers a
+     * session. See the module above for why a self-test compositor must
+     * not, and why this is an environment variable rather than an
+     * argument. */
+    session_enabled = getenv("LEANOS_SESSION") != 0;
     if (sys_fb_info(&fb_info) != 0) {
         sys_exit(1);
     }
@@ -4198,8 +4712,19 @@ int main(void) {
         saved.accent_color = accent_color;
         saved.wallpaper = wallpaper_id;
         if (settings_file_load(&saved)) {
-            bg_color = saved.bg_color;
-            accent_color = saved.accent_color;
+            /* M74: and the same check at this door. settings_file_load's
+             * all-or-nothing contract already covers a file that cannot
+             * be parsed; this covers one that parses perfectly and says
+             * something that would leave nothing on this screen legible.
+             *
+             * Only the colours are dropped, not the whole file - the
+             * volume and the wallpaper in an otherwise-broken settings
+             * file are still what the person chose, and throwing them
+             * away would be punishing them twice for one mistake. */
+            if (theme_is_readable(saved.bg_color, saved.accent_color)) {
+                bg_color = saved.bg_color;
+                accent_color = saved.accent_color;
+            }
             wallpaper_id = saved.wallpaper;
             animations_enabled = saved.animations != 0;
             audio_volume = saved.volume > 100 ? 100 : saved.volume;
@@ -4267,6 +4792,11 @@ int main(void) {
      * its one client connected: a console scroll mid- or post-frame
      * would shift whatever's already been drawn before anything can
      * verify it landed correctly. */
+    /* M74: relaunch the last session's windows now that this process can
+     * accept them. Before the message below, so the log reads in the
+     * order things actually happened. */
+    session_restore();
+
     const char msg[] = "[compositor] framebuffer mapped, accepting windows.\n";
     sys_write(1, msg, strlen(msg));
 
@@ -4305,6 +4835,25 @@ int main(void) {
             }
         }
         toasts_expire(now); /* M48: a deadline is the only thing that retires a toast on its own */
+        shutdown_tick(now);  /* M74: a shutdown that is waiting to hear whether anything minds */
+
+        /* M74: persist the session when it has actually changed. Checked
+         * twice a second, written almost never - see session_signature.
+         * A file written on every frame would be a disk write per frame,
+         * which on this machine's PIO driver is a desktop that stutters
+         * because it is remembering itself. */
+        if (session_enabled) {
+            static uint32_t last_sig;
+            static long next_session_check;
+            if (now >= next_session_check) {
+                next_session_check = now + 500;
+                uint32_t sig = session_signature();
+                if (sig != last_sig) {
+                    last_sig = sig;
+                    session_save();
+                }
+            }
+        }
         /* M61: the frame clock. This is the first thing in the project
          * that asks for a frame at a *time* rather than in response to
          * something arriving, and it is deliberately checked before the

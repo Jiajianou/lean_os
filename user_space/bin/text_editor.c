@@ -45,6 +45,7 @@
 #include "paths.h" /* system_api/include/paths.h - M53: /home is where a new document goes */
 #include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT - the editor's column arithmetic is a fixed cell by definition (M57) */
 #include "str.h"
+#include "recent.h" /* M74 - the recently-opened list */
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
@@ -169,6 +170,12 @@ static void load_file(const char *name) {
     if (fd < 0) {
         return; /* doesn't exist yet - starts as one empty line, same as "new file" */
     }
+    /* M74: recorded here rather than at startup, so that a file dropped
+     * onto this window mid-session counts too - the recents list is about
+     * what was opened, not about how the program was launched. A file
+     * that could not be opened is deliberately not recorded: offering it
+     * again is offering the same failure. */
+    recent_add(name);
     line_count = 0;
     truncated = 0;
     int col = 0;
@@ -285,6 +292,22 @@ static void save_file(void) {
     if (ok) {
         dirty = 0;
     }
+    /* M74: deliberately NOT recorded here, and the reason is measurable
+     * rather than aesthetic. A save is an open as far as a person is
+     * concerned, so recording one looked right - but recent_add on a
+     * name that is not already at the front writes /etc/recent.conf, and
+     * *creating* a file in leanfs rewrites the whole inode table and
+     * bitmap (see M59's note on the thirty-one metadata sectors). That
+     * put roughly half a second of PIO inside the first Ctrl+S of every
+     * editing session, which the [m60] self-test caught immediately: it
+     * types, saves, undoes and saves again on a 200/600 ms cadence, and
+     * the editor was still inside the disk write when the undo arrived.
+     *
+     * Recording on *open* alone is also the more faithful reading of
+     * what the list is: it is recently OPENED files. A document saved
+     * under a new name is one the person will open again from the file
+     * manager, and it is recorded then - by the program that opened it,
+     * which is the rule the whole feature is built on. */
 }
 
 static void clamp_cursor(void) {
@@ -1075,6 +1098,19 @@ int main(int argc, char **argv) {
                 }
             } else if (ev.type == WM_EVENT_CLOSE_REQUEST) {
                 request_action(PENDING_QUIT);
+            } else if (ev.type == WM_EVENT_QUERY_SHUTDOWN) {
+                /* M74: the machine is about to stop and is asking whether
+                 * this window minds. It does, if and only if there is
+                 * something in the buffer that is not on disk - which is
+                 * exactly the `dirty` flag the titlebar's close button has
+                 * consulted since M36. A veto is one call and no state:
+                 * the compositor abandons the shutdown and says which
+                 * window objected, and the person is then looking at this
+                 * one with an unsaved document in it, which is the whole
+                 * outcome this is for. */
+                if (dirty) {
+                    wm_veto_shutdown(win.window_id);
+                }
             } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
                 /* M49: one text row per detent. Scrolls the viewport
                  * without moving the caret - clamp_scroll (which the

@@ -54,19 +54,29 @@ def current_test():
 # strings.
 # ---------------------------------------------------------------------
 
-# desktop_icons.c: ICON_MARGIN 32, ICON_CELL_H 90, ICON_SIZE 48. Seven
-# icons (M45 added Tasks) in one column at 1024x768 - the column wraps at
-# max_y 660, and the seventh sits at 572, so they still all fit in one.
-# Coordinates are icon-box centers.
+# desktop_icons.c: ICON_MARGIN 32, ICON_CELL_H 90, ICON_SIZE 48,
+# ICON_CELL_W 90. At 1024x768 layout_icons wraps at max_y 660, so the
+# first seven fill one column (boxes at y 32..572) and M74's README icon
+# is the first thing on this desktop to start a second one, at x 122.
+# Coordinates below are icon-box centers, so each entry carries its own
+# x now rather than sharing one.
+# ICON_X is the first column and is what every test that names one icon
+# uses; the fourth field is the per-icon column, which only M74's README
+# differs on. Entry [2] is still the y centre everywhere, deliberately -
+# renumbering it would have touched twenty call sites to say nothing new.
 ICON_X = 56
 ICONS = [
-    ("Terminal", "gui_terminal", 56),
-    ("Editor", "text_editor", 146),
-    ("Files", "file_manager", 236),
-    ("Settings", "settings", 326),
-    ("Clock", "gui_clock", 416),
-    ("Paint", "gui_paint", 506),
-    ("Tasks", "task_manager", 596),
+    ("Terminal", "gui_terminal", 56, ICON_X),
+    ("Editor", "text_editor", 146, ICON_X),
+    ("Files", "file_manager", 236, ICON_X),
+    ("Settings", "settings", 326, ICON_X),
+    ("Clock", "gui_clock", 416, ICON_X),
+    ("Paint", "gui_paint", 506, ICON_X),
+    ("Tasks", "task_manager", 596, ICON_X),
+    # M74: opens text_editor on /home/readme.txt, so double-clicking it
+    # produces an editor window like the Editor icon does - which is why
+    # the window-count tests below still add up.
+    ("README", "text_editor", 56, ICON_X + 90),
 ]
 
 ICON_BOX = 0x4C99E6          # desktop_icons.c ICON_BOX_COLOR
@@ -725,16 +735,20 @@ def focused_slot(shot):
 # ---------------------------------------------------------------------
 
 def test_double_click_launches_every_icon(m):
-    """M40's proving ground: double-click all six desktop icons and
-    require six real windows. Before M40 this stopped at two - the third
+    """M40's proving ground: double-click every desktop icon and require
+    that many real windows. Before M40 this stopped at two - the third
     icon onward silently got window_id = -1 because the compositor's fd
     table was already full of pipes it had inherited from the kernel's own
     boot self-tests. Which two icons "didn't work" depended purely on
     launch order, which is why the bug got reported as being about the
-    Editor and the Clock specifically."""
+    Editor and the Clock specifically.
+
+    M74 added an eighth (README, in a second column), so this now spans
+    both columns - which is also the only test that would notice if
+    layout_icons ever stopped wrapping."""
     boot(m)
-    for i, (name, _program, y) in enumerate(ICONS):
-        m.double_click(ICON_X, y)
+    for i, (name, _program, y, x) in enumerate(ICONS):
+        m.double_click(x, y)
         wait_for_windows(m, i + 1)
 
     refused = refusals(m)
@@ -1412,6 +1426,71 @@ def test_settings_persist_across_a_reboot(m):
         time.sleep(1.0)
     raise Failure("after restarting, the desktop came back with the default gradient "
                   "rather than the saved Flat wallpaper")
+
+
+def test_session_restores_windows_across_a_reboot(m):
+    """M74's whole point, graded on pixels rather than on protocol.
+
+    Two windows are opened and one of them is dragged somewhere the
+    cascade would never put it. The machine is restarted. Both windows
+    have to come back, and the dragged one has to be *where it was left* -
+    which is the assertion that separates "the session file was written
+    and read" from "the desktop remembers". A compositor that relaunched
+    both programs and let them cascade would pass a window count and fail
+    this.
+
+    The restart goes through the launcher's `reboot`, for the same reason
+    settings_persist_across_a_reboot does: it is the path that actually
+    exercises SYS_shutdown, and the guest's disk writes survive a reset
+    because snapshot=on keeps them in an overlay for the lifetime of the
+    QEMU process."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])  # Clock
+    wait_for_windows(m, 1)
+    x, y = app_origin(FIRST_APP_IDX)
+
+    # Somewhere the cascade cannot land: the cascade starts at (100, 100)
+    # and steps 40px per window, so the second slot is (140, 140). This
+    # moves the Clock a long way right and down from both.
+    dest_x, dest_y = x + 380, y + 260
+    m.drag(x + 100, y - 8, dest_x + 100, dest_y - 8)
+    moved = wait_for(m, lambda s: s.px(dest_x + 4, dest_y - 8) != desktop_px(dest_y - 8),
+                     "the Clock did not move to where it was dragged")
+    titlebar = moved.px(dest_x + 4, dest_y - 8)
+
+    m.double_click(ICON_X, ICONS[5][2])  # Paint, so the session has two entries
+    wait_for_windows(m, 2)
+
+    # The compositor writes the session at most twice a second and only
+    # when the layout has changed, so this waits out one whole check
+    # interval plus margin rather than assuming the write already
+    # happened. Nothing to poll for from out here - the file is inside
+    # the guest.
+    time.sleep(3.0)
+
+    boots_before = m.read_log().count(BOOT_MARKER)
+    m.sendkey("ctrl-spc")
+    m.type_text("reboot")
+    m.sendkey("ret")
+
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        if m.read_log().count(BOOT_MARKER) > boots_before:
+            break
+        time.sleep(1.0)
+    else:
+        raise Failure("the machine never came back up after `reboot` (log tail: %r)"
+                      % m.read_log()[-400:])
+
+    # Both windows, and the moved one at its own coordinates. The window
+    # count is checked first because "nothing came back" and "the wrong
+    # thing came back" are different failures and the first would
+    # otherwise be reported as the second.
+    wait_for(m, lambda s: count_app_windows(s) >= 2,
+             "the session did not bring both windows back", timeout=90.0)
+    wait_for(m, lambda s: s.px(dest_x + 4, dest_y - 8) == titlebar,
+             "a window came back, but not where it was left - the session restored "
+             "the program and let the cascade place it", timeout=30.0)
 
 
 def test_launcher_does_not_offer_data_files(m):
@@ -2227,11 +2306,18 @@ def test_behaviour_settings_persist(m):
         time.sleep(1.0)
     check(m.read_log().count(BOOT_MARKER) > boots_before, "the machine never restarted")
 
+    # M74: Settings is not reopened here, because the session brings it
+    # back by itself - it was on screen when the machine was restarted,
+    # so it is on screen again, at the same coordinates the probe above
+    # was computed from. Double-clicking the icon as this test used to
+    # would open a *second* Settings window on top of the restored one.
+    # That the window is here at all is a second assertion this test now
+    # makes for free.
     boot(m)
-    m.double_click(ICON_X, ICONS[3][2])
-    wait_for_windows(m, 1)
-    shot = wait_for(m, lambda s: s.px(*probe) in (SETTINGS_BTN_ON, SETTINGS_BTN_OFF),
-                    "Settings did not come back with a readable Motion switch")
+    shot = wait_for(m, lambda s: count_app_windows(s) >= 1 and
+                                 s.px(*probe) in (SETTINGS_BTN_ON, SETTINGS_BTN_OFF),
+                    "Settings did not come back with a readable Motion switch",
+                    timeout=60.0)
     check(shot.px(*probe) == SETTINGS_BTN_OFF,
           "the Motion switch forgot it had been turned off across a restart")
     check(shot.px(*volume_probe(sx, sy, 0)) == SETTINGS_BTN_ON,
@@ -2266,6 +2352,7 @@ TESTS = [
     ("display_resolution_changes_and_persists", test_display_resolution_changes_and_persists),
     ("display_resolution_reverts_when_not_confirmed", test_display_resolution_reverts_when_not_confirmed),
     ("behaviour_settings_persist", test_behaviour_settings_persist),
+    ("session_restores_windows_across_a_reboot", test_session_restores_windows_across_a_reboot),
     ("launcher_does_not_offer_data_files", test_launcher_does_not_offer_data_files),
     ("clicking_a_toast_dismisses_it", test_clicking_a_toast_dismisses_it),
     ("wheel_scrolls_the_file_list_one_row_per_detent", test_wheel_scrolls_the_file_list_one_row_per_detent),

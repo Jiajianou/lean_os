@@ -350,6 +350,18 @@ long pipe_read(pipe_t *p, void *buf, size_t maxlen) {
                 return (long)n;
             }
             sched_block_on(PIPE_DATA_CHAN(p), 0, &pipe_lock, &f); /* see pipe_write's note above */
+            /* M76: a caught signal ends the wait as well as an arriving
+             * byte. Without this, a program that spends its life blocked
+             * on a pipe - which on this machine is most of them - could
+             * install a handler and never run it, because the handler
+             * only runs on the way back out to ring 3 and this loop
+             * never goes back out. Returning short (possibly zero) is
+             * the honest answer and is what every caller here already
+             * copes with; the handler runs during the return. */
+            if (sched_signal_pending()) {
+                spin_unlock_irqrestore(&pipe_lock, f);
+                return (long)n;
+            }
             continue;
         }
         dst[n] = p->buf[p->tail];
