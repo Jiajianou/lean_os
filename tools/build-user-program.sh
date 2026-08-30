@@ -12,7 +12,8 @@
 # Usage: tools/build-user-program.sh <source.c> [output-name]
 #   output-name defaults to source.c's basename (no extension) and
 #   becomes both build/<output-name>.elf and, conventionally, the
-#   leanfs filename you'd pass to leanfs-put.
+#   leanfs name you'd pass to leanfs-put (as /bin/NAME - leanfs has
+#   directories since M53, and a path is what names a file now).
 set -euo pipefail
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
@@ -52,4 +53,4 @@ $LD -T "$USER_LD" -o "$BUILD/$NAME.elf" $USER_LIBOBJS "$UOBJ/$NAME.o"
 
 echo "Built $BUILD/$NAME.elf - put it on a disk image with:"
 echo "  make preseed   # only needed once per image, before its first leanfs-put - see the Makefile's own comment on this target"
-echo "  build/leanfs-put build/os-image.bin $BUILD/$NAME.elf $NAME"
+echo "  build/leanfs-put build/os-image.bin $BUILD/$NAME.elf /bin/$NAME"

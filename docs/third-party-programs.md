@@ -20,7 +20,7 @@ rebuilding the kernel at all.
 make all                                          # 1. build the OS as usual
 make preseed                                      # 2. one time per disk image, see below
 tools/build-user-program.sh path/to/myapp.c myapp # 3. compile against user_space/lib
-build/leanfs-put build/os-image.bin build/myapp.elf myapp   # 4. write it onto the disk
+build/leanfs-put build/os-image.bin build/myapp.elf /bin/myapp  # 4. write it onto the disk
 make run                                          # 5. boot - 'myapp' is just another file now
 ```
 

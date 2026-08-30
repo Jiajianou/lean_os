@@ -338,6 +338,50 @@ runtime dependency).
       present), just makes the third-party workflow safe by construction
       instead of by instruction
 - [x] `docs/third-party-programs.md`: the end-to-end workflow
+- [x] **Repaired after M79** (see the note below): this tool had been
+      broken since M53 and nothing noticed, because nothing runs it -
+      `make preseed` is optional and no self-test uses it.
+
+### The drift M25's tooling was found in (repaired after M79)
+
+`tools/leanfs-put.c` duplicates leanfs's on-disk format, and duplication
+drifts. Found still speaking the M15-era format: an inode with a `name`
+field (M53 moved names into directory records), no `mtime` or
+`dindirect` (M59 added both), `used` where the format now has `type`, a
+32-inode cap the kernel left behind at M53, no concept of a directory at
+all, and a 256-byte out-of-bounds stack read. A file it wrote onto a
+filesystem that has a `/bin` was unreachable even when the write
+reported success.
+
+Rewritten to read its geometry from the *superblock* rather than from
+constants recomputed here - that is what a superblock is for, and it
+means the tool cannot disagree with the kernel about where the inode
+table is - with every remaining compile-time constant checked against
+the superblock at runtime, so a mismatch is a refusal naming the file to
+fix rather than a corrupt filesystem. It resolves absolute paths through
+directory records with `mkdir -p` semantics, and mirrors the kernel's
+own `map_block` and `format_fresh`.
+
+The last bug in it is the one worth writing down. Everything above was
+correct and the kernel still discarded the result: `LEANFS_MAGIC` here
+was M12's `LFS1`, and the kernel has bumped it twice since (M53 `LFS2`,
+M59 `LFS3`) precisely so that a disk in an older layout is reformatted
+rather than misread. Every write succeeded, the tool reported success on
+all 47 programs, and the next boot printed `no valid leanfs superblock
+found - formatting fresh` and re-seeded every one of them. It cost three
+instrumented boots to find, because a successful write and a silently
+discarded filesystem look identical from the host. So a magic that is
+neither ours nor a blank region is now an **error** naming both values
+and the file to update, not a reformat.
+
+The verification is end-to-end and is the reason any of this is known to
+work: preseed an image, boot it under `tools/qemu-serial-test.sh`, and
+require **zero** `seeding disk with` lines - the kernel seeds only what
+is missing, so zero means it found all 47 programs already on the disk.
+Both paths are covered: a fresh format, and a second `make preseed` over
+an image that already has one (no duplicate directory records, no leaked
+blocks - the bitmap matches block reachability exactly). Both boot
+69/69.
 
 ## M26 — UEFI-only boot, BIOS path removed ✅
 

@@ -398,7 +398,7 @@ $(UOBJ)/uifont.o: $(FONT_STAMP)
 # spoken for.
 preseed: $(IMAGE) $(LEANFS_PUT)
 	@for p in $(USER_PROGRAMS); do \
-		$(LEANFS_PUT) $(IMAGE) $(BUILD)/$$p.elf $$p; \
+		$(LEANFS_PUT) $(IMAGE) $(BUILD)/$$p.elf /bin/$$p; \
 	done
 
 # Lets tools/build-user-program.sh (and anyone else) read this Makefile's
