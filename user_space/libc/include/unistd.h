@@ -77,6 +77,40 @@ int ftruncate(int fd, off_t length);
  * exactly as POSIX specifies, because a target may legitimately contain
  * anything a path can. Every caller has to terminate it themselves and
  * every caller written elsewhere already does. */
+/* ---- M88: who is running this, and how much of what there is --------
+ *
+ * `getuid` and friends return 0, and that is not a placeholder. M65
+ * argued at length that there are no users on this machine and refused
+ * to invent one; a machine with exactly one principal that reports one
+ * principal is telling the truth. What M65 declined was a *permission
+ * model* that pretended to enforce something, and nothing here enforces
+ * anything - `access()` still says so in its own comment, and `chmod`
+ * is still a truthful failure.
+ *
+ * The effective and real forms are the same number for the same reason:
+ * there is no setuid on this machine, so there is nothing for them to
+ * differ about. A program that compares them is asking "am I running
+ * with borrowed authority", and the honest answer here is no. */
+uid_t getuid(void);
+uid_t geteuid(void);
+gid_t getgid(void);
+gid_t getegid(void);
+
+/* A subset, and the subset is the one a configure script actually
+ * asks. Each answer below is a real fact about this machine rather than
+ * a plausible number - see the implementation, where the ones that
+ * cannot be answered return -1 rather than a guess. */
+#define _SC_PAGESIZE      1
+#define _SC_OPEN_MAX      2
+#define _SC_NPROCESSORS_ONLN 3
+#define _SC_CLK_TCK       4
+#define _SC_PHYS_PAGES    5
+#define _SC_AVPHYS_PAGES  6
+long sysconf(int name);
+
+/* POSIX spells the page size both ways and programs use both. */
+int getpagesize(void);
+
 int symlink(const char *target, const char *path);
 long readlink(const char *path, char *buf, size_t bufsiz);
 

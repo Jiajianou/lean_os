@@ -22,6 +22,7 @@
 #include <locale.h>
 #include <langinfo.h>
 #include <math.h>
+#include <poll.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -584,6 +585,131 @@ int main(void) {
         }
         if (!isatty(1)) {
             fail("isatty(1) should be true - fd 1 is the implicit stdout");
+        }
+    }
+
+    /* M88: poll, over the pipe every program on this desktop already
+     * uses. Three states in order, because the interesting thing about
+     * poll is not that it answers but that it answers *differently*:
+     * nothing ready and a deadline that expires, then something ready,
+     * then the same descriptor no longer ready once it is drained. A
+     * test that only checked the middle one would pass against a poll
+     * that always said yes. */
+    {
+        int pf[2];
+        if (pipe(pf) != 0) {
+            fail("pipe() for the poll test");
+        } else {
+            struct pollfd p;
+            p.fd = pf[0];
+            p.events = POLLIN;
+            p.revents = 0;
+
+            /* Nothing written yet: this must time out rather than
+             * report readable, and must actually wait rather than
+             * return immediately - which is the difference between a
+             * blocking poll and a busy loop. */
+            if (poll(&p, 1, 30) != 0 || p.revents != 0) {
+                fail("poll: an empty pipe reported ready");
+            }
+
+            if (write(pf[1], "x", 1) != 1) {
+                fail("poll: could not write to the pipe");
+            } else {
+                p.revents = 0;
+                if (poll(&p, 1, 200) != 1 || !(p.revents & POLLIN)) {
+                    fail("poll: a pipe with a byte in it did not report POLLIN");
+                }
+            }
+
+            /* Drained, and not ready again. */
+            char got = 0;
+            if (read(pf[0], &got, 1) != 1 || got != 'x') {
+                fail("poll: the byte did not read back");
+            }
+            p.revents = 0;
+            if (poll(&p, 1, 30) != 0 || p.revents != 0) {
+                fail("poll: a drained pipe still reported ready");
+            }
+
+            /* A negative fd is skipped with revents 0 - POSIX's way of
+             * letting a program keep a fixed array and disable entries
+             * in it, and the one case where poll must ignore rather
+             * than refuse. */
+            struct pollfd skip[2];
+            skip[0].fd = -1;
+            skip[0].events = POLLIN;
+            skip[0].revents = 0xFF;
+            skip[1].fd = pf[0];
+            skip[1].events = POLLIN;
+            skip[1].revents = 0;
+            if (poll(skip, 2, 10) != 0 || skip[0].revents != 0) {
+                fail("poll: a negative fd was not skipped");
+            }
+
+            close(pf[0]);
+            close(pf[1]);
+        }
+    }
+
+    /* M88: the clock advances, and says so when it does not.
+     *
+     * This check exists because of a failure that took three attempts to
+     * understand. The M63 self-test kept reporting Whetstone's
+     * "Insufficient duration - Increase the LOOP count", which is what
+     * that benchmark prints when its start and end timestamps are equal.
+     * Two fixes were made to the RTC on two different theories and it
+     * came back both times - and neither the benchmark nor the self-test
+     * could say WHICH way it was broken, because "the clock read zero
+     * twice" and "the clock read the same number twice" print
+     * identically from inside Whetstone.
+     *
+     * So the clock is now asserted directly, and the failure names
+     * itself. A non-positive reading means the clock is not answering at
+     * all; two equal readings a second apart mean it is answering and
+     * not advancing. Those are different bugs and this is the difference
+     * between them.
+     *
+     * The sleep is poll's, which is what M88 made possible - an empty
+     * set with a deadline is a sleep, and it is the only one this libc
+     * has. */
+    {
+        time_t before = time(0);
+        if (before <= 0) {
+            printf("libctest: time() returned %ld\n", (long)before);
+            fail("the clock is not answering at all");
+        } else {
+            poll((struct pollfd *)0, 0, 1500);
+            time_t after = time(0);
+            if (after <= before) {
+                printf("libctest: time() read %ld then %ld across a 1.5s sleep\n",
+                       (long)before, (long)after);
+                fail("the clock is answering but not advancing");
+            }
+        }
+    }
+
+    /* M88: identity and sysconf. What is checked is not the values but
+     * the *shape* of the answers - that the real and effective ids agree
+     * (there is no setuid here for them to differ about), that the
+     * constants this machine can state are stated, and that the ones it
+     * cannot are -1 rather than a plausible number a configure script
+     * would then build against. */
+    {
+        if (getuid() != geteuid() || getgid() != getegid()) {
+            fail("real and effective ids differ on a machine with no setuid");
+        }
+        if (sysconf(_SC_PAGESIZE) != 4096 || getpagesize() != 4096) {
+            fail("sysconf(_SC_PAGESIZE) does not match the page size this kernel maps");
+        }
+        if (sysconf(_SC_OPEN_MAX) <= 0 || sysconf(_SC_CLK_TCK) <= 0) {
+            fail("sysconf could not state a limit this machine does have");
+        }
+        if (sysconf(_SC_PHYS_PAGES) != -1) {
+            fail("sysconf answered a question this machine cannot answer");
+        }
+        if (sysconf(-12345) != -1) {
+            fail("sysconf accepted a name it does not know");
         }
     }
 

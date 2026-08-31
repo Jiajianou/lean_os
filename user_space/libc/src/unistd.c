@@ -237,3 +237,61 @@ int symlink(const char *target, const char *path) {
 long readlink(const char *path, char *buf, size_t bufsiz) {
     return sys_readlink(path, buf, bufsiz);
 }
+
+/* ---- M88: identity, and why 0 is the truth here ----------------------
+ *
+ * See <unistd.h> for the argument. In short: M65 refused to invent a
+ * user, and a machine with exactly one principal that reports one
+ * principal is not inventing anything. The real and effective forms are
+ * equal because there is no setuid here for them to differ about.
+ */
+uid_t getuid(void) {
+    return 0;
+}
+
+uid_t geteuid(void) {
+    return 0;
+}
+
+gid_t getgid(void) {
+    return 0;
+}
+
+gid_t getegid(void) {
+    return 0;
+}
+
+int getpagesize(void) {
+    return 4096;
+}
+
+/* Each of these is a fact this machine can actually state. The ones it
+ * cannot are -1, which is what sysconf means by "no limit is defined" -
+ * and is a far better answer to a configure script than a plausible
+ * number it would then build against. */
+long sysconf(int name) {
+    switch (name) {
+    case _SC_PAGESIZE:
+        return 4096; /* the only page size this kernel maps */
+    case _SC_OPEN_MAX:
+        return 128;  /* MAX_FDS in kernel/sched/sched.h */
+    case _SC_CLK_TCK:
+        return 100;  /* PIT_HZ - the tick this machine actually counts in */
+    case _SC_NPROCESSORS_ONLN:
+        /* Not answerable from user space: SYS_taskinfo reports tasks and
+         * SYS_idle_ticks takes a cpu index without saying how many there
+         * are. Rather than probing idle_ticks until it fails - which
+         * would be inferring a number from an error - this says it does
+         * not know. */
+        return -1;
+    case _SC_PHYS_PAGES:
+    case _SC_AVPHYS_PAGES:
+        /* The kernel knows (/proc/meminfo reports MemFree), but there is
+         * no syscall that answers it and reading /proc from inside libc
+         * would make sysconf depend on a filesystem being mounted. -1 is
+         * the honest answer until something asks. */
+        return -1;
+    default:
+        return -1;
+    }
+}

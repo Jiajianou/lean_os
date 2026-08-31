@@ -3250,10 +3250,24 @@ static long sys_waitfds(uint64_t fds_ptr, uint64_t count, uint64_t timeout_ms,
     (void)a4;
     (void)a5;
     (void)a6;
-    if (count == 0 || count > MAX_FDS) {
+    if (count > MAX_FDS) {
         return -1;
     }
-    if (!user_range_ok(fds_ptr, count * sizeof(int), 0)) {
+    /* M88: a count of zero is allowed, and is a sleep.
+     *
+     * It used to be refused alongside an over-long count, which was
+     * reasonable when every caller had descriptors to watch. `poll` has
+     * one that does not: POSIX says an empty set with a timeout is a
+     * sleep, and every implementation honours it. This call already has
+     * a deadline and a park - a wait with nothing that could satisfy it
+     * early IS a sleep - so allowing zero gives user space the sleep
+     * primitive it did not otherwise have, rather than making libc spin
+     * on SYS_yield to imitate one.
+     *
+     * The scan below runs zero times, the deadline check still applies,
+     * and a negative timeout with no descriptors parks until a signal -
+     * which is `pause()`, and is also correct. */
+    if (count > 0 && !user_range_ok(fds_ptr, count * sizeof(int), 0)) {
         return -1;
     }
     const int *fds = (const int *)fds_ptr;

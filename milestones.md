@@ -7503,13 +7503,26 @@ symbolic links on this machine" and that "the day this filesystem grows
 links is the day that stops being true". That day is here and `..` is
 still resolved textually in `copy_path_from_user`, before leanfs sees the
 path - so `/a/b/..` where `b` is a link to `/c/d` gives `/a` where a
-physical resolution would give `/c`. Doing it properly means resolving
-`..` during the walk, which the walk can now do (it has the chain of
-inodes it came through) but which requires `path_normalize` to stop
-removing them first. It is a contained change and it is not this
-milestone's; recorded here so it is a known divergence rather than a
-surprise. Shells resolve `..` logically too, so this is the behaviour
-most people see - but the kernel's answer should be the physical one.
+physical resolution would give `/c`. Doing it properly is a bigger change than "stop
+stripping them", and working out why is worth recording.
+
+The walk itself could do it - it has the chain of inodes it came through,
+so `..` is a pop. The problem is above it. `vfs_resolve_mount` matches a
+path against the mount table BEFORE leanfs sees it, so a path that still
+contains `..` breaks the match: `/dev/../tmp/x` matches the `/dev` mount
+and hands devfs a relative path it cannot answer, while `/tmp/../dev/null`
+never reaches devfs at all. Textual normalisation is what currently makes
+mount matching work, and physical resolution is what makes symlinks work,
+and the two cannot both be done in the layer that currently does either.
+
+The real fix is for the VFS to own path resolution - walking components
+itself, consulting the mount table at each one, and handing whichever
+filesystem owns the result a path it can resolve. That is the vnode layer
+this milestone explicitly declined to build, and it is now the thing that
+would justify building it. Recorded here as a known divergence with a
+named cause rather than as a small thing left undone. Shells resolve `..`
+logically too, so this is the behaviour most people see - but the
+kernel's answer should be the physical one.
 
 *And the clock bug came back, which means the first fix was wrong about
 why.* M85 made `rtc_read` extrapolate from the last good sample instead
@@ -7522,9 +7535,9 @@ bad, which is exactly when it is being asked. It extrapolates from the
 TSC now, which counts cycles the CPU actually executed and which nothing
 coalesces.
 
-### M88 — Everything else a ported program calls
+### M88 — Everything else a ported program calls [~] poll and the identity/limits calls; the rest is open
 
-- [ ] `poll()` and `select()`, built over `SYS_waitfds` (syscall 68),
+- [~] `poll()` **shipped**; `select()` did not. Built over `SYS_waitfds` (syscall 68),
       which is genuinely the same idea under a lean_os name — so this is
       a header and a shim, not a kernel feature, and should be the
       cheapest bullet in the arc
@@ -7539,7 +7552,7 @@ coalesces.
       the BSD spelling (`<sys/socket.h>`, `<netdb.h>`,
       `getaddrinfo`/`gethostbyname`) over the stack M27, M64 and M66 already
       built. The stack is real; only the names are missing
-- [ ] `sysconf`, `getrlimit`/`setrlimit`, `getrusage`, `times`,
+- [~] `sysconf` and the identity calls **shipped**; `getrlimit`/`setrlimit`, `getrusage`, `times`,
       `statvfs`, `utime`/`utimensat`, `getuid`/`geteuid`/`getpwuid`.
       The identity calls return 0 and a single `root` entry, and that is
       **not** the fiction M65 refused to write: a machine with exactly
@@ -7566,6 +7579,92 @@ programs a Unix programmer could have written without reading anything
 in `system_api/`. And a UTF-8 string written to a file, read back,
 `wcrtomb`'d and compared byte for byte, which is the round trip that
 catches an encoding that is merely plausible.
+
+#### Progress notes
+
+*`poll` is the unusual case in this project: a header and a shim rather
+than something built.* `SYS_waitfds` (M68) already was poll, spelled
+differently - it blocks until one of a set of descriptors would not
+block, and a task inside it is `TASK_BLOCKED` rather than spinning. What
+was missing was the name and the shape of the answer.
+
+Two honest limits, both in the header rather than discovered. `POLLOUT`
+is reported ready for any open descriptor, because there is no
+write-readiness anywhere in this kernel - a pipe write blocks when the
+pipe is full and nothing can be asked in advance whether it would. Saying
+"ready" is what a caller then acts on anyway, and it beats never
+reporting `POLLOUT`, which would make a program waiting for it wait
+forever. And `POLLPRI`/`POLLRDHUP` are not defined at all: there is no
+out-of-band data here, and a constant a program could test but never see
+set is the failure mode `<fcntl.h>` spent a header comment avoiding.
+
+*The implementation is two passes, and the reason is in `SYS_waitfds`'s
+own note.* It returns ONE ready index rather than a bitmask, deliberately
+- "a mask would be an API that promises a fairness this scheduler does
+not implement". `poll` has to report every ready descriptor. So the first
+pass blocks, which is the part that must not spin, and the second asks
+each descriptor with a zero timeout, which the same call documents as a
+poll that returns immediately. That is n+1 syscalls to build a mask out
+of a call that returns an index, and it is nothing next to the block it
+just came out of.
+
+*One kernel change fell out of it, and it broke a test that was right to
+break.* `SYS_waitfds` refused a count of zero. POSIX says an empty poll
+set with a timeout is a sleep, and this libc had no sleep primitive at
+all - programs busy-yield. A wait with nothing that could satisfy it
+early IS a sleep, so zero is now allowed and `poll(NULL, 0, ms)` is a
+real one; a negative timeout with no descriptors is `pause()`, which is
+also correct.
+
+`racetest` asserted the old refusal in as many words - "a count of zero
+is an argument error, not an indefinite sleep on nothing" - and failed.
+That is the third time in this arc a test has failed because a milestone
+deliberately changed what it encoded (`libctest`'s `fcntl` in M84,
+`lstat`'s alias in M87, this). The fix is the same shape every time:
+assert the NEW contract rather than delete the check. `racetest` now
+verifies that a zero count sleeps *and actually waits* - the half that
+would still be wrong if it returned immediately - and separately that an
+over-long count is still refused, because the refusal moved rather than
+went away.
+
+The mistake underneath it is worth naming: widening a syscall's accepted
+input without grepping for anything asserting the old refusal. The kernel
+comment explaining why zero is now legal does not find the test that
+disagrees; `grep -rn waitfds user_space/` would have, in two seconds,
+before a nine-minute cycle said so instead.
+
+*`getuid` and friends return 0, and that is the truth rather than a
+stub.* M65 argued at length that there are no users here and refused to
+invent one. A machine with exactly one principal that reports one
+principal invents nothing; what M65 declined was a *permission model*
+that pretended to enforce something, and nothing here enforces anything -
+`access()` still says so in its own comment and `chmod` is still a
+truthful failure. Real and effective ids are equal because there is no
+setuid for them to differ about, and a program comparing them is asking
+"am I running with borrowed authority", whose honest answer here is no.
+
+*`sysconf` answers three things and refuses the rest.* Page size, open
+file limit and tick rate are facts this machine can state.
+`_SC_NPROCESSORS_ONLN` is -1 because it is not answerable from user
+space without inferring a number from an error, and `_SC_PHYS_PAGES` is
+-1 because the kernel knows it but no syscall reports it and reading
+`/proc` from inside libc would make `sysconf` depend on a filesystem
+being mounted. -1 means "no limit is defined", which is a far better
+answer to a configure script than a plausible number it would build
+against.
+
+*And a diagnostic that should have existed three milestones ago.* The M63
+Whetstone failure - "Insufficient duration - Increase the LOOP count" -
+survived two clock fixes on two different theories, because the benchmark
+prints the same line whether the clock read zero twice or read the same
+number twice. Those are different bugs. `libctest` now asserts the clock
+directly and the failure names itself: a non-positive reading means it is
+not answering, two equal readings across a 1.5 s sleep mean it is
+answering and not advancing. Both fixes are kept - each is right on its
+own terms - but neither was ever *verified*, because a quiet run passed
+before them too, and "the symptom did not reproduce" was treated as "the
+cause is gone" for a symptom already known to be load-dependent. The
+check is the first user of the `poll(NULL, 0, ms)` sleep above.
 
 ### M89 — Somebody else's userland
 

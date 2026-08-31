@@ -209,8 +209,12 @@ int main(int argc, char **argv) {
      *              with the index of the fd that was ready
      *   timeout  - an empty pipe with a deadline comes back -2, and does
      *              so having actually waited rather than spun
-     *   refused  - a count of zero is an argument error, not an
-     *              indefinite sleep on nothing
+     *   sleep    - M88: a count of zero with a deadline is a SLEEP. It
+     *              used to be an argument error, and this test asserted
+     *              that it was; `poll` is what changed it, because POSIX
+     *              says an empty set with a timeout is a sleep and this
+     *              libc had no other way to ask for one. A wait with
+     *              nothing that could satisfy it early is exactly that.
      *
      * The timeout case is the one that matters: it is the only assertion
      * here that would fail if the call returned instantly, which is what
@@ -229,7 +233,21 @@ int main(int argc, char **argv) {
             check(sys_waitfds(wfds, 1, 1000) == 0,
                   "waitfds did not report a pipe with bytes in it as ready");
 
-            check(sys_waitfds(wfds, 0, 10) == -1, "waitfds accepted a count of zero");
+            /* M88: a count of zero is a sleep, not an error - and it has
+             * to actually sleep, which is the half that would still be
+             * wrong if it returned immediately. Checked the same way the
+             * timeout case above is, because it is the same property. */
+            {
+                long before0 = sys_uptime_ms();
+                long r0 = sys_waitfds(wfds, 0, 50);
+                long waited0 = sys_uptime_ms() - before0;
+                check(r0 == -2, "waitfds with no descriptors did not report a timeout");
+                check(waited0 >= 30, "waitfds with no descriptors returned without sleeping");
+            }
+            /* An over-long count is still an argument error - the refusal
+             * moved, it did not go away. */
+            check(sys_waitfds(wfds, 100000, 10) == -1,
+                  "waitfds accepted a count larger than the fd table");
             sys_close(wfds[0]);
             sys_close(wfds[1]);
         }
