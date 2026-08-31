@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/io.h"
 #include "klog.h"
+#include "pit.h" /* M85: the tick count the fallback clock extrapolates from */
 
 #define CMOS_ADDR 0x70
 #define CMOS_DATA 0x71
@@ -56,7 +57,13 @@ static int sample(os_datetime_t *out) {
     uint8_t last_sec = 0xFF, last_min = 0xFF, last_hour = 0xFF;
     uint8_t last_day = 0xFF, last_mon = 0xFF, last_year = 0xFF, last_cent = 0xFF;
 
-    for (int attempt = 0; attempt < 16; attempt++) {
+    /* M85: 16 -> 64. Each attempt is two CMOS reads and the pair has to
+     * agree; a host that deschedules this guest between them makes them
+     * disagree, and sixteen tries was not enough headroom for a machine
+     * running several guests at once. Cheap - a successful sample takes
+     * two attempts - and the guard below is still what stops a dead chip
+     * from hanging the boot. */
+    for (int attempt = 0; attempt < 64; attempt++) {
         int guard = 0;
         while (update_in_progress() && guard++ < 1000000) {
             /* spin - one second at most on real hardware, and the guard
@@ -166,21 +173,66 @@ int rtc_available(void) {
  * every read rather than written back to the hardware - see rtc.h. */
 static int32_t correction;
 
+/* ---- M85: a clock that keeps answering ---------------------------------
+ *
+ * `sample` accepts a reading only when two consecutive passes agree,
+ * which is the right way to avoid reading a half-updated CMOS clock and
+ * is exactly why it can fail: if this machine is descheduled *by its
+ * host* between the two passes, the seconds field has moved on and the
+ * readings never agree. Sixteen attempts later it gives up and reports
+ * the time as invalid, and sys_time turns an invalid time into 0.
+ *
+ * That is not a hypothetical. It presented as the M63 self-test failing
+ * with Whetstone's "Insufficient duration - Increase the LOOP count",
+ * which is what that benchmark prints when its start and end timestamps
+ * are equal - and they were equal because both were zero. It happened
+ * only when several QEMU guests were competing for the host, which is
+ * why it looked like a timing flake for a long time before it looked
+ * like a clock bug. The self-test was already passing a loop count
+ * chosen to "cross several whole seconds"; no loop count survives a
+ * clock that has stopped.
+ *
+ * So a failed sample now extrapolates from the last good one using the
+ * PIT tick count, rather than reporting no time at all. A clock that is
+ * a fraction of a second stale under load is better than one that
+ * answers zero, and much better than one that answers zero *silently* -
+ * every caller here treats `valid` as a formality because until now it
+ * was one.
+ *
+ * The extrapolation is not a fallback clock in the sense of a second
+ * source of truth: the moment a real sample succeeds it takes over
+ * again, and the baseline moves with it. */
+static os_datetime_t last_good;
+static uint64_t last_good_ticks;
+static int have_good;
+
 void rtc_read(os_datetime_t *out) {
-    if (!available || !sample(out)) {
-        out->year = 0;
-        out->month = 0;
-        out->day = 0;
-        out->hour = 0;
-        out->minute = 0;
-        out->second = 0;
-        out->valid = 0;
+    if (available && sample(out)) {
+        if (correction != 0) {
+            os_civil_from_unix((uint32_t)((int64_t)os_unix_time(out) + correction), out);
+            out->valid = 1;
+        }
+        last_good = *out;
+        last_good_ticks = pit_get_ticks();
+        have_good = 1;
         return;
     }
-    if (correction != 0) {
-        os_civil_from_unix((uint32_t)((int64_t)os_unix_time(out) + correction), out);
+
+    if (have_good) {
+        uint64_t elapsed_ms = (pit_get_ticks() - last_good_ticks) * (1000 / PIT_HZ);
+        os_civil_from_unix((uint32_t)(os_unix_time(&last_good) + (uint32_t)(elapsed_ms / 1000)),
+                            out);
         out->valid = 1;
+        return;
     }
+
+    out->year = 0;
+    out->month = 0;
+    out->day = 0;
+    out->hour = 0;
+    out->minute = 0;
+    out->second = 0;
+    out->valid = 0;
 }
 
 int rtc_set_unix(uint32_t seconds) {

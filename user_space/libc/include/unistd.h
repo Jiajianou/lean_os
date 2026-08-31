@@ -77,6 +77,19 @@ int pipe(int fds[2]);
  * page-fault handler had to exist first for. */
 pid_t fork(void);
 
+/* M84: replaces this program with another. Does not return on success,
+ * which is why every caller in the world writes the error path with no
+ * `if` around it. `execv` supplies the current environment; `execvp`
+ * searches PATH when `file` contains no '/'.
+ *
+ * A `#!` script is refused: the kernel does not resolve shebangs (see
+ * SYS_execve), and a program that wants to run a script can run its
+ * interpreter. The shell resolves them, which is where M72 put that job
+ * and where it belongs. */
+int execve(const char *path, char *const argv[], char *const envp[]);
+int execv(const char *path, char *const argv[]);
+int execvp(const char *file, char *const argv[]);
+
 /* Runs `path` with `argv` and, for the `e` form, `envp`; returns the new
  * process's pid rather than replacing this one.
  *

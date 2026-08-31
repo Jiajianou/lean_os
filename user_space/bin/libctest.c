@@ -548,7 +548,16 @@ int main(void) {
         }
     }
 
-    /* <fcntl.h>'s open, and the fcntl that refuses what it cannot do. */
+    /* <fcntl.h>'s open, the one descriptor flag this machine has, and the
+     * fcntl that still refuses what it cannot do.
+     *
+     * M84 changed half of this test, and the half it changed is the point:
+     * F_SETFD used to be asserted to FAIL, because there was no exec on
+     * this machine and FD_CLOEXEC had nothing to mean. There is now, so it
+     * has to succeed and read back. F_SETFL is unchanged and still has to
+     * fail, because O_NONBLOCK is still a flag nothing here can honour -
+     * which is what keeps this from being a test that just believes
+     * whatever fcntl says. */
     {
         int fd = open("/tmp/libctest.tmp", O_WRONLY | O_CREAT | O_TRUNC);
         if (fd < 0) {
@@ -560,8 +569,15 @@ int main(void) {
             if (fcntl(fd, F_GETFD) != 0 || fcntl(fd, F_GETFL) != 0) {
                 fail("fcntl: a flag that is not set should read as 0");
             }
-            if (fcntl(fd, F_SETFD, FD_CLOEXEC) == 0) {
-                fail("fcntl accepted a flag it cannot honour");
+            if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 ||
+                fcntl(fd, F_GETFD) != FD_CLOEXEC) {
+                fail("fcntl: FD_CLOEXEC did not set and read back (M84)");
+            }
+            if (fcntl(fd, F_SETFD, 0) != 0 || fcntl(fd, F_GETFD) != 0) {
+                fail("fcntl: FD_CLOEXEC did not clear again");
+            }
+            if (fcntl(fd, F_SETFL, 1) == 0) {
+                fail("fcntl accepted a status flag it cannot honour");
             }
             close(fd);
             unlink("/tmp/libctest.tmp");

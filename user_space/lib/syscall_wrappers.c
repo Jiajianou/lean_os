@@ -163,6 +163,36 @@ long sys_fork(void) {
     return do_syscall(SYS_fork, 0, 0, 0);
 }
 
+/* M84: does not return on success. See SYS_execve. */
+long sys_execve(const char *path, char *const argv[], char *const envp[]) {
+    return do_syscall(SYS_execve, (long)path, (long)argv, (long)envp);
+}
+
+long sys_waitpid(long pid, int *status, long options) {
+    return do_syscall6(SYS_waitpid, pid, (long)status, options, 0, 0, 0);
+}
+
+long sys_fcntl(int fd, int cmd, long arg) {
+    return do_syscall(SYS_fcntl, fd, cmd, arg);
+}
+
+/* M85: process groups and sessions. See SYS_setpgid. */
+long sys_setpgid(long pid, long pgid) {
+    return do_syscall(SYS_setpgid, pid, pgid, 0);
+}
+
+long sys_setsid(void) {
+    return do_syscall(SYS_setsid, 0, 0, 0);
+}
+
+long sys_getsid(long pid) {
+    return do_syscall(SYS_getsid, pid, 0, 0);
+}
+
+long sys_ioctl(int fd, unsigned long cmd, void *arg) {
+    return do_syscall(SYS_ioctl, fd, (long)cmd, (long)arg);
+}
+
 long sys_mkdir(const char *path) {
     return do_syscall(SYS_mkdir, (long)path, 0, 0);
 }

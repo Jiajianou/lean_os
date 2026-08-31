@@ -54,6 +54,29 @@
  * and why a parent has had to poll ever since. */
 #define SIGCHLD  17
 
+/* ---- M85: the job-control signals -------------------------------------
+ *
+ * The five that make a terminal able to interrupt, suspend and resume the
+ * program in front of it. Their numbers are Linux's, like every other
+ * number in this file, so a program written elsewhere means what it says.
+ *
+ * Until M85 every signal here either killed the process or was ignored,
+ * which is why sched_raise_signal could get away with "death for
+ * everything except SIGCHLD" and a comment saying a table of one row is a
+ * table nobody reads. These add two more default actions - stop and
+ * continue - and that comment is now a table worth writing.
+ *
+ * SIGSTOP joins SIGKILL as a signal a process cannot argue with, and for
+ * the same kind of reason: a program able to catch or block it could
+ * make itself unsuspendable, which is exactly the thing a terminal needs
+ * to be able to do. SIGTSTP is the catchable one - it is what ^Z sends,
+ * and an editor with unsaved work is entitled to hear about it first. */
+#define SIGCONT  18 /* default: resume a stopped process. Cannot be ignored into uselessness - see sched_raise_signal */
+#define SIGSTOP  19 /* default: stop. Uncatchable, unblockable, unignorable */
+#define SIGTSTP  20 /* default: stop. What ^Z sends, and catchable so a program can save first */
+#define SIGTTIN  21 /* default: stop. A background process tried to read the terminal */
+#define SIGTTOU  22 /* default: stop. A background process tried to write it */
+
 /* The highest signal number this kernel will carry. A task's pending and
  * blocked sets are single 32-bit words, so this is 31 and the arithmetic
  * that depends on it is in one place. */
@@ -66,7 +89,27 @@
  * table so the kernel and user space cannot hold two different opinions
  * about it. */
 #define SIG_IS_CATCHABLE(sig) \
-    ((sig) > 0 && (sig) <= SIG_MAX && (sig) != SIGKILL && (sig) != SIGSEGV)
+    ((sig) > 0 && (sig) <= SIG_MAX && (sig) != SIGKILL && (sig) != SIGSEGV && \
+     (sig) != SIGSTOP)
+
+/* M85: what happens to a process that has installed no handler.
+ *
+ * This used to be a sentence in sched_raise_signal - "death for
+ * everything here except SIGCHLD" - with a note that a table of one row
+ * is a table nobody reads. Job control makes it four rows, and puts it
+ * somewhere both the kernel and a program can see the same answer. */
+#define SIG_DFL_TERMINATE 0
+#define SIG_DFL_IGNORE    1
+#define SIG_DFL_STOP      2
+#define SIG_DFL_CONTINUE  3
+
+#define SIG_DEFAULT_ACTION(sig)                                              \
+    ((sig) == SIGCHLD ? SIG_DFL_IGNORE                                       \
+     : ((sig) == SIGCONT ? SIG_DFL_CONTINUE                                  \
+        : (((sig) == SIGSTOP || (sig) == SIGTSTP || (sig) == SIGTTIN ||      \
+            (sig) == SIGTTOU)                                                \
+               ? SIG_DFL_STOP                                                \
+               : SIG_DFL_TERMINATE)))
 
 /* The two well-known handler values, as every C program spells them. */
 #define SIG_DFL_ADDR 0UL

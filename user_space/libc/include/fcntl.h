@@ -12,7 +12,7 @@
  */
 #pragma once
 
-#include "syscall.h" /* system_api/include/syscall.h - the OPEN_* flags themselves */
+#include "syscall.h" /* system_api/include/syscall.h - the OPEN_* flags, and M84's F_*_CMD/FD_CLOEXEC_BIT */
 
 #define O_RDONLY   OPEN_READ
 #define O_WRONLY   OPEN_WRITE
@@ -26,25 +26,38 @@
  * that at least the flag word is honest. */
 #define O_EXCL     0
 #define O_NONBLOCK 0 /* every descriptor here is what it is - see SYS_read/SYS_recv */
-#define O_CLOEXEC  0 /* there is no exec, only SYS_spawn, which copies the table */
+/* M84: a real bit. There is an exec now, so this finally has something to
+ * mean - and SYS_spawn honours it too, because a spawn is a fork and an
+ * exec in one call and this flag is about the exec half.
+ *
+ * Note it is OPEN_CLOEXEC and not FD_CLOEXEC_BIT: the F_SETFD flag and
+ * the open() flag are two different namespaces that happen to describe
+ * the same property, and conflating them collides with O_RDONLY. See the
+ * note next to OPEN_CLOEXEC. */
+#define O_CLOEXEC  OPEN_CLOEXEC
 
 int open(const char *path, int flags, ...);
 
 /* ---- fcntl, and exactly how little it can honestly do ------------------
  *
- * Every command fcntl carries is about a per-descriptor flag this kernel
- * does not have. That does not make the function meaningless, because
- * "this flag is not set" is a true answer for two of them and the only
- * ones a portable program actually reaches for:
+ * fcntl carries commands about two per-descriptor flags. As of M84 this
+ * machine has one of them for real and still does not have the other,
+ * and the difference is worth stating command by command rather than in
+ * a summary that would be half wrong:
  *
- *   F_GETFD -> 0. There is no exec on this machine (SYS_spawn loads a
- *              fresh image and copies the fd table), so FD_CLOEXEC has
- *              nothing to mean and is genuinely not set.
+ *   F_GETFD / F_SETFD -> real, as of M84. There IS an exec on this
+ *              machine now (SYS_execve), so FD_CLOEXEC has something to
+ *              mean: a descriptor marked with it does not survive into
+ *              the next program, and SYS_spawn honours it too because a
+ *              spawn is a fork and an exec in one call. This paragraph
+ *              said the opposite for seven milestones and the note above
+ *              said the header exists to avoid exactly that.
  *   F_GETFL -> 0. O_NONBLOCK is 0 here - see the flags above - so no
  *              status flag is set either.
- *   F_SETFD / F_SETFL -> 0 if the caller is setting nothing, -1
- *              otherwise. Accepting a flag that will not be honoured is
- *              the failure mode this whole file is written to avoid.
+ *   F_SETFL -> 0 if the caller is setting nothing, -1 otherwise.
+ *              Accepting a flag that will not be honoured is the failure
+ *              mode this whole file is written to avoid, and O_NONBLOCK
+ *              is still a flag this system cannot honour. M88.
  *
  * Everything else is -1. A program that needs F_DUPFD has dup2().
  */

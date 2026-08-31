@@ -320,3 +320,15 @@ global forktest_elf_end
 forktest_elf_start:
     incbin "build/forktest.elf"
 forktest_elf_end:
+
+global exectest_elf_start
+global exectest_elf_end
+exectest_elf_start:
+    incbin "build/exectest.elf"
+exectest_elf_end:
+
+global jobtest_elf_start
+global jobtest_elf_end
+jobtest_elf_start:
+    incbin "build/jobtest.elf"
+jobtest_elf_end:

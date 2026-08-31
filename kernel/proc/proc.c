@@ -79,32 +79,29 @@ uint64_t process_fork_address_space(uint64_t src_pml4_phys) {
     return vmm_fork_address_space(src_pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT);
 }
 
-static task_t *spawn_common(const char *name, const uint8_t *image, size_t image_size,
-                             const char *const *argv, const char *const *envp) {
-    /* M40: checked up front, before anything is allocated. The
-     * task-table-full check further down still exists (it has to - it's
-     * the one that runs under sched_lock and is therefore the
-     * authoritative one), but reaching *only* that one meant a full table
-     * cost an address space and an argument frame per rejected spawn,
-     * neither of which this project has a path to reclaim. Failing here
-     * instead makes the common case of a full table genuinely free. */
-    if (!sched_has_free_task_slot()) {
-        return (task_t *)0;
-    }
-
-    /* M40: reject a bad image before an address space exists to abandon.
-     * elf_load used to `panic` on anything that wasn't a valid x86-64
-     * ET_EXEC, which SYS_spawn made reachable from user space as
-     * sys_spawn("any_non_program_file", "") - it now returns 0 instead
-     * (elf.h), and asking elf_validate first means the refusal costs
-     * nothing at all: no frames, no page tables, no task slot. Worth the
-     * extra pass over the program headers precisely because there is no
-     * vmm_destroy_address_space in this project to clean up after the
-     * other ordering. */
+/* ---- M84: building an address space, separated from making a task -----
+ *
+ * Everything a fresh process needs in memory - the image mapped from its
+ * ELF, a stack, and the argument region argc/argv/envp live in - with no
+ * task_t anywhere in it.
+ *
+ * Split out because `execve` needs exactly this and nothing else: it
+ * already has a task, and what it wants is a new address space to point
+ * that task at. Before this split the only way to get one was to spawn a
+ * whole new process, which is the thing exec exists not to do.
+ *
+ * Returns the new PML4's physical address and writes the entry point to
+ * `*out_entry`, or returns 0 having given back everything it built. The
+ * stack top and the argument region are at their fixed addresses
+ * (USER_STACK_TOP, USER_ARG_ADDR), so there is nothing else to report.
+ */
+uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
+                                     const char *const *argv,
+                                     const char *const *envp,
+                                     uint64_t *out_entry) {
     if (elf_validate(image, image_size) == 0) {
-        return (task_t *)0;
+        return 0;
     }
-
     uint64_t pml4_phys = vmm_create_address_space();
     uint64_t entry = elf_load(pml4_phys, image, image_size);
     if (entry == 0) {
@@ -115,7 +112,7 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
          * for the machine's uptime, which is the leak M29 documented and
          * M50 measured. */
         process_destroy_address_space(pml4_phys);
-        return (task_t *)0;
+        return 0;
     }
 
     uint64_t stack_bottom = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
@@ -152,7 +149,7 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
                 pmm_free_frame(arg_frames[j]);
             }
             process_destroy_address_space(pml4_phys);
-            return (task_t *)0;
+            return 0;
         }
     }
     char *block = (char *)kmalloc(USER_ARG_BYTES);
@@ -161,7 +158,7 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
             pmm_free_frame(arg_frames[i]);
         }
         process_destroy_address_space(pml4_phys);
-        return (task_t *)0;
+        return 0;
     }
     k_memset(block, 0, USER_ARG_BYTES);
     {
@@ -239,6 +236,33 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
                          VMM_FLAG_WRITABLE | VMM_FLAG_USER);
     }
     kfree(block);
+    *out_entry = entry;
+    return pml4_phys;
+}
+
+static task_t *spawn_common(const char *name, const uint8_t *image, size_t image_size,
+                             const char *const *argv, const char *const *envp) {
+    /* M40: checked up front, before anything is allocated. The
+     * task-table-full check further down still exists (it has to - it's
+     * the one that runs under sched_lock and is therefore the
+     * authoritative one), but reaching *only* that one meant a full table
+     * cost an address space and an argument frame per rejected spawn,
+     * neither of which this project has a path to reclaim. Failing here
+     * instead makes the common case of a full table genuinely free. */
+    if (!sched_has_free_task_slot()) {
+        return (task_t *)0;
+    }
+
+    /* M40's "reject a bad image before an address space exists to
+     * abandon" check now lives at the top of
+     * process_build_address_space, because exec needs it for the same
+     * reason a spawn does and one copy is better than two. The reasoning
+     * is unchanged and is recorded there. */
+    uint64_t entry = 0;
+    uint64_t pml4_phys = process_build_address_space(image, image_size, argv, envp, &entry);
+    if (pml4_phys == 0) {
+        return (task_t *)0;
+    }
 
     /* This kmalloc runs in the caller's (kernel) context, but the
      * resulting pointer stays valid once the new task starts running

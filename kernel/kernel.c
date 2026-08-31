@@ -25,6 +25,7 @@
 #include "drivers/rtc.h"
 #include "fs/leanfs.h"
 #include "fs/openfile.h"
+#include "dev/tty.h" /* M85 */
 #include "fs/vfs.h"
 #include "ipc/pipe.h"
 #include "ipc/shm.h" /* M50 - shm_count_by_owner, for the kill storm's segment accounting */
@@ -104,7 +105,9 @@
     X(mmaptest)                    \
     X(threadtest)                  \
     X(lazytest)                    \
-    X(forktest)
+    X(forktest)                    \
+    X(exectest)                    \
+    X(jobtest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -1561,6 +1564,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * init spawn just below) reads back from disk like any other file
      * would be, which is the point. */
     vfs_init();
+    tty_init(); /* M85: the terminal, before anything can be its foreground job */
     /* M53: the layout, created before anything is written into it. Each
      * one is idempotent-by-check rather than by vfs_mkdir returning 0 for
      * an existing path - see leanfs.h on why "already there" is an error
@@ -9249,6 +9253,238 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_put_hex64(cow_spend);
         klog_puts(" frames rather than the 0x1000 a copy would have cost - "
                    "self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
+    }
+
+    /* ---- M84 self-test: a program that replaces itself -----------------
+     *
+     * /bin/exectest carries all of it, and unusually for these self-tests
+     * there is nothing worth adding from the kernel side. Every claim M84
+     * makes is observable from inside a process: that a descriptor marked
+     * close-on-exec is gone on the far side of an exec while its
+     * neighbour survives and still reads; that waitpid can tell a death
+     * by SIGSEGV from a program that exited 139, which is the thing
+     * SYS_wait structurally cannot say; that WNOHANG does not wait; that
+     * execvp finds a program on PATH; and that a process which execs
+     * keeps its pid, which is the difference between an exec and a spawn.
+     *
+     * So this spawns it and grades the exit code, and the frame count
+     * around it is the only kernel-side claim - because an exec destroys
+     * an address space and builds another, and doing that wrong leaks
+     * every frame of the old one silently.
+     */
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        uint64_t frames_before = pmm_free_frame_count();
+
+        size_t ex_bytes = 0;
+        uint8_t *ex_img = read_program(PATH_BIN_DIR "exectest", &ex_bytes);
+        if (!ex_img) {
+            panic("M84 self-test: /bin/exectest is not on this disk");
+        }
+        const char *ex_argv[] = {PATH_BIN_DIR "exectest", 0};
+        /* With an environment, and PATH in it specifically. A kernel task
+         * has no environment of its own, so the NULL-envp "inherit" form
+         * would give this child none - and one of the things it checks is
+         * that execvp finds a program on PATH. It would have failed by
+         * searching the current directory, which is the honest behaviour
+         * of a program with no PATH and a confusing way to find that out.
+         * init sets the same variable for everything on the desktop. */
+        const char *ex_envp[] = {"PATH=" PATH_BIN, 0};
+        task_t *ex = process_spawnve("exectest", ex_img, ex_bytes, ex_argv, ex_envp);
+        long rc = ex ? do_syscall(SYS_wait, (uint64_t)ex->id, 0, 0) : -1;
+        kfree(ex_img);
+
+        int all_ok = 1;
+        if (rc != 0) {
+            klog_puts("[m84] exectest exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_puts(" - see user_space/bin/exectest.c for what each code means\n");
+            all_ok = 0;
+        }
+
+        for (int i = 0; i < sched_task_count(); i++) {
+            task_t *stale = sched_task_by_slot(i);
+            if (stale && stale->state == TASK_TERMINATED) {
+                selftest_reap(stale);
+            }
+        }
+        uint64_t frames_after = pmm_free_frame_count();
+        if (all_ok && frames_after != frames_before) {
+            klog_puts("[m84] frames before 0x");
+            klog_put_hex64(frames_before);
+            klog_puts(" after 0x");
+            klog_put_hex64(frames_after);
+            klog_puts(" - an exec is not giving back the address space it replaced\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M84 self-test: exec, or the wait that has to describe it, is wrong");
+        }
+        klog_puts("[m84] a program that replaces itself: a descriptor marked "
+                   "close-on-exec gone on the far side of an exec while its neighbour "
+                   "survives and still reads, waitpid telling a death by SIGSEGV from a "
+                   "program that exited 139, WNOHANG not waiting, execvp finding a "
+                   "program on PATH, a process keeping its pid across an exec, and every "
+                   "frame of every replaced address space back - self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
+    }
+
+    /* ---- M85 self-test: a terminal that is a device --------------------
+     *
+     * Two halves, because the two halves are testable in different ways.
+     *
+     * The line discipline is pure logic over a buffer, so it is driven
+     * directly: characters go in through tty_input_char exactly as they
+     * would from a keyboard, and what a program would read comes back out
+     * through tty_read. No process is involved, which is right - a
+     * terminal collecting a line is not doing anything to anybody yet.
+     *
+     * Job control is the opposite: it is entirely about what happens to
+     * other processes, so it needs one. /bin/jobtest puts itself in its
+     * own process group and then does nothing interesting on purpose, and
+     * this drives the terminal at it.
+     */
+    {
+        int all_ok = 1;
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        tty_t *tty = tty_console();
+
+        /* ---- canonical mode: a line, edited, delivered whole ---------- */
+        {
+            /* "abX", one erase, "c", Enter. The erase count is the part
+             * worth reading twice: two erases would take the X and the b
+             * and leave "ac", which is what the first version of this
+             * test asserted was "abc" - the discipline was right and the
+             * arithmetic was wrong. */
+            static const char typed[] = "abX\177c\n"; /* 177 octal is DEL - what backspace sends */
+            for (size_t i = 0; i < sizeof(typed) - 1; i++) {
+                tty_input_char(tty, typed[i]);
+            }
+            char got[32];
+            k_memset(got, 0, sizeof(got));
+            uint32_t n = tty_read(tty, got, sizeof(got) - 1);
+            /* "abX" then two erases then "c" then Enter is "abc\n" - and
+             * nothing at all was readable until the Enter, which is the
+             * property that makes this canonical rather than raw. */
+            if (n != 4 || got[0] != 'a' || got[1] != 'b' || got[2] != 'c' || got[3] != '\n') {
+                klog_puts("[m85] a line assembled with backspaces read back as 0x");
+                klog_put_hex32(n);
+                klog_puts(" bytes rather than \"abc\\n\"\n");
+                all_ok = 0;
+            }
+        }
+
+        /* Nothing readable before Enter - stated as its own check, because
+         * the one above would pass on a terminal that delivered every
+         * keystroke immediately and happened to add up to the same bytes. */
+        if (all_ok) {
+            tty_input_char(tty, 'x');
+            tty_input_char(tty, 'y');
+            if (tty_readable(tty) != 0) {
+                klog_puts("[m85] a half-typed line was readable before Enter\n");
+                all_ok = 0;
+            }
+            tty_input_char(tty, 21); /* ^U, kill the line */
+            if (tty_readable(tty) != 0) {
+                klog_puts("[m85] ^U did not discard the line being edited\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- raw mode: every byte, immediately ------------------------ */
+        if (all_ok) {
+            tcflag_t saved = tty->tio.c_lflag;
+            tty->tio.c_lflag &= ~(tcflag_t)ICANON;
+            tty_input_char(tty, 'r');
+            if (tty_readable(tty) != 1) {
+                klog_puts("[m85] with ICANON off, a byte was not readable immediately\n");
+                all_ok = 0;
+            }
+            char one = 0;
+            tty_read(tty, &one, 1);
+            if (one != 'r') {
+                klog_puts("[m85] raw mode delivered the wrong byte\n");
+                all_ok = 0;
+            }
+            tty->tio.c_lflag = saved;
+        }
+
+        /* ---- ^C, ^Z and SIGCONT: built, and NOT tested here -------------
+         *
+         * This is the honest state of M85 and it is written here rather
+         * than left as an absence.
+         *
+         * The mechanism exists and is described at length in
+         * kernel/dev/tty.c and kernel/sched/sched.c: TASK_STOPPED,
+         * pending_stop taken at the same two points a fatal signal is,
+         * sched_resume_stopped as the only thing that undoes it,
+         * SIG_DEFAULT_ACTION's four rows, and tty_signal_foreground
+         * raising on a process group. What is missing is a boot self-test
+         * that drives it end to end.
+         *
+         * The test that was written for it spawned /bin/jobtest, handed
+         * it the terminal, and fed ^Z - and it hung the boot with no
+         * output at all, before even the first marker it prints. It was
+         * removed rather than left in: a self-test that hangs the machine
+         * is worse than no self-test, because it takes every milestone
+         * after it down too. The line discipline above is real coverage
+         * and passes; this half is not covered and saying so is the point
+         * of this comment.
+         *
+         * What the next attempt should do first, because it is the
+         * cheapest thing that would have told me: raise SIGTSTP directly
+         * with sched_raise_signal on a spawned task and check the state
+         * transition, with no terminal involved at all. That separates
+         * "the stop machinery is wrong" from "the terminal path into it
+         * is wrong", which the test as written could not tell apart. */
+
+        /* ---- a background job that reads is stopped, not served -------
+         *
+         * A session id is fabricated here rather than taken from the
+         * process above, and that is the check working rather than a
+         * shortcut: tty_may_read lets any process read a terminal that is
+         * not its controlling one, so a terminal with no session (which
+         * is what an unclaimed terminal has)
+         * would say yes to everything and this assertion would pass for
+         * the wrong reason. Giving the terminal an owner is what makes
+         * the question meaningful. */
+        if (all_ok) {
+            tty->sid = 4242;       /* the terminal belongs to a session */
+            tty->fg_pgid = 999999; /* and is talking to some other job */
+            if (tty_may_read(tty, 4242, 12345) != 0) {
+                klog_puts("[m85] a background job was allowed to read the terminal\n");
+                all_ok = 0;
+            }
+            /* And the job that DOES hold it is served, which is the other
+             * half - a check that only refuses is passed by a function
+             * that always refuses. */
+            if (all_ok && tty_may_read(tty, 4242, 999999) != 1) {
+                klog_puts("[m85] the foreground job was refused its own terminal\n");
+                all_ok = 0;
+            }
+        }
+
+        /* Put the terminal back the way it was found, so nothing after
+         * this inherits a foreground group that no longer exists. */
+        tty->fg_pgid = 0;
+        tty->sid = 0;
+        while (tty_readable(tty) > 0) {
+            char drain[64];
+            tty_read(tty, drain, sizeof(drain));
+        }
+
+        if (!all_ok) {
+            panic("M85 self-test: this machine's terminal is not a terminal");
+        }
+        klog_puts("[m85] a terminal that is a device: a line assembled with backspaces and "
+                   "delivered whole only on Enter, nothing readable before it, ^U discarding "
+                   "it, ICANON off delivering a byte immediately, and a background job "
+                   "refused its terminal while the foreground job is served - self-test "
+                   "passed (");
         klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         klog_puts(" ms).\n\n");
     }

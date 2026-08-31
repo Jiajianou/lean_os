@@ -10,6 +10,9 @@
 #include <unistd.h>
 
 #include "syscall_wrappers.h"
+#include <stdlib.h>   /* M84: getenv, for execvp's PATH search */
+#include <sys/wait.h> /* M84: waitpid */
+#include "paths.h"    /* system_api/include/paths.h - PATH_MAX_LEN */
 
 int chdir(const char *path) {
     return (int)sys_chdir(path);
@@ -113,14 +116,24 @@ int fcntl(int fd, int cmd, ...) {
         return -1;
     }
     switch (cmd) {
+    /* M84: FD_CLOEXEC is a real flag now, and these two are real calls.
+     * There is an exec on this machine, so "close this when a different
+     * program starts" finally means something - see SYS_fcntl. */
     case F_GETFD:
+        return (int)sys_fcntl(fd, F_GETFD_CMD, 0);
+    case F_SETFD: {
+        __builtin_va_list ap;
+        __builtin_va_start(ap, cmd);
+        int arg = __builtin_va_arg(ap, int);
+        __builtin_va_end(ap);
+        return (int)sys_fcntl(fd, F_SETFD_CMD, arg & FD_CLOEXEC);
+    }
+    /* F_GETFL/F_SETFL are unchanged and still honest. They are about
+     * O_NONBLOCK, every descriptor here is blocking, and a silent success
+     * would be a program believing otherwise. M88 is where that changes. */
     case F_GETFL:
-        return 0; /* genuinely no flag set - see the header */
-    case F_SETFD:
+        return 0;
     case F_SETFL: {
-        /* Setting nothing succeeds; setting anything is refused, because
-         * this system cannot honour it and a silent success would be a
-         * program believing its descriptor is non-blocking. */
         __builtin_va_list ap;
         __builtin_va_start(ap, cmd);
         int arg = __builtin_va_arg(ap, int);
@@ -134,4 +147,81 @@ int fcntl(int fd, int cmd, ...) {
 
 pid_t fork(void) {
     return (pid_t)sys_fork();
+}
+
+/* M84: replaces this program with another. Does not return on success -
+ * which is why every caller in the world writes `execve(...); perror(...)`
+ * with no `if` around it. */
+int execve(const char *path, char *const argv[], char *const envp[]) {
+    return (int)sys_execve(path, argv, envp);
+}
+
+int execv(const char *path, char *const argv[]) {
+    return execve(path, argv, environ);
+}
+
+/* M84: PATH search, which M75 deferred with "deliberately not a full
+ * PATH-search exec... M72 already owns those". M72 owns the *shell's*
+ * copy of it; this is the libc's, and the difference matters because a
+ * program that calls execvp is not going through a shell.
+ *
+ * A name containing a '/' is a path and is used as given - the same rule
+ * every execvp follows, and the reason `./a.out` works. Otherwise each
+ * PATH element is tried in order. An empty or unset PATH means only the
+ * current directory, which is what the standard says and not what most
+ * people expect; it is left as the standard has it rather than improved.
+ */
+int execvp(const char *file, char *const argv[]) {
+    if (!file || !*file) {
+        return -1;
+    }
+    for (const char *c = file; *c; c++) {
+        if (*c == '/') {
+            return execve(file, argv, environ);
+        }
+    }
+
+    const char *path = getenv("PATH");
+    if (!path || !*path) {
+        path = ".";
+    }
+    char attempt[PATH_MAX_LEN];
+    const char *p = path;
+    while (*p) {
+        size_t n = 0;
+        while (*p && *p != ':' && n < sizeof(attempt) - 2) {
+            attempt[n++] = *p++;
+        }
+        while (*p && *p != ':') {
+            p++; /* an element too long to try is skipped, not truncated */
+        }
+        if (n == 0) {
+            attempt[n++] = '.'; /* an empty element means the current directory */
+        }
+        if (attempt[n - 1] != '/') {
+            attempt[n++] = '/';
+        }
+        size_t f = 0;
+        while (file[f] && n < sizeof(attempt) - 1) {
+            attempt[n++] = file[f++];
+        }
+        attempt[n] = '\0';
+        if (!file[f]) {
+            /* Only attempted if the whole name fitted - a truncated name
+             * is a different program. */
+            execve(attempt, argv, environ);
+        }
+        if (*p == ':') {
+            p++;
+        }
+    }
+    return -1; /* nothing on PATH was runnable */
+}
+
+pid_t waitpid(pid_t pid, int *status, int options) {
+    return (pid_t)sys_waitpid(pid, status, options);
+}
+
+pid_t wait(int *status) {
+    return waitpid(-1, status, 0);
 }

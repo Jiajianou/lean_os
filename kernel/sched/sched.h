@@ -44,6 +44,19 @@ typedef enum {
      * why no core on this machine had ever halted while a desktop was
      * running. */
     TASK_BLOCKED,
+    /* M85: stopped by a job-control signal, and waiting for SIGCONT.
+     *
+     * Deliberately its own state rather than a flag on TASK_BLOCKED, and
+     * the difference is the one that matters: a blocked task is waiting
+     * for something that will happen on its own - bytes, a deadline, a
+     * child - and any wake makes it runnable again. A stopped task is
+     * waiting for a *decision*, and nothing but SIGCONT (or SIGKILL) may
+     * make it runnable. Making it a blocked task with a flag would mean
+     * every sched_wake_all in the kernel had to remember not to wake it,
+     * which is fourteen places that have to keep remembering; making it a
+     * state means pick_next's existing "is it TASK_READY" test excludes
+     * it for free and always will. */
+    TASK_STOPPED,
 } task_state_t;
 
 /* M14: a minimal per-task descriptor table. FD_STDIN/FD_STDOUT are
@@ -225,6 +238,22 @@ typedef struct {
         struct openfile *file;
         struct socket *sock;
     };
+    /* M84: FD_CLOEXEC, and it finally means something.
+     *
+     * <fcntl.h> defined this as a bit nothing checked, with an honest
+     * note that "there is no exec on this machine (SYS_spawn loads a
+     * fresh image and copies the fd table), so FD_CLOEXEC has nothing to
+     * mean and is genuinely not set". SYS_execve is what gives it
+     * something to mean: an exec keeps the fd table, so a descriptor
+     * that should not survive into a different program needs a way to
+     * say so.
+     *
+     * A whole byte for one bit, and deliberately: MAX_FDS * MAX_TASKS is
+     * 16384 slots, so this is 16 KiB of BSS against the alternative of
+     * packing it into `type` - which would make every existing read of
+     * `type` a masked read and every write a read-modify-write, for
+     * sixteen kilobytes on a machine with a hundred and twenty-eight. */
+    uint8_t cloexec;
 } fd_slot_t;
 
 /* ---- M69: two scheduling classes, third attempt and the one that works --
@@ -319,6 +348,28 @@ typedef struct task {
     void *arg;
     uint64_t pml4_phys; /* this task's address space - the shared kernel one for a plain kernel thread, a private one (M9) for a user process */
     int exit_code; /* valid once state == TASK_TERMINATED; set by task_exit_with_code (M13) */
+    /* M84: 0 if this task exited of its own accord, otherwise the signal
+     * that killed it.
+     *
+     * The exit code alone cannot answer this. A task killed by SIGSEGV
+     * exits with 128 + 11, and so does a program that calls exit(139) -
+     * the shell convention that makes the two *readable* is exactly what
+     * makes them indistinguishable to a program. SYS_wait has squashed
+     * them together since M13 and SYS_task_alive's own comment documents
+     * the squash; waitpid is the call that has to tell them apart, so
+     * this is the field that remembers which happened. */
+    int exit_signal;
+    /* M85: a stop that has been raised but not yet taken.
+     *
+     * Separate from pending_signal, whose invariant is documented at its
+     * one delivery point and is worth keeping: "nonzero means a signal
+     * whose disposition on this task is death". A stop is not a death and
+     * folding it in would make that sentence false everywhere it is
+     * relied on. Taken at the same two places pending_signal is - the
+     * scheduler tick and the syscall boundary - because a stop, like a
+     * death, is something that happens to a task at a moment it is not
+     * in the middle of something. */
+    int pending_stop;
     /* M63: this task's x87/SSE registers while it is not running. 512
      * bytes and 16-byte aligned, both architectural requirements of
      * FXSAVE rather than preferences - see arch/x86_64/fpu.h for why
@@ -333,7 +384,21 @@ typedef struct task {
      * property is what makes the model checkable rather than merely
      * present - it means nothing has to be trusted to hand one back. */
     uint32_t caps;
-    int pgid; /* process group: a process's own id if it's a group leader, otherwise inherited from whoever spawned it - read-only (SYS_getpgid), no job control to ever need changing it yet */
+    /* Process group: a process's own id if it is a group leader,
+     * otherwise inherited from whoever spawned it. Read-only until M85 -
+     * "no job control to ever need changing it yet" was the note, and
+     * SYS_setpgid is what job control needed. */
+    int pgid;
+    /* M85: the session this process belongs to.
+     *
+     * A session is a set of process groups that share a controlling
+     * terminal, and it is the level at which "which program is the
+     * terminal talking to" is decided - the group is which *job*, the
+     * session is which *terminal*. Inherited like pgid; changed only by
+     * setsid, which makes a process the leader of a brand-new session
+     * with no terminal at all. That last part is the whole reason a
+     * daemon calls it. */
+    int sid;
     int pending_signal; /* 0 = none, else SIGKILL/SIGTERM (system_api/include/signal.h) - checked at the next syscall entry or scheduler tick, see syscall.c/sched.c */
     int reaped; /* SYS_wait(-1) sets this once it's returned this task's id, so a later wait(-1) call doesn't hand back the same dead child twice */
     /* M19: per-process virtual memory bookkeeping (proc.h's USER_HEAP_
@@ -717,6 +782,18 @@ task_t *sched_task_by_id(int pid);
  * task keeps the environment it had). */
 int sched_set_env(task_t *t, const char *block, uint32_t len, uint32_t count);
 
+/* M84: rename a task that already exists. execve is the one caller - the
+ * name a person sees should be the program actually running, not the one
+ * that was originally spawned into this pid. */
+void sched_set_task_name(task_t *t, const char *name);
+
+/* M84: terminate the current task because of a signal, recording which.
+ * The exit code is still 128 + sig - every shell in the world reads that
+ * convention and nothing here changes it - but the signal is remembered
+ * separately so waitpid can report a death as a death rather than as a
+ * number that happens to look like one. */
+void task_exit_with_signal(int sig) __attribute__((noreturn));
+
 /* M75: releases `t`'s environment block. Called from task_exit_with_code;
  * exposed because sched_reap_slot has to be able to assert it is gone. */
 void sched_release_env(task_t *t);
@@ -753,6 +830,16 @@ int sched_signal_pending(void);
  * is by channel, which is right for "the pipe you were waiting on has
  * bytes" and wrong for "something happened to *you*". */
 void sched_wake_task(task_t *t);
+
+/* M85: put a task stopped by a job-control signal back on the run queue.
+ * Deliberately not sched_wake_task, which only ever moves TASK_BLOCKED:
+ * every wake in this kernel goes through that function and none of them
+ * should be able to resume a suspended process by accident. */
+void sched_resume_stopped(task_t *t);
+
+/* M85: raise `sig` on every live member of a process group - what a ^C
+ * does, and what SYS_kill's negative-pid form does. */
+void sched_raise_signal_group(int pgid, int sig);
 
 /* ---- M79 -------------------------------------------------------------
  *

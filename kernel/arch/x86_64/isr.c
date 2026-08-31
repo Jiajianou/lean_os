@@ -124,7 +124,7 @@ void isr_handler(isr_regs_t *r) {
          * SIGKILL/SIGTERM path already does from inside IRQ0's handler
          * (sched.c's deliver_pending_signal_and_exit), which is why this
          * is safe from interrupt context at all. */
-        task_exit_with_code(128 + SIGSEGV);
+        task_exit_with_signal(SIGSEGV);
     }
 
     klog_puts("\n*** UNHANDLED CPU EXCEPTION: ");

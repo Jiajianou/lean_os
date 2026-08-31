@@ -33,6 +33,7 @@
 #include "display.h" /* system_api/include/display.h - display_mode_t, M58 */
 #include "os_time.h" /* system_api/include/os_time.h - os_datetime_t, M59 */
 #include "os_net.h"  /* system_api/include/os_net.h - os_sockaddr_t/os_netconf_t, M64 */
+#include "dev/tty.h" /* M85: the terminal SYS_ioctl talks to */
 #include "mman.h"    /* system_api/include/mman.h - the PROT_ and MAP_ flags, M78 */
 #include "caps.h"    /* system_api/include/caps.h - CAP_*, M65 */
 #include "net/net.h"
@@ -620,6 +621,137 @@ static long sys_thread_exit(uint64_t value, uint64_t a2, uint64_t a3, uint64_t a
  * address-space duplication). The child inherits the caller's whole fd
  * table (sched.c's task_spawn_common), so a pipe set up beforehand
  * carries over. */
+/* ---- M84: argv and envp, copied out of the caller's address space -----
+ *
+ * Written for SYS_execve, which needs it for a reason SYS_spawn does not:
+ * it is about to destroy the address space these strings live in, so
+ * copying them into kernel buffers first is not an optimisation but the
+ * only order that works.
+ *
+ * SYS_spawn still has its own copy of this a few hundred lines below, and
+ * that is a duplication rather than a design - two places that decode
+ * untrusted user pointers should be one. It was left alone because the
+ * conversion is entangled with spawn's `#!` handling, which rebuilds the
+ * vector a third way, and doing that surgery in the same change as
+ * exec's first working version would have made a failure in either
+ * impossible to attribute. `path_is_argv0` exists so the conversion is a
+ * call-site change when it happens: spawn passes 1, exec passes 0.
+ *
+ * Most rules here were already in sys_spawn and are unchanged: the arrays
+ * are user memory and every pointer in them is a user pointer, so neither
+ * is trusted (M52); a vector too long or strings too large are truncated
+ * at the last whole entry rather than refused, because half an argument
+ * names something else and a program seeing fewer arguments than it was
+ * given is a failure it can report itself.
+ *
+ * `path_is_argv0` is the one thing the two callers disagree about, and
+ * getting it wrong is not subtle once it is seen. SYS_spawn's ABI says
+ * argv holds the arguments *after* the program name and the kernel
+ * supplies argv[0] itself, because that is the one element it knows for
+ * certain. execve's contract is POSIX's: argv is the COMPLETE vector,
+ * argv[0] included, and a program is entitled to put whatever it likes
+ * there.
+ *
+ * The first version of this took spawn's rule for both, which shifted
+ * every argument of every exec by one - so `execv(self, {self, "sig"})`
+ * arrived as argv[1] = self, the mode never matched, and the test
+ * program fell through to its own main path and re-exec'd itself. It
+ * presented as a boot that stopped after three ELF loads with no error
+ * at all.
+ *
+ * argv and envp get separate buffers, and that is deliberate: an
+ * environment is the larger of the two by an order of magnitude on any
+ * real system, and sharing one page would make a long PATH silently
+ * truncate the arguments.
+ *
+ * Returns 0, or -1 having freed whatever it allocated. A NULL `envp_ptr`
+ * leaves `v->envp` NULL, which every layer below reads as "inherit the
+ * caller's own environment".
+ */
+typedef struct {
+    char *argbuf;
+    char *envbuf;
+    const char *argv[SPAWN_MAX_ARGS + 1];
+    int argc;
+    const char *envv[USER_ENV_MAX_VARS + 1];
+    const char *const *envp;
+} user_vectors_t;
+
+static void free_vectors(user_vectors_t *v) {
+    kfree(v->argbuf);
+    kfree(v->envbuf);
+    v->argbuf = (char *)0;
+    v->envbuf = (char *)0;
+}
+
+static int copy_vectors_from_user(const char *path, uint64_t arg_ptr,
+                                  uint64_t envp_ptr, int path_is_argv0,
+                                  user_vectors_t *v) {
+    v->argbuf = (char *)kmalloc(PAGE_SIZE);
+    v->envbuf = (char *)0;
+    v->envp = (const char *const *)0;
+    v->argc = 0;
+    if (!v->argbuf) {
+        return -1;
+    }
+
+    size_t used = 0;
+    if (path_is_argv0) {
+        size_t len = k_strlen(path) + 1;
+        k_memcpy(v->argbuf, path, len);
+        v->argv[v->argc++] = v->argbuf;
+        used = len;
+    }
+    if (arg_ptr) {
+        for (int i = 0; v->argc < SPAWN_MAX_ARGS; i++) {
+            if (!user_range_ok(arg_ptr + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
+                break;
+            }
+            uint64_t slot = ((const uint64_t *)arg_ptr)[i];
+            if (slot == 0) {
+                break;
+            }
+            char *dst = v->argbuf + used;
+            size_t room = PAGE_SIZE - used;
+            if (room < 2 || copy_str_from_user(dst, slot, room) != 0) {
+                break;
+            }
+            v->argv[v->argc++] = dst;
+            used += k_strlen(dst) + 1;
+        }
+    }
+    v->argv[v->argc] = (const char *)0;
+
+    if (envp_ptr) {
+        v->envbuf = (char *)kmalloc(USER_ENV_MAX_BYTES);
+        if (!v->envbuf) {
+            free_vectors(v);
+            return -1;
+        }
+        int envc = 0;
+        size_t eused = 0;
+        for (int i = 0; envc < USER_ENV_MAX_VARS; i++) {
+            if (!user_range_ok(envp_ptr + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
+                break;
+            }
+            uint64_t slot = ((const uint64_t *)envp_ptr)[i];
+            if (slot == 0) {
+                break;
+            }
+            char *dst = v->envbuf + eused;
+            size_t room = USER_ENV_MAX_BYTES - eused;
+            if (room < 2 || copy_str_from_user(dst, slot, room) != 0) {
+                break;
+            }
+            v->envv[envc++] = dst;
+            eused += k_strlen(dst) + 1;
+        }
+        v->envv[envc] = (const char *)0;
+        v->envp = v->envv;
+    }
+    return 0;
+}
+
 static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
@@ -1189,6 +1321,41 @@ static long sys_mkdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, 
  * (128 + signal). Delivery isn't instantaneous: it's checked at the
  * target's next syscall entry (syscall_handler, below) or scheduler tick
  * (sched.c) - enough for signals whose only action is "terminate". */
+/* M85: may `self` signal `t`? Factored out of sys_kill, which had it
+ * inline, because signalling a whole process group has to ask the same
+ * question once per member - and asking it differently in two places is
+ * how a permission model grows a hole.
+ *
+ * M65: a parent may always signal its own descendants, with or without
+ * CAP_KILL_ANY - the relationship that gave you the pid is the one that
+ * entitles you to use it, and a launcher that cannot stop what it started
+ * is not a launcher. Anything else needs the capability.
+ *
+ * M76: and a process may always signal itself. raise() is kill(getpid())
+ * and nothing else, so without this the most ordinary use of a signal
+ * there is - a program telling itself something - would need the
+ * capability to kill *other people's* processes. That is identity, not a
+ * relationship, which is why it is a separate test from the walk.
+ *
+ * The walk goes up the whole parent chain rather than one level, because
+ * a shell that spawned a program that spawned a program is still the
+ * reason all three are running. It is bounded by MAX_TASKS: parent ids
+ * are never reassigned to form a cycle, but a bound costs one comparison
+ * and a kernel that loops here hangs the machine. */
+static int may_signal(task_t *self, task_t *t) {
+    if (t == self) {
+        return 1;
+    }
+    task_t *up = t;
+    for (int depth = 0; up && depth < MAX_TASKS; depth++) {
+        if (up->parent_id == self->id) {
+            return 1;
+        }
+        up = up->parent_id >= 0 ? sched_task_by_id(up->parent_id) : (task_t *)0;
+    }
+    return has_cap(CAP_KILL_ANY);
+}
+
 static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
@@ -1200,6 +1367,46 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
     if ((long)sig < 0 || sig > SIG_MAX) {
         return -1;
     }
+
+    /* ---- M85: signalling a whole process group ------------------------
+     *
+     * `kill(-pgid, sig)` and `kill(0, sig)` are how a terminal interrupts
+     * a *pipeline* rather than one of its stages - which is the thing ^C
+     * actually does, and the reason process groups exist at all. A shell
+     * that could only signal one pid would leave the other two stages of
+     * `a | b | c` running with their input gone.
+     *
+     * The permission rule is the same one the single-pid case uses, asked
+     * once per member: a parent may always signal its own descendants,
+     * anything else needs CAP_KILL_ANY. Asked per member rather than once
+     * for the group, because a group can contain processes this caller
+     * did not start - and the ones it did start should still be signalled
+     * rather than the whole call being refused. */
+    if ((long)pid <= 0) {
+        task_t *self_g = sched_current();
+        int target_pgid = ((long)pid == 0) ? self_g->pgid : (int)(-(long)pid);
+        int delivered = 0;
+        int total = sched_task_count();
+        for (int i = 0; i < total; i++) {
+            task_t *m = sched_task_by_slot(i);
+            if (!m || m->pgid != target_pgid || m->state == TASK_TERMINATED ||
+                m->state == TASK_FREE) {
+                continue;
+            }
+            if (!may_signal(self_g, m)) {
+                continue;
+            }
+            delivered++;
+            if (sig != 0) {
+                sched_raise_signal(m, (int)sig);
+            }
+        }
+        /* No member this caller may signal is the same answer as no such
+         * group: -1, rather than a silent success that would let a shell
+         * believe it had stopped a job it had not. */
+        return delivered > 0 ? 0 : -1;
+    }
+
     task_t *t = sched_task_by_id((int)pid);
     if (!t || t->state == TASK_TERMINATED) {
         return -1;
@@ -1215,23 +1422,7 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
      * parent ids are never reassigned to form a cycle, but a bound costs
      * one comparison and a kernel that loops here hangs the machine. */
     task_t *self = sched_current();
-    /* M76: a process may always signal itself, with or without
-     * CAP_KILL_ANY. raise() is kill(getpid()) and nothing else, so
-     * without this the most ordinary use of a signal there is - a
-     * program telling itself something - would need the capability to
-     * kill *other people's* processes. The parent walk below answers a
-     * different question and answers it correctly; this one is not a
-     * relationship, it is identity. */
-    int mine = (t == self);
-    task_t *up = t;
-    for (int depth = 0; up && !mine && depth < MAX_TASKS; depth++) {
-        if (up->parent_id == self->id) {
-            mine = 1;
-            break;
-        }
-        up = up->parent_id >= 0 ? sched_task_by_id(up->parent_id) : (task_t *)0;
-    }
-    if (!mine && !has_cap(CAP_KILL_ANY)) {
+    if (!may_signal(self, t)) {
         return -1;
     }
     if (sig == 0) {
@@ -1285,8 +1476,10 @@ static long sys_pipe(uint64_t fds_out_ptr, uint64_t a2, uint64_t a3, uint64_t a4
         return -1;
     }
     self->fds[read_fd].type = FD_PIPE_READ;
+    self->fds[read_fd].cloexec = 0; /* M84: a fresh descriptor is not close-on-exec until fcntl says so */
     self->fds[read_fd].pipe = p;
     self->fds[write_fd].type = FD_PIPE_WRITE;
+    self->fds[write_fd].cloexec = 0; /* M84: a fresh descriptor is not close-on-exec until fcntl says so */
     self->fds[write_fd].pipe = p;
 
     out[0] = read_fd;
@@ -1296,6 +1489,181 @@ static long sys_pipe(uint64_t fds_out_ptr, uint64_t a2, uint64_t a3, uint64_t a4
 
 /* Read-only: nothing needs to *change* a process's group yet (no job
  * control in this shell), so there's no setpgid to go with it. */
+/* ---- M85: ioctl, and only what a terminal needs -----------------------
+ *
+ * The first ioctl in this kernel, and the shape of it is the decision:
+ * five commands with behaviour behind every one, rather than a general
+ * "pass an integer to a driver" door. A door is what ioctl became
+ * everywhere else, and it became that by being open before anything
+ * needed it.
+ *
+ * `fd` must be one of the three descriptors a task starts with. That is
+ * the same approximation isatty has made since M77 - there is one
+ * terminal and fd 0/1/2 are it - and M87, which gives the terminal a
+ * path, is where it stops being one.
+ */
+static long sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
+                      uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *self = sched_current();
+    if (fd > 2) {
+        return -1;
+    }
+    if (self->fds[fd].type != FD_STDIN && self->fds[fd].type != FD_STDOUT) {
+        return -1; /* redirected somewhere that is not a terminal */
+    }
+    tty_t *t = tty_console();
+
+    switch (cmd) {
+    case TCGETS:
+        if (copy_to_user(arg, &t->tio, sizeof(t->tio)) != 0) {
+            return -1;
+        }
+        return 0;
+    case TCSETS: {
+        struct termios in;
+        if (copy_from_user(&in, arg, sizeof(in)) != 0) {
+            return -1;
+        }
+        /* Taken as given. There is no hardware here to refuse a setting -
+         * c_cflag describes a UART nothing dials - so the only honest
+         * failure would be a flag this discipline does not implement, and
+         * termios.h defines none of those on purpose. */
+        t->tio = in;
+        return 0;
+    }
+    case TIOCGWINSZ: {
+        struct winsize ws;
+        ws.ws_row = t->rows;
+        ws.ws_col = t->cols;
+        ws.ws_xpixel = 0;
+        ws.ws_ypixel = 0;
+        if (copy_to_user(arg, &ws, sizeof(ws)) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+    case TIOCGPGRP:
+        if (copy_to_user(arg, &t->fg_pgid, sizeof(t->fg_pgid)) != 0) {
+            return -1;
+        }
+        return 0;
+    case TIOCSPGRP: {
+        int pgid = 0;
+        if (copy_from_user(&pgid, arg, sizeof(pgid)) != 0) {
+            return -1;
+        }
+        /* An unclaimed terminal becomes this session's the first time a
+         * process in it puts a job in the foreground. That is what a
+         * shell does immediately after setsid, and doing it here rather
+         * than in a separate "claim" call means there is no window in
+         * which a terminal has a foreground group but no owner. */
+        if (t->sid == 0) {
+            t->sid = self->sid;
+        }
+        if (t->sid != self->sid) {
+            return -1; /* somebody else's terminal */
+        }
+        t->fg_pgid = pgid;
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+/* ---- M85: process groups and sessions ---------------------------------
+ *
+ * The three calls that make "which program is the terminal talking to" a
+ * question with an answer. A process group is a *job* - the stages of one
+ * pipeline, killed and suspended together. A session is a set of groups
+ * sharing one terminal, and is the level at which a controlling terminal
+ * is owned.
+ *
+ * setpgid's rules are POSIX's and each one exists to stop a real mistake:
+ * a process may only change its own group or that of a child it spawned
+ * (so a program cannot rearrange somebody else's jobs), and it may not
+ * move a process into a group in a different session (so a job cannot be
+ * moved to a terminal it does not belong to). `pid` 0 means the caller
+ * and `pgid` 0 means "make it a leader of its own group", which is what
+ * every shell passes.
+ */
+static long sys_setpgid(uint64_t pid_arg, uint64_t pgid_arg, uint64_t a3,
+                        uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *self = sched_current();
+    int pid = (int)pid_arg;
+    int pgid = (int)pgid_arg;
+
+    task_t *t = (pid == 0) ? self : sched_task_by_id(pid);
+    if (!t || t->state == TASK_TERMINATED || t->state == TASK_FREE) {
+        return -1;
+    }
+    if (t != self && t->parent_id != self->id) {
+        return -1; /* somebody else's job is not this program's to rearrange */
+    }
+    if (pgid == 0) {
+        pgid = t->id; /* leader of its own group - what every shell asks for */
+    }
+    if (pgid != t->id) {
+        /* Joining an existing group: it has to exist, and it has to be in
+         * this session. A group in another session is a job on another
+         * terminal. */
+        task_t *leader = sched_task_by_id(pgid);
+        if (!leader || leader->sid != t->sid) {
+            return -1;
+        }
+    }
+    t->pgid = pgid;
+    return 0;
+}
+
+/* Makes the caller the leader of a brand-new session and a brand-new
+ * process group, with NO controlling terminal. That last part is the
+ * whole reason anything calls this: a process with no terminal cannot be
+ * sent SIGINT by one, which is what "run in the background, detached"
+ * actually means.
+ *
+ * Refused for a process that is already a group leader, which is POSIX's
+ * rule and not an arbitrary one: the new session's id would collide with
+ * the group it already leads, and a session and a group that share an id
+ * without being the same thing is a knot nothing untangles. */
+static long sys_setsid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5, uint64_t a6) {
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *self = sched_current();
+    if (self->pgid == self->id) {
+        return -1;
+    }
+    self->sid = self->id;
+    self->pgid = self->id;
+    return self->id;
+}
+
+static long sys_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *t = (pid == 0) ? sched_current() : sched_task_by_id((int)pid);
+    if (!t) {
+        return -1;
+    }
+    return t->sid;
+}
+
 static long sys_getpgid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -1581,8 +1949,10 @@ static long sys_pipe_open(uint64_t name_ptr, uint64_t fds_out_ptr, uint64_t a3, 
         return -1;
     }
     self->fds[read_fd].type = FD_PIPE_READ;
+    self->fds[read_fd].cloexec = 0; /* M84: a fresh descriptor is not close-on-exec until fcntl says so */
     self->fds[read_fd].pipe = p;
     self->fds[write_fd].type = FD_PIPE_WRITE;
+    self->fds[write_fd].cloexec = 0; /* M84: a fresh descriptor is not close-on-exec until fcntl says so */
     self->fds[write_fd].pipe = p;
 
     out[0] = read_fd;
@@ -1987,6 +2357,11 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
         of->offset = vfs_handle_size(handle);
     }
     self->fds[fd].type = FD_FILE;
+    /* M84: a fresh descriptor is close-on-exec only if the caller asked
+     * at open time - which is the race-free way to ask, and the reason
+     * O_CLOEXEC exists alongside F_SETFD at all: a fork between the open
+     * and the fcntl would otherwise hand the flag's absence to a child. */
+    self->fds[fd].cloexec = (flags & OPEN_CLOEXEC) ? 1 : 0;
     self->fds[fd].file = of;
     return fd;
 }
@@ -2362,6 +2737,7 @@ static long install_socket_fd(struct socket *s) {
         return -1;
     }
     self->fds[fd].type = FD_SOCKET;
+    self->fds[fd].cloexec = 0; /* M84: a fresh descriptor is not close-on-exec until fcntl says so */
     self->fds[fd].sock = s;
     return fd;
 }
@@ -3128,6 +3504,355 @@ static long sys_fork(isr_regs_t *regs) {
     return (long)child->id;
 }
 
+/* M84: the one descriptor flag this machine has. See SYS_fcntl in
+ * system_api/include/syscall.h for why the rest of fcntl stays in libc
+ * answering honestly rather than arriving here to be refused. */
+static long sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
+                      uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *self = sched_current();
+    if (fd >= MAX_FDS || self->fds[fd].type == FD_NONE) {
+        return -1;
+    }
+    switch (cmd) {
+    case F_GETFD_CMD:
+        return self->fds[fd].cloexec ? FD_CLOEXEC_BIT : 0;
+    case F_SETFD_CMD:
+        self->fds[fd].cloexec = (arg & FD_CLOEXEC_BIT) ? 1 : 0;
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+/* ---- M84: waitpid -----------------------------------------------------
+ *
+ * What SYS_wait could not say. It returns an exit code, and an exit code
+ * cannot distinguish a program that called exit(139) from one that died
+ * on SIGSEGV - both are 139, because 128 + signal is the shell convention
+ * that makes a signal death *readable* and therefore indistinguishable to
+ * a program. SYS_task_alive's own comment documents that squash. This
+ * returns the pid and writes a status that decodes into either answer.
+ *
+ * The encoding is the familiar one, because every W-macro anyone has ever
+ * written assumes it: a normal exit is the code in bits 8-15 with the low
+ * seven bits clear; a signal death is the signal in the low seven bits.
+ * <sys/wait.h> is the other half.
+ *
+ * `pid` is -1 for any child or a specific pid. Process groups are not a
+ * thing this OS has yet, so a negative pid other than -1 is refused
+ * rather than silently treated as -1 - M85 is where groups arrive and
+ * where that case gets a meaning.
+ *
+ * The blocking is M68's, unchanged from sys_wait: a parent waiting on one
+ * child parks on that child and is woken by it; a parent waiting on any
+ * child parks on the poll channel with a short deadline, so a lost wake
+ * costs 50 ms rather than forever.
+ */
+static int wait_status_of(const task_t *t) {
+    if (t->exit_signal) {
+        return t->exit_signal & 0x7F;
+    }
+    return (t->exit_code & 0xFF) << 8;
+}
+
+static long sys_waitpid(uint64_t pid_arg, uint64_t status_ptr, uint64_t options,
+                        uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *self = sched_current();
+    int64_t want = (int64_t)pid_arg;
+    if (want < -1) {
+        return -1; /* process groups arrive with M85 */
+    }
+    if (status_ptr && !user_range_ok(status_ptr, sizeof(int), 1)) {
+        return -1;
+    }
+
+    for (;;) {
+        int any_children = 0;
+        uint64_t seq = sched_event_seq(); /* M68: sampled before the scan */
+        task_t *only = (task_t *)0;
+
+        if (want > 0) {
+            task_t *t = sched_task_by_id((int)want);
+            if (!t || t->reaped || t->parent_id != self->id) {
+                return -1;
+            }
+            any_children = 1;
+            only = t;
+            if (t->state == TASK_TERMINATED) {
+                int pid = t->id;
+                int status = wait_status_of(t);
+                t->reaped = 1;
+                sched_reap_slot(t);
+                if (status_ptr) {
+                    (void)copy_to_user(status_ptr, &status, sizeof(status));
+                }
+                return pid;
+            }
+        } else {
+            int total = sched_task_count();
+            for (int i = 0; i < total; i++) {
+                /* M54: by slot, not by id - a pid is not an index, and a
+                 * lookup would be answered by a recycled generation. */
+                task_t *t = sched_task_by_slot(i);
+                if (!t || t->parent_id != self->id || t->reaped) {
+                    continue;
+                }
+                any_children = 1;
+                if (t->state == TASK_TERMINATED) {
+                    int pid = t->id;
+                    int status = wait_status_of(t);
+                    t->reaped = 1;
+                    sched_reap_slot(t);
+                    if (status_ptr) {
+                        (void)copy_to_user(status_ptr, &status, sizeof(status));
+                    }
+                    return pid;
+                }
+            }
+        }
+
+        if (!any_children) {
+            return -1;
+        }
+        if (options & WNOHANG) {
+            return 0; /* alive, and the caller said not to wait */
+        }
+        if (only) {
+            sched_block_on_seq((const void *)only,
+                               pit_get_ticks() * (1000 / PIT_HZ) + 200, seq);
+        } else {
+            sched_block_on_seq(SCHED_POLL_CHAN,
+                               pit_get_ticks() * (1000 / PIT_HZ) + 50, seq);
+        }
+    }
+}
+
+/* ---- M84: execve ------------------------------------------------------
+ *
+ * Replaces the calling task's memory with a different program's, and
+ * changes nothing else about it: same pid, same parent, same process
+ * group, same working directory, same descriptors except the ones marked
+ * close-on-exec.
+ *
+ * The order below is the whole of the correctness, because there is a
+ * point in the middle after which nothing can fail:
+ *
+ *   1. everything that reads the CALLER's address space happens first -
+ *      the path, argv, envp. They are copied into kernel buffers because
+ *      the address space they point into is about to stop existing.
+ *   2. the image is read and the new address space is built. Both can
+ *      fail, and both fail harmlessly: the caller still has its own
+ *      memory and gets a -1 it can act on.
+ *   3. the swap. From here there is no way back - the old address space
+ *      is gone and the program that called this no longer exists - so
+ *      everything after this point must be incapable of failing.
+ *
+ * `regs` is rewritten rather than returned through: an exec does not
+ * return, it arrives. Setting rip, rsp and rdi and letting
+ * syscall_common_stub's own `iretq` do the rest is the same mechanism
+ * enter_user_mode uses for a fresh process, minus the fresh process.
+ */
+static long sys_execve(isr_regs_t *regs) {
+    task_t *self = sched_current();
+    if (!self || self->pml4_phys == vmm_kernel_pml4_phys()) {
+        return -1; /* a kernel thread has no image to replace */
+    }
+    /* Refused from a threaded process, for a plainer reason than fork's:
+     * the other threads are running on the address space this is about to
+     * destroy. POSIX says exec keeps only the calling thread and stops
+     * the rest, which needs a way to stop a thread that may be running on
+     * another core - the same machinery M83 said fork needs and does not
+     * have. Refusing is the honest version. */
+    if (sched_count_sharing_address_space(self->pml4_phys) > 1) {
+        return -1;
+    }
+
+    char path[LEANFS_MAX_PATH];
+    if (copy_path_from_user(path, regs->rdi) != 0) {
+        return -1;
+    }
+
+    user_vectors_t v;
+    if (copy_vectors_from_user(path, regs->rsi, regs->rdx, 0, &v) != 0) {
+        return -1;
+    }
+    if (v.argc == 0) {
+        /* A caller that passed no argv at all. POSIX leaves this
+         * undefined and every program in the world reads argv[0], so the
+         * path is supplied rather than handing over an empty vector -
+         * which is the one place exec borrows spawn's rule, and only
+         * because the alternative is a program that crashes on its first
+         * line. */
+        size_t len = k_strlen(path) + 1;
+        k_memcpy(v.argbuf, path, len);
+        v.argv[0] = v.argbuf;
+        v.argv[1] = (const char *)0;
+        v.argc = 1;
+    }
+
+    /* A `#!` script is refused here rather than resolved, and M84's own
+     * milestone note says why: shebang handling belongs to whoever has a
+     * path and an opinion about interpreters, which is the shell (M72),
+     * not a kernel. SYS_spawn resolves one because it is the call every
+     * launcher on this desktop already goes through; exec is the call a
+     * program makes about itself, and a program that wants to run a
+     * script can run its interpreter. */
+    leanfs_stat_t st;
+    if (vfs_stat(path, &st) != 0 || st.is_dir) {
+        free_vectors(&v);
+        return -1;
+    }
+    uint8_t *image = (uint8_t *)kmalloc(st.size ? st.size : 1);
+    if (!image) {
+        free_vectors(&v);
+        return -1;
+    }
+    int64_t size = vfs_read(path, image, st.size);
+    if (size < 2 || (image[0] == '#' && image[1] == '!') ||
+        !elf_validate(image, (size_t)size)) {
+        kfree(image);
+        free_vectors(&v);
+        return -1;
+    }
+
+    /* The inherit case, built before anything is torn down. env_block
+     * lives in the kernel heap, so these pointers stay valid across the
+     * swap - which is exactly why this can be built now and used after. */
+    const char *inherited[USER_ENV_MAX_VARS + 1];
+    const char *const *effective = v.envp;
+    task_t *owner = sched_vm_owner(self);
+    if (!effective && owner && owner->env_block && owner->env_count) {
+        uint32_t n = 0;
+        uint32_t off = 0;
+        while (off < owner->env_len && n < USER_ENV_MAX_VARS) {
+            inherited[n++] = owner->env_block + off;
+            while (off < owner->env_len && owner->env_block[off]) {
+                off++;
+            }
+            off++;
+        }
+        inherited[n] = (const char *)0;
+        effective = inherited;
+    }
+
+    uint64_t entry = 0;
+    uint64_t new_pml4 = process_build_address_space(image, (size_t)size, v.argv,
+                                                    effective, &entry);
+    kfree(image);
+    if (new_pml4 == 0) {
+        free_vectors(&v);
+        return -1;
+    }
+
+    /* ---- the point of no return -------------------------------------- */
+
+    uint64_t old_pml4 = self->pml4_phys;
+    self->pml4_phys = new_pml4;
+    /* Switched before the old one is destroyed, and this CPU is running
+     * on a kernel stack in PML4[0] - shared by every address space - so
+     * there is no instant at which the code doing this is unmapped. */
+    vmm_switch_address_space(new_pml4);
+    process_destroy_address_space(old_pml4);
+
+    /* Everything that described the old image's memory. Left set, each of
+     * these would be a cursor into an address space that no longer
+     * exists: heap_brk is the one that would bite first, since the new
+     * program's first malloc would extend a heap it does not have. */
+    self->heap_brk = USER_HEAP_START;
+    self->heap_mapped_end = USER_HEAP_START;
+    self->shm_next_vaddr = USER_SHM_BASE;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        self->mmaps[i].base = 0;
+        self->mmaps[i].pages = 0;
+        self->mmaps[i].prot = 0;
+    }
+
+    /* M84: the descriptors that said they should not survive this. */
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (self->fds[i].cloexec) {
+            fd_release(&self->fds[i]);
+            self->fds[i].type = FD_NONE;
+        }
+    }
+
+    /* POSIX's rule, and it is not the obvious one: a signal the old image
+     * had a HANDLER for goes back to the default, because that handler's
+     * address is in memory that no longer exists - but one it had chosen
+     * to IGNORE stays ignored, because "ignore this" is a decision about
+     * the process rather than about the image. The blocked mask survives
+     * for the same reason. */
+    for (int i = 0; i <= SIG_MAX; i++) {
+        if (self->sig_handler[i] != SIG_IGN_ADDR) {
+            self->sig_handler[i] = SIG_DFL_ADDR;
+        }
+    }
+    self->sig_restorer = 0;
+
+    /* The name a person sees in the task manager should be the program
+     * that is actually running. */
+    const char *base = path;
+    for (const char *c = path; *c; c++) {
+        if (*c == '/') {
+            base = c + 1;
+        }
+    }
+    sched_set_task_name(self, base);
+
+    /* M65: capabilities can only ever shrink. The new image gets what its
+     * manifest allows AND what this process already held - so exec can
+     * never be a way to gain a capability the caller did not have, which
+     * is the property the whole model rests on. */
+    self->caps &= caps_for_program(base);
+
+    /* The environment the new image was actually given, recorded so that
+     * *its* children inherit in turn. Best-effort: a failure here leaves
+     * the process running with the environment it had, which is wrong in
+     * a small way and better than not running at all - there is nothing
+     * left to return an error to. */
+    if (v.envp) {
+        char *packed = (char *)kmalloc(USER_ENV_MAX_BYTES);
+        if (packed) {
+            uint32_t len = 0;
+            uint32_t count = 0;
+            for (int i = 0; v.envv[i] && count < USER_ENV_MAX_VARS; i++) {
+                uint32_t n = (uint32_t)k_strlen(v.envv[i]) + 1;
+                if (len + n > USER_ENV_MAX_BYTES) {
+                    break;
+                }
+                k_memcpy(packed + len, v.envv[i], n);
+                len += n;
+                count++;
+            }
+            sched_set_env(self, packed, len, count);
+            kfree(packed);
+        }
+    }
+    free_vectors(&v);
+
+    /* And the frame the `iretq` at the end of syscall_common_stub will
+     * return through. Every register is cleared rather than left as the
+     * caller had it: the new program is entitled to assume it starts from
+     * a known state, and leaking the old image's registers into it would
+     * be a small, permanent source of nondeterminism. */
+    uint64_t cs = regs->cs;
+    uint64_t ss = regs->ss;
+    k_memset(regs, 0, sizeof(*regs));
+    regs->rip = entry;
+    regs->rsp = USER_STACK_TOP;
+    regs->rdi = USER_ARG_ADDR; /* crt0's argument, as enter_user_mode passes it */
+    regs->cs = cs;
+    regs->ss = ss;
+    regs->rflags = 0x202; /* bit 1 always set, bit 9 IF - ring 3 runs with interrupts on */
+    regs->vector = 0x80;
+    return 0;
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -3211,6 +3936,12 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_thread_exit] = sys_thread_exit,
     [SYS_gettid] = sys_gettid,
     [SYS_getdents] = sys_getdents,
+    [SYS_waitpid] = sys_waitpid,
+    [SYS_fcntl] = sys_fcntl,
+    [SYS_setpgid] = sys_setpgid,
+    [SYS_setsid] = sys_setsid,
+    [SYS_getsid] = sys_getsid,
+    [SYS_ioctl] = sys_ioctl,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than
@@ -3454,6 +4185,20 @@ void syscall_handler(isr_regs_t *regs) {
      * on two different stacks, so the frame is the argument. */
     if (num == SYS_fork) {
         regs->rax = (uint64_t)sys_fork(regs);
+        signal_deliver(regs);
+        return;
+    }
+
+    /* M84: intercepted for the same reason, and with one extra rule - on
+     * success it has already written every field of `regs`, including
+     * rax, so the return value must not be stored over it. An exec that
+     * worked has nowhere to return a value to; an exec that failed is an
+     * ordinary -1 to a caller that is still there. */
+    if (num == SYS_execve) {
+        long rc = sys_execve(regs);
+        if (rc != 0) {
+            regs->rax = (uint64_t)rc;
+        }
         signal_deliver(regs);
         return;
     }

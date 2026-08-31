@@ -277,6 +277,16 @@ uint64_t sched_total_ticks(int cpu) {
 /* M45: bounded copy into a task_t's own fixed name buffer. NULL and an
  * over-long name are both ordinary inputs here, not errors - see
  * TASK_NAME_MAX's own comment in sched.h. */
+static void set_task_name(task_t *t, const char *name);
+
+/* M84: exposed as sched_set_task_name, because execve renames a task that
+ * already exists - the one caller outside this file, and the one case
+ * where the name a person sees in the task manager has to follow the
+ * program actually running rather than the one that was spawned. */
+void sched_set_task_name(task_t *t, const char *name) {
+    set_task_name(t, name);
+}
+
 static void set_task_name(task_t *t, const char *name) {
     int i = 0;
     if (name) {
@@ -315,11 +325,54 @@ static void fork_child_trampoline(void) {
  * "just terminate" default action). Exit code follows the standard
  * shell convention (128 + signal number) so SYS_wait's caller can tell a
  * signal death from a normal exit. */
+/* M85: put a stopped task back on the run queue.
+ *
+ * Not sched_wake_task, which only ever moves TASK_BLOCKED - and
+ * deliberately so: every wake in this kernel goes through that function
+ * and none of them should be able to resume a suspended process by
+ * accident. Resuming is a decision, and this is the one function that
+ * makes it. */
+void sched_resume_stopped(task_t *t) {
+    if (!t) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    if (t->state == TASK_STOPPED) {
+        t->state = TASK_READY;
+        t->prio = PRIO_INTERACTIVE;
+        t->full_slices = 0;
+        t->wait_chan = (const void *)0;
+        t->wake_deadline_ms = 0;
+        event_seq++;
+    }
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+}
+
+/* M85: stop the *current* task, at a point where stopping is safe.
+ *
+ * Called from the same two places a fatal pending signal is taken - the
+ * scheduler tick and the syscall boundary - because a stop, like a death,
+ * has to happen to a task that is not in the middle of something. Marks
+ * the task TASK_STOPPED and reschedules; pick_next's existing "is it
+ * TASK_READY" test does the rest, and nothing will pick it again until
+ * sched_resume_stopped says so. */
+static void take_pending_stop(task_t *t) {
+    t->pending_stop = 0;
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    t->state = TASK_STOPPED;
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+    schedule();
+}
+
 static void deliver_pending_signal_and_exit(task_t *t) __attribute__((noreturn));
 static void deliver_pending_signal_and_exit(task_t *t) {
     int sig = t->pending_signal;
     t->pending_signal = 0;
-    task_exit_with_code(128 + sig);
+    task_exit_with_signal(sig);
 }
 
 /* Runs inside IRQ0's handler on every real PIT tick (BSP only - the 8259
@@ -391,6 +444,13 @@ void scheduler_tick_cpu(int cpu) {
     if (t->pending_signal != 0) {
         deliver_pending_signal_and_exit(t);
     }
+    /* M85: and a stop, at the same point and for the same reason. After
+     * the death check, because a task with both pending is a task that
+     * has been killed - and stopping it first would leave it suspended
+     * with a SIGKILL it can never take. */
+    if (t->pending_stop != 0) {
+        take_pending_stop(t);
+    }
     /* M69: aging. Nothing stays batch for more than a second without
      * another chance to prove itself; a genuinely CPU-bound task
      * re-demotes within SCHED_BATCH_THRESHOLD slices, so the promise
@@ -455,6 +515,7 @@ void sched_init(void) {
     tasks[0].fds[1].type = FD_STDOUT;
     tasks[0].parent_id = -1;
     tasks[0].pgid = 0;
+    tasks[0].sid = 0;  /* M85: the boot task is session 0, and everything descends from it */
     /* M65: the root of the whole model. Every capability any process on
      * this machine will ever hold is a subset of this one, arrived at by
      * a chain of spawns that can only narrow. */
@@ -493,8 +554,10 @@ void sched_init_ap(int cpu_id) {
     t->fds[1].type = FD_STDOUT;
     t->parent_id = -1;
     t->pgid = 0;
+    t->sid = 0;  /* M85 - an idle identity is in the boot session like task 0 */
     t->pending_signal = 0;
     t->reaped = 0;
+    t->exit_signal = 0; /* M84: not killed until something kills it */
     t->caps = CAP_ALL; /* M65: a kernel idle identity, which never enters ring 3 and never makes a syscall */
     t->is_idle = 1;    /* M68 */
     t->tgid = t->id;   /* M79 */
@@ -592,12 +655,25 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
      * records who to attribute this task to for SYS_wait(-1). */
     for (int i = 0; i < MAX_FDS; i++) {
         t->fds[i] = caller->fds[i];
+        /* M84: a spawn is a fork and an exec in one call, and FD_CLOEXEC
+         * is about the exec half - so a descriptor marked close-on-exec
+         * does not reach the program this starts. Dropped rather than
+         * copied-then-closed: the slot is never retained, so there is no
+         * reference to give back and no window in which the child holds
+         * something it was never meant to. */
+        if (t->fds[i].cloexec) {
+            t->fds[i].type = FD_NONE;
+            t->fds[i].cloexec = 0;
+            continue;
+        }
         fd_retain(&t->fds[i]); /* M59: the child holds these too - see fd_retain */
     }
     t->parent_id = caller->id;
     t->pgid = caller->pgid;
+    t->sid = caller->sid; /* M85: a child stays in its parent's session until setsid says otherwise */
     t->pending_signal = 0;
     t->reaped = 0;
+    t->exit_signal = 0; /* M84: not killed until something kills it */
     /* M75: the working directory is inherited exactly the way the fd
      * table above is, and for the same reason - a child is launched *in*
      * a place, and a launcher that had to pass one as an argument would
@@ -1076,6 +1152,14 @@ void sched_deliver_pending_signal(void) {
     }
 }
 
+void task_exit_with_signal(int sig) {
+    task_t *t = current_task[smp_current_cpu()];
+    if (t) {
+        t->exit_signal = sig;
+    }
+    task_exit_with_code(128 + sig);
+}
+
 void task_exit_with_code(int code) {
     task_t *t = current_task[smp_current_cpu()];
     /* Reclaims whatever shm segments this task created (kernel/ipc/
@@ -1280,6 +1364,7 @@ void sched_reap_slot(task_t *t) {
     t->state = TASK_FREE;
     t->pending_signal = 0;
     t->reaped = 0;
+    t->exit_signal = 0; /* M84: not killed until something kills it */
     t->parent_id = -1;
     t->caps = 0; /* M65: a free slot holds no authority, so a stale pointer to one cannot lend any */
     sched_reset_fds_to_std(t);
@@ -1599,13 +1684,20 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->kernel_stack_top = (uint64_t)(stack_base + TASK_STACK_SIZE);
 
     for (int i = 0; i < MAX_FDS; i++) {
+        /* M84: FD_CLOEXEC is copied, not acted on. It means "close this
+         * when a different program starts", and a fork starts no program
+         * - the child is still running this one. It is the exec that
+         * closes them, which is the whole reason the flag is per
+         * descriptor rather than per call. */
         t->fds[i] = parent->fds[i];
         fd_retain(&t->fds[i]);
     }
     t->parent_id = parent->id;
     t->pgid = parent->pgid;
+    t->sid = parent->sid; /* M85 - see task_spawn_common */
     t->pending_signal = 0;
     t->reaped = 0;
+    t->exit_signal = 0; /* M84: not killed until something kills it */
 
     for (int i = 0; i < PATH_MAX_LEN; i++) {
         t->cwd[i] = parent->cwd[i];
@@ -1741,10 +1833,42 @@ void sched_raise_signal(task_t *t, int sig) {
     if (sig <= 0 || sig > SIG_MAX) {
         return;
     }
+
+    /* ---- M85: SIGCONT, before anything else ---------------------------
+     *
+     * A stopped task is not running, so it cannot take a signal in the
+     * ordinary way - which means the signal that resumes it has to act
+     * on the task table rather than on the task. Handled first, and
+     * unconditionally, because a process that has ignored SIGCONT still
+     * has to be resumable: POSIX says the *continue* happens whatever the
+     * disposition, and only the optional handler is subject to it.
+     * Otherwise a program could make itself permanently unstoppable in
+     * the other direction - suspended forever with no way back. */
+    if (sig == SIGCONT) {
+        t->pending_stop = 0;
+        if (t->state == TASK_STOPPED) {
+            sched_resume_stopped(t);
+        }
+        /* Fall through: a handler for SIGCONT still runs if one is
+         * installed, which is how a shell learns it was resumed. */
+    }
+
     if (!SIG_IS_CATCHABLE(sig)) {
-        /* SIGKILL, and SIGSEGV if anything ever sends one. No handler,
-         * no mask, no argument. */
+        /* SIGKILL, SIGSEGV if anything ever sends one, and M85's SIGSTOP.
+         * No handler, no mask, no argument. */
+        if (sig == SIGSTOP) {
+            t->pending_stop = sig;
+            sched_wake_task(t);
+            return;
+        }
         t->pending_signal = sig;
+        /* M85: a stopped task has to become runnable to die. Nothing else
+         * will ever schedule it, so a SIGKILL to a suspended process
+         * would otherwise be a kill that never happens - which is the one
+         * thing SIGKILL is not allowed to be. */
+        if (t->state == TASK_STOPPED) {
+            sched_resume_stopped(t);
+        }
         sched_wake_task(t);
         return;
     }
@@ -1753,14 +1877,26 @@ void sched_raise_signal(task_t *t, int sig) {
         return;
     }
     if (h == SIG_DFL_ADDR) {
-        /* The default action, which is death for everything here except
-         * SIGCHLD. Being explicit about the one exception rather than
-         * carrying a table: this kernel has one signal whose default is
-         * to be ignored, and a table of one row is a table nobody reads. */
-        if (sig == SIGCHLD) {
+        /* M85: the default action, from the one table both the kernel and
+         * user space read (SIG_DEFAULT_ACTION in system_api's signal.h).
+         * This used to be "death for everything except SIGCHLD", with a
+         * note that a table of one row is a table nobody reads. Job
+         * control made it four. */
+        switch (SIG_DEFAULT_ACTION(sig)) {
+        case SIG_DFL_IGNORE:
+        case SIG_DFL_CONTINUE:
+            return; /* the resume itself was done above */
+        case SIG_DFL_STOP:
+            t->pending_stop = sig;
+            sched_wake_task(t);
             return;
+        default:
+            break;
         }
         t->pending_signal = sig;
+        if (t->state == TASK_STOPPED) {
+            sched_resume_stopped(t);
+        }
         sched_wake_task(t);
         return;
     }
@@ -1770,6 +1906,29 @@ void sched_raise_signal(task_t *t, int sig) {
      * - and a task that unblocks the signal a moment later would
      * otherwise sleep through it. */
     sched_wake_task(t);
+}
+
+/* M85: raise `sig` on every live member of a process group.
+ *
+ * Lives here rather than in the tty because it is a fact about the task
+ * table, and because SYS_kill's negative-pid form wants the same walk.
+ * No permission check: the callers that have one (SYS_kill) ask before
+ * calling, and the caller that does not (a terminal raising SIGINT on
+ * its own foreground job) has no user to check - the authority is the
+ * terminal's, established when the shell handed it the group. */
+void sched_raise_signal_group(int pgid, int sig) {
+    if (pgid == 0) {
+        return;
+    }
+    for (int i = 0; i < task_count; i++) {
+        task_t *t = &tasks[i];
+        if (t->state == TASK_FREE || t->state == TASK_TERMINATED) {
+            continue;
+        }
+        if (t->pgid == pgid) {
+            sched_raise_signal(t, sig);
+        }
+    }
 }
 
 int sched_signal_pending(void) {
@@ -1826,6 +1985,7 @@ int sched_set_env(task_t *t, const char *block, uint32_t len, uint32_t count) {
  * exiting, a slot being recycled, SYS_dup2 overwriting one - has to come
  * through here or the count is a lie. */
 void fd_release(fd_slot_t *slot) {
+    slot->cloexec = 0; /* M84: a slot that holds nothing holds no flag either */
     switch (slot->type) {
     case FD_PIPE_READ:
         pipe_unref_read(slot->pipe);

@@ -33,7 +33,7 @@
 #define SPAWN_MAX_ARGS 16
 
 #define SYS_spawn      3 /* (path, argv, envp) -> pid or -1 (a SPAWN_ERR_* code, M48). Combines fork+exec into one call - a fork/exec "equivalent" (M13), not literal fork(): no address-space duplication, just a fresh process loaded straight from a named file. M60: `argv` is a NULL-terminated array of char* holding the arguments *after* the program name - the kernel puts `path` in argv[0] itself, because that is the one element it knows for certain and the one a program is entitled to assume is there. NULL is a program launched with no arguments. Truncated at SPAWN_MAX_ARGS, or at whatever fits in the argument region the vector is copied into; the one-string form every caller in this project used until now is user_space/lib's sys_spawn(), which builds a two-element vector. M75: `envp` is a NULL-terminated array of "NAME=value" strings, or NULL to give the child a copy of the *caller's own* environment - which is what makes an environment a thing that survives a spawn rather than a thing each program invents. user_space/lib's sys_spawnv() passes `environ`, so a setenv() before a spawn is visible to the child; the NULL form is what a kernel thread and every pre-M75 caller get, and it means "whatever I was started with". M75: the child also inherits the caller's working directory (SYS_chdir), which is the other half of "a place to stand" - the pair is what lets a launcher say where a program should run without inventing an argument for it. */
-#define SYS_wait       4 /* (pid) -> exit code. Polls + cooperatively yields (schedule()) rather than a real blocking wait queue - M14 is where "more complete wait semantics" is scoped to land. */
+#define SYS_wait       4 /* (pid) -> exit code. M68: a real blocking wait - a parent waiting on one child parks on that child and is woken by it. (This said "polls + cooperatively yields rather than a real blocking wait queue - M14 is where more complete wait semantics is scoped to land" for fifty-four milestones after M68 made it false. M84 is what had reason to read it.) Returns an exit code, which cannot distinguish exit(139) from a death by SIGSEGV - SYS_waitpid is the call that can. */
 #define SYS_read       5 /* (fd, buf, len) -> bytes read. Only fd=0 (stdin/keyboard) is wired up; blocks (yields) until at least one byte is available. */
 #define SYS_readfile   6 /* (name, buf, maxlen) -> bytes copied or -1. Whole-file read by name - no open/close/fd-table/lseek yet, matching M13's "a couple of coreutils" scope rather than a full VFS API nothing needs yet. */
 #define SYS_listdir    7 /* (path, buf, maxlen) -> bytes written or -1. Newline-separated names of everything in the directory at `path`, with a '/' appended to each one that is itself a directory so a caller can tell the two apart without a second call. M53: this *was* SYS_listfiles(buf, maxlen), which took no path because leanfs was flat and "the entire namespace" was the only answer it could give. Same number, new signature - one repo, every caller converted in the same commit, and leaving a second call that only ever means "/" would just be a way for the two to drift. */
@@ -92,6 +92,18 @@
 #define OPEN_CREATE   0x4  /* create if absent - an error otherwise */
 #define OPEN_TRUNCATE 0x8  /* drop existing contents (requires OPEN_WRITE) */
 #define OPEN_APPEND   0x10 /* start positioned at the end */
+/* M84: close this descriptor when the process execs.
+ *
+ * A bit of its own in the OPEN_* space, and that is the whole point.
+ * FD_CLOEXEC_BIT (below) is the value F_SETFD takes and is 1, because
+ * that is what POSIX says and what every program passes; OPEN_READ is
+ * also 1, because that is what this ABI has said since M59. They are two
+ * different namespaces and defining O_CLOEXEC as FD_CLOEXEC_BIT - which
+ * is what the first draft of M84 did - makes `open(path, O_RDONLY)` mark
+ * a descriptor close-on-exec and `open(path, O_WRONLY|O_CLOEXEC)` mean
+ * O_RDWR. Caught by reading the numbers rather than by running it, which
+ * is the only way that one gets caught. */
+#define OPEN_CLOEXEC  0x20
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
@@ -273,6 +285,94 @@
  * thing that differs between the two sides. */
 #define SYS_fork       82
 
+/* M84: (path, argv, envp) -> does not return on success, -1 on failure.
+ *
+ * Replaces the calling process's memory with a different program's and
+ * changes nothing else: same pid, same parent, same process group, same
+ * working directory, same descriptors except those marked FD_CLOEXEC.
+ * Signal handlers go back to the default (their addresses were in memory
+ * that no longer exists) while an explicit "ignore" survives; the
+ * capability set is intersected with the new program's manifest, never
+ * widened.
+ *
+ * A `#!` script is refused rather than resolved. SYS_spawn resolves one
+ * because it is the call every launcher on this desktop goes through;
+ * exec is the call a program makes about itself, and a kernel with an
+ * opinion about interpreters is a kernel doing the shell's job.
+ *
+ * Refused from a process with more than one thread: the other threads
+ * are running on the address space this would destroy, and stopping a
+ * thread on another core needs machinery this kernel does not have (the
+ * same limit SYS_fork states).
+ *
+ * `envp` NULL means inherit, exactly as SYS_spawn's does. */
+#define SYS_execve     83
+
+/* M84: (pid, int *status, options) -> the pid reaped, 0, or -1.
+ *
+ * `pid` is -1 for any child, or a specific child's pid. A negative pid
+ * other than -1 is refused rather than quietly treated as -1: that form
+ * means a process group, and process groups arrive with M85.
+ *
+ * `status` may be NULL. Otherwise it receives the familiar encoding, and
+ * it is familiar on purpose - every W-macro ever written assumes it: a
+ * normal exit is the code in bits 8-15 with the low seven bits clear; a
+ * death by signal is the signal in the low seven bits. <sys/wait.h>
+ * decodes it.
+ *
+ * `options` is WNOHANG (1) or 0. With WNOHANG and a child that is alive,
+ * the answer is 0 rather than a block - which is the difference between
+ * a shell that can report a background job and one that stops to wait
+ * for it.
+ *
+ * This is what SYS_wait (4) could not be. That call returns an exit code
+ * and an exit code cannot tell exit(139) from a death by SIGSEGV, since
+ * 128+signal is exactly the convention that makes a signal death readable
+ * and therefore ambiguous. SYS_wait stays: every caller in this project
+ * uses it and means it. */
+#define WNOHANG 1
+#define SYS_waitpid    84
+
+/* M84: (fd, cmd, arg) -> the answer, or -1.
+ *
+ * One descriptor flag exists on this machine and this is the call that
+ * reads and writes it. F_GETFD returns FD_CLOEXEC or 0; F_SETFD sets or
+ * clears it. Everything else is -1, which is what <fcntl.h> already told
+ * a program to expect - and it is now -1 because the flag does not
+ * exist rather than because the whole call was a stub.
+ *
+ * F_GETFL/F_SETFL stay in libc and stay answering 0: O_NONBLOCK is the
+ * flag they are about, every descriptor here is blocking, and M88 is
+ * where that changes. */
+#define F_GETFD_CMD 1
+#define F_SETFD_CMD 2
+#define FD_CLOEXEC_BIT 1
+#define SYS_fcntl      85
+
+/* M85: process groups and sessions - see sys_setpgid in
+ * kernel/arch/x86_64/syscall.c for the rules and why each exists.
+ *
+ * SYS_getpgid (10) has been here since M13 with a note saying it was
+ * read-only because there was "no job control to ever need changing it
+ * yet". This is that milestone. */
+#define SYS_setpgid    86 /* (pid, pgid) -> 0 or -1. pid 0 is the caller; pgid 0 means "lead your own group" */
+#define SYS_setsid     87 /* () -> the new session id, or -1 if the caller already leads a group */
+#define SYS_getsid     88 /* (pid) -> the session id, or -1. pid 0 is the caller */
+
+/* M85: (fd, cmd, arg) -> the answer, or -1. The first ioctl on this
+ * machine, and deliberately the narrow one it looks like rather than a
+ * general escape hatch: five commands, each because something concrete
+ * needs it. TCGETS/TCSETS are how an editor turns off canonical mode and
+ * puts it back, TIOCGWINSZ is how anything that draws finds out how big
+ * the screen is, and TIOCGPGRP/TIOCSPGRP are how a shell hands the
+ * terminal to a job and takes it back. See system_api/include/termios.h.
+ *
+ * `fd` must name the terminal - which on this machine means fd 0, 1 or 2,
+ * the descriptors every task starts with. That is the same approximation
+ * <unistd.h>'s isatty has made since M77, and it stops being an
+ * approximation when M87 gives the terminal a path. */
+#define SYS_ioctl      89
+
 /* M81: the record SYS_getdents writes, and the two limits that go with
  * it. Kept here rather than in a header of its own because it is part of
  * one syscall's contract and nothing else refers to it.
@@ -301,4 +401,4 @@ typedef struct {
  * at least this big can never be told "nothing fits". */
 #define OS_DIRENT_MAX (8 + OS_NAME_MAX + 1 + 7)
 
-#define SYSCALL_COUNT 83
+#define SYSCALL_COUNT 90

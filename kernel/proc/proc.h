@@ -127,6 +127,17 @@ void process_destroy_address_space(uint64_t pml4_phys);
  * address, or 0. */
 uint64_t process_fork_address_space(uint64_t src_pml4_phys);
 
+/* M84: an address space holding `image`, a stack and an argument region
+ * built from `argv`/`envp` - everything a process needs in memory, with
+ * no task attached. Returns the PML4's physical address and writes the
+ * ELF entry point to *out_entry, or 0. Used by a spawn to make a new
+ * process and by execve to replace an existing one's memory without
+ * touching its identity. */
+uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
+                                     const char *const *argv,
+                                     const char *const *envp,
+                                     uint64_t *out_entry);
+
 /* M60: the real argument vector. `argv` is a NULL-terminated array of
  * NUL-terminated strings, argv[0] conventionally the program's own path -
  * the same shape every C program on every system expects, and the reason

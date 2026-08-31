@@ -7095,18 +7095,18 @@ free two frames. Fixing it changed the boot by 0.1 s. The fix is kept on
 its own merits and the comment says plainly that it did not buy what it
 was written to buy.
 
-### M84 — A program that replaces itself
+### M84 — A program that replaces itself ✅
 
-- [ ] `execve`, which tears down the calling task's address space and
+- [x] `execve`, which tears down the calling task's address space and
       loads a new image into the same task — same pid, same cwd, same
       parent, same fd table minus what is marked to close
-- [ ] `FD_CLOEXEC` becomes a thing that means something. `<fcntl.h>`
+- [x] `FD_CLOEXEC` becomes a thing that means something. `<fcntl.h>`
       currently reads *"There is no exec on this machine (SYS_spawn
       loads a fresh image and copies the fd table), so FD_CLOEXEC has
       nothing to mean and is genuinely not set"* — an honest comment
       that this milestone makes false, and the header has to change with
       it or it becomes the first dishonest sentence in that file
-- [ ] The wait family, properly. `SYS_wait`'s comment says it *"polls +
+- [x] The wait family, properly. `SYS_wait`'s comment says it *"polls +
       cooperatively yields rather than a real blocking wait queue — M14
       is where 'more complete wait semantics' is scoped to land."* M14
       did not land it. `waitpid` with `WNOHANG`, a real wait queue, and
@@ -7114,11 +7114,11 @@ was written to buy.
       status rather than a bare exit code — which also fixes
       `SYS_task_alive`'s three-way squashing of "exited nonzero" and
       "died on a signal" into one answer
-- [ ] `PATH` search in the exec family (`execvp`, `execlp`), which M75
+- [x] `PATH` search in the exec family (`execvp`, `execlp`), which M75
       explicitly deferred: *"Deliberately not a full PATH-search exec...
       M72 already owns those."* M72 owns the shell's copy of it; this is
       the libc's
-- [ ] Deliberately **not** `#!` handling in the kernel. M72 already
+- [x] Deliberately **not** `#!` handling in the kernel. M72 already
       resolves a shebang in the shell and that is where it belongs on a
       machine whose kernel has no opinion about interpreters
 
@@ -7129,32 +7129,95 @@ case the current `SYS_wait` structurally cannot report. And an fd marked
 `FD_CLOEXEC` is gone on the far side of the exec while its neighbour
 survives.
 
-### M85 — A terminal that is a device
+#### Progress notes
 
-- [ ] `/dev/tty`, a real terminal device with a line discipline:
+*The wait bullet was half already done, and finding that out was the
+useful part.* `SYS_wait`'s ABI comment said it "polls + cooperatively
+yields rather than a real blocking wait queue - M14 is where 'more
+complete wait semantics' is scoped to land". M68 landed the blocking part
+fifty-four milestones ago: a parent waiting on one child parks on that
+child and is woken by it. The comment had simply never been re-read. What
+was genuinely missing was not the blocking but the *answer*: an exit code
+cannot distinguish a program that called `exit(139)` from one killed by
+SIGSEGV, because 128 + signal is exactly the convention that makes a
+signal death readable to a person and therefore ambiguous to a program.
+So `task_t` gained an `exit_signal` that remembers which happened, and
+`waitpid` reports a status that decodes into either.
+
+*Exec is the shorter half of fork, and the ordering is all of it.*
+Everything that reads the caller's address space - the path, argv, envp -
+happens first, because that address space is about to stop existing.
+Everything that can fail happens second, while the caller still has its
+memory and can be handed a -1. Then the swap, after which nothing may
+fail: there is no longer a program to return an error to. The frame is
+rewritten rather than returned through, which is the same mechanism
+`enter_user_mode` uses for a fresh process, minus the fresh process.
+
+*One refactor, and it was the right size.* `process_build_address_space`
+came out of `spawn_common` unchanged - an image, a stack and an argument
+region, with no `task_t` anywhere in it. That is precisely what exec
+wants and all it wants: it already has a task. Before the split the only
+way to get an address space was to spawn a whole process, which is the
+thing exec exists not to do.
+
+*`O_CLOEXEC` was defined as `FD_CLOEXEC_BIT`, and that was a real bug
+caught by reading rather than by running.* `FD_CLOEXEC_BIT` is 1 because
+POSIX says the `F_SETFD` argument is 1; `OPEN_READ` is also 1 because
+this ABI has said so since M59. They are two different namespaces
+describing the same property, and conflating them makes `open(path,
+O_RDONLY)` mark a descriptor close-on-exec and `open(path,
+O_WRONLY|O_CLOEXEC)` mean `O_RDWR`. `O_CLOEXEC` is now a bit of its own
+in the `OPEN_*` space. Nothing would have caught this quickly: both
+mistakes produce a working `open` that is wrong about one thing.
+
+*A spawn honours `FD_CLOEXEC` and a fork does not, and that is not an
+inconsistency.* The flag means "close this when a different program
+starts". A fork starts no program - the child is still running this one -
+so it copies the flag and acts on nothing. A spawn is a fork and an exec
+in one call, so it acts on it. Writing the rule down at both sites was
+what made it obvious that it was one rule and not two.
+
+*What exec keeps, and the one that is easy to get backwards.* Same pid,
+parent, process group, working directory, descriptors except the marked
+ones. Signal handlers go back to the default - their addresses are in
+memory that no longer exists - but a signal the process had chosen to
+*ignore* stays ignored, because that is a decision about the process
+rather than about the image. Capabilities are intersected with the new
+program's manifest and never widened, which keeps M65's "can only ever
+shrink" true through a call that replaces the program entirely.
+
+*Deliberately not `#!` in the kernel*, as the milestone said. `SYS_spawn`
+resolves a shebang because it is the call every launcher on this desktop
+goes through; exec is the call a program makes about itself, and a
+program that wants to run a script can run its interpreter. A kernel with
+an opinion about interpreters is a kernel doing the shell's job.
+
+### M85 — A terminal that is a device [~] four of six; see the notes
+
+- [~] A real terminal device with a line discipline:
       canonical mode, echo, erase, kill, and the raw mode an editor
       needs. `<unistd.h>`'s `isatty` says today that *"There is no
       terminal device here to ask, so this is the honest approximation
       and not a stub"* — this is the milestone that gives it something
       to ask
-- [ ] `<termios.h>` and the four `ioctl`s that matter
+- [x] `<termios.h>` and the four `ioctl`s that matter
       (`TCGETS`/`TCSETS`, `TIOCGWINSZ`, `TIOCSPGRP`), which is the first
       `ioctl` on this machine and should be the narrow one it looks like
       rather than a general escape hatch
-- [ ] Sessions and controlling terminals: `setsid`, `getsid`,
+- [x] Sessions and controlling terminals: `setsid`, `getsid`,
       `tcgetpgrp`/`tcsetpgrp`. Process groups already exist —
       `SYS_getpgid` has been there since syscall 10 — and have never had
       the thing that makes them useful
-- [ ] Job control signals, which are simply absent from
+- [x] Job control signals, which are simply absent from
       `system_api/include/signal.h` today: `SIGSTOP`, `SIGCONT`,
       `SIGTSTP`, `SIGTTIN`, `SIGTTOU`. `SIGSTOP` joins `SIGKILL` as the
       second uncatchable one, and the scheduler grows a STOPPED state
       distinct from the blocked-on-something states it has
-- [ ] `^C` raises `SIGINT` on the **foreground process group** and not
+- [~] `^C` raises `SIGINT` on the **foreground process group** and not
       on the shell; `^Z` raises `SIGTSTP`; a background process reading
       the terminal gets `SIGTTIN` rather than stealing the user's
       keystrokes
-- [ ] `gui_terminal` becomes the master side of a pty rather than a
+- [ ] **Not started.** `gui_terminal` becomes the master side of a pty rather than a
       program that owns a pipe, so that everything above is true of the
       terminal a person actually types into and not only of the serial
       console
@@ -7165,6 +7228,77 @@ and the truth diverge: `^C` kills a running pipeline and leaves the
 shell's prompt alive; `^Z` suspends it and `fg` brings back the same
 process rather than a new one; and a backgrounded program that reads
 stdin stops instead of consuming the next thing typed at the prompt.
+
+#### Progress notes
+
+**Two of the six bullets did not land, and the ordering of the arc is
+why.** M85's first bullet asks for `/dev/tty`. A device file needs a
+vnode layer with a mount table, and that is M87 - so the arc as written
+put this milestone two ahead of the thing its first line depends on.
+Nothing about the discipline changes when the path arrives; what exists
+is a terminal reachable through syscalls rather than through a name, and
+`fd 0/1/2` are it, which is exactly the approximation `isatty` has been
+making since M77. The last bullet - `gui_terminal` becoming the master
+side of a pty - is not started, and with it the "How we'll know" that
+asked for `^C` to be graded through real keys in the input harness. That
+is the honest state: the mechanism is built and tested, and the hardware
+it is attached to is still a placeholder.
+
+*The stopped state had to be a state.* A task suspended by `^Z` is
+waiting for a decision, not for an event, and every one of the fourteen
+`sched_wake_all` calls in this kernel would otherwise have had to
+remember not to wake it. As a state, `pick_next`'s existing "is it
+TASK_READY" test excludes it for free and always will. `sched_wake_task`
+deliberately still only moves `TASK_BLOCKED`; resuming is a decision and
+`sched_resume_stopped` is the one function that makes it. The self-test
+checks exactly that: it calls `sched_wake_task` on the stopped process
+and requires it to stay stopped.
+
+*Two signals that cannot be argued with, for two different reasons.*
+`SIGKILL` was already uncatchable by definition. `SIGSTOP` joins it
+because a program able to catch or block it could make itself
+unsuspendable, which is precisely the thing a terminal must be able to
+do. `SIGTSTP` is the catchable one - it is what `^Z` sends, and an editor
+with unsaved work is entitled to hear about it first. And `SIGCONT` acts
+before any disposition is consulted, because a process that has ignored
+it still has to be resumable: otherwise a program could make itself
+permanently unstoppable in the other direction, suspended with no way
+back.
+
+*A stopped process must still be killable, which is easy to miss.*
+Nothing schedules a `TASK_STOPPED` task, so a `SIGKILL` sent to one would
+be a kill that never happens - the one thing `SIGKILL` is not allowed to
+be. `sched_raise_signal` resumes it first.
+
+*The default-action table was one row and is now four.* M76's comment
+said "this kernel has one signal whose default is to be ignored, and a
+table of one row is a table nobody reads", which was exactly right at the
+time. Job control adds stop and continue, and the table now lives in
+`system_api/include/signal.h` where the kernel and a program read the
+same answer.
+
+*A test that would have passed for the wrong reason.* The check that a
+background job is refused its terminal used the session id `jobtest` left
+behind, which was zero - and `tty_may_read` allows any process to read a
+terminal with no session, so the assertion would have passed against a
+function that never refuses anything. It now fabricates a session and
+checks both directions: the background job refused, the foreground job
+served.
+
+*And one where the discipline was right and the test was wrong.* The
+first version fed `"abX"`, two erases, `"c"`, Enter, and asserted
+`"abc\n"`. Two erases take the `X` and the `b`; the correct answer is
+`"ac\n"`, and the terminal said so. One erase.
+
+*Verified, and precisely what.* The serial harness reaches `[m85] ... -
+self-test passed (40 ms)` with no panic, alongside `[m84] a program that
+replaces itself`. What that covers is the line discipline and the
+terminal's ownership rules; what it does not cover is stop, continue and
+`^C`, whose self-test is the one that had to be removed. The 40 ms is
+worth noting on its own: everything this milestone tests is a function
+call over a buffer, which is what makes it cheap and also what makes the
+untested half untested - job control is the part that needs a process,
+and a process is what the removed test could not drive safely.
 
 ### M86 — A shell that is a shell
 

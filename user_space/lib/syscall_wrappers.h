@@ -105,6 +105,13 @@ long sys_readfile(const char *name, void *buf, size_t maxlen);
 long sys_listdir(const char *path, void *buf, size_t maxlen);
 long sys_getdents(const char *path, unsigned int *cookie, void *buf, size_t buflen);
 long sys_fork(void);
+long sys_execve(const char *path, char *const argv[], char *const envp[]);
+long sys_waitpid(long pid, int *status, long options);
+long sys_fcntl(int fd, int cmd, long arg);
+long sys_setpgid(long pid, long pgid);
+long sys_setsid(void);
+long sys_getsid(long pid);
+long sys_ioctl(int fd, unsigned long cmd, void *arg);
 
 /* M53: creates one directory whose parent already exists. */
 long sys_mkdir(const char *path);
