@@ -59,11 +59,15 @@ int close(int fd);
 int isatty(int fd);
 long lseek(int fd, long offset, int whence);
 int dup2(int oldfd, int newfd);
-/* No ftruncate. leanfs can truncate an open handle to zero
- * (leanfs_handle_truncate) and there is no syscall that exposes it, and
- * a declaration with no implementation would be worse than its absence:
- * a program that probes for it at configure time would find it and then
- * fail to link. It arrives the day something asks. */
+/* M87: it arrived. The paragraph here used to say "no ftruncate... a
+ * declaration with no implementation would be worse than its absence: a
+ * program that probes for it at configure time would find it and then
+ * fail to link. It arrives the day something asks." There is a syscall
+ * behind it now (SYS_ftruncate), and it does more than the function that
+ * note described: growing a file only changes its size, because an
+ * unallocated block already reads as zeros. */
+int ftruncate(int fd, off_t length);
+
 int unlink(const char *path);
 int pipe(int fds[2]);
 

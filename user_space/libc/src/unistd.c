@@ -225,3 +225,7 @@ pid_t waitpid(pid_t pid, int *status, int options) {
 pid_t wait(int *status) {
     return waitpid(-1, status, 0);
 }
+
+int ftruncate(int fd, off_t length) {
+    return (int)sys_ftruncate(fd, (long)length);
+}

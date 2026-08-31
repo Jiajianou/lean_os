@@ -7327,40 +7327,40 @@ A script written here to exercise the new features proves that they were
 implemented, which is a much weaker claim than that they were
 implemented *right*.
 
-### M87 — Files with a type, a place, and more than one name
+### M87 — Files with a type, a place, and more than one name [~] three of seven; see the notes
 
-- [ ] `kernel/fs/vfs.h` calls itself *"the seam a second filesystem type
+- [x] `kernel/fs/vfs.h` calls itself *"the seam a second filesystem type
       would plug into if this project ever needed one"* and says the
       pass-through is honest *"right now."* This milestone is the day it
       needs one: a vnode layer and a real mount table, replacing
       path-string dispatch
-- [ ] `devfs` at `/dev`: `null`, `zero`, `full`, `random`/`urandom`,
+- [x] `devfs` at `/dev`: `null`, `zero`, `full`, `random`/`urandom`,
       `tty`, `console`, `fd/*`. This is not a nicety — it is the single
       most common thing a ported program touches that this machine
       cannot answer, and every one of them is a few lines behind a vnode
       layer that exists
-- [ ] `procfs` at `/proc`: `self`, `self/exe`, `N/status`, `N/cmdline`,
+- [x] `procfs` at `/proc`: `self`, `self/exe`, `N/status`, `N/cmdline`,
       `uptime`, `meminfo`. `SYS_taskinfo`'s whole-shot snapshot stays
       for `task_manager`, which is a lean_os program and should keep
       using the lean_os interface; `/proc` is for programs that have
       never heard of it
-- [ ] Symbolic links and hard links in leanfs v2, and `O_NOFOLLOW`,
+- [ ] **Not started.** Symbolic links and hard links in leanfs v2, and `O_NOFOLLOW`,
       `readlink`, `symlink`, `link`. M75 wrote down exactly where this
       lands: *"With no symbolic links on this machine, `/a/b/..` and
       `/a` name the same directory by construction... The day this
       filesystem grows links is the day that stops being true, and the
       comment above `path_normalize` is where it stops."* That comment
       is this bullet's specification, written a year early
-- [ ] Loop detection with a hop limit, because the first symlink is also
+- [ ] **Not started** (it belongs with the links above). Loop detection with a hop limit, because the first symlink is also
       the first way to hang the kernel's path walker in a way no input
       before it could
-- [ ] The `*at()` family (`openat`, `fstatat`, `unlinkat`, `renameat`),
+- [~] `O_EXCL` and `ftruncate` **shipped**; the `*at()` family and `fsync` did not. Originally: the `*at()` family (`openat`, `fstatat`, `unlinkat`, `renameat`),
       a real `O_EXCL` — `<fcntl.h>` currently defines it as 0 with a
       comment saying a program relying on it *"gets no protection"* —
       plus `ftruncate` (declined in `<unistd.h>` pending a caller;
       `leanfs_handle_truncate` has been sitting there the whole time)
       and `fsync`
-- [ ] Deliberately **not** a buffer cache or a page cache. M82 makes one
+- [x] Deliberately **not** a buffer cache or a page cache. M82 makes one
       possible and no measurement has asked for one; M69's rule
 
 **How we'll know.** A program that has never heard of this OS opens
@@ -7369,6 +7369,97 @@ gets 64 different-looking bytes, and finds itself at `/proc/self/exe`. A
 symlink loop returns `ELOOP` rather than hanging the machine. And `cp
 -r` over a tree containing a symlink and a hard link reproduces both as
 what they were, rather than as two copies.
+
+#### Progress notes
+
+**Three of the seven bullets landed. The header says `[~]` for that
+reason and the rest of this note says which.** What is here is the mount
+seam, `/dev`, `/proc`, `O_EXCL` and `ftruncate`. What is not is symbolic
+and hard links, the `*at()` family, and `fsync` - and the largest of
+those, links, is the one M75 predicted would matter.
+
+*The seam M53 declined to build was right to decline, and is right to
+build now.* `vfs.h` has said since M53 that a vtable would be "pure
+speculative generality for a single-filesystem kernel", and that was
+exactly true for thirty-four milestones. It stopped being true the moment
+`/dev/null` had to exist: that is not a file with no bytes in it, it is a
+rule - reads end immediately, writes are accepted and discarded - and
+leanfs cannot express it without learning to lie about what a file is. A
+dispatch table with one implementation is speculation; with three it is
+the only way to avoid special-casing two filesystems inside a third.
+
+Deliberately still keyed by path, and deliberately not a reference-counted
+vnode cache. The mount table is three entries searched by prefix, which
+is faster than anything cleverer and easier to be sure of.
+
+*Prefix matching only at a component boundary, and there is a test for
+it.* `/devices` starts with `/dev` and belongs to the root filesystem. A
+matcher that missed that would silently shadow every path sharing a
+prefix with a mount, which shows up as one program mysteriously failing
+and nothing else. The self-test creates `/devices`, reads it back, and
+would catch it.
+
+*A mount point has to appear in its parent's listing*, or `ls /` says
+this machine has no `/dev`. The cookies for those synthetic entries are
+numbered from `0x40000000` upward - far past any byte offset a real
+directory could produce, since leanfs's are offsets into a file capped at
+8 MiB - so "have I finished the real entries" is a comparison rather
+than a flag the caller has to carry.
+
+*A handle has to say which filesystem it belongs to*, because the fd
+table stores one and comes back much later asking to read it. The mount
+index goes in the top byte, which leaves leanfs's handles numerically
+unchanged - that is the point, not a coincidence: an inode index has been
+the value of a handle since M59, it is in `openfile_t` and in every fd
+slot, and a scheme that renumbered them would have changed something
+already written into a saved session.
+
+*`/proc` files are generated at open, not per read.* A program that reads
+`/proc/uptime` in two calls must not see two different uptimes and a byte
+offset that means nothing between them. The self-test reads it twice a
+second apart at the *file* level and requires the answers to differ,
+which checks the other half - that it is generated at all rather than
+cached once.
+
+*`/proc/self/exe` is a real answer that will stop being one.* Every
+program on this machine lives in `/bin` and a task's name is its
+filename, so composing them is true today. The day something runs from
+somewhere else it is a guess, and the comment where it is composed says
+so.
+
+*`/dev/random` and `/dev/urandom` are the same device and neither is
+cryptographic.* There is no entropy pool, so a blocking variant would be
+a lie of a different shape. It is provided anyway because the
+overwhelming majority of reads from it anywhere are a hash seed or a
+temporary filename, and because the alternative is that the path does not
+exist and a program fails at startup rather than at the one operation
+that needed real entropy. Said in `devfs.c` rather than discovered.
+
+*`O_EXCL` is real, and the atomicity comes from a lock that was already
+there.* `<fcntl.h>` defined it as 0 for twenty-eight milestones with a
+note that "a program that relies on O_EXCL to avoid a race gets no
+protection". The existence check and the creation now happen inside one
+critical section of `fs_lock`, so of two processes that both ask, exactly
+one gets the file. That is what makes a lock file a lock.
+
+*`ftruncate` does more than the function it exposes.* `<unistd.h>`
+declined to declare it for ten milestones - "a declaration with no
+implementation would be worse than its absence: a program that probes for
+it at configure time would find it and then fail to link" - while
+`leanfs_handle_truncate` sat there truncating only to zero. Growing a
+file now only changes its size, because an unallocated block already
+reads as zeros: reserved, not allocated, which is what the call promises.
+
+*And the clock bug came back, which means the first fix was wrong about
+why.* M85 made `rtc_read` extrapolate from the last good sample instead
+of reporting no time, and the M63 Whetstone failure recurred anyway. The
+extrapolation was built on the PIT tick count - and a host too busy to
+let this guest read the CMOS twice in a row is also too busy to deliver
+its timer interrupts on time, and QEMU coalesces the ones it misses. A
+clock built on lost ticks runs slow by exactly the amount the load is
+bad, which is exactly when it is being asked. It extrapolates from the
+TSC now, which counts cycles the CPU actually executed and which nothing
+coalesces.
 
 ### M88 — Everything else a ported program calls
 

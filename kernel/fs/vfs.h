@@ -54,6 +54,9 @@ uint32_t vfs_handle_size(int handle);
 int vfs_handle_stat(int handle, leanfs_stat_t *out); /* M77 - see leanfs.h */
 int vfs_handle_truncate(int handle);
 
+/* M87: truncate to any length - see leanfs_handle_truncate_to. */
+int vfs_handle_truncate_to(int handle, uint32_t len);
+
 /* M47: the flush the shutdown path (kernel/power/power.c) calls before
  * cutting power.
  *

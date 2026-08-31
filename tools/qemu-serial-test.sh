@@ -254,6 +254,7 @@ REQUIRED_MARKERS=(
   "[m83] two processes from one:"
   "[m84] a program that replaces itself:"
   "[m85] a terminal that is a device:"
+  "[m87] files with a type and a place:"
   "[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"

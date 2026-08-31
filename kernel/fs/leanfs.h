@@ -341,7 +341,16 @@ int leanfs_handle_stat(int handle, leanfs_stat_t *out);
  *
  * leanfs_open resolves a path to a handle, creating an empty regular file
  * if `create` is set and nothing is there. Returns -1 for a malformed
- * path, a missing parent, a directory, or no free inode. */
+ * path, a missing parent, a directory, or no free inode.
+ *
+ * M87: `create` is a small flag word rather than a boolean.
+ * LEANFS_OPEN_EXCL means the caller wants to be the one who created the
+ * file - an existing file is a failure rather than something to open.
+ * That is what makes a lock file a lock, and the atomicity comes from
+ * fs_lock rather than from anything here: the existence check and the
+ * creation happen inside one critical section. */
+#define LEANFS_OPEN_CREATE 1
+#define LEANFS_OPEN_EXCL   2
 int leanfs_open(const char *path, int create);
 
 /* Byte-range read/write against an open handle. pwrite grows the file as
@@ -361,6 +370,12 @@ uint32_t leanfs_handle_size(int handle);
  * overwrite semantics leanfs_write has always had, now reachable without
  * having the whole file in memory. */
 int leanfs_handle_truncate(int handle);
+
+/* M87: truncate to any length. Shrinking frees the blocks past the new
+ * end; growing only changes the size, because an unallocated block
+ * already reads as zeros - so a file extended this way is reserved
+ * rather than allocated, which is what ftruncate promises. */
+int leanfs_handle_truncate_to(int handle, uint32_t len);
 
 /* M59: how many metadata sectors this filesystem has written since boot.
  * Exists so a test can assert what a one-byte save *costs* - the number

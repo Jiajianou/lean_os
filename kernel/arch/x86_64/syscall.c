@@ -1245,11 +1245,15 @@ static long sys_getdents(uint64_t path_ptr, uint64_t cookie_ptr, uint64_t buf,
     /* Resolved once for the whole fetch, not once per entry: walking
      * "/a/b/c" costs a block read per component, and paying that per
      * record would put a hidden factor of the path depth on a directory
-     * of thousands - which is the case this call exists for. */
+     * of thousands - which is the case this call exists for.
+     *
+     * M87: a synthetic directory (/dev, /proc) has no handle form, for
+     * the reason vfs_dir_open states - there is no inode to open, and
+     * its contents are generated from the path anyway, so the walk is
+     * the same cost either way. `dir < 0` after vfs_is_dir has already
+     * said yes means exactly that case, and the loop below uses the path
+     * form instead. */
     int dir = vfs_dir_open(path);
-    if (dir < 0) {
-        return -1;
-    }
 
     uint32_t cookie;
     if (copy_from_user(&cookie, cookie_ptr, sizeof(cookie)) != 0) {
@@ -1260,7 +1264,8 @@ static long sys_getdents(uint64_t path_ptr, uint64_t cookie_ptr, uint64_t buf,
     for (;;) {
         leanfs_dir_entry_t e;
         uint32_t next = cookie;
-        int rc = vfs_readdir_at(dir, &next, &e);
+        int rc = (dir >= 0) ? vfs_readdir_at(dir, &next, &e)
+                            : vfs_readdir(path, &next, &e);
         if (rc < 0) {
             return -1;
         }
@@ -1489,6 +1494,32 @@ static long sys_pipe(uint64_t fds_out_ptr, uint64_t a2, uint64_t a3, uint64_t a4
 
 /* Read-only: nothing needs to *change* a process's group yet (no job
  * control in this shell), so there's no setpgid to go with it. */
+/* M87: set a file's length. Needs the descriptor to be writable, for the
+ * same reason a write does - shortening a file is the most destructive
+ * thing a caller can do to it without deleting it. */
+static long sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a3, uint64_t a4,
+                          uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1;
+    }
+    task_t *self = sched_current();
+    if (fd >= MAX_FDS || self->fds[fd].type != FD_FILE) {
+        return -1;
+    }
+    openfile_t *of = self->fds[fd].file;
+    if (!of || !of->writable) {
+        return -1;
+    }
+    if (length > (uint64_t)LEANFS_MAX_FILE_SIZE) {
+        return -1;
+    }
+    return vfs_handle_truncate_to(of->handle, (uint32_t)length);
+}
+
 /* ---- M85: ioctl, and only what a terminal needs -----------------------
  *
  * The first ioctl in this kernel, and the shape of it is the decision:
@@ -2337,7 +2368,15 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
     if ((flags & (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)) && !has_cap(CAP_FS_WRITE)) {
         return -1;
     }
-    int handle = vfs_open(path, (flags & OPEN_CREATE) != 0);
+    /* M87: the create flags travel together now - OPEN_EXCL means
+     * nothing without OPEN_CREATE, and leanfs is the layer that can make
+     * the pair atomic because it is the one holding the lock. */
+    int create_flags = ((flags & OPEN_CREATE) ? LEANFS_OPEN_CREATE : 0) |
+                       ((flags & OPEN_EXCL) ? LEANFS_OPEN_EXCL : 0);
+    if ((flags & OPEN_EXCL) && !(flags & OPEN_CREATE)) {
+        return -1; /* O_EXCL without O_CREAT is undefined; refusing is the honest reading */
+    }
+    int handle = vfs_open(path, create_flags);
     if (handle < 0) {
         return -1;
     }
@@ -3942,6 +3981,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_setsid] = sys_setsid,
     [SYS_getsid] = sys_getsid,
     [SYS_ioctl] = sys_ioctl,
+    [SYS_ftruncate] = sys_ftruncate,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

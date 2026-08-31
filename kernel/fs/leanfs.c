@@ -1660,6 +1660,21 @@ int leanfs_handle_stat(int handle, leanfs_stat_t *out) {
 int leanfs_open(const char *path, int create) {
     int idx = resolve(path);
     if (inode_valid(idx)) {
+        /* M87: `create` carrying LEANFS_OPEN_EXCL means the caller is
+         * asking to be the one who made this file, not merely to have it
+         * open. Existing is the failure it is asking about.
+         *
+         * This is what makes a lock file a lock: two processes that both
+         * do it, and exactly one succeeds. <fcntl.h> defined O_EXCL as 0
+         * with a comment saying "a program that relies on O_EXCL to avoid
+         * a race gets no protection" - it does now. The atomicity is the
+         * whole point and it comes from fs_lock: the resolve and the
+         * create below happen inside one critical section with interrupts
+         * off, so there is no instant between them for a second caller to
+         * slip into. */
+        if (create & LEANFS_OPEN_EXCL) {
+            return -1;
+        }
         return inodes[idx].type == LEANFS_TYPE_FILE ? idx : -1;
     }
     if (!create) {
@@ -1715,12 +1730,99 @@ uint32_t leanfs_handle_size(int handle) {
     return inodes[handle].size;
 }
 
+/* M87: forget one logical block, so a truncated file does not keep a
+ * pointer to a block the allocator has handed to somebody else. The
+ * mirror of map_block's allocate path, and deliberately only the direct
+ * and single-indirect cases plus the double: the same three the mapper
+ * knows about, in the same order, so the two cannot disagree about where
+ * a block number lives. */
+static void clear_block_pointer(int idx, uint32_t logical) {
+    leanfs_inode_t *inode = &inodes[idx];
+    uint32_t table[LEANFS_INDIRECT_POINTERS];
+
+    if (logical < LEANFS_DIRECT_BLOCKS) {
+        inode->direct[logical] = 0;
+        mark_inode(idx);
+        return;
+    }
+    logical -= LEANFS_DIRECT_BLOCKS;
+    if (logical < (uint32_t)LEANFS_INDIRECT_POINTERS) {
+        if (!block_present(inode->indirect)) {
+            return;
+        }
+        ata_read_sectors(sb.data_lba + inode->indirect, 1, (uint8_t *)table);
+        table[logical] = 0;
+        ata_write_sectors(sb.data_lba + inode->indirect, 1, (const uint8_t *)table);
+        return;
+    }
+    logical -= (uint32_t)LEANFS_INDIRECT_POINTERS;
+    if (!block_present(inode->dindirect)) {
+        return;
+    }
+    uint32_t outer = logical / (uint32_t)LEANFS_INDIRECT_POINTERS;
+    uint32_t inner = logical % (uint32_t)LEANFS_INDIRECT_POINTERS;
+    if (outer >= (uint32_t)LEANFS_INDIRECT_POINTERS) {
+        return;
+    }
+    ata_read_sectors(sb.data_lba + inode->dindirect, 1, (uint8_t *)table);
+    uint32_t mid = table[outer];
+    if (!block_present(mid)) {
+        return;
+    }
+    ata_read_sectors(sb.data_lba + mid, 1, (uint8_t *)table);
+    table[inner] = 0;
+    ata_write_sectors(sb.data_lba + mid, 1, (const uint8_t *)table);
+}
+
 int leanfs_handle_truncate(int handle) {
     if (!inode_valid(handle) || inodes[handle].type != LEANFS_TYPE_FILE) {
         return -1;
     }
     free_inode_blocks(handle);
     inodes[handle].size = 0;
+    inodes[handle].mtime = rtc_now();
+    mark_inode(handle);
+    save_meta();
+    return 0;
+}
+
+/* M87: truncate to any length, not only to zero.
+ *
+ * Shrinking frees the blocks past the new end. Growing does nothing but
+ * change the size, and that is not a shortcut - inode_pread already
+ * returns zeros for a block that was never allocated (M59 called it "a
+ * hole", and every filesystem with sparse files does the same), so a
+ * file extended this way reads as zeros and costs nothing until
+ * something writes into it. That is precisely what a program calling
+ * ftruncate to reserve space expects, and on this machine it is also
+ * what it gets: reserved, not allocated.
+ *
+ * One honest imperfection: an indirect table that becomes empty is left
+ * allocated. Finding and freeing it means knowing whether every pointer
+ * in it is now zero, which is a second walk to reclaim one block out of
+ * sixteen thousand, and leanfs_check would not report it because the
+ * inode still points at it legitimately. It comes back when the file
+ * does. */
+int leanfs_handle_truncate_to(int handle, uint32_t len) {
+    if (!inode_valid(handle) || inodes[handle].type != LEANFS_TYPE_FILE) {
+        return -1;
+    }
+    if (len > (uint32_t)LEANFS_MAX_FILE_SIZE) {
+        return -1;
+    }
+    uint32_t old = inodes[handle].size;
+    if (len < old) {
+        uint32_t first = (len + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
+        uint32_t last = (old + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
+        for (uint32_t b = first; b < last; b++) {
+            int64_t blk = map_block(handle, b, 0);
+            if (blk >= 0) {
+                bitmap_clear((uint32_t)blk);
+                clear_block_pointer(handle, b);
+            }
+        }
+    }
+    inodes[handle].size = len;
     inodes[handle].mtime = rtc_now();
     mark_inode(handle);
     save_meta();

@@ -2,7 +2,7 @@
 
 #include "arch/x86_64/io.h"
 #include "klog.h"
-#include "pit.h" /* M85: the tick count the fallback clock extrapolates from */
+#include "arch/x86_64/tsc.h" /* M87: the cycle counter the fallback clock extrapolates from - see rtc_read */
 
 #define CMOS_ADDR 0x70
 #define CMOS_DATA 0x71
@@ -192,18 +192,26 @@ static int32_t correction;
  * chosen to "cross several whole seconds"; no loop count survives a
  * clock that has stopped.
  *
- * So a failed sample now extrapolates from the last good one using the
- * PIT tick count, rather than reporting no time at all. A clock that is
- * a fraction of a second stale under load is better than one that
- * answers zero, and much better than one that answers zero *silently* -
- * every caller here treats `valid` as a formality because until now it
- * was one.
+ * So a failed sample now extrapolates from the last good one rather than
+ * reporting no time at all. A clock that is a fraction of a second stale
+ * under load is better than one that answers zero, and much better than
+ * one that answers zero *silently* - every caller here treats `valid` as
+ * a formality because until now it was one.
+ *
+ * M87: extrapolated from the TSC, not from the PIT tick count, and the
+ * difference is the whole fix. The first version of this used ticks, and
+ * the M63 failure came back anyway - because a host that is too busy to
+ * let this guest read the CMOS twice in a row is also too busy to
+ * deliver its timer interrupts on time, and QEMU coalesces the ones it
+ * misses. A clock built on lost ticks runs slow by exactly the amount
+ * the load is bad, which is exactly when it is being asked. The TSC
+ * counts cycles the CPU actually executed and nothing coalesces it.
  *
  * The extrapolation is not a fallback clock in the sense of a second
  * source of truth: the moment a real sample succeeds it takes over
  * again, and the baseline moves with it. */
 static os_datetime_t last_good;
-static uint64_t last_good_ticks;
+static uint64_t last_good_tsc;
 static int have_good;
 
 void rtc_read(os_datetime_t *out) {
@@ -213,15 +221,14 @@ void rtc_read(os_datetime_t *out) {
             out->valid = 1;
         }
         last_good = *out;
-        last_good_ticks = pit_get_ticks();
+        last_good_tsc = tsc_read();
         have_good = 1;
         return;
     }
 
     if (have_good) {
-        uint64_t elapsed_ms = (pit_get_ticks() - last_good_ticks) * (1000 / PIT_HZ);
-        os_civil_from_unix((uint32_t)(os_unix_time(&last_good) + (uint32_t)(elapsed_ms / 1000)),
-                            out);
+        uint64_t elapsed_s = tsc_to_us(tsc_read() - last_good_tsc) / 1000000ULL;
+        os_civil_from_unix((uint32_t)(os_unix_time(&last_good) + (uint32_t)elapsed_s), out);
         out->valid = 1;
         return;
     }

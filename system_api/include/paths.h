@@ -39,6 +39,16 @@
 #define PATH_ICONS_DIR "/icons/"
 #define PATH_TMP_DIR  "/tmp/"
 
+/* M87: the two synthetic filesystems. Not directories on the disk - a
+ * mount table entry each, answered by kernel/fs/devfs.c and
+ * kernel/fs/procfs.c. Named here with everything else so that a caller
+ * building a path does not have to know which of the three filesystems
+ * it will land on. */
+#define PATH_DEV      "/dev"
+#define PATH_DEV_DIR  "/dev/"
+#define PATH_PROC     "/proc"
+#define PATH_PROC_DIR "/proc/"
+
 #define PATH_SETTINGS PATH_ETC_DIR "settings.conf"
 
 /* Longest absolute path anything here will build or resolve, NUL

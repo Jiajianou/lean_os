@@ -193,6 +193,11 @@ long sys_ioctl(int fd, unsigned long cmd, void *arg) {
     return do_syscall(SYS_ioctl, fd, (long)cmd, (long)arg);
 }
 
+/* M87: set a file's length. See SYS_ftruncate. */
+long sys_ftruncate(int fd, long length) {
+    return do_syscall(SYS_ftruncate, fd, length, 0);
+}
+
 long sys_mkdir(const char *path) {
     return do_syscall(SYS_mkdir, (long)path, 0, 0);
 }

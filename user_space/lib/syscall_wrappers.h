@@ -112,6 +112,7 @@ long sys_setpgid(long pid, long pgid);
 long sys_setsid(void);
 long sys_getsid(long pid);
 long sys_ioctl(int fd, unsigned long cmd, void *arg);
+long sys_ftruncate(int fd, long length);
 
 /* M53: creates one directory whose parent already exists. */
 long sys_mkdir(const char *path);

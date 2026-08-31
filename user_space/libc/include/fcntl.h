@@ -20,11 +20,14 @@
 #define O_CREAT    OPEN_CREATE
 #define O_TRUNC    OPEN_TRUNCATE
 #define O_APPEND   OPEN_APPEND
-/* Accepted and ignored: there is no exclusive-create in this
- * filesystem's open path, so a program that relies on O_EXCL to avoid a
- * race gets no protection. Zero rather than a bit nothing checks, so
- * that at least the flag word is honest. */
-#define O_EXCL     0
+/* M87: a real bit, and a real guarantee. This said "there is no
+ * exclusive-create in this filesystem's open path, so a program that
+ * relies on O_EXCL to avoid a race gets no protection" for twenty-eight
+ * milestones. There is now: the existence check and the creation happen
+ * inside one critical section of the filesystem lock, so of two
+ * processes that both ask, exactly one gets the file. That is what makes
+ * a lock file a lock. */
+#define O_EXCL     OPEN_EXCL
 #define O_NONBLOCK 0 /* every descriptor here is what it is - see SYS_read/SYS_recv */
 /* M84: a real bit. There is an exec now, so this finally has something to
  * mean - and SYS_spawn honours it too, because a spawn is a fork and an

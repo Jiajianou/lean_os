@@ -9489,6 +9489,319 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts(" ms).\n\n");
     }
 
+    /* ---- M87 self-test: files with a type and a place ------------------
+     *
+     * Three filesystems where there was one, and the assertions are about
+     * the two that have no disk behind them.
+     *
+     * `/dev/null` is the point of the whole milestone: it is not a file
+     * with no bytes in it, it is a rule - reads end immediately, writes
+     * are accepted and discarded - and leanfs cannot express that without
+     * learning to lie about what a file is. Everything checked here is a
+     * behaviour a real file could not have.
+     */
+    {
+        int all_ok = 1;
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        char buf[128];
+
+        /* ---- the mount points exist and are directories --------------- */
+        if (!vfs_is_dir(PATH_DEV) || !vfs_is_dir(PATH_PROC)) {
+            klog_puts("[m87] /dev or /proc is not a directory\n");
+            all_ok = 0;
+        }
+        /* And are visible from their parent, which is what makes `ls /`
+         * tell the truth about this machine. */
+        if (all_ok) {
+            size_t n = vfs_list("/", buf, sizeof(buf));
+            int saw_dev = 0, saw_proc = 0;
+            for (size_t i = 0; i + 4 <= n; i++) {
+                if (k_memcmp(buf + i, "dev/", 4) == 0) {
+                    saw_dev = 1;
+                }
+                if (i + 5 <= n && k_memcmp(buf + i, "proc/", 5) == 0) {
+                    saw_proc = 1;
+                }
+            }
+            if (!saw_dev || !saw_proc) {
+                klog_puts("[m87] a mount point is not listed in its parent directory\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- /dev/null: reads end, writes vanish ---------------------- */
+        if (all_ok) {
+            int h = vfs_open(PATH_DEV_DIR "null", 0);
+            if (h < 0) {
+                klog_puts("[m87] /dev/null could not be opened\n");
+                all_ok = 0;
+            } else {
+                k_memset(buf, 0xAA, sizeof(buf));
+                if (vfs_handle_read(h, buf, sizeof(buf), 0) != 0) {
+                    klog_puts("[m87] a read of /dev/null returned bytes\n");
+                    all_ok = 0;
+                }
+                if (vfs_handle_write(h, "swallowed", 9, 0) != 9) {
+                    klog_puts("[m87] a write to /dev/null was not accepted\n");
+                    all_ok = 0;
+                }
+            }
+        }
+
+        /* ---- /dev/zero reads zeros, and keeps doing it ---------------- */
+        if (all_ok) {
+            int h = vfs_open(PATH_DEV_DIR "zero", 0);
+            k_memset(buf, 0xAA, sizeof(buf));
+            if (h < 0 || vfs_handle_read(h, buf, 64, 0) != 64) {
+                klog_puts("[m87] /dev/zero did not deliver 64 bytes\n");
+                all_ok = 0;
+            } else {
+                for (int i = 0; i < 64; i++) {
+                    if (buf[i] != 0) {
+                        klog_puts("[m87] /dev/zero delivered something that was not zero\n");
+                        all_ok = 0;
+                        break;
+                    }
+                }
+                /* At a nonzero offset too: a device is not seekable, so
+                 * the same read at offset 4096 must still be zeros rather
+                 * than end-of-file the way a 0-length file would give. */
+                if (all_ok && vfs_handle_read(h, buf, 16, 4096) != 16) {
+                    klog_puts("[m87] /dev/zero ended at an offset - it is being treated as a file\n");
+                    all_ok = 0;
+                }
+            }
+        }
+
+        /* ---- /dev/full is the one that refuses ------------------------ */
+        if (all_ok) {
+            int h = vfs_open(PATH_DEV_DIR "full", 0);
+            if (h < 0 || vfs_handle_write(h, "x", 1, 0) != -1) {
+                klog_puts("[m87] /dev/full accepted a write\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- /dev/urandom is not constant ----------------------------- */
+        if (all_ok) {
+            int h = vfs_open(PATH_DEV_DIR "urandom", 0);
+            char a[16], b[16];
+            k_memset(a, 0, sizeof(a));
+            k_memset(b, 0, sizeof(b));
+            if (h < 0 || vfs_handle_read(h, a, sizeof(a), 0) != (int64_t)sizeof(a) ||
+                vfs_handle_read(h, b, sizeof(b), 0) != (int64_t)sizeof(b)) {
+                klog_puts("[m87] /dev/urandom did not deliver bytes\n");
+                all_ok = 0;
+            } else if (k_memcmp(a, b, sizeof(a)) == 0) {
+                /* Two reads the same is what a *file* does. Not a test of
+                 * randomness - which this generator does not claim, see
+                 * devfs.c - but of whether anything is being generated. */
+                klog_puts("[m87] two reads of /dev/urandom returned identical bytes\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- nothing under a synthetic mount may be created or removed */
+        if (all_ok) {
+            if (vfs_write(PATH_DEV_DIR "null", "x", 1) == 0 ||
+                vfs_mkdir(PATH_DEV_DIR "newdir") == 0 ||
+                vfs_unlink(PATH_DEV_DIR "null") == 0 ||
+                vfs_write(PATH_PROC_DIR "uptime", "x", 1) == 0) {
+                klog_puts("[m87] a synthetic filesystem accepted a change to itself\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- /proc/self/exe names the program that is running --------- */
+        if (all_ok) {
+            k_memset(buf, 0, sizeof(buf));
+            int64_t n = vfs_read(PATH_PROC_DIR "self/exe", buf, sizeof(buf) - 1);
+            if (n <= 0 || buf[0] != '/') {
+                klog_puts("[m87] /proc/self/exe did not read back a path\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- /proc/uptime is a number that grows ---------------------- */
+        if (all_ok) {
+            char first[32], second[32];
+            k_memset(first, 0, sizeof(first));
+            k_memset(second, 0, sizeof(second));
+            vfs_read(PATH_PROC_DIR "uptime", first, sizeof(first) - 1);
+            if (first[0] < '0' || first[0] > '9') {
+                klog_puts("[m87] /proc/uptime did not start with a digit\n");
+                all_ok = 0;
+            }
+            /* Read twice with real time in between: a file whose contents
+             * are generated has to give a different answer, and one that
+             * is secretly cached will not. */
+            if (all_ok) {
+                pit_sleep_ms(1200);
+                vfs_read(PATH_PROC_DIR "uptime", second, sizeof(second) - 1);
+                if (k_strcmp(first, second) == 0) {
+                    klog_puts("[m87] /proc/uptime read the same twice a second apart\n");
+                    all_ok = 0;
+                }
+            }
+        }
+
+        /* ---- /proc/self/status describes this task -------------------- */
+        if (all_ok) {
+            k_memset(buf, 0, sizeof(buf));
+            int64_t n = vfs_read(PATH_PROC_DIR "self/status", buf, sizeof(buf) - 1);
+            if (n <= 0 || k_memcmp(buf, "Name:\t", 6) != 0) {
+                klog_puts("[m87] /proc/self/status did not begin with a Name field\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- /proc lists the live tasks -------------------------------
+         *
+         * At least the two machine-wide files plus one process, which is
+         * the weakest true statement: the exact set changes with whatever
+         * else the boot has running. */
+        if (all_ok) {
+            uint32_t cookie = 0;
+            leanfs_dir_entry_t e;
+            int entries = 0;
+            int saw_uptime = 0;
+            while (vfs_readdir(PATH_PROC, &cookie, &e) == 1 && entries < 200) {
+                entries++;
+                if (k_strcmp(e.name, "uptime") == 0) {
+                    saw_uptime = 1;
+                }
+            }
+            if (!saw_uptime || entries < 3) {
+                klog_puts("[m87] /proc listed 0x");
+                klog_put_hex32((uint32_t)entries);
+                klog_puts(" entries and that is not a directory of processes\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- and a path that only LOOKS like a mount point ------------
+         *
+         * "/devices" starts with "/dev" and belongs to the root
+         * filesystem. Getting this wrong would silently shadow every path
+         * that shares a prefix with a mount, which is the kind of bug
+         * that shows up as one program mysteriously failing. */
+        if (all_ok) {
+            if (vfs_write("/devices", "real", 5) != 0) {
+                klog_puts("[m87] /devices could not be created on the real filesystem\n");
+                all_ok = 0;
+            } else {
+                k_memset(buf, 0, sizeof(buf));
+                if (vfs_read("/devices", buf, sizeof(buf)) != 5 || buf[0] != 'r') {
+                    klog_puts("[m87] /devices was shadowed by the /dev mount\n");
+                    all_ok = 0;
+                }
+                vfs_unlink("/devices");
+            }
+        }
+
+        /* ---- O_EXCL: exactly one of two callers gets the file --------
+         *
+         * The property that makes a lock file a lock. Two opens of the
+         * same absent path with EXCL: the first creates it, the second
+         * must fail *because it exists* rather than succeed by opening
+         * what the first one made. */
+        if (all_ok) {
+            static const char *const LOCK = PATH_TMP_DIR "m87.lock";
+            vfs_unlink(LOCK); /* from a previous boot, if the disk survived one */
+            int first = vfs_open(LOCK, LEANFS_OPEN_CREATE | LEANFS_OPEN_EXCL);
+            int second = vfs_open(LOCK, LEANFS_OPEN_CREATE | LEANFS_OPEN_EXCL);
+            if (first < 0) {
+                klog_puts("[m87] an exclusive create of a fresh path failed\n");
+                all_ok = 0;
+            } else if (second >= 0) {
+                klog_puts("[m87] a second exclusive create of the same path succeeded\n");
+                all_ok = 0;
+            }
+            /* And without EXCL the same path opens, which is the check
+             * that the refusal above was about the flag rather than about
+             * the file being unusable. */
+            if (all_ok && vfs_open(LOCK, LEANFS_OPEN_CREATE) < 0) {
+                klog_puts("[m87] a plain create could not open a file that exists\n");
+                all_ok = 0;
+            }
+            vfs_unlink(LOCK);
+        }
+
+        /* ---- ftruncate, both directions ------------------------------- */
+        if (all_ok) {
+            static const char *const TRUNC = PATH_TMP_DIR "m87.trunc";
+            static char body[100];
+            k_memset(body, 'A', sizeof(body));
+            if (vfs_write(TRUNC, body, sizeof(body)) != 0) {
+                klog_puts("[m87] could not create the file to truncate\n");
+                all_ok = 0;
+            } else {
+                int h = vfs_open(TRUNC, 0);
+                if (h < 0 || vfs_handle_truncate_to(h, 10) != 0 ||
+                    vfs_handle_size(h) != 10) {
+                    klog_puts("[m87] shrinking a file did not set its size to 10\n");
+                    all_ok = 0;
+                }
+                /* Growing: the size moves and the new bytes read as
+                 * zeros, because a block that was never allocated already
+                 * does. That is the whole of "reserved, not allocated". */
+                if (all_ok) {
+                    if (vfs_handle_truncate_to(h, 200) != 0 || vfs_handle_size(h) != 200) {
+                        klog_puts("[m87] growing a file did not set its size to 200\n");
+                        all_ok = 0;
+                    } else {
+                        char tail[32];
+                        k_memset(tail, 0xAA, sizeof(tail));
+                        if (vfs_handle_read(h, tail, sizeof(tail), 150) != (int64_t)sizeof(tail)) {
+                            klog_puts("[m87] a grown file would not read past its old end\n");
+                            all_ok = 0;
+                        } else {
+                            for (size_t i = 0; i < sizeof(tail); i++) {
+                                if (tail[i] != 0) {
+                                    klog_puts("[m87] a grown file's new bytes were not zero\n");
+                                    all_ok = 0;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                /* And the bytes that survived the shrink are still the
+                 * right ones - a truncate that also corrupted what was
+                 * kept would pass every size check above. */
+                if (all_ok) {
+                    char head[16];
+                    k_memset(head, 0, sizeof(head));
+                    vfs_handle_read(h, head, 10, 0);
+                    for (int i = 0; i < 10; i++) {
+                        if (head[i] != 'A') {
+                            klog_puts("[m87] truncation corrupted the bytes it kept\n");
+                            all_ok = 0;
+                            break;
+                        }
+                    }
+                }
+                vfs_unlink(TRUNC);
+            }
+        }
+
+        if (!all_ok) {
+            panic("M87 self-test: this machine's /dev and /proc are not what they claim");
+        }
+        klog_puts("[m87] files with a type and a place: /dev and /proc mounted and listed "
+                   "in their parent, /dev/null ending a read and swallowing a write, "
+                   "/dev/zero delivering zeros at any offset rather than ending like a "
+                   "0-length file, /dev/full refusing, /dev/urandom returning something "
+                   "different twice, every attempt to create or remove inside a synthetic "
+                   "filesystem refused, /proc/self/exe naming a path, /proc/uptime reading "
+                   "differently a second apart, /proc/self/status describing this task, and "
+                   "/devices NOT shadowed by the /dev mount, exactly one of two exclusive "
+                   "creates winning, and a file truncated in both directions keeping the "
+                   "bytes it kept and reading zeros past its old end - self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
+    }
+
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
      * exactly where a user program would reach them. Before this
      * milestone the middle case here didn't fail at all - it panicked the

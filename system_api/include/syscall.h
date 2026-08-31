@@ -104,6 +104,15 @@
  * O_RDWR. Caught by reading the numbers rather than by running it, which
  * is the only way that one gets caught. */
 #define OPEN_CLOEXEC  0x20
+/* M87: fail if the file already exists. Only meaningful with
+ * OPEN_CREATE, which is the pairing every open(2) documents - and the
+ * reason it exists at all is that "check then create" is a race and
+ * this is not: the check and the create happen inside one critical
+ * section of the filesystem lock, so of two processes that both ask,
+ * exactly one gets the file. <fcntl.h> defined O_EXCL as 0 for
+ * twenty-eight milestones with a note that a program relying on it
+ * "gets no protection". It does now. */
+#define OPEN_EXCL     0x40
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
@@ -373,6 +382,18 @@
  * approximation when M87 gives the terminal a path. */
 #define SYS_ioctl      89
 
+/* M87: (fd, length) -> 0 or -1. Sets a file's size.
+ *
+ * <unistd.h> declined to declare this for ten milestones with a note
+ * that "a declaration with no implementation would be worse than its
+ * absence: a program that probes for it at configure time would find it
+ * and then fail to link", and observed that leanfs_handle_truncate had
+ * been sitting there the whole time with no syscall exposing it. This is
+ * that syscall, and it does more than the function it exposes: growing a
+ * file only changes its size, because an unallocated block already reads
+ * as zeros. */
+#define SYS_ftruncate  90
+
 /* M81: the record SYS_getdents writes, and the two limits that go with
  * it. Kept here rather than in a header of its own because it is part of
  * one syscall's contract and nothing else refers to it.
@@ -401,4 +422,4 @@ typedef struct {
  * at least this big can never be told "nothing fits". */
 #define OS_DIRENT_MAX (8 + OS_NAME_MAX + 1 + 7)
 
-#define SYSCALL_COUNT 90
+#define SYSCALL_COUNT 91
