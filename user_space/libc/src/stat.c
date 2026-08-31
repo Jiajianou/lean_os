@@ -12,7 +12,9 @@
 
 static void fill(struct stat *out, const os_stat_t *st) {
     memset(out, 0, sizeof(*out));
-    out->st_mode = st->is_dir ? S_IFDIR : S_IFREG; /* type bits only - no permissions are invented */
+    /* M87: three types now, and the order matters - a link is checked
+     * first because a link's own is_dir says nothing about the link. */
+    out->st_mode = st->is_link ? S_IFLNK : (st->is_dir ? S_IFDIR : S_IFREG);
     out->st_size = (off_t)st->size;
     out->st_mtime = (time_t)st->mtime;
     out->st_atime = out->st_mtime; /* leanfs stores one timestamp, not three */
@@ -31,13 +33,23 @@ int stat(const char *path, struct stat *out) {
     return 0;
 }
 
-/* Identical to stat by construction: there are no symbolic links on this
- * filesystem, so there is nothing for lstat to decline to follow. An
- * alias rather than a stub that returns an error, because a tree walker
- * calling lstat is asking "what is this entry", and stat answers it
- * correctly here. */
+/* M87: a real lstat, over the syscall that does not follow a final link.
+ *
+ * This was an alias for `stat` for ten milestones, with an honest note
+ * that "there are no symbolic links on this filesystem, so there is
+ * nothing for lstat to decline to follow" - and a correct argument that
+ * an alias beat a stub returning an error, because a tree walker calling
+ * lstat is asking "what is this entry" and stat answered it. leanfs has
+ * links now, so the two calls answer different questions and the alias
+ * would give the wrong one: a walker following it would descend into
+ * whatever a link pointed at, including a directory above itself. */
 int lstat(const char *path, struct stat *out) {
-    return stat(path, out);
+    os_stat_t st;
+    if (!out || sys_lstat(path, &st) != 0) {
+        return -1;
+    }
+    fill(out, &st);
+    return 0;
 }
 
 int fstat(int fd, struct stat *out) {

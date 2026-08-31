@@ -31,10 +31,17 @@
 #define S_IFMT   0170000
 #define S_IFREG  0100000
 #define S_IFDIR  0040000
+#define S_IFLNK  0120000 /* M87 - see S_ISLNK */
 
 #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
 #define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
-#define S_ISLNK(m) (((void)(m), 0)) /* no symbolic links here, and saying so beats a bit that is never set */
+/* M87: a real bit. This said "no symbolic links here, and saying so beats
+ * a bit that is never set" for ten milestones; leanfs has them now.
+ *
+ * Only `lstat` can ever set it: `stat` follows a link, so by the time it
+ * answers there is nothing left to report - which is exactly why the two
+ * calls exist and why `ls -l` uses the one it does. */
+#define S_ISLNK(m) (((m) & S_IFMT) == S_IFLNK)
 #define S_ISCHR(m) (((void)(m), 0))
 #define S_ISBLK(m) (((void)(m), 0))
 #define S_ISFIFO(m) (((void)(m), 0))

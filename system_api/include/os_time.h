@@ -27,7 +27,19 @@ typedef struct {
     uint32_t size;
     uint32_t mtime;   /* seconds since 1970, or 0 if this file predates the machine knowing the date */
     uint8_t is_dir;
-    uint8_t reserved;
+    /* M87: was `reserved`, and is now the field that lets a program tell
+     * a symbolic link from what it points at.
+     *
+     * It takes the reserved byte rather than a new one on purpose: the
+     * kernel copies leanfs_stat_t into this struct byte for byte, so the
+     * two layouts have to agree exactly. Appending a field here instead
+     * would have put is_link at offset 10 on this side and offset 9 on
+     * the kernel's - a mismatch that reads as "every file is a link" or
+     * "no file is", depending which way the padding fell.
+     *
+     * Only ever set by SYS_lstat: every other path call follows a link,
+     * so by the time they answer there is nothing left to report. */
+    uint8_t is_link;
 } os_stat_t;
 
 typedef struct {

@@ -316,9 +316,32 @@ typedef struct {
     uint32_t size;
     uint32_t mtime;  /* seconds since 1970, or 0 - see the inode's own note */
     uint8_t is_dir;
+    /* M87: set only by leanfs_lstat, which is the only call that can see
+     * a link - every other path operation follows one, so by the time
+     * they answer there is nothing left to report. A caller that wants
+     * to know whether a name IS a link rather than what it points at has
+     * to ask the question that does not follow. */
+    uint8_t is_link;
 } leanfs_stat_t;
 
 int leanfs_stat(const char *path, leanfs_stat_t *out);
+
+/* ---- M87: symbolic links ----------------------------------------------
+ *
+ * A link's target lives in its data blocks the way a file's contents do,
+ * which is why this needed no format change beyond a type value.
+ *
+ * leanfs_symlink creates one; the name must not already exist. readlink
+ * and lstat are the two calls that do NOT follow a final link, because
+ * they are about the link rather than about what it points at - that
+ * distinction is the whole reason a program can tell the two apart.
+ *
+ * Every other path operation follows, with a hop limit: a chain longer
+ * than LEANFS_MAX_LINK_HOPS, or a link pointing at itself, is refused
+ * rather than walked further. */
+int leanfs_symlink(const char *path, const char *target);
+int64_t leanfs_readlink(const char *path, char *buf, size_t maxlen);
+int leanfs_lstat(const char *path, leanfs_stat_t *out);
 
 /* M77: the same three fields, for an already-open handle. A handle IS an
  * inode index here, so this is the path-resolution step of leanfs_stat

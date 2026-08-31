@@ -229,3 +229,11 @@ pid_t wait(int *status) {
 int ftruncate(int fd, off_t length) {
     return (int)sys_ftruncate(fd, (long)length);
 }
+
+int symlink(const char *target, const char *path) {
+    return (int)sys_symlink(target, path);
+}
+
+long readlink(const char *path, char *buf, size_t bufsiz) {
+    return sys_readlink(path, buf, bufsiz);
+}

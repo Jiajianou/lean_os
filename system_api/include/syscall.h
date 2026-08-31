@@ -394,6 +394,27 @@
  * as zeros. */
 #define SYS_ftruncate  90
 
+/* M87: symbolic links.
+ *
+ * SYS_symlink(target, path) creates `path` pointing at `target` - note
+ * the order, which is the one symlink(2) uses everywhere and is the
+ * reverse of what most people guess. SYS_readlink(path, buf, len) reads
+ * a link's target without following it, and SYS_lstat is stat that stops
+ * at a final link instead of resolving it.
+ *
+ * Those last two are the whole reason a program can tell a link from
+ * what it points at. Every other path-taking call here follows, with a
+ * hop limit - a chain that is too long, or a link that points at itself,
+ * is refused rather than walked further.
+ *
+ * Deliberately no SYS_link: hard links need a link count in the inode
+ * and an unlink that decrements rather than frees, which is a different
+ * change touching every path that removes a file. M81 left the room for
+ * the count; nothing has used it yet. */
+#define SYS_symlink    91
+#define SYS_readlink   92
+#define SYS_lstat      93
+
 /* M81: the record SYS_getdents writes, and the two limits that go with
  * it. Kept here rather than in a header of its own because it is part of
  * one syscall's contract and nothing else refers to it.
@@ -422,4 +443,4 @@ typedef struct {
  * at least this big can never be told "nothing fits". */
 #define OS_DIRENT_MAX (8 + OS_NAME_MAX + 1 + 7)
 
-#define SYSCALL_COUNT 91
+#define SYSCALL_COUNT 94

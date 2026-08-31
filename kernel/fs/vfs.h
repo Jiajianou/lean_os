@@ -47,6 +47,12 @@ int vfs_readdir_at(int handle, uint32_t *cookie, leanfs_dir_entry_t *out);
  * them. */
 int vfs_rmdir(const char *path);
 int vfs_stat(const char *path, leanfs_stat_t *out);
+
+/* M87: symbolic links. readlink and lstat are the two that do NOT follow
+ * a final link - see leanfs.h for why that distinction is the point. */
+int vfs_symlink(const char *path, const char *target);
+int64_t vfs_readlink(const char *path, char *buf, size_t maxlen);
+int vfs_lstat(const char *path, leanfs_stat_t *out);
 int vfs_open(const char *path, int create);
 int64_t vfs_handle_read(int handle, void *buf, size_t len, uint32_t off);
 int64_t vfs_handle_write(int handle, const void *buf, size_t len, uint32_t off);

@@ -68,6 +68,18 @@ int dup2(int oldfd, int newfd);
  * unallocated block already reads as zeros. */
 int ftruncate(int fd, off_t length);
 
+/* M87: symbolic links. Note symlink's argument order - the target first,
+ * then the name to create - which is symlink(2)'s everywhere and the
+ * reverse of what most people guess.
+ *
+ * `readlink` does NOT follow the link it is given, which is the whole
+ * point of it, and does NOT NUL-terminate: it returns the byte count,
+ * exactly as POSIX specifies, because a target may legitimately contain
+ * anything a path can. Every caller has to terminate it themselves and
+ * every caller written elsewhere already does. */
+int symlink(const char *target, const char *path);
+long readlink(const char *path, char *buf, size_t bufsiz);
+
 int unlink(const char *path);
 int pipe(int fds[2]);
 

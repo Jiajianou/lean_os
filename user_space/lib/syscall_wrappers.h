@@ -113,6 +113,9 @@ long sys_setsid(void);
 long sys_getsid(long pid);
 long sys_ioctl(int fd, unsigned long cmd, void *arg);
 long sys_ftruncate(int fd, long length);
+long sys_symlink(const char *target, const char *path);
+long sys_readlink(const char *path, char *buf, size_t len);
+long sys_lstat(const char *path, void *out);
 
 /* M53: creates one directory whose parent already exists. */
 long sys_mkdir(const char *path);

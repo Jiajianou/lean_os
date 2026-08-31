@@ -410,6 +410,49 @@ int vfs_stat(const char *path, leanfs_stat_t *out) {
     return r;
 }
 
+/* M87: symbolic links. Refused on a synthetic filesystem for the same
+ * reason every other change to one is - see the note at vfs_mkdir. */
+int vfs_symlink(const char *path, const char *target) {
+    const char *rel;
+    if (vfs_resolve_mount(path, &rel) >= 0) {
+        return -1;
+    }
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    int r = leanfs_symlink(path, target);
+    spin_unlock_irqrestore(&fs_lock, f);
+    return r;
+}
+
+int64_t vfs_readlink(const char *path, char *buf, size_t maxlen) {
+    const char *rel;
+    if (vfs_resolve_mount(path, &rel) >= 0) {
+        return -1; /* nothing synthetic is a link */
+    }
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    int64_t r = leanfs_readlink(path, buf, maxlen);
+    spin_unlock_irqrestore(&fs_lock, f);
+    return r;
+}
+
+int vfs_lstat(const char *path, leanfs_stat_t *out) {
+    const char *rel;
+    int m = vfs_resolve_mount(path, &rel);
+    if (m >= 0) {
+        /* A synthetic filesystem has no links, so lstat and stat are the
+         * same question there - answered by the same function rather than
+         * by a second one that would have to stay in step with it. */
+        int r = mounts[m].ops->stat(rel, out);
+        if (r == 0) {
+            out->is_link = 0;
+        }
+        return r;
+    }
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    int r = leanfs_lstat(path, out);
+    spin_unlock_irqrestore(&fs_lock, f);
+    return r;
+}
+
 int vfs_open(const char *path, int create) {
     const char *rel;
     int m = vfs_resolve_mount(path, &rel);

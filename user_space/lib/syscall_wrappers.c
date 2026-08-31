@@ -198,6 +198,20 @@ long sys_ftruncate(int fd, long length) {
     return do_syscall(SYS_ftruncate, fd, length, 0);
 }
 
+/* M87: symbolic links. Note the argument order on symlink - target
+ * first, then the name to create - which is symlink(2)'s everywhere. */
+long sys_symlink(const char *target, const char *path) {
+    return do_syscall(SYS_symlink, (long)target, (long)path, 0);
+}
+
+long sys_readlink(const char *path, char *buf, size_t len) {
+    return do_syscall(SYS_readlink, (long)path, (long)buf, (long)len);
+}
+
+long sys_lstat(const char *path, void *out) {
+    return do_syscall(SYS_lstat, (long)path, (long)out, 0);
+}
+
 long sys_mkdir(const char *path) {
     return do_syscall(SYS_mkdir, (long)path, 0, 0);
 }

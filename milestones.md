@@ -7192,14 +7192,21 @@ goes through; exec is the call a program makes about itself, and a
 program that wants to run a script can run its interpreter. A kernel with
 an opinion about interpreters is a kernel doing the shell's job.
 
-### M85 — A terminal that is a device [~] four of six; see the notes
+### M85 — A terminal that is a device [~] five of six; the pty is the one left
 
-- [~] A real terminal device with a line discipline:
-      canonical mode, echo, erase, kill, and the raw mode an editor
-      needs. `<unistd.h>`'s `isatty` says today that *"There is no
-      terminal device here to ask, so this is the honest approximation
-      and not a stub"* — this is the milestone that gives it something
-      to ask
+- [x] A real terminal device with a line discipline: canonical mode,
+      echo, erase, kill, and the raw mode an editor needs.
+      `<unistd.h>`'s `isatty` says today that *"There is no terminal
+      device here to ask, so this is the honest approximation and not a
+      stub"* — this is the milestone that gives it something to ask.
+      **`/dev/tty` itself was not here when M85 landed** and arrived with
+      M87: a device file needs a vnode layer with a mount table, and the
+      arc put this milestone two ahead of the one its first line depends
+      on. M87 built the seam and `devfs` wired `/dev/tty` to this same
+      console terminal. Nothing about the discipline changed when the
+      path arrived, which is exactly what `kernel/dev/tty.h` predicted -
+      recorded here rather than silently ticked, because "M85 was
+      finished by M87" is the useful fact and a tick is not
 - [x] `<termios.h>` and the four `ioctl`s that matter
       (`TCGETS`/`TCSETS`, `TIOCGWINSZ`, `TIOCSPGRP`), which is the first
       `ioctl` on this machine and should be the narrow one it looks like
@@ -7327,7 +7334,7 @@ A script written here to exercise the new features proves that they were
 implemented, which is a much weaker claim than that they were
 implemented *right*.
 
-### M87 — Files with a type, a place, and more than one name [~] three of seven; see the notes
+### M87 — Files with a type, a place, and more than one name [~] five of seven; see the notes
 
 - [x] `kernel/fs/vfs.h` calls itself *"the seam a second filesystem type
       would plug into if this project ever needed one"* and says the
@@ -7344,14 +7351,14 @@ implemented *right*.
       for `task_manager`, which is a lean_os program and should keep
       using the lean_os interface; `/proc` is for programs that have
       never heard of it
-- [ ] **Not started.** Symbolic links and hard links in leanfs v2, and `O_NOFOLLOW`,
+- [~] **Symbolic links shipped; hard links did not.** Symbolic links and hard links in leanfs v2, and `O_NOFOLLOW`,
       `readlink`, `symlink`, `link`. M75 wrote down exactly where this
       lands: *"With no symbolic links on this machine, `/a/b/..` and
       `/a` name the same directory by construction... The day this
       filesystem grows links is the day that stops being true, and the
       comment above `path_normalize` is where it stops."* That comment
       is this bullet's specification, written a year early
-- [ ] **Not started** (it belongs with the links above). Loop detection with a hop limit, because the first symlink is also
+- [x] Loop detection with a hop limit, because the first symlink is also
       the first way to hang the kernel's path walker in a way no input
       before it could
 - [~] `O_EXCL` and `ftruncate` **shipped**; the `*at()` family and `fsync` did not. Originally: the `*at()` family (`openat`, `fstatat`, `unlinkat`, `renameat`),
@@ -7449,6 +7456,60 @@ it at configure time would find it and then fail to link" - while
 `leanfs_handle_truncate` sat there truncating only to zero. Growing a
 file now only changes its size, because an unallocated block already
 reads as zeros: reserved, not allocated, which is what the call promises.
+
+*Symbolic links needed no format change at all, and that is M81 paying
+back a debt it did not know it was owed.* A link's target lives in its
+data blocks exactly the way a regular file's contents do, with `size` as
+the target's length - so the only new thing on disk is a type value, and
+an old disk has no inode carrying it. The magic did not have to move.
+M81 padded the inode to 128 bytes and reserved 44 of them specifically
+for "M87's link count and symlink target"; the symlink half turned out
+not to need a single one of them.
+
+*The walk substitutes and restarts, which is what makes an absolute
+target work.* When a component resolves to a link, the target replaces
+that component and the walk begins again on the rewritten path - because
+`/a/b` where `b` points at `/c` has to end up at `/c` and not at `/a/c`.
+Restarting is also why the hop limit has to exist: a link that points at
+itself would otherwise rewrite forever, and a resolver without a limit
+hangs the machine on the smallest possible loop rather than failing. The
+self-test builds that loop out of two links pointing at each other and
+requires it to resolve to nothing.
+
+*`readlink` and `lstat` do not follow, and everything else does.* That
+distinction is the entire reason a program can tell a link from what it
+points at, and the reason a tree walker does not descend through one into
+a directory above itself. It cost two resolvers rather than one -
+`resolve` and `resolve_nofollow`, both over the same walk with one flag.
+
+*Removing a link removes the link.* That fell out of `dir_lookup` naming
+the entry in a directory rather than resolving it, which is what `unlink`
+has always done; the only change needed was to stop refusing type 3.
+Getting it the other way round would make `rm` on a link delete somebody
+else's file, which is why the self-test checks the file survives.
+
+*Two claims this made false, both corrected where they stood.*
+`<sys/stat.h>`'s `S_ISLNK` was `0` with "no symbolic links here, and
+saying so beats a bit that is never set". And libc's `lstat` was an alias
+for `stat`, defended - correctly, at the time - on the grounds that "there
+are no symbolic links on this filesystem, so there is nothing for lstat
+to decline to follow" and that an alias beat a stub returning an error.
+Both arguments were right for ten milestones and stopped being right in
+this one.
+
+*What symbolic links did NOT fix, and it is the half M75 actually
+predicted.* M75's note says resolving `..` textually is safe "with no
+symbolic links on this machine" and that "the day this filesystem grows
+links is the day that stops being true". That day is here and `..` is
+still resolved textually in `copy_path_from_user`, before leanfs sees the
+path - so `/a/b/..` where `b` is a link to `/c/d` gives `/a` where a
+physical resolution would give `/c`. Doing it properly means resolving
+`..` during the walk, which the walk can now do (it has the chain of
+inodes it came through) but which requires `path_normalize` to stop
+removing them first. It is a contained change and it is not this
+milestone's; recorded here so it is a known divergence rather than a
+surprise. Shells resolve `..` logically too, so this is the behaviour
+most people see - but the kernel's answer should be the physical one.
 
 *And the clock bug came back, which means the first fix was wrong about
 why.* M85 made `rtc_read` extrapolate from the last good sample instead

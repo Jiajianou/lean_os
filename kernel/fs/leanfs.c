@@ -12,6 +12,12 @@
 #define LEANFS_TYPE_FREE 0
 #define LEANFS_TYPE_FILE 1
 #define LEANFS_TYPE_DIR  2
+/* M87: a symbolic link. Its target is stored in its data blocks exactly
+ * as a regular file's contents are, with `size` the target's length -
+ * which is why this needed no format change at all beyond the type
+ * value. An old disk has no inode of type 3, so a disk written before
+ * this milestone is still valid and the magic did not have to move. */
+#define LEANFS_TYPE_LINK 3
 
 #define ROOT_INODE 0
 
@@ -1205,41 +1211,169 @@ static int next_component(const char **p, char *out) {
  * of near-correct shortcut that turns into an escape from the root. The
  * file manager's own ".." is a caller-side string operation on a path it
  * already holds, which is honest about being exactly that. */
-static int resolve(const char *path) {
+/* ---- M87: following a symbolic link -----------------------------------
+ *
+ * M75 wrote down exactly where this milestone lands. Its note on
+ * resolving ".." textually says: "With no symbolic links on this
+ * machine, /a/b/.. and /a name the same directory by construction... The
+ * day this filesystem grows links is the day that stops being true, and
+ * the comment above path_normalize is where it stops." That day is here,
+ * and what follows is what was done about it - including the half that
+ * was not.
+ *
+ * The walk substitutes: when a component resolves to a link, the link's
+ * target replaces that component and the walk restarts from the
+ * beginning of the rewritten path. Restarting rather than continuing is
+ * what makes an absolute target work - "/a/b" where b is a link to "/c"
+ * has to end up at /c and not at /a/c - and it is why the hop limit
+ * exists, because a link to itself would otherwise rewrite forever.
+ *
+ * Two scratch buffers, static for the reason every other scratch in this
+ * file is: leanfs runs under vfs.c's fs_lock with interrupts off, so
+ * there is exactly one walk in progress at a time, and 8 KiB on a kernel
+ * stack that also holds a path is 8 KiB this walk cannot afford.
+ */
+#define LEANFS_MAX_LINK_HOPS 8
+
+static char walk_path[LEANFS_MAX_PATH];
+static char walk_next[LEANFS_MAX_PATH];
+
+/* Reads a link's target into `out`. Returns its length, or -1. */
+static int read_link_target(int idx, char *out, size_t cap) {
+    uint32_t n = inodes[idx].size;
+    if (n == 0 || n >= cap) {
+        return -1; /* an empty target names nothing; an over-long one cannot be walked */
+    }
+    if (inode_pread(idx, out, n, 0) != (int64_t)n) {
+        return -1;
+    }
+    out[n] = '\0';
+    return (int)n;
+}
+
+/* The walk itself. `follow_final` decides what happens when the LAST
+ * component is a link: resolve() follows it (which is what open, stat
+ * and every ordinary path operation want) and resolve_nofollow() does
+ * not (which is what readlink, lstat and unlink want - those are about
+ * the link rather than about what it points at). */
+static int resolve_ex(const char *path, int follow_final) {
     if (!path || path[0] != '/') {
         return -1;
     }
-    if (path[1] == '\0') {
-        return ROOT_INODE;
-    }
-    const char *p = path + 1;
-    int at = ROOT_INODE;
-    char comp[LEANFS_MAX_NAME + 1];
-    int rc;
-    while ((rc = next_component(&p, comp)) == 1) {
-        if (inodes[at].type != LEANFS_TYPE_DIR) {
-            return -1; /* tried to walk through a regular file */
+    k_strlcpy(walk_path, path, sizeof(walk_path));
+
+    for (int hop = 0; hop <= LEANFS_MAX_LINK_HOPS; hop++) {
+        if (walk_path[1] == '\0') {
+            return ROOT_INODE;
         }
-        at = dir_lookup(at, comp);
-        if (!inode_valid(at)) {
+        const char *p = walk_path + 1;
+        int at = ROOT_INODE;
+        char comp[LEANFS_MAX_NAME + 1];
+        int rc;
+        int rewritten = 0;
+
+        while ((rc = next_component(&p, comp)) == 1) {
+            if (inodes[at].type != LEANFS_TYPE_DIR) {
+                return -1; /* tried to walk through a regular file */
+            }
+            at = dir_lookup(at, comp);
+            if (!inode_valid(at)) {
+                return -1;
+            }
+            if (inodes[at].type != LEANFS_TYPE_LINK) {
+                continue;
+            }
+            /* A link. If it is the last component and the caller asked
+             * not to follow, it IS the answer. */
+            int is_final = (*p == '\0');
+            if (is_final && !follow_final) {
+                break;
+            }
+
+            char target[LEANFS_MAX_PATH];
+            if (read_link_target(at, target, sizeof(target)) < 0) {
+                return -1;
+            }
+
+            /* Rebuild: everything before this component (only when the
+             * target is relative), then the target, then everything
+             * after. `p` already points past the component's separator,
+             * which is what makes "the rest" a single copy. */
+            uint32_t n = 0;
+            if (target[0] != '/') {
+                /* The directory this component was found in - the text up
+                 * to and including the slash before it. */
+                size_t comp_len = k_strlen(comp);
+                const char *after = p;
+                size_t prefix_len = (size_t)(after - walk_path);
+                /* back off the component and its trailing separator */
+                prefix_len -= comp_len;
+                while (prefix_len > 1 && walk_path[prefix_len - 1] == '/') {
+                    prefix_len--;
+                }
+                if (prefix_len >= sizeof(walk_next) - 2) {
+                    return -1;
+                }
+                k_memcpy(walk_next, walk_path, prefix_len);
+                n = (uint32_t)prefix_len;
+                if (n == 0 || walk_next[n - 1] != '/') {
+                    walk_next[n++] = '/';
+                }
+            }
+            size_t tlen = k_strlen(target);
+            if (n + tlen + 1 >= sizeof(walk_next)) {
+                return -1;
+            }
+            k_memcpy(walk_next + n, target, tlen);
+            n += (uint32_t)tlen;
+            if (*p != '\0') {
+                if (walk_next[n - 1] != '/') {
+                    walk_next[n++] = '/';
+                }
+                size_t rest = k_strlen(p);
+                if (n + rest + 1 >= sizeof(walk_next)) {
+                    return -1;
+                }
+                k_memcpy(walk_next + n, p, rest);
+                n += (uint32_t)rest;
+            }
+            walk_next[n] = '\0';
+            k_strlcpy(walk_path, walk_next, sizeof(walk_path));
+            rewritten = 1;
+            break;
+        }
+
+        if (rewritten) {
+            continue; /* walk the rewritten path from the start */
+        }
+        if (rc < 0) {
             return -1;
         }
+        /* M60: a trailing slash is a claim that the thing named is a
+         * directory, so it is honoured for one and refused for a file.
+         * "/bin/" and "/bin" name the same directory - which is what
+         * makes tab completion's directory suffix usable - but "/bin/ls/"
+         * is saying something untrue about `ls`, and a resolver that
+         * shrugged at that would let a caller act on a file it believed
+         * was a directory. */
+        size_t len = k_strlen(walk_path);
+        if (len > 1 && walk_path[len - 1] == '/' && inodes[at].type != LEANFS_TYPE_DIR) {
+            return -1;
+        }
+        return at;
     }
-    if (rc < 0) {
-        return -1;
-    }
-    /* M60: a trailing slash is a claim that the thing named is a
-     * directory, so it is honoured for one and refused for a file.
-     * "/bin/" and "/bin" name the same directory - which is what makes
-     * tab completion's directory suffix usable - but "/bin/ls/" is
-     * saying something untrue about `ls`, and a resolver that shrugged
-     * at that would let a caller act on a file it believed was a
-     * directory. */
-    size_t len = k_strlen(path);
-    if (len > 1 && path[len - 1] == '/' && inodes[at].type != LEANFS_TYPE_DIR) {
-        return -1;
-    }
-    return at;
+    /* Out of hops: a link that points at itself, or a chain longer than
+     * anything legitimate. Refused rather than walked further, which is
+     * what ELOOP means everywhere else. */
+    return -1;
+}
+
+static int resolve(const char *path) {
+    return resolve_ex(path, 1);
+}
+
+static int resolve_nofollow(const char *path) {
+    return resolve_ex(path, 0);
 }
 
 /* Splits an absolute path into its parent directory's inode and the leaf
@@ -1462,7 +1596,14 @@ int leanfs_unlink(const char *path) {
         return -1;
     }
     int idx = dir_lookup(parent, leaf);
-    if (!inode_valid(idx) || inodes[idx].type != LEANFS_TYPE_FILE) {
+    /* M87: a symbolic link is removable too, and removing one removes the
+     * LINK rather than what it points at. That falls out of dir_lookup
+     * naming the entry in this directory rather than resolving it, which
+     * is what unlink has always done - the only change needed was to stop
+     * refusing type 3. Getting it the other way round would make `rm` on a
+     * link delete somebody else's file. */
+    if (!inode_valid(idx) ||
+        (inodes[idx].type != LEANFS_TYPE_FILE && inodes[idx].type != LEANFS_TYPE_LINK)) {
         return -1;
     }
     /* Blocks first, then the inode, then the name - each step making the
@@ -1634,6 +1775,95 @@ int leanfs_rmdir(const char *path) {
     return 0;
 }
 
+/* ---- M87: symbolic links ----------------------------------------------
+ *
+ * A link's target is stored in its data blocks, exactly the way a
+ * regular file's contents are, with `size` as the target's length. That
+ * is why this milestone needed no on-disk format change: the only new
+ * thing is a type value, and an old disk has no inode carrying it.
+ *
+ * Deliberately not hard links, which are the other half of this
+ * milestone's bullet and are a genuinely different change: they need a
+ * link count in the inode (there is room - M81 left 44 reserved bytes
+ * for exactly this) and they need unlink to decrement rather than free,
+ * which touches every path that removes a file. Symbolic links need
+ * neither, which is why they are here and hard links are not.
+ */
+int leanfs_symlink(const char *path, const char *target) {
+    if (!target || !target[0]) {
+        return -1; /* an empty target names nothing */
+    }
+    size_t tlen = k_strlen(target);
+    if (tlen >= LEANFS_MAX_PATH) {
+        return -1;
+    }
+    int parent;
+    char leaf[LEANFS_MAX_NAME + 1];
+    if (resolve_parent(path, &parent, leaf) != 0) {
+        return -1;
+    }
+    if (inode_valid(dir_lookup(parent, leaf))) {
+        return -1; /* something is already there - a link does not replace it */
+    }
+    int idx = find_free_inode();
+    if (idx < 0) {
+        return -1;
+    }
+    k_memset(&inodes[idx], 0, sizeof(inodes[idx]));
+    inodes[idx].type = LEANFS_TYPE_LINK;
+    inodes[idx].mtime = rtc_now();
+    mark_inode(idx);
+    /* The target goes in before the name does, the opposite of the order
+     * leanfs_write uses - and for the same underlying reason. A file with
+     * a name and no contents is an empty file, which is harmless; a LINK
+     * with a name and no target is a path that resolves to nothing and
+     * cannot be told apart from a broken one. */
+    if (inode_write_data(idx, target, tlen) != 0) {
+        inodes[idx].type = LEANFS_TYPE_FREE;
+        mark_inode(idx);
+        return -1;
+    }
+    if (dir_add(parent, leaf, idx) != 0) {
+        free_inode_blocks(idx);
+        inodes[idx].type = LEANFS_TYPE_FREE;
+        mark_inode(idx);
+        return -1;
+    }
+    save_meta();
+    return 0;
+}
+
+int64_t leanfs_readlink(const char *path, char *buf, size_t maxlen) {
+    /* Deliberately the non-following resolve: readlink is the one call
+     * that is about the link itself rather than about what it points at,
+     * and a following resolve would make it impossible to read a link to
+     * a link. */
+    int idx = resolve_nofollow(path);
+    if (!inode_valid(idx) || inodes[idx].type != LEANFS_TYPE_LINK) {
+        return -1;
+    }
+    uint32_t n = inodes[idx].size;
+    if (n > maxlen) {
+        n = (uint32_t)maxlen;
+    }
+    return inode_pread(idx, buf, n, 0);
+}
+
+/* M87: stat that does not follow a final symbolic link - lstat. The
+ * difference is the whole reason a program can tell a link from what it
+ * points at, and therefore the whole reason `ls -l` can show one. */
+int leanfs_lstat(const char *path, leanfs_stat_t *out) {
+    int idx = resolve_nofollow(path);
+    if (!inode_valid(idx)) {
+        return -1;
+    }
+    out->size = inodes[idx].size;
+    out->mtime = inodes[idx].mtime;
+    out->is_dir = (inodes[idx].type == LEANFS_TYPE_DIR) ? 1 : 0;
+    out->is_link = (inodes[idx].type == LEANFS_TYPE_LINK) ? 1 : 0;
+    return 0;
+}
+
 int leanfs_stat(const char *path, leanfs_stat_t *out) {
     int idx = resolve(path);
     if (!inode_valid(idx)) {
@@ -1642,6 +1872,10 @@ int leanfs_stat(const char *path, leanfs_stat_t *out) {
     out->size = inodes[idx].size;
     out->mtime = inodes[idx].mtime;
     out->is_dir = inodes[idx].type == LEANFS_TYPE_DIR;
+    /* M87: always 0, and that is the truthful answer rather than an
+     * omission - this resolve FOLLOWS links, so whatever it lands on is
+     * by definition not one. leanfs_lstat is the call that can say yes. */
+    out->is_link = 0;
     return 0;
 }
 

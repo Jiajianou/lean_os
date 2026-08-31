@@ -9785,6 +9785,128 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             }
         }
 
+        /* ---- symbolic links -------------------------------------------
+         *
+         * M75 predicted this milestone: its note on resolving ".."
+         * textually says "the day this filesystem grows links is the day
+         * that stops being true". This is that day, and what is checked
+         * here is the part that does work - a link followed on open,
+         * NOT followed by readlink and lstat, a chain followed to its
+         * end, and a loop refused rather than walked forever.
+         */
+        if (all_ok) {
+            static const char *const REAL = PATH_TMP_DIR "m87real";
+            static const char *const LINK = PATH_TMP_DIR "m87link";
+            static const char *const CHAIN = PATH_TMP_DIR "m87chain";
+            static const char *const LOOP_A = PATH_TMP_DIR "m87loopa";
+            static const char *const LOOP_B = PATH_TMP_DIR "m87loopb";
+            vfs_unlink(LINK);
+            vfs_unlink(CHAIN);
+            vfs_unlink(LOOP_A);
+            vfs_unlink(LOOP_B);
+            vfs_unlink(REAL);
+
+            static const char body[] = "pointed at";
+            if (vfs_write(REAL, body, sizeof(body)) != 0 ||
+                vfs_symlink(LINK, REAL) != 0) {
+                klog_puts("[m87] could not create a file and a link to it\n");
+                all_ok = 0;
+            }
+
+            /* Opening the link opens the file - which is the whole of
+             * "following" and the reason a link is useful at all. */
+            if (all_ok) {
+                k_memset(buf, 0, sizeof(buf));
+                if (vfs_read(LINK, buf, sizeof(buf)) != (int64_t)sizeof(body) ||
+                    buf[0] != 'p') {
+                    klog_puts("[m87] reading through a symlink did not reach the file\n");
+                    all_ok = 0;
+                }
+            }
+
+            /* readlink does NOT follow, and gives back exactly the target
+             * it was created with. */
+            if (all_ok) {
+                char target[128];
+                k_memset(target, 0, sizeof(target));
+                int64_t n = vfs_readlink(LINK, target, sizeof(target) - 1);
+                if (n <= 0 || k_strcmp(target, REAL) != 0) {
+                    klog_puts("[m87] readlink did not return the target it was given\n");
+                    all_ok = 0;
+                }
+                /* And refuses a name that is not a link, which is what
+                 * makes it usable as the question "is this a link". */
+                if (all_ok && vfs_readlink(REAL, target, sizeof(target)) >= 0) {
+                    klog_puts("[m87] readlink answered for something that is not a link\n");
+                    all_ok = 0;
+                }
+            }
+
+            /* stat follows and lstat does not - the distinction that lets
+             * a program tell a link from what it points at, and the one a
+             * tree walker depends on to avoid descending through one. */
+            if (all_ok) {
+                leanfs_stat_t st_follow, st_link;
+                if (vfs_stat(LINK, &st_follow) != 0 || vfs_lstat(LINK, &st_link) != 0) {
+                    klog_puts("[m87] stat or lstat failed on a symlink\n");
+                    all_ok = 0;
+                } else if (st_follow.is_link != 0 || st_link.is_link != 1) {
+                    klog_puts("[m87] stat and lstat gave the same answer about a symlink\n");
+                    all_ok = 0;
+                } else if (st_follow.size != sizeof(body)) {
+                    klog_puts("[m87] stat through a link reported the link's size, not the file's\n");
+                    all_ok = 0;
+                }
+            }
+
+            /* A chain: link -> link -> file, followed to the end. */
+            if (all_ok) {
+                if (vfs_symlink(CHAIN, LINK) != 0) {
+                    klog_puts("[m87] could not create a link to a link\n");
+                    all_ok = 0;
+                } else {
+                    k_memset(buf, 0, sizeof(buf));
+                    if (vfs_read(CHAIN, buf, sizeof(buf)) != (int64_t)sizeof(body)) {
+                        klog_puts("[m87] a chain of two links did not reach the file\n");
+                        all_ok = 0;
+                    }
+                }
+            }
+
+            /* A loop is refused rather than walked. Two links pointing at
+             * each other is the smallest one, and a resolver without a
+             * hop limit hangs the machine on it rather than failing -
+             * which is why this check matters more than it looks. */
+            if (all_ok) {
+                if (vfs_symlink(LOOP_A, LOOP_B) != 0 ||
+                    vfs_symlink(LOOP_B, LOOP_A) != 0) {
+                    klog_puts("[m87] could not build a symlink loop to test\n");
+                    all_ok = 0;
+                } else if (vfs_exists(LOOP_A)) {
+                    klog_puts("[m87] a symlink loop resolved to something\n");
+                    all_ok = 0;
+                }
+            }
+
+            /* Removing a link removes the LINK, not the file - getting
+             * this backwards would make `rm` on a link delete somebody
+             * else's data. */
+            if (all_ok) {
+                if (vfs_unlink(LINK) != 0) {
+                    klog_puts("[m87] a symlink could not be removed\n");
+                    all_ok = 0;
+                } else if (!vfs_exists(REAL)) {
+                    klog_puts("[m87] removing a symlink removed the file it pointed at\n");
+                    all_ok = 0;
+                }
+            }
+
+            vfs_unlink(CHAIN);
+            vfs_unlink(LOOP_A);
+            vfs_unlink(LOOP_B);
+            vfs_unlink(REAL);
+        }
+
         if (!all_ok) {
             panic("M87 self-test: this machine's /dev and /proc are not what they claim");
         }
@@ -9797,7 +9919,10 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "differently a second apart, /proc/self/status describing this task, and "
                    "/devices NOT shadowed by the /dev mount, exactly one of two exclusive "
                    "creates winning, and a file truncated in both directions keeping the "
-                   "bytes it kept and reading zeros past its old end - self-test passed (");
+                   "bytes it kept and reading zeros past its old end, a symlink followed on "
+                   "open and not followed by readlink or lstat, a chain of two followed to "
+                   "the end, a loop refused rather than walked, and removing a link leaving "
+                   "the file it pointed at - self-test passed (");
         klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         klog_puts(" ms).\n\n");
     }

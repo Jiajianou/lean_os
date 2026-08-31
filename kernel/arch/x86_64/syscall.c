@@ -1494,6 +1494,75 @@ static long sys_pipe(uint64_t fds_out_ptr, uint64_t a2, uint64_t a3, uint64_t a4
 
 /* Read-only: nothing needs to *change* a process's group yet (no job
  * control in this shell), so there's no setpgid to go with it. */
+/* M87: symbolic links. See SYS_symlink for the argument order, which is
+ * symlink(2)'s and is the reverse of what most people guess. */
+static long sys_symlink(uint64_t target_ptr, uint64_t path_ptr, uint64_t a3,
+                        uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1;
+    }
+    char path[LEANFS_MAX_PATH];
+    if (copy_path_from_user(path, path_ptr) != 0) {
+        return -1;
+    }
+    /* The TARGET is copied as a plain string, not resolved as a path:
+     * a symbolic link may legitimately point at something that does not
+     * exist yet, and may be relative to the directory it sits in rather
+     * than to the caller's. Normalising it here would quietly turn a
+     * relative link into an absolute one and break the first case a
+     * program uses it for. */
+    char target[LEANFS_MAX_PATH];
+    if (copy_str_from_user(target, target_ptr, sizeof(target)) != 0) {
+        return -1;
+    }
+    return vfs_symlink(path, target);
+}
+
+static long sys_readlink(uint64_t path_ptr, uint64_t buf, uint64_t len,
+                         uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    char path[LEANFS_MAX_PATH];
+    if (copy_path_from_user(path, path_ptr) != 0 || !user_range_ok(buf, len, 1)) {
+        return -1;
+    }
+    return (long)vfs_readlink(path, (char *)buf, (size_t)len);
+}
+
+static long sys_lstat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3,
+                      uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    char path[LEANFS_MAX_PATH];
+    if (copy_path_from_user(path, path_ptr) != 0 ||
+        !user_range_ok(out_ptr, sizeof(os_stat_t), 1)) {
+        return -1;
+    }
+    leanfs_stat_t st;
+    if (vfs_lstat(path, &st) != 0) {
+        return -1;
+    }
+    /* Converted field by field rather than copied whole, exactly as
+     * SYS_stat does it. leanfs_stat_t is a filesystem's internal record
+     * and os_stat_t is an ABI; copying one onto the other would make
+     * their layouts a thing that has to stay accidentally identical, and
+     * os_time.h's own header comment says they are deliberately not the
+     * same type. */
+    os_stat_t out;
+    out.size = st.size;
+    out.mtime = st.mtime;
+    out.is_dir = st.is_dir;
+    out.is_link = st.is_link;
+    return copy_to_user(out_ptr, &out, sizeof(out));
+}
+
 /* M87: set a file's length. Needs the descriptor to be writable, for the
  * same reason a write does - shortening a file is the most destructive
  * thing a caller can do to it without deleting it. */
@@ -2448,7 +2517,10 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
     out.size = st.size;
     out.mtime = st.mtime;
     out.is_dir = st.is_dir;
-    out.reserved = 0;
+    /* M87: always 0 here, and truthfully so - this resolve follows
+     * links, so whatever it landed on is by definition not one.
+     * SYS_lstat is the call that can say otherwise. */
+    out.is_link = 0;
     return copy_to_user(out_ptr, &out, sizeof(out));
 }
 
@@ -2702,7 +2774,10 @@ static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
     out.size = st.size;
     out.mtime = st.mtime;
     out.is_dir = st.is_dir;
-    out.reserved = 0;
+    /* M87: a descriptor cannot name a link. Opening one follows it, so
+     * what this handle refers to is whatever the link pointed at - which
+     * is why fstat has no lstat counterpart anywhere. */
+    out.is_link = 0;
     return copy_to_user(out_ptr, &out, sizeof(out)) == 0 ? 0 : -1;
 }
 
@@ -3982,6 +4057,9 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_getsid] = sys_getsid,
     [SYS_ioctl] = sys_ioctl,
     [SYS_ftruncate] = sys_ftruncate,
+    [SYS_symlink] = sys_symlink,
+    [SYS_readlink] = sys_readlink,
+    [SYS_lstat] = sys_lstat,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than
