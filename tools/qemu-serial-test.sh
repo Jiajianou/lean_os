@@ -250,6 +250,8 @@ REQUIRED_MARKERS=(
   "[m78] memory that can be given back:"
   "[m79] two threads, one address space:"
   "[m81] a filesystem that can hold somebody else's program:"
+  "[m82] a page that arrives when it is asked for:"
+  "[m83] two processes from one:"
   "[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"

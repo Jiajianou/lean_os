@@ -102,7 +102,9 @@
     X(sigtest)                     \
     X(treewalk)                    \
     X(mmaptest)                    \
-    X(threadtest)
+    X(threadtest)                  \
+    X(lazytest)                    \
+    X(forktest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -8934,6 +8936,320 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "with no two sharing an inode number, and a delete/recreate cycle reusing "
                    "the holes rather than growing the directory - self-test passed (");
         klog_put_dec(took_ms);
+        klog_puts(" ms).\n\n");
+    }
+
+    /* ---- M82 self-test: a page that arrives when it is asked for -------
+     *
+     * /bin/lazytest carries what a program can see: that a reservation
+     * larger than this machine's memory is granted, that a page of it
+     * works when touched, that an untouched one reads as zero, and that a
+     * gigabyte reserved across eight rounds does not run the machine out.
+     *
+     * What is added here is the only measurement that actually proves
+     * laziness, and it is one no program can make about itself: how many
+     * *frames* the machine spent while that reservation was outstanding.
+     * lazytest reserves 144 MiB and touches sixteen pages, then parks. An
+     * eager kernel - which is what this was until this milestone, and
+     * SYS_mmap's own ABI comment said so - would either have consumed
+     * 36864 frames here or, more likely, panicked in pmm_alloc_frame on
+     * the way. A lazy one spends the sixteen pages, the page tables to
+     * describe them, and nothing else.
+     *
+     * The threshold below is deliberately loose and the gap it is
+     * checking is not: sixteen pages against thirty-six thousand is three
+     * orders of magnitude, so a test that allows a few hundred frames of
+     * slack for page tables and for whatever else the machine does while
+     * the sample is taken still cannot pass an eager kernel.
+     */
+    {
+        int all_ok = 1;
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        uint64_t frames_before = pmm_free_frame_count();
+
+        size_t lz_bytes = 0;
+        uint8_t *lz_img = read_program(PATH_BIN_DIR "lazytest", &lz_bytes);
+        if (!lz_img) {
+            panic("M82 self-test: /bin/lazytest is not on this disk");
+        }
+
+        const char *lz_argv[] = {PATH_BIN_DIR "lazytest", 0};
+        task_t *lz = process_spawnv("lazytest", lz_img, lz_bytes, lz_argv);
+        if (!lz) {
+            panic("M82 self-test: could not spawn lazytest");
+        }
+        int lz_id = lz->id;
+
+        /* Sample while it is alive, keeping the low-water mark. Polled
+         * rather than timed, for M69's reason: the program parks for
+         * thousands of yields precisely so that this loop finds it
+         * holding the reservation, and a fixed sleep would be a guess
+         * about a machine whose speed varies. */
+        uint64_t lowest_free = frames_before;
+        for (int i = 0; i < 900; i++) {
+            if (do_syscall(SYS_task_alive, (uint64_t)lz_id, 0, 0) != 1) {
+                break;
+            }
+            uint64_t now = pmm_free_frame_count();
+            if (now < lowest_free) {
+                lowest_free = now;
+            }
+            do_syscall(SYS_yield, 0, 0, 0);
+        }
+
+        long rc = do_syscall(SYS_wait, (uint64_t)lz_id, 0, 0);
+        kfree(lz_img);
+        if (rc != 0) {
+            klog_puts("[m82] lazytest exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_puts(" - see user_space/bin/lazytest.c for what each code means\n");
+            all_ok = 0;
+        }
+
+        /* Bounded on BOTH sides, and the lower bound is the one that took
+         * a second look to get right.
+         *
+         * 144 MiB is 36864 frames, so an upper bound is the obvious check:
+         * spending far fewer than that means the reservation was not
+         * backed. But an upper bound alone is passed just as easily by a
+         * sample taken *before* lazytest mapped anything - the loop above
+         * would have found the process barely started, measured almost
+         * nothing, and reported success without ever observing the thing
+         * it exists to observe. lazytest touches 256 pages on purpose, so
+         * requiring at least 200 frames of spend is what proves the
+         * sample landed while the mapping was held.
+         *
+         * The upper bound allows 2048 - eight megabytes - for the touched
+         * megabyte, the seventy-odd page tables that describe pages
+         * spread across 144 MiB, the program's own image and stack, and
+         * whatever else the machine did while sampling. That is still
+         * eighteen times less than an eager mapping would have cost. */
+        uint64_t peak_spend = frames_before > lowest_free ? frames_before - lowest_free : 0;
+        if (all_ok && peak_spend > 2048) {
+            klog_puts("[m82] a 144 MiB reservation cost 0x");
+            klog_put_hex64(peak_spend);
+            klog_puts(" frames while it was held - it is still being backed eagerly\n");
+            all_ok = 0;
+        }
+        if (all_ok && peak_spend < 200) {
+            klog_puts("[m82] only 0x");
+            klog_put_hex64(peak_spend);
+            klog_puts(" frames were ever seen in use - the sample was taken before "
+                       "lazytest held its mapping, so this test proved nothing\n");
+            all_ok = 0;
+        }
+
+        /* And every frame back afterwards, exactly, which is M78's
+         * assertion carried forward: a fault handler that maps a page
+         * without the arena's teardown knowing about it would leak one
+         * frame per page touched, and nothing else here would notice. */
+        uint64_t frames_after = pmm_free_frame_count();
+        if (all_ok && frames_after != frames_before) {
+            klog_puts("[m82] frames before 0x");
+            klog_put_hex64(frames_before);
+            klog_puts(" after 0x");
+            klog_put_hex64(frames_after);
+            klog_puts(" - demand-filled pages are not all coming back\n");
+            all_ok = 0;
+        }
+
+        /* The two faults that must STAY fatal. This is the half of the
+         * milestone that is easy to get wrong in the direction nobody
+         * notices: a fault handler that filled any address in the arena
+         * would turn every out-of-bounds write in every program into a
+         * silent success, and one that ignored `prot` would quietly grant
+         * write access to a read-only mapping. Both are checked by
+         * running a program that commits them and requiring it to die -
+         * 139 is 128 + SIGSEGV, the same code M52's ring-3 fault path has
+         * produced since it was written. */
+        static const char *const FATAL_MODES[] = {"ro", "gap"};
+        static const char *const FATAL_WHY[] = {
+            "writing to a PROT_READ mapping",
+            "touching arena address space nobody reserved",
+        };
+        for (int m = 0; m < 2 && all_ok; m++) {
+            size_t f_bytes = 0;
+            uint8_t *f_img = read_program(PATH_BIN_DIR "lazytest", &f_bytes);
+            if (!f_img) {
+                panic("M82 self-test: /bin/lazytest vanished mid-test");
+            }
+            const char *f_argv[] = {PATH_BIN_DIR "lazytest", FATAL_MODES[m], 0};
+            task_t *ft = process_spawnv("lazytest", f_img, f_bytes, f_argv);
+            long frc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
+            kfree(f_img);
+            if (frc != 128 + SIGSEGV) {
+                klog_puts("[m82] ");
+                klog_puts(FATAL_WHY[m]);
+                klog_puts(" exited 0x");
+                klog_put_hex32((uint32_t)frc);
+                klog_puts(" rather than being killed - the fault handler is filling too much\n");
+                all_ok = 0;
+            }
+        }
+
+        if (!all_ok) {
+            panic("M82 self-test: this kernel is not filling pages on demand, or is filling too many");
+        }
+        klog_puts("[m82] a page that arrives when it is asked for: a 144 MiB reservation "
+                   "granted on a 128 MiB machine and held for 0x");
+        klog_put_hex64(peak_spend);
+        klog_puts(" frames rather than 0x9000 - and for more than the 0x100 pages "
+                   "deliberately touched, so the measurement is of something real - an "
+                   "untouched page reading as zero, an untouched mapping accepted as a "
+                   "syscall buffer, over a "
+                   "gigabyte reserved across eight rounds without exhausting the machine, "
+                   "every frame back at the end, and both of the faults that must stay "
+                   "fatal - a write to a read-only mapping and a touch of unreserved arena "
+                   "address space - still killing only the program that made them - "
+                   "self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
+    }
+
+    /* ---- M83 self-test: two processes from one -------------------------
+     *
+     * /bin/forktest carries everything a program can check about its own
+     * fork: that it returns twice with different values into processes
+     * with different pids, that memory written before the call is visible
+     * to the child and memory written after it by either side is not
+     * visible to the other, that a descriptor opened before the call
+     * works in both, and that a hundred rounds of fork/exit/wait leave
+     * a hundred-and-twenty-eight-slot task table where they found it.
+     *
+     * What is added here is the measurement that separates a
+     * copy-on-write fork from an honest, expensive, eager one - and
+     * without it every check above passes either way. `forktest cow`
+     * touches eight megabytes, forks, and has both sides sit still. An
+     * eager fork would have spent those eight megabytes twice by the time
+     * this samples; a copy-on-write fork has spent them once and a
+     * handful of page tables.
+     */
+    {
+        int all_ok = 1;
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        uint64_t frames_before = pmm_free_frame_count();
+
+        size_t ft_bytes = 0;
+        uint8_t *ft_img = read_program(PATH_BIN_DIR "forktest", &ft_bytes);
+        if (!ft_img) {
+            panic("M83 self-test: /bin/forktest is not on this disk");
+        }
+        const char *ft_argv[] = {PATH_BIN_DIR "forktest", 0};
+        task_t *ft = process_spawnv("forktest", ft_img, ft_bytes, ft_argv);
+        long rc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
+        kfree(ft_img);
+        if (rc != 0) {
+            klog_puts("[m83] forktest exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_puts(" - see user_space/bin/forktest.c for what each code means\n");
+            all_ok = 0;
+        }
+
+        /* Reap anything the fork rounds left terminated but unreaped -
+         * a child whose parent exited before waiting is reparented to
+         * nobody here, and its slot and kernel stack have to come back
+         * before the frame comparison below means anything. */
+        for (int i = 0; i < sched_task_count(); i++) {
+            task_t *stale = sched_task_by_slot(i);
+            if (stale && stale->state == TASK_TERMINATED) {
+                selftest_reap(stale);
+            }
+        }
+        uint64_t frames_after = pmm_free_frame_count();
+        if (all_ok && frames_after != frames_before) {
+            klog_puts("[m83] frames before 0x");
+            klog_put_hex64(frames_before);
+            klog_puts(" after 0x");
+            klog_put_hex64(frames_after);
+            klog_puts(" - a hundred forks did not give everything back\n");
+            all_ok = 0;
+        }
+
+        /* ---- and the measurement a program cannot make --------------- */
+        uint64_t cow_spend = 0;
+        if (all_ok) {
+            uint64_t cow_before = pmm_free_frame_count();
+            size_t cw_bytes = 0;
+            uint8_t *cw_img = read_program(PATH_BIN_DIR "forktest", &cw_bytes);
+            if (!cw_img) {
+                panic("M83 self-test: /bin/forktest vanished mid-test");
+            }
+            const char *cw_argv[] = {PATH_BIN_DIR "forktest", "cow", 0};
+            task_t *cw = process_spawnv("forktest", cw_img, cw_bytes, cw_argv);
+            if (!cw) {
+                panic("M83 self-test: could not spawn forktest in cow mode");
+            }
+            int cw_id = cw->id;
+
+            uint64_t lowest_free = cow_before;
+            for (int i = 0; i < 900; i++) {
+                if (do_syscall(SYS_task_alive, (uint64_t)cw_id, 0, 0) != 1) {
+                    break;
+                }
+                uint64_t now = pmm_free_frame_count();
+                if (now < lowest_free) {
+                    lowest_free = now;
+                }
+                do_syscall(SYS_yield, 0, 0, 0);
+            }
+            long cw_rc = do_syscall(SYS_wait, (uint64_t)cw_id, 0, 0);
+            kfree(cw_img);
+            cow_spend = cow_before > lowest_free ? cow_before - lowest_free : 0;
+
+            if (cw_rc != 0) {
+                klog_puts("[m83] forktest cow exited ");
+                klog_put_dec((uint32_t)(cw_rc < 0 ? 99 : cw_rc));
+                klog_puts("\n");
+                all_ok = 0;
+            }
+            /* Eight megabytes is 2048 frames. Held once, plus two
+             * processes' images, stacks and page tables, comes to a bit
+             * over 2048; copied eagerly it would be a bit over 4096. The
+             * window below is wide enough that neither bound is a
+             * hair's breadth from the truth and narrow enough that an
+             * eager copy cannot fit inside it.
+             *
+             * The lower bound earns its place for the reason M82's did:
+             * without it, a sample taken before forktest had touched
+             * anything would report almost nothing and be called a pass. */
+            if (all_ok && cow_spend > 3000) {
+                klog_puts("[m83] a fork of an 8 MiB process cost 0x");
+                klog_put_hex64(cow_spend);
+                klog_puts(" frames - the address space is being copied, not shared\n");
+                all_ok = 0;
+            }
+            if (all_ok && cow_spend < 2048) {
+                klog_puts("[m83] only 0x");
+                klog_put_hex64(cow_spend);
+                klog_puts(" frames were ever seen in use - the sample was taken before "
+                           "forktest had touched its memory, so this proved nothing\n");
+                all_ok = 0;
+            }
+            for (int i = 0; i < sched_task_count(); i++) {
+                task_t *stale = sched_task_by_slot(i);
+                if (stale && stale->state == TASK_TERMINATED) {
+                    selftest_reap(stale);
+                }
+            }
+            if (all_ok && pmm_free_frame_count() != cow_before) {
+                klog_puts("[m83] the copy-on-write round did not give every frame back\n");
+                all_ok = 0;
+            }
+        }
+
+        if (!all_ok) {
+            panic("M83 self-test: this kernel cannot make two processes out of one");
+        }
+        klog_puts("[m83] two processes from one: fork returning twice into two pids, "
+                   "memory written before the call visible to the child and memory "
+                   "written after it private to each, an inherited pipe carrying a "
+                   "message from child to parent, a hundred rounds of fork/exit/wait "
+                   "returning every task slot and every frame, and an 8 MiB process "
+                   "forked for 0x");
+        klog_put_hex64(cow_spend);
+        klog_puts(" frames rather than the 0x1000 a copy would have cost - "
+                   "self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         klog_puts(" ms).\n\n");
     }
 

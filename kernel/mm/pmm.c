@@ -27,6 +27,35 @@ extern uint8_t __kernel_end[];
  * so a stray/wrong E820 entry can't hand out memory that's actually
  * spoken for. */
 static uint8_t bitmap[PMM_BITMAP_BYTES];
+
+/* ---- M82: how many owners a frame has ---------------------------------
+ *
+ * Every frame this allocator hands out had exactly one owner until now,
+ * so "allocated" and "owned by somebody" were the same bit and the
+ * bitmap above said both. M83 breaks that: a forked address space shares
+ * its parent's pages read-only until one of them writes, and a page with
+ * two owners must not come back to the free list when the first of them
+ * lets go.
+ *
+ * So the bitmap keeps meaning "this frame is not free" and this array
+ * means "and this many owners are holding it". pmm_alloc_frame hands
+ * back a frame with one; pmm_frame_ref adds an owner; pmm_free_frame
+ * removes one and only clears the bitmap bit at zero. Every existing
+ * caller is a single owner calling free once, which is exactly the old
+ * behaviour, so nothing outside this file had to change for it.
+ *
+ * One byte per frame: 256 KiB for the 1 GiB this allocator tracks. A
+ * byte is enough because an owner is an address space and MAX_TASKS is
+ * 128, so 255 is not reachable - and the increment panics rather than
+ * wrapping if that reasoning ever stops holding, because a wrapped
+ * refcount frees a page somebody is still using.
+ *
+ * Frames reserved at init (low memory, the kernel image) are marked used
+ * in the bitmap and never get a refcount, which is right: nothing owns
+ * them and nothing may free them. pmm_free_frame on one of those still
+ * hits the double-free panic it always did, because their refcount is
+ * zero. */
+static uint8_t frame_refs[PMM_FRAME_COUNT];
 static uint64_t free_frames;
 static uint64_t total_frames;
 /* First frame index that might still be free. Monotonically advanced by
@@ -118,6 +147,7 @@ uint64_t pmm_try_alloc_frame(void) {
     for (uint64_t f = search_hint; f < total_frames; f++) {
         if (!bitmap_test(f)) {
             bitmap_set(f);
+            frame_refs[f] = 1; /* M82 - one owner, the caller */
             free_frames--;
             search_hint = f + 1;
             spin_unlock_irqrestore(&pmm_lock, irq_flags);
@@ -139,13 +169,17 @@ uint64_t pmm_alloc_frame(void) {
 void pmm_free_frame(uint64_t phys_addr) {
     uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
     uint64_t f = phys_addr / PAGE_SIZE;
-    if (f >= total_frames || !bitmap_test(f)) {
+    if (f >= total_frames || !bitmap_test(f) || frame_refs[f] == 0) {
         panic("pmm_free_frame: double-free or invalid frame");
     }
-    bitmap_clear(f);
-    free_frames++;
-    if (f < search_hint) {
-        search_hint = f;
+    /* M82: one owner letting go, not necessarily the last. The frame only
+     * returns to the free list when nobody is left holding it. */
+    if (--frame_refs[f] == 0) {
+        bitmap_clear(f);
+        free_frames++;
+        if (f < search_hint) {
+            search_hint = f;
+        }
     }
     spin_unlock_irqrestore(&pmm_lock, irq_flags);
 }
@@ -172,6 +206,7 @@ uint64_t pmm_alloc_contiguous(uint64_t count) {
             if (run_len == count) {
                 for (uint64_t i = 0; i < count; i++) {
                     bitmap_set(run_start + i);
+                    frame_refs[run_start + i] = 1; /* M82 */
                 }
                 free_frames -= count;
                 if (run_start <= search_hint && search_hint < run_start + count) {
@@ -194,14 +229,53 @@ void pmm_free_contiguous(uint64_t phys_addr, uint64_t count) {
         panic("pmm_free_contiguous: invalid range");
     }
     for (uint64_t f = first; f < first + count; f++) {
-        if (!bitmap_test(f)) {
+        if (!bitmap_test(f) || frame_refs[f] == 0) {
             panic("pmm_free_contiguous: double-free or invalid frame");
         }
-        bitmap_clear(f);
-        free_frames++;
+        /* A contiguous run is a kernel-internal allocation (task stacks)
+         * and is never shared, so this decrement always reaches zero -
+         * written as a decrement anyway so there is one rule about what
+         * frame_refs means rather than two. */
+        if (--frame_refs[f] == 0) {
+            bitmap_clear(f);
+            free_frames++;
+        }
     }
     if (first < search_hint) {
         search_hint = first;
     }
     spin_unlock_irqrestore(&pmm_lock, irq_flags);
+}
+
+/* M82: add an owner to a frame that already has at least one.
+ *
+ * The only caller is M83's fork, which walks a parent's page tables and
+ * points a child's at the same physical pages. Refuses to be the *first*
+ * owner - a frame nobody has allocated is not a frame anybody may claim -
+ * and panics rather than saturating, because a refcount that stopped
+ * counting would eventually free a page two address spaces are still
+ * reading. */
+void pmm_frame_ref(uint64_t phys_addr) {
+    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
+    uint64_t f = phys_addr / PAGE_SIZE;
+    if (f >= total_frames || !bitmap_test(f) || frame_refs[f] == 0) {
+        panic("pmm_frame_ref: no such allocated frame");
+    }
+    if (frame_refs[f] == 0xFF) {
+        panic("pmm_frame_ref: frame owner count would overflow");
+    }
+    frame_refs[f]++;
+    spin_unlock_irqrestore(&pmm_lock, irq_flags);
+}
+
+/* How many owners a frame has, or 0 if it is free. Exists so a self-test
+ * can state what sharing *is* rather than infer it from a free-frame
+ * count that would look identical whether two address spaces shared one
+ * page or each had its own. */
+uint8_t pmm_frame_refs(uint64_t phys_addr) {
+    uint64_t f = phys_addr / PAGE_SIZE;
+    if (f >= total_frames) {
+        return 0;
+    }
+    return frame_refs[f];
 }

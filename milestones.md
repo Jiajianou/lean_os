@@ -6856,30 +6856,30 @@ version and geometry all agree) and `/bin` lists 48 entries where the
 build ships 47 — the one extra being the file the tool wrote, which is
 the kernel reading the tool's variable-length records correctly.
 
-### M82 — A page that arrives when it is asked for
+### M82 — A page that arrives when it is asked for ✅
 
-- [ ] A page-fault handler that **populates** rather than kills.
+- [x] A page-fault handler that **populates** rather than kills.
       `SYS_mmap`'s own comment is the specification: *"Backed by real
       frames at the moment of the call, because nothing here fills a
       page in on a fault."* Everything in this milestone is that
       sentence stopping being true
-- [ ] Anonymous zero-fill on first touch, so a mapping costs address
+- [x] Anonymous zero-fill on first touch, so a mapping costs address
       space until it costs memory. This is M80's fifth blocker — "the
       memory budget is still unknown... M78's arena is 128 MiB of
       *address space*, but every mapping here is backed by a real frame
       at the moment of the call" — answered at the mechanism rather than
       by measuring harder
-- [ ] Reference-counted physical frames in M5's PMM, which nothing has
+- [x] Reference-counted physical frames in M5's PMM, which nothing has
       needed until now because no frame has ever had two owners. M83 is
       the milestone that gives them two, and this is where the counting
       goes so that fork does not invent it
-- [ ] The fault handler distinguishes *this address is not mapped yet*
+- [x] The fault handler distinguishes *this address is not mapped yet*
       from *this address is not yours*, and the second one still ends
       the process the way M4's handler always has. A page fault that
       silently succeeds where it used to catch a bug is the regression
       this milestone is most able to cause, and `badptr` is the test
       that already exists to catch it
-- [ ] Deliberately **not** swap. There is nowhere to put an evicted page
+- [x] Deliberately **not** swap. There is nowhere to put an evicted page
       that is not this project's own filesystem, no measurement asking
       for one, and M69's rule says performance work waits for a
       measurement. The ceiling stays physical; it just stops being
@@ -6891,14 +6891,91 @@ by the PMM equals the number of pages actually touched, not the number
 mapped. The second half is the whole test: a large mapping that
 *succeeds* proves nothing if it quietly allocated everything.
 
-### M83 — Two processes from one
+#### Progress notes
 
-- [ ] `fork()`, with copy-on-write over M82's fault handler and M82's
+*The handler is twenty lines and the milestone is everything around it.*
+Filling a page on a not-present fault is the easy part: find the region,
+allocate a frame, zero it, map it, return. What took the work is the set
+of faults that must keep being fatal, because a fault handler that is
+generous by one case turns every wild pointer in every program into a
+silent success. `fill_one_page` refuses four things and each one is a
+real bug it would otherwise hide: a fault on a page that is already
+present (a protection violation, not a first touch), an address outside
+the arena (the heap, stack and image are all mapped eagerly, so a fault
+there always was a wild pointer), an address inside the arena that no
+mapping covers, and a write to a mapping the caller asked for
+read-only. The last two are checked by running a program that commits
+them and requiring the kernel to kill it - `lazytest ro` and `lazytest
+gap` - because an assertion that a thing still fails is worth more here
+than an assertion that a thing works.
+
+*The bug this would have shipped with is not in the fault handler at
+all.* Every syscall that writes into a caller's buffer asks
+`user_range_ok` whether the range is really the caller's, and that
+question is answered by walking the caller's page tables. A page
+reserved by `SYS_mmap` and never touched has no page table entry, so
+the honest answer to "is this mapped" is *no* - and `read(fd, mmap(...),
+n)` would have started returning -1. Demand paging would have quietly
+broken the most ordinary thing anyone does with an mmap, and nothing in
+the milestone as written would have caught it: the fixture only touched
+its own memory.
+
+The fix is to build the range before checking it rather than to let the
+kernel's copy loop fault. That is a deliberate choice and not the
+obvious one - a page fault taken in ring 0 while the kernel holds a lock
+is a much harder thing to reason about than a loop that runs before any
+lock is taken - and it keeps the invariant that every kernel access to
+user memory touches only present pages. `lazytest` now passes an
+untouched mapping to `getcwd`, which is the smallest thing that would
+have failed.
+
+*The frame count needed a lower bound, and working out why is the most
+useful thing in this milestone.* The obvious assertion is that a 144 MiB
+reservation costs far fewer than its 36864 frames. That assertion is
+also passed, perfectly, by a test that samples the frame count *before
+the program has mapped anything* - the polling loop finds a process that
+has barely started, measures almost nothing, and reports success without
+ever observing the thing it exists to observe. So `lazytest` touches 256
+pages on purpose and the self-test requires the spend to be at least 200
+frames as well as at most 2048. The upper bound proves laziness; the
+lower bound proves the measurement happened.
+
+*Refcounted frames, for a milestone that does not need them.* M82's
+bullet said to put them here so M83 does not invent them, and that turned
+out to matter sooner than expected: the guard in `fill_one_page` against
+building a page that already exists is unreachable today and is exactly
+the case copy-on-write introduces - a page present and read-only inside a
+region whose prot says writable. Without the guard, the first write to a
+COW page would map a fresh frame over the shared one and strand it: a
+leak with no owner, invisible to every free-frame assertion in this
+kernel because the count would simply be short. Found by reading the new
+code against the next milestone rather than by running it.
+
+*What this changes about failure, said plainly.* Under M78's eager
+mapping, running out of memory happened at the call that reserved, and a
+program could handle a -1. It now happens at the instruction that
+touches, and that instruction cannot be handled - the process dies. That
+is the trade demand paging always makes and it is written into
+`sched_fault_fill`'s own header rather than left to be discovered. What
+it buys is the thing M80's fifth blocker was actually about: a program
+can reserve more than the machine has, which is what every real program
+that mmaps assumes.
+
+*The arena grew because address space stopped being expensive.* 128 MiB
+to 160 MiB, which is now bounded by `USER_SHM_BASE` with a deliberate
+32 MiB gap rather than by a policy. That is enough to be larger than this
+machine's 128 MiB of RAM, which is the property the test needs; going
+further means moving the shm window and the framebuffer's fixed mapping
+address, which is a bigger change than this milestone needs.
+
+### M83 — Two processes from one ✅
+
+- [x] `fork()`, with copy-on-write over M82's fault handler and M82's
       frame refcounts. The child gets its own address space, its own
       copy of the fd table (M14 already inherits one, so this half
       exists), the same cwd, the same environment, and 0 where the
       parent gets a pid
-- [ ] Reverse M13's "no fork," explicitly and in writing. **M13 was
+- [x] Reverse M13's "no fork," explicitly and in writing. **M13 was
       right when it was written** — a combined spawn is the correct
       primitive for a machine with no fault handler, because the only
       alternative was a full eager copy of an address space. M82 is what
@@ -6906,18 +6983,18 @@ mapped. The second half is the whole test: a large mapping that
       OS "has no `fork` and never will" is the one this milestone
       retires. A deferral that named its own condition is being
       collected, which is the pattern, not a reversal of judgement
-- [ ] `SYS_spawn` stays, unchanged and un-deprecated. It is not a
+- [x] `SYS_spawn` stays, unchanged and un-deprecated. It is not a
       workaround that fork replaces — it is `posix_spawn`, it is what
       every launcher on this desktop already calls, and it remains the
       cheap path for the overwhelmingly common case of "start this
       program." Two primitives because there are genuinely two things
-- [ ] `MAX_TASKS` (128) and the scheduler's slot table meet a workload
+- [x] `MAX_TASKS` (128) and the scheduler's slot table meet a workload
       that creates and destroys processes in a loop for the first time.
       Slots are never recycled today — `SYS_taskinfo`'s comment says so
       and `SYS_wait` relies on it — and a shell running a build will
       exhaust 128 in seconds. Recycling a slot without breaking what
       reads it is the real work in this bullet
-- [ ] Deliberately **not** `vfork`, and not `posix_spawn` as a third
+- [x] Deliberately **not** `vfork`, and not `posix_spawn` as a third
       spelling. One eager primitive and one lazy one is the whole set
 
 **How we'll know.** The classic, and it has to be the classic because it
@@ -6926,6 +7003,97 @@ same page, and have each read back only its own value — while the PMM
 reports one shared frame before the writes and two after. Then a shell
 loop that forks and reaps ten thousand times and leaves the slot table
 where it found it, which is the `MAX_TASKS` half.
+
+#### Progress notes
+
+*M13 was right, and that is the point.* M13 chose a combined spawn over
+fork because the only fork available to it was an eager copy of an entire
+address space at every call. That was the correct call for a kernel with
+no page-fault handler, and it stayed correct for seventy milestones. M82
+is what changes the trade: with a handler that can populate, a fork
+becomes a page-table walk and a refcount, and the copy happens only for
+pages somebody actually writes. The deferral named its own condition and
+the condition arrived - which is the pattern, not a reversal.
+
+`SYS_spawn` is unchanged and un-deprecated. It is `posix_spawn`, every
+launcher on this desktop calls it, and it remains the cheap path for
+"start this program". Two primitives because there are genuinely two
+things.
+
+*Only writable pages are marked copy-on-write, and getting that backwards
+would have been silent.* The obvious implementation marks every shared
+page. It is wrong in a way no test would find quickly: a page that was
+already read-only - the program's own text, a `PROT_READ` mapping - would
+then be indistinguishable from one that was writable before the fork, and
+the first write to the program's machine code would be quietly granted a
+private writable copy instead of killing the process. So the mark goes on
+writable pages only, and `vmm_cow_break` refuses anything unmarked. A
+write to text is present, unmarked, and as fatal as it has always been.
+
+*Fork copies exactly what teardown frees, and that is an invariant rather
+than a tidiness.* `vmm_fork_address_space` takes an owner reference on
+every page it copies and `vmm_destroy_address_space` drops one for every
+page it frees. A page in one list and not the other is a frame pinned for
+the machine's uptime with nothing pointing at it. The shm window and the
+framebuffer are in a process's address space without belonging to it -
+`shm.c` and the compositor own those frames - so they are in neither
+list, and the child does not inherit them. `PROCESS_OWNED` in proc.c is
+now one list read by both.
+
+*The guard M82 added for a case that could not happen yet was the case
+this milestone made happen.* M82's `fill_one_page` refuses to build a page
+that already exists, written for "a page present and read-only inside a
+region whose prot says writable" - which is precisely a copy-on-write
+arena page. Without it, the prefault path would have mapped a fresh frame
+over the shared one and stranded it. Found by reading M82's new code
+against M83 rather than by running either.
+
+*A threaded process cannot fork here, and that is an SMP limit stated
+rather than discovered.* Making a page copy-on-write clears its writable
+bit in the parent's tables, and the `invlpg` that follows flushes only
+this CPU. A second thread of the same process on another core still holds
+the old writable entry and would keep writing to a page the child has
+been promised is private - intermittently, on multi-core only, in a way
+no single-core self-test would ever reproduce. The real fix is a TLB
+shootdown IPI, which is its own piece of work and is needed by more than
+fork. So `SYS_fork` returns -1 from a process with more than one live
+thread. POSIX makes fork-from-a-thread nearly unusable anyway (only
+async-signal-safe calls are legal in the child), so this refuses
+something no correct program was going to do.
+
+*Two failures that had nothing to do with fork, both found by the same
+build.* The kernel image reached 2049 sectors and the Makefile's size
+guard refused to build - which is the guard doing its job, and the fix
+was to move the filesystem from 1 MiB in to 4 MiB in. Doing that exposed
+the second: `FS_TOTAL_SECTORS` still said 65585, the number from when the
+inode table was 32 sectors. M81 made it 2048, so the filesystem had
+actually been ending 17 sectors *past* the start of the EFI System
+Partition since that milestone. Nothing failed, because the ESP is
+rewritten by every `make` and those 17 blocks are at the far end of a
+32 MiB data region nothing had filled - the kind of bug that waits for
+the day somebody's disk is full. Both are now checked at build time
+rather than documented, and `ESP_START_LBA` is derived from the
+filesystem's real size.
+
+*And a third, which cost an entire test run.* Moving the ESP did not
+rebuild `mbr.bin`, because that target depended on `mbr.asm` and not on
+the Makefile the two hardcoded numbers come from. The result was a
+correct image with a partition entry pointing where the ESP used to be,
+and a firmware reporting "No bootable option or device was found" - a
+failure with no visible connection to the one-line edit that caused it.
+The target depends on the Makefile now.
+
+*What the boot costs, because a self-test that costs more than the
+milestone it checks is one nobody keeps.* M81, M82 and M83's self-tests
+are 8.1 s, 12.2 s and 14.2 s, taking the boot from 130 s to 162 s. The
+first draft of M82 and M83 took it to 280 s - almost all of it in park
+loops sized generously rather than measured - and those are now as small
+as the sampler tolerates. One optimisation was attempted and failed to
+help: `munmap` was walking every *address* in a range rather than every
+page table, which after M82 means thirty-six thousand four-level walks to
+free two frames. Fixing it changed the boot by 0.1 s. The fix is kept on
+its own merits and the comment says plainly that it did not buy what it
+was written to buy.
 
 ### M84 — A program that replaces itself
 

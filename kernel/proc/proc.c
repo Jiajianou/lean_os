@@ -41,15 +41,16 @@ static void user_task_launcher(void *arg) {
     enter_user_mode(entry, stack, arg_ptr, GDT_USER_DATA_SEL | 3, GDT_USER_CODE_SEL | 3);
 }
 
-void process_destroy_address_space(uint64_t pml4_phys) {
-    if (pml4_phys == 0 || pml4_phys == vmm_kernel_pml4_phys()) {
-        return; /* a plain kernel thread shares the kernel's - there is nothing private to tear down */
-    }
-    /* Everything from the image's load address up to and including the
-     * argument page (the stack sits between them), plus the sbrk heap.
-     * Deliberately *not* [USER_SHM_BASE, ...) or USER_FB_BASE - see this
-     * function's declaration in proc.h. */
-    static const vmm_range_t OWNED[] = {
+/* Everything from the image's load address up to and including the
+ * argument page (the stack sits between them), plus the sbrk heap and the
+ * mmap arena. Deliberately *not* [USER_SHM_BASE, ...) or USER_FB_BASE -
+ * see process_destroy_address_space's declaration in proc.h.
+ *
+ * M83: hoisted to file scope, because fork needs the identical list. It
+ * takes an owner reference on every page it copies and teardown drops one
+ * for every page it frees, so a page in one list and not the other is a
+ * frame pinned forever. One list, one place. */
+static const vmm_range_t PROCESS_OWNED[] = {
         {USER_IMAGE_BASE, USER_ARG_ADDR + USER_ARG_BYTES},
         {USER_HEAP_START, USER_HEAP_LIMIT},
         /* M78: the mmap arena. Anonymous and private by construction -
@@ -60,8 +61,22 @@ void process_destroy_address_space(uint64_t pml4_phys) {
          * milestone is not a limitation being apologised for: a shared
          * mapping here would make this list wrong. */
         {USER_MMAP_BASE, USER_MMAP_LIMIT},
-    };
-    vmm_destroy_address_space(pml4_phys, OWNED, (int)(sizeof(OWNED) / sizeof(OWNED[0])));
+};
+#define PROCESS_OWNED_COUNT ((int)(sizeof(PROCESS_OWNED) / sizeof(PROCESS_OWNED[0])))
+
+void process_destroy_address_space(uint64_t pml4_phys) {
+    if (pml4_phys == 0 || pml4_phys == vmm_kernel_pml4_phys()) {
+        return; /* a plain kernel thread shares the kernel's - there is nothing private to tear down */
+    }
+    vmm_destroy_address_space(pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT);
+}
+
+/* M83: the copy-on-write clone, over the same ranges. */
+uint64_t process_fork_address_space(uint64_t src_pml4_phys) {
+    if (src_pml4_phys == 0 || src_pml4_phys == vmm_kernel_pml4_phys()) {
+        return 0; /* a kernel thread has no private address space to fork */
+    }
+    return vmm_fork_address_space(src_pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT);
 }
 
 static task_t *spawn_common(const char *name, const uint8_t *image, size_t image_size,

@@ -139,6 +139,19 @@ static int user_range_ok(uint64_t addr, uint64_t len, int need_write) {
     if (end < addr || end > USER_REGION_LIMIT) {
         return 0; /* wrapped, or ran off the top of the private region */
     }
+    /* M82: build any page of this range that the caller reserved with
+     * SYS_mmap and has not touched yet, *before* asking the page tables
+     * whether it is mapped.
+     *
+     * Without this, demand paging would have quietly broken the most
+     * ordinary thing a program does with an mmap: pass it to a syscall.
+     * `read(fd, mmap(...), n)` would have found no page table entry at
+     * the buffer, and the check below would have called the caller's own
+     * memory not its own. sched_prefault_range only builds pages inside
+     * the caller's own mmap regions and only with the protection those
+     * regions were given, so this widens nothing - the check below is
+     * still the one that decides. */
+    sched_prefault_range(addr, len, need_write);
     return vmm_user_range_ok(sched_current()->pml4_phys, addr, len, need_write);
 }
 
@@ -2050,7 +2063,7 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
  * which is exactly the table below plus a decision this project has not
  * had to make.
  */
-static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages) {
+static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32_t prot) {
     /* Inserts, keeping the array sorted by base with free slots (pages
      * == 0) pushed to the end. Returns 0, or -1 if the table is full. */
     int free_slot = -1;
@@ -2078,6 +2091,7 @@ static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages) {
     }
     t->mmaps[at].base = base;
     t->mmaps[at].pages = pages;
+    t->mmaps[at].prot = prot; /* M82 - the page fault that fills this region reads it */
     return 0;
 }
 
@@ -2087,6 +2101,7 @@ static void mmap_slot_remove(task_t *t, int index) {
     }
     t->mmaps[MAX_MMAP_REGIONS - 1].base = 0;
     t->mmaps[MAX_MMAP_REGIONS - 1].pages = 0;
+    t->mmaps[MAX_MMAP_REGIONS - 1].prot = 0;
 }
 
 /* The first gap in the arena that `pages` will fit into, or 0. THE
@@ -2156,38 +2171,25 @@ static long sys_mmap(uint64_t len, uint64_t prot, uint64_t flags, uint64_t a4,
     if (base == 0) {
         return -1;
     }
-    if (mmap_slot_cmp_insert(self, base, (uint32_t)pages) != 0) {
+    if (mmap_slot_cmp_insert(self, base, (uint32_t)pages, (uint32_t)prot) != 0) {
         return -1; /* the table is full - see MAX_MMAP_REGIONS */
     }
 
-    uint64_t page_flags = VMM_FLAG_USER | ((prot & PROT_WRITE) ? VMM_FLAG_WRITABLE : 0);
-    for (uint64_t i = 0; i < pages; i++) {
-        uint64_t phys = pmm_alloc_frame();
-        if (phys == 0) {
-            /* Out of frames partway through. Undo exactly what was done -
-             * a half-mapped region would be a mapping whose second half
-             * faults, which is worse than no mapping at all. */
-            for (uint64_t j = 0; j < i; j++) {
-                uint64_t p = vmm_unmap_page_take(self->pml4_phys, base + j * PAGE_SIZE);
-                if (p) {
-                    pmm_free_frame(p);
-                }
-            }
-            for (int k = 0; k < MAX_MMAP_REGIONS; k++) {
-                if (self->mmaps[k].base == base && self->mmaps[k].pages == pages) {
-                    mmap_slot_remove(self, k);
-                    break;
-                }
-            }
-            return -1;
-        }
-        /* Zeroed, which is not a nicety - anonymous memory that handed a
-         * process the previous owner's bytes would leak one program's
-         * data into another's, and every mmap on every system promises
-         * zeros for exactly that reason. */
-        k_memset((void *)phys, 0, PAGE_SIZE);
-        vmm_map_page_in(self->pml4_phys, base + i * PAGE_SIZE, phys, page_flags);
-    }
+    /* M82: and that is the whole call.
+     *
+     * Until now this loop allocated and mapped every page before
+     * returning, and M78's comment on SYS_mmap said so: "backed by real
+     * frames at the moment of the call, because nothing here fills a page
+     * in on a fault." Something does now (sched_fault_fill), so a mapping
+     * costs address space and a table slot until it is touched, and a
+     * page costs a frame at the moment it is first read or written.
+     *
+     * What this buys is not speed, it is the ability to reserve more than
+     * the machine has - which is what every real program that mmaps
+     * assumes, and what M80's unmeasured "memory budget" blocker was
+     * actually about. What it costs is that running out of memory now
+     * happens at the instruction that touches rather than at the call
+     * that reserves; sched_fault_fill's header says so at more length. */
     return (long)base;
 }
 
@@ -2223,13 +2225,14 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
         if (cut_start >= cut_end) {
             continue; /* no overlap with this mapping */
         }
-        /* The frames first, whatever shape the cut turns out to be. */
-        for (uint64_t at = cut_start; at < cut_end; at += PAGE_SIZE) {
-            uint64_t phys = vmm_unmap_page_take(self->pml4_phys, at);
-            if (phys) {
-                pmm_free_frame(phys);
-            }
-        }
+        /* The frames first, whatever shape the cut turns out to be.
+         *
+         * M82: by page table rather than by address. This was a loop over
+         * every address in the cut, which was exactly right when a
+         * mapping was fully backed - and became thirty-six thousand
+         * four-level walks to free two frames the moment mappings became
+         * sparse. */
+        vmm_unmap_range_free(self->pml4_phys, cut_start, cut_end);
         if (cut_start == rstart && cut_end == rend) {
             mmap_slot_remove(self, i);
             i--; /* the tail shifted down into this index */
@@ -2247,7 +2250,8 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
              * caller knows the tail is no longer reachable. */
             self->mmaps[i].pages = (uint32_t)((cut_start - rstart) / PAGE_SIZE);
             if (mmap_slot_cmp_insert(self, cut_end,
-                                      (uint32_t)((rend - cut_end) / PAGE_SIZE)) != 0) {
+                                      (uint32_t)((rend - cut_end) / PAGE_SIZE),
+                                      self->mmaps[i].prot) != 0) {
                 return -1;
             }
             i = -1; /* the array was re-sorted underneath; rescan from the start */
@@ -3040,6 +3044,90 @@ static long sys_rename_replace(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
     return vfs_rename_replace(old_path, new_path);
 }
 
+/* ---- M83: fork ---------------------------------------------------------
+ *
+ * The ordering here is the whole of the error handling, and it is chosen
+ * so that every failure leaves the parent exactly as it was:
+ *
+ *   1. clone the address space. This is the expensive step and the one
+ *      most likely to fail, so it goes first - and it is undoable by
+ *      itself, because a clone nobody has been given is just an address
+ *      space to destroy.
+ *   2. take a task slot. If the table is full, destroy the clone.
+ *   3. copy the environment. This allocates, so it can fail too - and by
+ *      now there is a live child in the table, which is why the failure
+ *      path has to kill it rather than just returning. A child with no
+ *      environment would be a child that silently lost its parent's, and
+ *      M75 built that environment precisely so it would survive.
+ *
+ * Note what is NOT here: nothing copies the parent's memory. That is the
+ * milestone. vmm_fork_address_space marks both sides read-only and hands
+ * the page back to whoever writes to it first.
+ */
+static long sys_fork(isr_regs_t *regs) {
+    task_t *parent = sched_current();
+    if (!parent || parent->pml4_phys == vmm_kernel_pml4_phys()) {
+        return -1; /* a kernel thread has no address space of its own to copy */
+    }
+
+    /* ---- refused from a process with more than one thread, and why ----
+     *
+     * This is an SMP correctness limit, not a policy one, and it is worth
+     * writing down rather than discovering.
+     *
+     * Making a page copy-on-write means clearing its writable bit in the
+     * parent's page tables. The `invlpg` that follows only flushes the
+     * translation on *this* CPU. A second thread of the same process
+     * running on another core still holds the old writable entry in its
+     * own TLB, and would go on writing to a page this call has just
+     * promised the child is a private copy of - so the child would see
+     * the parent's later writes, intermittently, on a multi-core machine
+     * only, in a way no self-test on one core would ever reproduce.
+     *
+     * The real fix is a TLB shootdown: an IPI to every CPU running this
+     * address space, and a wait for each to acknowledge. That is a piece
+     * of machinery this kernel does not have and M83 is not the milestone
+     * to build it in - it is its own work, with its own failure modes,
+     * and it is needed by more than fork.
+     *
+     * So a threaded process cannot fork here, and gets a clean -1 rather
+     * than a page that is sometimes shared. POSIX makes fork-from-a-thread
+     * nearly unusable anyway (only async-signal-safe calls are legal in
+     * the child), so a program that needs both is already in territory
+     * this OS has no business pretending to support. */
+    if (sched_count_sharing_address_space(parent->pml4_phys) > 1) {
+        return -1;
+    }
+
+    uint64_t child_pml4 = process_fork_address_space(parent->pml4_phys);
+    if (child_pml4 == 0) {
+        return -1;
+    }
+
+    task_t *child = task_fork(child_pml4, regs);
+    if (!child) {
+        process_destroy_address_space(child_pml4);
+        return -1;
+    }
+
+    /* M79: the environment belongs to the address space's owner, so a
+     * thread that forks passes on the environment of the process it is
+     * part of rather than the nothing it holds itself. */
+    task_t *owner = sched_vm_owner(parent);
+    if (owner->env_block && owner->env_len && owner->env_count) {
+        if (sched_set_env(child, owner->env_block, owner->env_len, owner->env_count) != 0) {
+            /* The child exists and is schedulable, so this cannot be
+             * unwound by freeing things - it has to be killed the way any
+             * other doomed task is, and reaped by whoever waits for it.
+             * The parent is told the fork failed, which is true. */
+            sched_raise_signal(child, SIGKILL);
+            return -1;
+        }
+    }
+
+    return (long)child->id;
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -3360,6 +3448,16 @@ void syscall_handler(isr_regs_t *regs) {
      * is the only answer available: there is no context left to return
      * to and killing the process for a malformed frame it did not
      * construct would blame the wrong party. */
+    /* M83: intercepted before dispatch for the same reason SYS_sigreturn
+     * is - it needs `regs`, which the six-argument dispatch below cannot
+     * hand it. A fork's whole observable difference is the value in rax
+     * on two different stacks, so the frame is the argument. */
+    if (num == SYS_fork) {
+        regs->rax = (uint64_t)sys_fork(regs);
+        signal_deliver(regs);
+        return;
+    }
+
     if (num == SYS_sigreturn) {
         if (signal_return(regs) != 0) {
             regs->rax = (uint64_t)-1;

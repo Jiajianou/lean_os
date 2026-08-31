@@ -13,6 +13,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <sys/types.h>
 
 /* The environment, as every program that has ever walked one expects to
  * find it: a NULL-terminated array of "NAME=value". Points into the
@@ -66,10 +67,24 @@ int dup2(int oldfd, int newfd);
 int unlink(const char *path);
 int pipe(int fds[2]);
 
+/* M83: the real thing. Returns the child's pid in the parent, 0 in the
+ * child, and -1 if the fork failed.
+ *
+ * The paragraph that used to be below this one said "there is no fork on
+ * this machine", and it was true for eighty-two milestones. The child is
+ * a copy-on-write clone: it shares every page with its parent until one
+ * of them writes, which is what makes this affordable and what M82's
+ * page-fault handler had to exist first for. */
+pid_t fork(void);
+
 /* Runs `path` with `argv` and, for the `e` form, `envp`; returns the new
- * process's pid rather than replacing this one. NOT execve: there is no
- * fork on this machine and SYS_spawn is a combined fork+exec (see
- * system_api/include/syscall.h), so a call that never returned would be
- * a call nothing could use. Named for what it does. */
+ * process's pid rather than replacing this one.
+ *
+ * Still not execve, and still useful: SYS_spawn is a combined fork+exec
+ * (see system_api/include/syscall.h) and remains the cheap path for the
+ * overwhelmingly common case of "start this program", which is what every
+ * launcher on this desktop actually wants. `fork` above is for the cases
+ * that need the two halves apart. M84 is where `execve` lands and where
+ * this stops being the only way to start a program with arguments. */
 long spawnv(const char *path, char *const argv[]);
 long spawnve(const char *path, char *const argv[], char *const envp[]);

@@ -54,3 +54,15 @@ uint64_t pmm_free_frame_count(void);
 
 uint64_t pmm_alloc_contiguous(uint64_t count);
 void pmm_free_contiguous(uint64_t phys_addr, uint64_t count);
+
+/* ---- M82: frame ownership --------------------------------------------
+ *
+ * A frame used to have exactly one owner, so the allocator's "is this
+ * frame free" bit answered both questions at once. Copy-on-write breaks
+ * that - see pmm.c's frame_refs for the whole argument. pmm_frame_ref
+ * adds an owner to an already-allocated frame; pmm_free_frame removes
+ * one and only returns the frame to the free list when the last owner
+ * lets go, which is what every existing single-owner caller was already
+ * doing without knowing it. */
+void pmm_frame_ref(uint64_t phys_addr);
+uint8_t pmm_frame_refs(uint64_t phys_addr);

@@ -19,6 +19,7 @@
 #include "lib/spinlock.h"
 #include "arch/x86_64/fpu.h" /* M63: FPU_STATE_SIZE/ALIGN - a task carries its own SSE state now */
 
+#include "arch/x86_64/isr.h" /* M83: isr_regs_t, the frame task_fork copies */
 #include "proc.h" /* system_api/include/proc.h - TASK_INFO_MAX, which *is* MAX_TASKS below. Resolves to the system_api header: a quoted include searches this file's own directory first (kernel/sched/, no proc.h), then -Ikernel (no kernel/proc.h), then -Isystem_api/include. */
 
 struct pipe; /* kernel/ipc/pipe.h owns the real definition - not included here so sched.h doesn't have to know pipes exist */
@@ -119,6 +120,14 @@ typedef enum {
 typedef struct {
     uint64_t base;  /* page-aligned start; meaningless when pages == 0 */
     uint32_t pages; /* 0 = this slot is free */
+    /* M82: the PROT_* the caller asked for, kept because the mapping is
+     * no longer built at the moment it is asked for. A page in this
+     * region gets its table entry when it is first touched, and the fault
+     * that touches it has to know whether the caller was promised
+     * writable memory - which is a fact about the *mapping* and therefore
+     * has to live with the mapping rather than in a page table entry that
+     * does not exist yet. */
+    uint32_t prot;
 } mmap_region_t;
 
 /* M45: how long a per-task name may be, NUL included. A process was a
@@ -760,11 +769,42 @@ void sched_wake_task(task_t *t);
  * dereference. */
 task_t *sched_vm_owner(task_t *t);
 
+/* ---- M82: demand paging ----------------------------------------------
+ *
+ * The page-fault handler's one question: was this fault a program
+ * touching a page of its own mmap for the first time?
+ *
+ * Returns 1 if so, having put a zeroed page there - the faulting
+ * instruction is then restarted and sees memory. Returns 0 for
+ * everything else, which leaves kernel/arch/x86_64/isr.c's existing
+ * behaviour exactly as it was: a ring-3 fault kills the process, a
+ * ring-0 fault panics. That split is the important part. A fault that
+ * this fills is not a bug; every other fault still is, and this must
+ * never turn one of those into a silent success.
+ *
+ * Lives here rather than in kernel/mm because the thing it consults is
+ * the mmap table, and that is task state.
+ */
+int sched_fault_fill(uint64_t addr, uint64_t error_code);
+
+/* M82: build every page of `addr`..`addr+len` that is a reserved-but-
+ * untouched mmap page, so that a buffer a program obtained from mmap and
+ * has not written to yet can still be passed to a syscall. See the
+ * implementation for why this is done up front rather than by letting
+ * the kernel's own copy loop fault. */
+void sched_prefault_range(uint64_t addr, uint64_t len, int for_write);
+
 /* M79: makes a new task in `pml4_phys` that is a *thread* of `leader` -
  * same address space, its own kernel stack, and its own entry. Used only
  * by kernel/proc/proc.c's process_spawn_thread; declared here because
  * only sched.c can set the fields that make it a thread. */
 task_t *task_spawn_thread(const char *name, task_t *leader, void (*entry)(void *arg), void *arg);
+
+/* M83: a task that resumes where its parent was, in `child_pml4`, with
+ * `regs` as its user-visible register state and rax forced to 0. See the
+ * implementation for what a fork inherits that a spawn does not, and why
+ * each of those differs. Returns NULL if the task table is full. */
+task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs);
 
 /* M79: posts SIGKILL to every task in `t`'s thread group except `t`
  * itself. What SYS_exit does before ending the caller - POSIX exit()

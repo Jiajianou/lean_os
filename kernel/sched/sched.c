@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/isr.h" /* M83: isr_regs_t - the frame a forked child resumes through */
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/io.h" /* irq_save_disable/irq_restore */
 #include "arch/x86_64/smp.h"
@@ -19,6 +20,8 @@
 #include "mm/vmm.h"
 #include "panic.h"
 #include "proc/proc.h" /* M54 - process_destroy_address_space, called from task_exit_with_code */
+#include "lib/libk.h" /* M82: k_memset, zeroing a demand-filled page */
+#include "mman.h"  /* system_api/include/mman.h - PROT_WRITE, read by sched_fault_fill */
 #include "signal.h" /* system_api/include/signal.h - SIGKILL/SIGTERM */
 
 /* M81: 8 KiB -> 32 KiB, and the reason is a number in another file.
@@ -289,6 +292,22 @@ static void task_entry_trampoline(void) {
     task_t *t = current_task[smp_current_cpu()];
     t->entry(t->arg);
     task_exit();
+}
+
+/* M83: the same resume point, for a task that has no entry function to
+ * call. Unlocks sched_lock exactly as the trampoline above does - that
+ * pairing is the invariant, not which trampoline does it - and then hands
+ * the frame at the top of this task's own kernel stack to
+ * fork_return_to_user, which pops it and `iretq`s into ring 3. Never
+ * returns: from here on this task is a user process that happens to have
+ * been born in the middle of a syscall. */
+extern void fork_return_to_user(void *frame) __attribute__((noreturn));
+
+static void fork_child_trampoline(void) __attribute__((noreturn));
+static void fork_child_trampoline(void) {
+    spin_unlock(&sched_lock);
+    task_t *t = current_task[smp_current_cpu()];
+    fork_return_to_user((void *)(t->kernel_stack_top - sizeof(isr_regs_t)));
 }
 
 /* Terminates a task in response to a pending fatal signal (SIGKILL or
@@ -1327,6 +1346,339 @@ task_t *sched_vm_owner(task_t *t) {
      * break is a bug in one program, and a null dereference here is the
      * machine. */
     return leader ? leader : t;
+}
+
+/* ---- M82: demand paging ----------------------------------------------
+ *
+ * See sched.h for the contract. What is worth arguing here is the set of
+ * things this deliberately refuses to fill, because every one of them is
+ * a fault that used to be fatal and has to stay fatal:
+ *
+ *   - a fault on a page that is PRESENT. That is a protection violation,
+ *     not a first touch: a write to a read-only mapping, or (once M83
+ *     exists) a write to a shared copy-on-write page. Filling it would
+ *     mean silently granting write access nobody asked for.
+ *   - a fault outside the mmap arena. The heap, the stack, the image and
+ *     the shm window are all mapped eagerly by whoever owns them, so a
+ *     fault there is a wild pointer and always was.
+ *   - a fault inside the arena but outside any mapping this process
+ *     holds. Reserving address space is what SYS_mmap does; touching
+ *     address space nobody reserved is exactly the bug the arena's
+ *     bounds exist to catch.
+ *   - a WRITE to a mapping the caller asked for read-only. The promise
+ *     SYS_mmap made is in the region's `prot`, and it is the only place
+ *     that promise is written down before a page exists.
+ *
+ * Out of physical memory returns 0 too, so a process that touches more
+ * than the machine has dies rather than the machine panicking. That is a
+ * real behaviour change from M78's eager mapping, where the same program
+ * would have been told -1 by SYS_mmap and could have handled it. It is
+ * the trade demand paging always makes and it is worth stating plainly:
+ * the failure moves from the call that reserves to the instruction that
+ * touches.
+ */
+/* The one page-building step, shared by the fault path and the prefault
+ * path below so there is one set of rules about what may be built and
+ * one place they are written down. Returns 1 if the page is now there. */
+static int fill_one_page(task_t *self, uint64_t page, int for_write) {
+    if (page < USER_MMAP_BASE || page >= USER_MMAP_LIMIT) {
+        return 0;
+    }
+
+    /* Never build a page that already exists.
+     *
+     * The fault path cannot reach here with a present page - the P bit in
+     * the error code is checked first - but the prefault path can, and
+     * will the moment a page can be present *and* not satisfy the access
+     * being prefaulted. That is exactly what M83's copy-on-write
+     * introduces: a page present and read-only inside a region whose prot
+     * says writable. Mapping a fresh frame over it would strand the old
+     * one - a leak with no owner, invisible to every free-frame assertion
+     * in this kernel because the count would simply be short.
+     *
+     * Guarded here rather than in the caller because there is one rule -
+     * this function builds pages that do not exist - and one place is
+     * where a rule survives the next milestone. */
+    if (vmm_user_range_ok(self->pml4_phys, page, 1, 0)) {
+        return 0;
+    }
+
+    const mmap_region_t *region = 0;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (self->mmaps[i].pages == 0) {
+            break; /* the table is kept sorted and packed - see mmap_slot_cmp_insert */
+        }
+        uint64_t start = self->mmaps[i].base;
+        uint64_t end = start + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+        if (page >= start && page < end) {
+            region = &self->mmaps[i];
+            break;
+        }
+    }
+    if (!region) {
+        return 0;
+    }
+    if (for_write && !(region->prot & PROT_WRITE)) {
+        return 0;
+    }
+
+    uint64_t phys = pmm_try_alloc_frame();
+    if (phys == 0) {
+        return 0;
+    }
+    /* Zeroed, for the reason M78 gave when it did this eagerly:
+     * anonymous memory that handed a process the previous owner's bytes
+     * would leak one program's data into another's. */
+    k_memset((void *)phys, 0, PAGE_SIZE);
+    uint64_t flags = VMM_FLAG_USER | ((region->prot & PROT_WRITE) ? VMM_FLAG_WRITABLE : 0);
+    vmm_map_page_in(self->pml4_phys, page, phys, flags);
+    return 1;
+}
+
+int sched_fault_fill(uint64_t addr, uint64_t error_code) {
+    task_t *self = sched_vm_owner(sched_current());
+    if (!self || self->pml4_phys == vmm_kernel_pml4_phys()) {
+        return 0; /* a kernel thread has no arena to fault into */
+    }
+    uint64_t page = addr & ~(uint64_t)(PAGE_SIZE - 1);
+
+    /* Bit 0 of the error code is P and bit 1 is W/R. The two bits split
+     * this into the only two faults this kernel knows how to answer, and
+     * everything else falls through to fatal:
+     *
+     *   not present            -> a first touch of a reserved mapping (M82)
+     *   present, and a write   -> a write to a page shared by a fork (M83)
+     *
+     * The second case is narrower than it looks: vmm_cow_break refuses
+     * anything not marked PTE_COW, and only pages that were *writable*
+     * before the fork carry that mark. A write to the program's own text,
+     * or to a PROT_READ mapping, is present and not marked, and stays as
+     * fatal as it has always been. */
+    if (error_code & 1u) {
+        if (error_code & 2u) {
+            return vmm_cow_break(self->pml4_phys, page);
+        }
+        return 0;
+    }
+    return fill_one_page(self, page, (error_code & 2u) != 0);
+}
+
+/* ---- M82: prefaulting a buffer the kernel is about to touch -----------
+ *
+ * This is the half of demand paging that is invisible until it bites.
+ *
+ * A syscall that writes into a caller's buffer - SYS_read, SYS_getcwd,
+ * SYS_recv, SYS_getdents - first asks user_range_ok whether the range is
+ * really the caller's, and that question is answered by walking the
+ * caller's page tables. A page that has been *reserved* by SYS_mmap and
+ * never touched has no page table entry, so the honest answer to "is
+ * this mapped" is no - and every one of those syscalls would have
+ * started returning -1 for a buffer that a program had every right to
+ * pass. `char *buf = mmap(...); read(fd, buf, n);` is not an exotic
+ * thing to write.
+ *
+ * So the range is built before it is checked. Deliberately built here
+ * rather than left to fault inside the copy loop: a page fault taken in
+ * ring 0 while the kernel holds a lock is a much harder thing to reason
+ * about than a loop that runs before any lock is taken, and this way
+ * every kernel access to user memory still touches only present pages.
+ *
+ * Fills what it can and reports nothing. It is not this function's job to
+ * decide whether the range is acceptable - user_range_ok still asks the
+ * page tables afterwards, and a range this could not build is one that
+ * check will refuse exactly as it did before.
+ */
+void sched_prefault_range(uint64_t addr, uint64_t len, int for_write) {
+    if (len == 0) {
+        return;
+    }
+    task_t *self = sched_vm_owner(sched_current());
+    if (!self || self->pml4_phys == vmm_kernel_pml4_phys()) {
+        return;
+    }
+    uint64_t first = addr & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t last = (addr + len - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if (last < first) {
+        return; /* wrapped - user_range_ok refuses it below */
+    }
+    /* Bounded to the arena before looping, so a bogus length cannot turn
+     * this into a walk over the whole address space. */
+    if (last < USER_MMAP_BASE || first >= USER_MMAP_LIMIT) {
+        return;
+    }
+    for (uint64_t page = first; page <= last; page += PAGE_SIZE) {
+        if (vmm_user_range_ok(self->pml4_phys, page, 1, for_write)) {
+            continue; /* already there and already good enough for this access */
+        }
+        /* M83: a page shared by a fork is present and read-only, so the
+         * check above says no for a write - and fill_one_page refuses it
+         * too, because the page exists. Breaking the sharing here is what
+         * keeps "the kernel writing into a caller's buffer" working for a
+         * process that has just forked, and it has to happen before the
+         * copy loop for the same reason the fill does: so that no kernel
+         * access to user memory ever takes a fault. */
+        if (for_write && vmm_cow_break(self->pml4_phys, page)) {
+            continue;
+        }
+        fill_one_page(self, page, for_write);
+    }
+}
+
+/* ---- M83: a task that resumes where its parent was --------------------
+ *
+ * Every other task in this kernel starts at an entry point. A forked
+ * child does not: it has to resume in the middle of its parent's
+ * `int 0x80`, with every register the parent had and rax replaced by
+ * zero. That is the whole difference between this and task_spawn_common,
+ * and it is why the two are separate functions rather than one with a
+ * flag - almost every line that looks the same means something different.
+ *
+ * The child's kernel stack is built in two halves. At the very top sits a
+ * copy of the parent's own trap frame, which fork_return_to_user
+ * (isr_asm.asm) will pop and `iretq` through. Below it sits the same
+ * fabricated context_switch frame every new task gets, except that it
+ * returns into fork_child_trampoline rather than task_entry_trampoline -
+ * so the first time the scheduler picks this task, it lands there, and
+ * that hands control to the frame above.
+ *
+ * What is inherited and what is not follows POSIX rather than following
+ * task_spawn_common:
+ *
+ *   - signal DISPOSITIONS are inherited, where a spawn resets them. A
+ *     spawn loads a different program and a handler address belongs to
+ *     the image that installed it; a fork keeps the same image running,
+ *     so keeping the handlers is the only answer that makes sense.
+ *   - the mmap table is inherited, where a spawn starts empty. The
+ *     child's address space is a copy of the parent's, so every address
+ *     in that table means the same thing in it.
+ *   - the heap cursors are inherited for the same reason.
+ *   - the environment is NOT copied here, exactly as task_spawn_common
+ *     does not: a kmalloc under sched_lock would invert this kernel's one
+ *     lock-ordering rule. The fork syscall copies it after this returns.
+ *   - the FPU state IS copied, where a spawn starts clean. Same argument
+ *     as the handlers: this is the same program mid-computation, and
+ *     starting the child from a zeroed FPU would corrupt a float that was
+ *     live across the call.
+ */
+task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
+    _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
+    uint8_t *stack_base = (uint8_t *)(uintptr_t)pmm_alloc_contiguous(TASK_STACK_SIZE / 4096);
+    if (!stack_base) {
+        panic("task_fork: out of physical memory for a task stack");
+    }
+
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+
+    int slot = -1;
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_FREE) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (task_count >= MAX_TASKS) {
+            spin_unlock(&sched_lock);
+            irq_restore(flags);
+            pmm_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
+            return NULL;
+        }
+        slot = task_count++;
+    }
+
+    task_t *t = &tasks[slot];
+    task_t *parent = current_task[smp_current_cpu()];
+
+    t->id = PID_MAKE(slot, t->generation);
+    t->entry = NULL; /* a fork has no entry point - see this function's header */
+    t->arg = NULL;
+    t->state = TASK_READY;
+    t->pml4_phys = child_pml4;
+    t->stack_base = stack_base;
+    t->kernel_stack_top = (uint64_t)(stack_base + TASK_STACK_SIZE);
+
+    for (int i = 0; i < MAX_FDS; i++) {
+        t->fds[i] = parent->fds[i];
+        fd_retain(&t->fds[i]);
+    }
+    t->parent_id = parent->id;
+    t->pgid = parent->pgid;
+    t->pending_signal = 0;
+    t->reaped = 0;
+
+    for (int i = 0; i < PATH_MAX_LEN; i++) {
+        t->cwd[i] = parent->cwd[i];
+        if (!parent->cwd[i]) {
+            break;
+        }
+    }
+    if (!t->cwd[0]) {
+        t->cwd[0] = '/';
+        t->cwd[1] = '\0';
+    }
+    t->env_block = NULL;
+    t->env_len = 0;
+    t->env_count = 0;
+
+    for (int i = 0; i <= SIG_MAX; i++) {
+        t->sig_handler[i] = parent->sig_handler[i];
+    }
+    t->sig_restorer = parent->sig_restorer;
+    t->sig_blocked = parent->sig_blocked;
+    /* Pending signals are NOT inherited. POSIX says so, and the reason is
+     * good: a signal was sent to the parent, and a child that had not
+     * existed when it was sent has no business acting on it. */
+    t->sig_pending = 0;
+
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        t->mmaps[i] = parent->mmaps[i];
+    }
+
+    /* A fork produces a process, never a thread, even when the caller was
+     * one. POSIX is explicit that only the calling thread survives into
+     * the child, and a child that believed it was a thread of its
+     * parent's group would share bookkeeping with an address space it no
+     * longer shares. */
+    t->tgid = t->id;
+    t->is_thread = 0;
+    t->exiting = 0;
+    t->caps = parent->caps;
+
+    for (size_t i = 0; i < sizeof(t->fpu_state); i++) {
+        t->fpu_state[i] = parent->fpu_state[i];
+    }
+
+    t->heap_brk = parent->heap_brk;
+    t->heap_mapped_end = parent->heap_mapped_end;
+    t->shm_next_vaddr = parent->shm_next_vaddr;
+    set_task_name(t, parent->name);
+
+    /* The parent's trap frame, at the very top of the child's own kernel
+     * stack, with rax zeroed - which is the entire user-visible
+     * difference between the two sides of a fork. */
+    isr_regs_t *child_frame =
+        (isr_regs_t *)(t->kernel_stack_top - sizeof(isr_regs_t));
+    *child_frame = *regs;
+    child_frame->rax = 0;
+
+    /* And below it, the same fabricated context_switch frame every task
+     * gets - see task_spawn_common for what each slot is - returning into
+     * the fork trampoline instead of the ordinary one. */
+    uint64_t *sp = (uint64_t *)child_frame;
+    *(--sp) = (uint64_t)fork_child_trampoline; /* popped by `ret` */
+    *(--sp) = 0x202; /* rflags, popped by `popfq` */
+    *(--sp) = 0; /* rbp */
+    *(--sp) = 0; /* rbx */
+    *(--sp) = 0; /* r12 */
+    *(--sp) = 0; /* r13 */
+    *(--sp) = 0; /* r14 */
+    *(--sp) = 0; /* r15 */
+    t->rsp = (uint64_t)sp;
+
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+    return t;
 }
 
 task_t *task_spawn_thread(const char *name, task_t *leader, void (*entry)(void *arg), void *arg) {

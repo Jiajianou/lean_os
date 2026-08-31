@@ -65,7 +65,22 @@
  * ceiling is physical and the arena is only ever the room to arrange
  * things in. */
 #define USER_MMAP_BASE   0x0000008014000000ULL /* 512 GiB + 320 MiB - M78 */
-#define USER_MMAP_LIMIT  0x000000801C000000ULL /* 512 GiB + 448 MiB */
+/* M82: 448 MiB -> 480 MiB, taking the arena from 128 MiB to 160 MiB.
+ *
+ * M78 sized this when every mapping was backed by a real frame at the
+ * moment of the call, so an arena bigger than the machine's memory would
+ * have been address space nothing could ever use. Demand paging makes
+ * reserved address space nearly free, and the number that matters becomes
+ * "can a program reserve more than this machine has?" - which it must be
+ * able to, because that is what every program that mmaps assumes.
+ *
+ * 160 MiB against 128 MiB of RAM is enough to make the point and to test
+ * it. The ceiling is USER_SHM_BASE at 512 MiB with a 32 MiB gap left
+ * deliberately, so this is now bounded by the next thing in the address
+ * space rather than by a policy - growing it further means moving shm and
+ * the framebuffer window, which is a bigger change than this milestone
+ * needs. */
+#define USER_MMAP_LIMIT  0x000000801E000000ULL /* 512 GiB + 480 MiB */
 #define USER_SHM_BASE    0x0000008020000000ULL /* 512 GiB + 512 MiB - M19 */
 #define USER_FB_BASE     0x0000008040000000ULL /* 512 GiB + 1 GiB - M20, SYS_fb_map's fixed target address */
 
@@ -106,6 +121,11 @@
  * Never call this on the address space the calling CPU is running on;
  * task_exit_with_code switches to the kernel's own first. */
 void process_destroy_address_space(uint64_t pml4_phys);
+
+/* M83: a copy-on-write clone of `src_pml4_phys`, over exactly the ranges
+ * process_destroy_address_space frees. Returns the new PML4's physical
+ * address, or 0. */
+uint64_t process_fork_address_space(uint64_t src_pml4_phys);
 
 /* M60: the real argument vector. `argv` is a NULL-terminated array of
  * NUL-terminated strings, argv[0] conventionally the program's own path -

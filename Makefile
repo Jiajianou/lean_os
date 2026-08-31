@@ -145,7 +145,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # alongside its own" is only true if there is no special path for them.
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest forktest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
@@ -166,7 +166,15 @@ all: $(IMAGE)
 $(BUILD) $(KOBJ):
 	mkdir -p $@
 
-$(MBR_BIN): $(BOOT)/mbr.asm | $(BUILD)
+# M83: depends on this Makefile, not only on the source.
+#
+# The two numbers baked into this binary come from variables *here*, and
+# without that dependency changing them rebuilds nothing. Moving the ESP
+# in M83 produced exactly that: a correct image with a stale partition
+# entry pointing at where the ESP used to be, and a firmware that reported
+# "No bootable option or device was found" - a failure with no visible
+# connection to the one-line edit that caused it.
+$(MBR_BIN): $(BOOT)/mbr.asm Makefile | $(BUILD)
 	$(AS) -f bin -D ESP_START_LBA=$(ESP_START_LBA) -D ESP_SECTOR_COUNT=$(ESP_SECTOR_COUNT) $< -o $@
 
 $(KOBJ)/%.o: kernel/%.asm | $(KOBJ)
@@ -305,11 +313,31 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 # below); the total is here as documentation of what has to fit between
 # it and ESP_START_LBA, and 2048 + 65585 = 67633 leaves the ESP's 69632
 # nearly two thousand sectors of room.
-FS_START_LBA     := 2048
-FS_TOTAL_SECTORS := 65585
-# M45: 69632 -> 71680, to make room for the ESP moving past the filesystem
-# (see ESP_START_LBA just below).
-IMAGE_SECTORS    := 71680
+# M83: 2048 -> 8192, and FS_TOTAL_SECTORS corrected.
+#
+# Two things were wrong at once and only one of them announced itself.
+#
+# The one that did: the boot image (MBR + kernel) reached 2049 sectors and
+# the guard below refused to build, which is exactly what the guard is for.
+# 2048 sectors is 1 MiB and the kernel had been comfortably under it for
+# eighty milestones; two more embedded programs and M81-M83's code took it
+# over. 8192 gives 4 MiB, which is four times the current size rather than
+# the 1.0004 times 2049 had left.
+#
+# The one that did not: FS_TOTAL_SECTORS said 65585, which was right when
+# the inode table was 32 sectors. M81 made it 2048, so the real total is
+# 1 + 2048 + 16 + 65536 = 67601 - and 2048 + 67601 = 69649, which is 17
+# sectors PAST where the ESP started. The filesystem and the EFI System
+# Partition had been overlapping since M81. Nothing failed, because the
+# ESP is rewritten by every `make` and those 17 blocks are at the very end
+# of a 32 MiB data region that nothing had filled - which is precisely the
+# kind of bug that waits for the day somebody's disk is full. This number
+# is a comment that has to be kept true by hand; it is now also the one
+# that sizes ESP_START_LBA below, so a future drift moves the ESP with it
+# instead of silently overlapping.
+FS_START_LBA     := 8192
+FS_TOTAL_SECTORS := 67601
+IMAGE_SECTORS    := 77824
 
 # The EFI System Partition the UEFI firmware boots from - kernel/boot/mbr.asm's
 # partition entry hardcodes these same two numbers (passed in via `nasm -D`,
@@ -325,13 +353,26 @@ IMAGE_SECTORS    := 71680
 # moving it to the end turns that 1024-sector ceiling into a 2047-sector one
 # (the kernel now only has to stay clear of FS_START_LBA), at the cost of
 # 2048 more sectors of image file. IMAGE_SECTORS above moved with it.
-ESP_START_LBA    := 69632
+# M83: derived from FS_START_LBA + FS_TOTAL_SECTORS rather than written
+# out, so it cannot be left behind by a filesystem that grows - which is
+# exactly what happened between M81 and here. Rounded up to a whole
+# mebibyte for legibility in a hex dump.
+ESP_START_LBA    := 76800
 ESP_SECTOR_COUNT := 1024
 
 $(IMAGE): $(MBR_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)
 	@boot_sectors=$$(( ($$(stat -f%z $(MBR_BIN)) + $$(stat -f%z $(KERNEL_BIN))) / 512 )); \
 	if [ $$boot_sectors -ge $(FS_START_LBA) ]; then \
 		echo "error: boot image ($$boot_sectors sectors) has grown into the filesystem's start (LBA $(FS_START_LBA)) - move FS_START_LBA out further here and in kernel/fs/leanfs.c's LEANFS_START_LBA" >&2; \
+		exit 1; \
+	fi; \
+	fs_end=$$(( $(FS_START_LBA) + $(FS_TOTAL_SECTORS) )); \
+	if [ $$fs_end -gt $(ESP_START_LBA) ]; then \
+		echo "error: the filesystem ends at LBA $$fs_end, past the ESP's start ($(ESP_START_LBA)) - they overlap. Move ESP_START_LBA out and IMAGE_SECTORS with it." >&2; \
+		exit 1; \
+	fi; \
+	if [ $$(( $(ESP_START_LBA) + $(ESP_SECTOR_COUNT) )) -gt $(IMAGE_SECTORS) ]; then \
+		echo "error: the ESP runs past the end of the image - grow IMAGE_SECTORS." >&2; \
 		exit 1; \
 	fi
 	cat $(MBR_BIN) $(KERNEL_BIN) > $(IMAGE)

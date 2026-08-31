@@ -179,6 +179,28 @@ syscall_common_stub:
     add rsp, 16
     iretq
 
+; ---- M83: entering ring 3 from a register frame, not from an entry point
+;
+; fork_return_to_user(isr_regs_t *frame) - never returns.
+;
+; A forked child has no entry point to be started at: it has to resume in
+; the middle of its parent's `int 0x80`, with every register the parent
+; had and rax replaced by zero. proc.c writes that frame onto the child's
+; own kernel stack and sched.c's fork trampoline hands it here, where the
+; last four instructions of a syscall return - the same four the stub
+; above ends with - do the rest.
+;
+; Deliberately in this file rather than a new one, so that the register
+; order lives in exactly one place: this must pop the frame the SAVE_REGS
+; macro above pushes, and two copies of that order would be a bug waiting
+; for someone to add a register.
+global fork_return_to_user
+fork_return_to_user:
+    mov rsp, rdi
+    RESTORE_REGS
+    add rsp, 16
+    iretq
+
 lapic_common_stub:
     SAVE_REGS
     mov rdi, rsp

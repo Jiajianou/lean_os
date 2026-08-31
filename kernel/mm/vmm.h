@@ -104,6 +104,29 @@ typedef struct {
  * task_exit_with_code, which switches to the kernel's own first. */
 void vmm_destroy_address_space(uint64_t pml4_phys, const vmm_range_t *owned, int owned_count);
 
+/* M83: clone `src_pml4_phys` copy-on-write. Every page in `owned` becomes
+ * read-only and PTE_COW in both address spaces and gains an owner; the
+ * first write to one takes the fault that separates them. Returns the new
+ * PML4's physical address, or 0.
+ *
+ * `owned` must be the same list vmm_destroy_address_space is given for
+ * these address spaces - see the implementation for why that is an
+ * invariant and not a convention. kernel/proc/proc.c holds the one copy
+ * and process_fork_address_space is the call that should be used. */
+/* M82: unmap every present page in [start, end) and give its frame back,
+ * returning how many there were. Walks page tables rather than addresses,
+ * so a sparse range costs what is mapped rather than what was reserved -
+ * see the implementation for the twelve seconds of boot that bought. */
+uint64_t vmm_unmap_range_free(uint64_t pml4_phys, uint64_t start, uint64_t end);
+
+uint64_t vmm_fork_address_space(uint64_t src_pml4_phys, const vmm_range_t *owned, int owned_count);
+
+/* M83: a write to a page shared by a fork. Returns 1 if `virt` was a
+ * copy-on-write page and this address space now has a private writable
+ * copy, 0 if it was not - in which case the fault is as fatal as it has
+ * always been. */
+int vmm_cow_break(uint64_t pml4_phys, uint64_t virt);
+
 /* Allocates a fresh PML4 with PML4[0] shared with the kernel's (so ring 0
  * code - interrupt/syscall handlers - keeps working no matter which
  * process's CR3 is loaded) and everything else zeroed, ready for

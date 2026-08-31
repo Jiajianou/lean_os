@@ -154,6 +154,15 @@ long sys_getdents(const char *path, unsigned int *cookie, void *buf, size_t bufl
                        (long)buflen, 0, 0);
 }
 
+/* M83: the child's pid in the parent, 0 in the child, -1 on failure.
+ *
+ * No arguments, and none possible: the two sides of a fork differ only in
+ * what this returns. See SYS_fork in system_api/include/syscall.h for
+ * what the child does and does not inherit. */
+long sys_fork(void) {
+    return do_syscall(SYS_fork, 0, 0, 0);
+}
+
 long sys_mkdir(const char *path) {
     return do_syscall(SYS_mkdir, (long)path, 0, 0);
 }

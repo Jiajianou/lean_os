@@ -248,6 +248,31 @@
  * inside the kernel, so there is no second implementation to drift. */
 #define SYS_getdents   81
 
+/* M83: () -> the child's pid in the parent, 0 in the child, or -1.
+ *
+ * The real thing, and the sentence M13 and M80 both wrote has to be
+ * retired: this OS *did* have no fork, and SYS_spawn (3) is still a
+ * combined fork+exec and still the right call for "start this program".
+ * What changed is M82. A fork without demand paging means copying an
+ * entire address space eagerly at every call, and M13 was right to refuse
+ * that; with a fault handler that can populate, the copy becomes
+ * copy-on-write and the trade is a different one.
+ *
+ * The child gets: a copy-on-write clone of the parent's image, stack,
+ * heap and mmap arena - and nothing else that happens to be mapped, so
+ * shared memory and the framebuffer window are NOT inherited (the frames
+ * behind those belong to shm.c and the compositor, not to the process).
+ * It gets the parent's descriptors, working directory, environment,
+ * capabilities, signal handlers and signal mask, and its floating-point
+ * state. It does not get the parent's pending signals, and it is always a
+ * single-threaded process even when the caller was one thread of several
+ * - both of which are what POSIX says and both for reasons written down
+ * at task_fork.
+ *
+ * Takes no arguments and cannot, because the value it returns is the only
+ * thing that differs between the two sides. */
+#define SYS_fork       82
+
 /* M81: the record SYS_getdents writes, and the two limits that go with
  * it. Kept here rather than in a header of its own because it is part of
  * one syscall's contract and nothing else refers to it.
@@ -276,4 +301,4 @@ typedef struct {
  * at least this big can never be told "nothing fits". */
 #define OS_DIRENT_MAX (8 + OS_NAME_MAX + 1 + 7)
 
-#define SYSCALL_COUNT 82
+#define SYSCALL_COUNT 83

@@ -7,7 +7,7 @@
 
 #define LEANFS_MAGIC     0x3453464Cu /* "LFS4". M81: bumped from M59's 0x3353464C (itself M53's 0x3253464C, itself M12's 0x3153464C). Every region moved: the inode table grew from 32 sectors to 2048, which pushes the bitmap and the whole data region down the disk, and directory records stopped being fixed-size. An old disk read with this layout would resolve garbage block numbers, so it is reformatted rather than misread - see leanfs_init, where M81 also adds the version field that makes a *future* bump able to do better than that. */
 #define LEANFS_VERSION   4u          /* M81: see sb.version. Bumped only when the on-disk meaning changes; the magic is bumped only when the geometry does. */
-#define LEANFS_START_LBA 2048u /* 1 MiB in - generously past the boot image; see Makefile's build-time size guard */
+#define LEANFS_START_LBA 8192u /* M83: 2048 -> 8192. 4 MiB in, because the boot image reached 2049 sectors and the Makefile's size guard refused to build - see the FS_START_LBA note there, which also records that this filesystem had been overlapping the EFI System Partition since M81. Must match Makefile's FS_START_LBA. */
 
 #define LEANFS_TYPE_FREE 0
 #define LEANFS_TYPE_FILE 1

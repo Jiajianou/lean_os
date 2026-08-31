@@ -79,6 +79,31 @@ void isr_handler(isr_regs_t *r) {
         return;
     }
 
+    /* M82: before deciding whose bug this is, ask whether it is a bug at
+     * all.
+     *
+     * A page fault in ring 3 on a page of the caller's own mmap that has
+     * never been touched is not a fault in the "something went wrong"
+     * sense - it is how a reservation becomes memory. sched_fault_fill
+     * answers that question and is deliberately narrow about it: it
+     * refuses a present page, an address outside the arena, an address
+     * inside the arena that no mapping covers, and a write to a mapping
+     * that was asked for read-only. Anything it refuses falls through to
+     * exactly the behaviour below, unchanged since M52.
+     *
+     * Ring 0 is checked too, and that is not an oversight. The kernel
+     * reads and writes user buffers directly (copy_to_user and friends
+     * run on the caller's own page tables), so a syscall handed a pointer
+     * into a mapping the program has reserved but not yet touched faults
+     * in ring 0 at an address that is perfectly legitimate. Filling it is
+     * right; the alternative is that mmap'd memory works everywhere
+     * except as a syscall argument. sched_fault_fill still consults the
+     * *current task's* arena, so this cannot fill anything for a fault in
+     * kernel memory. */
+    if (r->vector == PAGE_FAULT_VECTOR && sched_fault_fill(read_cr2(), r->error_code)) {
+        return;
+    }
+
     /* The low two bits of the saved CS are the privilege level the fault
      * came from - 3 for user code, 0 for the kernel. This is the real
      * question ("whose bug is this?"), and it is one the interrupt frame

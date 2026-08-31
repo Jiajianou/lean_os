@@ -131,3 +131,7 @@ int fcntl(int fd, int cmd, ...) {
         return -1;
     }
 }
+
+pid_t fork(void) {
+    return (pid_t)sys_fork();
+}

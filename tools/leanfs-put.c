@@ -59,7 +59,7 @@
  * and the next boot silently throws away. It must track kernel/fs/leanfs.c. */
 #define LEANFS_MAGIC             0x3453464Cu
 #define LEANFS_VERSION           4u
-#define LEANFS_START_LBA         2048u
+#define LEANFS_START_LBA         8192u /* M83 - must match Makefile's FS_START_LBA and kernel/fs/leanfs.c */
 #define LEANFS_MAX_NAME          255
 #define LEANFS_DIRECT_BLOCKS     16
 #define LEANFS_BLOCK_SIZE        512
