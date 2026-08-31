@@ -156,7 +156,10 @@ effect of the call - spec-anticipated, and why every real UEFI OS loader
 rather than treating it as fatal.
 
 Each surviving UEFI memory type is translated to a firmware-agnostic
-`E820_TYPE_USABLE` or `E820_TYPE_RESERVED` (`EfiLoaderCode`/`EfiLoaderData`/
+one of five e820 types (M90: usable, reserved, ACPI reclaim, ACPI NVS, or
+this project's own "MMIO" for a range that is not memory at all —
+`kernel/mm/e820.h` explains why that last one had to exist before the
+identity map could be built from this table). `EfiLoaderCode`/`EfiLoaderData`/
 `EfiBootServicesCode`/`EfiBootServicesData`/`EfiConventionalMemory` count
 as usable; everything else reserved) - producing the exact same
 `{count, entries[]}` shape `kernel/mm/e820.h` already defines, which is

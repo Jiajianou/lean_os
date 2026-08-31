@@ -120,7 +120,8 @@ neither is something a real machine can be assumed to have:
   Real mode setting on real hardware means a GPU driver per vendor, and
   that is not a thing this project will do. This is one of three things
   the deferred real-hardware step has to answer for - the other two being
-  the ramdisk root (`leanfs.c` calls `ata_read_sectors` directly, so a
+  the ramdisk root (`leanfs.c` goes through `drivers/blk.c`, which since
+  M92 tries virtio-blk first and falls back to ATA PIO, so a
   machine with no IDE controller has nothing for it to talk to) and a
   panic that paints (on a machine with no serial port, a panic is
   currently a black screen).

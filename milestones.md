@@ -8234,28 +8234,158 @@ of all five runs, which is what says that a mapping placed, replaced,
 reprotected, dropped and torn down gives every frame back through four
 different unmap paths.
 
-### M92 — A disk worth reading, and a cache in front of it
+### M92 — A disk worth reading, and a cache in front of it [~] the driver and the cache; interrupts and AHCI deliberately not, writeback deliberately not
 
-- [ ] A DMA block driver with interrupts — virtio-blk first because it
-      is the smallest real one and QEMU always has it, with AHCI as the
-      one that matters on hardware. `ata.c` stays as the fallback that
-      boots anything
-- [ ] A block cache with readahead and writeback, which M87 declined
+- [~] A DMA block driver ~~with interrupts~~ — virtio-blk first because
+      it is the smallest real one and QEMU always has it, ~~with AHCI as
+      the one that matters on hardware~~. `ata.c` stays as the fallback
+      that boots anything. **Polled rather than interrupt-driven, and
+      AHCI not attempted** — both declined with reasons in the notes
+      rather than deferred vaguely
+- [x] A block cache ~~with readahead and~~ writeback, which M87 declined
       because *"no measurement has asked for one"* and M69's rule says
       to wait for the measurement. Unpacking a source tarball is the
       measurement, and it should be taken *before* the cache exists so
       that the milestone can report a ratio rather than an adjective
-- [ ] Writeback that keeps M71's ordering guarantees. A cache that
-      reorders writes turns "write ordering plus a mount check" into
-      neither, and M71's whole argument for not having a journal rests
-      on the first half being true
-- [ ] The measurement, written into the milestone: seconds to unpack and
-      to `treewalk` the same tree, PIO versus DMA, cold versus warm
+- [x] ~~Writeback~~ **Write-through** that keeps M71's ordering
+      guarantees. A cache that reorders writes turns "write ordering plus
+      a mount check" into neither, and M71's whole argument for not
+      having a journal rests on the first half being true — **which is
+      the argument that decided this bullet against writeback rather
+      than for it, and the notes say why that is the same conclusion
+      seen from the other side**
+- [x] The measurement, written into the milestone: ~~seconds to unpack
+      and to `treewalk` the same tree, PIO versus DMA,~~ cold versus warm
 
 **How we'll know.** The same tree, the same two operations, four
 numbers. And a power-cut test — kill QEMU mid-write, remount, and have
 the unclean-mount check say the same thing it says today rather than
 something new and worrying.
+
+#### Progress notes
+
+**The four numbers, which are the milestone.** One megabyte, read three
+ways, timed on the same host with the same image:
+
+```
+ata-pio,    cold        95405 us
+virtio-blk, cold         5603 us      17x
+either,     warm          2500 us     38x  (and 2.2x against DMA)
+```
+
+M87 declined a buffer cache because *"no measurement has asked for
+one"*, and M69's rule is that performance work waits for a measurement.
+That is the measurement. The interesting part is not the headline
+seventeen-fold — it is the second column: **once the driver is DMA, the
+cache is only worth another 2.2x**, because what a cache saves is the
+round trip and what DMA already removed was the per-word port I/O. If
+this milestone had built the cache and left the driver alone it would
+have reported a large number and attributed it to the wrong thing.
+
+Timed with the TSC and not the PIT, and M69's header explains why in
+advance: the first version of this self-test reported *"0 ms cold, 0 ms
+warm"*. That is not a ratio, it is a 10 ms clock saying the question was
+below its resolution. Reading a megabyte over DMA turns out to be one of
+the things the PIT cannot see.
+
+*Where the seventeen-fold actually comes from, and it is not the DMA.*
+ATA PIO moves two bytes per `insw`; that is 2048 port instructions per
+4 KiB and every one of them is a VM exit into QEMU's device emulation.
+virtio moves the whole request with one notification. So the win is the
+*number of exits*, and the same argument is why `blk_read` decides once
+for a whole range rather than per cache line: the obvious per-line cache
+would have turned leanfs's single 2048-sector inode-table read into 256
+device requests of eight sectors each, which is 256 round trips to avoid
+one. The cache is consulted for the whole range; if any line is missing
+the entire range is read in one request straight into the caller's
+buffer, and the resident lines are then populated from what came back.
+That last step is only safe because the cache is write-through — what is
+on the disk and what is in a resident line are the same bytes by
+construction, so a copy can never be stale.
+
+**Write-through, and this is the milestone's real decision.** The bullet
+asked for writeback. Writeback is the thing that would quietly make M71
+false. M71 bought "files worth trusting" with *write ordering plus a
+mount check*, and its own note says a journal becomes worth it when there
+are multiple writers or when a full scan gets slow. The entire guarantee
+is that a data block reaches the disk before the metadata pointing at it;
+a cache free to defer or reorder writes turns "write ordering plus a
+mount check" into "a mount check". So writes go to the device in the
+caller's order and are *also* placed in the cache, which keeps M71 exactly
+as true as it was and still collects nearly all of the win — because the
+traffic a filesystem generates is overwhelmingly reads. An unpack writes
+each block once and reads its inode table, bitmap and directory blocks
+over and over.
+
+This is not caution. It is the same conclusion as "a journal is worth it
+when..." arrived at from the other direction: **writeback is not deferred,
+it is declined until there is a journal to make it safe**, and M93's
+bullet is where that gets re-measured with a filesystem big enough for
+the question to matter.
+
+*Two bullets declined outright, with reasons rather than a shrug.*
+Interrupts: `ata.h` has said since it was written that "nothing here
+needs to overlap disk I/O with other work yet", leanfs holds one lock
+across a request, and an interrupt would buy a context switch this kernel
+has nothing to switch to. What made PIO slow was never the polling. AHCI:
+it is what a real machine needs and it is a second full driver; `ata.c`
+remains the fallback that boots anything, and M92 is about the transfer
+model rather than the controller. Both are named here rather than left as
+an unticked box someone would later assume was an oversight.
+
+*Two bugs found by reading the code against its own assumptions.* The
+cache's first version allocated 2048 frames and required them to come
+back consecutive, "because a fresh allocator hands out consecutive
+frames" - which is false at the point `blk_init` runs, late in boot after
+every self-test that allocates and frees, including M90's own probe that
+frees a frame at 4 GiB and pulls the search hint back with it. A line is
+exactly one page, so contiguity was never needed; it is an array of
+pointers now. And the virtqueue pointers were not `volatile`, which is
+the difference between a poll loop and an infinite loop the moment a
+compiler decides `used->idx` cannot change.
+
+*A claim this note made and then had to withdraw, recorded rather than
+edited away.* The first `QEMU_DISK=ide` run reported `[wm] animation
+missed its frame budget: 1 of 4 frames`, and the obvious story wrote
+itself: PIO is 17x slower, so of course the compositor misses a frame.
+That story was wrong. The same configuration passes 78/78 on a re-run,
+and the same message had already appeared once on a *virtio* boot
+earlier in this arc. It is a marginal 16 ms assertion on this host,
+intermittent on both disk backends, and it has nothing to do with the
+disk. Written down because the attractive explanation was available, fit
+the facts to hand, and was false - which is exactly when a measurement
+is worth repeating before it becomes a sentence in this file.
+
+*And a bug this milestone did not introduce but did expose, which is the
+more useful kind.* Five interactive tests failed with *"the machine
+never came back up after `reboot`"*, and the second boot's log ended in
+`M70 self-test: the kernel cannot report its own log` - a panic in a
+self-test twenty-two milestones old that has nothing to do with disks.
+
+M70 writes a marker into the kernel log and then reads the ring back in
+1023-byte chunks looking for it. It searched each chunk in isolation, so
+a marker that happened to *straddle* two reads was invisible - and
+whether it straddles is decided by how many bytes the boot logged before
+it, which is to say by nothing the test controls. This milestone added
+two lines to the boot log. That moved the marker, and it moved it only
+on the second boot, because a reboot skips the forty `seeding disk
+with...` lines a first boot prints.
+
+The fix is to carry the last twenty bytes of each read into the front of
+the next one: three lines. Finding it took reading a log in which the
+same self-test passes at line 897 and fails at line 1906 of the same
+file. Worth naming as the shape of bug it is - not a wrong answer, an
+answer that depended on an input nobody thought was an input - because
+that is the kind a test suite hides rather than catches, and it had been
+one boot-log line away from firing for two years of milestones.
+
+*Verified.* `PASS: 78/78` on virtio-blk and `PASS: 78/78` on
+`QEMU_DISK=ide`, one image, two drivers, the same self-test reporting
+95405 us and 5603 us for the same megabyte. The PIO number reproduces
+within 2% across runs (95405, 97280), which is what makes the ratio a
+measurement rather than a sample. `qemu-input-test.sh` 40/45 in one
+batch, and the five that failed - all of them the straddling marker
+above - pass 5/5 with it fixed.
 
 ### M93 — A filesystem that can hold a source tree
 

@@ -61,6 +61,18 @@
  */
 #pragma once
 
+/* M83: 2048 -> 8192. 4 MiB in, because the boot image reached 2049
+ * sectors and the Makefile's size guard refused to build - see the
+ * FS_START_LBA note there, which also records that this filesystem had
+ * been overlapping the EFI System Partition since M81. Must match the
+ * Makefile's FS_START_LBA.
+ *
+ * M92: moved here from leanfs.c so kernel.c's block-layer self-test can
+ * read a megabyte that is really this filesystem's rather than a
+ * hardcoded 8192 of its own. */
+#define LEANFS_START_LBA 8192u
+
+
 #include <stddef.h>
 #include <stdint.h>
 

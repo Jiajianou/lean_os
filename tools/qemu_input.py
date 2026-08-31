@@ -220,7 +220,15 @@ class Machine:
             # this suite can all proceed while one is in flight - and
             # every test starts from the same pristine, never-booted image
             # rather than from whatever the previous one left on disk.
-            "-drive", "format=raw,snapshot=on,file=" + IMAGE,
+            # M92: a virtio block device rather than the IDE drive a
+            # bare -drive gives on the `pc` machine - see
+            # tools/run-qemu.sh for why, and LEANOS_QEMU_DISK=ide for the
+            # ATA path. snapshot=on still means guest writes land in a
+            # throwaway overlay.
+            *(["-drive", "format=raw,snapshot=on,file=" + IMAGE]
+              if os.environ.get("LEANOS_QEMU_DISK") == "ide" else
+              ["-drive", "if=none,id=disk0,format=raw,snapshot=on,file=" + IMAGE,
+               "-device", "virtio-blk-pci,drive=disk0"]),
             "-display", "none",
             # M90: the guest's memory size, stated rather than defaulted -
             # see tools/run-qemu.sh for why 4 GiB specifically. Overridable

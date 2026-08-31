@@ -48,10 +48,21 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 # entirely below the hole and would have tested nothing that 1 GiB did
 # not.
 QEMU_MEM=${QEMU_MEM:-4096}
+# M92: the disk is a virtio block device rather than the IDE drive a bare
+# `-drive` gives on the `pc` machine. kernel/drivers/virtio_blk.c drives
+# it; kernel/drivers/ata.c stays as the fallback for anything that has no
+# virtio, and QEMU_DISK=ide selects that path so the two can be measured
+# against each other. OVMF boots either.
+if [ "${QEMU_DISK:-virtio}" = "ide" ]; then
+  DISK_ARGS=(-drive "format=raw,file=$IMAGE")
+else
+  DISK_ARGS=(-drive "if=none,id=disk0,format=raw,file=$IMAGE"
+             -device virtio-blk-pci,drive=disk0)
+fi
 qemu-system-x86_64 \
   -m "$QEMU_MEM" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
-  -drive format=raw,file="$IMAGE" \
+  "${DISK_ARGS[@]}" \
   -netdev user,id=net0 -device rtl8139,netdev=net0 \
   -audiodev none,id=snd0 -device AC97,audiodev=snd0

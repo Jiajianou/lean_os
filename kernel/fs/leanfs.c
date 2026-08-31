@@ -1,13 +1,15 @@
 #include "leanfs.h"
 
-#include "drivers/ata.h"
+#include "drivers/blk.h"
 #include "drivers/klog.h"
 #include "drivers/rtc.h"
 #include "lib/libk.h"
 
 #define LEANFS_MAGIC     0x3453464Cu /* "LFS4". M81: bumped from M59's 0x3353464C (itself M53's 0x3253464C, itself M12's 0x3153464C). Every region moved: the inode table grew from 32 sectors to 2048, which pushes the bitmap and the whole data region down the disk, and directory records stopped being fixed-size. An old disk read with this layout would resolve garbage block numbers, so it is reformatted rather than misread - see leanfs_init, where M81 also adds the version field that makes a *future* bump able to do better than that. */
 #define LEANFS_VERSION   4u          /* M81: see sb.version. Bumped only when the on-disk meaning changes; the magic is bumped only when the geometry does. */
-#define LEANFS_START_LBA 8192u /* M83: 2048 -> 8192. 4 MiB in, because the boot image reached 2049 sectors and the Makefile's size guard refused to build - see the FS_START_LBA note there, which also records that this filesystem had been overlapping the EFI System Partition since M81. Must match Makefile's FS_START_LBA. */
+/* M92: moved to leanfs.h - kernel.c's block-layer self-test needs an
+ * LBA that is really this filesystem's, and a second copy of 8192 would
+ * be the drift the Makefile comment already warns about. */
 
 #define LEANFS_TYPE_FREE 0
 #define LEANFS_TYPE_FILE 1
@@ -158,7 +160,7 @@ static void save_superblock(void) {
     uint8_t buf[LEANFS_BLOCK_SIZE];
     k_memset(buf, 0, sizeof(buf));
     k_memcpy(buf, &sb, sizeof(sb));
-    ata_write_sectors(LEANFS_START_LBA, 1, buf);
+    blk_write(LEANFS_START_LBA, 1, buf);
 }
 
 /* ---- M59: dirty-sector metadata tracking ------------------------------
@@ -217,35 +219,23 @@ static void mark_all_blocks(void) {
     }
 }
 
-/* M81: ata_write_sectors takes a uint8_t count, so a run longer than 255
- * sectors cannot be expressed - and 255 truncates to 0, which the drive
- * reads as "256" while the driver's own loop writes none of them. That
- * was unreachable while the inode table was 32 sectors and is very
- * reachable now that it is 2048, so every bulk write goes through here.
+/* M81 wrote these because ata_write_sectors takes a uint8_t count and a
+ * run longer than 255 sectors cannot be expressed - 255 truncates to 0,
+ * which the drive reads as "256" while the driver's own loop writes none
+ * of them. That was unreachable while the inode table was 32 sectors and
+ * became very reachable when it grew to 2048.
  *
- * Deliberately fixed at the call site rather than by widening the ATA
- * driver's signature: 255 is what 28-bit LBA PIO actually encodes in one
- * command, so the chunking is the hardware's, not this filesystem's. */
-#define ATA_MAX_RUN 255u
-
+ * M92: the chunking moved down into drivers/blk.c, where it belongs -
+ * 255 is what 28-bit LBA PIO encodes in one command, which is a fact
+ * about one driver rather than about this filesystem, and the other
+ * driver has no such limit. These stay as names because the call sites
+ * read better with them. */
 static void write_run(uint32_t lba, size_t sectors, const uint8_t *src) {
-    while (sectors > 0) {
-        size_t n = sectors > ATA_MAX_RUN ? ATA_MAX_RUN : sectors;
-        ata_write_sectors(lba, (uint8_t)n, src);
-        lba += (uint32_t)n;
-        src += n * LEANFS_BLOCK_SIZE;
-        sectors -= n;
-    }
+    blk_write(lba, (uint32_t)sectors, src);
 }
 
 static void read_run(uint32_t lba, size_t sectors, uint8_t *dst) {
-    while (sectors > 0) {
-        size_t n = sectors > ATA_MAX_RUN ? ATA_MAX_RUN : sectors;
-        ata_read_sectors(lba, (uint8_t)n, dst);
-        lba += (uint32_t)n;
-        dst += n * LEANFS_BLOCK_SIZE;
-        sectors -= n;
-    }
+    blk_read(lba, (uint32_t)sectors, dst);
 }
 
 /* Writes only what changed. Runs of adjacent dirty sectors go out as one
@@ -327,7 +317,7 @@ static void format(void) {
 
 void leanfs_init(void) {
     uint8_t buf[LEANFS_BLOCK_SIZE];
-    ata_read_sectors(LEANFS_START_LBA, 1, buf);
+    blk_read(LEANFS_START_LBA, 1, buf);
     k_memcpy(&sb, buf, sizeof(sb));
 
     /* M29: every field checked here sizes a fixed-size buffer somewhere
@@ -422,7 +412,7 @@ static void bitmap_clear(uint32_t bit) {
  * out of alloc_block (always < sb.data_blocks by construction) or off
  * disk (an inode's direct[]/indirect fields, or an indirect table's
  * entries) - the latter is trusted nowhere else, so a single bit flip
- * there would otherwise walk bitmap_clear/ata_read_sectors off the end of
+ * there would otherwise walk bitmap_clear/blk_read off the end of
  * the fixed-size `bitmap` array or into an arbitrary disk LBA. */
 static int block_valid(uint32_t block) {
     return block < sb.data_blocks;
@@ -537,7 +527,7 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
             return -1;
         }
         k_memset(table, 0, sizeof(table));
-        ata_write_sectors(sb.data_lba + (uint32_t)t, 1, (const uint8_t *)table);
+        blk_write(sb.data_lba + (uint32_t)t, 1, (const uint8_t *)table);
         root = (uint32_t)t;
         if (use_dindirect) {
             inode->dindirect = root;
@@ -551,7 +541,7 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
         table_block = root;
     } else {
         /* The outer table names inner tables; the inner one names blocks. */
-        ata_read_sectors(sb.data_lba + root, 1, (uint8_t *)table);
+        blk_read(sb.data_lba + root, 1, (uint8_t *)table);
         if (!block_present(table[outer])) {
             if (!allocate) {
                 return -1;
@@ -561,15 +551,15 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
                 return -1;
             }
             table[outer] = (uint32_t)t;
-            ata_write_sectors(sb.data_lba + root, 1, (const uint8_t *)table);
+            blk_write(sb.data_lba + root, 1, (const uint8_t *)table);
             uint32_t empty[LEANFS_INDIRECT_POINTERS];
             k_memset(empty, 0, sizeof(empty));
-            ata_write_sectors(sb.data_lba + (uint32_t)t, 1, (const uint8_t *)empty);
+            blk_write(sb.data_lba + (uint32_t)t, 1, (const uint8_t *)empty);
         }
         table_block = table[outer];
     }
 
-    ata_read_sectors(sb.data_lba + table_block, 1, (uint8_t *)table);
+    blk_read(sb.data_lba + table_block, 1, (uint8_t *)table);
     if (block_present(table[slot])) {
         return table[slot];
     }
@@ -581,7 +571,7 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
         return -1;
     }
     table[slot] = (uint32_t)blk;
-    ata_write_sectors(sb.data_lba + table_block, 1, (const uint8_t *)table);
+    blk_write(sb.data_lba + table_block, 1, (const uint8_t *)table);
     return blk;
 }
 
@@ -651,7 +641,7 @@ void leanfs_check(void) {
         }
         if (block_present(inode->dindirect)) {
             check_mark(inode->dindirect);
-            ata_read_sectors(sb.data_lba + inode->dindirect, 1, (uint8_t *)table);
+            blk_read(sb.data_lba + inode->dindirect, 1, (uint8_t *)table);
             for (int i = 0; i < LEANFS_INDIRECT_POINTERS; i++) {
                 if (block_present(table[i])) {
                     check_mark(table[i]);
@@ -700,7 +690,7 @@ static void free_inode_blocks(int idx) {
         bitmap_clear(inode->indirect);
     }
     if (block_present(inode->dindirect)) {
-        ata_read_sectors(sb.data_lba + inode->dindirect, 1, (uint8_t *)table);
+        blk_read(sb.data_lba + inode->dindirect, 1, (uint8_t *)table);
         for (int i = 0; i < LEANFS_INDIRECT_POINTERS; i++) {
             if (block_present(table[i])) {
                 bitmap_clear(table[i]);
@@ -745,7 +735,7 @@ static int64_t inode_pread(int idx, void *buf, size_t len, uint32_t off) {
              * that has sparse files does, and is cheaper than refusing. */
             k_memset((uint8_t *)buf + copied, 0, chunk);
         } else {
-            ata_read_sectors(sb.data_lba + (uint32_t)blk, 1, block_buf);
+            blk_read(sb.data_lba + (uint32_t)blk, 1, block_buf);
             k_memcpy((uint8_t *)buf + copied, block_buf + within, chunk);
         }
         copied += chunk;
@@ -790,13 +780,13 @@ static int64_t inode_pwrite(int idx, const void *buf, size_t len, uint32_t off) 
              * contents into the tail of a new one. */
             uint32_t block_start = logical * (uint32_t)LEANFS_BLOCK_SIZE;
             if (block_start < inode->size) {
-                ata_read_sectors(sb.data_lba + (uint32_t)blk, 1, block_buf);
+                blk_read(sb.data_lba + (uint32_t)blk, 1, block_buf);
             } else {
                 k_memset(block_buf, 0, sizeof(block_buf));
             }
         }
         k_memcpy(block_buf + within, (const uint8_t *)buf + written, chunk);
-        ata_write_sectors(sb.data_lba + (uint32_t)blk, 1,
+        blk_write(sb.data_lba + (uint32_t)blk, 1, 
                            chunk == LEANFS_BLOCK_SIZE ? (const uint8_t *)buf + written : block_buf);
         written += chunk;
         if (pos + chunk > inode->size) {
@@ -918,7 +908,7 @@ static int dir_block_read(int idx, uint32_t logical) {
         dir_block_init();
         return 0;
     }
-    ata_read_sectors(sb.data_lba + (uint32_t)blk, 1, dir_block);
+    blk_read(sb.data_lba + (uint32_t)blk, 1, dir_block);
     if (!dir_block_valid()) {
         return -1;
     }
@@ -930,7 +920,7 @@ static int dir_block_write(int idx, uint32_t logical) {
     if (blk < 0) {
         return -1;
     }
-    ata_write_sectors(sb.data_lba + (uint32_t)blk, 1, dir_block);
+    blk_write(sb.data_lba + (uint32_t)blk, 1, dir_block);
     inodes[idx].mtime = rtc_now();
     mark_inode(idx);
     return 0;
@@ -1984,9 +1974,9 @@ static void clear_block_pointer(int idx, uint32_t logical) {
         if (!block_present(inode->indirect)) {
             return;
         }
-        ata_read_sectors(sb.data_lba + inode->indirect, 1, (uint8_t *)table);
+        blk_read(sb.data_lba + inode->indirect, 1, (uint8_t *)table);
         table[logical] = 0;
-        ata_write_sectors(sb.data_lba + inode->indirect, 1, (const uint8_t *)table);
+        blk_write(sb.data_lba + inode->indirect, 1, (const uint8_t *)table);
         return;
     }
     logical -= (uint32_t)LEANFS_INDIRECT_POINTERS;
@@ -1998,14 +1988,14 @@ static void clear_block_pointer(int idx, uint32_t logical) {
     if (outer >= (uint32_t)LEANFS_INDIRECT_POINTERS) {
         return;
     }
-    ata_read_sectors(sb.data_lba + inode->dindirect, 1, (uint8_t *)table);
+    blk_read(sb.data_lba + inode->dindirect, 1, (uint8_t *)table);
     uint32_t mid = table[outer];
     if (!block_present(mid)) {
         return;
     }
-    ata_read_sectors(sb.data_lba + mid, 1, (uint8_t *)table);
+    blk_read(sb.data_lba + mid, 1, (uint8_t *)table);
     table[inner] = 0;
-    ata_write_sectors(sb.data_lba + mid, 1, (const uint8_t *)table);
+    blk_write(sb.data_lba + mid, 1, (const uint8_t *)table);
 }
 
 int leanfs_handle_truncate(int handle) {
