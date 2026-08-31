@@ -43,8 +43,14 @@ typedef struct __attribute__((packed)) {
     UINT32 acpi_ext;
 } e820_entry_t;
 
+/* Kept in step with kernel/mm/e820.h by hand, the same way e820_entry_t
+ * above is: this file is built by clang for a PE32+ EFI target and cannot
+ * include a kernel header. M90 added the last three. */
 #define E820_TYPE_USABLE 1
 #define E820_TYPE_RESERVED 2
+#define E820_TYPE_ACPI_RECLAIM 3
+#define E820_TYPE_ACPI_NVS 4
+#define E820_TYPE_MMIO 6
 
 typedef struct __attribute__((packed)) {
     UINT32 count;
@@ -230,7 +236,18 @@ static void load_kernel(EFI_HANDLE image_handle) {
     }
 
     UINTN kernel_bytes = (UINTN)KERNEL_SECTOR_COUNT * 512;
-    UINTN pages = (kernel_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    /* M90: reserve the whole *loaded* image, not just the bytes read off
+     * disk. .bss is NOBITS - it is not in kernel.bin and not in
+     * KERNEL_SECTOR_COUNT - but entry.asm zeroes it before kernel_main
+     * runs, so those pages are written to whether they were reserved or
+     * not. Reserving only the file's sectors left firmware free to place
+     * a pool allocation inside the region the kernel was about to clear,
+     * and the e820 handoff buffer is exactly such an allocation. The
+     * Makefile computes KERNEL_IMAGE_PAGES from __kernel_end in the ELF. */
+    UINTN pages = KERNEL_IMAGE_PAGES;
+    if (pages < (kernel_bytes + PAGE_SIZE - 1) / PAGE_SIZE) {
+        halt(u"lean_os uefi: KERNEL_IMAGE_PAGES is smaller than the kernel on disk\r\n");
+    }
     EFI_PHYSICAL_ADDRESS addr = KERNEL_LOAD_ADDR;
     if (EFI_ERROR(gST->BootServices->AllocatePages(AllocateAddress, EfiLoaderData, pages, &addr))) {
         halt(u"lean_os uefi: could not reserve kernel load address (0x100000)\r\n");
@@ -309,6 +326,13 @@ static e820_map_t *build_e820_and_exit_boot_services(EFI_HANDLE image_handle) {
             e820->entries[n].base = d->PhysicalStart;
             e820->entries[n].length = d->NumberOfPages * PAGE_SIZE;
             e820->entries[n].acpi_ext = 1;
+            /* M90: three answers rather than two. "Free" and "not free"
+             * was enough while the identity map was a fixed 1 GiB that
+             * covered everything low regardless of type; a map built from
+             * this table has to know which ranges are memory at all, or
+             * it maps a device aperture as cached RAM and then panics
+             * when drivers/fb.c tries to map the same pages itself. See
+             * kernel/mm/e820.h. */
             switch (d->Type) {
                 case EfiLoaderCode:
                 case EfiLoaderData:
@@ -317,7 +341,25 @@ static e820_map_t *build_e820_and_exit_boot_services(EFI_HANDLE image_handle) {
                 case EfiConventionalMemory:
                     e820->entries[n].type = E820_TYPE_USABLE;
                     break;
+                case EfiACPIReclaimMemory:
+                    e820->entries[n].type = E820_TYPE_ACPI_RECLAIM;
+                    break;
+                case EfiACPIMemoryNVS:
+                    e820->entries[n].type = E820_TYPE_ACPI_NVS;
+                    break;
+                case EfiMemoryMappedIO:
+                case EfiMemoryMappedIOPortSpace:
+                    e820->entries[n].type = E820_TYPE_MMIO;
+                    break;
                 default:
+                    /* EfiReservedMemoryType, EfiRuntimeServices*,
+                     * EfiUnusableMemory, EfiPalCode, EfiPersistentMemory
+                     * and anything a future spec adds: real memory this
+                     * kernel may not allocate. Defaulting an unknown type
+                     * to RAM-but-reserved is the safe direction - the
+                     * wrong guess costs a few unused pages in the
+                     * identity map, where guessing MMIO would cost a
+                     * fault on a firmware structure somebody reads. */
                     e820->entries[n].type = E820_TYPE_RESERVED;
                     break;
             }

@@ -222,6 +222,13 @@ class Machine:
             # rather than from whatever the previous one left on disk.
             "-drive", "format=raw,snapshot=on,file=" + IMAGE,
             "-display", "none",
+            # M90: the guest's memory size, stated rather than defaulted -
+            # see tools/run-qemu.sh for why 4 GiB specifically. Overridable
+            # because this suite runs several guests at once: QEMU only
+            # commits pages the guest touches, so three 4 GiB guests cost
+            # what three small ones do, but a machine short on RAM can set
+            # LEANOS_QEMU_MEM lower without editing anything.
+            "-m", os.environ.get("LEANOS_QEMU_MEM", "4096"),
             # Same SLIRP NAT tools/run-qemu.sh explains: the boot self-test
             # pings the gateway and panics with no NIC attached at all.
             "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",

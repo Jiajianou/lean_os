@@ -7,6 +7,7 @@ AS      := nasm
 CC      := x86_64-elf-gcc
 LD      := x86_64-elf-ld
 OBJCOPY := x86_64-elf-objcopy
+NM      := x86_64-elf-nm
 QEMU    := qemu-system-x86_64
 
 # M24 (UEFI boot path): a completely separate toolchain from the rest of
@@ -113,6 +114,8 @@ MBR_BIN    := $(BUILD)/mbr.bin
 KERNEL_ELF := $(BUILD)/kernel.elf
 KERNEL_BIN := $(BUILD)/kernel.bin
 KERNEL_SECTORS_FILE := $(BUILD)/kernel.sectors
+# M90: pages the loaded image occupies including .bss - see $(KERNEL_BIN).
+KERNEL_PAGES_FILE   := $(BUILD)/kernel.pages
 IMAGE      := $(BUILD)/os-image.bin
 UEFI_BOOT_OBJ := $(BUILD)/uefi_boot.obj
 UEFI_BOOT_EFI := $(BUILD)/BOOTX64.EFI
@@ -282,6 +285,7 @@ $(UEFI_BOOT_OBJ): kernel/boot/uefi/boot.c kernel/boot/uefi/efi.h kernel/boot/uef
 	$(UEFI_CC) -target $(UEFI_CC_TARGET) -ffreestanding -fshort-wchar -mno-red-zone \
 	           -fno-stack-protector -std=c11 -Wall -Wextra -Werror \
 	           -DKERNEL_SECTOR_COUNT=$$(cat $(KERNEL_SECTORS_FILE)) \
+	           -DKERNEL_IMAGE_PAGES=$$(cat $(KERNEL_PAGES_FILE)) \
 	           -Ikernel/boot/uefi -c kernel/boot/uefi/boot.c -o $@
 
 $(UEFI_BOOT_EFI): $(UEFI_BOOT_OBJ)
@@ -292,13 +296,29 @@ $(UEFI_BOOT_EFI): $(UEFI_BOOT_OBJ)
 # layout is exact — no relying on how a short final sector reads off
 # disk) and records that sector count for boot.c to read the kernel back
 # with.
+#
+# M90: also records how many 4 KiB pages the *loaded* image occupies,
+# which is not the same number. .bss is NOBITS, so it is absent from
+# kernel.bin and from the sector count above - and the loader was
+# reserving only the sectors it reads, leaving every byte of .bss outside
+# any AllocatePages call. Firmware was free to put its own pool
+# allocations there, and entry.asm zeroes the whole region before
+# kernel_main runs: the e820 handoff buffer is an EfiLoaderData pool
+# allocation, so the failure mode was the memory map being erased by the
+# kernel that was about to read it. It never fired because .bss was small
+# and the pool happened to land elsewhere. M90 makes .bss smaller rather
+# than larger (the frame bitmap stops being a static array), which is not
+# a fix - this is.
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
 	@size=$$(stat -f%z $@); \
 	sectors=$$(( (size + 511) / 512 )); \
 	padded=$$(( sectors * 512 )); \
 	truncate -s $$padded $@; \
-	echo $$sectors > $(KERNEL_SECTORS_FILE)
+	echo $$sectors > $(KERNEL_SECTORS_FILE); \
+	end=$$($(NM) $(KERNEL_ELF) | awk '$$3 == "__kernel_end" { print $$1 }'); \
+	[ -n "$$end" ] || { echo "kernel.bin: __kernel_end not found in $(KERNEL_ELF)" >&2; exit 1; }; \
+	echo $$(( ( (0x$$end - 0x100000) + 4095 ) / 4096 )) > $(KERNEL_PAGES_FILE)
 
 # leanfs (kernel/fs/leanfs.c) starts at sector 2048 (1 MiB) and needs
 # 1 superblock + INODE_TABLE_SECTORS + 16 bitmap + 65536 data sectors,

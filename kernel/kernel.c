@@ -981,14 +981,20 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     klog_putc('\n');
 
     pmm_init(e820_map);
-    vmm_init();
+    vmm_init(e820_map);
     heap_init();
 
     /* Self-test: map, write through, read back, and unmap a throwaway
      * virtual address directly via vmm - the same "prove it, don't just
      * trust it compiled" discipline as the int3 test above. */
     uint64_t scratch_phys = pmm_alloc_frame();
-    uint64_t scratch_virt = 0x50000000ULL; /* arbitrary address above the 1 GiB identity map, unused by the heap */
+    /* M90: 0x50000000 until this milestone, described as "above the 1 GiB
+     * identity map" - which it stopped being the moment the map was sized
+     * from the machine. 1.25 GiB is ordinary RAM on a 4 GiB machine, and
+     * mapping a 4 KiB page inside an existing 2 MiB one is the case
+     * vmm_map_page_in panics on. This address is below the kernel heap
+     * (vmm.h) and far above any physical memory. */
+    uint64_t scratch_virt = KERNEL_HEAP_VIRT_BASE - 0x40000000ULL;
     vmm_map_page(scratch_virt, scratch_phys, VMM_FLAG_WRITABLE);
     volatile uint64_t *scratch = (volatile uint64_t *)scratch_virt;
     *scratch = 0x1122334455667788ULL;
@@ -1012,6 +1018,85 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     }
     kfree(test);
     klog_puts("[heap] kmalloc/kfree self-test passed.\n\n");
+
+    /* ---- M90 self-test: a frame above the old ceiling, and a query that
+     * can still say no.
+     *
+     * Three things are worth proving here and "the allocator reports a
+     * big number" is none of them. A bitmap sized from firmware would
+     * report whatever firmware said whether or not a single frame at the
+     * top of it could be touched, and an ordinary pmm_alloc_frame comes
+     * off the bottom of the bitmap - it would pass identically on the
+     * 128 MiB machine this kernel booted on for eighty-nine milestones.
+     *
+     *   1. A frame at a *high* physical address can be allocated, and
+     *      written and read back through the identity map - which is the
+     *      whole claim: tracked and addressable are different properties
+     *      and the old header comment was about the second one.
+     *   2. Freeing it returns the count exactly, so growing the allocator
+     *      did not grow a leak with it.
+     *   3. vmm_identity_covers says NO to an address past the end of
+     *      memory. Without this the first two would pass against a
+     *      function that returns 1 unconditionally, and acpi.c would then
+     *      dereference whatever a firmware table pointed at.
+     *
+     * The floor adapts rather than being 1 GiB, because a kernel that
+     * only works on a big machine has traded one hardcoded size for
+     * another - on a machine smaller than a gigabyte this still tests the
+     * top half of whatever there is. */
+    {
+        uint64_t tracked = pmm_tracked_limit();
+        /* The strongest claim this machine can support. Above 4 GiB is
+         * the genuinely new case - a physical address that does not fit
+         * in 32 bits, which is also what pmm_alloc_frame_dma exists to
+         * keep away from the NIC and the sound card. Above 1 GiB is the
+         * old ceiling. Below that, half of whatever there is, because a
+         * kernel that only works on a big machine has traded one
+         * hardcoded size for another. */
+        uint64_t floor;
+        if (tracked > PMM_DMA_LIMIT) {
+            floor = PMM_DMA_LIMIT;
+        } else if (tracked > 0x40000000ULL) {
+            floor = 0x40000000ULL;
+        } else {
+            floor = tracked / 2;
+        }
+        uint64_t before = pmm_free_frame_count();
+        uint64_t high = pmm_alloc_frame_above(floor);
+        if (high == 0) {
+            panic("[m90] no free frame above the probe floor");
+        }
+        if (high < floor) {
+            panic("[m90] pmm_alloc_frame_above returned a frame below its floor");
+        }
+        if (!vmm_identity_covers(high, 4096)) {
+            panic("[m90] a frame the allocator handed out is not identity-mapped");
+        }
+        volatile uint64_t *probe = (volatile uint64_t *)(uintptr_t)high;
+        probe[0] = 0x9090909090909090ULL;
+        probe[511] = 0x0123456789ABCDEFULL;
+        if (probe[0] != 0x9090909090909090ULL || probe[511] != 0x0123456789ABCDEFULL) {
+            panic("[m90] readback mismatch on a high physical frame");
+        }
+        pmm_free_frame(high);
+        if (pmm_free_frame_count() != before) {
+            panic("[m90] freeing a high frame did not return the count");
+        }
+        /* One byte past the last frame the allocator describes: not RAM,
+         * and the map must say so. */
+        if (vmm_identity_covers(tracked + 0x40000000ULL, 4096)) {
+            panic("[m90] the identity map claims to cover memory that does not exist");
+        }
+        klog_puts("[m90] more than a gigabyte: ");
+        klog_put_hex64(tracked / (1024 * 1024));
+        klog_puts(" MiB tracked in ");
+        klog_put_hex64(pmm_total_frame_count());
+        klog_puts(" frames, a frame at 0x");
+        klog_put_hex64(high);
+        klog_puts(" written and read back through the identity map, freed with the\n"
+                  "      count returning exactly, and an address past the end of memory "
+                  "correctly reported as not mapped.\n\n");
+    }
 
     /* M16: bring up the linear framebuffer the boot loader's
      * init_framebuffer set up and described in RSI (fb_info, this

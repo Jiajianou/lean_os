@@ -162,7 +162,19 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 # -netdev user: see tools/run-qemu.sh's comment - needed here too since
 # the boot self-test (kernel/kernel.c) pings the gateway and would panic
 # without a NIC attached at all.
+# M90: the machine's memory size, stated rather than defaulted. Every
+# boot before M90 ran on whatever `qemu-system-x86_64` picks when nobody
+# says - 128 MiB - and no file in this tree recorded that, which made "how
+# much memory does lean_os have" a question with no answer in the
+# repository. 4 GiB is chosen for a specific reason and not for headroom:
+# QEMU splits it across the PCI hole, so the guest gets a RAM region above
+# the 4 GiB mark and the kernel's frame allocator has to handle a physical
+# address that does not fit in 32 bits. A round 2 GiB would have been
+# entirely below the hole and would have tested nothing that 1 GiB did
+# not.
+QEMU_MEM=${QEMU_MEM:-4096}
 qemu-system-x86_64 \
+  -m "$QEMU_MEM" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
   -drive format=raw,snapshot=on,file="$IMAGE" -display none \
@@ -255,6 +267,7 @@ REQUIRED_MARKERS=(
   "[m84] a program that replaces itself:"
   "[m85] a terminal that is a device:"
   "[m87] files with a type and a place:"
+  "[m90] more than a gigabyte:"
   "[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"

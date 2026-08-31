@@ -37,7 +37,19 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 # in CI, and is enough for everything the driver's self-test asserts (the
 # device consumed the buffer it was handed). Swap it for `coreaudio`,
 # `pa` or `sdl` to actually hear the thing.
+# M90: the machine's memory size, stated rather than defaulted. Every
+# boot before M90 ran on whatever `qemu-system-x86_64` picks when nobody
+# says - 128 MiB - and no file in this tree recorded that, which made "how
+# much memory does lean_os have" a question with no answer in the
+# repository. 4 GiB is chosen for a specific reason and not for headroom:
+# QEMU splits it across the PCI hole, so the guest gets a RAM region above
+# the 4 GiB mark and the kernel's frame allocator has to handle a physical
+# address that does not fit in 32 bits. A round 2 GiB would have been
+# entirely below the hole and would have tested nothing that 1 GiB did
+# not.
+QEMU_MEM=${QEMU_MEM:-4096}
 qemu-system-x86_64 \
+  -m "$QEMU_MEM" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
   -drive format=raw,file="$IMAGE" \

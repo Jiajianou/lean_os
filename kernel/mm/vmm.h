@@ -4,9 +4,16 @@
  * loader left CR3 pointing at (firmware-owned, not the kernel's own
  * memory) with a fresh PML4 built from pmm_alloc_frame() frames: the same
  * "kernel takes ownership away from a bootloader-owned scratch structure"
- * pattern M4 already used for the GDT (gdt.c). It rebuilds the identical
- * 1 GiB identity map so nothing the kernel is currently running out of
- * moves.
+ * pattern M4 already used for the GDT (gdt.c).
+ *
+ * M90: the identity map it builds used to be a flat 1 GiB, chosen as a
+ * constant and shared with pmm.h so the two could not drift. It is now
+ * every RAM range in the e820 map the boot loader handed off, rounded
+ * outward to 2 MiB pages - which is both larger and *smaller* than the
+ * old map, and the smaller half matters as much: MMIO ranges the
+ * firmware described are deliberately left out, because drivers/fb.c and
+ * arch/x86_64/lapic.c map their own device pages 4 KiB at a time and
+ * vmm_map_page panics on an address already covered by a huge page.
  *
  * vmm_map_page/vmm_unmap_page give the rest of the kernel a real
  * map/unmap API for 4 KiB pages at virtual addresses outside that
@@ -19,7 +26,32 @@
 #define VMM_FLAG_WRITABLE (1ULL << 1) /* matches the hardware PTE writable bit directly */
 #define VMM_FLAG_USER     (1ULL << 2) /* matches the hardware PTE U/S bit - ring 3 may access the page (M9) */
 
-void vmm_init(void);
+/* M90: where the kernel heap starts, and the one virtual address in this
+ * kernel that is chosen rather than derived.
+ *
+ * heap.c used to start the heap at PMM_TRACKED_MEMORY - "the first
+ * address above the 1 GiB vmm_init() identity-maps", which was a correct
+ * derivation right up to the moment the identity map stopped being a
+ * constant. A heap based on the size of the machine's RAM would move
+ * whenever the RAM did, and would collide with the identity map on any
+ * machine with more memory than the one it was built on.
+ *
+ * 256 GiB is above any physical memory this kernel will see and below
+ * USER_REGION_BASE (512 GiB, kernel/proc/proc.h), so it stays inside
+ * PML4[0] - the entry every address space shares - which is what makes
+ * the kernel heap reachable no matter which CR3 is loaded. */
+#define KERNEL_HEAP_VIRT_BASE 0x0000004000000000ULL /* 256 GiB */
+
+/* M90: takes the e820 map (kernel/mm/e820.h) it builds the identity map
+ * from. Must be called after pmm_init, which is where the frames for its
+ * own page tables come from. */
+void vmm_init(const uint32_t *e820_map);
+
+/* M90: is [phys, phys + len) inside the identity map? Walks the tables
+ * rather than comparing against a limit, because the map is not one range
+ * starting at zero on a machine with a PCI hole in the middle of it.
+ * kernel/acpi/acpi.c is the caller. */
+int vmm_identity_covers(uint64_t phys, uint64_t len);
 
 /* The kernel's own address space: PML4[0], covering the 1 GiB identity
  * map and the heap. Every per-process address space (vmm_create_address_

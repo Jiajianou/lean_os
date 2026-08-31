@@ -12,11 +12,18 @@
 #define PAGE_SIZE 4096ULL
 #define HEAP_ALIGN 8ULL /* word alignment - sufficient for every scalar type in use so far, no SSE/AVX allocations yet */
 
-/* First address above the 1 GiB vmm_init() identity-maps, so every page
- * this heap grows into is a genuinely new vmm_map_page mapping (not
- * already-present identity-map structure) - a real exercise of the vmm
- * map path, not a free ride on the bootstrap map. */
-#define HEAP_VIRT_START PMM_TRACKED_MEMORY
+/* An address above every identity-mapped range, so every page this heap
+ * grows into is a genuinely new vmm_map_page mapping (not already-present
+ * identity-map structure) - a real exercise of the vmm map path, not a
+ * free ride on the bootstrap map.
+ *
+ * M90: this used to be PMM_TRACKED_MEMORY, i.e. "just above the 1 GiB the
+ * identity map covers". That derivation was right while the identity map
+ * was a constant and became wrong the moment it was sized from the
+ * machine: a heap that moves when the RAM does is a heap that lands
+ * inside the identity map on a machine with 2 GiB. vmm.h now names a
+ * fixed address well clear of both. */
+#define HEAP_VIRT_START KERNEL_HEAP_VIRT_BASE
 
 typedef struct block_header {
     size_t size; /* usable bytes following this header - excludes the header itself */

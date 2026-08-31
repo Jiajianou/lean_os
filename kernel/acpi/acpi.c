@@ -1,6 +1,7 @@
 #include "acpi.h"
 
 #include "drivers/klog.h"
+#include "mm/vmm.h"
 #include "panic.h"
 
 typedef struct __attribute__((packed)) {
@@ -29,17 +30,26 @@ typedef struct __attribute__((packed)) {
 } acpi_sdt_header_t;
 
 /* Every physical address this file dereferences - the RSDP search range,
- * and every table the RSDT/XSDT points at - is expected to fall inside the
- * 1 GiB vmm.c always identity-maps (the same assumption pmm/vmm already
- * document). True on QEMU's default machine, but M29: NOT something a
- * real machine's firmware owes this kernel - ACPI tables commonly live in
- * high reserved memory well above 1 GiB on real hardware, and this was
- * the one ACPI outcome that still panicked instead of degrading, exactly
- * the "assumes present, panics if not" pattern M27 already flagged and
- * fixed for RTL8139/PS2 - see table_at, below, which is where this
- * actually got softened once M28's real-hardware boot made it a real
- * risk rather than a hypothetical one. */
-#define ACPI_IDENTITY_LIMIT 0x40000000ULL
+ * and every table the RSDT/XSDT points at - has to fall inside what vmm.c
+ * identity-maps. M29: NOT something a real machine's firmware owes this
+ * kernel - ACPI tables commonly live in high reserved memory on real
+ * hardware, and this was the one ACPI outcome that still panicked instead
+ * of degrading, exactly the "assumes present, panics if not" pattern M27
+ * already flagged and fixed for RTL8139/PS2 - see table_at, below, which
+ * is where this actually got softened once M28's real-hardware boot made
+ * it a real risk rather than a hypothetical one.
+ *
+ * M90: the test used to be `phys < 1 GiB`, hardcoding the size of a map
+ * this file does not own. It now asks the map. That is strictly better
+ * for the reason M29 wrote the degradation in the first place: the
+ * identity map covers every RAM range the firmware described, so a table
+ * in high reserved memory is now usually *in range* rather than
+ * gracefully skipped - and where it genuinely is not (a firmware that
+ * described the range as MMIO, or did not describe it at all), the answer
+ * is still NULL rather than a fault. */
+static int acpi_addr_readable(uint64_t phys, uint64_t len) {
+    return phys != 0 && vmm_identity_covers(phys, len);
+}
 
 static int sig_eq(const void *a, const char *b, int len) {
     const uint8_t *pa = (const uint8_t *)a;
@@ -65,7 +75,7 @@ static const acpi_rsdp_t *find_rsdp(void) {
      * rather than trusted: a pointer that doesn't start with "RSD PTR "
      * is not an RSDP whatever handed it over, and falling through to the
      * scan is a better outcome than parsing whatever is there. */
-    if (handoff_rsdp_phys != 0 && handoff_rsdp_phys < ACPI_IDENTITY_LIMIT &&
+    if (acpi_addr_readable(handoff_rsdp_phys, sizeof(acpi_rsdp_t)) &&
         sig_eq((const void *)(uintptr_t)handoff_rsdp_phys, "RSD PTR ", 8)) {
         return (const acpi_rsdp_t *)(uintptr_t)handoff_rsdp_phys;
     }
@@ -102,7 +112,7 @@ static const acpi_rsdp_t *find_rsdp(void) {
  * another instance of that same path instead of the one outcome that
  * used to take the whole kernel down. */
 static const acpi_sdt_header_t *table_at(uint64_t phys) {
-    if (phys == 0 || phys >= ACPI_IDENTITY_LIMIT) {
+    if (!acpi_addr_readable(phys, sizeof(acpi_sdt_header_t))) {
         return (const acpi_sdt_header_t *)0;
     }
     return (const acpi_sdt_header_t *)(uintptr_t)phys;

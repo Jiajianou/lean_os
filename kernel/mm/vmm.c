@@ -4,17 +4,13 @@
 
 #include "drivers/klog.h"
 #include "lib/spinlock.h"
+#include "mm/e820.h"
 #include "mm/pmm.h"
 #include "panic.h"
 
 #define PAGE_SIZE 4096ULL
 #define HUGE_PAGE_SIZE (2ULL * 1024 * 1024)
 #define ENTRIES_PER_TABLE 512ULL
-/* PMM_TRACKED_MEMORY / HUGE_PAGE_SIZE, i.e. 512 - computed from the shared
- * constant (pmm.h) rather than hardcoded again, so the identity map this
- * builds can't silently drift out of sync with what the frame allocator
- * tracks. */
-#define IDENTITY_MAP_ENTRIES (PMM_TRACKED_MEMORY / HUGE_PAGE_SIZE)
 
 #define PTE_PRESENT   (1ULL << 0)
 #define PTE_WRITABLE  (1ULL << 1)
@@ -56,12 +52,26 @@ static uint64_t kernel_pml4_phys;
  * CPU's own CR3, never shared table contents. */
 static spinlock_t vmm_lock;
 
-/* Every frame pmm_alloc_frame() can return lives within the 1 GiB this
- * file identity-maps, under whichever page tables are currently active
- * (the bootstrap ones during vmm_init, the kernel's own ones after) - so a
+/* Every frame pmm_alloc_frame() can return lives within the identity map
+ * this file builds, under whichever page tables are currently active (the
+ * bootstrap ones during vmm_init, the kernel's own ones after) - so a
  * physical frame address is always safe to dereference directly as a
- * pointer. That stops being true the day physical memory tracking or
- * kernel mappings grow past 1 GiB. */
+ * pointer.
+ *
+ * M90: that used to be true because both numbers were the same constant,
+ * 1 GiB. It is now true because both come from the same e820 map: pmm.c
+ * tracks frames up to the highest usable address in it, and vmm_init maps
+ * every RAM range in it. The invariant is unchanged and the reason for it
+ * is stronger - it is derived rather than asserted.
+ *
+ * There is one ordering subtlety worth stating, because it looks like a
+ * bug and is not: vmm_init runs *after* pmm_init and allocates its page
+ * tables from frames the identity map does not cover yet. Those writes go
+ * through the boot loader's own page tables, which map all of low memory
+ * 1:1 - and pmm's own metadata placement puts every early allocation near
+ * the bottom of RAM. A machine whose firmware handed off a map covering
+ * less than that would fault here rather than corrupt anything, which is
+ * the failure mode to want. */
 static inline uint64_t *phys_to_table(uint64_t phys) {
     return (uint64_t *)phys;
 }
@@ -98,26 +108,131 @@ static uint64_t *table_walk(uint64_t *table, uint64_t index, int allocate, uint6
     return phys_to_table(table[index] & PTE_ADDR_MASK);
 }
 
-void vmm_init(void) {
+/* M90: one 2 MiB identity page, allocating the PDPT/PD structure above it
+ * on the way down. Idempotent - e820 ranges rounded outward to 2 MiB can
+ * overlap each other, and mapping the same block twice has to be free
+ * rather than an error.
+ *
+ * Deliberately 2 MiB pages and not 1 GiB ones, which the CPU almost
+ * certainly supports and which would cut the page tables for 8 GiB from
+ * 40 KiB to 4 KiB. Every walk in this file tests for PTE_HUGE at exactly
+ * one level - the PD - and a 1 GiB page puts one at the PDPT level
+ * instead. Supporting both would mean auditing nine functions
+ * (map/unmap/take, user_range_ok, destroy, fork, cow_break,
+ * unmap_range_free, and this) for a second huge-page case, to save 36 KiB
+ * on a machine with gigabytes. The saving is not the point of the
+ * milestone and the audit is exactly the kind of thing that gets one
+ * function wrong. */
+static uint64_t identity_map_pages;
+
+static void identity_map_block(uint64_t phys_2m) {
+    uint64_t *pdpt = table_walk(kernel_pml4, PML4_INDEX(phys_2m), 1, 0);
+    uint64_t *pd = table_walk(pdpt, PDPT_INDEX(phys_2m), 1, 0);
+    if (pd[PD_INDEX(phys_2m)] & PTE_PRESENT) {
+        return;
+    }
+    pd[PD_INDEX(phys_2m)] = phys_2m | PTE_PRESENT | PTE_WRITABLE | PTE_HUGE;
+    identity_map_pages++;
+}
+
+void vmm_init(const uint32_t *e820_map) {
     uint64_t pml4_phys = alloc_table();
     kernel_pml4 = phys_to_table(pml4_phys);
     kernel_pml4_phys = pml4_phys;
 
-    uint64_t pdpt_phys = alloc_table();
-    kernel_pml4[0] = pdpt_phys | PTE_PRESENT | PTE_WRITABLE;
-    uint64_t *pdpt = phys_to_table(pdpt_phys);
+    /* Every RAM range the firmware described, rounded outward to whole
+     * 2 MiB pages - not every *usable* range, which is a different and
+     * wrong set. kernel/acpi/acpi.c reads ACPI tables at the physical
+     * addresses the RSDT points at, and those live in firmware-reserved
+     * RAM that no allocator will ever hand out; before M90 they were
+     * covered by accident, because a flat 1 GiB map covered everything
+     * low regardless of type. What must stay *out* is MMIO: drivers/fb.c
+     * and arch/x86_64/lapic.c map their own device pages 4 KiB at a time,
+     * and vmm_map_page_in panics outright on an address already inside a
+     * huge page. e820.h is where those three cases became three types.
+     *
+     * And one bound that the types alone do not give: nothing above the
+     * last byte of real memory is mapped, whatever its type says. OVMF on
+     * this machine reports a 12 GiB EfiReservedMemoryType range at
+     * 1012 GiB - the address-space window the PCIe hierarchy lives in,
+     * reserved so that nothing allocates over it, and emphatically not
+     * memory. The first version of this loop mapped it, and reported a
+     * 16 GiB identity map on a 4 GiB machine. "Reserved" answers *may
+     * anything allocate here*; it does not answer *is there RAM here*, and
+     * the only entries that answer the second one affirmatively are the
+     * ones a frame allocator or an ACPI table could occupy. So the
+     * ceiling comes from those, and a reserved range above every byte of
+     * real memory is read as what it is: an address-space reservation. */
+    uint32_t count = e820_count(e820_map);
+    const e820_entry_t *entries = e820_entries(e820_map);
 
-    uint64_t pd_phys = alloc_table();
-    pdpt[0] = pd_phys | PTE_PRESENT | PTE_WRITABLE;
-    uint64_t *pd = phys_to_table(pd_phys);
-
-    for (uint64_t i = 0; i < IDENTITY_MAP_ENTRIES; i++) {
-        pd[i] = (i * HUGE_PAGE_SIZE) | PTE_PRESENT | PTE_WRITABLE | PTE_HUGE;
+    uint64_t ram_top = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (entries[i].type != E820_TYPE_USABLE &&
+            entries[i].type != E820_TYPE_ACPI_RECLAIM &&
+            entries[i].type != E820_TYPE_ACPI_NVS) {
+            continue;
+        }
+        uint64_t end = entries[i].base + entries[i].length;
+        if (end > ram_top) ram_top = end;
     }
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (!e820_is_ram(entries[i].type) || entries[i].base >= ram_top) {
+            continue;
+        }
+        uint64_t limit = entries[i].base + entries[i].length;
+        if (limit > ram_top) limit = ram_top;
+        uint64_t start = entries[i].base & ~(HUGE_PAGE_SIZE - 1);
+        uint64_t end = (limit + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
+        for (uint64_t p = start; p < end; p += HUGE_PAGE_SIZE) {
+            identity_map_block(p);
+        }
+    }
+
+    /* The first 2 MiB unconditionally. The real-mode IVT/BDA, the VGA
+     * text buffer at 0xB8000 and the AP trampoline's landing address are
+     * all in it, and a firmware that describes the first page as
+     * something other than RAM would otherwise leave them unmapped. */
+    identity_map_block(0);
 
     __asm__ volatile("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
 
-    klog_puts("[vmm] kernel-owned page tables installed (1 GiB identity map)\n");
+    klog_puts("[vmm] kernel-owned page tables installed (");
+    klog_put_hex64(identity_map_pages * 2);
+    klog_puts(" MiB identity-mapped in 2 MiB pages)\n");
+}
+
+/* M90: does the identity map cover [phys, phys + len)?
+ *
+ * Answered by walking the tables rather than by remembering a limit,
+ * because the map is no longer a single range starting at zero - a
+ * machine with more than ~3 GiB has RAM below the PCI hole and RAM above
+ * 4 GiB with nothing in between, and a limit would call the hole mapped.
+ * kernel/acpi/acpi.c is the caller: it dereferences table addresses the
+ * firmware chose and has degraded gracefully on anything out of reach
+ * since M29, which is a check it could only make against a constant
+ * until now. */
+int vmm_identity_covers(uint64_t phys, uint64_t len) {
+    if (len == 0) {
+        return 1;
+    }
+    uint64_t end = phys + len;
+    if (end < phys) {
+        return 0;
+    }
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
+    int ok = 1;
+    for (uint64_t p = phys & ~(HUGE_PAGE_SIZE - 1); p < end; p += HUGE_PAGE_SIZE) {
+        uint64_t *pdpt = table_walk(kernel_pml4, PML4_INDEX(p), 0, 0);
+        uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(p), 0, 0) : (uint64_t *)0;
+        if (!pd || !(pd[PD_INDEX(p)] & PTE_PRESENT) || !(pd[PD_INDEX(p)] & PTE_HUGE)) {
+            ok = 0;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
+    return ok;
 }
 
 uint64_t vmm_kernel_pml4_phys(void) {

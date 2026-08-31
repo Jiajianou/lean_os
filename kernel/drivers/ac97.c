@@ -100,18 +100,25 @@ void ac97_init(void) {
     ac97_set_volume(100);
 
     /* One page for the descriptor list, and enough contiguous pages for
-     * the PCM buffer. pmm_alloc_frame hands out single frames, so the
+     * the PCM buffer. pmm_alloc_frame_dma hands out single frames, so the
      * buffer's pages are only contiguous because they are allocated back
      * to back from a fresh allocator - checked rather than assumed,
      * because a device walking a discontiguous buffer would produce
-     * noise rather than an error. */
-    bdl_phys = pmm_alloc_frame();
+     * noise rather than an error.
+     *
+     * M90: _dma, not plain pmm_alloc_frame. Both addresses below are
+     * written to the device as 32-bit values, and until this milestone
+     * every frame in the machine was below 4 GiB so the truncation could
+     * not happen. On a machine with more memory it can, and it would be a
+     * silent one: the cast compiles, the driver reports success, and the
+     * card DMAs into somebody else's page. */
+    bdl_phys = pmm_alloc_frame_dma();
     bdl = (bdl_entry_t *)bdl_phys;
     k_memset(bdl, 0, 4096);
 
-    pcm_phys = pmm_alloc_frame();
+    pcm_phys = pmm_alloc_frame_dma();
     for (uint32_t i = 1; i < PCM_PAGES; i++) {
-        uint64_t next = pmm_alloc_frame();
+        uint64_t next = pmm_alloc_frame_dma();
         if (next != pcm_phys + (uint64_t)i * 4096) {
             klog_puts("[ac97] could not get a contiguous PCM buffer - audio disabled this boot.\n");
             return;

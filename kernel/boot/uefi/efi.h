@@ -92,7 +92,20 @@ typedef enum {
     EfiBootServicesData,
     EfiRuntimeServicesCode,
     EfiRuntimeServicesData,
-    EfiConventionalMemory
+    EfiConventionalMemory,
+    /* M90: the four types past EfiConventionalMemory that build_e820_map
+     * now has to tell apart. EfiUnusableMemory and EfiPalCode are RAM the
+     * OS must not touch; the two ACPI types are RAM holding tables
+     * kernel/acpi/acpi.c reads where they lie; the two MMIO types are not
+     * memory at all, and the identity map must not cover them - see
+     * kernel/mm/e820.h for the whole argument. */
+    EfiUnusableMemory,
+    EfiACPIReclaimMemory,
+    EfiACPIMemoryNVS,
+    EfiMemoryMappedIO,
+    EfiMemoryMappedIOPortSpace,
+    EfiPalCode,
+    EfiPersistentMemory
 } EFI_MEMORY_TYPE;
 
 /* GetMemoryMap's own descriptor format. Per spec, GetMemoryMap's

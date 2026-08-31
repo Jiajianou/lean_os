@@ -7720,6 +7720,605 @@ still not in this arc — the arc is nine milestones already and a loader
 is its own — but the condition will have been met rather than argued
 about, which is how this project has always preferred to decide.
 
+## And the arc after that: a machine big enough to build on
+
+The M81–M89 arc's target is one sentence — *software written for Unix by
+someone who has never heard of lean_os builds here and runs here,
+without patching its source* — and that sentence is about a **surface**:
+the syscalls and library functions a program names. This arc keeps the
+sentence and changes the axis, because the three programs now being
+asked for — **Python, GCC and Chrome** — are, with one exception, not
+blocked by a surface. They are blocked by numbers, and every one of the
+numbers is already written down somewhere in this tree:
+
+| the number | where it is written | what wants more |
+|---|---|---|
+| 1 GiB of physical memory tracked | `kernel/mm/pmm.h`: *"Extending past 1 GiB is future work for whoever needs more than that much physical memory tracked"* | this arc is whoever |
+| 128 MiB of actual RAM | `tools/run-qemu.sh` passes no `-m` at all, so the machine has been QEMU's default for ninety milestones and no file in this tree says so out loud | one `cc1plus` translation unit |
+| 256 MiB heap, 160 MiB mmap arena, both fixed | `kernel/proc/proc.h` | a GCC garbage-collected heap; V8 |
+| 8 MiB per file, 32 MiB of data region | `kernel/fs/leanfs.h` | GCC's source tree is ~25× the second number unpacked, and its bootstrap tree is hundreds of times |
+| `MAX_TASKS 128`, `MAX_FDS 128` | `kernel/sched/sched.h` | `make -j` and a linker |
+| a sector at a time through a CPU register, no cache | `kernel/drivers/ata.c`; M87 declined a buffer cache because *"no measurement has asked for one"* | this arc is the measurement |
+| one program, one fixed load address, statically linked | `user_space/lib/user.ld`, and M80's *"nothing on this machine has ever loaded code it did not statically link"* | `libstdc++.so`, `dlopen`, and every browser ever shipped |
+
+The one exception — the thing that genuinely *is* a missing surface and
+not a small number — is **C++**. There is not one line of it in this
+tree, there is no unwinder, and GCC has been written in C++ since 4.8
+while Chrome is C++20. That is M97 and it is the hardest milestone here.
+
+### What this arc assumes from the last one, and what it absorbs
+
+M81–M89 is not finished, and this arc does not pretend the leftovers are
+optional. Sorted by whether this arc needs them:
+
+- **M86 is a hard prerequisite, not a leftover.** `./configure` is a
+  shell script — it is the densest per-line user of exactly the five
+  things `sh.c`'s header admits are missing, which is why M86's own
+  "How we'll know" already names it. Nothing from M94 onward is
+  attemptable through a shell without `if`, `&&`, command substitution
+  and a real `|`. If one milestone from the previous arc gets finished
+  before this one starts, it is that one.
+- **M87's `*at()` family, `fsync` and hard links** are absorbed into
+  M93, because M93 rewrites the on-disk format anyway and doing that
+  twice would be the mistake M81 already recorded.
+- **M88's `O_NONBLOCK` and `AF_UNIX`** are absorbed into M100, where a
+  browser's process model asks for both at once and for the first real
+  reason.
+- **M88's UTF-8** is not absorbed and should be finished on its own:
+  every program in this arc has non-ASCII bytes in its source tree and
+  in its test suite, and an encoding that is *merely plausible* corrupts
+  data quietly, which is the failure mode the milestone's own last
+  bullet spent a paragraph distinguishing from a rendering limit.
+- **M85's pty** is needed by M98 and not before: a build that runs for
+  an hour is a build somebody wants to `^C`, and `gui_terminal` owning a
+  pipe means `^C` reaches the shell instead of the compiler.
+
+### Three decisions taken here rather than discovered halfway
+
+**Chrome is a program, not a milestone, and this arc does not contain
+it.** The "Deliberately not next" note has called a browser a decade of
+work twice and nothing below reverses that. What changes is that the
+distance stops being an argument and becomes a measurement: M100 builds
+the dependency stack a browser actually links against and writes down,
+in numbers, what broke. Chromium's own published requirements are on the
+order of 100 GB of disk and 16 GB of RAM to build, ~35 million lines of
+C++, a Linux syscall surface most of which this kernel has never heard
+of, and a GPU path this project has already refused on good grounds.
+A milestone that says "port Chrome" would be the first unfalsifiable
+item in this file. A milestone that says "build every library Chrome
+needs and report the gap" is the same information, honestly priced.
+
+**The libc stays this project's own, through M99 at least, and the
+condition for changing that is named now.** The M63 rule — let the
+program's own link errors be the specification — has worked twice, and
+M80's notes are explicit that it produced a *better* libc than a
+standard would have, because every header had to answer a real question
+honestly rather than plausibly. It also cost several hundred lines for
+one interpreter. GCC will cost more and Chrome will cost far more. The
+rule does not break on volume; it breaks on **symbol versioning** — the
+day a program's build needs `GLIBC_2.17`-style versioned symbols, or
+`__libc_start_main`'s exact glibc contract, the surface stops being
+learnable from an error message and starts being a specific
+implementation's ABI. That day, and not before, is when adopting a
+third-party libc becomes an honest choice rather than a shortcut. It is
+not expected before M100.
+
+**There is still no NX bit, and M91 is where that stops being free.**
+`SYS_mmap`'s comment says it plainly: *"there is no NX bit here, so
+`PROT_EXEC` is neither granted nor withheld and `PROT_NONE` is refused
+rather than pretended."* Every page in every process is executable
+today. A JIT would love that and everything else about it is a bug — and
+the moment `mprotect` exists, a kernel that ignores `PROT_EXEC` is
+answering a question with a lie rather than with a refusal, which is the
+one thing this project's headers have consistently declined to do.
+
+**A note on sizing, in M69's spirit.** Every number this arc raises is
+raised to something specific, and each one should be *measured* against
+a real build before the next milestone locks it in. The vendors'
+published requirements are the starting estimate, not the answer; the
+answer is what this machine reports.
+
+---
+
+### M90 — More than a gigabyte ✅
+
+- [x] `PMM_TRACKED_MEMORY` stops being a constant. The frame bitmap is
+      sized from the e820 map at boot and allocated out of the memory it
+      describes, instead of a fixed 1 GiB array — the recursion that
+      makes this awkward is real and is the milestone
+- [x] `vmm_init`'s 1 GiB identity map becomes a direct map of all
+      physical memory, sized the same way, ~~using 1 GiB pages where the
+      CPU reports them~~ — 2 MiB pages, and the progress notes say why
+      the 1 GiB ones were declined. `pmm.h`'s constraint — *"a frame this
+      allocator hands out has to be addressable before any virtual-memory
+      mapping exists for it"* — is exactly right and is what makes the
+      ordering here delicate rather than mechanical
+- [x] `tools/run-qemu.sh` and both harnesses grow an explicit `-m`, and
+      the number appears in the boot log. A machine whose memory size is
+      "whatever QEMU defaults to" is a machine nobody has decided the
+      size of
+- [x] Deliberately **not** swap, still, and now for a better reason than
+      M82's: with 8 GiB the question is whether a GCC bootstrap fits,
+      and that is answerable by running one. M98 is where the answer
+      arrives; if it is no, swap gets a milestone rather than a guess
+
+**How we'll know.** Boot with `-m 8192` and have a program touch 6 GiB
+through M78's mmap, with the PMM's high-water mark tracking it page for
+page — and then boot the same kernel with `-m 128` and pass the entire
+existing serial harness. The second half is the actual test: a kernel
+that only works when the machine is big has traded one hardcoded size
+for another.
+
+#### Progress notes
+
+**What shipped, and where the grading criterion was changed.** The
+machine boots with 4 GiB rather than 8, and the kernel-side proof is a
+frame allocated at physical `0x100000000` — written, read back through
+the identity map, and freed with the free count returning exactly —
+rather than a user program touching 6 GiB. The reason is the harness
+rather than the kernel: `tools/qemu-input-test.sh` runs three guests
+concurrently, and a test that *touches* 6 GiB touches 6 GiB of the host's
+memory three times over. QEMU commits only what a guest writes, so a
+4 GiB guest that touches a page costs a page — which is why the memory
+size could be raised at all — and a test built to defeat that property is
+a test that cannot run in CI.
+
+What replaced it is not weaker in the part that matters. The claim was
+never "a large number appears"; it was *tracked and addressable are
+different properties*, which is what the old `pmm.h` comment was about.
+`0x100000000` is a physical address that does not fit in 32 bits, and
+writing to it through the identity map is exactly the thing a 1 GiB map
+could not do. The self-test picks the strongest floor the machine
+supports — above 4 GiB, else above 1 GiB, else half of what there is —
+so it keeps saying something true on a small machine instead of being
+skipped.
+
+*The number that made this a milestone rather than an edit is 4096.*
+`-m` was never passed to QEMU, by any of the three scripts, in
+eighty-nine milestones. The machine has been 128 MiB the whole time and
+no file in this repository said so. 4 GiB was chosen for one specific
+reason and not for headroom: QEMU splits it across the PCI hole, so the
+guest gets a RAM region at `0x100000000` and the allocator has to handle
+a frame whose address needs more than 32 bits. A round 2 GiB would have
+been entirely below the hole and would have tested nothing 1 GiB did not.
+
+*The bootstrap knot, and how it is untied.* A bitmap over 8 GiB is
+256 KiB and the refcount array M82 added is 2 MiB, and neither belongs in
+`.bss`: `.bss` is sized at link time, for the largest machine anyone
+might boot on, and is loaded (or zeroed) before there is an allocator to
+ask. So both are placed at run time in physical memory found in the very
+map they are about to describe. The ordering that makes that safe is to
+do every read before any write — pass one measures how much RAM there is,
+how big the metadata must be and where it fits; nothing is written until
+a home is chosen. The home has to avoid three ranges, and all three are
+*inside* memory the map calls usable, which is why they are listed rather
+than inferred: low memory, the kernel image, and **the e820 buffer
+itself**. That last one is the interesting one — the firmware allocates
+it as `EfiLoaderData`, which this loader classifies as usable, so the
+metadata's natural placement would have landed on top of the map while
+still reading it.
+
+*A latent bug found on the way, which had nothing to do with memory
+size.* The loader called `AllocatePages` for the *sectors it reads off
+disk* — and `.bss` is `NOBITS`, so it is not in `kernel.bin` and not in
+that count. `__kernel_end` is at `0x4af650` and the file ends at
+`0x31c000`: 2.6 MiB of the loaded image was outside any allocation the
+firmware knew about, and `entry.asm` zeroes all of it before
+`kernel_main` runs. Firmware was free to put a pool allocation there —
+and the e820 handoff buffer is a pool allocation. The failure mode was
+the memory map being erased by the kernel that was about to read it. It
+never fired because the pool happened to land elsewhere. The Makefile now
+computes the page count from `__kernel_end` in the ELF and the loader
+reserves the whole loaded image; the boot log's own memory map shows the
+result, with a usable range that now begins exactly at `0x4B0000`.
+
+*The identity map's rule took two attempts, and the first one was wrong
+in a way only the log showed.* "Map every range that is not MMIO" is the
+right shape — ACPI tables live in firmware-reserved RAM and `acpi.c`
+reads them where they lie, so mapping only the *usable* ranges would
+have broken ACPI, while mapping MMIO would make `drivers/fb.c` and
+`lapic.c` panic on their own device pages, which `vmm_map_page_in`
+refuses to place inside an existing huge page. Three cases, which is why
+`e820.h` now has three kinds of answer where it had two.
+
+But it reported **16384 MiB identity-mapped on a 4 GiB machine**. OVMF
+describes a 12 GiB `EfiReservedMemoryType` range at 1012 GiB — the
+address-space window the PCIe hierarchy lives in, reserved so nothing
+allocates over it, and emphatically not memory. "Reserved" answers *may
+anything allocate here*; it does not answer *is there RAM here*. So the
+map is now additionally bounded by the top of real memory, where "real"
+means a range something could actually occupy: usable, or ACPI. The
+second run reports 4096 MiB, which is the RAM exactly. Worth recording
+that the only thing that caught this was printing the number — the boot
+worked fine either way, and a 12 GiB region of device address space
+mapped as cached memory is precisely the kind of thing that works on the
+emulator and does something else on hardware.
+
+*1 GiB pages were declined, deliberately.* The CPU supports them and they
+would take the page tables for 8 GiB from 40 KiB to 4 KiB. Every walk in
+`vmm.c` tests for `PTE_HUGE` at exactly one level — the PD — and a 1 GiB
+page puts one at the PDPT level instead. Supporting both means auditing
+nine functions (map, unmap, unmap-take, `user_range_ok`, destroy, fork,
+`cow_break`, `unmap_range_free`, and the mapper itself) for a second
+huge-page case, to save 36 KiB on a machine with gigabytes. That is not
+what this milestone is for, and it is exactly the kind of audit that gets
+one function wrong.
+
+*Three things elsewhere were resting on the 1 GiB constant, and one of
+them would have corrupted memory silently.*
+
+  - `heap.c` started the kernel heap at `PMM_TRACKED_MEMORY` — "the first
+    address above the identity map", a correct derivation that becomes
+    wrong the moment the map is sized from the machine. A heap that moves
+    when the RAM does lands *inside* the identity map on a bigger
+    machine. It now starts at a fixed 256 GiB, which is above any
+    physical memory and below `USER_REGION_BASE`, so it stays in the
+    PML4[0] subtree every address space shares. The `vmm` self-test's own
+    scratch address had the same bug for the same reason and moved with
+    it.
+  - `acpi.c` refused any table address `>= 1 GiB`, hardcoding the size of
+    a map it does not own. It now asks `vmm_identity_covers`, which walks
+    the tables rather than comparing against a limit — necessary, because
+    the map is no longer one range starting at zero: a machine with a PCI
+    hole has RAM below it and RAM above 4 GiB with nothing in between,
+    and a limit would call the hole mapped. This makes M29's graceful
+    degradation *better* rather than merely preserved: a table in high
+    reserved memory is now usually in range instead of skipped.
+  - **`ac97.c` writes a frame address to the device as a 32-bit value.**
+    So does `rtl8139.c`. Until this milestone every frame in the machine
+    was below 4 GiB and the truncation could not happen; afterwards it
+    can, and it is silent — the cast compiles, the driver reports
+    success, and the card DMAs into somebody else's page. `pmm.h` grew
+    `PMM_DMA_LIMIT` and `pmm_alloc_frame_dma`, and `pmm_alloc_contiguous`
+    is now always below 4 GiB because both its callers (DMA rings, kernel
+    stacks) are fine with that and one rule that is always safe beats two
+    rules where the unsafe one is the default. This was found by reading
+    the code against the new invariant, not by a test — the same way M82
+    found its own COW guard.
+
+*Verified.* `tools/qemu-serial-test.sh` reaches `[init] PID 1 spawned`
+with no panic and every existing marker, plus the new one:
+
+```
+[pmm] 0xFF4CB / 0x140000 frames free, tracking to 0x140000000 (5120 MiB);
+      bitmap+refcounts at 0x4B0000
+[vmm] kernel-owned page tables installed (4096 MiB identity-mapped in 2 MiB pages)
+[heap] kernel heap starts at 0x4000000000
+[m90] more than a gigabyte: 5120 MiB tracked in 0x140000 frames, a frame at
+      0x100000000 written and read back through the identity map, freed with the
+      count returning exactly, and an address past the end of memory correctly
+      reported as not mapped.
+```
+
+The tracked span is 5120 MiB and the mapped memory is 4096 MiB, and the
+difference is not a discrepancy: the bitmap covers the frames *up to* the
+highest usable address, which includes the 1 GiB PCI hole between 3 GiB
+and 4 GiB, and every frame in it is marked reserved because no e820 entry
+freed it. The identity map covers only what is there.
+
+The last assertion in that line is the one that makes the rest mean
+anything. `vmm_identity_covers` returning 1 unconditionally would pass
+every other check in the self-test, and `acpi.c` would then dereference
+whatever a firmware table pointed at — so the test also requires a
+**no**, for an address a gigabyte past the end of memory.
+
+**And the half of the criterion that was the actual point: the same
+kernel, `QEMU_MEM=128`.** 76 of 76 markers, no panic, and the self-test
+reports 126 MiB tracked, 128 MiB identity-mapped, and its probe frame at
+`0x3F7A000` — half of what there is, because that is the strongest floor
+a small machine supports. Two runs, one binary, a thirty-two-fold
+difference in memory, and nothing in between them was a constant. That
+was written as the real test and it stayed the real test:
+
+```
+-m 4096   PASS: 76/76   5120 MiB tracked   4096 MiB mapped   probe 0x100000000
+-m 128    PASS: 76/76    126 MiB tracked    128 MiB mapped   probe 0x3F7A000
+```
+
+`tools/qemu-input-test.sh` passes unchanged — it grades pixels, and
+nothing in this milestone was supposed to reach them.
+
+### M91 — An address space that is a set of mappings
+
+- [ ] Per-process VMAs replace `proc.h`'s fixed layout. The heap, the
+      stack, the image and the mmap arena stop being six constants with
+      "generous gaps" between them and become entries in a list that the
+      fault handler, `user_range_ok` and `SYS_munmap` all read
+- [ ] `mmap` with a hint and `MAP_FIXED`, `MAP_SHARED`, and file-backed
+      mappings. `SYS_mmap` refuses all three today, in its own words,
+      *"rather than quietly given private anonymous memory"* — that
+      refusal was right and this is the milestone that earns the yes.
+      A dynamic loader maps a file at an address it chose; there is no
+      version of M95 that does not need this first
+- [ ] `mprotect`, `mremap`, `madvise(MADV_DONTNEED)` — and a real NX
+      bit, so `PROT_EXEC` is a fact rather than a shrug and `PROT_NONE`
+      is a mapping rather than a refusal
+- [ ] A stack that grows on fault, and a heap that is just another
+      mapping. GCC recurses deeply on generated code and the current
+      stack is a fixed number of pages placed below a constant
+- [ ] The private region is [512 GiB, 1 TiB) and stays that way — M52's
+      argument for why that boundary is what makes a kernel pointer an
+      error rather than a read is untouched by any of this, and should
+      be
+
+**How we'll know.** A program reserves 4 GiB at an address it names,
+`mprotect`s one page read-only and dies on the write, then makes a
+second page executable and *calls into code it wrote there* — three
+different answers from three page-table bits that all previously
+answered the same way. And `badptr` and `lazytest` still die exactly
+where they died before, because a fault handler that gets more generous
+by one case is the regression M82 already named as the most likely one.
+
+### M92 — A disk worth reading, and a cache in front of it
+
+- [ ] A DMA block driver with interrupts — virtio-blk first because it
+      is the smallest real one and QEMU always has it, with AHCI as the
+      one that matters on hardware. `ata.c` stays as the fallback that
+      boots anything
+- [ ] A block cache with readahead and writeback, which M87 declined
+      because *"no measurement has asked for one"* and M69's rule says
+      to wait for the measurement. Unpacking a source tarball is the
+      measurement, and it should be taken *before* the cache exists so
+      that the milestone can report a ratio rather than an adjective
+- [ ] Writeback that keeps M71's ordering guarantees. A cache that
+      reorders writes turns "write ordering plus a mount check" into
+      neither, and M71's whole argument for not having a journal rests
+      on the first half being true
+- [ ] The measurement, written into the milestone: seconds to unpack and
+      to `treewalk` the same tree, PIO versus DMA, cold versus warm
+
+**How we'll know.** The same tree, the same two operations, four
+numbers. And a power-cut test — kill QEMU mid-write, remount, and have
+the unclean-mount check say the same thing it says today rather than
+something new and worrying.
+
+### M93 — A filesystem that can hold a source tree
+
+- [ ] leanfs v3: a file ceiling in the gigabytes (a triple-indirect
+      block is the cheap answer; extents are the right one and M81
+      already declined them once with a reason worth re-reading), inodes
+      into the hundreds of thousands, and a data region measured in
+      gigabytes rather than the current 32 MiB
+- [ ] The migration M81 wrote the version field for and could not use,
+      *now* used — that bullet says the branch is *"in place for the
+      next format change, which will be the kind that can."* This is
+      that change or it is an admission that the field was speculation
+- [ ] Hard links, the `*at()` family, and `fsync` — M87's three
+      unfinished bullets, absorbed here because this milestone is
+      already rewriting the format they touch
+- [ ] A host-side image builder. Today every program reaches the disk by
+      being `incbin`'d into the kernel and seeded on first boot
+      (`kernel/proc/embed_programs.asm` says so at the top: *"there's no
+      way to get them onto the disk filesystem... other than the kernel
+      seeding them there itself"*). A source tree is 800 MB and cannot
+      live inside a kernel image; a tool that writes a leanfs image from
+      a host directory is how a tarball gets here at all
+- [ ] The journal deferral, re-measured rather than re-argued. M81 said
+      thousands of files makes "a full scan gets slow" *nearly* true and
+      that "nearly" is not a measurement. Hundreds of thousands of files
+      is where the measurement gets taken, with M92's numbers in hand
+
+**How we'll know.** Unpack GCC's own release tarball on the machine,
+`treewalk` it, and compare file count and total bytes against the host's
+own count of the same tarball — then check a SHA of a file deeper than
+any path this filesystem could previously express. A tree small enough
+to have fitted in v2 proves nothing, and the test should be written so
+it cannot accidentally be one.
+
+### M94 — A target this compiler knows by name
+
+- [ ] `x86_64-lean_os` as a real triple in binutils and GCC: a config
+      fragment, an OS name, and the default library and startup-file
+      rules that go with it. M63 and M80 both built with `x86_64-elf`
+      plus `-ffreestanding` plus a hand-written link line, and a
+      `./configure` script cannot be told about a hand-written link line
+- [ ] A sysroot: `usr/include` from `user_space/libc/include`, `usr/lib`
+      with `libc.a`, `crt1.o`, `crti.o`, `crtn.o` and a `libgcc` built
+      for the target. `crt0` exists in `user_space/lib` and has never
+      had to be a file a linker finds by name
+- [ ] GCC specs that make `x86_64-lean_os-gcc hello.c -o hello` produce
+      a program this OS runs, with no flag invented by hand — which is
+      the entire point, because every flag invented by hand is a flag
+      someone else's build system will not pass
+- [ ] `install` targets, so the sysroot is generated by the build rather
+      than assembled by a person. The drift M25's tooling was found in
+      is the precedent: a thing maintained by hand is a thing that is
+      wrong by the time anybody looks
+- [ ] Deliberately **not** a GCC fork. A target port is upstream-shaped
+      configuration; a patch to the compiler's own passes is the thing
+      M63's rule exists to forbid
+
+**How we'll know.** `./configure --host=x86_64-lean_os && make` on a
+small autotools project nobody here wrote — `bzip2`, `less` or `jq` —
+producing a binary that runs, with zero flags supplied by hand and zero
+edits to its source. The configure script's own log is the evidence,
+because it records every test it ran and which ones this OS failed.
+
+### M95 — Code that is loaded, not linked
+
+- [ ] ELF `ET_DYN` and `PT_INTERP` in `kernel/proc/elf.c`, which today
+      maps `PT_LOAD` at fixed addresses and checks them against
+      `USER_IMAGE_BASE`/`LIMIT`. A position-independent executable has
+      no fixed address by construction
+- [ ] `/lib/ld-lean.so`: relocation processing (`R_X86_64_RELATIVE`,
+      `GLOB_DAT`, `JUMP_SLOT`, `COPY`, `TPOFF64`), symbol lookup across
+      a search scope, `DT_NEEDED`, lazy PLT binding, and `LD_LIBRARY_PATH`
+- [ ] `dlopen`/`dlsym`/`dlclose`/`dlerror`
+- [ ] `libc.so`, `libgcc_s.so` and later `libstdc++.so` as real shared
+      objects, with the static archives kept — the kernel and anything
+      that runs before the loader will always be static
+- [ ] This collects the deferral M89's closing note scheduled: *"a
+      second and third static binary duplicating the same libc."* By the
+      time this milestone starts, `/bin` is full of them
+
+**How we'll know.** Two different programs running at once share exactly
+one copy of `libc.so`'s text, and the proof is the PMM's frame count —
+not the fact that both programs ran, which a static build also achieves.
+And `dlopen` of a shared object compiled *after* the program that loads
+it, resolving a symbol by name.
+
+### M96 — A thread with its own variables, and a wait that costs nothing
+
+- [ ] Thread-local storage properly: `%fs` base per task, `arch_prctl`
+      (`ARCH_SET_FS`/`ARCH_GET_FS`), the TLS segment from `PT_TLS`, and
+      the initial-exec, local-exec and general-dynamic models with
+      `__tls_get_addr`. `__thread` and C++'s `thread_local` are not
+      optional for libstdc++ and they do not exist here in any form
+- [ ] `errno` becomes genuinely per-thread, over that
+- [ ] A futex: `FUTEX_WAIT`, `FUTEX_WAKE`, and a wait queue keyed on a
+      user address. `pthread.h` asks for it by name — *"There are no
+      futexes here... a waiter also burns CPU while it waits, which a
+      futex would not"* — and every mutex, condition variable and
+      barrier in this libc is a spin-then-yield loop until this exists
+- [ ] Real `pthread_mutex`, `pthread_cond`, `pthread_rwlock`,
+      `pthread_barrier` and `sem_*` over the futex, replacing the spin
+      loops rather than sitting beside them
+- [ ] `clone`-shaped thread creation with the flags a ported runtime
+      passes, over M79's `SYS_thread_create`
+
+**How we'll know.** Sixteen threads on a contended mutex, and the
+measurement that matters is the *CPU time a blocked waiter consumes*,
+which must be indistinguishable from zero — the disappearance of the
+spin loop is the test, and a throughput number would pass with the spin
+loop still in place. Plus a `__thread` counter per thread that stays
+independent across a `dlopen`ed object, which is the case the
+general-dynamic model exists for and the one a local-exec-only
+implementation silently gets wrong.
+
+### M97 — C++
+
+- [ ] libstdc++ (GCC's own) built for the target: `operator new`/`delete`,
+      static initialization and `__cxa_atexit`, `std::string`,
+      the containers, iostreams, `<atomic>`, and `std::thread` over M96
+- [ ] **Exceptions**, which is the milestone inside the milestone:
+      `.eh_frame`, `_Unwind_RaiseException` and the rest of the unwinder
+      ABI, the personality routine, and unwinding *through* a shared
+      object boundary. This is the single largest new mechanism in the
+      arc and there is no version of GCC or Chrome that runs without it
+- [ ] RTTI and `dynamic_cast`, which need type identity to be stable
+      across shared objects — the same problem exceptions have, with the
+      same answer, and both get it wrong in the same way if `COPY`
+      relocations and symbol interposition are not right in M95
+- [ ] `libsupc++`/`libstdc++` as both an archive and a shared object
+- [ ] Deliberately **not** `libc++`. One C++ runtime, and it is the one
+      GCC ships with, because M98's whole test is GCC compiling itself
+
+**How we'll know.** A `throw` in one shared object caught by type in
+another, with destructors running for every frame in between — verified
+by counting the destructor calls, because a catch that fires while
+skipping a destructor is the bug this gets wrong and it looks like
+success. And a C++ program nobody here wrote, with templates,
+containers and iostreams, run unmodified.
+
+### M98 — A compiler that runs here
+
+- [ ] binutils built *for* lean_os and running *on* it: `as`, `ld`, `ar`,
+      `nm`, `objdump`, `strip`
+- [ ] GCC built for and running on lean_os — `cc1`, `cc1plus`, the
+      driver — plus GNU make (or toybox's, if M89 got there first)
+- [ ] Whatever the build actually asks the kernel for that is still
+      missing, in M63's method: process counts past `MAX_TASKS 128`
+      under `make -j`, fd counts past `MAX_FDS 128` in a linker, `/tmp`,
+      `vfork`, `posix_spawn`, `wait4`, big `O_APPEND` writes. The list
+      is a prediction; the build's own failures are the specification
+- [ ] The measurements the arc has been deferring to this point, all
+      taken here: peak RSS of the largest translation unit, disk used by
+      the build tree, wall-clock for a bootstrap. Whether M90's memory
+      ceiling and M93's disk are big enough stops being a plan and
+      becomes a number
+
+**How we'll know.** The classic test, and it is classic precisely
+because nothing weaker is convincing: **a three-stage bootstrap where
+stage 2 and stage 3 are byte-identical.** Stage 1 proves the compiler
+runs. Stage 2 proves it compiles itself. Stage 3 being bit-for-bit equal
+to stage 2 proves that the compiler it produced is the same compiler —
+which catches a miscompilation, an uninitialized read, and a libc
+function that is subtly wrong, none of which a `hello.c` that prints
+would catch. If a full bootstrap does not fit this machine, the honest
+outcome is the *number* that says by how much, and a stage-1 compiler
+that builds a real program.
+
+### M99 — Python, built here
+
+- [ ] `./configure && make` for CPython **on the machine**, with the
+      machine's own compiler — the inverse of M80, which cross-compiled
+      and froze and never linked
+- [ ] The standard library as `.py` files on the filesystem, which M81's
+      closing note already identified as the thing M93 turns *"from a
+      hard constraint into an ordinary choice"*
+- [ ] Extension modules built as shared objects and imported at runtime
+      over M95 — which is also the second concrete thing the
+      dynamic-linking deferral named: *"a C-extension wheel"*
+- [ ] `python3 -m test` over a subset of CPython's own regression suite,
+      with the pass/fail counts recorded rather than summarized. A test
+      suite someone else wrote, reporting its own failures, is the most
+      honest grading instrument this project will ever get
+- [ ] Deliberately **not** `pip` reaching the network. That needs TLS
+      and a certificate store, and neither exists; a package installed
+      from a local wheel is the same mechanism without the fiction
+
+**How we'll know.** M80's own bar first — `python3 -c "print(1+1)"` —
+then the bar it said mattered more: a real script with a dict, a class,
+a loop and a file open. Then the regression suite's own numbers, which
+is a bar M80 never got to name.
+
+### M100 — What a browser actually needs, measured rather than argued
+
+- [ ] Build the stack a browser links against, in dependency order, each
+      one unmodified: zlib, libpng, libjpeg, freetype, harfbuzz, expat,
+      sqlite, ICU, and a TLS library. Every one is a well-behaved
+      autotools or CMake project and every one is a real test of M94
+      through M97
+- [ ] A TLS library working end to end over M66's TCP, which finally
+      gives this machine an `https://` — and gives `fetch` something to
+      do that is not a plaintext port 80 demo
+- [ ] M88's `O_NONBLOCK` and `AF_UNIX`/`socketpair`, absorbed here
+      because a multi-process browser is the first program that needs
+      both at once and for a reason rather than for completeness
+- [ ] A real but small browser engine — NetSurf has its own layout
+      engine and a framebuffer front end, which makes it the honest
+      candidate: it is a browser, it is not a toy, and it is four orders
+      of magnitude smaller than Chromium
+- [ ] **The measurement, written down as the milestone's deliverable.**
+      What Chromium's build actually asks for on this machine, in
+      numbers: disk, RAM, syscalls it uses that this kernel does not
+      have, and what its GPU and sandbox layers assume. Not an estimate
+      — a list produced by trying and reading the errors, which is this
+      project's method applied to the question "how far away is it"
+
+**How we'll know.** A page fetched over TLS, laid out, and drawn on this
+compositor by an engine nobody here wrote. And a written gap analysis
+for Chromium with a number next to every line — which is a deliverable
+this file can grade, unlike "port Chrome", which it cannot.
+
+### What this arc does not answer, and where that gets decided
+
+Three things stay open on purpose, and each one has a milestone that
+will hand it a number rather than an opinion:
+
+- **Swap.** M82 deferred it for lack of a measurement and M90 defers it
+  again for a better reason. M98 measures a GCC bootstrap's peak
+  footprint; if that number is larger than what M90 makes available,
+  swap gets a milestone and the measurement is its specification.
+- **A journal.** M71 and M81 both deferred it. M93 takes the scan-time
+  measurement at hundreds of thousands of files, which is the second of
+  M71's two conditions, and M92's writeback cache puts real pressure on
+  the first.
+- **A third-party libc.** Named above: the trigger is symbol versioning,
+  not volume, and it is not expected before M100. If M100's gap analysis
+  says a browser needs a glibc ABI rather than a glibc-shaped surface,
+  that is the milestone that turns the decision over — and it will have
+  said so with a link error, which is how this project has decided every
+  other thing.
+
+**On the size of all this.** The M81–M89 arc's own note said three of
+its nine were multi-attempt milestones and that writing them as one each
+was a statement about the goal rather than a prediction about landing
+them. That is more true here, not less: M91, M95, M97 and M98 are each
+larger than anything in that arc, and M97 and M98 are each plausibly
+larger than the whole of M75–M79. Eleven headings is the shape of the
+work, not its cost.
+
 ## Deliberately not next, and why
 
 *Re-read after the M81–M89 arc was written, because "next" moved.* Every entry below is still deliberately not next — none of them is in
@@ -7729,17 +8328,42 @@ reversed by writing the arc, which is worth recording, because an arc
 that quietly collected its own deferrals would be the drift
 this section exists to prevent.
 
+*Re-read again after the M90–M100 arc, and this time two entries were
+reversed — which is exactly the event the paragraph above says to watch
+for, so it is recorded here rather than left to be noticed.* **Dynamic
+linking is now M95 and self-hosting is now M98.** Neither was promoted
+because the arc wanted them; both were promoted because the condition
+each one named for itself had been met and written down in advance. The
+loader's condition was *"a second and third static binary duplicating
+the same libc"*, which M89 produces by construction. Self-hosting's was
+never stated as a condition at all — it was called "the romantic end
+state, and genuinely out of reach" — and what moved is that a target
+triple, a C++ runtime and a filesystem that can hold a source tree turn
+it from a category of work into a list of four milestones with a
+falsifiable test at the end. Both are still fair to call reversals, and
+calling them that is cheaper than pretending they were always coming.
+Everything else below is unchanged or changed only in place.
+
 - **A GPU driver, or real mode-setting.** Already argued in the
   stretch-goal list: it is a driver per vendor, and it is not a thing
   this project will do. M58's Display pane showing only the firmware's
-  mode on real hardware is the honest outcome.
+  mode on real hardware is the honest outcome. **Unchanged by M100,**
+  which is worth saying because a browser is where the pressure for one
+  comes from: software rasterization into this compositor's framebuffer
+  is the answer here, and it is a slow answer rather than a missing
+  one.
 - **A browser.** Now a named goal rather than a hypothetical one — see
   the arc above — and the estimate has not moved: HTML, CSS, a layout
   engine, a JS runtime, TLS, GPU compositing, codecs, a sandbox, and a
   Linux-scale syscall surface underneath most real-world binaries of
   that size. `fetch` and M75–M80 are the right-sized steps in that
   direction; there is no version of this list where a browser is the
-  *next* one.
+  *next* one. **Unchanged, and M100 is not a crack in it:** that
+  milestone builds the libraries a browser links against and *measures*
+  the remaining gap to Chromium, which is the opposite of porting it.
+  A small engine with its own layout code running there is a real
+  browser and is still four orders of magnitude short of the one being
+  asked about.
 - **Dynamic linking (shared objects, `dlopen`).** M80's Python is
   planned fully static on purpose — M75–M79 buy POSIX primitives and
   threads, not a loader. Worth building once something concrete asks
@@ -7750,6 +8374,8 @@ this section exists to prevent.
   and third static binary, so this is a deferral with a date rather than
   an open question — see the arc's closing note. It is also the real fork in the road
   toward a browser: nothing at that scale ships as one static binary.
+  **Collected. This is M95.** The condition was met exactly as
+  scheduled, which is the only reason it moved.
 - **Multi-user, logins, uids.** M65 argued this exactly right: there are
   no users here, and inventing one would be a larger lie than the one it
   fixed. It becomes real if and when two people share a machine, and not
@@ -7765,14 +8391,28 @@ this section exists to prevent.
   an 8 MiB-file filesystem on a 36 MiB image. **M81 is where that second
   clause gets re-measured**, because thousands of files is the first
   thing that could make a full scan slow — re-measured, not assumed:
-  M81's own bullet says "nearly" is not a measurement.
+  M81's own bullet says "nearly" is not a measurement. **Still not next,
+  and the re-measurement moved rather than happened:** M93 takes it at
+  hundreds of thousands of files instead of thousands, with M92's cache
+  numbers in hand, because both of M71's two conditions are finally
+  under pressure at once.
 - **Self-hosting (a compiler on the machine).** The romantic end state,
   and genuinely out of reach — but M72 moves the line: after it, some of
-  what needed a cross-compiler needs a script instead.
+  what needed a cross-compiler needs a script instead. **Reversed. This
+  is M98,** and the honest account of why is that "out of reach" was a
+  judgement about a category of work rather than a condition anything
+  could satisfy. M93, M94, M96 and M97 make it a list with a test at the
+  end — a three-stage bootstrap whose stages 2 and 3 are byte-identical
+  — and a thing with a falsifiable test is a milestone whatever it felt
+  like beforehand.
 - **`syscall`/`sysret`, window scaling, SACK, Nagle.** Performance work
   on paths whose performance nobody has measured. M69 establishes that
   measuring first is how this project decides; these come back when a
-  measurement asks for them.
+  measurement asks for them. **Unchanged, and M98 is the first thing
+  likely to ask:** a compiler bootstrap is millions of `open`/`read`/
+  `write` calls and is the first workload on this machine whose
+  wall-clock is worth attributing. If `int 0x80`'s cost shows up in that
+  attribution, this stops being a deferral and becomes a number.
 - **The USB boot** (M28's one open box). Unchanged and still open — it
   needs hands. M70's painting panic and M71's mount check both make the
   day it happens go better, which is a nice side effect and not a reason
