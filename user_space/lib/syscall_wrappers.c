@@ -145,6 +145,15 @@ long sys_listdir(const char *path, void *buf, size_t maxlen) {
     return do_syscall(SYS_listdir, (long)path, (long)buf, (long)maxlen);
 }
 
+/* M81: the streaming counterpart. `cookie` is opaque - zero to start, and
+ * handed straight back untouched on every following call. Returns the
+ * bytes of os_dirent_t records written, 0 at the end of the directory, or
+ * -1. See SYS_getdents in system_api/include/syscall.h. */
+long sys_getdents(const char *path, unsigned int *cookie, void *buf, size_t buflen) {
+    return do_syscall6(SYS_getdents, (long)path, (long)cookie, (long)buf,
+                       (long)buflen, 0, 0);
+}
+
 long sys_mkdir(const char *path) {
     return do_syscall(SYS_mkdir, (long)path, 0, 0);
 }

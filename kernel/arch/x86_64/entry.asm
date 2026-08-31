@@ -52,6 +52,12 @@ _start:
     jmp .zero_bss
 .zero_bss_done:
 
+    ; M81: stamp the guard word below the stack. After .bss is zeroed, so
+    ; the zeroing loop cannot undo it.
+    mov rax, kernel_stack_guard
+    mov rbx, 0x5354414B47554152  ; "STAKGUAR"
+    mov qword [rax], rbx
+
     call kernel_main
 
 .hang:
@@ -61,6 +67,33 @@ _start:
 
 section .bss
 align 16
+
+; M81: a guard word immediately below the stack, and the story of why it
+; is here.
+;
+; This stack was 16 KiB and it overflowed the first time LEANFS_MAX_PATH
+; became 4096: kernel_main runs every boot self-test on it, and those call
+; straight into leanfs, whose resolve_parent puts a whole path on the
+; stack. It did not present as a stack overflow. It presented as
+; `embedded_programs` - a `static const` array in .rodata, 0x6F0 bytes
+; below kernel_stack_bottom - reading back as garbage twenty self-tests
+; later, and then as a page fault dereferencing a string literal as a
+; pointer. Nothing said "stack".
+;
+; So the stack grew to 64 KiB, and it gained a word underneath it that
+; says so when it happens again. kernel_main checks it (see
+; kernel_stack_guard_intact) after the self-tests, which is exactly where
+; the deepest call chains in this kernel run. A guard cannot catch a
+; single leaf frame that skips clean over it, but the thing that actually
+; happens - a chain walking down through it - it catches, and it turns
+; four hours of bisecting into one line of log.
+global kernel_stack_guard
+kernel_stack_guard:
+    resq 1
+
 kernel_stack_bottom:
-    resb 16384                  ; 16 KiB kernel stack
+    ; M81: 16 KiB -> 64 KiB. See kernel/sched/sched.c's TASK_STACK_SIZE
+    ; for the same change made for the same reason to every other stack in
+    ; the system, and for the measurement behind the number.
+    resb 65536                  ; 64 KiB kernel stack
 kernel_stack_top:

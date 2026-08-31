@@ -126,11 +126,17 @@ typedef struct {
  * knew what it was, which made SYS_taskinfo's enumeration (and the task
  * manager built on it) unable to show anything a person could act on.
  * 24 comfortably holds every program name this project ships (the
- * longest, "desktop_icons"/"gui_terminal", are 13) and leanfs's own
- * LEANFS_MAX_NAME (27 + NUL) is the real upper bound on what a spawn
- * path can even be; a name longer than this is truncated, never a spawn
- * failure - a display string is not worth refusing to run a program
- * over. */
+ * longest, "desktop_icons"/"gui_terminal", are 13); a name longer than
+ * this is truncated, never a spawn failure - a display string is not
+ * worth refusing to run a program over.
+ *
+ * M81: this used to add "and leanfs's own LEANFS_MAX_NAME (27 + NUL) is
+ * the real upper bound on what a spawn path can even be", which stopped
+ * being true when names went to 255. Removed rather than updated,
+ * because the second clause was never the reason for the number - it was
+ * a reassurance that the first clause could not be wrong by much, and
+ * now that it can be, the honest version is the first clause alone plus
+ * the truncation rule. */
 #define TASK_NAME_MAX 24
 
 /* M45: moved out of sched.c, where it had lived since M13. A caller that

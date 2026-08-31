@@ -6622,7 +6622,559 @@ and tells you to re-run before believing; it is worth noticing that the
 warning was right rather than assuming it was.
 
 
+## The arc after that: the things underneath the names
+
+M77 was called "POSIX names for what is already here," and that is
+exactly what it was — a header layer over machinery this OS already had,
+written so that a program could spell things the way it learned to spell
+them elsewhere. This arc is the inverse, and the name is the honest
+description: **the things underneath the names.** Every milestone below
+builds a mechanism this machine has never had, and several of them
+collect a deferral written down years of milestones ago.
+
+**The target is not POSIX conformance, and choosing that deliberately is
+the first decision of the arc.** POSIX.1-2017 is roughly 1,200 functions
+and 160 utilities, and a meaningful fraction of both exists to describe
+machines nobody builds any more. Conformance is a certification; this
+project has never wanted one. The target instead is the M63 rule at the
+largest scale it will bear:
+
+> **Software written for Unix by someone who has never heard of lean_os
+> builds here and runs here, without patching its source.**
+
+That is a smaller target than conformance and a much larger one than
+M75–M79, and it has the property this project keeps choosing: it is
+falsifiable by running something, not by reading a standard. Where the
+two targets disagree, this arc follows the program.
+
+**What the previous arc established, and where it stopped.** M80 got
+every one of CPython's 113 core translation units compiling and stopped
+at `Modules/posixmodule.c`, which is the file where the operating system
+actually lives. Its five numbered blockers are not a list of headers
+this libc is missing. Four of the five are subsystems this kernel does
+not have, and this arc is those subsystems in the order a program hits
+them. M80 is not renumbered and not abandoned: it is the milestone that
+becomes attemptable again once M84 lands, and the thing that grades M87
+and M88 when they do.
+
+**A note on where these estimates come from, and how much to trust
+them.** Nine milestones, and at least three of them — M82, M85, M87 —
+are of the size that M74 and M80 turned out to be, which is to say
+multi-attempt. Writing them as one milestone each is a statement about
+what the goal is, not a prediction about landing it in one pass. That
+was true of M80's own note and it was right.
+
+**Two things this arc deliberately does not do, stated here rather than
+discovered halfway.** There are still no users — M65's argument holds
+completely and nothing below weakens it, and where a ported program asks
+`getuid()` the honest answer on a single-principal machine is 0, which
+is a true statement rather than the fiction M65 refused to write. And
+there is still no dynamic linker; every binary this arc produces is
+static, for the same reason M80's Python was going to be. See the
+closing note for why M89 is probably the milestone that finally collects
+that deferral rather than restating it.
+
+### M81 — A filesystem that can hold somebody else's program ✅
+
+- [x] leanfs v2 on-disk format. `LEANFS_MAX_INODES` is **192** — that is
+      not a per-directory limit, it is every file on the disk — and a
+      source tree, a standard library or an unpacked archive is
+      thousands. This is the wall M80's fourth blocker ("the standard
+      library still has nowhere to live") actually hits, and it hits it
+      before a single syscall is involved
+- [x] `LEANFS_MAX_NAME` 27 → 255 and `LEANFS_MAX_PATH` 128 → 4096, the
+      numbers `<dirent.h>` already advertises. M77's `NAME_MAX` is 255
+      today with a comment admitting leanfs's real limit is 27; one of
+      those two numbers is a lie and this milestone decides which
+- [x] `d_ino` reports a real inode number. `<dirent.h>` says plainly that
+      leanfs has inode numbers and `SYS_listdir` reports names instead —
+      that comment is the bug report, and a program that wants identity
+      should not have to `stat` every entry to get it
+- [x] A directory read as a stream, not whole-shot. `SYS_listdir`'s
+      newline-separated buffer was built for a person reading a terminal
+      and `<dirent.h>` says so; a directory that can now hold thousands
+      of entries is a directory that no longer fits the shape that
+      assumed it could not
+- [~] A format version in the superblock — **shipped**; the migration
+      that runs once — **not**, and the progress notes say why: this
+      milestone moves every region on the disk, so there is nowhere to
+      migrate *to*. The version field and the branch that would hold a
+      migration are in place for the next format change, which will be
+      the kind that can
+- [x] Deliberately **not** a journal, and deliberately not extents.
+      M71's own note argued that write ordering plus a mount check buys
+      most of the safety and that a journal is worth it when there are
+      multiple writers or a full scan gets slow. Thousands of files
+      makes the second one *nearly* true, and "nearly" is not a
+      measurement — this is where that deferral gets re-examined, in
+      M69's spirit, not where it gets cashed on a guess
+
+**How we'll know.** Unpack a real source tarball — thousands of files,
+paths deeper than 128 bytes, names longer than 27 — and `treewalk` it
+back, comparing the count and the total bytes against what went in. A
+tree that would have fitted in 192 inodes proves nothing at all, and the
+test should be written so it cannot accidentally be one.
+
+**Why this is first even though it is not the hardest.** It is the
+cheapest of the nine and it is the only one that blocks M80
+independently of every other. It also has to happen before M87's links
+and before anything writes a `/proc`, and doing the on-disk format once
+is better than doing it twice.
+
+#### Progress notes
+
+*The inode cap was the easy half, and the directory record was the whole
+milestone.* Raising `LEANFS_MAX_INODES` from 192 to 8192 is a number and
+a bigger array. Raising `LEANFS_MAX_NAME` from 27 to 255 is not, because
+27 was never a taste decision — it was exactly what made a directory
+record 32 bytes, so sixteen fitted a block and no record straddled one.
+That invariant is what lets a lookup in a small directory read a single
+sector, and it is worth more than it looks.
+
+A fixed record big enough for a 255-byte name is 260 bytes: it no longer
+divides a block, and it makes a directory of three thousand
+twenty-character filenames 780 KiB that every lookup scans, where the
+names themselves are 60 KiB. So records are variable-length, ext2's
+shape, with the one rule that keeps the block invariant intact: the last
+record in a block has its `rec_len` stretched to reach the end of that
+block, so records tile each block exactly and none ever crosses a
+boundary. A directory is still a whole number of blocks and scanning one
+is still scanning a sector.
+
+*Three things fell out of that which were not planned.* `dir_load` and
+`dir_store` — load the whole directory, modify it, write all of it back
+— are gone, because at 8192 inodes that was two megabytes of scratch and
+four thousand sector writes per created file. Creating a file now writes
+the one block its name landed in. Free space is `inode == 0`, which is
+safe as a sentinel for exactly the reason block 0 is: inode 0 is the
+root, and the root is nobody's child. And the record carries a type, so
+`d_type` is read rather than reconstructed from the trailing `/`
+`SYS_listdir` appends — which M77 had to do because the old record had
+nowhere to put it.
+
+*The stack was the real cost of `PATH_MAX`, and it took two panics to
+find out.* M53's comment next to `LEANFS_MAX_PATH 128` said the number
+was load-bearing because the syscall layer puts a path on an 8 KiB
+kernel stack. It was right. The first boot after the bump panicked in
+`pmm_free_frame` with a double-free — which is what a task writing
+through the bottom of its stack into the allocator's business looks
+like. Fixed by moving the stack, not the path: 8 KiB → 32 KiB.
+
+The second panic was better. `kernel_main` runs every boot self-test on
+its *own* stack (`entry.asm`), which was 16 KiB and is not the one that
+had just been raised. It overran by about 0x6F0 bytes into `.rodata` and
+clobbered the tail of `embedded_programs`, a `static const` array sitting
+just below it. That did not present as a stack overflow. It presented as
+five garbage program names twenty self-tests later, and then as a page
+fault dereferencing the middle of a string literal as a pointer. So that
+stack is 64 KiB now and there is a guard word underneath it that
+`kernel_main` checks and the serial harness greps for. A guard cannot
+catch a leaf frame that jumps clean over it; it catches a chain walking
+down through it, which is the thing that actually happens, and it turns
+an afternoon of bisecting into one line of log.
+
+*Kernel stacks came out of the heap, and that was a self-test telling the
+truth.* With 32 KiB stacks the M67 concurrency test began reporting
+nineteen leaked frames. Nothing had leaked: four concurrent 32 KiB stacks
+were more than the heap had slack for, so the heap grew, and a heap here
+grows by taking frames from the PMM and never giving them back — which is
+indistinguishable from a leak to a test that counts free frames on either
+side of a spawn. A stack is a page-granular object with a page-granular
+lifetime, so it now comes from `pmm_alloc_contiguous` and goes back to
+`pmm_free_contiguous`. The frames a task borrows are the frames it
+returns, and M67's accounting balances because it is telling the truth
+again.
+
+That change then broke M79's own frame assertion, in a way worth
+recording because the comment predicted it exactly. M79's test ends by
+reaping every terminated task, justified with "their kernel stacks are
+heap rather than frames, but their slots have to go back" — true when
+written, false as of this milestone. The sweep was handing the test *more*
+free frames than it started with, so a strict equality failed with a leak
+of zero. The fix is to clear the backlog before the baseline as well as
+after, so "every frame back" does not have to be spelled "every frame
+back, give or take an earlier test's litter".
+
+*The version field is honest about not being used yet.* M81's own bullet
+asked for "a migration that runs once, so an existing image is upgraded
+rather than reformatted", and that is not what shipped. The reason is
+structural rather than a shortcut: the inode table grew by 2016 sectors,
+which moves the bitmap and every data block on the disk, and an in-place
+upgrade would have to relocate the entire data region on a disk already
+sized to hold it. A format change that only reinterprets bytes can
+migrate; one that moves them cannot. So the superblock gained a `version`
+distinct from the magic — the magic guards geometry, the version guards
+meaning — and the branch that would carry a migration is written, is
+currently a reformat, and says in the code that being a reformat is a
+decision rather than an oversight. The inode was padded to 128 bytes in
+the same change, which leaves 44 bytes for M87's link count and symlink
+target to land in without moving anything after them.
+
+*Two bugs the scale found that 400 files would not have.* The self-test
+was written at 400 files first, then raised to 1200 to match the
+milestone's actual claim, and the raise found both. The first was in the
+test: names were formatted with three digits in three places, so file
+1000 was called `f000` and overwrote file 0 — a directory told to hold
+1200 names held 1000, and the test reported the *filesystem* as broken.
+The filesystem was fine. One formatter, wide enough for the count, is the
+fix. The second was real: `dir_add` scanned from block zero on every
+insert, so filling a directory was quadratic in exactly the workload this
+milestone exists for. A one-entry hint remembering where the last insert
+landed takes the common case to a single block read; it is never trusted,
+so a stale hint costs one extra pass and can never hide a hole.
+
+*And a measurement that another milestone was waiting for.* 1200 files,
+a 255-character name, a 252-byte path, a full streaming walk and a
+delete/recreate cycle cost 7.7 s of boot, taking it from 130 s to 135 s.
+Most of what remains is not the insert — it is `dir_lookup` missing:
+creating a file asks whether the name already exists, and that scans
+every block of the directory as an uncached PIO read. M87's "deliberately
+not a buffer cache or a page cache… no measurement has asked for one" is
+the deferral this is the measurement for. It is not cashed here, because
+M81 is not the milestone to add a cache to, but the number now exists and
+M87 should be made to look at it.
+
+*What "unpack a real source tarball" turned into, and why that is not a
+dodge.* The milestone's own "How we'll know" asks for a tarball unpacked
+and walked back. There is no `tar` on this machine and no `gzip`, and
+building one to test a filesystem would be building M89's work inside
+M81. So the self-test creates the tree directly: 1200 files in one
+directory, a name at the 255-byte boundary rather than near it, and a
+252-byte path built by nesting twelve levels the way a real tree produces
+one. The property the tarball was standing in for is what is actually
+asserted — a tree that could not have existed under the old caps, walked
+back entry by entry with every inode number distinct. The tarball
+version of this test becomes possible at M89 and is worth doing then,
+against a tree nobody here chose the shape of.
+
+*Verified.* The serial harness passes 70/70 — the 69 this milestone
+started with plus `[m81]`, and including the new `[boot] kernel stack
+guard intact` line. `tools/leanfs-put.c` was ported to the same format
+and checked end to end rather than by inspection: an image preseeded by
+the host tool boots without the kernel reformatting it (so magic,
+version and geometry all agree) and `/bin` lists 48 entries where the
+build ships 47 — the one extra being the file the tool wrote, which is
+the kernel reading the tool's variable-length records correctly.
+
+### M82 — A page that arrives when it is asked for
+
+- [ ] A page-fault handler that **populates** rather than kills.
+      `SYS_mmap`'s own comment is the specification: *"Backed by real
+      frames at the moment of the call, because nothing here fills a
+      page in on a fault."* Everything in this milestone is that
+      sentence stopping being true
+- [ ] Anonymous zero-fill on first touch, so a mapping costs address
+      space until it costs memory. This is M80's fifth blocker — "the
+      memory budget is still unknown... M78's arena is 128 MiB of
+      *address space*, but every mapping here is backed by a real frame
+      at the moment of the call" — answered at the mechanism rather than
+      by measuring harder
+- [ ] Reference-counted physical frames in M5's PMM, which nothing has
+      needed until now because no frame has ever had two owners. M83 is
+      the milestone that gives them two, and this is where the counting
+      goes so that fork does not invent it
+- [ ] The fault handler distinguishes *this address is not mapped yet*
+      from *this address is not yours*, and the second one still ends
+      the process the way M4's handler always has. A page fault that
+      silently succeeds where it used to catch a bug is the regression
+      this milestone is most able to cause, and `badptr` is the test
+      that already exists to catch it
+- [ ] Deliberately **not** swap. There is nowhere to put an evicted page
+      that is not this project's own filesystem, no measurement asking
+      for one, and M69's rule says performance work waits for a
+      measurement. The ceiling stays physical; it just stops being
+      reserved in advance
+
+**How we'll know.** A mapping substantially larger than the machine's
+RAM, touched sparsely, works — and the physical high-water mark reported
+by the PMM equals the number of pages actually touched, not the number
+mapped. The second half is the whole test: a large mapping that
+*succeeds* proves nothing if it quietly allocated everything.
+
+### M83 — Two processes from one
+
+- [ ] `fork()`, with copy-on-write over M82's fault handler and M82's
+      frame refcounts. The child gets its own address space, its own
+      copy of the fd table (M14 already inherits one, so this half
+      exists), the same cwd, the same environment, and 0 where the
+      parent gets a pid
+- [ ] Reverse M13's "no fork," explicitly and in writing. **M13 was
+      right when it was written** — a combined spawn is the correct
+      primitive for a machine with no fault handler, because the only
+      alternative was a full eager copy of an address space. M82 is what
+      changes the trade, and the sentence in M80's notes that says this
+      OS "has no `fork` and never will" is the one this milestone
+      retires. A deferral that named its own condition is being
+      collected, which is the pattern, not a reversal of judgement
+- [ ] `SYS_spawn` stays, unchanged and un-deprecated. It is not a
+      workaround that fork replaces — it is `posix_spawn`, it is what
+      every launcher on this desktop already calls, and it remains the
+      cheap path for the overwhelmingly common case of "start this
+      program." Two primitives because there are genuinely two things
+- [ ] `MAX_TASKS` (128) and the scheduler's slot table meet a workload
+      that creates and destroys processes in a loop for the first time.
+      Slots are never recycled today — `SYS_taskinfo`'s comment says so
+      and `SYS_wait` relies on it — and a shell running a build will
+      exhaust 128 in seconds. Recycling a slot without breaking what
+      reads it is the real work in this bullet
+- [ ] Deliberately **not** `vfork`, and not `posix_spawn` as a third
+      spelling. One eager primitive and one lazy one is the whole set
+
+**How we'll know.** The classic, and it has to be the classic because it
+is the thing that is hard to fake: fork, have both sides write to the
+same page, and have each read back only its own value — while the PMM
+reports one shared frame before the writes and two after. Then a shell
+loop that forks and reaps ten thousand times and leaves the slot table
+where it found it, which is the `MAX_TASKS` half.
+
+### M84 — A program that replaces itself
+
+- [ ] `execve`, which tears down the calling task's address space and
+      loads a new image into the same task — same pid, same cwd, same
+      parent, same fd table minus what is marked to close
+- [ ] `FD_CLOEXEC` becomes a thing that means something. `<fcntl.h>`
+      currently reads *"There is no exec on this machine (SYS_spawn
+      loads a fresh image and copies the fd table), so FD_CLOEXEC has
+      nothing to mean and is genuinely not set"* — an honest comment
+      that this milestone makes false, and the header has to change with
+      it or it becomes the first dishonest sentence in that file
+- [ ] The wait family, properly. `SYS_wait`'s comment says it *"polls +
+      cooperatively yields rather than a real blocking wait queue — M14
+      is where 'more complete wait semantics' is scoped to land."* M14
+      did not land it. `waitpid` with `WNOHANG`, a real wait queue, and
+      `WIFEXITED`/`WEXITSTATUS`/`WIFSIGNALED`/`WTERMSIG` that decode a
+      status rather than a bare exit code — which also fixes
+      `SYS_task_alive`'s three-way squashing of "exited nonzero" and
+      "died on a signal" into one answer
+- [ ] `PATH` search in the exec family (`execvp`, `execlp`), which M75
+      explicitly deferred: *"Deliberately not a full PATH-search exec...
+      M72 already owns those."* M72 owns the shell's copy of it; this is
+      the libc's
+- [ ] Deliberately **not** `#!` handling in the kernel. M72 already
+      resolves a shebang in the shell and that is where it belongs on a
+      machine whose kernel has no opinion about interpreters
+
+**How we'll know.** `sh` runs a three-stage pipeline in which every
+stage is a real fork + exec + `waitpid`, and reports each stage's exit
+status distinctly — including one that died on a signal, which is the
+case the current `SYS_wait` structurally cannot report. And an fd marked
+`FD_CLOEXEC` is gone on the far side of the exec while its neighbour
+survives.
+
+### M85 — A terminal that is a device
+
+- [ ] `/dev/tty`, a real terminal device with a line discipline:
+      canonical mode, echo, erase, kill, and the raw mode an editor
+      needs. `<unistd.h>`'s `isatty` says today that *"There is no
+      terminal device here to ask, so this is the honest approximation
+      and not a stub"* — this is the milestone that gives it something
+      to ask
+- [ ] `<termios.h>` and the four `ioctl`s that matter
+      (`TCGETS`/`TCSETS`, `TIOCGWINSZ`, `TIOCSPGRP`), which is the first
+      `ioctl` on this machine and should be the narrow one it looks like
+      rather than a general escape hatch
+- [ ] Sessions and controlling terminals: `setsid`, `getsid`,
+      `tcgetpgrp`/`tcsetpgrp`. Process groups already exist —
+      `SYS_getpgid` has been there since syscall 10 — and have never had
+      the thing that makes them useful
+- [ ] Job control signals, which are simply absent from
+      `system_api/include/signal.h` today: `SIGSTOP`, `SIGCONT`,
+      `SIGTSTP`, `SIGTTIN`, `SIGTTOU`. `SIGSTOP` joins `SIGKILL` as the
+      second uncatchable one, and the scheduler grows a STOPPED state
+      distinct from the blocked-on-something states it has
+- [ ] `^C` raises `SIGINT` on the **foreground process group** and not
+      on the shell; `^Z` raises `SIGTSTP`; a background process reading
+      the terminal gets `SIGTTIN` rather than stealing the user's
+      keystrokes
+- [ ] `gui_terminal` becomes the master side of a pty rather than a
+      program that owns a pipe, so that everything above is true of the
+      terminal a person actually types into and not only of the serial
+      console
+
+**How we'll know.** In `qemu-input-test.sh`, with real keys, because
+M40's entire lesson is that this is the layer where the serial harness
+and the truth diverge: `^C` kills a running pipeline and leaves the
+shell's prompt alive; `^Z` suspends it and `fg` brings back the same
+process rather than a new one; and a backgrounded program that reads
+stdin stops instead of consuming the next thing typed at the prompt.
+
+### M86 — A shell that is a shell
+
+- [ ] `sh.c`'s own header is the specification. It says what is missing:
+      *"job control, `&`, subshells, functions, and `|`"* — the last one
+      meaning more than a single pipe. All five, now that M83 and M85
+      make four of them expressible
+- [ ] Two variable namespaces, and `export` that moves a name between
+      them. M75 wrote: *"`export` is accepted and does nothing but
+      assign, because this shell has one namespace — the reason POSIX
+      has two is subshells and functions, and it has neither."* This is
+      the milestone where it has both, and that sentence stops being a
+      justification and becomes a to-do
+- [ ] `if`/`while`/`for`/`case`, `&&`/`||`, command substitution,
+      parameter expansion with the `${x:-y}` family, and `$?`/`$#`/`$@`
+- [ ] `jobs`, `fg`, `bg`, and the builtins job control implies, over
+      M85's `tcsetpgrp`
+- [ ] Deliberately **not** a `bash`, and deliberately not an arithmetic
+      expansion engine or `[[`. The measure is a `configure` script that
+      someone else wrote running to completion, not a feature list
+
+**How we'll know.** A shell script nobody here wrote runs correctly —
+the honest candidate is a real `configure`, because it is the densest
+per-line user of exactly the five things the header admits are missing.
+A script written here to exercise the new features proves that they were
+implemented, which is a much weaker claim than that they were
+implemented *right*.
+
+### M87 — Files with a type, a place, and more than one name
+
+- [ ] `kernel/fs/vfs.h` calls itself *"the seam a second filesystem type
+      would plug into if this project ever needed one"* and says the
+      pass-through is honest *"right now."* This milestone is the day it
+      needs one: a vnode layer and a real mount table, replacing
+      path-string dispatch
+- [ ] `devfs` at `/dev`: `null`, `zero`, `full`, `random`/`urandom`,
+      `tty`, `console`, `fd/*`. This is not a nicety — it is the single
+      most common thing a ported program touches that this machine
+      cannot answer, and every one of them is a few lines behind a vnode
+      layer that exists
+- [ ] `procfs` at `/proc`: `self`, `self/exe`, `N/status`, `N/cmdline`,
+      `uptime`, `meminfo`. `SYS_taskinfo`'s whole-shot snapshot stays
+      for `task_manager`, which is a lean_os program and should keep
+      using the lean_os interface; `/proc` is for programs that have
+      never heard of it
+- [ ] Symbolic links and hard links in leanfs v2, and `O_NOFOLLOW`,
+      `readlink`, `symlink`, `link`. M75 wrote down exactly where this
+      lands: *"With no symbolic links on this machine, `/a/b/..` and
+      `/a` name the same directory by construction... The day this
+      filesystem grows links is the day that stops being true, and the
+      comment above `path_normalize` is where it stops."* That comment
+      is this bullet's specification, written a year early
+- [ ] Loop detection with a hop limit, because the first symlink is also
+      the first way to hang the kernel's path walker in a way no input
+      before it could
+- [ ] The `*at()` family (`openat`, `fstatat`, `unlinkat`, `renameat`),
+      a real `O_EXCL` — `<fcntl.h>` currently defines it as 0 with a
+      comment saying a program relying on it *"gets no protection"* —
+      plus `ftruncate` (declined in `<unistd.h>` pending a caller;
+      `leanfs_handle_truncate` has been sitting there the whole time)
+      and `fsync`
+- [ ] Deliberately **not** a buffer cache or a page cache. M82 makes one
+      possible and no measurement has asked for one; M69's rule
+
+**How we'll know.** A program that has never heard of this OS opens
+`/dev/null` and writes to it, reads 64 bytes from `/dev/urandom` and
+gets 64 different-looking bytes, and finds itself at `/proc/self/exe`. A
+symlink loop returns `ELOOP` rather than hanging the machine. And `cp
+-r` over a tree containing a symlink and a hard link reproduces both as
+what they were, rather than as two copies.
+
+### M88 — Everything else a ported program calls
+
+- [ ] `poll()` and `select()`, built over `SYS_waitfds` (syscall 68),
+      which is genuinely the same idea under a lean_os name — so this is
+      a header and a shim, not a kernel feature, and should be the
+      cheapest bullet in the arc
+- [ ] `O_NONBLOCK` that is a real bit. `<fcntl.h>` defines it as 0 today
+      with *"every descriptor here is what it is"* next to it, and
+      `fcntl` refuses to set flags specifically because it will not
+      accept one it cannot honour. Pipes, sockets and M85's tty each
+      grow a non-blocking path, and `fcntl`'s `F_SETFL` starts saying
+      yes
+- [ ] `AF_UNIX` sockets and `socketpair`, which is what a ported program
+      reaches for where this project has always used a named pipe, plus
+      the BSD spelling (`<sys/socket.h>`, `<netdb.h>`,
+      `getaddrinfo`/`gethostbyname`) over the stack M27, M64 and M66 already
+      built. The stack is real; only the names are missing
+- [ ] `sysconf`, `getrlimit`/`setrlimit`, `getrusage`, `times`,
+      `statvfs`, `utime`/`utimensat`, `getuid`/`geteuid`/`getpwuid`.
+      The identity calls return 0 and a single `root` entry, and that is
+      **not** the fiction M65 refused to write: a machine with exactly
+      one principal that reports one principal is telling the truth. The
+      lie M65 declined was a *permission model* that pretended to
+      enforce something, and nothing here enforces anything
+- [ ] UTF-8 in the C library: `mbrtowc`, `wcrtomb`, a real
+      `<wchar.h>` instead of the Latin-1 one that says at the top that
+      it is wrong above U+00FF, and `nl_langinfo(CODESET)` finally
+      allowed to say `UTF-8` truthfully
+- [ ] Deliberately **not** the glyphs. The font is one byte per glyph
+      (M39/M57) and a font covering more than Latin-1 is a font project,
+      not a libc one. The split is exact and worth stating: after this
+      milestone the *encoding* is correct end to end and text round-trips
+      through the system unmangled; text above U+00FF still draws as a
+      replacement box. That is a rendering limitation a program can be
+      told about, which is categorically better than an encoding
+      limitation that corrupts its data
+
+**How we'll know.** `nettest` and `httpd` rewritten against the BSD
+names and the plain `<sys/socket.h>` spelling, still passing the same
+serial assertions they pass now — the point being that they are now
+programs a Unix programmer could have written without reading anything
+in `system_api/`. And a UTF-8 string written to a file, read back,
+`wcrtomb`'d and compared byte for byte, which is the round trip that
+catches an encoding that is merely plausible.
+
+### M89 — Somebody else's userland
+
+- [ ] Port **toybox** (or busybox) — M63's rule at the largest scale it
+      goes: its build's own errors are the specification, and no patch
+      to its source. One static binary, multi-call, a hundred and fifty
+      or so utilities
+- [ ] `/bin` stops being six programs. Today it is `ls`, `cat`, `cp`,
+      `echo`, `env` and `sh`; there is no `rm`, no `mv`, no `mkdir`, no
+      `ps`, no `grep`, no `sed`, no `find`, no `sort`, no `wc`, no
+      `test`, no `tar`, no `xargs` — and every one of those is a program
+      a script someone else wrote assumes without thinking about it
+- [ ] The lean_os programs that overlap stay, and this is a real
+      decision rather than sentiment: `ls` here knows about leanfs's own
+      shape and `caps` has no toybox equivalent. Where toybox and this
+      tree both provide a name, the one in `/bin` is the ported one and
+      the lean_os one keeps its own name, because a script does not care
+      and a person might
+- [ ] This milestone is also the arc's own test. Toybox is the densest
+      single consumer of the POSIX surface that exists in one build:
+      whatever M81–M88 got wrong, its build breaks on, and it breaks
+      with a compiler error naming the thing rather than with a desktop
+      that feels slightly off
+
+**How we'll know.** `find . -type f | xargs grep -l something | sort |
+uniq -c | sort -rn` — five stages, every one of them a program nobody
+here wrote, connected by M86's pipes, forked and exec'd by M83 and M84,
+over a tree that could not have existed before M81, interruptible with
+`^C` by M85. One command line that is false if any milestone in the arc
+is incomplete.
+
+### Where this leaves M80, and the deferral M89 is likely to collect
+
+**M80 becomes attemptable again after M84**, not after M89.
+`posixmodule.c`'s list — `fork`, `execv`, `waitpid`, `pipe2`, `select`,
+`poll`, `sysconf`, `getuid`, `chmod`, `symlink`, `readlink`, `utime`,
+`statvfs`, `sched_yield` — is M83, M84, M87 and M88 almost exactly, with
+`chmod` the one entry that stays a truthful failure. Its two remaining
+blockers that this arc does not address are both build-side rather than
+OS-side: a host CPython to run `_freeze_module`, and the decision about
+where the standard library lives — which M81 turns from a hard
+constraint into an ordinary choice, since a filesystem holding thousands
+of files can simply hold the `.py` files.
+
+**And the dynamic-linking deferral names its own collection date.** The
+"Deliberately not next" note below says shared objects become worth
+building *"once something concrete asks for it (a C-extension wheel; a
+second and third static binary duplicating the same libc)."* After M89
+there is a toybox and a Python and a `/bin` full of programs, every one
+of them carrying its own copy of this libc into memory. That is the
+second and third static binary, arriving exactly as predicted. It is
+still not in this arc — the arc is nine milestones already and a loader
+is its own — but the condition will have been met rather than argued
+about, which is how this project has always preferred to decide.
+
 ## Deliberately not next, and why
+
+*Re-read after the M81–M89 arc was written, because "next" moved.* Every entry below is still deliberately not next — none of them is in
+that arc either. Three have changed status in a smaller way and say so
+in place: the journal, the loader, and uids. Nothing here was
+reversed by writing the arc, which is worth recording, because an arc
+that quietly collected its own deferrals would be the drift
+this section exists to prevent.
 
 - **A GPU driver, or real mode-setting.** Already argued in the
   stretch-goal list: it is a driver per vendor, and it is not a thing
@@ -6640,16 +7192,27 @@ warning was right rather than assuming it was.
   threads, not a loader. Worth building once something concrete asks
   for it (a C-extension wheel; a second and third static binary
   duplicating the same libc), same measure-first discipline as M69's
-  deferred performance work. It is also the real fork in the road
+  deferred performance work. **Still not next, but the condition is now
+  scheduled rather than hypothetical:** M89 produces exactly that second
+  and third static binary, so this is a deferral with a date rather than
+  an open question — see the arc's closing note. It is also the real fork in the road
   toward a browser: nothing at that scale ships as one static binary.
 - **Multi-user, logins, uids.** M65 argued this exactly right: there are
   no users here, and inventing one would be a larger lie than the one it
   fixed. It becomes real if and when two people share a machine, and not
-  before.
+  before. **Unchanged by the arc, and M88's `getuid()` is not a crack in
+  it:** a machine with one principal that reports one principal is
+  telling the truth. What M65 refused was a permission model that
+  pretended to enforce something, and M88 adds no enforcement — which
+  is also why `chmod` stays a truthful failure rather than a no-op that
+  returns 0.
 - **A journalling filesystem.** M71 buys most of the safety with write
   ordering and a mount check. A journal is worth it when there are
   multiple writers or when a full scan gets slow, and neither is true of
-  an 8 MiB-file filesystem on a 36 MiB image.
+  an 8 MiB-file filesystem on a 36 MiB image. **M81 is where that second
+  clause gets re-measured**, because thousands of files is the first
+  thing that could make a full scan slow — re-measured, not assumed:
+  M81's own bullet says "nearly" is not a measurement.
 - **Self-hosting (a compiler on the machine).** The romantic end state,
   and genuinely out of reach — but M72 moves the line: after it, some of
   what needed a cross-compiler needs a script instead.

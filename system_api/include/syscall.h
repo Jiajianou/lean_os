@@ -225,4 +225,55 @@
 #define SYS_thread_exit 79 /* (value) -> never returns. Ends THIS thread and nothing else, unlike SYS_exit which ends the whole thread group the way POSIX exit() does. The address space survives until the last task using it goes - see kernel/sched/sched.c's task_exit_with_code, where "am I the last user of this page table" replaced "am I a process". */
 #define SYS_gettid 80 /* () -> this task's own id. SYS_getpid answers with the thread GROUP's id, which is what a program means by "my pid" and what it was already returning before threads existed (a process is its own group). The two differ only inside a thread, which is exactly when the difference matters - raise() has to reach the calling thread, not the leader. */
 
-#define SYSCALL_COUNT 81
+/* M81: (path, uint32_t *cookie, buf, buflen) -> bytes written into buf, 0 at the end of the directory, or -1.
+ *
+ * The streaming counterpart to SYS_listdir (7), which is whole-shot: it
+ * writes every name in a directory, newline-separated, with a '/' on the
+ * ones that are directories, into one buffer sized by the caller. That
+ * shape was built for a person reading a terminal and <dirent.h> said so
+ * in as many words; it also could not survive M81 raising the file count
+ * from 192 to 8192, because "size the buffer for the whole directory" is
+ * not something a caller can do when a directory can hold thousands of
+ * names of up to 255 bytes.
+ *
+ * So this one fills whatever buffer it is given with as many whole
+ * os_dirent_t records as fit and reports where it got to in `cookie` -
+ * zero to start, and handed straight back on the next call. A partial
+ * record is never written: a caller that gets fewer bytes than it asked
+ * for got fewer entries, not half of one.
+ *
+ * SYS_listdir stays, and is not deprecated. `ls` and the terminal want a
+ * blob of newline-separated names and building one out of records would
+ * be longer than asking for it - and since M81 both are the same walk
+ * inside the kernel, so there is no second implementation to drift. */
+#define SYS_getdents   81
+
+/* M81: the record SYS_getdents writes, and the two limits that go with
+ * it. Kept here rather than in a header of its own because it is part of
+ * one syscall's contract and nothing else refers to it.
+ *
+ * `reclen` is the distance to the next record, so a caller walks the
+ * buffer without knowing what a name length is; it is rounded up to a
+ * multiple of 8 so every record after the first is aligned. The name IS
+ * NUL-terminated here, unlike its on-disk form - a kernel that has
+ * already copied the bytes can afford the terminator, and every caller
+ * in user space wants a C string. */
+#define OS_NAME_MAX 255      /* the longest name leanfs stores - matches <dirent.h>'s NAME_MAX */
+#define OS_DT_UNKNOWN 0
+#define OS_DT_DIR     4      /* the same values <dirent.h> uses, so libc's readdir copies rather than translates */
+#define OS_DT_REG     8
+
+typedef struct {
+    unsigned int   ino;      /* the inode number, which since M81 is a real one */
+    unsigned short reclen;   /* bytes from here to the next record; a multiple of 8 */
+    unsigned char  type;     /* OS_DT_* */
+    unsigned char  name_len; /* not counting the NUL */
+    char           name[];   /* name_len bytes, then a NUL, then padding to reclen */
+} os_dirent_t;
+
+/* The most bytes one record can take: the header, the longest name, its
+ * NUL, and up to 7 bytes of alignment padding. A caller whose buffer is
+ * at least this big can never be told "nothing fits". */
+#define OS_DIRENT_MAX (8 + OS_NAME_MAX + 1 + 7)
+
+#define SYSCALL_COUNT 82

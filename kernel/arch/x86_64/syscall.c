@@ -85,13 +85,14 @@ typedef long (*syscall_fn_t)(uint64_t a1, uint64_t a2, uint64_t a3,
  *    length, and allocating one per call would turn every large write
  *    into an allocation that can fail.
  *
- * There is deliberately no copy_from_user counterpart to copy_to_user:
- * no syscall in this project takes a fixed-size struct *from* the caller
- * (the window-manager protocol carries its structs over pipes, not
- * arguments), so it would be a primitive with no user - which this
- * project has refused to write before, for the reasons kernel/ipc/pipe.h
- * gives about pipe_named. The day one is needed it is four lines, and
- * the rule it enforces is already written down here.
+ * This paragraph used to say there was deliberately no copy_from_user
+ * counterpart, because no syscall took a fixed-size struct *from* the
+ * caller, and that "the day one is needed it is four lines". That day was
+ * M64 - SYS_sendto's payload - and the function has been sitting a few
+ * lines below ever since. Corrected here rather than left standing,
+ * because a comment that says a thing does not exist while it does is
+ * worse than no comment at all: it is the one a reader believes without
+ * checking. M81 reads it too (SYS_getdents's cookie)
  *
  * In-place use is safe here for a reason worth stating rather than
  * assuming: the only way a mapping in the private region can go away is
@@ -220,12 +221,25 @@ static int copy_str_from_user(char *dst, uint64_t src, uint64_t max) {
  * Refuses rather than truncates when the result will not fit, the same
  * rule copy_str_from_user follows and for the same reason.
  */
+/* M81: the most path components this layer will resolve. See `starts`
+ * below for why it is a number of its own rather than a function of
+ * LEANFS_MAX_PATH. */
+#define PATH_MAX_DEPTH 128
+
 static int path_normalize(char *out, const char *in) {
     /* A stack of component start offsets in `out`, so ".." can pop the
-     * last one without re-scanning. Depth is bounded by the path length,
-     * and LEANFS_MAX_PATH / 2 is the most components a path that short
-     * can hold ("/a/a/a..."). */
-    int starts[LEANFS_MAX_PATH / 2];
+     * last one without re-scanning.
+     *
+     * M81: bounded by PATH_MAX_DEPTH rather than by LEANFS_MAX_PATH / 2.
+     * The old bound was exactly right - a component needs at least two
+     * bytes, so a path can hold at most half its length in components -
+     * and it was 64 entries while a path was 128 bytes. At 4096 it is
+     * 2048 entries, which is 8 KiB of kernel stack to describe a
+     * pathological path nobody will type. A tree deeper than
+     * PATH_MAX_DEPTH is refused, which is a real limit and a far smaller
+     * one than a filesystem this shape can reach: the deepest path in
+     * anything this OS has ever held is four. */
+    int starts[PATH_MAX_DEPTH];
     int depth = 0;
     int n = 0;
 
@@ -302,9 +316,18 @@ static int copy_path_from_user(char *out, uint64_t src) {
         return path_normalize(out, raw);
     }
     /* Relative: join onto the caller's directory. Built in a second
-     * buffer because the join can be longer than either piece and
-     * path_normalize reads its input while writing its output. */
-    char joined[LEANFS_MAX_PATH * 2];
+     * buffer because path_normalize reads its input while writing its
+     * output.
+     *
+     * M81: one PATH_MAX rather than two. The doubled buffer existed so
+     * that a join which overflows could still be *normalized* down under
+     * the limit ("/very/long/cwd/../../x"), and at a 128-byte PATH_MAX
+     * that was a plausible thing for a caller to do. At 4096 it is not,
+     * and 8 KiB of kernel stack to keep the possibility open is the wrong
+     * trade. A join that does not fit is refused before it is
+     * normalized, which is a slightly stricter rule stated here rather
+     * than discovered. */
+    char joined[LEANFS_MAX_PATH];
     /* M79: the working directory belongs to the process, not the task -
      * POSIX is explicit that a chdir in one thread is seen by all of
      * them, and it is the same argument sched_vm_owner makes about the
@@ -1047,6 +1070,87 @@ static long sys_listdir(uint64_t path_ptr, uint64_t buf, uint64_t maxlen, uint64
         return -1; /* an ordinary file, or nothing at all - either way not something with contents to list */
     }
     return (long)vfs_list(path, (char *)buf, (size_t)maxlen);
+}
+
+/* M81: as many whole directory records as fit in the caller's buffer,
+ * resuming from `cookie`.
+ *
+ * The one design decision worth stating: a partial record is never
+ * written. The loop fetches an entry, works out what it costs, and stops
+ * *without consuming it* if it will not fit - which is why `cookie` is
+ * only advanced past entries that actually reached the caller. Getting
+ * that backwards is how a directory walk silently skips a file, and a
+ * skipped file in a tree walk is a much worse failure than a short read.
+ *
+ * `cookie` lives in user space and is read and written each call. That
+ * makes it the caller's business to keep, which is right - it is a
+ * position in *their* walk, and two programs reading one directory have
+ * two of them and no shared state in the kernel at all.
+ */
+static long sys_getdents(uint64_t path_ptr, uint64_t cookie_ptr, uint64_t buf,
+                         uint64_t buflen, uint64_t a5, uint64_t a6) {
+    (void)a5;
+    (void)a6;
+    char path[LEANFS_MAX_PATH];
+    if (copy_path_from_user(path, path_ptr) != 0 ||
+        !user_range_ok(cookie_ptr, sizeof(uint32_t), 1) ||
+        !user_range_ok(buf, buflen, 1)) {
+        return -1;
+    }
+    /* Resolved once for the whole fetch, not once per entry: walking
+     * "/a/b/c" costs a block read per component, and paying that per
+     * record would put a hidden factor of the path depth on a directory
+     * of thousands - which is the case this call exists for. */
+    int dir = vfs_dir_open(path);
+    if (dir < 0) {
+        return -1;
+    }
+
+    uint32_t cookie;
+    if (copy_from_user(&cookie, cookie_ptr, sizeof(cookie)) != 0) {
+        return -1;
+    }
+
+    size_t written = 0;
+    for (;;) {
+        leanfs_dir_entry_t e;
+        uint32_t next = cookie;
+        int rc = vfs_readdir_at(dir, &next, &e);
+        if (rc < 0) {
+            return -1;
+        }
+        if (rc == 0) {
+            break; /* end of the directory */
+        }
+
+        size_t name_len = k_strlen(e.name);
+        size_t need = (sizeof(os_dirent_t) + name_len + 1 + 7) & ~(size_t)7;
+        if (written + need > buflen) {
+            /* Does not fit. Leave `cookie` where it was so this entry is
+             * the first one the next call returns, and report what did
+             * fit. A caller whose buffer is at least OS_DIRENT_MAX never
+             * sees this on the first record, so "0 bytes" always means
+             * end-of-directory and never "your buffer is too small". */
+            break;
+        }
+
+        os_dirent_t rec;
+        rec.ino = e.inode;
+        rec.reclen = (unsigned short)need;
+        rec.type = e.is_dir ? OS_DT_DIR : OS_DT_REG;
+        rec.name_len = (unsigned char)name_len;
+        if (copy_to_user(buf + written, &rec, sizeof(rec)) != 0 ||
+            copy_to_user(buf + written + sizeof(rec), e.name, name_len + 1) != 0) {
+            return -1;
+        }
+        written += need;
+        cookie = next;
+    }
+
+    if (copy_to_user(cookie_ptr, &cookie, sizeof(cookie)) != 0) {
+        return -1;
+    }
+    return (long)written;
 }
 
 /* M53: one directory, whose parent must already exist. */
@@ -3018,6 +3122,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_thread_create] = sys_thread_create,
     [SYS_thread_exit] = sys_thread_exit,
     [SYS_gettid] = sys_gettid,
+    [SYS_getdents] = sys_getdents,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

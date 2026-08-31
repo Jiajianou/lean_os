@@ -85,8 +85,24 @@
 #define STATUS_BG      0x00141820u
 #define STATUS_ERR_FG  0x00E08878u
 
-#define MAX_FILES    48
-#define MAX_NAME_LEN 32 /* leanfs's real cap (LEANFS_MAX_NAME, kernel/fs/leanfs.h) is 27 + a NUL - this just needs to be at least that, kept as its own constant since that header isn't visible to user_space builds */
+/* M81: 48 -> 512 and 32 -> 256.
+ *
+ * MAX_NAME_LEN was a correctness bug the moment leanfs's names went to
+ * 255, not a cosmetic one: a name longer than 31 bytes was truncated on
+ * the way in, and entry_path() builds the path it opens out of the
+ * truncated copy - so double-clicking a long name would have opened
+ * nothing, or something else. It is now leanfs's real cap plus a NUL.
+ *
+ * MAX_FILES is a window's capacity rather than a filesystem's, and it
+ * stays that way - but 48 was chosen when the whole disk held 192 files
+ * and a directory now holds thousands, so it was the smaller lie of the
+ * two. 512 entries of 256 bytes is 128 KiB of this program's own .bss,
+ * which is the price of not silently hiding files.
+ *
+ * Kept as constants here rather than including the kernel header, which
+ * user_space builds cannot see. */
+#define MAX_FILES    512
+#define MAX_NAME_LEN 256
 #define LIST_BUF_SIZE 2048
 #define DOUBLE_CLICK_MS 500
 
@@ -182,7 +198,18 @@ static int path_in_cwd(const char *name, char *out) {
  * same two flavors: one that takes typing and one that takes y/n. */
 #define PROMPT_W 260
 #define PROMPT_H 72
-#define PROMPT_MAX_LEN 27 /* LEANFS_MAX_NAME - a name this window cannot express is one it should not offer to create */
+/* M81: this is a *window* limit and no longer a filesystem one, which is
+ * a distinction worth keeping rather than quietly raising to 255.
+ *
+ * The original comment said "a name this window cannot express is one it
+ * should not offer to create", and that reasoning is still exactly right
+ * - the prompt field does not scroll, so a name longer than fits in it
+ * could be typed and never read back. What changed is that 27 is no
+ * longer also leanfs's cap: this dialog now refuses names the filesystem
+ * would accept, and says so here rather than leaving a reader to assume
+ * the two numbers are still the same one. Raising it means making the
+ * field scroll, which is a UI change and not this milestone's. */
+#define PROMPT_MAX_LEN 48
 #define PROMPT_BG      0x00243040u
 #define PROMPT_BORDER  0x004C6699u
 #define PROMPT_TEXT    0x00E8E8E8u
@@ -280,7 +307,7 @@ static void format_date(uint32_t mtime, char *out) {
 }
 
 /* M59: an insertion sort over the parallel arrays. Insertion rather than
- * anything cleverer for the honest reason: MAX_FILES is 48, the list is
+ * anything cleverer for the honest reason: MAX_FILES is small, the list is
  * re-sorted only when it is re-read, and forty-eight elements is the size
  * at which a simpler algorithm is also the faster one.
  *

@@ -110,6 +110,12 @@
 FOR_EACH_EMBEDDED_PROGRAM(DECLARE_EMBEDDED_PROGRAM)
 #undef DECLARE_EMBEDDED_PROGRAM
 
+/* M81: the word entry.asm stamps immediately below the boot stack. See
+ * the checking code near the desktop handoff, and entry.asm for why it
+ * exists at all. */
+extern uint64_t kernel_stack_guard[];
+#define KERNEL_STACK_GUARD_VALUE 0x5354414B47554152ULL /* "STAKGUAR" */
+
 typedef struct {
     const char *name;
     const uint8_t *start;
@@ -914,6 +920,23 @@ static void quick_task(void *arg) {
  * the legacy BIOS ranges kernel/acpi/acpi.c scans, so without this ACPI
  * simply is not found - which had been silently true (and quietly costing
  * this kernel SMP) since M26 removed the BIOS boot path. */
+/* M81: "fNNNN" for the file storm in the M81 self-test, four digits wide.
+ *
+ * A function because the first version of that test open-coded three
+ * digits in three places, which silently wrapped at a thousand: file 1000
+ * was named "f000" and overwrote file 0, so a directory told to hold 1200
+ * names held 1000 and the test reported the filesystem as broken. The
+ * filesystem was fine. One formatter, wide enough for the count, is both
+ * the fix and the reason it is not written inline three times. */
+static void m81_storm_name(char *out, int i) {
+    out[0] = 'f';
+    out[1] = (char)('0' + (i / 1000) % 10);
+    out[2] = (char)('0' + (i / 100) % 10);
+    out[3] = (char)('0' + (i / 10) % 10);
+    out[4] = (char)('0' + i % 10);
+    out[5] = '\0';
+}
+
 void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys) {
     klog_init();
     klog_puts("lean_os kernel: hello from C!\n\n");
@@ -8531,6 +8554,28 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!tt_img) {
             panic("M79 self-test: /bin/threadtest is not on this disk");
         }
+        /* M81: reap everything already dead BEFORE the baseline, not
+         * after.
+         *
+         * The sweep at the end of this test used to be justified with
+         * "their kernel stacks are heap rather than frames, but their
+         * slots have to go back" - true when it was written, and made
+         * false by M81 moving task stacks from kmalloc to
+         * pmm_alloc_contiguous. Reaping a task left over from an earlier
+         * self-test now returns its stack's frames, so the sweep was
+         * handing this test *more* free frames than it started with and
+         * the strict equality below failed with a leak of zero. Clearing
+         * the backlog first keeps the assertion exact, which is the
+         * property worth protecting: "every frame back" should not have to
+         * be spelled "every frame back, give or take an earlier test's
+         * litter". */
+        for (int i = 0; i < sched_task_count(); i++) {
+            task_t *stale = sched_task_by_slot(i);
+            if (stale && stale->state == TASK_TERMINATED) {
+                selftest_reap(stale);
+            }
+        }
+
         uint64_t frames_before = pmm_free_frame_count();
 
         const char *tt_argv[] = {PATH_BIN_DIR "threadtest", 0};
@@ -8587,9 +8632,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * declining to free because the others looked alive, is exactly
          * a leak and exactly what this counts.
          *
-         * Reaping every terminated thread first: their kernel stacks are
-         * heap rather than frames, but their slots have to go back or the
-         * next milestone's self-test starts from a smaller table. */
+         * Reaping every terminated thread first: their slots have to go
+         * back or the next milestone's self-test starts from a smaller
+         * table, and since M81 their kernel stacks are frames too - which
+         * is exactly why the same sweep now also runs before the baseline
+         * above. Both sweeps are needed: this one returns what this test
+         * created, that one clears what earlier tests left. */
         for (int i = 0; i < sched_task_count(); i++) {
             task_t *o = sched_task_by_slot(i);
             if (o && o->state == TASK_TERMINATED) {
@@ -8614,6 +8662,279 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "million, memory written by one thread read by the other, separate tids "
                    "under one pid, each thread's floating-point state surviving the other's, "
                    "and every frame back when the last of them left - self-test passed.\n\n");
+    }
+
+    /* M81 self-test: a filesystem that can hold somebody else's program.
+     *
+     * Four claims, and each one is a wall this filesystem had before this
+     * milestone rather than a limit it merely approached:
+     *
+     *   1. More files than the old whole-disk cap of 192. The number
+     *      below is deliberately well past it, because "192 was a floor
+     *      under every real workload" is the milestone's whole argument
+     *      and a test that created 190 would prove nothing.
+     *   2. A name longer than 27 characters - the longest one leanfs
+     *      will now take, so the boundary itself is exercised rather
+     *      than a comfortable value near it.
+     *   3. A path longer than 128 bytes, built by nesting, because a
+     *      deep tree is how a real source tarball produces one.
+     *   4. Every one of them found again by streaming readdir, with the
+     *      inode numbers all distinct - which is the check that a
+     *      directory holding hundreds of variable-length records across
+     *      many blocks is being walked correctly and not merely being
+     *      walked without crashing.
+     *
+     * The cost is reported rather than hidden. Every file here is real
+     * PIO writes on a disk this project measured as its slowest thing
+     * (M56), and a self-test that quietly added a minute to every boot
+     * would be a bad trade made invisibly. See the timing line below: if
+     * it grows, that is the number to argue with.
+     */
+    {
+        int all_ok = 1;
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+
+        /* Thousands, because that is the claim. The milestone's argument
+         * is that 192 was not a small ceiling but a floor below every
+         * real workload - a language's standard library is roughly three
+         * thousand files - so a test that created 190 and passed would be
+         * measuring nothing.
+         *
+         * This is the one number here that is a trade rather than a
+         * boundary, and the trade was measured rather than guessed: 400
+         * files cost 2.1 s of boot, so the cost is about 2.7 ms per file
+         * operation and this many is a little under seven seconds of a
+         * 130-second boot. If that ever stops being worth it, the timing
+         * printed at the end of this test is the number to argue with. */
+        const int MANY = 1200;
+        static const char *const MANY_DIR = PATH_TMP_DIR "m81many";
+
+        if (!vfs_exists(MANY_DIR) && vfs_mkdir(MANY_DIR) != 0) {
+            klog_puts("[m81] could not create the directory for the file storm\n");
+            all_ok = 0;
+        }
+
+        int created = 0;
+        for (int i = 0; i < MANY && all_ok; i++) {
+            char path[PATH_MAX_LEN];
+            char name[16];
+            m81_storm_name(name, i);
+            if (path_join(path, PATH_TMP_DIR "m81many/", name) != 0) {
+                klog_puts("[m81] a name in the file storm did not fit a path\n");
+                all_ok = 0;
+                break;
+            }
+            /* The body carries the index, so reading one back proves it
+             * is the file that name refers to and not merely a file. */
+            char body[4];
+            body[0] = (char)(i & 0xFF);
+            body[1] = (char)((i >> 8) & 0xFF);
+            body[2] = 'm';
+            body[3] = '\0';
+            if (vfs_write(path, body, sizeof(body)) != 0) {
+                klog_puts("[m81] the filesystem ran out at 0x");
+                klog_put_hex32((uint32_t)i);
+                klog_puts(" files - the inode cap is still a wall\n");
+                all_ok = 0;
+                break;
+            }
+            created++;
+        }
+
+        /* The longest name this filesystem will take, in the same
+         * directory, so it lands among hundreds of short ones and has to
+         * be placed and found by the variable-length record code rather
+         * than by luck. */
+        char longname[LEANFS_MAX_NAME + 1];
+        for (int i = 0; i < LEANFS_MAX_NAME; i++) {
+            longname[i] = (char)('a' + (i % 26));
+        }
+        longname[LEANFS_MAX_NAME] = '\0';
+        {
+            char path[PATH_MAX_LEN];
+            if (path_join(path, PATH_TMP_DIR "m81many/", longname) != 0 ||
+                vfs_write(path, "long", 5) != 0) {
+                klog_puts("[m81] a 255-character name was refused\n");
+                all_ok = 0;
+            } else {
+                char got[8];
+                k_memset(got, 0, sizeof(got));
+                if (vfs_read(path, got, sizeof(got)) != 5 || got[0] != 'l') {
+                    klog_puts("[m81] a 255-character name did not read back by path\n");
+                    all_ok = 0;
+                }
+            }
+        }
+
+        /* A path past the old 128-byte limit, built the way a real tree
+         * builds one: by nesting. Twelve levels of a twenty-character
+         * name is 250-odd bytes, which no path in this project could name
+         * before this milestone. */
+        char deep[PATH_MAX_LEN];
+        int deep_len = 0;
+        {
+            const char *seg = "/adirectorylevelname";  /* 20 bytes */
+            k_strlcpy(deep, PATH_TMP_DIR "m81deep", sizeof(deep));
+            deep_len = (int)k_strlen(deep);
+            if (!vfs_exists(deep) && vfs_mkdir(deep) != 0) {
+                klog_puts("[m81] could not start the deep path\n");
+                all_ok = 0;
+            }
+            for (int level = 0; level < 12 && all_ok; level++) {
+                size_t seg_len = k_strlen(seg);
+                if (deep_len + (int)seg_len >= (int)sizeof(deep)) {
+                    break;
+                }
+                k_memcpy(deep + deep_len, seg, seg_len);
+                deep_len += (int)seg_len;
+                deep[deep_len] = '\0';
+                if (!vfs_exists(deep) && vfs_mkdir(deep) != 0) {
+                    klog_puts("[m81] mkdir failed at depth 0x");
+                    klog_put_hex32((uint32_t)level);
+                    klog_puts("\n");
+                    all_ok = 0;
+                }
+            }
+        }
+        if (all_ok && deep_len <= 128) {
+            klog_puts("[m81] the deep path is not actually deeper than the old limit\n");
+            all_ok = 0;
+        }
+        if (all_ok) {
+            char leaf[PATH_MAX_LEN];
+            k_strlcpy(leaf, deep, sizeof(leaf));
+            size_t l = k_strlen(leaf);
+            k_strlcpy(leaf + l, "/bottom.txt", sizeof(leaf) - l);
+            static const char deep_body[] = "reached the bottom";
+            if (vfs_write(leaf, deep_body, sizeof(deep_body)) != 0) {
+                klog_puts("[m81] could not write a file at the bottom of a 0x");
+                klog_put_hex32((uint32_t)deep_len);
+                klog_puts("-byte path\n");
+                all_ok = 0;
+            } else {
+                char got[32];
+                k_memset(got, 0, sizeof(got));
+                if (vfs_read(leaf, got, sizeof(got)) != (int64_t)sizeof(deep_body) ||
+                    got[0] != 'r') {
+                    klog_puts("[m81] the file at the bottom of the deep path did not read back\n");
+                    all_ok = 0;
+                }
+            }
+        }
+
+        /* Walk the storm directory back one entry at a time and check
+         * three things at once: every file is there, the long name is
+         * among them, and no two entries share an inode number. The last
+         * is what would catch a record walk that re-reads a block or
+         * mis-advances its cookie - failures that produce a plausible
+         * count and the wrong contents. */
+        int seen = 0;
+        int saw_long = 0;
+        int dup_inode = 0;
+        if (all_ok) {
+            /* One bit per inode, so "have I seen this number" is a test
+             * rather than a search. LEANFS_MAX_INODES bits is 1 KiB. */
+            static uint8_t seen_ino[LEANFS_MAX_INODES / 8];
+            k_memset(seen_ino, 0, sizeof(seen_ino));
+            uint32_t cookie = 0;
+            leanfs_dir_entry_t e;
+            int rc;
+            while ((rc = vfs_readdir(MANY_DIR, &cookie, &e)) == 1) {
+                seen++;
+                if (e.inode < LEANFS_MAX_INODES) {
+                    if (seen_ino[e.inode / 8] & (1u << (e.inode % 8))) {
+                        dup_inode = 1;
+                    }
+                    seen_ino[e.inode / 8] |= (uint8_t)(1u << (e.inode % 8));
+                }
+                if (k_strlen(e.name) == LEANFS_MAX_NAME) {
+                    saw_long = 1;
+                }
+            }
+            if (rc < 0) {
+                klog_puts("[m81] readdir reported a corrupt directory\n");
+                all_ok = 0;
+            }
+        }
+        if (all_ok && seen != created + 1) {
+            klog_puts("[m81] a directory holding 0x");
+            klog_put_hex32((uint32_t)(created + 1));
+            klog_puts(" entries walked back 0x");
+            klog_put_hex32((uint32_t)seen);
+            klog_puts(" of them\n");
+            all_ok = 0;
+        }
+        if (all_ok && !saw_long) {
+            klog_puts("[m81] the 255-character name was not among the entries walked back\n");
+            all_ok = 0;
+        }
+        if (all_ok && dup_inode) {
+            klog_puts("[m81] two entries reported the same inode number - the walk repeated itself\n");
+            all_ok = 0;
+        }
+
+        /* Removing entries must leave holes a later create can use, or a
+         * directory that has churned grows without bound. Deleting every
+         * other file and putting the same number back must not make the
+         * directory any longer than it already was. */
+        if (all_ok) {
+            leanfs_stat_t before, after;
+            vfs_stat(MANY_DIR, &before);
+            /* Every eighth file rather than every other one. The
+             * assertion is about whether a hole is reused, which one
+             * removal proves and 600 do not; the difference is seven
+             * seconds of boot on a disk whose every directory scan is an
+             * uncached PIO read. Enough churn to spread the holes across
+             * many blocks, not enough to double the test. */
+            const int CHURN = 8;
+            for (int i = 0; i < created; i += CHURN) {
+                char path[PATH_MAX_LEN];
+                char name[16];
+                m81_storm_name(name, i);
+                path_join(path, PATH_TMP_DIR "m81many/", name);
+                if (vfs_unlink(path) != 0) {
+                    klog_puts("[m81] could not remove a file from the storm\n");
+                    all_ok = 0;
+                    break;
+                }
+            }
+            for (int i = 0; i < created && all_ok; i += CHURN) {
+                char path[PATH_MAX_LEN];
+                char name[16];
+                m81_storm_name(name, i);
+                path_join(path, PATH_TMP_DIR "m81many/", name);
+                if (vfs_write(path, "re", 3) != 0) {
+                    klog_puts("[m81] could not put a removed file back\n");
+                    all_ok = 0;
+                    break;
+                }
+            }
+            vfs_stat(MANY_DIR, &after);
+            if (all_ok && after.size > before.size) {
+                klog_puts("[m81] a directory grew from 0x");
+                klog_put_hex32(before.size);
+                klog_puts(" to 0x");
+                klog_put_hex32(after.size);
+                klog_puts(" bytes across a delete/recreate cycle - the holes are not being reused\n");
+                all_ok = 0;
+            }
+        }
+
+        uint32_t took_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms;
+        if (!all_ok) {
+            panic("M81 self-test: this filesystem still cannot hold somebody else's program");
+        }
+        klog_puts("[m81] a filesystem that can hold somebody else's program: 0x");
+        klog_put_hex32((uint32_t)created);
+        klog_puts(" files in one directory (the whole disk held 0xC0 before this milestone), "
+                   "a 255-character name written and read back by path, a file at the bottom "
+                   "of a 0x");
+        klog_put_hex32((uint32_t)deep_len);
+        klog_puts("-byte path, every entry walked back one at a time by streaming readdir "
+                   "with no two sharing an inode number, and a delete/recreate cycle reusing "
+                   "the holes rather than growing the directory - self-test passed (");
+        klog_put_dec(took_ms);
+        klog_puts(" ms).\n\n");
     }
 
     /* M40 self-test: SYS_spawn's failure paths, driven end to end from
@@ -8747,6 +9068,29 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     int64_t init_size = (int64_t)init_size_bytes;
     process_spawn("init", init_image, (size_t)init_size, "");
     kfree(init_image);
+
+    /* M81: did the boot's own stack hold?
+     *
+     * Every self-test above runs on kernel_stack_bottom (entry.asm), and
+     * the deepest call chains this kernel ever makes are in them - a
+     * filesystem self-test reaches leanfs's resolve_parent, which puts a
+     * whole LEANFS_MAX_PATH on the stack. When that stack was 16 KiB and
+     * a path became 4096 bytes, it silently overran into .rodata and the
+     * symptom was a `static const` table reading back as garbage twenty
+     * tests later. This is the check that would have said so in one line.
+     *
+     * Deliberately a check and not a panic: by the time it runs the
+     * damage is done and the machine may not survive a panic's own
+     * formatting, and a boot that gets to the desktop with a loud line in
+     * the log is more useful to debug than one that dies here. The serial
+     * harness greps for the marker below, so a silent overflow cannot
+     * pass a test run either way. */
+    if (*(volatile uint64_t *)kernel_stack_guard != KERNEL_STACK_GUARD_VALUE) {
+        klog_puts("[boot] KERNEL STACK GUARD CLOBBERED - the boot stack overflowed; "
+                  "statics below it in .rodata/.data are not to be trusted\n");
+    } else {
+        klog_puts("[boot] kernel stack guard intact.\n");
+    }
 
     /* M69: how long the boot actually took, in seconds. The serial
      * harness captures for a fixed budget and then grades, so the only

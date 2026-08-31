@@ -49,11 +49,19 @@
 /* M60: how much of a directory listing tab completion reads at once.
  * /bin holds every program this OS ships and is by far the longest thing
  * this will ever list. */
-#define LIST_BUF 2048
-/* leanfs's own LEANFS_MAX_NAME (27) plus the '/' SYS_listdir appends to a
- * directory and a NUL - that header is not visible to user_space builds,
- * which is why file_manager.c keeps its own copy of the same number. */
-#define LEANFS_NAME_MAX 28
+/* M81: 2048 -> 16384. /bin is still the longest thing this lists, but a
+ * name is now up to 255 bytes rather than 27, so the old buffer could be
+ * filled by sixty long names - and SYS_listdir stops at a whole name when
+ * it runs out, so the failure would have been tab completion quietly not
+ * knowing about the programs past the cut. */
+#define LIST_BUF 16384
+/* M81: leanfs's own LEANFS_MAX_NAME (255) plus the '/' SYS_listdir
+ * appends to a directory and a NUL. That header is not visible to
+ * user_space builds, which is why file_manager.c keeps its own copy of
+ * the same number. It was 28 until this milestone, which would have made
+ * tab completion silently complete to a truncated name - and a truncated
+ * name is a different file. */
+#define LEANFS_NAME_MAX 256
 
 static char grid[ROWS][COLS + 1];
 static int32_t cur_row, cur_col;

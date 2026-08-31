@@ -11,11 +11,17 @@
  *   16 sectors  free-block bitmap (LEANFS_DATA_BLOCKS bits)
  *   M sectors   data blocks (1 block == 1 sector == 512 bytes)
  *
- * Each inode has a small fixed number of direct block pointers plus one
+ * Each inode has a small fixed number of direct block pointers, one
  * singly-indirect block (a data block full of 32-bit block pointers) -
  * M15's addition, needed once GUI app binaries/toolkit code started
- * bumping up against the direct-only 8 KiB cap. Deliberately stops at
- * one level of indirection.
+ * bumping up against the direct-only 8 KiB cap - and, since M59, one
+ * doubly-indirect block, which is what takes the ceiling to 8 MiB.
+ * Deliberately stops at two levels: a third would be another order of
+ * magnitude past anything this OS can hold.
+ *
+ * (This paragraph said "deliberately stops at one level of indirection"
+ * for twenty-two milestones after M59 added the second. Corrected in
+ * M81, which had reason to read it.)
  *
  * M53 makes it a *tree*. It was flat until then, and the flatness showed
  * up in three apps at once: the file manager listed this OS's own
@@ -32,29 +38,58 @@
  * of truth for what this file is called" structurally impossible rather
  * than merely avoided.
  *
- * Inode 0 is the root directory, created by format(). Every path is
- * absolute and starts at it; there is no working directory in this
- * project, so there is nothing for a relative path to be relative to.
+ * Inode 0 is the root directory, created by format(). Every path this
+ * file resolves is absolute and starts at it. That is still true and no
+ * longer means what it used to: M75 gave *tasks* a working directory,
+ * and the syscall layer joins a relative path onto it before leanfs ever
+ * sees one (see copy_path_from_user). A working directory is a property
+ * of a caller, not of a filesystem, which is why it lives there and this
+ * sentence stays true.
+ *
+ * M81 makes the directory record variable-length so a name can be 255
+ * bytes without a directory paying 260 bytes for every short one - see
+ * leanfs_dirent_t below for the rule that keeps records from straddling
+ * a block, which is what all of this rests on.
  *
  * leanfs_init() formats a fresh filesystem automatically if the
- * superblock magic or geometry doesn't match - nothing to migrate, and
- * M53's own layout change is exactly the case that relies on it.
+ * superblock magic or geometry doesn't match - M53's and M81's layout
+ * changes are both exactly the case that relies on it. M81 also adds a
+ * `version` distinct from the magic: the magic guards *geometry* and a
+ * mismatch can only ever be a reformat, while the version guards
+ * *meaning* and is the field a future change that merely reinterprets
+ * bytes can migrate across.
  */
 #pragma once
 
 #include <stddef.h>
 #include <stdint.h>
 
-#define LEANFS_MAX_NAME             27
+/* M81: 27 -> 255, the number <dirent.h> has advertised as NAME_MAX since
+ * M77 while noting that "leanfs will never produce" one that long. One of
+ * those two numbers was a lie and this milestone decides which: a name is
+ * now what POSIX says a name is, and the header stops apologising.
+ *
+ * The old 27 was not arbitrary - it was what made a directory record
+ * exactly 32 bytes so sixteen fitted a block with nothing straddling.
+ * That constraint is real and is kept; see leanfs_dirent_t, which buys
+ * both a 255-byte name and the same no-straddling guarantee by making
+ * records variable-length instead of making them bigger. */
+#define LEANFS_MAX_NAME             255
 
 /* M53: the longest absolute path this filesystem will resolve, NUL
- * included. Deep enough for anything the layout below actually needs
- * ("/home/notes.txt" is 15) with room for nesting a person might create,
- * and short enough that the syscall layer can put one on a kernel stack -
- * which is 8 KiB, so this being a number rather than "however long the
- * caller's string is" is load-bearing rather than tidy. A longer path is
- * refused, never truncated: a truncated path names a different file. */
-#define LEANFS_MAX_PATH             128
+ * included. Refused rather than truncated: a truncated path names a
+ * different file.
+ *
+ * M81: 128 -> 4096, the number every program that has ever declared
+ * `char path[PATH_MAX]` expects. M53's own reasoning for 128 was that the
+ * syscall layer puts one on a kernel stack "which is 8 KiB, so this being
+ * a number rather than 'however long the caller's string is' is
+ * load-bearing rather than tidy." That reasoning is still exactly right,
+ * which is why the stack moved rather than the argument: a kernel stack
+ * is 32 KiB as of this milestone (kernel/sched/sched.c), because a path
+ * is now 4 KiB and copy_path_from_user holds two of them at once. The
+ * constraint did not go away - it got priced. */
+#define LEANFS_MAX_PATH             4096
 #define LEANFS_DIRECT_BLOCKS        16
 #define LEANFS_BLOCK_SIZE           512
 #define LEANFS_INDIRECT_POINTERS    (LEANFS_BLOCK_SIZE / (int)sizeof(uint32_t)) /* 128 */
@@ -66,50 +101,124 @@
 #define LEANFS_MAX_FILE_BLOCKS      (LEANFS_DIRECT_BLOCKS + LEANFS_INDIRECT_POINTERS + LEANFS_DINDIRECT_BLOCKS)
 #define LEANFS_MAX_FILE_SIZE        (LEANFS_MAX_FILE_BLOCKS * LEANFS_BLOCK_SIZE)
 
-/* M53: 32 -> 96. The old number was an exact fit the moment directories
- * arrived and it took a count to see it: this project ships 24 programs,
- * which with four directories, the boot self-tests' own fixtures and
- * settings.conf came to exactly 32 - no headroom at all, and "the next
- * program you add silently cannot be seeded" is the same shape of bug
- * this project has shipped three times behind an exactly-sized cap (M40,
- * M48, M50). 96 is that plus room for sixty more files, and costs 15
- * sectors of inode table instead of 7.
+/* The number of files this filesystem can hold, in total, across every
+ * directory. Its history is this project's most-repeated bug: 32 (M12),
+ * 96 (M53), 192 (M74-M79), each one "enough for what is here now" and
+ * each one exhausted by the next arc. M53's own note says so in as many
+ * words and then M74 did it again, which is the strongest possible
+ * argument that the number was never the problem.
  *
- * M74-M79: 96 -> 192, and it is the *fourth* time this project has
- * shipped a bug that was really an exactly-sized cap - which is
- * remarkable given that the paragraph above says so in as many words.
- * Six new programs (env, envtest, sigtest, treewalk, mmaptest,
- * threadtest) and two more seeded files in /home took the count from 56
- * to 64 before a single self-test fixture existed, and the boot's own
- * fixtures need the rest. It presented as `writefile failed` from four
- * concurrent racers in the [m67] self-test - i.e. as a locking bug in a
- * milestone that had nothing to do with it, which is exactly how a full
- * inode table looks from the outside.
+ * M81: 192 -> 8192, and this time the reasoning is not "enough for what
+ * is here now". It is that the wall this cap creates is not a limit a
+ * program can work around - a source tarball is thousands of files, a
+ * language's standard library is thousands of files, and every one of
+ * them has to exist at once or the program does not run at all. 192 is
+ * not a small ceiling, it is a floor below every real workload. 8192 is
+ * chosen to be past the largest thing this OS has any prospect of
+ * holding (CPython's standard library is roughly 3000 files) rather than
+ * past the largest thing it holds today.
  *
- * 192 costs 32 sectors of inode table instead of 16, which is 8 KiB more
- * of a 36 MiB image and 16 KiB more kernel BSS. The honest reason for
- * doubling rather than adding twenty: the last three bumps were each
- * "enough for what is here now", and each of them ran out. */
-#define LEANFS_MAX_INODES           192
+ * What it costs, stated because the last four bumps stated theirs: 1 MiB
+ * of inode table on disk (2048 sectors, out of a 35 MiB image that has
+ * room) and the same 1 MiB of kernel BSS, up from 16 KiB. The inode grew
+ * to 128 bytes to get there - see leanfs_inode_t in leanfs.c for why a
+ * power of two rather than the 84 bytes it packs into. */
+#define LEANFS_MAX_INODES           8192
 
 /* Total data region capacity. 65536 blocks = 32 MiB. Must be a multiple
  * of (LEANFS_BLOCK_SIZE * 8) so the bitmap lands on a whole number of
  * sectors. */
 #define LEANFS_DATA_BLOCKS          65536u
 
-/* An entry in a directory's own contents. 32 bytes exactly, so 16 fit in
- * a block and no record ever straddles one - which is what lets every
- * directory operation below be a whole-block read/modify/write rather
- * than needing byte-level addressing this driver does not have. A free
- * slot is one whose name is empty. */
+/* ---- M81: a directory record, and why it is variable-length ----------
+ *
+ * Until M81 this was a fixed 32 bytes - a 27-char name and an inode
+ * number - chosen so sixteen fitted exactly in a 512-byte block and no
+ * record ever straddled one. That invariant is what lets every directory
+ * operation work a block at a time, and it is worth more than it looks:
+ * a lookup in a ten-entry directory reads one sector.
+ *
+ * A 255-byte name cannot keep that shape. A fixed record big enough for
+ * the longest name is 260 bytes, which (a) no longer divides a block, and
+ * (b) makes a directory of three thousand twenty-character filenames
+ * 780 KiB that every lookup scans, where the names themselves are 60 KiB.
+ * Paying eight times over for the one entry in a thousand that is long is
+ * the wrong trade on the exact workload this milestone exists for.
+ *
+ * So records are variable-length, the way ext2's are, with the one rule
+ * that keeps the block invariant intact: **`rec_len` of the last record
+ * in a block is stretched to reach the end of that block**, so records
+ * tile each block exactly and none ever crosses a boundary. A directory
+ * is therefore always a whole number of blocks, and scanning one is
+ * scanning a sector.
+ *
+ * `inode == 0` marks a record as free space. Zero is safe as a sentinel
+ * for the same reason block 0 is: inode 0 is the root, and the root is
+ * nobody's child, so no live record can ever name it.
+ *
+ * `type` is carried in the record so that listing a directory does not
+ * have to fetch every inode to answer "is this a directory" - which is
+ * precisely what <dirent.h>'s d_type is for, and what M77 had to
+ * reconstruct from a trailing '/' because this record had nowhere to put
+ * it.
+ */
 typedef struct __attribute__((packed)) {
-    char name[LEANFS_MAX_NAME + 1];
-    uint32_t inode;
+    uint32_t inode;    /* 0 == free space; otherwise the inode this name refers to */
+    uint16_t rec_len;  /* bytes from the start of this record to the next */
+    uint8_t  name_len; /* 0..LEANFS_MAX_NAME */
+    uint8_t  type;     /* LEANFS_TYPE_FILE / LEANFS_TYPE_DIR; meaningless when inode == 0 */
+    /* char name[name_len] follows, unterminated and unpadded. */
 } leanfs_dirent_t;
 
-/* The most entries any one directory can hold. There are no hard links
- * here, so no directory can name more inodes than exist. */
-#define LEANFS_MAX_DIRENTS LEANFS_MAX_INODES
+#define LEANFS_DIRENT_HDR   8u  /* sizeof(leanfs_dirent_t), asserted in leanfs.c */
+#define LEANFS_DIRENT_ALIGN 4u
+
+/* The smallest record that can hold a name this long. Records are padded
+ * to LEANFS_DIRENT_ALIGN so that every rec_len keeps the next header
+ * aligned, which is what lets this driver read one out of a block buffer
+ * as a struct rather than byte by byte. */
+#define LEANFS_DIRENT_NEED(name_len) \
+    ((LEANFS_DIRENT_HDR + (uint32_t)(name_len) + LEANFS_DIRENT_ALIGN - 1u) & ~(LEANFS_DIRENT_ALIGN - 1u))
+
+/* One unpacked entry, as everything above this driver wants to see it:
+ * the name NUL-terminated, and the two facts a caller would otherwise
+ * need a stat for. */
+typedef struct {
+    uint32_t inode;
+    uint8_t  is_dir;
+    char     name[LEANFS_MAX_NAME + 1];
+} leanfs_dir_entry_t;
+
+/* M81: read one entry at a time, so that a directory holding thousands of
+ * them can be walked by a caller holding one.
+ *
+ * `*cookie` is an opaque position, zero to start; each call advances it
+ * past the entry it returned. It is a byte offset into the directory
+ * file, which is what makes resuming O(1) - the next call seeks straight
+ * to the block rather than counting entries it has already seen.
+ *
+ * Returns 1 and fills `out` when there was an entry, 0 at the end of the
+ * directory, and -1 if `path` is not a directory. Free records and the
+ * padding at the end of a block are skipped internally: a caller sees
+ * only real names.
+ *
+ * This is the interface leanfs_list should have had. That one is kept
+ * because a terminal wanting a newline-separated blob is a real caller
+ * and reimplementing it over this would be longer, not shorter - but it
+ * is now written in terms of this, so there is one walk and not two. */
+int leanfs_readdir(const char *path, uint32_t *cookie, leanfs_dir_entry_t *out);
+
+/* The same walk, with the path resolved once instead of once per entry.
+ *
+ * leanfs_readdir is the convenient form and the right one for a caller
+ * fetching a handful of entries. It is the wrong one for a caller walking
+ * a directory of thousands, because resolving "/a/b/c" costs a block read
+ * per component and doing that per *entry* is a hidden factor of the path
+ * depth on the exact workload M81 exists for. So SYS_getdents opens once
+ * and walks; `handle` is an inode index, the same thing leanfs_open has
+ * returned since M59, and is re-validated on every call. */
+int leanfs_dir_open(const char *path);
+int leanfs_readdir_at(int handle, uint32_t *cookie, leanfs_dir_entry_t *out);
 
 void leanfs_init(void);
 

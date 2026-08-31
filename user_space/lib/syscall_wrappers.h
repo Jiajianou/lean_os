@@ -103,6 +103,7 @@ long sys_readfile(const char *name, void *buf, size_t maxlen);
  * knows what entering it would mean without a second call. Returns bytes
  * written, or -1 if `path` is not a directory. */
 long sys_listdir(const char *path, void *buf, size_t maxlen);
+long sys_getdents(const char *path, unsigned int *cookie, void *buf, size_t buflen);
 
 /* M53: creates one directory whose parent already exists. */
 long sys_mkdir(const char *path);

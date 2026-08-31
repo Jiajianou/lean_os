@@ -1,23 +1,28 @@
-/* user_space/libc/include/dirent.h - M77
+/* user_space/libc/include/dirent.h - M77, rewritten in M81
  *
- * opendir/readdir/closedir over SYS_listdir (M53), which returns
- * newline-separated names with a '/' appended to each one that is itself
- * a directory - a shape built for a person reading a terminal, not for a
- * program walking a tree. This is the difference between the two.
+ * opendir/readdir/closedir over SYS_getdents (M81), which returns real
+ * records: an inode number, a type, and a name. SYS_listdir (M53) is
+ * still there and still returns newline-separated names with a '/' on
+ * the directories - a shape built for a person reading a terminal, not
+ * for a program walking a tree. This is the difference between the two.
  *
- * The whole listing is fetched by opendir and readdir walks it. That is a
- * real design choice and not a shortcut: SYS_listdir is whole-shot with
- * no iterator and no handle, so there is nothing to stream - and a
+ * M77 fetched the whole listing in opendir and walked it in readdir, and
+ * defended that as "a real design choice and not a shortcut" because "a
  * directory here holds at most LEANFS_MAX_DIRENTS entries, which is
- * kilobytes. A streaming readdir would be a second kernel interface
- * built for a size this filesystem cannot reach.
+ * kilobytes". M81 made that two megabytes - 8192 entries of up to 255
+ * bytes - so the condition the defence rested on is gone, and with it the
+ * design. This now streams through SYS_getdents a bufferful at a time,
+ * which is the interface M77 said it would build "for a size this
+ * filesystem cannot reach" on the day the filesystem could reach it.
  */
 #pragma once
 
 #include <sys/types.h>
 
-/* Longer than leanfs will ever produce (its own limit is 27), sized to
- * the number every program that walks a tree already assumes. */
+/* M81: exactly leanfs's own limit, which is exactly the number every
+ * program that walks a tree already assumes. This used to say "longer
+ * than leanfs will ever produce (its own limit is 27)" - one of the two
+ * numbers was a lie, and M81 decided which by moving the filesystem. */
 #define NAME_MAX 255
 
 /* d_type, as every program that avoids a stat per entry uses it. DT_DIR
@@ -29,12 +34,18 @@
 #define DT_REG     8
 
 struct dirent {
-    /* Always 0. leanfs has inode numbers, and SYS_listdir does not
-     * report them - it reports names. Present because a program that
-     * reads the field compiles, zero because zero is the conventional
-     * "this filesystem is not telling you", and a fabricated number
-     * would be worse than an honest one. A program that needs identity
-     * calls stat. */
+    /* M81: a real inode number.
+     *
+     * This field was documented as "always 0" for four milestones, with
+     * the honest reason that leanfs had inode numbers and SYS_listdir
+     * reported names. SYS_getdents reports both, so the apology is
+     * retired: two entries with the same d_ino are the same file, and a
+     * program that uses this to break a cycle or spot a repeat can now
+     * do so without a stat per entry.
+     *
+     * Still no hard links in leanfs, so in practice two live names never
+     * share one - which makes this useful for identity rather than for
+     * counting. */
     ino_t d_ino;
     unsigned char d_type;
     char d_name[NAME_MAX + 1];

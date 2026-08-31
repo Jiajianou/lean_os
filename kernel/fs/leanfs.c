@@ -5,7 +5,8 @@
 #include "drivers/rtc.h"
 #include "lib/libk.h"
 
-#define LEANFS_MAGIC     0x3353464Cu /* M59: bumped again (from M53's 0x3253464C, itself from M12's 0x3153464C). The inode grew an mtime and a double-indirect pointer, which moves every field after them - an old disk read with this layout would resolve garbage block numbers, so it is reformatted rather than misread. Nothing here has ever had a migration path and nothing on these disks has ever been worth one. */
+#define LEANFS_MAGIC     0x3453464Cu /* "LFS4". M81: bumped from M59's 0x3353464C (itself M53's 0x3253464C, itself M12's 0x3153464C). Every region moved: the inode table grew from 32 sectors to 2048, which pushes the bitmap and the whole data region down the disk, and directory records stopped being fixed-size. An old disk read with this layout would resolve garbage block numbers, so it is reformatted rather than misread - see leanfs_init, where M81 also adds the version field that makes a *future* bump able to do better than that. */
+#define LEANFS_VERSION   4u          /* M81: see sb.version. Bumped only when the on-disk meaning changes; the magic is bumped only when the geometry does. */
 #define LEANFS_START_LBA 2048u /* 1 MiB in - generously past the boot image; see Makefile's build-time size guard */
 
 #define LEANFS_TYPE_FREE 0
@@ -33,6 +34,21 @@ typedef struct __attribute__((packed)) {
      * default - it was, by construction, written by a kernel that had no
      * way to leave it otherwise. */
     uint32_t state;
+    /* M81: the format version, distinct from the magic on purpose.
+     *
+     * The magic answers "is this a leanfs, laid out the way this build
+     * expects" - it changes when a region moves, and a mismatch can only
+     * ever be a reformat, because there is nowhere to stand to read the
+     * old disk. The version answers "which revision of the format is
+     * this" for changes that leave the geometry alone - a new inode
+     * field landing in the padding, a new record flag - and those a
+     * future build genuinely can migrate in place.
+     *
+     * M81 itself is a geometry change and therefore reformats; the field
+     * exists so that the next one does not have to. An old disk reads 0
+     * here, which is not LEANFS_VERSION, and is caught by the magic
+     * first anyway. */
+    uint32_t version;
 } leanfs_superblock_t;
 
 #define LEANFS_STATE_CLEAN 0u
@@ -60,34 +76,77 @@ typedef struct __attribute__((packed)) {
      * than it looks. Deliberately stops here: a third level would be
      * another order of magnitude past anything this OS can hold. */
     uint32_t dindirect;
+    /* M81: pad to a round 128 bytes. Two reasons, and the second is the
+     * one that matters.
+     *
+     * Four inodes per sector exactly means mark_inode never has to widen
+     * a range across a sector boundary, and an inode table of N inodes is
+     * exactly N/4 sectors with no rounding - which is what makes the
+     * table writable straight out of `inodes[]` with no staging buffer
+     * (see save_meta, which used to need a 16 KiB one).
+     *
+     * And it leaves 44 bytes that a field can land in without moving
+     * anything after it - which is the difference between the next
+     * format change being a version bump and being a reformat. M87 is
+     * scheduled to add a link count and a symlink target; this is the
+     * room for them, reserved because that is scheduled work and not
+     * because a field might one day be nice. */
+    uint8_t  reserved[44];
 } leanfs_inode_t;
+
+_Static_assert(sizeof(leanfs_inode_t) == 128, "an inode must be 128 bytes so four fit a sector exactly");
+_Static_assert(LEANFS_BLOCK_SIZE % sizeof(leanfs_inode_t) == 0, "an inode must not straddle a sector");
 
 #define INODE_TABLE_SECTORS ((sizeof(leanfs_inode_t) * LEANFS_MAX_INODES + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE)
 #define BITMAP_SECTORS       (LEANFS_DATA_BLOCKS / 8 / LEANFS_BLOCK_SIZE)
 
-/* The claim leanfs.h makes about records never straddling a block, as a
- * check the compiler makes rather than a comment somebody has to keep
- * true - a padded record would silently break every directory on disk. */
-_Static_assert(sizeof(leanfs_dirent_t) == 32, "leanfs_dirent_t must stay 32 bytes so 16 fit exactly in a block");
-_Static_assert(LEANFS_BLOCK_SIZE % sizeof(leanfs_dirent_t) == 0, "a directory record must not straddle a block");
+/* M81: the record header is variable-length now, so the old "16 fit a
+ * block exactly" assertion is gone - the no-straddling guarantee it
+ * protected is enforced instead by dir_block_place and dir_block_walk,
+ * which never let a rec_len run past the end of its block. What is still
+ * a compile-time claim is the header's own size, because
+ * LEANFS_DIRENT_NEED in leanfs.h computes with the number rather than
+ * the type. */
+_Static_assert(sizeof(leanfs_dirent_t) == LEANFS_DIRENT_HDR, "leanfs_dirent_t header must stay 8 bytes");
+_Static_assert(LEANFS_DIRENT_NEED(LEANFS_MAX_NAME) <= LEANFS_BLOCK_SIZE, "the longest name must still fit in one block");
 
 static leanfs_superblock_t sb;
+
+/* M81: the inode table is written to disk straight out of this array.
+ *
+ * It used to be staged through a separate sector-sized `inode_table_buf`
+ * because 192 * 84 bytes is not a whole number of sectors and the tail of
+ * the last one had to come from somewhere. An inode is 128 bytes now
+ * (see leanfs_inode_t), so the array *is* a whole number of sectors by
+ * construction, and the staging buffer - which had grown to a second full
+ * copy of a table that is now 1 MiB - is gone rather than doubled. */
 static leanfs_inode_t inodes[LEANFS_MAX_INODES];
 static uint8_t bitmap[BITMAP_SECTORS * LEANFS_BLOCK_SIZE];
 
-/* M53: static, not stack. A kernel task stack is 8 KiB (sched.c's
- * TASK_STACK_SIZE) and the inode table is now 15 sectors - 7680 bytes -
- * so the buffer these two used to declare locally would have overflowed
- * the stack of any user task that reached them through SYS_writefile.
- * It was already 3584 bytes before this milestone, which was uncomfortably
- * close to the same cliff without anyone having measured it. leanfs has
- * no concurrency of its own (every caller is inside a syscall, and the
- * scheduler is cooperative at these points), so one shared scratch buffer
- * is safe as well as smaller. */
-static uint8_t inode_table_buf[INODE_TABLE_SECTORS * LEANFS_BLOCK_SIZE];
-/* One directory's whole contents, unpacked. Shared for the same reason,
- * and only ever live inside one directory operation at a time. */
-static leanfs_dirent_t dirent_scratch[LEANFS_MAX_DIRENTS];
+_Static_assert(sizeof(inodes) % LEANFS_BLOCK_SIZE == 0,
+               "the inode table must be a whole number of sectors so save_meta can write it in place");
+
+/* M81: one directory block, and that is the whole scratch space
+ * directories need now.
+ *
+ * Before this, dir_load unpacked an entire directory into a
+ * dirent_scratch sized at LEANFS_MAX_DIRENTS records and dir_store wrote
+ * all of it back - which was 6 KiB and one sector's worth of I/O at 192
+ * inodes, and would have been 2 MiB and four thousand sector writes per
+ * created file at 8192. Records are addressed a block at a time instead,
+ * so creating a file writes the one block its name landed in.
+ *
+ * Shared rather than on the stack for M53's original reason (a kernel
+ * stack has better things to do) and safe for M67's: every entry point
+ * into this file is called under vfs.c's fs_lock with interrupts off. */
+static uint8_t dir_block[LEANFS_BLOCK_SIZE];
+
+/* M81: the last block of the last directory an insert landed in. See
+ * dir_add for what it buys and why it is safe to be wrong. Reset by
+ * dir_remove when it frees something below it, so a hole is never hidden
+ * behind the hint. */
+static int dir_hint_inode = -1;
+static uint32_t dir_hint_block = 0;
 
 static void save_superblock(void) {
     uint8_t buf[LEANFS_BLOCK_SIZE];
@@ -152,12 +211,42 @@ static void mark_all_blocks(void) {
     }
 }
 
+/* M81: ata_write_sectors takes a uint8_t count, so a run longer than 255
+ * sectors cannot be expressed - and 255 truncates to 0, which the drive
+ * reads as "256" while the driver's own loop writes none of them. That
+ * was unreachable while the inode table was 32 sectors and is very
+ * reachable now that it is 2048, so every bulk write goes through here.
+ *
+ * Deliberately fixed at the call site rather than by widening the ATA
+ * driver's signature: 255 is what 28-bit LBA PIO actually encodes in one
+ * command, so the chunking is the hardware's, not this filesystem's. */
+#define ATA_MAX_RUN 255u
+
+static void write_run(uint32_t lba, size_t sectors, const uint8_t *src) {
+    while (sectors > 0) {
+        size_t n = sectors > ATA_MAX_RUN ? ATA_MAX_RUN : sectors;
+        ata_write_sectors(lba, (uint8_t)n, src);
+        lba += (uint32_t)n;
+        src += n * LEANFS_BLOCK_SIZE;
+        sectors -= n;
+    }
+}
+
+static void read_run(uint32_t lba, size_t sectors, uint8_t *dst) {
+    while (sectors > 0) {
+        size_t n = sectors > ATA_MAX_RUN ? ATA_MAX_RUN : sectors;
+        ata_read_sectors(lba, (uint8_t)n, dst);
+        lba += (uint32_t)n;
+        dst += n * LEANFS_BLOCK_SIZE;
+        sectors -= n;
+    }
+}
+
 /* Writes only what changed. Runs of adjacent dirty sectors go out as one
- * ata_write_sectors call, because a run is exactly as cheap as a single
- * sector to set up and this is the path a whole-file write takes. */
+ * write_run call, because a run is exactly as cheap as a single sector to
+ * set up and this is the path a whole-file write takes. */
 static void save_meta(void) {
-    k_memset(inode_table_buf, 0, sizeof(inode_table_buf));
-    k_memcpy(inode_table_buf, inodes, sizeof(inodes));
+    const uint8_t *inode_bytes = (const uint8_t *)inodes;
 
     for (size_t i = 0; i < INODE_TABLE_SECTORS; ) {
         if (!inode_sector_dirty[i]) {
@@ -169,8 +258,8 @@ static void save_meta(void) {
             inode_sector_dirty[i + run] = 0;
             run++;
         }
-        ata_write_sectors(sb.inode_table_lba + (uint32_t)i, (uint8_t)run,
-                           inode_table_buf + i * LEANFS_BLOCK_SIZE);
+        write_run(sb.inode_table_lba + (uint32_t)i, run,
+                  inode_bytes + i * LEANFS_BLOCK_SIZE);
         meta_writes += (uint32_t)run;
         i += run;
     }
@@ -185,8 +274,8 @@ static void save_meta(void) {
             bitmap_sector_dirty[i + run] = 0;
             run++;
         }
-        ata_write_sectors(sb.bitmap_lba + (uint32_t)i, (uint8_t)run,
-                           bitmap + i * LEANFS_BLOCK_SIZE);
+        write_run(sb.bitmap_lba + (uint32_t)i, run,
+                  bitmap + i * LEANFS_BLOCK_SIZE);
         meta_writes += (uint32_t)run;
         i += run;
     }
@@ -207,6 +296,7 @@ static void format(void) {
     sb.data_lba = sb.bitmap_lba + BITMAP_SECTORS;
     sb.data_blocks = LEANFS_DATA_BLOCKS;
     sb.state = LEANFS_STATE_CLEAN;
+    sb.version = LEANFS_VERSION;
 
     k_memset(inodes, 0, sizeof(inodes));
     k_memset(bitmap, 0, sizeof(bitmap));
@@ -219,7 +309,7 @@ static void format(void) {
 
     /* M53: the root directory is inode 0 and exists from the moment the
      * filesystem does. Empty (size 0, no blocks) - a directory with no
-     * entries needs no storage, and dir_store below allocates on demand. */
+     * entries needs no storage, and dir_add below allocates on demand. */
     inodes[ROOT_INODE].type = LEANFS_TYPE_DIR;
     inodes[ROOT_INODE].size = 0;
 
@@ -253,10 +343,29 @@ void leanfs_init(void) {
         sb.inode_table_sectors != INODE_TABLE_SECTORS ||
         sb.bitmap_sectors != BITMAP_SECTORS) {
         format();
+    } else if (sb.version != LEANFS_VERSION) {
+        /* M81: the geometry matches but the format revision does not.
+         *
+         * This is the branch the version field exists for, and today it
+         * is unreachable - LEANFS_VERSION has only ever been 4 and the
+         * magic that guards it was bumped in the same commit. It is
+         * written now, and written as a reformat, so that the next
+         * milestone to change the meaning of a field has a place to put
+         * a migration and a visible reminder that leaving it a reformat
+         * is a decision rather than an oversight.
+         *
+         * The honest reason M81 itself could not migrate: the inode
+         * table grew by 2016 sectors, which moves the bitmap and every
+         * data block on the disk. An in-place upgrade would have to
+         * relocate the entire data region, and there is nowhere to
+         * relocate it *to* on a disk that is already sized to hold it.
+         * A format change that only reinterprets bytes can migrate; one
+         * that moves them cannot. */
+        klog_puts("[fs] leanfs on-disk version is not this build's - reformatting\n");
+        format();
     } else {
-        ata_read_sectors(sb.inode_table_lba, (uint8_t)sb.inode_table_sectors, inode_table_buf);
-        k_memcpy(inodes, inode_table_buf, sizeof(inodes));
-        ata_read_sectors(sb.bitmap_lba, (uint8_t)sb.bitmap_sectors, bitmap);
+        read_run(sb.inode_table_lba, sb.inode_table_sectors, (uint8_t *)inodes);
+        read_run(sb.bitmap_lba, sb.bitmap_sectors, bitmap);
 
         /* A filesystem whose root is not a directory is one nothing can
          * be resolved against - reformat rather than fail every path. */
@@ -735,68 +844,276 @@ static int inode_write_data(int idx, const void *buf, size_t len) {
 
 /* ---- directories ----------------------------------------------------- */
 
-/* Unpacks a directory's records into dirent_scratch and returns how many
- * slots it holds (including free ones, which keeps a slot's index stable
- * across a load/modify/store round trip). -1 if idx isn't a directory or
- * its contents are unreadable. */
-static int dir_load(int idx) {
-    if (!inode_valid(idx) || inodes[idx].type != LEANFS_TYPE_DIR) {
-        return -1;
-    }
-    uint32_t bytes = inodes[idx].size;
-    if (bytes > sizeof(dirent_scratch)) {
-        return -1; /* more records than there are inodes to name - corrupt */
-    }
-    k_memset(dirent_scratch, 0, sizeof(dirent_scratch));
-    if (bytes > 0 && inode_read_data(idx, dirent_scratch, bytes) < 0) {
-        return -1;
-    }
-    return (int)(bytes / sizeof(leanfs_dirent_t));
+/* M81: a directory is a sequence of whole blocks, and each block is a
+ * sequence of variable-length records that tile it exactly (see
+ * leanfs_dirent_t in leanfs.h). Every operation below is therefore
+ * "find the block, rewrite that block" - never "load the directory".
+ *
+ * The invariants, in one place, because four functions depend on all of
+ * them and none of them is checked by the type system:
+ *
+ *   1. inodes[dir].size is a whole multiple of LEANFS_BLOCK_SIZE.
+ *   2. Within a block, the rec_lens sum to exactly LEANFS_BLOCK_SIZE.
+ *   3. Every rec_len is >= LEANFS_DIRENT_HDR, is a multiple of
+ *      LEANFS_DIRENT_ALIGN, and is >= LEANFS_DIRENT_NEED(name_len).
+ *   4. inode == 0 means free space; the name and type mean nothing.
+ *
+ * dir_block_valid checks 2 and 3 on every block this driver reads, and a
+ * block that fails is treated as an unreadable directory rather than
+ * walked - a corrupt rec_len is otherwise an unbounded loop or a read off
+ * the end of the buffer, which is exactly the class of bug M29 added
+ * block_valid to prevent on the block numbers.
+ */
+
+static leanfs_dirent_t *dir_rec(uint32_t off) {
+    return (leanfs_dirent_t *)(dir_block + off);
 }
 
-static int dir_store(int idx, int count) {
-    return inode_write_data(idx, dirent_scratch, (size_t)count * sizeof(leanfs_dirent_t));
+/* Walks the block in `dir_block` and returns 1 if it satisfies invariants
+ * 2 and 3, 0 otherwise. */
+static int dir_block_valid(void) {
+    uint32_t off = 0;
+    while (off < LEANFS_BLOCK_SIZE) {
+        /* Bounds-check the header BEFORE reading it. This function is the
+         * only one here that runs on bytes straight off the disk, so it is
+         * the only one that can be handed an off that leaves no room for a
+         * record header - and reading rec_len at 508 would read four bytes
+         * past dir_block. Every other walk below runs after this one has
+         * returned 1, which guarantees rec_len >= 8 and off + rec_len <=
+         * 512, so no reachable off there can exceed 504. */
+        if (off + LEANFS_DIRENT_HDR > LEANFS_BLOCK_SIZE) {
+            return 0;
+        }
+        leanfs_dirent_t *r = dir_rec(off);
+        if (r->rec_len < LEANFS_DIRENT_HDR ||
+            (r->rec_len % LEANFS_DIRENT_ALIGN) != 0 ||
+            off + r->rec_len > LEANFS_BLOCK_SIZE ||
+            LEANFS_DIRENT_NEED(r->name_len) > r->rec_len) {
+            return 0;
+        }
+        off += r->rec_len;
+    }
+    return off == LEANFS_BLOCK_SIZE;
+}
+
+/* Lays out an empty block: one free record covering the whole thing. */
+static void dir_block_init(void) {
+    k_memset(dir_block, 0, LEANFS_BLOCK_SIZE);
+    dir_rec(0)->rec_len = (uint16_t)LEANFS_BLOCK_SIZE;
+}
+
+/* Reads directory block `logical` into dir_block. Returns 1 on success, 0
+ * if the block is a hole (which a directory should never have, and which
+ * is treated as an empty block rather than as an error so that a
+ * half-grown directory still reads), -1 if it is unreadable or corrupt. */
+static int dir_block_read(int idx, uint32_t logical) {
+    int64_t blk = map_block(idx, logical, 0);
+    if (blk < 0) {
+        dir_block_init();
+        return 0;
+    }
+    ata_read_sectors(sb.data_lba + (uint32_t)blk, 1, dir_block);
+    if (!dir_block_valid()) {
+        return -1;
+    }
+    return 1;
+}
+
+static int dir_block_write(int idx, uint32_t logical) {
+    int64_t blk = map_block(idx, logical, 1);
+    if (blk < 0) {
+        return -1;
+    }
+    ata_write_sectors(sb.data_lba + (uint32_t)blk, 1, dir_block);
+    inodes[idx].mtime = rtc_now();
+    mark_inode(idx);
+    return 0;
+}
+
+static uint32_t dir_nblocks(int idx) {
+    return inodes[idx].size / LEANFS_BLOCK_SIZE;
+}
+
+static int dir_ok(int idx) {
+    return inode_valid(idx) && inodes[idx].type == LEANFS_TYPE_DIR;
+}
+
+/* The offset of the record naming `name` in the block currently in
+ * dir_block, or -1. Compares against name_len rather than a NUL, because
+ * a record's name is not terminated on disk. */
+static int32_t dir_block_find(const char *name, uint32_t name_len) {
+    uint32_t off = 0;
+    while (off < LEANFS_BLOCK_SIZE) {
+        leanfs_dirent_t *r = dir_rec(off);
+        if (r->inode != 0 && r->name_len == name_len &&
+            k_memcmp(dir_block + off + LEANFS_DIRENT_HDR, name, name_len) == 0) {
+            return (int32_t)off;
+        }
+        off += r->rec_len;
+    }
+    return -1;
+}
+
+/* Merges every run of adjacent free records in dir_block into one.
+ *
+ * Without this, deleting alternate entries in a directory leaves it full
+ * of holes too small to hold anything, and a name long enough to need two
+ * of them adjacent would fail to be created in a directory that is mostly
+ * empty. Called on every removal, which is the only thing that makes a
+ * hole, so runs never get a chance to build up. */
+static void dir_block_coalesce(void) {
+    uint32_t off = 0;
+    while (off < LEANFS_BLOCK_SIZE) {
+        leanfs_dirent_t *r = dir_rec(off);
+        if (r->inode == 0) {
+            uint32_t next = off + r->rec_len;
+            while (next < LEANFS_BLOCK_SIZE && dir_rec(next)->inode == 0) {
+                r->rec_len = (uint16_t)(r->rec_len + dir_rec(next)->rec_len);
+                next = off + r->rec_len;
+            }
+            r->name_len = 0;
+            r->type = 0;
+        }
+        off += dir_rec(off)->rec_len;
+    }
+}
+
+/* Tries to place a record for `name` in the block currently in dir_block.
+ * Returns 1 if it fitted (dir_block is now dirty and must be written), 0
+ * if there was no room.
+ *
+ * Two kinds of room, and taking them in this order matters: a whole free
+ * record big enough is used as-is, and otherwise a live record with slack
+ * beyond what its own name needs is shrunk to its true size and the
+ * remainder becomes the new record. Preferring free records means a
+ * directory that has had entries removed reuses those holes before it
+ * starts carving up the tail of a block. */
+static int dir_block_place(const char *name, uint32_t name_len, int inode_idx) {
+    uint32_t need = LEANFS_DIRENT_NEED(name_len);
+
+    for (int pass = 0; pass < 2; pass++) {
+        uint32_t off = 0;
+        while (off < LEANFS_BLOCK_SIZE) {
+            leanfs_dirent_t *r = dir_rec(off);
+            uint32_t place_at = 0;
+            uint32_t place_len = 0;
+
+            if (pass == 0 && r->inode == 0 && r->rec_len >= need) {
+                place_at = off;
+                place_len = r->rec_len;
+            } else if (pass == 1 && r->inode != 0) {
+                uint32_t used = LEANFS_DIRENT_NEED(r->name_len);
+                if (r->rec_len >= used + need) {
+                    place_len = r->rec_len - used;
+                    r->rec_len = (uint16_t)used;
+                    place_at = off + used;
+                }
+            }
+
+            if (place_len > 0) {
+                leanfs_dirent_t *n = dir_rec(place_at);
+                n->inode = (uint32_t)inode_idx;
+                n->rec_len = (uint16_t)place_len;
+                n->name_len = (uint8_t)name_len;
+                n->type = (uint8_t)inodes[inode_idx].type;
+                k_memcpy(dir_block + place_at + LEANFS_DIRENT_HDR, name, name_len);
+                return 1;
+            }
+            off += r->rec_len;
+        }
+    }
+    return 0;
 }
 
 /* The inode `name` refers to inside the directory `dir`, or -1. */
 static int dir_lookup(int dir, const char *name) {
-    int count = dir_load(dir);
-    if (count < 0) {
+    if (!dir_ok(dir)) {
         return -1;
     }
-    for (int i = 0; i < count; i++) {
-        if (dirent_scratch[i].name[0] && k_strcmp(dirent_scratch[i].name, name) == 0) {
-            return (int)dirent_scratch[i].inode;
+    uint32_t name_len = (uint32_t)k_strlen(name);
+    uint32_t blocks = dir_nblocks(dir);
+    for (uint32_t b = 0; b < blocks; b++) {
+        if (dir_block_read(dir, b) < 0) {
+            return -1;
+        }
+        int32_t off = dir_block_find(name, name_len);
+        if (off >= 0) {
+            return (int)dir_rec((uint32_t)off)->inode;
         }
     }
     return -1;
 }
 
-/* Adds one record. Reuses a slot left free by a removal before growing
- * the directory, so a create/remove cycle doesn't make a directory grow
- * without bound. Returns 0 or -1. */
+/* Adds one record naming `inode_idx`. Reuses a hole in an existing block
+ * before growing the directory by one, so a create/remove cycle does not
+ * make a directory grow without bound. The record's type is read from the
+ * inode rather than passed in - two sources of truth for what a thing is
+ * is the bug M53 removed from this filesystem and there is no reason to
+ * put it back. Returns 0 or -1. */
 static int dir_add(int dir, const char *name, int inode_idx) {
-    int count = dir_load(dir);
-    if (count < 0) {
+    if (!dir_ok(dir) || !inode_valid(inode_idx)) {
         return -1;
     }
-    int slot = -1;
-    for (int i = 0; i < count; i++) {
-        if (!dirent_scratch[i].name[0]) {
-            slot = i;
-            break;
+    uint32_t name_len = (uint32_t)k_strlen(name);
+    if (name_len == 0 || name_len > LEANFS_MAX_NAME) {
+        return -1;
+    }
+
+    /* M81: start where the last insert into this directory succeeded.
+     *
+     * Measured, not assumed. Without the hint this loop scans from block
+     * zero every time, and each block scanned is a 512-byte PIO read - so
+     * filling a directory is quadratic in the number of files, which is
+     * precisely the workload this milestone exists to make possible.
+     * Creating 1200 files in one directory took 18.9 s of a boot; with
+     * the hint it is a single block read per insert until a block fills.
+     *
+     * The hint is a pure optimization and is never trusted: if the scan
+     * from it finds nothing, the scan from zero runs anyway (below), so a
+     * stale or wrong hint costs one extra pass and can never lose a hole.
+     * That is why it is one entry rather than a table - a directory being
+     * filled is the case worth catching, and being filled is something
+     * one directory at a time. */
+    uint32_t blocks = dir_nblocks(dir);
+    uint32_t start = (dir == dir_hint_inode && dir_hint_block < blocks) ? dir_hint_block : 0;
+
+    for (int pass = 0; pass < 2; pass++) {
+        uint32_t from = (pass == 0) ? start : 0;
+        uint32_t to = (pass == 0) ? blocks : start;
+        for (uint32_t b = from; b < to; b++) {
+            if (dir_block_read(dir, b) < 0) {
+                return -1;
+            }
+            if (dir_block_place(name, name_len, inode_idx)) {
+                dir_hint_inode = dir;
+                dir_hint_block = b;
+                return dir_block_write(dir, b);
+            }
+        }
+        if (start == 0) {
+            break; /* the first pass already covered the whole directory */
         }
     }
-    if (slot < 0) {
-        if (count >= LEANFS_MAX_DIRENTS) {
-            return -1;
-        }
-        slot = count++;
+
+    /* No room anywhere: grow by one block. The size only moves once the
+     * block is safely written, so a failure to allocate leaves a
+     * directory that is one block shorter rather than one block of
+     * garbage longer. */
+    if (inodes[dir].size > (uint32_t)LEANFS_MAX_FILE_SIZE - LEANFS_BLOCK_SIZE) {
+        return -1;
     }
-    k_memset(&dirent_scratch[slot], 0, sizeof(dirent_scratch[slot]));
-    k_strlcpy(dirent_scratch[slot].name, name, sizeof(dirent_scratch[slot].name));
-    dirent_scratch[slot].inode = (uint32_t)inode_idx;
-    return dir_store(dir, count);
+    dir_block_init();
+    if (!dir_block_place(name, name_len, inode_idx)) {
+        return -1; /* cannot happen: an empty block holds the longest name */
+    }
+    if (dir_block_write(dir, blocks) != 0) {
+        return -1;
+    }
+    dir_hint_inode = dir;
+    dir_hint_block = blocks;
+    inodes[dir].size += LEANFS_BLOCK_SIZE;
+    mark_inode(dir);
+    return 0;
 }
 
 /* M71: point an EXISTING directory entry at a different inode, in place.
@@ -811,14 +1128,21 @@ static int dir_add(int dir, const char *name, int inode_idx) {
  * there was no such entry (which is not an error to the caller - it means
  * "this is a plain rename into a free name", and dir_add handles that). */
 static int dir_repoint(int dir, const char *name, int inode_idx) {
-    int count = dir_load(dir);
-    if (count < 0) {
+    if (!dir_ok(dir) || !inode_valid(inode_idx)) {
         return -1;
     }
-    for (int i = 0; i < count; i++) {
-        if (dirent_scratch[i].name[0] && k_strcmp(dirent_scratch[i].name, name) == 0) {
-            dirent_scratch[i].inode = (uint32_t)inode_idx;
-            return dir_store(dir, count);
+    uint32_t name_len = (uint32_t)k_strlen(name);
+    uint32_t blocks = dir_nblocks(dir);
+    for (uint32_t b = 0; b < blocks; b++) {
+        if (dir_block_read(dir, b) < 0) {
+            return -1;
+        }
+        int32_t off = dir_block_find(name, name_len);
+        if (off >= 0) {
+            leanfs_dirent_t *r = dir_rec((uint32_t)off);
+            r->inode = (uint32_t)inode_idx;
+            r->type = (uint8_t)inodes[inode_idx].type;
+            return dir_block_write(dir, b);
         }
     }
     return -1;
@@ -970,23 +1294,70 @@ static int resolve_parent(const char *path, int *out_parent, char *out_leaf) {
     return 0;
 }
 
-/* M56: drops the record naming `name` from `dir`. The slot is blanked
- * rather than the array compacted, so every other entry keeps its index
- * across the round trip and dir_add can reuse the hole. Returns the
- * inode the record pointed at, or -1. */
+/* M56: drops the record naming `name` from `dir`. Returns the inode the
+ * record pointed at, or -1.
+ *
+ * M81: the record is marked free (inode 0) and merged with any free
+ * neighbours rather than the block being compacted - which is what keeps
+ * a removal to one block write, and what lets dir_add reuse the hole. A
+ * directory therefore never shrinks; it only stops growing. That is the
+ * same trade every filesystem of this shape makes, and the alternative -
+ * moving records between blocks to close a gap - would invalidate the
+ * byte offsets leanfs_readdir hands out as cookies. */
 static int dir_remove(int dir, const char *name) {
-    int count = dir_load(dir);
-    if (count < 0) {
+    if (!dir_ok(dir)) {
         return -1;
     }
-    for (int i = 0; i < count; i++) {
-        if (dirent_scratch[i].name[0] && k_strcmp(dirent_scratch[i].name, name) == 0) {
-            int idx = (int)dirent_scratch[i].inode;
-            k_memset(&dirent_scratch[i], 0, sizeof(dirent_scratch[i]));
-            return dir_store(dir, count) == 0 ? idx : -1;
+    uint32_t name_len = (uint32_t)k_strlen(name);
+    uint32_t blocks = dir_nblocks(dir);
+    for (uint32_t b = 0; b < blocks; b++) {
+        if (dir_block_read(dir, b) < 0) {
+            return -1;
+        }
+        int32_t off = dir_block_find(name, name_len);
+        if (off >= 0) {
+            leanfs_dirent_t *r = dir_rec((uint32_t)off);
+            int idx = (int)r->inode;
+            r->inode = 0;
+            r->name_len = 0;
+            r->type = 0;
+            dir_block_coalesce();
+            /* This block now has room, so no later insert may skip past
+             * it. Lowering rather than clearing keeps the hint useful for
+             * the directory being filled; taking it over outright when it
+             * belongs to a different directory is right too, because the
+             * one with a fresh hole is the better guess. */
+            if (dir != dir_hint_inode || b < dir_hint_block) {
+                dir_hint_inode = dir;
+                dir_hint_block = b;
+            }
+            return dir_block_write(dir, b) == 0 ? idx : -1;
         }
     }
     return -1;
+}
+
+/* M81: how many live entries a directory holds. Only ever compared
+ * against zero (rmdir), so it stops at the first one it finds rather than
+ * reading every block of a directory to answer a yes/no question. */
+static int dir_is_empty(int idx) {
+    if (!dir_ok(idx)) {
+        return 0;
+    }
+    uint32_t blocks = dir_nblocks(idx);
+    for (uint32_t b = 0; b < blocks; b++) {
+        if (dir_block_read(idx, b) < 0) {
+            return 0;
+        }
+        uint32_t off = 0;
+        while (off < LEANFS_BLOCK_SIZE) {
+            if (dir_rec(off)->inode != 0) {
+                return 0;
+            }
+            off += dir_rec(off)->rec_len;
+        }
+    }
+    return 1;
 }
 
 /* ---- public API ------------------------------------------------------ */
@@ -1250,14 +1621,8 @@ int leanfs_rmdir(const char *path) {
      * everything under a path and this OS has no trash to take it back
      * out of - the same judgment leanfs_unlink makes when it refuses a
      * directory rather than guessing what was meant. */
-    int count = dir_load(idx);
-    if (count < 0) {
+    if (!dir_is_empty(idx)) {
         return -1;
-    }
-    for (int i = 0; i < count; i++) {
-        if (dirent_scratch[i].name[0]) {
-            return -1;
-        }
     }
     free_inode_blocks(idx);
     k_memset(&inodes[idx], 0, sizeof(inodes[idx]));
@@ -1362,31 +1727,97 @@ int leanfs_handle_truncate(int handle) {
     return 0;
 }
 
+/* M81: the one directory walk, which both public listing calls use.
+ *
+ * `*cookie` is a byte offset into the directory file. The block it lands
+ * in is always walked from its start rather than indexed into directly,
+ * which costs at most 64 header reads and buys two things: a cookie that
+ * has been corrupted or handed back out of order can only ever land on a
+ * real record boundary, and the caller never has to know that records are
+ * variable-length. Returns 1 and fills `out`, 0 at the end, -1 if a block
+ * is corrupt. */
+static int dir_next(int idx, uint32_t *cookie, leanfs_dir_entry_t *out) {
+    uint32_t blocks = dir_nblocks(idx);
+    uint32_t pos = *cookie;
+
+    while (pos / LEANFS_BLOCK_SIZE < blocks) {
+        uint32_t b = pos / LEANFS_BLOCK_SIZE;
+        uint32_t want = pos % LEANFS_BLOCK_SIZE;
+        if (dir_block_read(idx, b) < 0) {
+            return -1;
+        }
+        uint32_t off = 0;
+        while (off < LEANFS_BLOCK_SIZE) {
+            leanfs_dirent_t *r = dir_rec(off);
+            if (off >= want && r->inode != 0) {
+                uint32_t n = r->name_len;
+                if (n > LEANFS_MAX_NAME) {
+                    return -1;
+                }
+                out->inode = r->inode;
+                out->is_dir = (uint8_t)(r->type == LEANFS_TYPE_DIR);
+                k_memcpy(out->name, dir_block + off + LEANFS_DIRENT_HDR, n);
+                out->name[n] = '\0';
+                *cookie = b * LEANFS_BLOCK_SIZE + off + r->rec_len;
+                return 1;
+            }
+            off += r->rec_len;
+        }
+        pos = (b + 1) * LEANFS_BLOCK_SIZE;
+    }
+    *cookie = blocks * LEANFS_BLOCK_SIZE;
+    return 0;
+}
+
+int leanfs_dir_open(const char *path) {
+    int idx = resolve(path);
+    return dir_ok(idx) ? idx : -1;
+}
+
+int leanfs_readdir_at(int handle, uint32_t *cookie, leanfs_dir_entry_t *out) {
+    /* Re-checked on every call rather than trusted from leanfs_dir_open.
+     * A handle is an inode index (the same contract leanfs_open has had
+     * since M59), so a directory removed between two calls leaves this
+     * one naming a free or reused inode - and dir_ok is what turns that
+     * into a clean -1 instead of a walk through whatever is there now. */
+    if (!dir_ok(handle)) {
+        return -1;
+    }
+    return dir_next(handle, cookie, out);
+}
+
+int leanfs_readdir(const char *path, uint32_t *cookie, leanfs_dir_entry_t *out) {
+    int idx = leanfs_dir_open(path);
+    if (idx < 0) {
+        return -1;
+    }
+    return dir_next(idx, cookie, out);
+}
+
 size_t leanfs_list(const char *path, char *buf, size_t maxlen) {
     int idx = resolve(path);
-    if (!inode_valid(idx) || inodes[idx].type != LEANFS_TYPE_DIR) {
+    if (!dir_ok(idx)) {
         return 0;
     }
-    int count = dir_load(idx);
-    if (count < 0) {
-        return 0;
-    }
-    /* dir_load's results live in the shared scratch buffer, and the
-     * is-it-a-directory question below re-reads `inodes` rather than the
-     * scratch - so nothing here can invalidate what it is iterating. */
+    /* M81: written over dir_next rather than over its own copy of the
+     * walk. The '/' suffix is still built from the *inode's* type rather
+     * than the record's, which is not redundancy for its own sake: the
+     * record's type is what M77's d_type reports and this is the older
+     * caller that predates it, so keeping the two answers coming from two
+     * places is what makes the boot self-test's "d_type and st_mode
+     * agree" assertion mean something. */
     size_t written = 0;
-    for (int i = 0; i < count; i++) {
-        if (!dirent_scratch[i].name[0]) {
-            continue;
-        }
-        int child = (int)dirent_scratch[i].inode;
+    uint32_t cookie = 0;
+    leanfs_dir_entry_t e;
+    while (dir_next(idx, &cookie, &e) == 1) {
+        int child = (int)e.inode;
         int is_dir = inode_valid(child) && inodes[child].type == LEANFS_TYPE_DIR;
-        size_t name_len = k_strlen(dirent_scratch[i].name);
+        size_t name_len = k_strlen(e.name);
         size_t need = name_len + (is_dir ? 1u : 0u) + 1u; /* name + optional '/' + '\n' */
         if (written + need > maxlen) {
             break;
         }
-        k_memcpy(buf + written, dirent_scratch[i].name, name_len);
+        k_memcpy(buf + written, e.name, name_len);
         written += name_len;
         if (is_dir) {
             buf[written++] = '/';

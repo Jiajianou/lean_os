@@ -21,7 +21,14 @@
  * reason precisely about exact boundaries. */
 #define PAGE_SIZE        4096ULL
 #define USER_STACK_TOP   0x0000008000200000ULL /* 512 GiB + 2 MiB */
-#define USER_STACK_PAGES 4                      /* 16 KiB */
+/* M81: 4 -> 16. PATH_MAX_LEN became 4096 this milestone (system_api/
+ * include/paths.h), and the programs that walk a filesystem - the file
+ * manager above all - hold two or three paths in locals at once. Three
+ * of them is three quarters of a 16 KiB stack before anything else, which
+ * is the same cliff the kernel's own stacks went over in this milestone
+ * and worth not going over twice. 64 KiB costs 48 KiB of frames per
+ * process. */
+#define USER_STACK_PAGES 16                     /* 64 KiB */
 #define USER_ARG_ADDR    USER_STACK_TOP
 /* M75: the argument region is two pages, not one, because it now holds
  * an environment as well as an argument vector - and they live in ONE

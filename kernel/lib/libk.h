@@ -22,6 +22,12 @@ void *k_memcpy(void *dst, const void *src, size_t n);
 void *k_memmove(void *dst, const void *src, size_t n);
 void *k_memset(void *dst, int c, size_t n);
 size_t k_strlen(const char *s);
+
+/* M81: the one string primitive this kernel had never needed, asked for
+ * by leanfs's directory records - whose names are stored with a length
+ * and no NUL, so k_strcmp has nothing to stop at. Same contract as the C
+ * library's: negative, zero or positive, and it reads exactly n bytes. */
+int k_memcmp(const void *a, const void *b, size_t n);
 int k_strcmp(const char *a, const char *b);
 /* Copies up to n-1 bytes of src plus a null terminator into dst, always
  * null-terminating (unlike the standard strncpy, which doesn't if src is

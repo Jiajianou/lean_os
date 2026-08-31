@@ -30,6 +30,17 @@ int vfs_unlink(const char *path);
 int vfs_rename(const char *old_path, const char *new_path);
 size_t vfs_list(const char *path, char *buf, size_t maxlen);
 
+/* M81: one directory entry at a time - see leanfs_readdir for the cookie
+ * contract. The pass-through this file has always been, plus the lock
+ * every other call here takes: a walk that holds the lock only for the
+ * entry it is fetching is what lets a caller take as long as it likes
+ * between entries without stopping every other filesystem user. */
+int vfs_readdir(const char *path, uint32_t *cookie, leanfs_dir_entry_t *out);
+
+/* M81: the same walk with the path resolved once - see leanfs_dir_open. */
+int vfs_dir_open(const char *path);
+int vfs_readdir_at(int handle, uint32_t *cookie, leanfs_dir_entry_t *out);
+
 /* M59: see the leanfs.h declarations of the same names for what each one
  * promises. This layer stays the thin, honest pass-through it has always
  * been - a second filesystem type would implement these, not reshape

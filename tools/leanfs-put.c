@@ -52,22 +52,22 @@
 #include <time.h>
 
 /* ---- kernel/fs/leanfs.h, duplicated - see the header comment --------- */
-/* "LFS3". Bumped by the kernel whenever the on-disk layout moves (M12
- * 0x3153464C -> M53 0x3253464C -> M59 this one), and the kernel reformats
+/* "LFS4". Bumped by the kernel whenever the on-disk layout moves (M12
+ * 0x3153464C -> M53 0x3253464C -> M59 0x3353464C -> M81 this one), and the kernel reformats
  * any disk whose magic is not exactly its own - so a stale value here does
  * not produce a diagnosable error, it produces a filesystem this tool wrote
  * and the next boot silently throws away. It must track kernel/fs/leanfs.c. */
-#define LEANFS_MAGIC             0x3353464Cu
+#define LEANFS_MAGIC             0x3453464Cu
+#define LEANFS_VERSION           4u
 #define LEANFS_START_LBA         2048u
-#define LEANFS_MAX_NAME          27
+#define LEANFS_MAX_NAME          255
 #define LEANFS_DIRECT_BLOCKS     16
 #define LEANFS_BLOCK_SIZE        512
 #define LEANFS_INDIRECT_POINTERS (LEANFS_BLOCK_SIZE / (int)sizeof(uint32_t)) /* 128 */
 #define LEANFS_DINDIRECT_BLOCKS  (LEANFS_INDIRECT_POINTERS * LEANFS_INDIRECT_POINTERS)
 #define LEANFS_MAX_FILE_BLOCKS   (LEANFS_DIRECT_BLOCKS + LEANFS_INDIRECT_POINTERS + LEANFS_DINDIRECT_BLOCKS)
 #define LEANFS_MAX_FILE_SIZE     (LEANFS_MAX_FILE_BLOCKS * LEANFS_BLOCK_SIZE)
-#define LEANFS_MAX_INODES        192
-#define LEANFS_MAX_DIRENTS       LEANFS_MAX_INODES
+#define LEANFS_MAX_INODES        8192
 #define LEANFS_DATA_BLOCKS       65536u
 
 #define LEANFS_TYPE_FREE 0
@@ -86,6 +86,7 @@ typedef struct __attribute__((packed)) {
     uint32_t data_lba;
     uint32_t data_blocks;
     uint32_t state;
+    uint32_t version; /* M81 - see kernel/fs/leanfs.c */
 } leanfs_superblock_t;
 
 typedef struct __attribute__((packed)) {
@@ -95,12 +96,25 @@ typedef struct __attribute__((packed)) {
     uint32_t direct[LEANFS_DIRECT_BLOCKS];
     uint32_t indirect;
     uint32_t dindirect;
+    uint8_t  reserved[44]; /* M81: pads the inode to 128 bytes - four per sector */
 } leanfs_inode_t;
 
+/* M81: variable-length, matching kernel/fs/leanfs.h exactly - see that
+ * header for the design and for the one rule that makes it work (the last
+ * record in a block is stretched to reach the block's end, so records tile
+ * each block and none ever straddles one). */
 typedef struct __attribute__((packed)) {
-    char name[LEANFS_MAX_NAME + 1];
-    uint32_t inode;
+    uint32_t inode;    /* 0 == free space */
+    uint16_t rec_len;
+    uint8_t  name_len;
+    uint8_t  type;
+    /* char name[name_len] follows, unterminated */
 } leanfs_dirent_t;
+
+#define LEANFS_DIRENT_HDR   8u
+#define LEANFS_DIRENT_ALIGN 4u
+#define LEANFS_DIRENT_NEED(name_len) \
+    ((LEANFS_DIRENT_HDR + (uint32_t)(name_len) + LEANFS_DIRENT_ALIGN - 1u) & ~(LEANFS_DIRENT_ALIGN - 1u))
 
 #define INODE_TABLE_SECTORS ((sizeof(leanfs_inode_t) * LEANFS_MAX_INODES + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE)
 #define BITMAP_SECTORS      (LEANFS_DATA_BLOCKS / 8 / LEANFS_BLOCK_SIZE)
@@ -109,7 +123,7 @@ static FILE *img;
 static leanfs_superblock_t sb;
 static leanfs_inode_t inodes[LEANFS_MAX_INODES];
 static uint8_t bitmap[BITMAP_SECTORS * LEANFS_BLOCK_SIZE];
-static leanfs_dirent_t dirents[LEANFS_MAX_DIRENTS];
+static uint8_t dir_block[LEANFS_BLOCK_SIZE]; /* M81: one directory block at a time */
 
 static void die(const char *msg) {
     fprintf(stderr, "leanfs-put: %s\n", msg);
@@ -271,20 +285,13 @@ static void free_inode_blocks(leanfs_inode_t *inode) {
 
 /* ---- whole-file read/write over an inode ----------------------------- */
 
-static void inode_read_all(leanfs_inode_t *inode, uint8_t *out, size_t len) {
-    uint8_t block_buf[LEANFS_BLOCK_SIZE];
-    size_t done = 0;
-    for (uint32_t b = 0; done < len; b++) {
-        uint32_t phys = map_block(inode, b);
-        read_block(phys, block_buf);
-        size_t chunk = len - done;
-        if (chunk > LEANFS_BLOCK_SIZE) {
-            chunk = LEANFS_BLOCK_SIZE;
-        }
-        memcpy(out + done, block_buf, chunk);
-        done += chunk;
-    }
-}
+/* M81: inode_read_all lived here, and was the mirror of inode_write_all
+ * below. Its only caller was the old whole-directory dir_load, which
+ * variable-length records replaced with a block-at-a-time walk - so it
+ * became genuinely uncalled rather than merely half of a pair, and is
+ * gone rather than kept behind a pragma. inode_write_all stays because a
+ * file's contents are still written in one shot.
+ */
 
 static void inode_write_all(leanfs_inode_t *inode, const uint8_t *data, size_t len) {
     free_inode_blocks(inode);
@@ -311,25 +318,114 @@ static void inode_write_all(leanfs_inode_t *inode, const uint8_t *data, size_t l
 
 /* ---- directories ----------------------------------------------------- */
 
-static int dir_load(leanfs_inode_t *dir) {
-    if (dir->type != LEANFS_TYPE_DIR) {
-        die("a path component exists but is not a directory");
+/* M81: the block-at-a-time directory, matching kernel/fs/leanfs.c. See
+ * dir_add there for the invariants; this is the same code with the
+ * kernel's ata_* calls replaced by this tool's read_block/write_block and
+ * without the insert hint, which is an optimization for a machine filling
+ * a directory rather than for a tool writing thirty files once. */
+
+static leanfs_dirent_t *dir_rec(uint32_t off) {
+    return (leanfs_dirent_t *)(void *)(dir_block + off);
+}
+
+static int dir_block_valid(void) {
+    uint32_t off = 0;
+    while (off < LEANFS_BLOCK_SIZE) {
+        /* Bounds-check the header before reading it - see the same guard
+         * in kernel/fs/leanfs.c for why this one function needs it. */
+        if (off + LEANFS_DIRENT_HDR > LEANFS_BLOCK_SIZE) {
+            return 0;
+        }
+        leanfs_dirent_t *r = dir_rec(off);
+        if (r->rec_len < LEANFS_DIRENT_HDR ||
+            (r->rec_len % LEANFS_DIRENT_ALIGN) != 0 ||
+            off + r->rec_len > LEANFS_BLOCK_SIZE ||
+            LEANFS_DIRENT_NEED(r->name_len) > r->rec_len) {
+            return 0;
+        }
+        off += r->rec_len;
     }
-    if (dir->size > sizeof(dirents)) {
-        die("directory holds more records than there are inodes to name it - corrupt image");
+    return off == LEANFS_BLOCK_SIZE;
+}
+
+static void dir_block_init(void) {
+    memset(dir_block, 0, LEANFS_BLOCK_SIZE);
+    dir_rec(0)->rec_len = (uint16_t)LEANFS_BLOCK_SIZE;
+}
+
+static uint32_t dir_nblocks(const leanfs_inode_t *dir) {
+    return dir->size / LEANFS_BLOCK_SIZE;
+}
+
+/* Reads directory block `logical`. Unlike the kernel's, this only ever
+ * runs against an image this tool or the kernel wrote, so a block that
+ * does not validate is a corrupt image and worth dying on rather than
+ * working around. */
+static void dir_block_read(leanfs_inode_t *dir, uint32_t logical) {
+    read_block(map_block(dir, logical), dir_block);
+    if (!dir_block_valid()) {
+        die("a directory block does not parse - corrupt image");
     }
-    memset(dirents, 0, sizeof(dirents));
-    if (dir->size > 0) {
-        inode_read_all(dir, (uint8_t *)dirents, dir->size);
+}
+
+static int32_t dir_block_find(const char *name, uint32_t name_len) {
+    uint32_t off = 0;
+    while (off < LEANFS_BLOCK_SIZE) {
+        leanfs_dirent_t *r = dir_rec(off);
+        if (r->inode != 0 && r->name_len == name_len &&
+            memcmp(dir_block + off + LEANFS_DIRENT_HDR, name, name_len) == 0) {
+            return (int32_t)off;
+        }
+        off += r->rec_len;
     }
-    return (int)(dir->size / sizeof(leanfs_dirent_t));
+    return -1;
+}
+
+static int dir_block_place(const char *name, uint32_t name_len, int inode_idx, uint32_t type) {
+    uint32_t need = LEANFS_DIRENT_NEED(name_len);
+    for (int pass = 0; pass < 2; pass++) {
+        uint32_t off = 0;
+        while (off < LEANFS_BLOCK_SIZE) {
+            leanfs_dirent_t *r = dir_rec(off);
+            uint32_t place_at = 0;
+            uint32_t place_len = 0;
+            if (pass == 0 && r->inode == 0 && r->rec_len >= need) {
+                place_at = off;
+                place_len = r->rec_len;
+            } else if (pass == 1 && r->inode != 0) {
+                uint32_t used = LEANFS_DIRENT_NEED(r->name_len);
+                if (r->rec_len >= used + need) {
+                    place_len = r->rec_len - used;
+                    r->rec_len = (uint16_t)used;
+                    place_at = off + used;
+                }
+            }
+            if (place_len > 0) {
+                leanfs_dirent_t *n = dir_rec(place_at);
+                n->inode = (uint32_t)inode_idx;
+                n->rec_len = (uint16_t)place_len;
+                n->name_len = (uint8_t)name_len;
+                n->type = (uint8_t)type;
+                memcpy(dir_block + place_at + LEANFS_DIRENT_HDR, name, name_len);
+                return 1;
+            }
+            off += r->rec_len;
+        }
+    }
+    return 0;
 }
 
 static int dir_lookup(leanfs_inode_t *dir, const char *name) {
-    int count = dir_load(dir);
-    for (int i = 0; i < count; i++) {
-        if (dirents[i].name[0] && strcmp(dirents[i].name, name) == 0) {
-            return (int)dirents[i].inode;
+    if (dir->type != LEANFS_TYPE_DIR) {
+        die("a path component exists but is not a directory");
+    }
+    uint32_t name_len = (uint32_t)strlen(name);
+    uint32_t blocks = dir_nblocks(dir);
+    for (uint32_t b = 0; b < blocks; b++) {
+        dir_block_read(dir, b);
+        int32_t off = dir_block_find(name, name_len);
+        if (off >= 0) {
+            return (int)dir_rec((uint32_t)off)->inode;
         }
     }
     return -1;
@@ -348,27 +444,33 @@ static int alloc_inode(uint32_t type) {
     exit(1);
 }
 
-/* Adds a record, reusing a slot a removal left free before growing the
- * directory - the same rule kernel/fs/leanfs.c's dir_add follows. */
+/* Adds a record, reusing a hole before growing the directory - the same
+ * rule kernel/fs/leanfs.c's dir_add follows. */
 static void dir_add(leanfs_inode_t *dir, const char *name, int inode_idx) {
-    int count = dir_load(dir);
-    int slot = -1;
-    for (int i = 0; i < count; i++) {
-        if (!dirents[i].name[0]) {
-            slot = i;
-            break;
+    if (dir->type != LEANFS_TYPE_DIR) {
+        die("cannot add an entry to something that is not a directory");
+    }
+    uint32_t name_len = (uint32_t)strlen(name);
+    if (name_len == 0 || name_len > LEANFS_MAX_NAME) {
+        die("empty or over-long name");
+    }
+    uint32_t type = inodes[inode_idx].type;
+
+    uint32_t blocks = dir_nblocks(dir);
+    for (uint32_t b = 0; b < blocks; b++) {
+        dir_block_read(dir, b);
+        if (dir_block_place(name, name_len, inode_idx, type)) {
+            write_block(map_block(dir, b), dir_block);
+            return;
         }
     }
-    if (slot < 0) {
-        if (count >= LEANFS_MAX_DIRENTS) {
-            die("directory is full");
-        }
-        slot = count++;
+    dir_block_init();
+    if (!dir_block_place(name, name_len, inode_idx, type)) {
+        die("a name did not fit an empty directory block - impossible");
     }
-    memset(&dirents[slot], 0, sizeof(dirents[slot]));
-    snprintf(dirents[slot].name, sizeof(dirents[slot].name), "%s", name);
-    dirents[slot].inode = (uint32_t)inode_idx;
-    inode_write_all(dir, (const uint8_t *)dirents, (size_t)count * sizeof(leanfs_dirent_t));
+    write_block(map_block(dir, blocks), dir_block);
+    dir->size += LEANFS_BLOCK_SIZE;
+    dir->mtime = (uint32_t)time(NULL);
 }
 
 /* Walks `path` and hands back the inode of its parent directory plus the
@@ -418,6 +520,7 @@ static int resolve_parent(const char *path, char *leaf_out) {
 static void format_fresh(void) {
     memset(&sb, 0, sizeof(sb));
     sb.magic = LEANFS_MAGIC;
+    sb.version = LEANFS_VERSION;
     sb.inode_table_lba = LEANFS_START_LBA + 1;
     sb.inode_table_sectors = (uint32_t)INODE_TABLE_SECTORS;
     sb.bitmap_lba = sb.inode_table_lba + (uint32_t)INODE_TABLE_SECTORS;

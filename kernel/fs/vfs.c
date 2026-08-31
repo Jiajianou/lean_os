@@ -103,6 +103,27 @@ int vfs_rename(const char *old_path, const char *new_path) {
     return r;
 }
 
+int vfs_readdir(const char *path, uint32_t *cookie, leanfs_dir_entry_t *out) {
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    int r = leanfs_readdir(path, cookie, out);
+    spin_unlock_irqrestore(&fs_lock, f);
+    return r;
+}
+
+int vfs_dir_open(const char *path) {
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    int r = leanfs_dir_open(path);
+    spin_unlock_irqrestore(&fs_lock, f);
+    return r;
+}
+
+int vfs_readdir_at(int handle, uint32_t *cookie, leanfs_dir_entry_t *out) {
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    int r = leanfs_readdir_at(handle, cookie, out);
+    spin_unlock_irqrestore(&fs_lock, f);
+    return r;
+}
+
 size_t vfs_list(const char *path, char *buf, size_t maxlen) {
     uint64_t f = spin_lock_irqsave(&fs_lock);
     size_t r = leanfs_list(path, buf, maxlen);

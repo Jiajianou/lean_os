@@ -15,12 +15,33 @@
 #include "ipc/shm.h" /* shm_free_by_owner - see task_exit_with_code */
 #include "lib/spinlock.h"
 #include "mm/heap.h"
+#include "mm/pmm.h" /* M81: task stacks come from the frame allocator - see task_spawn */
 #include "mm/vmm.h"
 #include "panic.h"
 #include "proc/proc.h" /* M54 - process_destroy_address_space, called from task_exit_with_code */
 #include "signal.h" /* system_api/include/signal.h - SIGKILL/SIGTERM */
 
-#define TASK_STACK_SIZE (8 * 1024)
+/* M81: 8 KiB -> 32 KiB, and the reason is a number in another file.
+ *
+ * LEANFS_MAX_PATH went from 128 to 4096 this milestone, and M53's comment
+ * next to the old value said exactly why that matters here: a path is put
+ * on a kernel stack, "which is 8 KiB, so this being a number rather than
+ * 'however long the caller's string is' is load-bearing rather than
+ * tidy." It was right, and the first boot after the bump proved it - the
+ * syscall layer holds two paths at once (copy_path_from_user's raw and
+ * joined) while its caller already holds a third, and leanfs's
+ * resolve_parent holds a fourth below that. Twelve kilobytes of paths on
+ * an eight-kilobyte stack presents as a pmm_free_frame double-free during
+ * boot, because what actually happened is that a task wrote through the
+ * bottom of its stack into the allocator's business.
+ *
+ * 32 KiB is the deepest measured chain (about 12.5 KiB) with room for the
+ * interrupt frames and the nested handlers a preemptible kernel (M67) can
+ * stack on top of it. It costs 3 MiB across MAX_TASKS, which is a real
+ * cost on a 128 MiB machine and a smaller one than the alternative:
+ * pushing paths into per-task heap buffers would put an allocation in
+ * front of every path-taking syscall. */
+#define TASK_STACK_SIZE (32 * 1024)
 /* M69: 5 -> 1. The quantum was the latency floor and nothing else.
  *
  * Round-robin gives every runnable task the CPU for a whole slice, so the
@@ -482,12 +503,31 @@ void sched_init_ap(int cpu_id) {
  * fully-initialised task is the only version of this that is correct. */
 static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
                                   uint64_t heap_start, uint64_t shm_base, task_t *thread_of) {
-    /* kmalloc takes its own lock (heap.c) - done before sched_lock so the
-     * two are never nested in the reverse order anywhere in this kernel
-     * (see heap.c's own note on lock ordering). */
-    uint8_t *stack_base = (uint8_t *)kmalloc(TASK_STACK_SIZE);
+    /* M81: a kernel stack comes from the frame allocator, not the heap.
+     *
+     * It was kmalloc'd for sixty milestones and that was fine while it was
+     * 8 KiB. At 32 KiB it stopped being fine, and the way it announced
+     * that is worth recording: the M67 concurrency self-test began
+     * reporting nineteen leaked frames. Nothing had leaked. Four
+     * concurrent 32 KiB stacks were more than the heap had slack for, so
+     * the heap grew - and a heap here grows by taking frames from the PMM
+     * and never gives them back, which is indistinguishable from a leak to
+     * a test that counts free frames on either side of a spawn.
+     *
+     * A stack is a page-granular object with a page-granular lifetime,
+     * which is exactly what pmm_alloc_contiguous is for. Taking it from
+     * there means the frames a task borrows are the frames it returns, and
+     * the self-test's accounting balances because it is now telling the
+     * truth. It also stops task stacks fragmenting a heap they have no
+     * business being in.
+     *
+     * Allocated before sched_lock for the same lock-ordering reason the
+     * kmalloc it replaces was (see heap.c's note): the PMM takes its own
+     * lock, and these two are never nested in the other order anywhere. */
+    _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
+    uint8_t *stack_base = (uint8_t *)(uintptr_t)pmm_alloc_contiguous(TASK_STACK_SIZE / 4096);
     if (!stack_base) {
-        panic("task_spawn: out of heap memory for a task stack");
+        panic("task_spawn: out of physical memory for a task stack");
     }
 
     uint64_t flags = irq_save_disable();
@@ -508,7 +548,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
         if (task_count >= MAX_TASKS) {
             spin_unlock(&sched_lock);
             irq_restore(flags);
-            kfree(stack_base);
+            pmm_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
             return NULL;
         }
         slot = task_count++;
@@ -1071,7 +1111,7 @@ void task_exit_with_code(int code) {
      * at the same moment cannot each see the other as a live user and
      * both decline to free. The state cannot be set to TERMINATED this
      * early instead - another CPU would be free to reap the slot and
-     * kfree the kernel stack this code is still running on. */
+     * free the kernel stack this code is still running on. */
     if (t->pml4_phys != vmm_kernel_pml4_phys()) {
         int cpu = smp_current_cpu();
         uint64_t dead = t->pml4_phys;
@@ -1253,7 +1293,7 @@ void sched_reap_slot(task_t *t) {
     spin_unlock(&sched_lock);
     irq_restore(flags);
     if (stack) {
-        kfree(stack);
+        pmm_free_contiguous((uint64_t)(uintptr_t)stack, TASK_STACK_SIZE / 4096);
     }
 }
 

@@ -45,8 +45,16 @@
  * included - the same number kernel/fs/leanfs.h's LEANFS_MAX_PATH uses,
  * repeated here because user space has no business including a kernel
  * header and a buffer sized differently from the resolver's own limit is
- * how a path gets silently truncated into a different file. */
-#define PATH_MAX_LEN 128
+ * how a path gets silently truncated into a different file.
+ *
+ * M81: 128 -> 4096, in step with LEANFS_MAX_PATH. The two numbers have to
+ * move together and this is why: the kernel stores a task's working
+ * directory in a buffer of *this* size (task_t.cwd), so a PATH_MAX_LEN
+ * smaller than the resolver's limit means a directory you can create and
+ * open but cannot cd into. It also means user stacks got bigger - see
+ * USER_STACK_PAGES in kernel/proc/proc.h, which four kilobytes of path in
+ * a local variable made too small. */
+#define PATH_MAX_LEN 4096
 
 /* Joins `dir` (with its trailing slash) and `name` into out, which must
  * hold PATH_MAX_LEN bytes. Returns 0, or -1 if the result would not fit -
