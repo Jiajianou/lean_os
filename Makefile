@@ -356,9 +356,26 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 # is a comment that has to be kept true by hand; it is now also the one
 # that sizes ESP_START_LBA below, so a future drift moves the ESP with it
 # instead of silently overlapping.
+#
+# M93: leanfs blocks became 4096 bytes and the region grew from 32 MiB to
+# 2 GiB, so this number is now computed rather than counted by hand -
+# which is what the paragraph above spent forty lines wishing for. In
+# leanfs blocks: 1 superblock + 4096 inode table (131072 inodes at 128
+# bytes) + 16 bitmap + 524288 data = 528401, and a block is 8 sectors.
+#
+#     528401 * 8 = 4227208 sectors = 2.016 GiB
+#
+# The image file that holds it is sparse - `truncate` creates it, nothing
+# writes the data region until something stores a file there, and a first
+# boot's format touches only the 16 MiB inode table and the 64 KiB
+# bitmap. So the cost of this on disk and in every harness's overlay is
+# what is actually used, not two gigabytes.
 FS_START_LBA     := 8192
-FS_TOTAL_SECTORS := 67601
-IMAGE_SECTORS    := 77824
+FS_INODE_BLOCKS  := 4096
+FS_BITMAP_BLOCKS := 16
+FS_DATA_BLOCKS   := 524288
+FS_TOTAL_SECTORS := $(shell echo $$(( (1 + $(FS_INODE_BLOCKS) + $(FS_BITMAP_BLOCKS) + $(FS_DATA_BLOCKS)) * 8 )))
+IMAGE_SECTORS    := $(shell echo $$(( 8192 + (1 + 4096 + 16 + 524288) * 8 + 2048 )))
 
 # The EFI System Partition the UEFI firmware boots from - kernel/boot/mbr.asm's
 # partition entry hardcodes these same two numbers (passed in via `nasm -D`,
@@ -378,7 +395,13 @@ IMAGE_SECTORS    := 77824
 # out, so it cannot be left behind by a filesystem that grows - which is
 # exactly what happened between M81 and here. Rounded up to a whole
 # mebibyte for legibility in a hex dump.
-ESP_START_LBA    := 76800
+#
+# M93: computed from FS_START_LBA + FS_TOTAL_SECTORS rather than written
+# out, which M83's note above already said it should be ("so it cannot be
+# left behind by a filesystem that grows - which is exactly what happened
+# between M81 and here"). A filesystem that grew by sixty times is what
+# finally made writing it out untenable.
+ESP_START_LBA    := $(shell echo $$(( 8192 + (1 + 4096 + 16 + 524288) * 8 )))
 ESP_SECTOR_COUNT := 1024
 
 $(IMAGE): $(MBR_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)

@@ -234,6 +234,18 @@ int symlink(const char *target, const char *path) {
     return (int)sys_symlink(target, path);
 }
 
+int link(const char *old_path, const char *new_path) {
+    return (int)sys_link(old_path, new_path);
+}
+
+int fsync(int fd) {
+    return (int)sys_fsync(fd);
+}
+
+int fdatasync(int fd) {
+    return fsync(fd);
+}
+
 long readlink(const char *path, char *buf, size_t bufsiz) {
     return sys_readlink(path, buf, bufsiz);
 }

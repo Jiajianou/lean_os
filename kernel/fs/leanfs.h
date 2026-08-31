@@ -6,10 +6,16 @@
  * format (or a simple FAT-like layout)" allowance for M12.
  *
  * On-disk layout, starting at LEANFS_START_LBA:
- *   1 sector    superblock
- *   N sectors   inode table (LEANFS_MAX_INODES entries)
- *   16 sectors  free-block bitmap (LEANFS_DATA_BLOCKS bits)
- *   M sectors   data blocks (1 block == 1 sector == 512 bytes)
+ *   1 block     superblock
+ *   N blocks    inode table (LEANFS_MAX_INODES entries)
+ *   16 blocks   free-block bitmap (LEANFS_DATA_BLOCKS bits)
+ *   M blocks    data blocks
+ *
+ * M93: a block is 4096 bytes, not 512. It was one disk sector from M12
+ * until M93 and the two words were used interchangeably throughout;
+ * everything below that says "sector" about leanfs's own units is now
+ * about eight of them. See LEANFS_BLOCK_SIZE for the three reasons, of
+ * which the file ceiling is only the first.
  *
  * Each inode has a small fixed number of direct block pointers, one
  * singly-indirect block (a data block full of 32-bit block pointers) -
@@ -72,6 +78,11 @@
  * hardcoded 8192 of its own. */
 #define LEANFS_START_LBA 8192u
 
+/* M93: the same place, counted in leanfs blocks rather than in disk
+ * sectors. 8192 / 8 is exact, which is not luck - M83 chose 8192 as
+ * "4 MiB in" and 4 MiB is a whole number of anything. */
+#define LEANFS_START_BLOCK (LEANFS_START_LBA / LEANFS_SECTORS_PER_BLOCK)
+
 
 #include <stddef.h>
 #include <stdint.h>
@@ -103,15 +114,54 @@
  * constraint did not go away - it got priced. */
 #define LEANFS_MAX_PATH             4096
 #define LEANFS_DIRECT_BLOCKS        16
-#define LEANFS_BLOCK_SIZE           512
-#define LEANFS_INDIRECT_POINTERS    (LEANFS_BLOCK_SIZE / (int)sizeof(uint32_t)) /* 128 */
-/* M59: 16 direct + 128 indirect + 128 * 128 double-indirect blocks.
- * 16528 blocks, a shade over 8 MiB - up from a 72 KiB ceiling that was
- * smaller than this project's own largest source file, and which three
- * separate apps were visibly working around. */
-#define LEANFS_DINDIRECT_BLOCKS     (LEANFS_INDIRECT_POINTERS * LEANFS_INDIRECT_POINTERS) /* 16384 */
-#define LEANFS_MAX_FILE_BLOCKS      (LEANFS_DIRECT_BLOCKS + LEANFS_INDIRECT_POINTERS + LEANFS_DINDIRECT_BLOCKS)
-#define LEANFS_MAX_FILE_SIZE        (LEANFS_MAX_FILE_BLOCKS * LEANFS_BLOCK_SIZE)
+
+/* ---- M93: a block is 4 KiB, and almost everything else follows -------
+ *
+ * A leanfs block was one 512-byte sector for eighty-one milestones,
+ * because that is the unit the disk driver moves and equating the two
+ * meant never converting between them. Three things make that the wrong
+ * size for a filesystem that has to hold a source tree, and only the
+ * first is obvious:
+ *
+ *   - the file ceiling. With 512-byte blocks an indirect block holds 128
+ *     pointers, so two levels of indirection reach 8 MiB. With 4 KiB
+ *     blocks it holds 1024, and the same two levels reach four
+ *     gigabytes - which is a change of format, not of structure. A third
+ *     indirection level would have been the alternative and it is a
+ *     worse one: more code, another read on every deep access, and a
+ *     ceiling nobody would ever reach anyway.
+ *   - the metadata cost. Every block needs a bitmap bit and every
+ *     allocation touches one; eight times fewer blocks is eight times
+ *     less bitmap to scan for a filesystem of the same size.
+ *   - and the one that only became true this arc: M92's cache holds 4 KiB
+ *     lines, because that is a page and a page is what everything else in
+ *     this kernel is a multiple of. A 512-byte filesystem block means
+ *     every block operation touches one eighth of a cache line, and a
+ *     directory scan reads a line to look at a sector of it.
+ *
+ * The driver still speaks 512-byte sectors - that is what the hardware
+ * is - so leanfs.c converts, once, in the four functions that touch a
+ * block. LEANFS_START_LBA divides by eight exactly, which is not luck:
+ * it was chosen in M83 as 4 MiB in.
+ */
+#define LEANFS_BLOCK_SIZE           4096
+#define LEANFS_SECTOR_SIZE          512
+#define LEANFS_SECTORS_PER_BLOCK    (LEANFS_BLOCK_SIZE / LEANFS_SECTOR_SIZE) /* 8 */
+#define LEANFS_INDIRECT_POINTERS    (LEANFS_BLOCK_SIZE / (int)sizeof(uint32_t)) /* 1024 */
+/* M59: 16 direct + N indirect + N * N double-indirect blocks. That was
+ * 16528 blocks and a shade over 8 MiB at 512-byte blocks; at 4 KiB it is
+ * 1049616 blocks and a shade over four gigabytes. Deliberately still two
+ * levels - see the note above on why the block size moved instead. */
+#define LEANFS_DINDIRECT_BLOCKS     ((uint64_t)LEANFS_INDIRECT_POINTERS * LEANFS_INDIRECT_POINTERS)
+#define LEANFS_MAX_FILE_BLOCKS      ((uint64_t)LEANFS_DIRECT_BLOCKS + LEANFS_INDIRECT_POINTERS + LEANFS_DINDIRECT_BLOCKS)
+/* M93: the block tree reaches 4295 MiB and `size` is a uint32_t, so the
+ * ceiling is the *field*, not the structure - 4 GiB minus one block.
+ * Stated as the smaller of the two rather than as the block count,
+ * because a file one block past this would have a size that wrapped to
+ * something small and a length nothing could detect afterwards. Widening
+ * `size` is a one-field change into the inode's reserved space on the day
+ * a program wants a file bigger than four gigabytes; nothing does. */
+#define LEANFS_MAX_FILE_SIZE        0xFFFFF000u
 
 /* The number of files this filesystem can hold, in total, across every
  * directory. Its history is this project's most-repeated bug: 32 (M12),
@@ -135,12 +185,44 @@
  * room) and the same 1 MiB of kernel BSS, up from 16 KiB. The inode grew
  * to 128 bytes to get there - see leanfs_inode_t in leanfs.c for why a
  * power of two rather than the 84 bytes it packs into. */
-#define LEANFS_MAX_INODES           8192
+/* M93: 8192 -> 131072, and this is the last bump that can be a number.
+ *
+ * M81 raised this from 192 with the argument that "the wall this cap
+ * creates is not a limit a program can work around - a source tarball is
+ * thousands of files", and chose 8192 as past CPython's roughly 3000. A
+ * compiler is the next thing along and GCC's tree is a hundred thousand
+ * files, so 8192 is a floor again for exactly the reason M81 gave.
+ *
+ * What is different this time is the cost and where it lands. The inode
+ * table is held in memory in full, so 131072 inodes is 16 MiB of it -
+ * which is why this milestone also moves the table out of `.bss` and
+ * into a run-time allocation (see leanfs.c): 16 MiB linked into the
+ * kernel image would be 16 MiB the boot loader reads off disk and zeroes
+ * on a machine that may not want a filesystem at all.
+ *
+ * And the honest limit, stated so the next arc does not have to discover
+ * it: this cannot keep doubling. A million inodes is 128 MiB of table and
+ * the answer at that point is not a bigger array, it is to stop holding
+ * the table and read inodes through M92's block cache like every other
+ * block. That is a real piece of work and it has a trigger rather than a
+ * date - the day a tree with more than 131072 files has to exist here at
+ * once. GCC's source without its test suite is under that; with it, it is
+ * not. */
+#define LEANFS_MAX_INODES           131072u
 
-/* Total data region capacity. 65536 blocks = 32 MiB. Must be a multiple
- * of (LEANFS_BLOCK_SIZE * 8) so the bitmap lands on a whole number of
- * sectors. */
-#define LEANFS_DATA_BLOCKS          65536u
+/* Total data region capacity. M93: 65536 512-byte blocks (32 MiB) ->
+ * 524288 4 KiB blocks (2 GiB). Must be a multiple of
+ * (LEANFS_BLOCK_SIZE * 8) so the bitmap lands on a whole number of
+ * blocks - 524288 / 8 / 4096 is 16 exactly.
+ *
+ * Two gigabytes rather than more for one reason that is not about
+ * leanfs: the disk image is a file the build creates and every harness
+ * copies, and it is sparse, so the number that matters is how much of it
+ * a first boot actually writes. A format writes the inode table (16 MiB)
+ * and the bitmap (64 KiB) and nothing else, whatever the data region's
+ * size. Growing this is a constant and a Makefile line, and M98 is the
+ * milestone that will know what number it needs. */
+#define LEANFS_DATA_BLOCKS          524288u
 
 /* ---- M81: a directory record, and why it is variable-length ----------
  *
@@ -352,6 +434,25 @@ int leanfs_stat(const char *path, leanfs_stat_t *out);
  * than LEANFS_MAX_LINK_HOPS, or a link pointing at itself, is refused
  * rather than walked further. */
 int leanfs_symlink(const char *path, const char *target);
+
+/* ---- M93: a second name for the same file -----------------------------
+ *
+ * M87's fourth bullet asked for hard links and shipped only symbolic
+ * ones; this is the half that was left. A directory record has always
+ * been a name plus an inode number, so two records naming one inode is
+ * not new structure - what was missing was a count of how many do, which
+ * is the inode's `nlink` (M81's reserved padding, used at last).
+ *
+ * Refused for a directory. Not a limitation: a directory with two parents
+ * is a cycle, `..` does not exist here to make it visible as one, and
+ * every path walk in this filesystem assumes a tree. See leanfs.c. */
+int leanfs_link(const char *old_path, const char *new_path);
+
+/* How many names reach this file. 0 if the path does not resolve. Exists
+ * so a self-test can state what a link IS rather than infer it from two
+ * paths happening to read the same bytes - which two copies would also
+ * do. */
+uint32_t leanfs_nlink(const char *path);
 int64_t leanfs_readlink(const char *path, char *buf, size_t maxlen);
 int leanfs_lstat(const char *path, leanfs_stat_t *out);
 

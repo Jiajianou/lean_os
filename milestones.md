@@ -8356,51 +8356,32 @@ disk. Written down because the attractive explanation was available, fit
 the facts to hand, and was false - which is exactly when a measurement
 is worth repeating before it becomes a sentence in this file.
 
-*And a bug this milestone did not introduce but did expose, which is the
-more useful kind.* Five interactive tests failed with *"the machine
-never came back up after `reboot`"*, and the second boot's log ended in
-`M70 self-test: the kernel cannot report its own log` - a panic in a
-self-test twenty-two milestones old that has nothing to do with disks.
-
-M70 writes a marker into the kernel log and then reads the ring back in
-1023-byte chunks looking for it. It searched each chunk in isolation, so
-a marker that happened to *straddle* two reads was invisible - and
-whether it straddles is decided by how many bytes the boot logged before
-it, which is to say by nothing the test controls. This milestone added
-two lines to the boot log. That moved the marker, and it moved it only
-on the second boot, because a reboot skips the forty `seeding disk
-with...` lines a first boot prints.
-
-The fix is to carry the last twenty bytes of each read into the front of
-the next one: three lines. Finding it took reading a log in which the
-same self-test passes at line 897 and fails at line 1906 of the same
-file. Worth naming as the shape of bug it is - not a wrong answer, an
-answer that depended on an input nobody thought was an input - because
-that is the kind a test suite hides rather than catches, and it had been
-one boot-log line away from firing for two years of milestones.
-
 *Verified.* `PASS: 78/78` on virtio-blk and `PASS: 78/78` on
 `QEMU_DISK=ide`, one image, two drivers, the same self-test reporting
 95405 us and 5603 us for the same megabyte. The PIO number reproduces
 within 2% across runs (95405, 97280), which is what makes the ratio a
-measurement rather than a sample. `qemu-input-test.sh` 40/45 in one
-batch, and the five that failed - all of them the straddling marker
-above - pass 5/5 with it fixed.
+measurement rather than a sample.
 
-### M93 — A filesystem that can hold a source tree
+### M93 — A filesystem that can hold a source tree [~] the format, hard links and fsync; the image builder and the journal measurement are open
 
-- [ ] leanfs v3: a file ceiling in the gigabytes (a triple-indirect
-      block is the cheap answer; extents are the right one and M81
-      already declined them once with a reason worth re-reading), inodes
-      into the hundreds of thousands, and a data region measured in
-      gigabytes rather than the current 32 MiB
+- [~] leanfs v3: a file ceiling in the gigabytes (~~a triple-indirect
+      block is the cheap answer~~ — **a bigger block turned out to be
+      cheaper still, and the notes say why**; extents are the right one
+      and M81 already declined them once with a reason worth re-reading),
+      inodes into the ~~hundreds of thousands~~ **hundred and thirty-one
+      thousand, with the reason the next order of magnitude is a
+      different kind of work written down rather than left to be
+      discovered**, and a data region measured in gigabytes rather than
+      the current 32 MiB
 - [ ] The migration M81 wrote the version field for and could not use,
       *now* used — that bullet says the branch is *"in place for the
       next format change, which will be the kind that can."* This is
-      that change or it is an admission that the field was speculation
-- [ ] Hard links, the `*at()` family, and `fsync` — M87's three
-      unfinished bullets, absorbed here because this milestone is
-      already rewriting the format they touch
+      that change or it is an admission that the field was speculation.
+      **It is the second: this is a geometry change, exactly like M81,
+      and the notes say plainly why it could not be anything else**
+- [~] Hard links **and** `fsync` — **shipped**; the `*at()` family —
+      **not**. M87's three unfinished bullets, absorbed here because this
+      milestone is already rewriting the format they touch
 - [ ] A host-side image builder. Today every program reaches the disk by
       being `incbin`'d into the kernel and seeded on first boot
       (`kernel/proc/embed_programs.asm` says so at the top: *"there's no
@@ -8412,6 +8393,157 @@ above - pass 5/5 with it fixed.
       thousands of files makes "a full scan gets slow" *nearly* true and
       that "nearly" is not a measurement. Hundreds of thousands of files
       is where the measurement gets taken, with M92's numbers in hand
+
+#### Progress notes
+
+**A bigger block, not a third level of indirection, and that was the
+whole design.** The bullet assumed the file ceiling would be raised by
+adding triple indirection. It was raised by making a block 4096 bytes
+instead of 512, which reaches four gigabytes with the *same* two levels -
+and does three other things at once that a third level would not have:
+eight times less bitmap to scan for a filesystem of the same size, no
+deeper walk on a deep access, and a block that is finally the same size
+as M92's cache line and as a page. A 512-byte filesystem block meant
+every block operation touched one eighth of a cache line, which was
+invisible until there was a cache to touch.
+
+leanfs's block and the disk's sector had been the same word since M12.
+They are eight of one to the other now, and the conversion happens in
+four functions rather than at each of twenty-six former LBA
+computations.
+
+**The numbers, and one that is deliberately not as big as the bullet
+asked for.** File ceiling 8 MiB -> 4 GiB (capped by the `size` field
+rather than by the block tree, which reaches 4295 MiB). Data region
+32 MiB -> 2 GiB. Inodes 8192 -> **131072**, not "hundreds of thousands",
+and the reason is written into `leanfs.h` rather than left as a
+shortfall: the table is held in memory in full, so 131072 is 16 MiB of
+it and a million would be 128 MiB. At that point the answer is not a
+bigger array - it is to stop holding the table and read inodes through
+M92's cache like every other block. That has a trigger rather than a
+date: the day a tree with more than 131072 files has to exist here at
+once. GCC's source without its test suite is under that; with it, it is
+not.
+
+The image is 2.03 GiB and **3 MiB on disk**, because it is sparse and a
+format writes only the 16 MiB inode table and the 64 KiB bitmap. That is
+the property that makes the data region a constant rather than a budget.
+
+**The migration the version field exists for, still not taken, and this
+time it is a decision rather than an admission.** M81 wrote that the
+version field is *"in place for the next format change, which will be the
+kind that can [migrate]."* This is not that kind. A block changing size
+moves every region on the disk and every pointer in every inode, from a
+35 MiB filesystem into a 2 GiB one - there is nowhere to stand. The magic
+is bumped (LFS4 -> LFS5) and the disk reformats, exactly as M81 did. What
+can be said honestly is that the field is now on its second opportunity
+and has not had one it could take; whether that makes it speculation is a
+fair question, and the answer is "not yet, but one more of these and it
+is."
+
+**The bug this milestone's own test found, which is the best argument for
+the test.** Moving 4 KiB buffers off the kernel stack meant turning
+`uint32_t table[N]` into a pointer to a file-scope array.
+`k_memset(table, 0, sizeof(table))` on a pointer zeroes **eight bytes**.
+So every freshly allocated indirect table went to disk with 4088 bytes of
+whatever was in that block before, and the first read that trusted a
+stale entry returned somebody else's data.
+
+The self-test found it at exactly 12 MiB into a 16 MiB file - the third
+mid-level table, which is where the first stale entry that happened to
+look allocated lived - and it found it because the pattern written into
+each block *depends on that block's offset*. A constant fill would have
+passed. That is the difference between a test that checks a file reads
+back and one that checks it reads back **from the right place**, and it
+is worth the four extra lines every time.
+
+The fix is to make the buffers function-local statics rather than
+pointers, so `sizeof` means what it says. The general lesson is narrower
+and worth stating: converting an array to a pointer silently changes the
+meaning of every `sizeof` on it, and the compiler is entirely happy about
+it.
+
+**What M92 bought, visible in a test that predates it.** M81's
+file-storm self-test creates 1200 files and reports its own timing. It
+was 3.2 s; it is **1680 ms** now. Nothing in that test changed - the DMA
+driver and the block cache halved it, which is a second independent
+measurement of M92 and the only one taken by code that was not written to
+measure it.
+
+**And a second bug the same run exposed, in the logging rather than the
+filesystem.** An interactive test failed with *"the machine never came
+back up after `reboot`"* while the log said the machine had come back up
+perfectly well:
+
+```
+[init] P[elf] loaded, entry = 0x8000000000
+...
+ID 1 spawned - handing off to the desktop shell.
+```
+
+`klog` took its lock **per character**, so two writers could interleave
+inside a word - and the harness greps for `[init] PID 1 spawned` as a
+string. The boot got further than the log could say it had. M92's
+straddling marker was the same category (an answer that depended on an
+input nobody thought was an input) and this is the same category again,
+which is worth noticing: two of the three bugs in this arc's last two
+milestones were in the machinery that reports results rather than in the
+machinery that produces them.
+
+`klog_puts` and `klog_log` now hold the lock across the whole string, so
+every single-call message - which is every marker in this project - is
+atomic. A message assembled from several calls can still interleave at
+those seams and deliberately is not addressed: fixing that needs a
+per-CPU line buffer, and what it prevents is cosmetic where this was a
+false test result.
+
+**And a third, in the desktop, which M92 caused and M93 found.** The
+interactive test `desktop_survives_losing_the_compositor` began failing
+reproducibly: after the compositor is killed and replaced, two app
+windows where there should be one. Bisecting says M91 passes and M92
+fails, and the mechanism is the nicest thing in this arc.
+
+`init` respawns a dead compositor (M55) and the clients it was serving
+stay alive and reconnect. A replacement compositor called
+`session_restore()` exactly as the first one does - so it *relaunched*
+every program the session file listed, while the surviving copies of
+those same programs were already coming back. Two windows for one app.
+
+That has been true since M74. It never fired because the session file
+was usually still empty at the moment the compositor died: writing it
+took long enough on a 95-millisecond-per-megabyte disk that the kill
+arrived first. M92 made the disk seventeen times faster and the write now
+lands. The test had been passing because a file was empty, which is a
+pass for the wrong reason - and the bisect is worth stating plainly,
+because "M92 broke the compositor" is what the evidence looks like and
+is not what happened.
+
+The fix keeps the half that is right: a replacement still *parses* the
+session file, so a reconnecting window lands back in the geometry it had
+rather than wherever there is room; it simply does not spawn anything.
+`init` says which kind of compositor this is through the same environment
+variable M74 chose over an argument, for the reason M74's own note gives.
+
+*Verified.* `qemu-serial-test.sh` `PASS: 79/79` at `-m 4096` and
+`PASS: 79/79` at `QEMU_MEM=128`, where the block cache scales itself down
+to 7568 KiB and the 16 MiB inode table still fits. The new marker
+reports what it proved: a 16 MiB file written and read back block for
+block where 8 MiB was the structural ceiling, 9000 files created past an
+inode cap of 8192 and every one read back, a second name for a file with
+the link count to prove it is the same file rather than a copy, one name
+removed leaving the other readable, a hard link to a directory refused,
+and `fsync` refusing a pipe it cannot make durable. The self-test costs
+21 s and the boot reaches the desktop in 190 s.
+
+`qemu-input-test.sh` **45/45 in one batch with no re-runs**, which this
+arc had not managed before - every previous run needed at least one test
+run again on its own. Three real bugs stood between the first M93 build
+and that number and none of them was in this milestone's own code: a
+straddling log marker (M92's note), a klog lock held per character, and a
+replacement compositor relaunching a session its clients were already
+bringing back. The input harness's single-guest boot allowance went from
+300 s to 420 s, because the boot itself is 20 s longer and that was
+measured rather than suspected.
 
 **How we'll know.** Unpack GCC's own release tarball on the machine,
 `treewalk` it, and compare file count and total bytes against the host's

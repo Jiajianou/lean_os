@@ -20,7 +20,7 @@ static void fill(struct stat *out, const os_stat_t *st) {
     out->st_atime = out->st_mtime; /* leanfs stores one timestamp, not three */
     out->st_ctime = out->st_mtime;
     out->st_nlink = 1;             /* no hard links exist here, so this is a fact rather than a default */
-    out->st_blksize = 512;         /* leanfs's own block size (LEANFS_BLOCK_SIZE) */
+    out->st_blksize = 4096;        /* leanfs's own block size (LEANFS_BLOCK_SIZE) - M93: was 512 */
     out->st_blocks = (blkcnt_t)((st->size + 511u) / 512u);
 }
 

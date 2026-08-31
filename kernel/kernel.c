@@ -9122,7 +9122,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         int dup_inode = 0;
         if (all_ok) {
             /* One bit per inode, so "have I seen this number" is a test
-             * rather than a search. LEANFS_MAX_INODES bits is 1 KiB. */
+             * rather than a search. LEANFS_MAX_INODES bits is 16 KiB
+             * as of M93, up from 1 KiB - the cost of a cap that stopped
+             * being a floor under every real workload. */
             static uint8_t seen_ino[LEANFS_MAX_INODES / 8];
             k_memset(seen_ino, 0, sizeof(seen_ino));
             uint32_t cookie = 0;
@@ -9222,6 +9224,217 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts("-byte path, every entry walked back one at a time by streaming readdir "
                    "with no two sharing an inode number, and a delete/recreate cycle reusing "
                    "the holes rather than growing the directory - self-test passed (");
+        klog_put_dec(took_ms);
+        klog_puts(" ms).\n\n");
+    }
+
+    /* ---- M93 self-test: a filesystem sized for a source tree ----------
+     *
+     * M81's test above proves that a directory can hold more names than
+     * the whole disk used to. This one proves the three caps it did not
+     * touch, because each of them is a wall a build hits and none of them
+     * is reachable from inside a directory:
+     *
+     *   1. A file larger than the old 8 MiB ceiling. 16 MiB, written and
+     *      read back, which at 4 KiB blocks is four thousand blocks and
+     *      therefore well into the double-indirect table. A `cc1plus` is
+     *      a hundred megabytes; the point of the number is only that it
+     *      is past a ceiling that used to be structural.
+     *   2. More files than the old 8192 inode cap. Created past it and
+     *      counted back, because "the constant is bigger" is not the
+     *      claim - the claim is that the allocator, the directory and the
+     *      inode table all still work on the far side of it.
+     *   3. A hard link, which is M87's fourth bullet finally: two names,
+     *      one inode, and removing one leaving the other. Checked by
+     *      link count and not by reading the same bytes through both
+     *      names, because two *copies* would pass that.
+     *
+     * And fsync, which is M87's seventh, checked in both directions: 0
+     * for a file and a refusal for a pipe, because a call that returns
+     * success for something it cannot make durable is worse than one that
+     * does not exist.
+     */
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        int all_ok = 1;
+
+        /* ---- 1. A file past the old ceiling --------------------------- */
+        static const char *const BIG = PATH_TMP_DIR "m93big";
+        const uint32_t BIG_BYTES = 16u * 1024 * 1024;
+        const uint32_t CHUNK = 64u * 1024;
+        static uint8_t chunk[64 * 1024];
+        int big_handle = -1;
+        if (all_ok) {
+            big_handle = vfs_open(BIG, 1);
+            if (big_handle < 0) {
+                klog_puts("[m93] could not create a file to grow\n");
+                all_ok = 0;
+            }
+        }
+        for (uint32_t off = 0; all_ok && off < BIG_BYTES; off += CHUNK) {
+            /* A pattern that depends on the offset, so a block written to
+             * the wrong place reads back as the wrong bytes rather than
+             * as plausible ones. A constant fill would pass against a
+             * block map that returned the same block every time. */
+            for (uint32_t i = 0; i < CHUNK; i += 512) {
+                chunk[i] = (uint8_t)((off + i) >> 12);
+                chunk[i + 1] = (uint8_t)((off + i) >> 20);
+            }
+            if (vfs_handle_write(big_handle, chunk, CHUNK, off) != (int64_t)CHUNK) {
+                klog_puts("[m93] a write past the old 8 MiB ceiling was refused at 0x");
+                klog_put_hex32(off);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+        if (all_ok && vfs_handle_size(big_handle) != BIG_BYTES) {
+            klog_puts("[m93] the grown file is not the size it was written to\n");
+            all_ok = 0;
+        }
+        for (uint32_t off = 0; all_ok && off < BIG_BYTES; off += CHUNK) {
+            k_memset(chunk, 0, CHUNK);
+            if (vfs_handle_read(big_handle, chunk, CHUNK, off) != (int64_t)CHUNK) {
+                klog_puts("[m93] a read past the old ceiling came up short\n");
+                all_ok = 0;
+                break;
+            }
+            for (uint32_t i = 0; i < CHUNK; i += 512) {
+                if (chunk[i] != (uint8_t)((off + i) >> 12) ||
+                    chunk[i + 1] != (uint8_t)((off + i) >> 20)) {
+                    klog_puts("[m93] a block came back from the wrong place at 0x");
+                    klog_put_hex32(off + i);
+                    klog_putc('\n');
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+        if (all_ok) {
+            /* No vfs_close: a handle is an inode index in this filesystem
+             * and nothing holds state that needs releasing - which is why
+             * there is no such function to call. Said here because its
+             * absence looks like an omission. */
+            if (vfs_unlink(BIG) != 0) {
+                klog_puts("[m93] the big file could not be removed\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- 2. Past the old inode cap -------------------------------- */
+        static const char *const MANYDIR = PATH_TMP_DIR "m93many";
+        const int PAST_CAP = 9000; /* the old LEANFS_MAX_INODES was 8192 */
+        int made = 0;
+        if (all_ok && !vfs_exists(MANYDIR) && vfs_mkdir(MANYDIR) != 0) {
+            klog_puts("[m93] could not make the directory for the inode storm\n");
+            all_ok = 0;
+        }
+        for (int i = 0; i < PAST_CAP && all_ok; i++) {
+            char path[PATH_MAX_LEN];
+            char name[16];
+            m81_storm_name(name, i);
+            if (path_join(path, PATH_TMP_DIR "m93many/", name) != 0 ||
+                vfs_write(path, "x", 1) != 0) {
+                klog_puts("[m93] file creation failed at 0x");
+                klog_put_hex32((uint32_t)i);
+                klog_puts(" - the inode cap is still where it was\n");
+                all_ok = 0;
+                break;
+            }
+            made++;
+        }
+        if (all_ok && made <= 8192) {
+            klog_puts("[m93] the storm stopped at or below the old cap, so it proved nothing\n");
+            all_ok = 0;
+        }
+        if (all_ok) {
+            uint32_t cookie = 0;
+            leanfs_dir_entry_t e;
+            int seen = 0;
+            while (vfs_readdir(MANYDIR, &cookie, &e) == 1) {
+                seen++;
+            }
+            if (seen != made) {
+                klog_puts("[m93] made 0x");
+                klog_put_hex32((uint32_t)made);
+                klog_puts(" files and read back 0x");
+                klog_put_hex32((uint32_t)seen);
+                klog_putc('\n');
+                all_ok = 0;
+            }
+        }
+
+        /* ---- 3. Two names for one file -------------------------------- */
+        static const char *const L_A = PATH_TMP_DIR "m93link.a";
+        static const char *const L_B = PATH_TMP_DIR "m93link.b";
+        if (all_ok) {
+            vfs_unlink(L_A);
+            vfs_unlink(L_B);
+            if (vfs_write(L_A, "two names", 9) != 0) {
+                klog_puts("[m93] could not write the file to link\n");
+                all_ok = 0;
+            }
+        }
+        if (all_ok && vfs_link(L_A, L_B) != 0) {
+            klog_puts("[m93] link refused a file it should have accepted\n");
+            all_ok = 0;
+        }
+        if (all_ok && (vfs_nlink(L_A) != 2 || vfs_nlink(L_B) != 2)) {
+            klog_puts("[m93] the link count is not 2 through both names\n");
+            all_ok = 0;
+        }
+        /* A hard link to a directory has to be refused - see leanfs.c on
+         * why this is a rule and not a limitation. Checked, because the
+         * cost of getting it wrong is a filesystem check that never
+         * terminates. */
+        if (all_ok && vfs_link(PATH_TMP_DIR "m93many", PATH_TMP_DIR "m93dirlink") == 0) {
+            klog_puts("[m93] a hard link to a directory was allowed\n");
+            all_ok = 0;
+        }
+        if (all_ok && vfs_unlink(L_A) != 0) {
+            klog_puts("[m93] removing the first name failed\n");
+            all_ok = 0;
+        }
+        if (all_ok) {
+            char back[16];
+            int64_t n = vfs_read(L_B, back, sizeof(back));
+            if (n != 9 || back[0] != 't') {
+                klog_puts("[m93] removing one name took the file with it\n");
+                all_ok = 0;
+            }
+        }
+        if (all_ok && vfs_nlink(L_B) != 1) {
+            klog_puts("[m93] the link count did not come back down\n");
+            all_ok = 0;
+        }
+        if (all_ok) {
+            vfs_unlink(L_B);
+        }
+
+        /* ---- 4. fsync refuses what it cannot make durable -------------- */
+        if (all_ok) {
+            int fds[2];
+            if (do_syscall(SYS_pipe, (uint64_t)fds, 0, 0) == 0) {
+                if (do_syscall(SYS_fsync, (uint64_t)fds[0], 0, 0) == 0) {
+                    klog_puts("[m93] fsync claimed to have made a pipe durable\n");
+                    all_ok = 0;
+                }
+                do_syscall(SYS_close, (uint64_t)fds[0], 0, 0);
+                do_syscall(SYS_close, (uint64_t)fds[1], 0, 0);
+            }
+        }
+
+        if (!all_ok) {
+            panic("M93 self-test: this filesystem cannot hold what a build would put in it");
+        }
+        uint32_t took_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms;
+        klog_puts("[m93] a filesystem that can hold a source tree: a 16 MiB file written and "
+                   "read back block for block where 8 MiB was the structural ceiling, 0x");
+        klog_put_hex32((uint32_t)made);
+        klog_puts(" files created past an inode cap of 0x2000 and every one of them read back, "
+                   "a second name for a file with the link count to prove it is the same file "
+                   "rather than a copy, one name removed leaving the other readable, a hard "
+                   "link to a directory refused, and fsync refusing a pipe it cannot make "
+                   "durable - self-test passed (");
         klog_put_dec(took_ms);
         klog_puts(" ms).\n\n");
     }

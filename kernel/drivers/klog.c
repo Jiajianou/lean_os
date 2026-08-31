@@ -75,15 +75,9 @@ static uint64_t klog_written; /* total bytes ever emitted */
  * gets it either way (nothing klog emits is ever lost from serial capture,
  * per the header's fan-out guarantee). klog_putc and the leveled path in
  * klog_log_putc below both fall through to this. */
-static void klog_emit(char c, int also_console) {
-    /* cli has to happen *before* taking the lock, not after: an interrupt
-     * landing on this CPU in the gap between them, whose handler also
-     * calls klog_puts (a fault reported by isr_handler, say), would try to
-     * spin_lock a lock this exact CPU already holds and deadlock on
-     * itself - the identical mistake sched_lock had, see sched.c's own
-     * note on why. */
-    uint64_t flags = irq_save_disable();
-    spin_lock(&klog_lock);
+/* The body, with the lock already held. Split out by M93 so a whole
+ * string can be written under one acquisition - see klog_puts. */
+static void klog_emit_locked(char c, int also_console) {
     if (also_console) {
         if (use_console) {
             console_putc(c);
@@ -97,6 +91,18 @@ static void klog_emit(char c, int also_console) {
      * half-written line that the serial capture does not. */
     klog_ring[klog_written % KLOG_RING_SIZE] = c;
     klog_written++;
+}
+
+static void klog_emit(char c, int also_console) {
+    /* cli has to happen *before* taking the lock, not after: an interrupt
+     * landing on this CPU in the gap between them, whose handler also
+     * calls klog_puts (a fault reported by isr_handler, say), would try to
+     * spin_lock a lock this exact CPU already holds and deadlock on
+     * itself - the identical mistake sched_lock had, see sched.c's own
+     * note on why. */
+    uint64_t flags = irq_save_disable();
+    spin_lock(&klog_lock);
+    klog_emit_locked(c, also_console);
     spin_unlock(&klog_lock);
     irq_restore(flags);
 }
@@ -105,10 +111,40 @@ void klog_putc(char c) {
     klog_emit(c, 1);
 }
 
+/* ---- M93: a whole string under one lock -------------------------------
+ *
+ * This took the lock per *character*, which serialises the ring and the
+ * serial port correctly and lets two writers interleave in the middle of
+ * a word. That is not theoretical: an interactive test failed with the
+ * machine apparently never rebooting, and the reason in the log was
+ *
+ *     [init] P[elf] loaded, entry = 0x8000000000
+ *     ...
+ *     ID 1 spawned - handing off to the desktop shell.
+ *
+ * The marker the harness greps for had a spawning task's debug line
+ * inserted into the middle of it. The boot got further than the log could
+ * say it had.
+ *
+ * Holding the lock across the string makes every single-call message
+ * atomic, which is every marker in this project. A message assembled from
+ * several calls (a string, a number, another string) can still interleave
+ * at those seams and deliberately is not addressed here: fixing that
+ * means a per-CPU line buffer, and the failure it prevents is cosmetic
+ * where this one was a false test result.
+ *
+ * The cost is that a CPU writing a line holds the lock for the whole line
+ * rather than a character - and since serial_putc polls a UART, that is a
+ * real interval. It is also strictly less lock traffic than before, and
+ * the serial port was always the bottleneck it appears to be. */
 void klog_puts(const char *s) {
+    uint64_t flags = irq_save_disable();
+    spin_lock(&klog_lock);
     while (*s) {
-        klog_putc(*s++);
+        klog_emit_locked(*s++, 1);
     }
+    spin_unlock(&klog_lock);
+    irq_restore(flags);
 }
 
 static char hex_digit(uint8_t nibble) {
@@ -156,10 +192,18 @@ static void klog_log_putc(klog_level_t level, char c) {
     klog_emit(c, level >= current_level);
 }
 
+/* M93: the same whole-string atomicity as klog_puts, for the same
+ * reason - a debug line interleaving into a marker is what made this
+ * necessary, and this is the path those debug lines take. */
 void klog_log(klog_level_t level, const char *s) {
+    int also_console = level >= current_level;
+    uint64_t flags = irq_save_disable();
+    spin_lock(&klog_lock);
     while (*s) {
-        klog_log_putc(level, *s++);
+        klog_emit_locked(*s++, also_console);
     }
+    spin_unlock(&klog_lock);
+    irq_restore(flags);
 }
 
 void klog_log_hex32(klog_level_t level, uint32_t value) {

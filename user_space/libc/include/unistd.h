@@ -112,6 +112,18 @@ long sysconf(int name);
 int getpagesize(void);
 
 int symlink(const char *target, const char *path);
+/* M93: a hard link. Note the argument order is the opposite way round
+ * from symlink's, and that is POSIX's doing rather than this project's -
+ * link(existing, new) reads as a copy, symlink(target, path) reads as an
+ * assignment, and every Unix has had both spellings since V7. */
+int link(const char *old_path, const char *new_path);
+/* M93. On this machine a file's contents are already durable when write()
+ * returns (leanfs and M92's cache are both write-through); what this
+ * pushes is the metadata that write dirtied. See SYS_fsync. fdatasync is
+ * the same call - there is no metadata this could skip and still be
+ * honest about. */
+int fsync(int fd);
+int fdatasync(int fd);
 long readlink(const char *path, char *buf, size_t bufsiz);
 
 int unlink(const char *path);

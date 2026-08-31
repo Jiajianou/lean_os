@@ -106,6 +106,14 @@ long sys_mmap(void *addr, unsigned long len, int prot, int flags, int fd,
     return do_syscall6(SYS_mmap, (long)addr, (long)len, prot, flags, fd, (long)offset);
 }
 
+long sys_link(const char *old_path, const char *new_path) {
+    return do_syscall(SYS_link, (long)old_path, (long)new_path, 0);
+}
+
+long sys_fsync(int fd) {
+    return do_syscall(SYS_fsync, fd, 0, 0);
+}
+
 long sys_mprotect(void *addr, unsigned long len, int prot) {
     return do_syscall(SYS_mprotect, (long)addr, (long)len, prot);
 }

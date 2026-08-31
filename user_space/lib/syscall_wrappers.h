@@ -82,6 +82,9 @@ long sys_mmap(void *addr, unsigned long len, int prot, int flags, int fd,
 long sys_munmap(void *addr, unsigned long len);
 /* M91: change an existing mapping's permissions, and drop its pages
  * without giving up its address space. See SYS_mprotect/SYS_madvise. */
+/* M93: a second name for an existing file - see SYS_link. */
+long sys_link(const char *old_path, const char *new_path);
+long sys_fsync(int fd);
 long sys_mprotect(void *addr, unsigned long len, int prot);
 long sys_madvise(void *addr, unsigned long len, int advice);
 

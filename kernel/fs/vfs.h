@@ -51,6 +51,10 @@ int vfs_stat(const char *path, leanfs_stat_t *out);
 /* M87: symbolic links. readlink and lstat are the two that do NOT follow
  * a final link - see leanfs.h for why that distinction is the point. */
 int vfs_symlink(const char *path, const char *target);
+/* M93: a second name for a file, and how many names it has. Refused for
+ * anything under a synthetic mount - see the implementation. */
+int vfs_link(const char *old_path, const char *new_path);
+uint32_t vfs_nlink(const char *path);
 int64_t vfs_readlink(const char *path, char *buf, size_t maxlen);
 int vfs_lstat(const char *path, leanfs_stat_t *out);
 int vfs_open(const char *path, int create);

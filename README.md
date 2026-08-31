@@ -4,7 +4,7 @@ A desktop operating system for x86-64, written from scratch: bootloader,
 kernel, drivers, filesystem, window system and applications. No GRUB, no
 libc, no third-party code anywhere in the OS itself.
 
-![79 milestones](https://img.shields.io/badge/milestones-79-informational)
+![93 milestones](https://img.shields.io/badge/milestones-93-informational)
 
 ```
 UEFI firmware
@@ -27,8 +27,16 @@ UEFI firmware
   task manager, a settings panel, a paint toy and a clock.
 - **A system underneath.** Pre-emptive multitasking across multiple
   cores, a per-process address space, a custom filesystem with
-  directories and files up to 8 MiB, pipes, shared memory, an orderly
+  directories and files up to 4 GiB, pipes, shared memory, an orderly
   shutdown, and a clock that knows the date.
+- **A machine, not a demo.** Physical memory sized from what the
+  firmware reports rather than from a constant, an identity map built
+  from the same table, and a per-process address space measured in
+  hundreds of gigabytes with a real NX bit, `mprotect`, `MAP_FIXED` and
+  a stack that grows when it is touched. A virtio block driver with the
+  ATA one kept as the fallback, and a cache in front of both: the same
+  megabyte costs 95 ms through PIO, 5.6 ms through DMA and 2.5 ms warm.
+  See M90-M93 in [milestones.md](milestones.md).
 - **Unix-shaped enough to build against.** An environment inherited
   across a spawn and a real working directory, so a relative path means
   something; signals a program can *catch*, delivered through a frame on
@@ -70,12 +78,18 @@ EFI app), `mtools` and `qemu-system-x86_64`. See
 ./tools/run-qemu.sh          # builds everything, fetches OVMF the first time, boots
 ```
 
+The disk image is 2 GiB and sparse - a few megabytes on disk until
+something fills it. `QEMU_MEM=128` boots the same kernel on a small
+machine and `QEMU_DISK=ide` runs it through the ATA driver instead of
+virtio; both are configurations the harnesses are expected to pass in,
+not fallbacks.
+
 ## Tests
 
 Two harnesses, and neither subsumes the other. Run both.
 
 ```sh
-./tools/qemu-serial-test.sh  # boots headless, grades the serial log: 69 boot markers
+./tools/qemu-serial-test.sh  # boots headless, grades the serial log: 79 boot markers
 ./tools/qemu-input-test.sh   # drives real clicks and keys, grades real pixels: 45 tests
 ```
 

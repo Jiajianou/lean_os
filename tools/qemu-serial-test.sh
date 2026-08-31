@@ -279,6 +279,7 @@ REQUIRED_MARKERS=(
   "[m90] more than a gigabyte:"
   "[m91] an address space that is a set of mappings:"
   "[m92] a disk worth reading:"
+  "[m93] a filesystem that can hold a source tree:"
   "[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"

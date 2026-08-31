@@ -1522,6 +1522,49 @@ static long sys_symlink(uint64_t target_ptr, uint64_t path_ptr, uint64_t a3,
     return vfs_symlink(path, target);
 }
 
+/* M93: both arguments are real paths, unlike SYS_symlink's target - a
+ * hard link names an inode that has to exist right now, so the second
+ * one is resolved exactly like the first. That difference is the whole
+ * difference between the two calls at this layer. */
+static long sys_link(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
+                     uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1;
+    }
+    char old_path[LEANFS_MAX_PATH];
+    char new_path[LEANFS_MAX_PATH];
+    if (copy_path_from_user(old_path, old_ptr) != 0 ||
+        copy_path_from_user(new_path, new_ptr) != 0) {
+        return -1;
+    }
+    return vfs_link(old_path, new_path);
+}
+
+/* M93: see SYS_fsync's ABI note for what this does and does not promise
+ * on a write-through filesystem. The fd is checked rather than ignored
+ * because the answer for a pipe is "there is nothing here to make
+ * durable", and 0 would be a claim. */
+static long sys_fsync(uint64_t fd, uint64_t a2, uint64_t a3,
+                      uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (fd >= MAX_FDS) {
+        return -1;
+    }
+    if (sched_current()->fds[fd].type != FD_FILE) {
+        return -1;
+    }
+    vfs_sync();
+    return 0;
+}
+
 static long sys_readlink(uint64_t path_ptr, uint64_t buf, uint64_t len,
                          uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
@@ -4301,6 +4344,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_ioctl] = sys_ioctl,
     [SYS_ftruncate] = sys_ftruncate,
     [SYS_symlink] = sys_symlink,
+    [SYS_link] = sys_link,
+    [SYS_fsync] = sys_fsync,
     [SYS_readlink] = sys_readlink,
     [SYS_lstat] = sys_lstat,
 };

@@ -2533,7 +2533,19 @@ def main(argv):
     # running - and a boot timeout is the harness giving up, not a
     # verdict. The allowance grows with the job count for exactly that
     # reason.
-    boot_timeout = 300 + 90 * (jobs - 1)
+    #
+    # M93: 300 -> 420 for a single guest. The boot itself got longer, and
+    # by a measured amount rather than a suspected one: the [m93]
+    # self-test creates nine thousand files and writes a 16 MiB file, and
+    # reports its own cost at 21 s. A boot that reached the desktop in
+    # 170 s reaches it in 190 s, and the old 300 s allowance for one guest
+    # was the one number in this harness that a 20 s change could push
+    # over - two tests failed here with a log showing a boot that was
+    # simply still going.
+    #
+    # Raised rather than made adaptive on purpose. A timeout that scales
+    # with what it is timing cannot fail, which makes it not a timeout.
+    boot_timeout = 420 + 90 * (jobs - 1)
 
     print("running %d test(s), %d at a time" % (len(selected), jobs), flush=True)
     started_all = time.time()

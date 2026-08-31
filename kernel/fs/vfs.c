@@ -423,6 +423,31 @@ int vfs_symlink(const char *path, const char *target) {
     return r;
 }
 
+/* M93: both paths have to be on the real filesystem. A link into or out
+ * of a synthetic one is refused for the reason every other create is:
+ * /dev and /proc do not have inodes to name twice. */
+int vfs_link(const char *old_path, const char *new_path) {
+    const char *rel;
+    if (vfs_resolve_mount(old_path, &rel) >= 0 || vfs_resolve_mount(new_path, &rel) >= 0) {
+        return -1;
+    }
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    int r = leanfs_link(old_path, new_path);
+    spin_unlock_irqrestore(&fs_lock, f);
+    return r;
+}
+
+uint32_t vfs_nlink(const char *path) {
+    const char *rel;
+    if (vfs_resolve_mount(path, &rel) >= 0) {
+        return 0;
+    }
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint32_t r = leanfs_nlink(path);
+    spin_unlock_irqrestore(&fs_lock, f);
+    return r;
+}
+
 int64_t vfs_readlink(const char *path, char *buf, size_t maxlen) {
     const char *rel;
     if (vfs_resolve_mount(path, &rel) >= 0) {

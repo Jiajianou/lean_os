@@ -4491,6 +4491,26 @@ static void handle_keyboard(void) {
 #define SESSION_MAX    8
 
 static int session_enabled;
+/* M93: whether this compositor should *relaunch* the saved session, as
+ * opposed to merely remembering where its windows go.
+ *
+ * The two were the same thing until a compositor crash got fast enough
+ * to matter. init respawns a dead compositor (M55) and the clients it was
+ * serving stay alive and reconnect - so a replacement that also relaunched
+ * the session file started a *second* copy of every program that was
+ * already coming back. Two windows for one app.
+ *
+ * This was latent for two arcs and M92 made it fire: the compositor now
+ * gets its session file written before it is killed, where a 95-ms-per-
+ * megabyte disk had usually not finished. The interactive test that
+ * caught it (`desktop_survives_losing_the_compositor`) had been passing
+ * because the file was empty, which is a pass for the wrong reason.
+ *
+ * A replacement still parses the file, because that is what lets a
+ * reconnecting window land back in the geometry it had rather than
+ * wherever the compositor next has room - session_claim does that, and it
+ * is the half worth keeping. */
+static int session_relaunch;
 
 static session_entry_t session_pending[SESSION_MAX];
 static int session_pending_count;
@@ -4691,11 +4711,13 @@ static void session_restore(void) {
         if (path_join(path, PATH_BIN_DIR, e.program) != 0) {
             continue;
         }
-        long pid = sys_spawn(path, "");
-        if (pid < 0) {
-            continue; /* the program is gone - drop the entry rather than fail the session */
+        if (session_relaunch) {
+            long pid = sys_spawn(path, "");
+            if (pid < 0) {
+                continue; /* the program is gone - drop the entry rather than fail the session */
+            }
+            child_track(pid); /* M54: so its slot comes back when it closes */
         }
-        child_track(pid); /* M54: so its slot comes back when it closes */
         e.claimed = 0;
         session_pending[session_pending_count++] = e;
     }
@@ -4706,9 +4728,16 @@ static void session_restore(void) {
         msg[m++] = pre[i];
     }
     m += format_uint((uint32_t)session_pending_count, msg + m);
-    static const char post[] = " window(s) relaunched\n";
-    for (int i = 0; post[i]; i++) {
-        msg[m++] = post[i];
+    if (session_relaunch) {
+        static const char post[] = " window(s) relaunched\n";
+        for (int i = 0; post[i]; i++) {
+            msg[m++] = post[i];
+        }
+    } else {
+        static const char post[] = " window(s) expected back\n";
+        for (int i = 0; post[i]; i++) {
+            msg[m++] = post[i];
+        }
     }
     sys_write(1, msg, (size_t)m);
 }
@@ -4753,7 +4782,16 @@ int main(void) {
      * session. See the module above for why a self-test compositor must
      * not, and why this is an environment variable rather than an
      * argument. */
-    session_enabled = getenv("LEANOS_SESSION") != 0;
+    {
+        /* "1" from PID 1's first pass, "reconnect" from every one after
+         * it - see init.c, and session_relaunch above for why the two
+         * differ. Anything else present at all still enables saving, so
+         * an unrecognised value degrades to the old behaviour rather than
+         * to no session at all. */
+        const char *sess = getenv("LEANOS_SESSION");
+        session_enabled = sess != 0;
+        session_relaunch = sess != 0 && strcmp(sess, "reconnect") != 0;
+    }
     if (sys_fb_info(&fb_info) != 0) {
         sys_exit(1);
     }

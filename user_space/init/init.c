@@ -64,7 +64,27 @@ int main(int argc, char **argv) {
     setenv("LEANOS_SESSION", "1", 1);
     chdir(PATH_HOME);
 
+    /* M93: the first compositor restores the session; every one after it
+     * only remembers where the windows go.
+     *
+     * This loop respawns a dead compositor (M55), and its clients stay
+     * alive across that - they reconnect. A replacement that also
+     * relaunched the session file therefore started a *second* copy of
+     * every program that was already coming back, which is two windows
+     * for one app. Latent since M74 and made real by M92: the compositor
+     * now finishes writing its session file before it is killed, where a
+     * disk 17 times slower usually had not.
+     *
+     * Told through the same environment variable M74 chose over an
+     * argument, for the reason its note gives - a gate PID 1 says once
+     * rather than a parameter every `main` has to grow. */
+    int first_compositor = 1;
+
     for (;;) {
+        if (!first_compositor) {
+            setenv("LEANOS_SESSION", "reconnect", 1);
+        }
+        first_compositor = 0;
         long comp_pid = sys_spawn(PATH_BIN_DIR "compositor", "");
         if (comp_pid < 0) {
             /* Nothing to do if the compositor binary itself is missing -
