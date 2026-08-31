@@ -202,42 +202,6 @@ static uint8_t *read_program(const char *path, size_t *out_size) {
  * loop is a burst that gets dropped. M56's own editor test injected two
  * characters by hand; a command line is thirty, which is where doing it
  * by hand stops being reasonable. */
-/* M61: how many pixels of the column at `x`, between the bottom of a
- * cascaded window and the bottom of the screen, are not the desktop
- * colour. An animation is deliberately *not* settled, so what a test can
- * honestly assert is that something is somewhere on the path - not where
- * exactly, which is a question about easing and scheduler jitter. */
-static int selftest_column_lit(uint32_t x, uint32_t bg) {
-    int lit = 0;
-    for (uint32_t y = 240; y < fb_height(); y += 4) {
-        if (fb_get_pixel(x, y) != bg) {
-            lit++;
-        }
-    }
-    return lit;
-}
-
-/* The same column, sampled repeatedly over roughly one animation's worth
- * of time, reporting the most it ever saw.
- *
- * One sample is not enough and the reason is worth writing down: this
- * task sleeps with `hlt` and comes back when the scheduler next picks it,
- * so "wait 60 ms" is a floor rather than a time - a single sample can
- * land after a 140 ms animation has already finished. Taking the maximum
- * over several is what makes the assertion about whether motion happened
- * rather than about when this task happened to wake up. */
-static int selftest_column_lit_peak(uint32_t x, uint32_t bg, int samples, uint32_t gap_ms) {
-    int peak = 0;
-    for (int i = 0; i < samples; i++) {
-        int lit = selftest_column_lit(x, bg);
-        if (lit > peak) {
-            peak = lit;
-        }
-        pit_sleep_ms(gap_ms);
-    }
-    return peak;
-}
-
 static void selftest_type(const char *s) {
     for (const char *p = s; *p; p++) {
         keyboard_inject(*p, 0);
@@ -350,6 +314,115 @@ static int selftest_wait_for_pixel(uint32_t x, uint32_t y, uint32_t expected,
     return selftest_wait_until(pixel_matches, &probe, timeout_ms, what);
 }
 
+/* How long the check below will wait for the screen to catch up.
+ * Generous for the reason SELFTEST_POLL_MS's own comment gives: this is
+ * the difference between "not yet" and "never", not a budget. */
+#define SELFTEST_PAINT_MS 4000
+
+/* The pixel at (x, y) once it is what the caller expects - or whatever it
+ * actually is when the deadline expires, which leaves the caller's own
+ * comparison to report the failure exactly as it would have.
+ *
+ * The shape almost every GUI check in this file wanted and did not have.
+ * `pit_sleep_ms(400); px = fb_get_pixel(...)` grades a constant against a
+ * guess at how long this machine takes to paint one, and those two things
+ * are unrelated. M69 replaced the sleeps that waited for a *process* with
+ * conditions and left behind the ones that wait for a *repaint*; they
+ * fail the same way it described - intermittently, on a busy host, and
+ * looking exactly like the defect the check exists to find. Two were
+ * caught doing it: a launcher overlay sampled three fifths of the way
+ * through its fade-in, and a terminal sampled while `ls` was still
+ * printing.
+ *
+ * It cannot make a check weaker. On a timeout the caller gets whatever is
+ * actually on screen and grades that, exactly as it graded whatever a
+ * sleep happened to leave it - a pixel that is never going to be right is
+ * still wrong at the deadline, and this only decides how long to keep
+ * asking. The expected value passed here is a condition to wait on and
+ * not the assertion; where a caller has a table of expected values, that
+ * table is still what grades.
+ *
+ * Two agreeing reads, not one, and that is not belt-and-braces. This
+ * kernel reads the framebuffer while the compositor is in the middle of
+ * copying its back buffer into it a row at a time (compositor.c's
+ * present), so a single read taken at the instant a pixel first goes
+ * right can be half of one frame and half of the one before - which is
+ * how a probe a few rows lower comes back holding the *previous* frame,
+ * animation ghost and all. A fixed sleep never saw that because it always
+ * sampled long after the last paint; waiting for a condition means
+ * sampling exactly when one is happening. Ten milliseconds apart is
+ * several frames' worth of separation, and a torn frame does not survive
+ * to the second one.
+ *
+ * Which is also why every *graded* pixel of a group should come through
+ * here rather than only the one that changes: settling the one and then
+ * reading its neighbours plainly puts those neighbours back in the
+ * torn-frame window this exists to step out of. */
+static uint32_t selftest_pixel_settled(uint32_t x, uint32_t y, uint32_t expected,
+                                        const char *what) {
+    uint64_t deadline = pit_get_ticks() + (SELFTEST_PAINT_MS + 9) / 10;
+    int agreed = 0;
+    for (;;) {
+        if (fb_get_pixel(x, y) == expected) {
+            if (++agreed >= 2) {
+                return expected;
+            }
+        } else {
+            agreed = 0;
+        }
+        if (pit_get_ticks() >= deadline) {
+            klog_puts("[selftest] timed out waiting for: ");
+            klog_puts(what);
+            klog_putc('\n');
+            return fb_get_pixel(x, y);
+        }
+        pit_sleep_ms(SELFTEST_POLL_MS);
+    }
+}
+
+/* M46: the window title's own pixels, counted by colour over the strip
+ * the title is drawn in - x:[106, 150), y:[82, 98), which is "Clock"
+ * starting at the cascade origin plus TITLE_MARGIN.
+ *
+ * Counted rather than probed at a point on purpose: picking one glyph
+ * pixel by hand would be asserting on the shape of the font rather than
+ * on the colour the title is drawn in.
+ *
+ * `until_bright` says which of the two this pass is waiting to see, and
+ * the wait is the same one selftest_pixel_settled makes: the title is
+ * painted by the same repaint as the frame around it, so a titlebar with
+ * an animation ghost over it (a window opening is one, and it is drawn in
+ * front of the windows by design) has *neither* colour anywhere in the
+ * strip. Zero and zero is not the dim title this check is looking for and
+ * not the bright one either - it is the check having looked too early.
+ * The counts it returns are still exactly what grades. */
+static void selftest_title_counts(int until_bright, int *out_bright, int *out_dim) {
+    uint64_t deadline = pit_get_ticks() + (SELFTEST_PAINT_MS + 9) / 10;
+    for (;;) {
+        int bright = 0, dim = 0;
+        for (int32_t ty = 82; ty < 98; ty++) {
+            for (int32_t tx = 106; tx < 150; tx++) {
+                uint32_t c = fb_get_pixel(tx, ty);
+                if (c == 0x00F0F0F0u) {
+                    bright++;
+                } else if (c == 0x009AA4B0u) {
+                    dim++;
+                }
+            }
+        }
+        int found = until_bright ? bright : dim;
+        if (found > 0 || pit_get_ticks() >= deadline) {
+            if (found == 0) {
+                klog_puts("[selftest] timed out waiting for: the window title to be drawn\n");
+            }
+            *out_bright = bright;
+            *out_dim = dim;
+            return;
+        }
+        pit_sleep_ms(SELFTEST_POLL_MS);
+    }
+}
+
 /* M69: "wait until the compositor owns the screen", which is what all
  * ~35 `process_spawn("compositor"); pit_sleep_ms(N)` pairs in this file
  * were really saying. The desktop background at a point no window covers
@@ -367,6 +440,212 @@ static int selftest_wait_for_pixel(uint32_t x, uint32_t y, uint32_t expected,
  * over it before checking the compositor is up. */
 static void selftest_wait_for_compositor(void) {
     selftest_wait_for_pixel(500, 400, 0x001A1A2Eu, 5000, "the compositor to paint the desktop");
+}
+
+/* M61: how many pixels of the column at `x`, between the bottom of a
+ * cascaded window and the bottom of the screen, are not the desktop
+ * colour. An animation is deliberately *not* settled, so what a test can
+ * honestly assert is that something is somewhere on the path - not where
+ * exactly, which is a question about easing and scheduler jitter. */
+static int selftest_column_lit(uint32_t x, uint32_t bg) {
+    int lit = 0;
+    for (uint32_t y = 240; y < fb_height(); y += 4) {
+        if (fb_get_pixel(x, y) != bg) {
+            lit++;
+        }
+    }
+    return lit;
+}
+
+/* The same column, watched until something appears on it. Returns the
+ * most it ever saw (0 if nothing did), and how long it took to see it.
+ *
+ * One sample is not enough and the reason is worth writing down: this
+ * task sleeps with `hlt` and comes back when the scheduler next picks it,
+ * so "wait 60 ms" is a floor rather than a time - a single sample can
+ * land after a 140 ms animation has already finished.
+ *
+ * And nor is a fixed *number* of samples, which is what this was.
+ * Twelve samples 12 ms apart covers a 140 ms animation on a machine
+ * where a sleep of 12 ms is 12 ms and a frame is 16 ms. Attach a display
+ * to the emulator, or put the host under load, and both of those numbers
+ * grow together - the animation stretches (compositor.c's
+ * ANIM_MIN_FRAMES) and this task's own turn comes round less often - and
+ * a window that covers a fixed 144 ms lands entirely before the motion it
+ * was meant to catch. That failure looks exactly like the defect this
+ * check exists to find, which is the worst property a check can have.
+ *
+ * So: a deadline instead of a sample count, and one that is generous
+ * because it is not a performance budget - what is being asserted is that
+ * motion happens at all, not that it happens within any particular number
+ * of milliseconds. The caller gets the latency back so that the matching
+ * negative check ("and nothing at all with motion switched off") can be
+ * watched for at least as long as the positive one needed. */
+static int selftest_column_lit_wait(uint32_t x, uint32_t bg, uint32_t timeout_ms,
+                                     uint32_t *took_ms) {
+    uint64_t start = pit_get_ticks();
+    uint64_t deadline = start + (timeout_ms + 9) / 10;
+    int peak = 0;
+    for (;;) {
+        int lit = selftest_column_lit(x, bg);
+        if (lit > peak) {
+            peak = lit;
+        }
+        if (peak > 0 || pit_get_ticks() >= deadline) {
+            break;
+        }
+        pit_sleep_ms(SELFTEST_POLL_MS);
+    }
+    if (took_ms) {
+        *took_ms = (uint32_t)((pit_get_ticks() - start) * 10);
+    }
+    return peak;
+}
+
+/* The same column, watched for a whole window of time rather than until
+ * something happens - the shape a *negative* claim needs, since there is
+ * no moment at which "nothing is going to appear" becomes true. */
+static int selftest_column_lit_peak_ms(uint32_t x, uint32_t bg, uint32_t window_ms) {
+    uint64_t deadline = pit_get_ticks() + (window_ms + 9) / 10;
+    int peak = 0;
+    for (;;) {
+        int lit = selftest_column_lit(x, bg);
+        if (lit > peak) {
+            peak = lit;
+        }
+        if (pit_get_ticks() >= deadline) {
+            return peak;
+        }
+        pit_sleep_ms(SELFTEST_POLL_MS);
+    }
+}
+
+/* And the other end of the same claim: watched until the path is bare
+ * again. Returns what is still lit, which is 0 when the animation cleaned
+ * up after itself and a real finding when it did not. A deadline rather
+ * than a sleep for the same reason as above - "the animation has
+ * finished" is a condition, and on a machine slow enough to stretch one
+ * (ANIM_MIN_FRAMES again) a fixed 400 ms can expire in the middle of it
+ * and report a perfectly healthy animation as a trail left behind. */
+static int selftest_column_clear_wait(uint32_t x, uint32_t bg, uint32_t timeout_ms) {
+    uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
+    for (;;) {
+        int lit = selftest_column_lit(x, bg);
+        if (lit == 0 || pit_get_ticks() >= deadline) {
+            return lit;
+        }
+        pit_sleep_ms(SELFTEST_POLL_MS);
+    }
+}
+
+/* M56: how much of gui_terminal's top text row is lit.
+ *
+ * The window is the only one on screen, so it lands at the cascade origin
+ * (100, 100) and its first row of 8x16 cells is y:[100, 116) across its
+ * 70 columns. Counting lit pixels rather than reading the text is
+ * deliberate: what row is at the top of a scrolled-back terminal is a
+ * claim about scrollback, and which filenames are on it is a claim about
+ * the order leanfs happens to return directory records in. */
+static int selftest_term_top_lit(void) {
+    int lit = 0;
+    for (int32_t ty = 100; ty < 116; ty++) {
+        for (int32_t tx = 100; tx < 660; tx++) {
+            if (fb_get_pixel((uint32_t)tx, (uint32_t)ty) == 0x00D0D0D0u) {
+                lit++;
+            }
+        }
+    }
+    return lit;
+}
+
+/* The same count, once it has stopped moving - and, when `differs_from`
+ * is not -1, once it has stopped moving somewhere *else*.
+ *
+ * This used to be three fixed sleeps, and the middle one carried the
+ * whole test: `ls /bin` is a spawn, its output through a pipe, and a
+ * terminal draining that pipe a line at a time, and 1500 ms was how long
+ * those three take on the machine the number was written on. On a slower
+ * one the count gets sampled while output is still arriving; the terminal
+ * scrolls once more behind the sample, and the "live" figure the last
+ * check compares against is a view the terminal had already left. The
+ * failure that produces - scrolling forward did not come back to the live
+ * view - is indistinguishable from the defect the check exists to find.
+ *
+ * "Stopped moving" needs a length of quiet, and the length that means
+ * something is a property of the machine rather than a constant: a
+ * terminal rendering a line every 30 ms and one rendering a line every
+ * 400 ms both look identical for 300 ms at a time. So the quiet this
+ * requires is measured from the machine's own cadence - four times the
+ * longest gap between two changes it has actually been seen to take, and
+ * never less than 300 ms. Nothing to keep in step with a scheduler
+ * change, and nothing to re-measure when the host gets slower. */
+static int selftest_term_top_settled(int differs_from, uint32_t timeout_ms) {
+    uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
+    uint64_t last_change = pit_get_ticks();
+    uint64_t quiet_needed = 30;  /* ticks: 300 ms, the floor */
+    int value = selftest_term_top_lit();
+    for (;;) {
+        pit_sleep_ms(SELFTEST_POLL_MS);
+        uint64_t now = pit_get_ticks();
+        int sampled = selftest_term_top_lit();
+        if (sampled != value) {
+            uint64_t gap = (now - last_change) * 4;
+            if (gap > quiet_needed) {
+                quiet_needed = gap > 400 ? 400 : gap; /* ticks: 4 s, the ceiling */
+            }
+            value = sampled;
+            last_change = now;
+        } else if (now - last_change >= quiet_needed &&
+                   (differs_from < 0 || value != differs_from)) {
+            return value;
+        }
+        if (now >= deadline) {
+            /* Out of time. Returning what is actually on screen leaves
+             * the caller's own assertion to say what went wrong, which is
+             * a better report than a timeout here would be. */
+            return value;
+        }
+    }
+}
+
+/* "The compositor has taken this settings change" as a condition rather
+ * than as a sleep.
+ *
+ * M61's own test writes `animations = 0` down WM_SETTINGS_PIPE and then
+ * asserts that the next minimize animates *nothing*. Between those two
+ * things sits a message the compositor has not read yet, and a fixed
+ * sleep in the gap is a guess about how long a busy machine takes to get
+ * round to its request pipes. Guess short and the toggle arrives while
+ * the setting is still on, the window animates exactly as designed, and
+ * the test reports the setting as broken. So ask, using M44's read side
+ * of the same setting, until the answer comes back. */
+static int selftest_wait_for_animations_setting(int want, uint32_t timeout_ms) {
+    int sq_fds[2];
+    int sqr_fds[2];
+    if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_PIPE, (uint64_t)sq_fds, 0) != 0 ||
+        do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_RESP_PIPE, (uint64_t)sqr_fds, 0) != 0) {
+        return 0;
+    }
+    uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
+    for (;;) {
+        /* Drain first: anything already in there is the answer to
+         * somebody else's question - see the M44 self-test's own note. */
+        do_syscall(SYS_pipe_reset, (uint64_t)sqr_fds[0], 0, 0);
+        uint8_t ping = 1;
+        do_syscall(SYS_write, (uint64_t)sq_fds[1], (uint64_t)&ping, sizeof(ping));
+        pit_sleep_ms(SELFTEST_POLL_MS);
+        wm_settings_request_t got;
+        k_memset(&got, 0, sizeof(got));
+        if (do_syscall(SYS_read, (uint64_t)sqr_fds[0], (uint64_t)&got, sizeof(got)) == (long)sizeof(got) &&
+            (int)(got.animations != 0) == (want != 0)) {
+            return 1;
+        }
+        if (pit_get_ticks() >= deadline) {
+            klog_puts("[selftest] timed out waiting for: the compositor to take the animations setting\n");
+            return 0;
+        }
+        pit_sleep_ms(SELFTEST_POLL_MS);
+    }
 }
 
 /* ---- M69: input-to-photon ---------------------------------------------
@@ -1869,31 +2148,34 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         req.action = WM_ACTION_MAXIMIZE;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(300);
-        uint32_t after_maximize = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
+        uint32_t after_maximize = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
+                                                          desktop_bg, "the maximize to leave the home position");
 
         req.action = WM_ACTION_RESTORE;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(300);
-        uint32_t after_restore = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
+        uint32_t after_restore = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
+                                                         clock_bg, "the restore to put the window back");
 
         req.action = WM_ACTION_TOGGLE_MINIMIZE;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(300);
-        uint32_t after_minimize = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
+        /* Waiting for the desktop here also waits out M61's minimize
+         * animation, whose ghost passes over this very pixel on its way
+         * down - which a fixed sleep did only by being longer than it. */
+        uint32_t after_minimize = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
+                                                          desktop_bg, "the minimize to clear the home position");
 
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req)); /* toggle back */
-        pit_sleep_ms(300);
-        uint32_t after_unminimize = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
+        uint32_t after_unminimize = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
+                                                            clock_bg, "the window to come back");
 
         req.action = WM_ACTION_CLOSE;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
         /* Signal delivery isn't instantaneous (checked at the target's
          * next syscall/tick - signal.h), and M29's reap_dead_clients only
-         * runs once per compositor loop iteration after that - 300ms is
-         * comfortably many iterations either way. */
-        pit_sleep_ms(300);
-        uint32_t after_close = fb_get_pixel((uint32_t)home_x, (uint32_t)home_y);
+         * runs once per compositor loop iteration after that - which is
+         * what this waits for rather than guesses at. */
+        uint32_t after_close = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
+                                                       desktop_bg, "the closed window's slot to be reclaimed");
         long clock_exit = do_syscall(SYS_wait, (uint64_t)clock_task->id, 0, 0);
 
         selftest_reap(comp_task);
@@ -2170,8 +2452,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         req.window_id = 0;
         req.action = WM_ACTION_CLOSE;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(400);
-        uint32_t after_close = fb_get_pixel((uint32_t)probe_x, (uint32_t)probe_y);
+        uint32_t after_close = selftest_pixel_settled((uint32_t)probe_x, (uint32_t)probe_y,
+                                                       desktop_bg, "the editor's window to go away");
         long editor_exit = do_syscall(SYS_wait, (uint64_t)editor_task->id, 0, 0);
 
         selftest_reap(comp_task);
@@ -2258,8 +2540,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * does, and [m46] below checks the same probe point on both sides
          * of a focus change, which is what actually pins the pair of
          * ratios down. */
-        uint32_t shadow_pixel = fb_get_pixel(304, 150);
         uint32_t expected_shadow = 0x000D0D17u;
+        uint32_t shadow_pixel = selftest_pixel_settled(304, 150, expected_shadow,
+                                                        "the window's drop shadow to be drawn");
 
         int settings_fds[2];
         if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
@@ -2541,15 +2824,16 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         req.window_id = 1; /* the clock - the panel took window 0 */
         req.action = WM_ACTION_MAXIMIZE;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(400);
         /* content_top_limit is TITLEBAR_H(20) + BORDER(2) = 22 now that no
          * top-docked bar exists any more, so a maximized window's content
          * starts at y=22 and its titlebar occupies y:[2, 22). x=100 is
          * inside that titlebar (gui_clock's buffer is 200 wide, and
          * maximize never grows a window past its own buffer), past the
          * "Clock" title text and well left of the three buttons. */
-        uint32_t maximized_titlebar = fb_get_pixel(100, 12);
-        uint32_t panel_over_maximized = fb_get_pixel(512, 738);
+        uint32_t maximized_titlebar = selftest_pixel_settled(100, 12, 0x004C99E6u,
+                                                              "the maximized window's titlebar");
+        uint32_t panel_over_maximized = selftest_pixel_settled(512, 738, 0x00181829u,
+                                                                "the taskbar to stay on top of the maximized window");
 
         /* The launcher: no window_id at all (see WM_ACTION_TOGGLE_LAUNCHER),
          * and the overlay is centered horizontally and a third of the way
@@ -2559,11 +2843,14 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         req.window_id = -1;
         req.action = WM_ACTION_TOGGLE_LAUNCHER;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(400);
-        uint32_t launcher_open_px = fb_get_pixel(512, 309);
+        /* The overlay fades in (M61), so what a fixed sleep sampled was
+         * whichever frame of that fade the machine had got to. The values
+         * waited for here are the ones names[] grades against below. */
+        uint32_t launcher_open_px = selftest_pixel_settled(512, 309, 0x001B2032u,
+                                                            "the launcher overlay to finish fading in");
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(400);
-        uint32_t launcher_closed_px = fb_get_pixel(512, 309);
+        uint32_t launcher_closed_px = selftest_pixel_settled(512, 309, 0x001A1A2Eu,
+                                                              "the launcher overlay to go away again");
 
         selftest_reap(clock_task);
         selftest_reap(shell_task);
@@ -2667,15 +2954,21 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * titlebar would be, and must be bare desktop. */
         req.action = WM_ACTION_SNAP_RIGHT;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(400);
-        uint32_t right_titlebar = fb_get_pixel(700, 12);
-        uint32_t right_left_half = fb_get_pixel(200, 12);
+        /* Waited on the half the window moves *into*: the other half is
+         * bare desktop both before and after, so waiting on it would be
+         * waiting for something that is already true. Read second, once
+         * the snap has demonstrably happened. */
+        uint32_t right_titlebar = selftest_pixel_settled(700, 12, 0x004C99E6u,
+                                                          "the window to snap to the right half");
+        uint32_t right_left_half = selftest_pixel_settled(200, 12, 0x001A1A2Eu,
+                                                           "the left half to be empty");
 
         req.action = WM_ACTION_SNAP_LEFT;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(400);
-        uint32_t left_titlebar = fb_get_pixel(200, 12);
-        uint32_t left_right_half = fb_get_pixel(700, 12);
+        uint32_t left_titlebar = selftest_pixel_settled(200, 12, 0x004C99E6u,
+                                                         "the window to snap to the left half");
+        uint32_t left_right_half = selftest_pixel_settled(700, 12, 0x001A1A2Eu,
+                                                           "the right half to be empty");
 
         /* The launcher overlay sits at x:[272, 752), y:[149, 469), and
          * its first result row at y:[195, 215) - LAUNCHER_LIST_Y(46) into
@@ -2689,12 +2982,16 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         req.window_id = -1;
         req.action = WM_ACTION_TOGGLE_LAUNCHER;
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(400);
-        uint32_t launcher_bg = fb_get_pixel(700, 309);
-        uint32_t launcher_selected_row = fb_get_pixel(700, 205);
+        /* The overlay fades in (M61) - see the same wait in the [m42]
+         * block above for what a fixed sleep here was really sampling.
+         * The values waited for are the ones names[] grades against. */
+        uint32_t launcher_bg = selftest_pixel_settled(700, 309, 0x001B2032u,
+                                                       "the launcher overlay to finish fading in");
+        uint32_t launcher_selected_row = selftest_pixel_settled(700, 205, 0x00335577u,
+                                                                 "the launcher's first result to be drawn selected");
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(400);
-        uint32_t launcher_closed = fb_get_pixel(700, 309);
+        uint32_t launcher_closed = selftest_pixel_settled(700, 309, 0x001A1A2Eu,
+                                                           "the launcher overlay to go away again");
 
         selftest_reap(editor_task);
         selftest_reap(shell_task);
@@ -2919,9 +3216,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         uint64_t frames_before_victim = pmm_free_frame_count();
         task_t *victim = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
-        pit_sleep_ms(600); /* connects as window 0, focused, and fills its buffer */
-
-        uint32_t victim_pixel = fb_get_pixel(200, 150);
+        /* Connects as window 0, focused, and fills its buffer - waited
+         * for rather than guessed at. The value is the one names[] grades
+         * this against below. */
+        uint32_t victim_pixel = selftest_pixel_settled(200, 150, 0x00B03040u,
+                                                        "the stubborn client's window to be drawn");
         uint64_t frames_with_victim = pmm_free_frame_count();
 
         /* (1) the enumeration. Both tasks were spawned by this test, so
@@ -2972,8 +3271,10 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             pit_sleep_ms(10);
             alive_after_kill = do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
         }
-        pit_sleep_ms(400); /* then for reap_dead_clients to notice and repaint */
-        uint32_t after_kill_pixel = fb_get_pixel(200, 150);
+        /* Then for reap_dead_clients to notice and repaint - a condition,
+         * not an interval. */
+        uint32_t after_kill_pixel = selftest_pixel_settled(200, 150, 0x001A1A2Eu,
+                                                            "the killed client's window to be taken down");
         do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0); /* now it can be reaped - see selftest_reap */
         uint64_t frames_after_kill = pmm_free_frame_count();
 
@@ -2983,8 +3284,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * event pipe behind that slot are both live again. */
         task_t *victim2 = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
         kfree(stub_image);
-        pit_sleep_ms(700);
-        uint32_t reused_slot_pixel = fb_get_pixel(200, 150);
+        uint32_t reused_slot_pixel = selftest_pixel_settled(200, 150, 0x00B03040u,
+                                                             "a second client to draw through the reclaimed slot");
 
         selftest_reap(victim2);
         selftest_reap(comp_task);
@@ -3106,56 +3407,45 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
         kfree(clock_image);
-        pit_sleep_ms(700); /* connects as window 0, focused, and draws */
-
-        uint32_t focused_corner = fb_get_pixel(246, 83);
-        uint32_t focused_disc = fb_get_pixel(250, 90);
-        uint32_t focused_glyph = fb_get_pixel(253, 90);
+        /* Connects as window 0, focused, and draws. The corner is the
+         * titlebar's own colour, which is exactly what says the frame has
+         * been painted - the value names[] grades it against below. */
+        uint32_t focused_corner = selftest_pixel_settled(246, 83, 0x004C99E6u,
+                                                          "the focused window's titlebar to be drawn");
+        uint32_t focused_disc = selftest_pixel_settled(250, 90, 0x00FF5F57u,
+                                                        "the close button's own colour");
+        uint32_t focused_glyph = selftest_pixel_settled(253, 90, 0x00303030u,
+                                                         "the x drawn on the close button");
         /* (304, 100) is in the right-hand sliver of this window's own drop
          * shadow (the frame's right edge is x = 302, the shadow reaches
          * x = 308) and above where the second client's frame will land,
          * so the same point can be read before and after the focus change
          * - which is what pins down *both* shadow ratios rather than just
          * whichever one happens to be in effect. */
-        uint32_t focused_shadow = fb_get_pixel(304, 100);
-        /* The title itself is text, so counting its pixels is the honest
-         * check - picking one glyph pixel by hand would be asserting on
-         * the font's shape rather than on the color the title is drawn
-         * in. "Clock" starts at x = 100 + TITLE_MARGIN(6). */
+        uint32_t focused_shadow = selftest_pixel_settled(304, 100, 0x000D0D17u,
+                                                          "the focused window's deeper drop shadow");
+        /* The title itself - see selftest_title_counts, which also
+         * explains why this waits rather than looks once. */
         int focused_bright = 0, focused_dim = 0;
-        for (int32_t ty = 82; ty < 98; ty++) {
-            for (int32_t tx = 106; tx < 150; tx++) {
-                uint32_t c = fb_get_pixel(tx, ty);
-                if (c == 0x00F0F0F0u) {
-                    focused_bright++;
-                } else if (c == 0x009AA4B0u) {
-                    focused_dim++;
-                }
-            }
-        }
+        selftest_title_counts(1, &focused_bright, &focused_dim);
 
         /* A second client connects and takes focus, so the clock's window
          * is now the unfocused one - without anything having touched the
          * clock, its window or the cursor. */
         task_t *stub_task = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
         kfree(stub_image);
-        pit_sleep_ms(700);
-
-        uint32_t unfocused_corner = fb_get_pixel(246, 83);
-        uint32_t unfocused_disc = fb_get_pixel(250, 90);
-        uint32_t unfocused_glyph = fb_get_pixel(253, 90);
-        uint32_t unfocused_shadow = fb_get_pixel(304, 100);
+        /* The same corner, once the focus change has actually been
+         * painted - which is what the unfocused titlebar colour says. */
+        uint32_t unfocused_corner = selftest_pixel_settled(246, 83, 0x00335577u,
+                                                            "the clock's window to be repainted unfocused");
+        uint32_t unfocused_disc = selftest_pixel_settled(250, 90, 0x00FF5F57u,
+                                                          "the close button keeping its own colour unfocused");
+        uint32_t unfocused_glyph = selftest_pixel_settled(253, 90, 0x00FF5F57u,
+                                                           "the x to be gone from an unfocused button");
+        uint32_t unfocused_shadow = selftest_pixel_settled(304, 100, 0x0011111Eu,
+                                                            "the unfocused window's shallower drop shadow");
         int unfocused_bright = 0, unfocused_dim = 0;
-        for (int32_t ty = 82; ty < 98; ty++) {
-            for (int32_t tx = 106; tx < 150; tx++) {
-                uint32_t c = fb_get_pixel(tx, ty);
-                if (c == 0x00F0F0F0u) {
-                    unfocused_bright++;
-                } else if (c == 0x009AA4B0u) {
-                    unfocused_dim++;
-                }
-            }
-        }
+        selftest_title_counts(0, &unfocused_bright, &unfocused_dim);
 
         selftest_reap(stub_task);
         selftest_reap(clock_task);
@@ -3253,10 +3543,16 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         int64_t icons_size = (int64_t)icons_size_bytes;
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
-        selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
+        /* Not selftest_wait_for_compositor: that one waits for the
+         * *default* background, and the whole point of this compositor is
+         * that it comes up with saved_conf's 0x00203040 instead - so it
+         * waited out its full five seconds, every boot, and said so. The
+         * condition is the same one, told what this desktop looks like. */
+        selftest_wait_for_pixel(500, 400, 0x00203040u, 5000,
+                                 "the compositor to paint the saved background");
         task_t *icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
-        pit_sleep_ms(700);
-        uint32_t saved_pixel = fb_get_pixel(600, 400);
+        uint32_t saved_pixel = selftest_pixel_settled(600, 400, 0x00203040u,
+                                                       "the desktop to come up with the saved settings");
         selftest_reap(icons_task);
         selftest_reap(comp_task);
 
@@ -3274,8 +3570,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         selftest_wait_for_compositor(); /* M69: was a fixed sleep - see the helper */
         icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
         kfree(icons_image);
-        pit_sleep_ms(700);
-        uint32_t fallback_pixel = fb_get_pixel(600, 400);
+        uint32_t fallback_pixel = selftest_pixel_settled(600, 400, 0x001B1B31u,
+                                                          "the desktop to fall back to the compiled-in defaults");
         selftest_reap(icons_task);
         selftest_reap(comp_task);
         console_init();
@@ -4127,7 +4423,8 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         /* B connected second, so it is in front to begin with - which was
          * true before this milestone too, and is the baseline the raise
          * below has to change. */
-        uint32_t overlap_before = fb_get_pixel(200, 250);
+        uint32_t overlap_before = selftest_pixel_settled(200, 250, 0x002060C0u,
+                                                          "the second client to connect in front of the first");
 
         /* A real click, at a point that is inside A and outside B. Each
          * click is three injected events: a pin to the top-left corner (a
@@ -4141,11 +4438,20 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         mouse_inject(0, 0, 1, 0);
         pit_sleep_ms(120);
         mouse_inject(0, 0, 0, 0);
-        pit_sleep_ms(300);
 
-        uint32_t overlap_after_raise = fb_get_pixel(200, 250);
-        uint32_t a_tick1 = fb_get_pixel(393, 293);
-        uint32_t b_tick1 = fb_get_pixel(433, 333);
+        /* Two separate things have to happen here and they belong to two
+         * different processes: the compositor raises the window, and the
+         * *client* draws a tick to say the press reached it. Waiting only
+         * for the raise samples the tick before its owner has had a turn,
+         * which is a failure that reads as "the click was eaten". So both
+         * are waited for, in the order they happen. The unlit tick on the
+         * other window is a negative and is read once they have. */
+        uint32_t overlap_after_raise = selftest_pixel_settled(200, 250, 0x00A02020u,
+                                                               "the clicked window to come forward");
+        uint32_t a_tick1 = selftest_pixel_settled(393, 293, 0x00F0E000u,
+                                                   "the clicked window to record the press it received");
+        uint32_t b_tick1 = selftest_pixel_settled(433, 333, 0x002060C0u,
+                                                   "the other window's tick to stay unlit");
 
         /* The occlusion bug, stated as a test: a click in the region both
          * windows cover has to reach exactly the one in front. */
@@ -4155,10 +4461,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         mouse_inject(0, 0, 1, 0);
         pit_sleep_ms(120);
         mouse_inject(0, 0, 0, 0);
-        pit_sleep_ms(300);
 
-        uint32_t a_tick2 = fb_get_pixel(379, 293);
-        uint32_t b_tick_still = fb_get_pixel(433, 333);
+        uint32_t a_tick2 = selftest_pixel_settled(379, 293, 0x00F0E000u,
+                                                   "the front window to record the overlap click");
+        uint32_t b_tick_still = selftest_pixel_settled(433, 333, 0x002060C0u,
+                                                        "the other window's tick to stay unlit still");
 
         /* And the protocol half: wm_window_info_t.z_index, which is how a
          * shell learns which window is frontmost without the query
@@ -4278,9 +4585,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         uint64_t frames_before = pmm_free_frame_count();
         task_t *victim = process_spawn("wm_faulter", fault_image, (size_t)fault_size, "");
         kfree(fault_image);
-        pit_sleep_ms(500); /* connects and paints, comfortably inside its own ALIVE_MS before it faults */
-
-        uint32_t painted = fb_get_pixel(150, 150);
+        /* Connects and paints, comfortably inside its own ALIVE_MS before
+         * it faults - waited for, so a slow machine spends that budget on
+         * the connect rather than on a sleep. */
+        uint32_t painted = selftest_pixel_settled(150, 150, 0x0020C0A0u,
+                                                   "the faulter's window to be drawn");
         int alive_before_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
         uint64_t frames_with_victim = pmm_free_frame_count();
 
@@ -4289,9 +4598,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * is where it would have. */
         pit_sleep_ms(1400);
 
+        /* And then until the compositor has actually taken the window
+         * down, which is the observable end of the whole sequence - the
+         * task cannot still be alive once its window is gone, so reading
+         * this first is what makes the two checks below about the fault
+         * rather than about how long the repaint took. */
+        uint32_t after_fault = selftest_pixel_settled(150, 150, 0x001A1A2Eu,
+                                                       "the faulted client's window to be taken down");
         int alive_after_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
         long victim_exit = do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0);
-        uint32_t after_fault = fb_get_pixel(150, 150);
         uint64_t frames_after = pmm_free_frame_count();
 
         /* SYS_shm_free's own range check, which is not behind
@@ -4857,40 +5172,28 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         kfree(term_image);
         pit_sleep_ms(900);
 
+        int lit_before_cmd = selftest_term_top_lit();
         static const char cmd[] = "ls /bin\n";
         for (size_t i = 0; i < sizeof(cmd) - 1; i++) {
             keyboard_inject(cmd[i], 0);
         }
-        pit_sleep_ms(1500); /* the spawn, its output, and the terminal draining it */
-
-        int lit_live = 0, lit_scrolled = 0, lit_back = 0;
-        for (int32_t ty = 100; ty < 116; ty++) {
-            for (int32_t tx = 100; tx < 660; tx++) {
-                if (fb_get_pixel((uint32_t)tx, (uint32_t)ty) == 0x00D0D0D0u) {
-                    lit_live++;
-                }
-            }
-        }
+        /* The spawn, its output, and the terminal draining it - waited
+         * out as a condition rather than guessed at. `ls /bin` is far
+         * more than the 21 rows this grid holds, so the top row is
+         * guaranteed to end up showing something it was not showing
+         * before the command was typed; requiring that as well as quiet
+         * is what stops this settling on the prompt it started from.
+         * See selftest_term_top_settled. */
+        int lit_live = selftest_term_top_settled(lit_before_cmd, 12000);
         /* The wheel acts on whatever is under the pointer, which starts
-         * at the screen centre - inside this window. Ten detents back. */
+         * at the screen centre - inside this window. Ten detents back,
+         * and then the top row settled at something that is not the live
+         * view: what the next check asserts is that it *changed*, so
+         * "changed" is also the condition worth waiting for. */
         mouse_inject(0, 0, 0, -10);
-        pit_sleep_ms(500);
-        for (int32_t ty = 100; ty < 116; ty++) {
-            for (int32_t tx = 100; tx < 660; tx++) {
-                if (fb_get_pixel((uint32_t)tx, (uint32_t)ty) == 0x00D0D0D0u) {
-                    lit_scrolled++;
-                }
-            }
-        }
+        int lit_scrolled = selftest_term_top_settled(lit_live, 4000);
         mouse_inject(0, 0, 0, 10);
-        pit_sleep_ms(500);
-        for (int32_t ty = 100; ty < 116; ty++) {
-            for (int32_t tx = 100; tx < 660; tx++) {
-                if (fb_get_pixel((uint32_t)tx, (uint32_t)ty) == 0x00D0D0D0u) {
-                    lit_back++;
-                }
-            }
-        }
+        int lit_back = selftest_term_top_settled(lit_scrolled, 4000);
 
         selftest_reap(term_task);
         selftest_reap(comp_task);
@@ -5685,14 +5988,18 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         req.window_id = 0;
         req.action = WM_ACTION_TOGGLE_MINIMIZE;
 
-        /* Sampled 60 ms in - comfortably inside a 140 ms animation and
-         * well past the first frame, so this is the middle rather than
-         * either end. */
+        /* Watched from the moment the request goes out until something
+         * lands on the path - see selftest_column_lit_wait for why this
+         * is a deadline rather than the fixed 144 ms window it used to
+         * be. `lit_ms` is how long this machine actually needed,
+         * which the negative check below is then held to. */
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        int during_lit = selftest_column_lit_peak(probe_x, desktop_bg, 12, 12);
-        pit_sleep_ms(400);
+        uint32_t lit_ms = 0;
+        int during_lit = selftest_column_lit_wait(probe_x, desktop_bg, 4000, &lit_ms);
+        /* And then until the path is bare again, which is the animation
+         * finishing rather than a guess at how long it takes to. */
+        int after_lit = selftest_column_clear_wait(probe_x, desktop_bg, 4000);
         uint32_t after_window = fb_get_pixel(150, 150);
-        int after_lit = selftest_column_lit(probe_x, desktop_bg);
 
         /* And again with motion switched off, which must produce nothing
          * on that path at any point. */
@@ -5701,21 +6008,31 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M61 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
         wm_settings_request_t off;
+        k_memset(&off, 0, sizeof(off)); /* volume is a field of this struct too - sending a stack full of whatever was there before is sending a volume */
+        off.volume = 70;                /* compositor.c's own default, which is what is already set */
         off.animations = 0;
         off.bg_color = 0x001A1A2Eu;   /* compositor.c's DEFAULT_BG_COLOR */
         off.accent_color = 0x004C99E6u; /* and its TITLEBAR_FOCUS_COLOR */
         off.wallpaper = 0;              /* WALLPAPER_FLAT - a flat desktop makes "nothing there" unambiguous */
         do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&off, sizeof(off));
-        pit_sleep_ms(300);
+        selftest_wait_for_animations_setting(0, 4000);
 
         /* Un-minimize (which with motion off is instantaneous), then
-         * minimize again and sample the same instant. */
+         * minimize again and watch the same path. */
         do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        pit_sleep_ms(400);
+        selftest_wait_for_pixel(150, 150, before_window, 4000, "the window to come back");
         uint32_t quiet_bg = fb_get_pixel(probe_x, 700);
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
-        int quiet_lit = selftest_column_lit_peak(probe_x, quiet_bg, 12, 12);
-        pit_sleep_ms(400);
+        /* Watched for at least as long as the animated case needed to
+         * show itself, and never less than 400 ms. There is no instant at
+         * which "nothing is going to appear" becomes true, so the only
+         * honest form this claim has is a window of time - and the only
+         * honest length for that window is one this machine has already
+         * been observed to be able to animate inside of. */
+        uint32_t quiet_window = lit_ms * 4 + 400;
+        if (quiet_window > 3000) {
+            quiet_window = 3000;
+        }
+        int quiet_lit = selftest_column_lit_peak_ms(probe_x, quiet_bg, quiet_window);
 
         selftest_reap(clock_task);
         selftest_reap(comp_task);
@@ -6191,22 +6508,26 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         uint32_t desktop = fb_get_pixel(500, 500);
         uint32_t on_home = fb_get_pixel(150, 150);
 
+        /* Each of these waits for the screen the chord asks for, rather
+         * than for half a second. The expected values are the two this
+         * test read for itself a moment ago, so nothing here is a
+         * constant that could drift out of step with the compositor. */
         keyboard_inject((char)KBD_KEY_RIGHT, KBD_MOD_CTRL | KBD_MOD_SHIFT);
-        pit_sleep_ms(500);
-        uint32_t after_switch = fb_get_pixel(150, 150);
+        uint32_t after_switch = selftest_pixel_settled(150, 150, desktop,
+                                                        "the window to be hidden by switching desktop");
 
         keyboard_inject((char)KBD_KEY_LEFT, KBD_MOD_CTRL | KBD_MOD_SHIFT);
-        pit_sleep_ms(500);
-        uint32_t back_home = fb_get_pixel(150, 150);
+        uint32_t back_home = selftest_pixel_settled(150, 150, on_home,
+                                                     "the window to come back when we switch back");
 
         /* And take it with us. */
         keyboard_inject((char)KBD_KEY_RIGHT, KBD_MOD_CTRL | KBD_MOD_SHIFT | KBD_MOD_ALT);
-        pit_sleep_ms(500);
-        uint32_t moved_with = fb_get_pixel(150, 150);
+        uint32_t moved_with = selftest_pixel_settled(150, 150, on_home,
+                                                      "the window to follow us to the next desktop");
 
         keyboard_inject((char)KBD_KEY_LEFT, KBD_MOD_CTRL | KBD_MOD_SHIFT);
-        pit_sleep_ms(500);
-        uint32_t left_behind = fb_get_pixel(150, 150);
+        uint32_t left_behind = selftest_pixel_settled(150, 150, desktop,
+                                                       "the desktop it came from to be empty");
 
         selftest_reap(clock_task);
         selftest_reap(comp_task);

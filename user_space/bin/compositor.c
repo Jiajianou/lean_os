@@ -496,6 +496,39 @@ static long mode_revert_at_ms;
  * none" into something a test can assert. */
 #define FRAME_BUDGET_MS 16
 #define ANIM_MAX        6
+/* The fewest positions an animation is allowed to show, and the reason
+ * this number exists at all.
+ *
+ * ANIM_MS is a duration, and a duration is only an animation on a machine
+ * that can draw inside it. Under emulation with a display attached - which
+ * is how a person actually looks at this thing (tools/run-qemu.sh), and
+ * three to five times slower than the headless boot the 16 ms budget was
+ * measured against - a frame can cost longer than the whole 140 ms. A
+ * purely time-driven animation then does exactly the wrong thing: it draws
+ * its first frame at progress zero, finds the clock already past the end
+ * on its second, and retires having never once been anywhere between the
+ * two ends. The window blinks, and it blinks having *paid* for an
+ * animation.
+ *
+ * So progress is the lesser of what the clock says and what the frames
+ * say. On a machine that keeps up, the clock is always behind (one frame
+ * per 16 ms against one per 28 ms here) and the animation is exactly the
+ * 140 ms it has always been - this cannot slow down a machine that was
+ * fast enough. On one that does not, the animation stretches instead of
+ * collapsing, and still says the one thing it exists to say: the window
+ * went *there*. The frame-budget counter below still reports every
+ * overrun, so a stretched animation is visible as what it is rather than
+ * quietly recorded as a healthy one.
+ *
+ * The floor belongs to ANIM_MINIMIZE and ANIM_RESTORE alone, and that
+ * line is the point rather than an exception to it. Those two carry
+ * *information* - a window that vanished said nothing about where it
+ * went - and information is worth stretching for. Open and close are
+ * decoration: they scale in place, so a machine too slow to draw the
+ * scale loses nothing by skipping to the end, and stretching them would
+ * make it worse rather than better, since what the ghost obscures while
+ * it lasts is the window that just opened. See anim_min_frames(). */
+#define ANIM_MIN_FRAMES 5
 
 typedef enum {
     ANIM_NONE = 0,
@@ -508,6 +541,9 @@ typedef enum {
 typedef struct {
     uint8_t kind;
     long start_ms;
+    /* How many frames the frame clock has handed this animation - the
+     * other half of its progress, see ANIM_MIN_FRAMES. */
+    uint16_t frames;
     int32_t fx, fy, fw, fh; /* from */
     int32_t tx, ty, tw, th; /* to */
     /* Where this was drawn last frame, so a frame only has to repaint the
@@ -523,6 +559,19 @@ static int animations_enabled = 1;
  * shows and the value the mixer holds have one source. */
 static uint32_t audio_volume = 70;
 static long frame_due_ms;      /* when the next animation frame is owed */
+/* Whether a run of motion is still owed its settling frame - the one
+ * drawn *after* the last thing stopped moving, which is what puts the
+ * screen back to what it settles at.
+ *
+ * Without it the frame clock's gate closes on the same tick the last
+ * animation or fade expires, and everything that tick was going to do
+ * (clear the fade clocks, mark the screen dirty, report the budget) never
+ * runs. What is left on screen is the last *in-flight* frame - a launcher
+ * at three fifths of its opacity, a ghost one step short of where it was
+ * going - until the 100 ms fallback poll happens to come round. A fade
+ * that ends 4/5 of the way there is not a fade, and on a machine busy
+ * enough that the fallback is late, it is what a person sees. */
+static int frame_settle_owed;
 static uint32_t frames_over_budget;
 static uint32_t frames_drawn;
 static long anim_run_start_ms; /* when the current run of animations began */
@@ -579,15 +628,30 @@ static int32_t lerp(int32_t from, int32_t to, int32_t p) {
     return from + (to - from) * p / 1000;
 }
 
+/* 1 means "no floor": one frame is already the whole animation, so the
+ * clock alone decides - which is what every kind did before, and what the
+ * two kinds that do not carry a destination still do. */
+static int32_t anim_min_frames(const anim_t *a) {
+    return (a->kind == ANIM_MINIMIZE || a->kind == ANIM_RESTORE) ? ANIM_MIN_FRAMES : 1;
+}
+
 /* The rectangle an animation occupies right now, and whether it is still
  * running. Retires it here rather than in the drawing code, so "is
  * anything moving" has one answer. */
 static int anim_rect_now(anim_t *a, long now, int32_t *x, int32_t *y, int32_t *w, int32_t *h) {
     long elapsed = now - a->start_ms;
-    if (elapsed >= ANIM_MS) {
+    int32_t by_clock = elapsed <= 0 ? 0 : (int32_t)(elapsed * 1000 / ANIM_MS);
+    int32_t by_frames = (int32_t)a->frames * 1000 / anim_min_frames(a);
+    /* Whichever is *less* far along - see ANIM_MIN_FRAMES. Retiring on
+     * this rather than on the clock alone is what makes "at least
+     * ANIM_MIN_FRAMES positions" a guarantee instead of a hope: an
+     * animation is over when the clock says so *and* it has been drawn
+     * enough times to have gone somewhere. */
+    int32_t t = by_clock < by_frames ? by_clock : by_frames;
+    if (t >= 1000) {
         return 0;
     }
-    int32_t p = ease_out((int32_t)(elapsed * 1000 / ANIM_MS));
+    int32_t p = ease_out(t);
     *x = lerp(a->fx, a->tx, p);
     *y = lerp(a->fy, a->ty, p);
     *w = lerp(a->fw, a->tw, p);
@@ -1750,6 +1814,12 @@ static int anim_step(long now, int32_t *out_x0, int32_t *out_y0, int32_t *out_x1
         anim_t *a = &anims[i];
         if (a->kind == ANIM_NONE) {
             continue;
+        }
+        /* This frame is being handed to it now, before its rectangle is
+         * asked for, so the rectangle this frame repaints and the one
+         * draw_animations paints into it are the same one. */
+        if (a->frames < 0xFFFFu) {
+            a->frames++;
         }
         if (a->drawn) {
             x0 = min_i32(x0, a->lx);
@@ -3353,6 +3423,7 @@ static void anim_start(anim_kind_t kind,
     anim_t *a = &anims[slot];
     a->kind = (uint8_t)kind;
     a->start_ms = sys_uptime_ms();
+    a->frames = 0;
     a->fx = fx; a->fy = fy; a->fw = fw; a->fh = fh;
     a->tx = tx; a->ty = ty; a->tw = tw; a->th = th;
     a->drawn = 0;
@@ -4925,9 +4996,10 @@ int main(void) {
          * The repaint is the union of where each animation was and where
          * it now is - a few hundred rows, not a screen - which is what
          * keeps a 16 ms budget reachable at all. */
-        if (anim_any_active() && now >= frame_due_ms) {
+        if ((anim_any_active() || frame_settle_owed) && now >= frame_due_ms) {
             int32_t ax0, ay0, ax1, ay1;
             frame_due_ms = now + FRAME_MS;
+            frame_settle_owed = anim_any_active();
             long began = sys_uptime_ms();
             int painted = 0;
             if (anim_step(now, &ax0, &ay0, &ax1, &ay1)) {
@@ -4986,6 +5058,20 @@ int main(void) {
                     }
                     sys_write(1, msg, (size_t)n);
                 }
+                /* Zeroed at the end of every run rather than at the start
+                 * of the next one. anim_start does reset them, but a
+                 * launcher or snap fade does not go through anim_start -
+                 * it just sets its own clock - so a run made only of a
+                 * fade used to inherit whatever the previous run left
+                 * here and report it as its own. Ending the run is the
+                 * one moment that is common to all of them.
+                 *
+                 * (It also keeps the line to one per run: the settling
+                 * frame reaches this branch a second time by design - see
+                 * frame_settle_owed - and a run that is over has nothing
+                 * further to say about itself.) */
+                frames_over_budget = 0;
+                frames_drawn = 0;
             }
         }
 
