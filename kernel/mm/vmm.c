@@ -27,6 +27,19 @@
  * which must stay unwritable however many times it is written to. The two
  * look identical in the hardware bits and must not be treated alike. */
 #define PTE_COW       (1ULL << 9)
+/* M91: the execute-disable bit, and the first page-table bit in this
+ * kernel that the hardware only honours if it is asked to. It lives at
+ * the top of the entry rather than the bottom, and it is *inverted* -
+ * set means "may not execute" - so a kernel that never sets it maps
+ * everything executable, which is what this one did for ninety
+ * milestones.
+ *
+ * Setting it without EFER.NXE first is not a no-op: the CPU treats bit 63
+ * as reserved-must-be-zero and faults on any translation that uses the
+ * entry. So nx_enabled below is checked at every write rather than
+ * assumed, and vmm_init turns the feature on before it builds a single
+ * table. */
+#define PTE_NX        (1ULL << 63)
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
 
 #define PML4_INDEX(v) (((v) >> 39) & 0x1FF)
@@ -36,6 +49,55 @@
 
 static uint64_t *kernel_pml4;
 static uint64_t kernel_pml4_phys;
+
+/* M91: whether this CPU family has execute-disable and EFER.NXE is on.
+ * Read on every leaf write; 0 makes PTE_NX unreachable, so a machine
+ * without the feature maps everything executable exactly as this kernel
+ * always did rather than faulting on a reserved bit. */
+static int nx_enabled;
+
+/* CPUID leaf 0x80000001, EDX bit 20 - "execute disable bit available". */
+static int cpu_has_nx(void) {
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(0x80000000u));
+    if (eax < 0x80000001u) {
+        return 0;
+    }
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(0x80000001u));
+    return (edx & (1u << 20)) != 0;
+}
+
+/* IA32_EFER bit 11. Per-CPU state, so this is called on the BSP by
+ * vmm_init and on every AP by smp.c - an AP that skipped it would fault
+ * on the first user page it touched, because the entries are shared and
+ * already carry the bit. */
+void vmm_enable_nx_this_cpu(void) {
+    if (!nx_enabled) {
+        return;
+    }
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000080u));
+    lo |= (1u << 11);
+    __asm__ volatile("wrmsr" : : "a"(lo), "d"(hi), "c"(0xC0000080u));
+}
+
+int vmm_nx_enabled(void) {
+    return nx_enabled;
+}
+
+/* The leaf-entry bits a caller's VMM_FLAG_* map to. One function so that
+ * every place that writes a leaf - map, cow_break, protect - agrees, which
+ * is the bug M91 would otherwise ship: a page that loses its NX bit on
+ * the first write to it is a W^X hole that only appears after a fork. */
+static uint64_t leaf_flags(uint64_t flags) {
+    uint64_t e = (flags & (PTE_WRITABLE | PTE_USER)) | PTE_PRESENT;
+    if (nx_enabled && !(flags & VMM_FLAG_EXEC)) {
+        e |= PTE_NX;
+    }
+    return e;
+}
 
 /* SMP: guards every page-table-mutating call below (vmm_map_page_in,
  * vmm_unmap_page, vmm_create_address_space) - a multi-level table walk
@@ -136,6 +198,12 @@ static void identity_map_block(uint64_t phys_2m) {
 }
 
 void vmm_init(const uint32_t *e820_map) {
+    /* Before any table is built, because a leaf written with PTE_NX under
+     * a CPU whose EFER.NXE is clear faults on a reserved bit rather than
+     * being ignored. */
+    nx_enabled = cpu_has_nx();
+    vmm_enable_nx_this_cpu();
+
     uint64_t pml4_phys = alloc_table();
     kernel_pml4 = phys_to_table(pml4_phys);
     kernel_pml4_phys = pml4_phys;
@@ -200,7 +268,9 @@ void vmm_init(const uint32_t *e820_map) {
 
     klog_puts("[vmm] kernel-owned page tables installed (");
     klog_put_hex64(identity_map_pages * 2);
-    klog_puts(" MiB identity-mapped in 2 MiB pages)\n");
+    klog_puts(" MiB identity-mapped in 2 MiB pages, NX ");
+    klog_puts(nx_enabled ? "on" : "unavailable");
+    klog_puts(")\n");
 }
 
 /* M90: does the identity map cover [phys, phys + len)?
@@ -306,9 +376,57 @@ void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t 
     }
     uint64_t *pt = table_walk(pd, PD_INDEX(virt), 1, extra);
 
-    pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | (flags & (PTE_WRITABLE | PTE_USER)) | PTE_PRESENT;
+    pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | leaf_flags(flags);
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
+}
+
+/* M91: change the permissions of every page already present in
+ * [start, end) without touching what is mapped there. Returns how many
+ * entries it rewrote.
+ *
+ * Pages inside the range that are NOT present are deliberately left
+ * alone: in a demand-paged address space most of a mapping has no entry
+ * at all, and the authority on what those pages will become is the
+ * region's own `prot` (sched.h's mmap_region_t), which mprotect updates
+ * separately. Writing entries for them here would defeat M82 by
+ * materialising a mapping the moment anybody adjusted its permissions.
+ *
+ * A copy-on-write page is the one case that needs care and gets it: a
+ * PTE_COW page stays read-only in the hardware whatever the caller asks
+ * for, because the whole mechanism depends on the write faulting. It
+ * keeps its mark, so vmm_cow_break still separates it later - and it is
+ * given the *new* NX bit immediately, because that one has nothing to do
+ * with the fault. */
+uint64_t vmm_protect_range_in(uint64_t pml4_phys, uint64_t start, uint64_t end,
+                              uint64_t flags) {
+    uint64_t changed = 0;
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
+    uint64_t *pml4 = phys_to_table(pml4_phys);
+    for (uint64_t virt = start; virt < end; virt += PAGE_SIZE) {
+        uint64_t *pdpt = table_walk(pml4, PML4_INDEX(virt), 0, 0);
+        uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(virt), 0, 0) : (uint64_t *)0;
+        if (!pd || (pd[PD_INDEX(virt)] & PTE_HUGE)) {
+            continue;
+        }
+        uint64_t *pt = table_walk(pd, PD_INDEX(virt), 0, 0);
+        if (!pt) {
+            continue;
+        }
+        uint64_t e = pt[PT_INDEX(virt)];
+        if (!(e & PTE_PRESENT)) {
+            continue;
+        }
+        uint64_t want = leaf_flags(flags);
+        if (e & PTE_COW) {
+            want = (want & ~PTE_WRITABLE) | PTE_COW;
+        }
+        pt[PT_INDEX(virt)] = (e & PTE_ADDR_MASK) | want;
+        __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+        changed++;
+    }
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
+    return changed;
 }
 
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -701,7 +819,14 @@ int vmm_cow_break(uint64_t pml4_phys, uint64_t virt) {
     for (uint64_t i = 0; i < PAGE_SIZE; i++) {
         to[i] = from[i];
     }
-    pt[PT_INDEX(virt)] = new_phys | (entry & (PTE_USER | PTE_PRESENT)) | PTE_WRITABLE;
+    /* M91: PTE_NX carried over with the rest. A copy-on-write break that
+     * dropped it would hand back an executable copy of a page that was
+     * not executable before - a W^X hole that appears only after a fork,
+     * which is exactly the kind of thing nobody would find by running a
+     * program. Every other place that writes a leaf goes through
+     * leaf_flags for the same reason; this one cannot, because it is
+     * preserving an entry rather than building one. */
+    pt[PT_INDEX(virt)] = new_phys | (entry & (PTE_USER | PTE_PRESENT | PTE_NX)) | PTE_WRITABLE;
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
 

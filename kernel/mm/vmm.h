@@ -25,6 +25,14 @@
 
 #define VMM_FLAG_WRITABLE (1ULL << 1) /* matches the hardware PTE writable bit directly */
 #define VMM_FLAG_USER     (1ULL << 2) /* matches the hardware PTE U/S bit - ring 3 may access the page (M9) */
+/* M91: may code be fetched from this page? Unlike the two above, this
+ * does NOT match a hardware bit - the hardware bit is execute-*disable*
+ * and lives at bit 63. It is spelled the positive way here because that
+ * is how a caller thinks (PROT_EXEC), and because a flag whose absence is
+ * the permissive case is a flag every existing call site would silently
+ * get wrong. Absent means the page is mapped NX, which is why every
+ * caller in this kernel had to be looked at when it was introduced. */
+#define VMM_FLAG_EXEC     (1ULL << 3)
 
 /* M90: where the kernel heap starts, and the one virtual address in this
  * kernel that is chosen rather than derived.
@@ -52,6 +60,25 @@ void vmm_init(const uint32_t *e820_map);
  * starting at zero on a machine with a PCI hole in the middle of it.
  * kernel/acpi/acpi.c is the caller. */
 int vmm_identity_covers(uint64_t phys, uint64_t len);
+
+/* M91: execute-disable. vmm_init turns it on for the BSP if the CPU has
+ * it; smp.c calls the per-CPU half for every AP, because EFER is per-CPU
+ * state and the page tables carrying the bit are not - an AP that skipped
+ * it would fault on a reserved bit at the first user page it touched.
+ * vmm_nx_enabled reports whether any of it is real, so a self-test can
+ * say what it actually proved on this machine. */
+void vmm_enable_nx_this_cpu(void);
+int vmm_nx_enabled(void);
+
+/* M91: rewrite the permissions of every page already present in
+ * [start, end) without changing what is mapped there; returns how many
+ * entries changed. Pages with no entry yet are left alone - in a
+ * demand-paged address space that is most of a mapping, and the authority
+ * on what they will become is the region's own prot. A copy-on-write page
+ * keeps its mark and stays hardware-read-only whatever is asked, because
+ * the mechanism depends on the write still faulting. */
+uint64_t vmm_protect_range_in(uint64_t pml4_phys, uint64_t start, uint64_t end,
+                              uint64_t flags);
 
 /* The kernel's own address space: PML4[0], covering the 1 GiB identity
  * map and the heap. Every per-process address space (vmm_create_address_

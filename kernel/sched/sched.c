@@ -1465,10 +1465,75 @@ task_t *sched_vm_owner(task_t *t) {
 /* The one page-building step, shared by the fault path and the prefault
  * path below so there is one set of rules about what may be built and
  * one place they are written down. Returns 1 if the page is now there. */
-static int fill_one_page(task_t *self, uint64_t page, int for_write) {
-    if (page < USER_MMAP_BASE || page >= USER_MMAP_LIMIT) {
-        return 0;
+/* M91: what a page in this address space is allowed to become, or
+ * FILL_REFUSE. Split out of fill_one_page because there are now two kinds
+ * of address that may be filled - a reserved mmap region, and the stack
+ * below what was mapped at spawn - and because the answer is no longer
+ * just yes/no: it is the set of permissions the new page gets, which for
+ * the first time includes whether code may be fetched from it. */
+#define FILL_REFUSE ((uint64_t)-1)
+
+static uint64_t fill_policy(task_t *self, uint64_t page, int for_write, int for_exec) {
+    /* The stack. Writable, never executable, and bounded by
+     * USER_STACK_LIMIT rather than by anything a program can influence -
+     * proc.h's USER_STACK_MAX_BYTES is the whole rule. The caller has
+     * already decided whether this fault is close enough to the stack
+     * pointer to be a stack access at all; see sched_fault_fill. */
+    if (page >= USER_STACK_LIMIT && page < USER_STACK_TOP) {
+        if (for_exec) {
+            return FILL_REFUSE;
+        }
+        return VMM_FLAG_USER | VMM_FLAG_WRITABLE;
     }
+
+    if (page < USER_MMAP_BASE || page >= USER_MMAP_LIMIT) {
+        return FILL_REFUSE;
+    }
+    const mmap_region_t *region = 0;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (self->mmaps[i].pages == 0) {
+            break; /* the table is kept sorted and packed - see mmap_slot_cmp_insert */
+        }
+        uint64_t start = self->mmaps[i].base;
+        uint64_t end = start + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+        if (page >= start && page < end) {
+            region = &self->mmaps[i];
+            break;
+        }
+    }
+    if (!region) {
+        return FILL_REFUSE;
+    }
+    /* M91: PROT_NONE is now a mapping rather than a refused argument, and
+     * this is the line that makes it mean something. A region with no
+     * access bits is address space reserved so that nothing else lands
+     * there and so that touching it dies - a guard page. Filling it would
+     * make it a guard page that guards nothing, which is exactly what
+     * M78's comment said it declined to ship. */
+    if ((region->prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0) {
+        return FILL_REFUSE;
+    }
+    if (for_write && !(region->prot & PROT_WRITE)) {
+        return FILL_REFUSE;
+    }
+    /* An instruction fetch from a region that is not PROT_EXEC is refused
+     * here rather than being allowed to build a page the CPU will refuse
+     * to run one instruction later. Both end in the same death; this one
+     * ends in it immediately and without allocating a frame first. */
+    if (for_exec && !(region->prot & PROT_EXEC)) {
+        return FILL_REFUSE;
+    }
+    uint64_t flags = VMM_FLAG_USER;
+    if (region->prot & PROT_WRITE) {
+        flags |= VMM_FLAG_WRITABLE;
+    }
+    if (region->prot & PROT_EXEC) {
+        flags |= VMM_FLAG_EXEC;
+    }
+    return flags;
+}
+
+static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_exec) {
 
     /* Never build a page that already exists.
      *
@@ -1488,22 +1553,8 @@ static int fill_one_page(task_t *self, uint64_t page, int for_write) {
         return 0;
     }
 
-    const mmap_region_t *region = 0;
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
-        if (self->mmaps[i].pages == 0) {
-            break; /* the table is kept sorted and packed - see mmap_slot_cmp_insert */
-        }
-        uint64_t start = self->mmaps[i].base;
-        uint64_t end = start + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
-        if (page >= start && page < end) {
-            region = &self->mmaps[i];
-            break;
-        }
-    }
-    if (!region) {
-        return 0;
-    }
-    if (for_write && !(region->prot & PROT_WRITE)) {
+    uint64_t flags = fill_policy(self, page, for_write, for_exec);
+    if (flags == FILL_REFUSE) {
         return 0;
     }
 
@@ -1515,17 +1566,51 @@ static int fill_one_page(task_t *self, uint64_t page, int for_write) {
      * anonymous memory that handed a process the previous owner's bytes
      * would leak one program's data into another's. */
     k_memset((void *)phys, 0, PAGE_SIZE);
-    uint64_t flags = VMM_FLAG_USER | ((region->prot & PROT_WRITE) ? VMM_FLAG_WRITABLE : 0);
     vmm_map_page_in(self->pml4_phys, page, phys, flags);
     return 1;
 }
 
-int sched_fault_fill(uint64_t addr, uint64_t error_code) {
+/* The pre-M91 shape, for the prefault path, which never faults on an
+ * instruction fetch. */
+static int fill_one_page(task_t *self, uint64_t page, int for_write) {
+    return fill_one_page_ex(self, page, for_write, 0);
+}
+
+/* M91: how far below the stack pointer a fault may be and still be a
+ * stack access.
+ *
+ * The stack region is 64 MiB of address space this process owns and
+ * nothing else can be. A rule of "any fault inside it grows it" would be
+ * one case more generous than it should be, in exactly the way M82's own
+ * notes warn about: a wild pointer 30 MiB below the stack would quietly
+ * become a valid page instead of killing the process.
+ *
+ * So the fault has to be near the stack pointer. SysV's red zone is 128
+ * bytes and a compiler may touch that far below rsp legitimately; a
+ * function that allocates a large local by subtracting from rsp and then
+ * writes into the middle of it faults further down than that, before rsp
+ * has moved. 64 KiB covers every prologue GCC emits without
+ * -fstack-clash-protection, and is small enough that a pointer computed
+ * from garbage lands outside it.
+ */
+#define STACK_GROW_SLACK 65536ULL
+
+int sched_fault_fill(uint64_t addr, uint64_t error_code, uint64_t user_rsp) {
     task_t *self = sched_vm_owner(sched_current());
     if (!self || self->pml4_phys == vmm_kernel_pml4_phys()) {
         return 0; /* a kernel thread has no arena to fault into */
     }
     uint64_t page = addr & ~(uint64_t)(PAGE_SIZE - 1);
+
+    /* A fault in the stack window that is not near the stack pointer is
+     * not a stack access, and is refused before anything else looks at
+     * it. Checked here rather than in fill_policy because rsp is a fact
+     * about this fault, not about the address space. */
+    if (page >= USER_STACK_LIMIT && page < USER_STACK_TOP) {
+        if (addr + STACK_GROW_SLACK < user_rsp) {
+            return 0;
+        }
+    }
 
     /* Bit 0 of the error code is P and bit 1 is W/R. The two bits split
      * this into the only two faults this kernel knows how to answer, and
@@ -1545,7 +1630,9 @@ int sched_fault_fill(uint64_t addr, uint64_t error_code) {
         }
         return 0;
     }
-    return fill_one_page(self, page, (error_code & 2u) != 0);
+    /* Bit 4 is I/D: the fault was an instruction fetch. M91 is the first
+     * milestone in which that can be refused rather than merely noted. */
+    return fill_one_page_ex(self, page, (error_code & 2u) != 0, (error_code & 16u) != 0);
 }
 
 /* ---- M82: prefaulting a buffer the kernel is about to touch -----------
@@ -1581,14 +1668,42 @@ void sched_prefault_range(uint64_t addr, uint64_t len, int for_write) {
     if (!self || self->pml4_phys == vmm_kernel_pml4_phys()) {
         return;
     }
+    /* M91: the whole range asked about once, before anything is done per
+     * page. The common case by a very large margin is a buffer that is
+     * already entirely mapped - a local on the stack, a static, an mmap
+     * region the program has been using - and answering that in one
+     * locked walk rather than in one locked walk per page matters now
+     * that the stack window is checked as well as the arena. Before this
+     * milestone a stack buffer left this function on the bounds test
+     * below and did no walking at all; it must not become more expensive
+     * than it was for the case that was already free. */
+    if (vmm_user_range_ok(self->pml4_phys, addr, len, for_write)) {
+        return;
+    }
     uint64_t first = addr & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t last = (addr + len - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (last < first) {
         return; /* wrapped - user_range_ok refuses it below */
     }
-    /* Bounded to the arena before looping, so a bogus length cannot turn
-     * this into a walk over the whole address space. */
-    if (last < USER_MMAP_BASE || first >= USER_MMAP_LIMIT) {
+    /* Bounded before looping, so a bogus length cannot turn this into a
+     * walk over the whole address space. Two windows rather than one
+     * since M91: a syscall buffer can legitimately be a large local that
+     * the program allocated by subtracting from rsp and has not yet
+     * touched, which is stack the fault handler has not been asked to
+     * build. `read(fd, buf, sizeof buf)` into a 1 MiB local is the
+     * ordinary case, and refusing it would be a -1 for a buffer the
+     * program has every right to pass.
+     *
+     * Deliberately no stack-pointer heuristic here, unlike the fault
+     * path, and the reason is that there is nothing to apply it to: this
+     * address came from a syscall argument rather than from a faulting
+     * instruction. The cost is that a wild syscall pointer inside the
+     * process's own 64 MiB stack window is built rather than refused,
+     * where before it would have been an EFAULT. That is the same trade
+     * every Unix makes for the same reason. */
+    int in_arena = !(last < USER_MMAP_BASE || first >= USER_MMAP_LIMIT);
+    int in_stack = !(last < USER_STACK_LIMIT || first >= USER_STACK_TOP);
+    if (!in_arena && !in_stack) {
         return;
     }
     for (uint64_t page = first; page <= last; page += PAGE_SIZE) {

@@ -101,8 +101,17 @@ long sys_gettid(void) {
     return do_syscall(SYS_gettid, 0, 0, 0);
 }
 
-long sys_mmap(unsigned long len, int prot, int flags) {
-    return do_syscall(SYS_mmap, (long)len, prot, flags);
+long sys_mmap(void *addr, unsigned long len, int prot, int flags, int fd,
+              unsigned long offset) {
+    return do_syscall6(SYS_mmap, (long)addr, (long)len, prot, flags, fd, (long)offset);
+}
+
+long sys_mprotect(void *addr, unsigned long len, int prot) {
+    return do_syscall(SYS_mprotect, (long)addr, (long)len, prot);
+}
+
+long sys_madvise(void *addr, unsigned long len, int advice) {
+    return do_syscall(SYS_madvise, (long)addr, (long)len, advice);
 }
 
 long sys_munmap(void *addr, unsigned long len) {

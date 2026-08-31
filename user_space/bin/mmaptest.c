@@ -25,6 +25,8 @@
  *   6  a mapping in the middle of the arena was not reused
  *   7  munmap accepted an address outside the arena
  *   8  a refused flag combination was accepted
+ *   9  a PROT_NONE guard mapping was refused (M91 - it used to be, and
+ *      the note by the check says why that changed)
  */
 #include <stdio.h>
 #include <string.h>
@@ -139,9 +141,20 @@ int main(void) {
     if (mmap(0, PAGE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0) != MAP_FAILED) {
         return 8; /* a shared mapping handed back as private memory */
     }
-    if (mmap(0, PAGE, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0) != MAP_FAILED) {
-        return 8; /* a guard page that is not one */
+    /* M91: this used to be a refusal - "a guard page that is not one" -
+     * because M78's mmap could not express "mapped but inaccessible" and
+     * declined to pretend. It can now: the region exists so nothing else
+     * lands there, no page is ever built for it, and touching it is
+     * fatal. So the assertion is inverted rather than deleted, which is
+     * the rule this project keeps arriving at - a test that encoded a
+     * deliberate refusal should encode the new contract when the refusal
+     * goes, not disappear. That it *dies* when touched is vmtest's
+     * "guard" mode; what is checked here is that reserving one works. */
+    void *guard = mmap(0, PAGE, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (guard == MAP_FAILED) {
+        return 9;
     }
+    munmap(guard, PAGE);
     if (mmap(0, PAGE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, 3, 0) != MAP_FAILED) {
         return 8; /* a file-backed mapping handed back as anonymous */
     }

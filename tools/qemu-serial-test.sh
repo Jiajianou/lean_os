@@ -173,11 +173,20 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 # entirely below the hole and would have tested nothing that 1 GiB did
 # not.
 QEMU_MEM=${QEMU_MEM:-4096}
+# M92: virtio-blk rather than the default IDE drive - see tools/run-qemu.sh.
+# QEMU_DISK=ide runs the same image through kernel/drivers/ata.c instead,
+# which is how the two numbers in the [m92] line get compared.
+if [ "${QEMU_DISK:-virtio}" = "ide" ]; then
+  DISK_ARGS=(-drive "format=raw,snapshot=on,file=$IMAGE")
+else
+  DISK_ARGS=(-drive "if=none,id=disk0,format=raw,snapshot=on,file=$IMAGE"
+             -device virtio-blk-pci,drive=disk0)
+fi
 qemu-system-x86_64 \
   -m "$QEMU_MEM" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
-  -drive format=raw,snapshot=on,file="$IMAGE" -display none \
+  "${DISK_ARGS[@]}" -display none \
   -netdev user,id=net0 -device rtl8139,netdev=net0 \
   -audiodev none,id=snd0 -device AC97,audiodev=snd0 \
   -serial file:"$LOG" -monitor none ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} &
@@ -268,6 +277,7 @@ REQUIRED_MARKERS=(
   "[m85] a terminal that is a device:"
   "[m87] files with a type and a place:"
   "[m90] more than a gigabyte:"
+  "[m91] an address space that is a set of mappings:"
   "[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"

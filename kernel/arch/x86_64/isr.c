@@ -100,7 +100,7 @@ void isr_handler(isr_regs_t *r) {
      * except as a syscall argument. sched_fault_fill still consults the
      * *current task's* arena, so this cannot fill anything for a fault in
      * kernel memory. */
-    if (r->vector == PAGE_FAULT_VECTOR && sched_fault_fill(read_cr2(), r->error_code)) {
+    if (r->vector == PAGE_FAULT_VECTOR && sched_fault_fill(read_cr2(), r->error_code, r->rsp)) {
         return;
     }
 

@@ -491,10 +491,40 @@ int main(void) {
                 fail("munmap");
             }
         }
-        /* addr and fd are refused rather than ignored - see <sys/mman.h> */
-        if (mmap((void *)0x8000000000UL, 4096, PROT_READ | PROT_WRITE,
-                  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0) != MAP_FAILED) {
-            fail("mmap accepted an address hint it cannot honour");
+        /* M91: an address is a hint now, not a refusal. This used to
+         * assert the opposite - "addr and fd are refused rather than
+         * ignored" - which was the honest contract while this kernel
+         * placed every mapping itself. It places them where it is asked
+         * to now, so the check is inverted rather than deleted, the same
+         * way M88's racetest was when SYS_waitfds started accepting a
+         * count of zero.
+         *
+         * 0x8000000000 is this program's own load address, so it is a
+         * hint that CANNOT be honoured - which is exactly the interesting
+         * case: an unusable hint must be quietly ignored and a mapping
+         * made somewhere legal, not refused and not granted on top of the
+         * caller's own text. The address that comes back is the proof,
+         * and it must not be the one asked for. */
+        void *hinted = mmap((void *)0x8000000000UL, 4096, PROT_READ | PROT_WRITE,
+                            MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (hinted == MAP_FAILED) {
+            fail("mmap refused an unusable address hint instead of ignoring it");
+        } else {
+            if (hinted == (void *)0x8000000000UL) {
+                fail("mmap honoured an address hint over the program's own image");
+            }
+            ((char *)hinted)[0] = 'z';
+            if (((char *)hinted)[0] != 'z') {
+                fail("the mapping made in place of an unusable hint is not usable");
+            }
+            munmap(hinted, 4096);
+        }
+        /* fd is still refused rather than ignored - there are no
+         * file-backed mappings here, and anonymous zeroes are not a
+         * file. */
+        if (mmap(0, 4096, PROT_READ | PROT_WRITE,
+                  MAP_ANONYMOUS | MAP_PRIVATE, 3, 0) != MAP_FAILED) {
+            fail("mmap accepted a file descriptor it cannot honour");
         }
     }
 

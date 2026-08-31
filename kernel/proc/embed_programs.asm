@@ -315,6 +315,12 @@ lazytest_elf_start:
     incbin "build/lazytest.elf"
 lazytest_elf_end:
 
+global vmtest_elf_start
+global vmtest_elf_end
+vmtest_elf_start:
+    incbin "build/vmtest.elf"
+vmtest_elf_end:
+
 global forktest_elf_start
 global forktest_elf_end
 forktest_elf_start:

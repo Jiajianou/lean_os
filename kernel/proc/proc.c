@@ -51,7 +51,16 @@ static void user_task_launcher(void *arg) {
  * for every page it frees, so a page in one list and not the other is a
  * frame pinned forever. One list, one place. */
 static const vmm_range_t PROCESS_OWNED[] = {
-        {USER_IMAGE_BASE, USER_ARG_ADDR + USER_ARG_BYTES},
+        /* M91: the image and the stack used to be one range, because the
+         * stack sat 2 MiB above the image and the single span
+         * [USER_IMAGE_BASE, USER_ARG_ADDR + USER_ARG_BYTES) covered both
+         * with the gap between them costing nothing. They are now 496 GiB
+         * apart, so they are two ranges - and the stack's low end is
+         * USER_STACK_LIMIT rather than the initial mapping's bottom,
+         * because a stack that grew on a fault must be freed as far down
+         * as it grew. */
+        {USER_IMAGE_BASE, USER_IMAGE_LIMIT},
+        {USER_STACK_LIMIT, USER_ARG_ADDR + USER_ARG_BYTES},
         {USER_HEAP_START, USER_HEAP_LIMIT},
         /* M78: the mmap arena. Anonymous and private by construction -
          * there is no file-backed or MAP_SHARED mapping in this kernel -
@@ -115,9 +124,21 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
         return 0;
     }
 
+    /* M91: still eager, and still only USER_STACK_PAGES of it.
+     *
+     * The stack can now grow down to USER_STACK_LIMIT on a fault
+     * (sched_fault_fill), which is what makes 64 MiB of stack cost
+     * nothing until it is used. What is built here is the part a program
+     * has before it has run an instruction - a process whose very first
+     * push depended on the fault handler would be a process whose
+     * simplest failure mode is the hardest one to debug.
+     *
+     * No VMM_FLAG_EXEC: a stack is not code. Nothing on this machine
+     * needed that to be true before, because nothing could express it. */
     uint64_t stack_bottom = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
     for (uint64_t va = stack_bottom; va < USER_STACK_TOP; va += PAGE_SIZE) {
         uint64_t phys = pmm_alloc_frame();
+        k_memset((void *)phys, 0, PAGE_SIZE);
         vmm_map_page_in(pml4_phys, va, phys, VMM_FLAG_WRITABLE | VMM_FLAG_USER);
     }
 

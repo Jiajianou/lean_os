@@ -127,8 +127,20 @@ typedef enum {
  * either and costs 512 bytes a task. Past it, SYS_mmap returns -1 -
  * which is a thing a caller can report, unlike the alternative of
  * silently merging two mappings a munmap would then have to guess about.
+ *
+ * M91: 32 -> 128. Three things this milestone added all consume slots
+ * rather than pages. mprotect splits a region in two or three every time
+ * it is applied to part of one - which is what a dynamic loader does to
+ * every object it maps, making its relocation table read-only after
+ * fixing it up. MAP_FIXED replaces a subrange, which splits as well.
+ * And PROT_NONE guard pages are regions that hold no memory at all and a
+ * slot each. A program that maps twenty shared objects and protects three
+ * ranges in each is past 32 before it has run a line of its own code.
+ * 128 costs 1.5 KiB a task, which against MAX_TASKS is a fifth of a
+ * megabyte - a real cost, and a smaller one than a loader that fails at
+ * the twelfth library.
  */
-#define MAX_MMAP_REGIONS 32
+#define MAX_MMAP_REGIONS 128
 
 typedef struct {
     uint64_t base;  /* page-aligned start; meaningless when pages == 0 */
@@ -872,7 +884,11 @@ task_t *sched_vm_owner(task_t *t);
  * Lives here rather than in kernel/mm because the thing it consults is
  * the mmap table, and that is task state.
  */
-int sched_fault_fill(uint64_t addr, uint64_t error_code);
+/* M91: `user_rsp` is the faulting task's ring-3 stack pointer, needed
+ * because the stack now grows on a fault and "is this a stack access"
+ * cannot be answered from the address alone - see STACK_GROW_SLACK in
+ * sched.c. */
+int sched_fault_fill(uint64_t addr, uint64_t error_code, uint64_t user_rsp);
 
 /* M82: build every page of `addr`..`addr+len` that is a reserved-but-
  * untouched mmap page, so that a buffer a program obtained from mmap and

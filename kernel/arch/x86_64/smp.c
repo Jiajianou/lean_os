@@ -93,6 +93,13 @@ void ap_main(uint32_t cpu_id) {
      * a task doing floating-point work was scheduled onto it, which is a
      * bug that shows up as "sometimes". */
     fpu_init_cpu();
+    /* M91: EFER.NXE, for exactly the reason the FXSAVE line above gives.
+     * EFER is per-CPU and the page tables carrying PTE_NX are not, so an
+     * AP that skipped this would take a reserved-bit page fault the first
+     * time it touched a user page - which is the same "shows up as
+     * sometimes" bug, on a core that was fine until a task migrated to
+     * it. */
+    vmm_enable_nx_this_cpu();
     lapic_init_this_cpu();
     sched_init_ap((int)cpu_id);
 

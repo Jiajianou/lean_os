@@ -73,8 +73,17 @@ long sys_thread_create(void *entry, void *arg, unsigned long stack_top);
 void sys_thread_exit(int value) __attribute__((noreturn));
 long sys_gettid(void);
 
-long sys_mmap(unsigned long len, int prot, int flags);
+/* M91: the full 4.2BSD-shaped argument list. `addr` 0 is "anywhere"; a
+ * non-zero one is a hint unless MAP_FIXED makes it a requirement. `fd`
+ * must be -1 and `offset` 0 - a file-backed mapping is refused by name
+ * rather than quietly given anonymous zeroes. */
+long sys_mmap(void *addr, unsigned long len, int prot, int flags, int fd,
+              unsigned long offset);
 long sys_munmap(void *addr, unsigned long len);
+/* M91: change an existing mapping's permissions, and drop its pages
+ * without giving up its address space. See SYS_mprotect/SYS_madvise. */
+long sys_mprotect(void *addr, unsigned long len, int prot);
+long sys_madvise(void *addr, unsigned long len, int advice);
 
 long sys_chdir(const char *path);
 long sys_getcwd(char *buf, size_t maxlen);

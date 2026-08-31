@@ -17,6 +17,10 @@
 #define ET_EXEC   2
 #define EM_X86_64 62
 #define PT_LOAD   1
+/* Segment permission bits from the ELF spec (M91). */
+#define PF_X 0x1
+#define PF_W 0x2
+#define PF_R 0x4
 
 typedef struct __attribute__((packed)) {
     uint8_t  e_ident[16];
@@ -185,7 +189,22 @@ uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size) {
                 k_memcpy((void *)(phys + page_off), image + file_off, overlap_end - overlap_start);
             }
 
-            vmm_map_page_in(pml4_phys, page_va, phys, VMM_FLAG_WRITABLE | VMM_FLAG_USER);
+            /* M91: the segment's own p_flags, honoured rather than
+             * ignored. Every page of every program was mapped writable
+             * and (before this milestone there was no other option)
+             * executable; a program's text is now read-only and its data
+             * is not executable, which is the first W^X boundary this OS
+             * has had. user_space/lib/user.ld is the other half - a
+             * single RWE segment, which is what it produced until now,
+             * gives this nothing to honour. */
+            uint64_t seg_flags = VMM_FLAG_USER;
+            if (ph[i].p_flags & PF_W) {
+                seg_flags |= VMM_FLAG_WRITABLE;
+            }
+            if (ph[i].p_flags & PF_X) {
+                seg_flags |= VMM_FLAG_EXEC;
+            }
+            vmm_map_page_in(pml4_phys, page_va, phys, seg_flags);
         }
     }
 

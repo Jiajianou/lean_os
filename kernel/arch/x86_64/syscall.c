@@ -2618,31 +2618,64 @@ static uint64_t mmap_find_gap(task_t *t, uint32_t pages) {
     return 0;
 }
 
-static long sys_mmap(uint64_t len, uint64_t prot, uint64_t flags, uint64_t a4,
-                      uint64_t a5, uint64_t a6) {
-    (void)a4;
-    (void)a5;
-    (void)a6;
+/* M91: is [base, base + pages) entirely free inside the arena? Used by
+ * the address-hint path, which must not hand back an address that
+ * overlaps a live mapping, and by MAP_FIXED, which must know whether it
+ * has anything to displace. */
+static int mmap_range_is_free(task_t *t, uint64_t base, uint64_t pages) {
+    uint64_t end = base + pages * PAGE_SIZE;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (t->mmaps[i].pages == 0) {
+            break;
+        }
+        uint64_t rstart = t->mmaps[i].base;
+        uint64_t rend = rstart + (uint64_t)t->mmaps[i].pages * PAGE_SIZE;
+        if (base < rend && rstart < end) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
+                        uint64_t a5, uint64_t a6);
+
+/* M91: SYS_mmap grows the three arguments every other Unix has had since
+ * 4.2BSD - an address, and (accepted but refused) a descriptor and an
+ * offset. M78 left them out because nothing could use them; a dynamic
+ * loader is the program that cannot be written without the first, since
+ * placing a shared object means choosing where it goes and then placing
+ * every other one relative to it. */
+static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
+                      uint64_t fd, uint64_t offset) {
     if (len == 0) {
         return -1;
     }
-    /* Anonymous and private, and refused by name otherwise. A MAP_SHARED
-     * that quietly handed back private memory would be the kind of lie
-     * this project keeps declining to tell - two processes would each
-     * write to their own copy and neither would ever find out. */
+    /* Still anonymous and private, and still refused by name otherwise -
+     * a MAP_SHARED that quietly handed back private memory would be the
+     * kind of lie this project keeps declining to tell. MAP_FIXED is the
+     * one that stopped being on this list. */
     if ((flags & MAP_ANONYMOUS) == 0 || (flags & MAP_PRIVATE) == 0 ||
-        (flags & MAP_SHARED) != 0 || (flags & MAP_FIXED) != 0) {
+        (flags & MAP_SHARED) != 0) {
         return -1;
     }
-    /* PROT_NONE is refused rather than granted-and-ignored: there is no
-     * way to express "mapped but inaccessible" in a page table entry
-     * this kernel sets up, and a caller that asked for a guard page and
-     * got a writable one has a guard page that guards nothing. */
-    if ((prot & (PROT_READ | PROT_WRITE)) == 0) {
+    /* A file-backed mapping is refused rather than silently given
+     * anonymous zeroes, for the reason MAP_SHARED is: a caller that asked
+     * for a file and got zeros finds out much later and somewhere else. */
+    if ((long)fd >= 0 || offset != 0) {
+        return -1;
+    }
+    /* M91: PROT_NONE is now a mapping. M78 refused it because "there is
+     * no way to express 'mapped but inaccessible' in a page table entry
+     * this kernel sets up" - true then, and demand paging is what changed
+     * it: the region exists, no page is ever built for it, and the fault
+     * that touches it is fatal. That is exactly a guard page, and
+     * sched.c's fill_policy is where it is enforced. */
+    if (prot & ~(uint64_t)(PROT_READ | PROT_WRITE | PROT_EXEC)) {
         return -1;
     }
     uint64_t pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
-    if (pages > (USER_MMAP_LIMIT - USER_MMAP_BASE) / PAGE_SIZE) {
+    if (pages == 0 || pages > (USER_MMAP_LIMIT - USER_MMAP_BASE) / PAGE_SIZE) {
         return -1;
     }
 
@@ -2653,7 +2686,41 @@ static long sys_mmap(uint64_t len, uint64_t prot, uint64_t flags, uint64_t a4,
     if (self->pml4_phys == vmm_kernel_pml4_phys()) {
         return -1; /* a kernel thread has no private region to map into */
     }
-    uint64_t base = mmap_find_gap(self, (uint32_t)pages);
+
+    uint64_t base = 0;
+    if (flags & MAP_FIXED) {
+        /* MAP_FIXED means "here, or fail" - and, per every Unix since
+         * SunOS, it *replaces* whatever was already there rather than
+         * refusing. That second half is not a detail: it is how a loader
+         * lays a second segment of the same object over the tail of the
+         * first one's page reservation. Refused outside the arena, which
+         * keeps the rule this kernel has always had - a program may
+         * arrange its own arena and nothing else. */
+        if ((addr & (PAGE_SIZE - 1)) != 0) {
+            return -1;
+        }
+        if (addr < USER_MMAP_BASE || addr + pages * PAGE_SIZE > USER_MMAP_LIMIT) {
+            return -1;
+        }
+        if (!mmap_range_is_free(self, addr, pages) &&
+            sys_munmap(addr, pages * PAGE_SIZE, 0, 0, 0, 0) != 0) {
+            return -1;
+        }
+        base = addr;
+    } else if (addr != 0) {
+        /* An address hint. Honoured when it is page-aligned, inside the
+         * arena and free; ignored otherwise, which is what a hint means -
+         * a caller that cannot accept an answer elsewhere passes
+         * MAP_FIXED. */
+        uint64_t want = addr & ~(PAGE_SIZE - 1);
+        if (want >= USER_MMAP_BASE && want + pages * PAGE_SIZE <= USER_MMAP_LIMIT &&
+            mmap_range_is_free(self, want, pages)) {
+            base = want;
+        }
+    }
+    if (base == 0) {
+        base = mmap_find_gap(self, (uint32_t)pages);
+    }
     if (base == 0) {
         return -1;
     }
@@ -2746,6 +2813,166 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
     /* A range that overlapped nothing is a success: the caller asked for
      * those pages not to be mapped, and they are not. Every Unix answers
      * this the same way and for the same reason. */
+    return 0;
+}
+
+/* ---- M91: mprotect and madvise ---------------------------------------
+ *
+ * Both walk the caller's own regions and both split them the same way
+ * munmap does, which is why the shape below repeats: a range that covers
+ * part of a mapping turns one region into two or three, and the
+ * bookkeeping has to survive that. The alternative - a region list that
+ * stores permissions per page - would be a page table written twice.
+ *
+ * The rule they share, and the reason mprotect is not simply a page-table
+ * rewrite: in a demand-paged address space most of a mapping has no page
+ * table entry at all, so the authority on what an untouched page will
+ * become is the *region's* prot. Changing only the entries that exist
+ * would leave a mapping whose first half is read-only and whose second
+ * half becomes writable the moment it is touched.
+ */
+static int mmap_split_for(task_t *t, uint64_t addr, uint64_t end) {
+    /* Ensures no live region straddles either boundary, so that after
+     * this call every region is either wholly inside [addr, end) or
+     * wholly outside it. Returns -1 if the table has no room for the
+     * pieces, which is the only way this can fail. */
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (t->mmaps[i].pages == 0) {
+            break;
+        }
+        uint64_t rstart = t->mmaps[i].base;
+        uint64_t rend = rstart + (uint64_t)t->mmaps[i].pages * PAGE_SIZE;
+        uint64_t cut = 0;
+        if (addr > rstart && addr < rend) {
+            cut = addr;
+        } else if (end > rstart && end < rend) {
+            cut = end;
+        }
+        if (cut == 0) {
+            continue;
+        }
+        uint32_t prot = t->mmaps[i].prot;
+        t->mmaps[i].pages = (uint32_t)((cut - rstart) / PAGE_SIZE);
+        if (mmap_slot_cmp_insert(t, cut, (uint32_t)((rend - cut) / PAGE_SIZE), prot) != 0) {
+            /* Put it back rather than leaving a region shorter than the
+             * memory it describes - a mapping the caller can still touch
+             * with nothing saying what it may become is worse than a
+             * refusal. */
+            t->mmaps[i].pages = (uint32_t)((rend - rstart) / PAGE_SIZE);
+            return -1;
+        }
+        i = -1; /* the array was re-sorted underneath; rescan */
+    }
+    return 0;
+}
+
+static long sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot, uint64_t a4,
+                          uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if ((addr & (PAGE_SIZE - 1)) != 0 || len == 0) {
+        return -1;
+    }
+    if (prot & ~(uint64_t)(PROT_READ | PROT_WRITE | PROT_EXEC)) {
+        return -1;
+    }
+    uint64_t end = addr + ((len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+    if (end <= addr) {
+        return -1;
+    }
+    if (addr < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
+        return -1; /* the caller's own arena, exactly as munmap is bounded */
+    }
+    task_t *self = sched_vm_owner(sched_current());
+    if (self->pml4_phys == vmm_kernel_pml4_phys()) {
+        return -1;
+    }
+    /* Every page of the range has to be inside a mapping. POSIX says
+     * ENOMEM otherwise, and this project would rather say no than
+     * silently protect the half that exists.
+     *
+     * Checked BEFORE the split, and measured as overlap rather than as
+     * whole regions, which is the same question asked in the order that
+     * does not leave damage behind: splitting first and refusing after
+     * would consume a region slot every time a program called mprotect on
+     * a range it does not own, and a program in a loop would run the
+     * table out for a call that never succeeded. */
+    uint64_t covered = 0;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (self->mmaps[i].pages == 0) {
+            break;
+        }
+        uint64_t rstart = self->mmaps[i].base;
+        uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+        uint64_t lo = rstart > addr ? rstart : addr;
+        uint64_t hi = rend < end ? rend : end;
+        if (lo < hi) {
+            covered += hi - lo;
+        }
+    }
+    if (covered != end - addr) {
+        return -1;
+    }
+    if (mmap_split_for(self, addr, end) != 0) {
+        return -1;
+    }
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (self->mmaps[i].pages == 0) {
+            break;
+        }
+        uint64_t rstart = self->mmaps[i].base;
+        uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+        if (rstart >= addr && rend <= end) {
+            self->mmaps[i].prot = (uint32_t)prot;
+        }
+    }
+    uint64_t flags = VMM_FLAG_USER;
+    if (prot & PROT_WRITE) {
+        flags |= VMM_FLAG_WRITABLE;
+    }
+    if (prot & PROT_EXEC) {
+        flags |= VMM_FLAG_EXEC;
+    }
+    vmm_protect_range_in(self->pml4_phys, addr, end, flags);
+    return 0;
+}
+
+/* MADV_DONTNEED and nothing else, which is the one piece of advice that
+ * is not advice: it is an instruction to drop the pages, and the next
+ * touch gets zeroes. Everything else in <sys/mman.h>'s advice list is a
+ * hint about future access that this kernel has no cache to apply it to,
+ * and is accepted as a no-op success - refusing MADV_WILLNEED would make
+ * a program fail for asking politely. */
+static long sys_madvise(uint64_t addr, uint64_t len, uint64_t advice, uint64_t a4,
+                         uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if ((addr & (PAGE_SIZE - 1)) != 0 || len == 0) {
+        return -1;
+    }
+    uint64_t end = addr + ((len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+    if (end <= addr) {
+        return -1;
+    }
+    if (addr < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
+        return -1;
+    }
+    if (advice != MADV_DONTNEED) {
+        return 0;
+    }
+    task_t *self = sched_vm_owner(sched_current());
+    if (self->pml4_phys == vmm_kernel_pml4_phys()) {
+        return -1;
+    }
+    /* The frames go back and the regions stay. That distinction is the
+     * whole call: after this the address is still reserved, still has the
+     * permissions it had, and reads as zero - which is what a program
+     * that has finished with a large buffer but not with the space wants,
+     * and what an allocator returning memory to the system without giving
+     * up its arena does. */
+    vmm_unmap_range_free(self->pml4_phys, addr, end);
     return 0;
 }
 
@@ -4059,6 +4286,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_sigprocmask] = sys_sigprocmask,
     [SYS_fstat] = sys_fstat,
     [SYS_mmap] = sys_mmap,
+    [SYS_mprotect] = sys_mprotect,
+    [SYS_madvise] = sys_madvise,
     [SYS_munmap] = sys_munmap,
     [SYS_thread_create] = sys_thread_create,
     [SYS_thread_exit] = sys_thread_exit,

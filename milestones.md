@@ -8018,25 +8018,34 @@ was written as the real test and it stayed the real test:
 `tools/qemu-input-test.sh` passes unchanged — it grades pixels, and
 nothing in this milestone was supposed to reach them.
 
-### M91 — An address space that is a set of mappings
+### M91 — An address space that is a set of mappings [~] six of seven; MAP_SHARED, file-backed and mremap are the three left
 
-- [ ] Per-process VMAs replace `proc.h`'s fixed layout. The heap, the
+- [~] Per-process VMAs replace `proc.h`'s fixed layout. The heap, the
       stack, the image and the mmap arena stop being six constants with
       "generous gaps" between them and become entries in a list that the
-      fault handler, `user_range_ok` and `SYS_munmap` all read
-- [ ] `mmap` with a hint and `MAP_FIXED`, `MAP_SHARED`, and file-backed
-      mappings. `SYS_mmap` refuses all three today, in its own words,
-      *"rather than quietly given private anonymous memory"* — that
-      refusal was right and this is the milestone that earns the yes.
-      A dynamic loader maps a file at an address it chose; there is no
-      version of M95 that does not need this first
-- [ ] `mprotect`, `mremap`, `madvise(MADV_DONTNEED)` — and a real NX
-      bit, so `PROT_EXEC` is a fact rather than a shrug and `PROT_NONE`
-      is a mapping rather than a refusal
-- [ ] A stack that grows on fault, and a heap that is just another
-      mapping. GCC recurses deeply on generated code and the current
+      fault handler, `user_range_ok` and `SYS_munmap` all read.
+      **Half of this: the map was rebuilt and the numbers are no longer
+      the constraint, but the heap, image and stack are still regions the
+      kernel names rather than list entries** — see the notes for why
+      that turned out to be the right stopping point rather than a
+      shortfall
+- [~] `mmap` with a hint and `MAP_FIXED` — **shipped**; `MAP_SHARED` and
+      file-backed mappings — **not**. `SYS_mmap` refuses all three today,
+      in its own words, *"rather than quietly given private anonymous
+      memory"* — that refusal was right and this is the milestone that
+      earns the yes for the first one. A dynamic loader maps a file at an
+      address it chose; there is no version of M95 that does not need
+      this first
+- [~] `mprotect` and `madvise(MADV_DONTNEED)` — **shipped**; `mremap` —
+      **not**. And a real NX bit, so `PROT_EXEC` is a fact rather than a
+      shrug and `PROT_NONE` is a mapping rather than a refusal —
+      **shipped, and it reached further than expected**: see the notes on
+      what had to change in the linker script before the bit meant
+      anything
+- [x] A stack that grows on fault, and ~~a heap that is just another
+      mapping~~. GCC recurses deeply on generated code and the current
       stack is a fixed number of pages placed below a constant
-- [ ] The private region is [512 GiB, 1 TiB) and stays that way — M52's
+- [x] The private region is [512 GiB, 1 TiB) and stays that way — M52's
       argument for why that boundary is what makes a kernel pointer an
       error rather than a read is untouched by any of this, and should
       be
@@ -8048,6 +8057,182 @@ different answers from three page-table bits that all previously
 answered the same way. And `badptr` and `lazytest` still die exactly
 where they died before, because a fault handler that gets more generous
 by one case is the regression M82 already named as the most likely one.
+
+#### Progress notes
+
+*The map, and why moving it was the milestone rather than a preamble to
+it.* What `proc.h` described until M91 fitted an entire process into the
+first gigabyte of a 512 GiB private region: a 2 MiB image window, the
+stack immediately above it, a 256 MiB heap, a 160 MiB mmap arena, and the
+shm and framebuffer windows at 512 MiB and 1 GiB pinning the arena's top.
+`cc1plus` is a hundred megabytes of text — the image window alone was
+fifty times too small — and because the stack sat directly above the
+image, growing one meant moving the other. The new map uses the region
+this OS was already entitled to and was using a fifth of a percent of:
+
+```
+512 GiB  +   0        image           64 GiB
+         +  64 GiB    sbrk heap       64 GiB
+         + 128 GiB    mmap arena     256 GiB
+         + 384 GiB    shm window      64 GiB
+         + 448 GiB    framebuffer
+         + 496 GiB    stack top, growing down; argv/envp just above
+1 TiB                 end of the private region
+```
+
+M82 is what makes this an edit to a header rather than a memory budget:
+address space is free until it is touched and the page tables that
+describe it are built on demand, so a 256 GiB arena costs exactly what a
+160 MiB one did until something reserves inside it. M82's own note
+predicted the cost of not doing this — *"going further means moving the
+shm window and the framebuffer's fixed mapping address, which is a bigger
+change than this milestone needs"* — and it was right about the size of
+the change: four constants moved and three other files had to be looked
+at.
+
+*What did not become a VMA, and why that is the honest stopping point.*
+The bullet asked for the heap, image and stack to become list entries
+alongside the mmap regions. They did not. The mmap arena has a region
+list because a program creates and destroys mappings there at arbitrary
+addresses; the image is placed once by the ELF loader, the heap is a
+single growing range with one syscall that moves its end, and the stack
+is one range with a fixed top. Turning three singletons into list entries
+would add a lookup to every path that touches them and would not answer a
+question anybody is asking. What the milestone was actually *for* — that
+the layout stops being the constraint, and that a program can arrange its
+own address space — is delivered by the map above plus `MAP_FIXED`. The
+bullet is marked `[~]` rather than ticked because that is not what it
+said, and rewriting the bullet to match what was built is the drift this
+file exists to prevent.
+
+*NX reached three files further than it looked like it would.* The bit
+itself is small: `PTE_NX` at bit 63, `EFER.NXE` per CPU, and one function
+(`leaf_flags`) that every place writing a leaf entry now goes through.
+Three things around it were not small.
+
+  - **Every binary this project has ever produced had a single RWE
+    segment.** `readelf -l` on any of them said so, because
+    `user_space/lib/user.ld` said nothing about program headers and `ld`
+    merged everything into one. Page permissions are per page, so a
+    loader honouring `p_flags` on that image maps the whole program
+    writable *and* executable — no protection at all. The script now
+    emits two `PT_LOAD`s, R+X for text and rodata and R+W for data and
+    bss, with an `ALIGN` between them that is not cosmetic: two segments
+    sharing a page have to be given the union of both sets of rights.
+  - **`elf.c` mapped every segment `VMM_FLAG_WRITABLE`**, ignoring
+    `p_flags` entirely. It honours them now, so a program's text is
+    read-only for the first time in this project's history.
+  - **`vmm_cow_break` dropped the bit.** The copy path rebuilt a leaf
+    entry as `new_phys | (entry & (PTE_USER | PTE_PRESENT)) |
+    PTE_WRITABLE`, which is correct for every bit it names and silently
+    loses the one it does not. A fork followed by a write would have
+    handed back an *executable* copy of a page that was not executable
+    before — a W^X hole that appears only after a fork, which is
+    precisely the class of bug nobody finds by running a program. Found
+    by grepping for every write to a page-table leaf after adding a bit
+    to them, which is the same method M82 used to find its own
+    unreachable-today COW guard.
+
+*The stack needed a heuristic, and the heuristic is the whole
+correctness argument.* A stack that grows on any fault inside its window
+is one case more generous than it should be in exactly the way M82's
+notes warn about: a wild pointer 30 MiB below the stack would quietly
+become a valid page instead of killing the process. So the fault has to
+be *near the stack pointer* — 64 KiB, which covers every prologue GCC
+emits without `-fstack-clash-protection` and is small enough that a
+pointer computed from garbage lands outside it. That check is why
+`sched_fault_fill` grew a third argument: rsp is a fact about the fault,
+not about the address space, and it had to be threaded from `isr.c`.
+`vmtest stackfar` is the test, and it is the one a growable stack written
+in a hurry would not have.
+
+The prefault path deliberately has no such heuristic and the reason is
+that there is nothing to apply it to: a syscall buffer's address comes
+from an argument, not from a faulting instruction. `read(fd, buf,
+sizeof buf)` into a 1 MiB local that the program has not touched is
+ordinary, and refusing it would be an `EFAULT` for a buffer the program
+has every right to pass. The cost — a wild syscall pointer inside the
+process's own stack window gets built rather than refused — is the trade
+every Unix makes for the same reason, and it is written into the code
+rather than left to be discovered.
+
+*Two tests failed because they asserted contracts this milestone
+deliberately changed, which is now the fourth time in two arcs.*
+`mmaptest` required `PROT_NONE` to be **refused** ("a guard page that is
+not one" — M78 declining to pretend), and `libctest` required a non-NULL
+`addr` to be **refused** ("addr and fd are refused rather than ignored").
+Both were honest encodings of what was true when they were written and
+both are false now. The fix is the same shape every time and it is worth
+naming again because the temptation is always to delete the check: assert
+the *new* contract. `mmaptest` now requires a `PROT_NONE` mapping to
+succeed; `libctest` now passes a hint that **cannot** be honoured — its
+own load address — and requires the kernel to quietly ignore it and map
+somewhere legal, which is the interesting half of what a hint means and a
+stronger check than the refusal it replaced.
+
+*A pre-existing flake, correctly diagnosed at last.* Four boot failures
+in the M90 input-harness run were all the same thing: `[m63]` panicking
+with *"floating point, the libc subset, or the ported program is
+wrong"* after whetstone printed `Insufficient duration- Increase the LOOP
+count`. None of those three things was wrong. Whetstone runs the entire
+benchmark and only then compares `time(0)` either side of it; a
+difference of zero prints that message and skips the figure. M88's notes
+say the same thing about the same message — *"the benchmark prints the
+same line whether the clock read zero twice or read the same number
+twice. Those are different bugs"* — and answered it for `clock()` in
+`libctest`. `time()` is a different clock (the RTC, not the PIT) and it
+is the one whetstone uses. So the self-test now reads that same clock
+itself, either side of the run: if the kernel's reading advanced and
+whetstone's did not, `time()` is wrong and that is a failure; if neither
+advanced, nothing measured anything and the run still completed, which is
+what proves the FP and the libc. A boot that dies because four QEMU
+guests were competing for the same cores is a harness grading the host.
+
+*One regression this milestone introduced and then removed, found by
+reading rather than by measuring.* Widening `sched_prefault_range` to
+cover the stack window made every syscall that passes a stack buffer -
+which is most of them - do a locked four-level page walk per page, where
+before M91 a stack address left the function immediately on the bounds
+test and did no walking at all. It was correct and it made the free case
+cost something. The fix is one line at the top: ask about the whole range
+once, and only fall into the per-page loop if something is actually
+missing. That is strictly better than the code that was there for the
+arena too, which had been doing a locked walk per page since M82.
+
+Worth being precise about what this is and is not: it is not a
+measurement, and no measurement asked for it. It is a case that used to
+be free and stopped being, noticed while adding the second window, and
+put back. M69's rule is about not doing performance work on a guess; it
+is not about leaving a cost in that was introduced two hours earlier.
+
+*Verified.* `tools/qemu-serial-test.sh` reaches `PASS: 77/77` with no
+panic, including the new marker, which reports what it actually proved:
+
+```
+[m91] an address space that is a set of mappings: an address hint honoured and
+      MAP_FIXED landing exactly where it was told and replacing what was there,
+      mprotect taking write away and giving it back with the bytes intact and
+      refusing a range no mapping covers, bytes written to a page and then
+      executed from it, MADV_DONTNEED returning the frames and keeping the
+      mapping, a 4 GiB reservation touched at both ends on a machine whose whole
+      user region used to be under a gigabyte, a stack grown sixteen times past
+      what it was given, NX enforced, and all four faults that must stay fatal -
+      executing a non-executable page, writing to one mprotect made read-only,
+      touching a guard page, and touching far below the stack pointer - still
+      killing only the program that made them - self-test passed (350 ms).
+```
+
+The four fatal modes are the half that matters and they are four different
+mechanisms rather than four spellings of one: `nx` is an instruction
+fetch nothing before M91 could refuse; `wx` is a write to a page that
+*was* writable and stopped being, which goes through
+`vmm_protect_range_in` rewriting a live entry rather than through the
+fault handler consulting a region; `guard` is a `PROT_NONE` mapping; and
+`stackfar` is the one that separates a growable stack from a 64 MiB
+window of silently valid addresses. The frame count is equal either side
+of all five runs, which is what says that a mapping placed, replaced,
+reprotected, dropped and torn down gives every frame back through four
+different unmap paths.
 
 ### M92 — A disk worth reading, and a cache in front of it
 

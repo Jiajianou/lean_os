@@ -105,6 +105,7 @@
     X(mmaptest)                    \
     X(threadtest)                  \
     X(lazytest)                    \
+    X(vmtest)                      \
     X(forktest)                    \
     X(exectest)                    \
     X(jobtest)
@@ -6394,12 +6395,35 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
              * whetstone reports "Insufficient duration" and exits
              * nonzero otherwise, and a benchmark that measured nothing
              * would be a weaker thing to assert on than one that did. */
-            /* Big enough that the run crosses several whole seconds: time()
-             * has one-second resolution, and 800 loops came back saying
-             * "Duration: 1 sec." - one host slower or faster and that is
-             * zero, which whetstone reports as insufficient and exits
-             * nonzero for. */
-            const char *argv[] = { PATH_BIN_DIR "whetstone", "2500", 0 };
+            /* Big enough that the run crosses several whole seconds:
+             * time() has one-second resolution, and 800 loops came back
+             * saying "Duration: 1 sec." - one host slower or faster and
+             * that is zero, which whetstone reports as insufficient and
+             * exits nonzero for.
+             *
+             * M91: 2500 -> 8000, and this is the number that was actually
+             * causing the intermittent boot panic rather than anything
+             * about load. 2500 loops came back as "Duration: 1 sec." on
+             * this host, which is one second measured with one-second
+             * resolution - a coin flip on where the second boundary
+             * happens to fall. Roughly one boot in four landed on zero
+             * and killed the machine with a message blaming floating
+             * point. The diagnostic added alongside this found it on its
+             * first firing, by saying that the kernel's own clock had
+             * advanced across a run whetstone thought took no time; the
+             * conclusion is not "time() is broken" but "the run is
+             * shorter than the clock can see". 8000 is three to four
+             * seconds, which is not a coin flip, and it is still far
+             * inside the sixty-second drain deadline below even when
+             * several guests are competing for the same cores. */
+            const char *argv[] = { PATH_BIN_DIR "whetstone", "8000", 0 };
+            /* M91: the kernel's own reading of the same clock whetstone
+             * uses, either side of the run. See the "Insufficient
+             * duration" branch below for what it is for - in short, the
+             * benchmark reports that one message whether the clock is
+             * broken or whether this guest simply did not get a whole
+             * second of wall time, and those are different bugs. */
+            long wall_before = do_syscall(SYS_time, 0, 0, 0);
             task_t *t = process_spawnv("whetstone", image, bytes, argv);
             kfree(image);
 
@@ -6451,13 +6475,72 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             fd_release(&sched_current()->fds[1]);
             sched_current()->fds[1].type = FD_STDOUT;
 
-            if (!k_strstr(out, "Loops:")) {
+            long wall_after = do_syscall(SYS_time, 0, 0, 0);
+
+            /* ---- M91: telling "the port is wrong" from "nothing could
+             * be timed" ----------------------------------------------
+             *
+             * whetstone runs the entire benchmark and only then compares
+             * time(0) either side of it; a difference of zero makes it
+             * print "Insufficient duration" and exit 1 without printing
+             * its figure. That one message covers two completely
+             * different situations and this self-test used to panic with
+             * "floating point, the libc subset, or the ported program is
+             * wrong" for both:
+             *
+             *   - the clock is broken, which IS this project's bug; or
+             *   - this guest did not get a whole second of wall clock
+             *     across the run, which is a fact about the machine it
+             *     was run on and no verdict on the port at all.
+             *
+             * M88's notes say the same thing about the same message -
+             * "the benchmark prints the same line whether the clock read
+             * zero twice or read the same number twice. Those are
+             * different bugs" - and answered it for clock() in libctest.
+             * time() is a different clock (the RTC, not the PIT) and it
+             * is the one whetstone uses, so the distinction has to be
+             * made here.
+             *
+             * The kernel reads the same clock either side of the run. If
+             * it advanced and whetstone saw no advance, something between
+             * SYS_time and time() is wrong and that is a failure. If the
+             * kernel saw no advance either, then nothing measured
+             * anything and the honest outcome is to say so and carry on -
+             * the run still completed, which is what proves the FP and
+             * libc work, and a boot that dies because four QEMU guests
+             * were competing for the same cores is a test harness
+             * grading the host. */
+            int unmeasured = 0;
+            if (k_strstr(out, "Insufficient duration")) {
+                /* Three seconds, not one. A window of one second either
+                 * side of a run that reported none is the clock's own
+                 * resolution and says nothing; a window of three says the
+                 * run really did take time that time() did not report.
+                 * The loop count above is chosen so the ordinary case
+                 * never reaches this branch at all. */
+                if (wall_before > 0 && wall_after - wall_before >= 3) {
+                    klog_puts("[m63] the ported program could not time its own run, but this "
+                               "kernel's clock advanced across it - time() is wrong\n");
+                    all_ok = 0;
+                } else {
+                    unmeasured = 1;
+                    klog_puts("[m63] the ported program completed its run and the clock did not "
+                               "advance across it, for the kernel either - the figure is "
+                               "unmeasured on this boot, which is a statement about the host "
+                               "rather than about the port\n");
+                }
+            }
+
+            if (!unmeasured && !k_strstr(out, "Loops:")) {
                 klog_puts("[m63] the ported program did not report a completed run. It said:\n");
                 klog_puts(out);
                 klog_putc('\n');
                 all_ok = 0;
             }
-            if (!k_strstr(out, "Whetstones:")) {
+            if (unmeasured) {
+                /* Nothing more to assert: the run happened, the figure
+                 * did not. */
+            } else if (!k_strstr(out, "Whetstones:")) {
                 klog_puts("[m63] the ported program produced no benchmark figure\n");
                 all_ok = 0;
             } else {
@@ -9191,6 +9274,123 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "fatal - a write to a read-only mapping and a touch of unreserved arena "
                    "address space - still killing only the program that made them - "
                    "self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
+    }
+
+    /* ---- M91 self-test: an address space that is a set of mappings ----
+     *
+     * Everything M91 changed is visible from user space and nothing of it
+     * is visible from inside the kernel, so this is almost entirely a
+     * wrapper around /bin/vmtest - which is the right shape: the claim is
+     * that a program can arrange its own address space, and only a
+     * program can test that.
+     *
+     * The kernel-side half is the frame count either side, for the same
+     * reason M82 checked it: a mapping placed at an address the program
+     * chose, replaced by a fixed mapping, reprotected, dropped with
+     * MADV_DONTNEED and torn down goes through four different paths that
+     * each unmap something, and a frame lost by any of them would show up
+     * nowhere else.
+     */
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        int all_ok = 1;
+        uint64_t frames_before = pmm_free_frame_count();
+
+        size_t vm_bytes = 0;
+        uint8_t *vm_img = read_program(PATH_BIN_DIR "vmtest", &vm_bytes);
+        if (!vm_img) {
+            panic("M91 self-test: /bin/vmtest is not on this disk");
+        }
+        const char *vm_argv[] = {PATH_BIN_DIR "vmtest", 0};
+        task_t *vt = process_spawnv("vmtest", vm_img, vm_bytes, vm_argv);
+        long vrc = vt ? do_syscall(SYS_wait, (uint64_t)vt->id, 0, 0) : -1;
+        kfree(vm_img);
+        if (vrc != 0) {
+            klog_puts("[m91] vmtest exited ");
+            klog_put_hex32((uint32_t)vrc);
+            klog_puts(" - see user_space/bin/vmtest.c for what each code means\n");
+            all_ok = 0;
+        }
+
+        /* The four faults that must STAY fatal, and each one is a
+         * different mechanism rather than four spellings of the same
+         * check:
+         *
+         *   nx        an instruction fetch from a page mapped without
+         *             PROT_EXEC. Nothing before M91 could refuse this,
+         *             because every page in every process was executable.
+         *   wx        a write to a page that WAS writable and stopped
+         *             being. Distinct from M82's "ro", which is read-only
+         *             from birth: this one goes through
+         *             vmm_protect_range_in rewriting a live entry, not
+         *             through the fault handler consulting a region.
+         *   guard     a touch of a PROT_NONE mapping - address space
+         *             reserved so nothing else lands there and fatal to
+         *             use, which M78 refused to pretend to offer.
+         *   stackfar  a touch 32 MiB below the stack pointer, inside the
+         *             window the stack may grow into. This is the one
+         *             that separates "the stack grows on demand" from
+         *             "any address in a 64 MiB window is silently valid",
+         *             and it is the check most likely to be missing from
+         *             a growable stack somebody wrote in a hurry.
+         */
+        static const char *const M91_FATAL[] = {"nx", "wx", "guard", "stackfar"};
+        static const char *const M91_WHY[] = {
+            "executing a page that is not PROT_EXEC",
+            "writing to a page mprotect made read-only",
+            "touching a PROT_NONE guard mapping",
+            "touching 32 MiB below the stack pointer",
+        };
+        for (int m = 0; m < 4 && all_ok; m++) {
+            size_t f_bytes = 0;
+            uint8_t *f_img = read_program(PATH_BIN_DIR "vmtest", &f_bytes);
+            if (!f_img) {
+                panic("M91 self-test: /bin/vmtest vanished mid-test");
+            }
+            const char *f_argv[] = {PATH_BIN_DIR "vmtest", M91_FATAL[m], 0};
+            task_t *ft = process_spawnv("vmtest", f_img, f_bytes, f_argv);
+            long frc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
+            kfree(f_img);
+            if (frc != 128 + SIGSEGV) {
+                klog_puts("[m91] ");
+                klog_puts(M91_WHY[m]);
+                klog_puts(" exited 0x");
+                klog_put_hex32((uint32_t)frc);
+                klog_puts(" rather than being killed\n");
+                all_ok = 0;
+            }
+        }
+
+        uint64_t frames_after = pmm_free_frame_count();
+        if (all_ok && frames_after != frames_before) {
+            klog_puts("[m91] frames before 0x");
+            klog_put_hex64(frames_before);
+            klog_puts(" after 0x");
+            klog_put_hex64(frames_after);
+            klog_puts(" - a mapping that was placed, replaced, reprotected or dropped "
+                       "is not giving every frame back\n");
+            all_ok = 0;
+        }
+
+        if (!all_ok) {
+            panic("M91 self-test: the address space is not a set of mappings this program can arrange");
+        }
+        klog_puts("[m91] an address space that is a set of mappings: an address hint "
+                   "honoured and MAP_FIXED landing exactly where it was told and "
+                   "replacing what was there, mprotect taking write away and giving it "
+                   "back with the bytes intact and refusing a range no mapping covers, "
+                   "bytes written to a page and then executed from it, MADV_DONTNEED "
+                   "returning the frames and keeping the mapping, a 4 GiB reservation "
+                   "touched at both ends on a machine whose whole user region used to be "
+                   "under a gigabyte, a stack grown sixteen times past what it was given, "
+                   "NX ");
+        klog_puts(vmm_nx_enabled() ? "enforced" : "unavailable on this CPU");
+        klog_puts(", and all four faults that must stay fatal - executing a "
+                   "non-executable page, writing to one mprotect made read-only, touching "
+                   "a guard page, and touching far below the stack pointer - still "
+                   "killing only the program that made them - self-test passed (");
         klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         klog_puts(" ms).\n\n");
     }

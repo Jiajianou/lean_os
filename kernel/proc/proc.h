@@ -18,9 +18,42 @@
  * syscall.c (which bounds-checks growth into it - SYS_sbrk, SYS_shm_map)
  * can't drift apart. Generous gaps between regions rather than packed
  * tightly: nothing here needs to be dense, and it avoids ever having to
- * reason precisely about exact boundaries. */
+ * reason precisely about exact boundaries.
+ *
+ * ---- M91: the whole map moved, and the numbers are the milestone ------
+ *
+ * What was here until M91 fitted an entire process into the first gigabyte
+ * of a 512 GiB private region: the image at 512 GiB with a 2 MiB ceiling,
+ * the stack immediately above it, a 256 MiB heap, a 160 MiB mmap arena,
+ * and the shm and framebuffer windows at 512 MiB and 1 GiB pinning the
+ * arena's top. Every one of those numbers was chosen when the largest
+ * program on this machine was a few hundred kilobytes.
+ *
+ * `cc1plus` is a hundred megabytes of text. The image window alone was
+ * fifty times too small, and because the stack sat directly above the
+ * image, growing one meant moving the other. So the map is rebuilt around
+ * what the region actually is - half a terabyte of address space, of which
+ * this OS was using a fifth of a percent:
+ *
+ *     512 GiB  +   0        image           64 GiB
+ *              +  64 GiB    sbrk heap       64 GiB
+ *              + 128 GiB    mmap arena     256 GiB
+ *              + 384 GiB    shm window      64 GiB
+ *              + 448 GiB    framebuffer
+ *              + 496 GiB    stack top, growing down; argv/envp just above
+ *     1 TiB                 end of the private region
+ *
+ * Address space is free until it is touched (M82) and the page tables
+ * that describe it are built on demand, so a 256 GiB arena costs exactly
+ * what a 160 MiB one did until something reserves inside it. That is the
+ * property that makes this an edit to a header rather than a memory
+ * budget. */
 #define PAGE_SIZE        4096ULL
-#define USER_STACK_TOP   0x0000008000200000ULL /* 512 GiB + 2 MiB */
+#define GIB              (1024ULL * 1024 * 1024)
+/* The stack grows down from here and the argument region sits just above
+ * it, exactly as before - what changed is where "here" is, and that the
+ * pages below it arrive on a fault rather than all at spawn time. */
+#define USER_STACK_TOP   0x000000FC00000000ULL /* 512 GiB + 496 GiB */
 /* M81: 4 -> 16. PATH_MAX_LEN became 4096 this milestone (system_api/
  * include/paths.h), and the programs that walk a filesystem - the file
  * manager above all - hold two or three paths in locals at once. Three
@@ -29,6 +62,17 @@
  * and worth not going over twice. 64 KiB costs 48 KiB of frames per
  * process. */
 #define USER_STACK_PAGES 16                     /* 64 KiB */
+/* M91: how far down the stack may grow before a fault is a fault again.
+ *
+ * USER_STACK_PAGES is now the *initial* mapping - what a process starts
+ * with, still built eagerly at spawn so that a program's very first push
+ * does not depend on the fault handler - and this is the ceiling on what
+ * sched_fault_fill will add to it. 64 MiB is eight times a Linux default
+ * `ulimit -s` and costs nothing until it is used; GCC recurses deeply on
+ * generated code and is the reason the number is generous rather than
+ * merely adequate. */
+#define USER_STACK_MAX_BYTES (64ULL * 1024 * 1024)
+#define USER_STACK_LIMIT (USER_STACK_TOP - USER_STACK_MAX_BYTES)
 #define USER_ARG_ADDR    USER_STACK_TOP
 /* M75: the argument region is two pages, not one, because it now holds
  * an environment as well as an argument vector - and they live in ONE
@@ -50,8 +94,8 @@
  * reason (half a "NAME=value" is a different variable). */
 #define USER_ENV_MAX_VARS  64
 #define USER_ENV_MAX_BYTES 4096
-#define USER_HEAP_START  0x0000008000400000ULL /* 512 GiB + 4 MiB - M19 */
-#define USER_HEAP_LIMIT  0x0000008010000000ULL /* 512 GiB + 256 MiB ceiling - M19 */
+#define USER_HEAP_START  0x0000009000000000ULL /* 512 GiB + 64 GiB - M19, moved by M91 */
+#define USER_HEAP_LIMIT  0x000000A000000000ULL /* 512 GiB + 128 GiB ceiling */
 /* M78: the mmap arena - the second memory primitive next to M19's
  * growth-only sbrk. Placed in the gap the layout already left between
  * the heap's ceiling and the shm window rather than beside either, for
@@ -64,7 +108,7 @@
  * no page-fault handler that could fill one in later), so the real
  * ceiling is physical and the arena is only ever the room to arrange
  * things in. */
-#define USER_MMAP_BASE   0x0000008014000000ULL /* 512 GiB + 320 MiB - M78 */
+#define USER_MMAP_BASE   0x000000A000000000ULL /* 512 GiB + 128 GiB - M78, moved by M91 */
 /* M82: 448 MiB -> 480 MiB, taking the arena from 128 MiB to 160 MiB.
  *
  * M78 sized this when every mapping was backed by a real frame at the
@@ -80,9 +124,16 @@
  * space rather than by a policy - growing it further means moving shm and
  * the framebuffer window, which is a bigger change than this milestone
  * needs. */
-#define USER_MMAP_LIMIT  0x000000801E000000ULL /* 512 GiB + 480 MiB */
-#define USER_SHM_BASE    0x0000008020000000ULL /* 512 GiB + 512 MiB - M19 */
-#define USER_FB_BASE     0x0000008040000000ULL /* 512 GiB + 1 GiB - M20, SYS_fb_map's fixed target address */
+/* M91: 160 MiB -> 256 GiB.
+ *
+ * M82's own note explains why the old number was what it was: "going
+ * further means moving the shm window and the framebuffer's fixed mapping
+ * address, which is a bigger change than this milestone needs." This is
+ * the milestone that needs it, and the two windows moved. */
+#define USER_MMAP_LIMIT  0x000000E000000000ULL /* 512 GiB + 384 GiB */
+#define USER_SHM_BASE    0x000000E000000000ULL /* 512 GiB + 384 GiB - M19, moved by M91 */
+#define USER_SHM_LIMIT   0x000000F000000000ULL /* 512 GiB + 448 GiB */
+#define USER_FB_BASE     0x000000F000000000ULL /* 512 GiB + 448 GiB - M20, SYS_fb_map's fixed target address */
 
 /* M52: the whole private region, which is exactly what PML4 entry 1
  * covers - [512 GiB, 1 TiB). Every constant above lives inside it, and
@@ -107,7 +158,13 @@
  * - nothing else in this project is either - but "a user program can take
  * down the kernel by spawning a text file" is a bug at any threat model. */
 #define USER_IMAGE_BASE  0x0000008000000000ULL /* 512 GiB - matches user_space/lib/user.ld */
-#define USER_IMAGE_LIMIT (USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE)
+/* M91: was `USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE`, which put a
+ * 2 MiB ceiling on a program image because the stack sat immediately
+ * above it. The stack is now 496 GiB away and this is a window of its
+ * own: 64 GiB, which is not a number anything will reach and is chosen
+ * for that reason - an image limit that has to be revisited per program
+ * is the thing being fixed, not a number to tune. */
+#define USER_IMAGE_LIMIT 0x0000009000000000ULL /* 512 GiB + 64 GiB */
 
 /* M54: hands `pml4_phys` and every frame the process itself owns back to
  * the allocator. Lives here rather than in vmm.c because the decision it
