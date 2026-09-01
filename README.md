@@ -122,6 +122,13 @@ Four instruments, and none of them subsumes another:
   is the only instrument here that grades the *tests* rather than the
   machine, and the first thing it found was a file at 100% line coverage
   whose mutation score was zero.
+- **A shell differential test** (`tools/sh-test.sh`) compiles
+  `/bin/sh` from the same source the machine runs, for the machine you
+  are sitting at, and requires every fixture in `tests/sh/` to produce
+  byte-identical output to the host's own `/bin/sh`. Nothing in those
+  fixtures says what the right answer is - a shell nobody here wrote
+  decides, which is the only useful standard for a program whose whole
+  job is to agree with every other shell about what a script means.
 - **An image-tree test** (`tools/image-tree-test.sh`) has a host tool
   write a directory tree into a leanfs image, compares the image with an
   independent reader against the tree it came from, then boots it and has

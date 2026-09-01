@@ -50,6 +50,18 @@ int unlink(const char *path);
 long read(int fd, void *buf, size_t count);
 long write(int fd, const void *buf, size_t count);
 int close(int fd);
+
+/* M86: exit without running anything on the way out.
+ *
+ * The shell asked for this by name and the reason is fork: a child that
+ * has decided not to exec must leave WITHOUT running what the parent
+ * registered on its way out. Nothing here registers anything yet -
+ * `exit` is a syscall and no more (see stdlib.c) - so today the two are
+ * the same call, and that is worth stating rather than hiding. The
+ * distinction becomes real the day this libc grows atexit or a buffered
+ * stdio that flushes, and a shell that had spelled it `exit` would then
+ * quietly flush its parent's buffers once per forked command. */
+void _exit(int status) __attribute__((noreturn));
 /* M80 groundwork. `isatty` answers from what this system actually knows:
  * fd 0 and 1 are the implicit stdin/stdout every task starts with
  * (kernel/sched/sched.h's fd table), and everything else is a pipe, a

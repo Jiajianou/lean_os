@@ -103,6 +103,14 @@ else
   run_stage "host unit tests" make --no-print-directory test-fast
 fi
 
+# ---- M86: the shell, against a shell nobody here wrote ---------------
+#
+# In every tier including --fast, because it costs about a second and is
+# the only instrument that grades /bin/sh against an implementation this
+# project did not write. See tests/sh/README.md for why a shell in
+# particular needs that and a boot marker will not do.
+run_stage "the shell, against $(basename "${REFERENCE_SH:-/bin/sh}")" ./tools/sh-test.sh
+
 # ---- Q11/Q12: the instruments that grade the tests themselves --------
 #
 # Only in --full. Both are minutes rather than seconds, and both answer a

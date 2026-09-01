@@ -7313,9 +7313,9 @@ call over a buffer, which is what makes it cheap and also what makes the
 untested half untested - job control is the part that needs a process,
 and a process is what the removed test could not drive safely.
 
-### M86 — A shell that is a shell
+### M86 — A shell that is a shell ✅
 
-*Scheduled second of the five before M94 — see "Before M94" below. Two
+*Was scheduled second of the five before M94 — see "Before M94" below. Two
 corrections to the bullets, from reading `sh.c` rather than this entry:
 `&&`, `||` and `$?` shipped in M72 and the third bullet should not claim
 them, and `jobs`/`fg`/`bg` are dropped from this milestone — they need
@@ -7323,23 +7323,31 @@ M85's pty, which this arc deliberately holds until M98. What that costs
 is stated in the notes at the end of this entry rather than left as a
 quiet omission.*
 
-- [ ] `sh.c`'s own header is the specification. It says what is missing:
+- [x] `sh.c`'s own header is the specification. It says what is missing:
       *"job control, `&`, subshells, functions, and `|`"* — the last one
-      meaning more than a single pipe. All five, now that M83 and M85
-      make four of them expressible
-- [ ] Two variable namespaces, and `export` that moves a name between
+      meaning more than a single pipe. **Four of the five: `&`,
+      subshells, functions and pipelines of any length. Job control is
+      the one deliberately left, and the re-scope note above says why**
+- [x] Two variable namespaces, and `export` that moves a name between
       them. M75 wrote: *"`export` is accepted and does nothing but
       assign, because this shell has one namespace — the reason POSIX
       has two is subshells and functions, and it has neither."* This is
       the milestone where it has both, and that sentence stops being a
       justification and becomes a to-do
-- [ ] `if`/`while`/`for`/`case`, `&&`/`||`, command substitution,
-      parameter expansion with the `${x:-y}` family, and `$?`/`$#`/`$@`
-- [ ] `jobs`, `fg`, `bg`, and the builtins job control implies, over
-      M85's `tcsetpgrp`
-- [ ] Deliberately **not** a `bash`, and deliberately not an arithmetic
+- [x] `if`/`while`/`for`/`case`, `&&`/`||`, command substitution,
+      parameter expansion with the `${x:-y}` family, and `$?`/`$#`/`$@`.
+      **Also `until`, `!`, `${#x}`, the `${x#pat}`/`${x%pat}` family,
+      heredocs including `<<-`, `2>&1`, and `test`/`[` as a builtin —
+      each one added because a real script cannot be run without it,
+      not for completeness**
+- [~] `jobs`, `fg`, `bg`, and the builtins job control implies, over
+      M85's `tcsetpgrp` — **dropped from this milestone on purpose; the
+      pty stays M98's, and `&` plus `wait` shipped without them**
+- [x] Deliberately **not** a `bash`, and deliberately not an arithmetic
       expansion engine or `[[`. The measure is a `configure` script that
-      someone else wrote running to completion, not a feature list
+      someone else wrote running to completion, not a feature list —
+      **and that measure could not be taken here, for a reason that is
+      about M89 rather than about this shell. See the notes**
 
 **How we'll know.** A shell script nobody here wrote runs correctly —
 the honest candidate is a real `configure`, because it is the densest
@@ -7347,6 +7355,122 @@ per-line user of exactly the five things the header admits are missing.
 A script written here to exercise the new features proves that they were
 implemented, which is a much weaker claim than that they were
 implemented *right*.
+
+#### Progress notes
+
+**It had to be a rewrite, and the reason fits in one line.** M72's shell
+read a line, scanned it for `;`, `&&` and `||`, and expanded variables
+while it tokenised. That is a good design for what it was and it cannot
+grow any of this milestone's features, because every one of them is a
+*nested* structure and a line is not: `if` spans lines, `|` spans
+commands, `$(...)` contains a whole program, and a `case` pattern must
+reach the matcher **unexpanded** or it globs against the directory
+before it is ever compared. So this is a lexer, a recursive-descent
+parser and an evaluator over a tree — 1400 lines where there were 760 —
+and expansion moved to execution time, where POSIX puts it.
+
+**The thing that mattered most was not a feature.** It is that every
+system call the new shell makes is POSIX — open, read, write, close,
+dup2, pipe, fork, execve, waitpid, chdir, getcwd, opendir, readdir — and
+there is not one `sys_` wrapper left in the file. That is not tidiness.
+It means `user_space/shell/sh.c` **compiles for the host**, and the host
+has a reference implementation of the thing being tested sitting in
+`/bin/sh`. `tools/sh-test.sh` builds the same source the machine runs and
+puts every fixture in `tests/sh/` through both, and requires the output
+and the exit status to be **byte-identical**.
+
+Nothing in `tests/sh` says what the right answer is. That is the whole
+value: for a program whose entire job is to agree with every other shell
+about what a script means, a test that checks strings this project chose
+itself is close to worthless. Eight fixtures, 130 lines of script,
+agreeing with `/bin/sh` exactly — and the ability to write that test at
+all is a dividend of M75–M85 rather than of this milestone. M72's shell
+could not have been tested this way because it could not have been
+compiled anywhere else.
+
+**Four bugs the host fixtures caught in seconds**, each of which would
+have cost a three-minute boot to find and some of which would not have
+been found at all:
+
+- `x='a b'` was not an assignment. The parser required the whole word to
+  be unquoted, when what must be unquoted is the *name*. Every
+  assignment of a quoted value became a command.
+- `<<'EOF'` ran to the end of the file. The delimiter kept its quotes, so
+  it never matched the line that ended it, and the rest of the script
+  became the heredoc's body — a failure that reads like the parser
+  losing its place rather than like a string compare.
+- `shift` was a use-after-free: it passed `pos_params + n` to a function
+  whose first act is to free `pos_params`.
+- a pipeline reported the *first* stage's status rather than the last.
+  This one was found deliberately, by breaking it on purpose to check
+  that the fixtures could fail at all — the Q1–Q10 ritual — and it is
+  the reason that ritual exists: the diff was one line and no boot-time
+  marker would have looked at it.
+
+**And two that only the machine could show, one of them this project's
+own bug taught twice.**
+
+The first: a script's first redirect worked and every one after it went
+to the console. That is *verbatim* the symptom M72 recorded and fixed,
+and its note explains it exactly — the parking slot must be claimed
+**before** the target is opened, because `open` returns the lowest free
+descriptor and after one redirect cycle that is the parking slot itself.
+This rewrite opened first and re-broke it. The instrumentation that
+found it printed `RD target=20 saved=20`, which is that sentence in
+numbers.
+
+The second is new and is the more interesting half. The fixed parking
+number M72 used was safe for M72 and is not safe in general: **a shell on
+this machine does not start with two descriptors.** It is spawned by
+`init` and inherits a table with roughly forty entries in it — the first
+`open` in a script returned fd 42 — so a constant parking slot is
+eventually one of *those*, and `dup2` does not ask before it releases
+what is there. The slot is now probed with `fcntl(F_GETFD)`, which is the
+one call available here that can tell an open descriptor from a free one.
+
+**A third thing the machine showed, which was not a bug in this shell at
+all.** The instrumentation printed nothing the first time, because it
+wrote to fd 2 — and a task on this machine starts with fd 0 and fd 1 and
+nothing else. Every error `/bin/sh` has ever written, including
+`command not found`, has gone nowhere since M13. The shell now makes fd 2
+a copy of fd 1 when it starts and finds none, which is what a login shell
+inherits everywhere else; `2>file` still redirects it afterwards, because
+it is now a real descriptor to redirect.
+
+**`_exit` was added to the libc**, by M63's rule: the program asked for
+it by name. A forked child that has decided not to exec must leave
+without running what the parent registered on the way out. Today `exit`
+is a syscall and no more, so the two are the same call — and the header
+says so rather than hiding it, because the distinction becomes real the
+day this libc grows `atexit` or a buffered stdio that flushes, and a
+shell that had spelled it `exit` would then flush its parent's buffers
+once per forked command.
+
+**What this milestone could not grade, and why that is M89's problem
+rather than a shortfall here.** The bullet above says the measure is *"a
+`configure` script that someone else wrote running to completion"*, and
+that could not be run. Not because of the shell: a configure script
+shells out to `sed`, `grep`, `rm`, `mkdir`, `expr` and `install` in its
+first hundred lines, and `/bin` on this machine holds six programs. The
+ordering note in "Before M94" put M89 after M86 on the grounds that
+toybox is static and needs no loader; what it did not notice is that
+M86's own grading instrument is downstream of M89. **The measure is not
+abandoned, it is relocated:** running a real `configure` is now part of
+M89's test, where the utilities it needs will exist, and M94's own "How
+we'll know" already requires the same thing one step later. What stands
+in for it here is stronger than a feature list and weaker than a real
+script: byte-for-byte agreement with a reference shell over every
+construct the milestone claims.
+
+*Verified.* `tools/sh-test.sh` 8/8 byte-identical to `/bin/sh`, including
+exit status, and each fixture checked against a deliberately broken build
+before being believed. `qemu-serial-test.sh` **81/81** with the new
+`[m86]` marker, which runs a fixture using nothing the host could have
+exercised: a pipeline from a forked builtin into an exec'd `/bin/cat`, a
+subshell whose assignment does not escape it, a here-document fed by a
+second process, and an exported variable reaching a child's environment
+through `env` while an unexported one does not. `qemu-input-test.sh` 9/9
+on the quick subset, `make test-fast` 123/123.
 
 #### What dropping job control costs, and why it is affordable here
 
@@ -8784,16 +8908,18 @@ command and neither of them is a target triple:
   and a real `|`"* — and then M86 stayed unscheduled anyway.
 
 The next five milestones are those prerequisites, ordered by which one
-blocks the next. **The first is done** — see M93's second-attempt notes,
-which also record that the journal deferral finally has a number behind
-it (30 ms at a hundred thousand files) instead of an argument. They keep their own numbers rather than becoming
+blocks the next. **The first two are done** — see M93's second-attempt
+notes, which also record that the journal deferral finally has a number
+behind it (30 ms at a hundred thousand files) instead of an argument, and
+M86's, which record that the shell is now graded against a shell nobody
+here wrote. They keep their own numbers rather than becoming
 M101–M105, because none of this is new scope and M68 and M74 already set
 the precedent for a milestone reopened under the number it was given.
 
 | order | milestone | what closes | why here and not later |
 |---|---|---|---|
 | 1 | M93 (2nd) ✅ | the host-side image builder, and the journal measurement | nothing else in the arc can begin until a tarball can reach the disk |
-| 2 | M86 | the shell | M94's grading test *is* a shell script |
+| 2 | M86 ✅ | the shell | M94's grading test *is* a shell script |
 | 3 | M88 (2nd) | UTF-8, and the calls a build probes for | every source tree in this arc has non-ASCII bytes in it |
 | 4 | M89 | toybox | a configure run shells out to `sed`, `grep`, `install`; `/bin` has six programs |
 | 5 | M91 (2nd) | `MAP_SHARED` and file-backed `mmap` | M91's own words: *"there is no version of M95 that does not need this first"* |
@@ -8804,6 +8930,18 @@ putting it first means M94's configure test has real utilities beneath
 it rather than six programs. If toybox's own build turns out to want
 `MAP_SHARED`, the two swap — and this paragraph is what says that was
 allowed rather than a plan quietly rewritten after the fact.
+
+**And one place it was already wrong, recorded here because this is the
+paragraph that asked to be checked.** M86 was scheduled before M89 on the
+grounds that the shell is what M94's configure test runs *in*. It is —
+and the same configure test is also what M86's own bullet named as its
+measure, which makes M86's grading instrument downstream of M89's
+utilities rather than upstream of them. Nothing about the order needed to
+change: the shell still has to exist before anything can run a script,
+and M86 shipped with a stronger instrument than the one it planned (see
+its notes). What moved is where the configure run gets graded — M89, and
+then M94 again. The lesson is narrower than the ordering: **a milestone
+whose test names a program should check that the program will exist.**
 
 **What it does not change.** M92's writeback cache and AHCI, M91's
 `mremap`, and `O_NONBLOCK`/`AF_UNIX` all stay exactly where they were

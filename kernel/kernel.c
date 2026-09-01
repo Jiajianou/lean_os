@@ -7351,6 +7351,179 @@ static void boot_selftests_system(void) {
                    "self-test passed.\n\n");
     }
 
+    /* ---- M86 self-test: a shell that is a shell -------------------------
+     *
+     * M72's fixture above proves a script is a program. This one proves
+     * the thing a script is FOR: the constructs a person who has never
+     * heard of lean_os writes without thinking about them.
+     *
+     * The host-side instrument (tools/sh-test.sh) grades this same source
+     * against the host's own /bin/sh, byte for byte, which is a stronger
+     * claim about *correctness* than anything here can make - a reference
+     * implementation decides the answers rather than this project. What
+     * it cannot reach is any of the machinery underneath, all of which is
+     * lean_os's own and none of which the host exercises:
+     *
+     *   - `fork` returning twice (M83), for a subshell and every stage of
+     *     a pipeline;
+     *   - a pipe carrying bytes between two of THIS kernel's processes,
+     *     with `$(...)` reading the far end;
+     *   - `execve` replacing a forked child (M84), which is how the
+     *     pipeline's `cat` gets there;
+     *   - and `#!` resolved by the ordinary spawn path, which is what
+     *     makes this fixture runnable at all.
+     *
+     * So the two instruments are checking different halves of the same
+     * program and neither is redundant. This one is deliberately written
+     * so that every line of it needs the kernel: a construct that could
+     * pass on the host alone would belong in tests/sh instead.
+     */
+    {
+        int all_ok = 1;
+        const char *script = PATH_TMP_DIR "m86.sh";
+        const char *result = PATH_TMP_DIR "m86.out";
+
+        static const char SCRIPT[] =
+            "#!/bin/sh\n"
+            "out=" PATH_TMP_DIR "m86.out\n"
+            /* A function, called with an argument that has a space in it,
+             * whose output is redirected by its caller. */
+            "say() { echo \"func:$1\"; }\n"
+            "say 'two words' > $out\n"
+            /* if / elif / else over a real exit status. */
+            "if false; then echo bad >> $out\n"
+            "elif true; then echo elif:taken >> $out\n"
+            "else echo bad2 >> $out\n"
+            "fi\n"
+            /* A loop that ends, with the counter advanced through a
+             * command substitution - which is a fork, a pipe and a wait
+             * per iteration. */
+            "i=x\n"
+            "while test ${#i} -lt 4; do\n"
+            "  echo \"loop:${#i}\" >> $out\n"
+            "  i=$(echo ${i}x)\n"
+            "done\n"
+            /* for over a list, and case with an alternation. */
+            "for f in one two; do echo \"for:$f\" >> $out; done\n"
+            "for v in cat dog; do\n"
+            "  case $v in cat|dog) echo \"case:$v-pet\" >> $out ;; *) echo bad3 >> $out ;; esac\n"
+            "done\n"
+            /* A pipeline: a builtin in a forked child, writing into a
+             * pipe, read by an exec'd /bin/cat. */
+            "echo pipe:carried | cat >> $out\n"
+            /* A subshell must not change the shell that made it. */
+            "v=outer\n"
+            "( v=inner; echo \"sub:$v\" >> $out )\n"
+            "echo \"after:$v\" >> $out\n"
+            /* Two namespaces: an unexported variable is invisible to a
+             * child, an exported one is not. `env` is a real program, so
+             * this is the environment the kernel actually handed over. */
+            "PRIVATE=no\n"
+            "export SHARED=yes\n"
+            "env | cat >> " PATH_TMP_DIR "m86.env\n"
+            /* A here-document, whose body is written by a second process
+             * into a pipe this shell reads. */
+            "cat >> $out <<END\n"
+            "here:$v\n"
+            "END\n"
+            "echo \"expand:${nothing:-fallback}\" >> $out\n";
+
+        if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                        sizeof(SCRIPT) - 1) != 0) {
+            panic("M86 self-test: could not write the script fixture");
+        }
+
+        long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+        if (pid < 0) {
+            klog_puts("[m86] the script could not be spawned\n");
+            all_ok = 0;
+        } else {
+            do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+        }
+
+        static char produced[1024];
+        k_memset(produced, 0, sizeof(produced));
+        int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+        if (n <= 0) {
+            klog_puts("[m86] the script produced no output at all\n");
+            all_ok = 0;
+        } else {
+            produced[n] = '\0';
+            static const struct { const char *needle; const char *what; } EXPECT[] = {
+                {"func:two words", "a function, its argument, and its caller's redirect"},
+                {"elif:taken",     "if/elif/else over a real exit status"},
+                {"loop:1",         "a while loop entered"},
+                {"loop:3",         "a while loop that advanced and then ended"},
+                {"for:two",        "for over a word list"},
+                {"case:dog-pet",   "case with an alternation"},
+                {"pipe:carried",   "a pipeline: a forked builtin writing to an exec'd cat"},
+                {"sub:inner",      "a subshell running in its own process"},
+                {"after:outer",    "and not changing the shell that forked it"},
+                {"here:outer",     "a here-document fed by a second process"},
+                {"expand:fallback", "${x:-default} for a name that is not set"},
+            };
+            for (size_t e = 0; e < sizeof(EXPECT) / sizeof(EXPECT[0]); e++) {
+                if (!selftest_contains(produced, EXPECT[e].needle)) {
+                    klog_puts("[m86] the script did not demonstrate ");
+                    klog_puts(EXPECT[e].what);
+                    klog_puts("\n");
+                    all_ok = 0;
+                }
+            }
+            /* The negative: nothing that should not have run, ran. Three
+             * branches above are dead ends and a shell that took any of
+             * them would still satisfy every needle above. */
+            static const char *const FORBIDDEN[] = { "bad", "bad2", "bad3", 0 };
+            for (int e = 0; FORBIDDEN[e]; e++) {
+                if (selftest_contains(produced, FORBIDDEN[e])) {
+                    klog_puts("[m86] a branch that should not have run, ran\n");
+                    all_ok = 0;
+                }
+            }
+        }
+
+        /* The environment a child was handed: exported yes, private no.
+         * This is the half of "two namespaces" that only a real spawn can
+         * show, because the difference between the two is precisely what
+         * crosses that boundary. */
+        static char env_seen[2048];
+        k_memset(env_seen, 0, sizeof(env_seen));
+        int64_t en = vfs_read(PATH_TMP_DIR "m86.env", env_seen, sizeof(env_seen) - 1);
+        if (en <= 0) {
+            klog_puts("[m86] `env` in a pipeline produced nothing\n");
+            all_ok = 0;
+        } else {
+            env_seen[en] = '\0';
+            if (!selftest_contains(env_seen, "SHARED=yes")) {
+                klog_puts("[m86] an exported variable did not reach a child's environment\n");
+                all_ok = 0;
+            }
+            if (selftest_contains(env_seen, "PRIVATE=no")) {
+                klog_puts("[m86] an UNexported variable reached a child's environment - "
+                           "the two namespaces are one\n");
+                all_ok = 0;
+            }
+        }
+
+        do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)PATH_TMP_DIR "m86.env", 0, 0);
+
+        if (!all_ok) {
+            klog_puts("[m86] what the script actually wrote:\n");
+            klog_puts(produced);
+            klog_puts("[m86] ---- end\n");
+            panic("M86 self-test: this shell is not a shell");
+        }
+
+        klog_puts("[m86] a shell that is a shell: a function called with a quoted argument, "
+                   "if/elif over a real status, a while loop advanced by command substitution, "
+                   "for and case, a pipeline from a forked builtin into an exec'd program, a "
+                   "subshell whose assignment does not escape it, a here-document written by a "
+                   "second process, ${x:-default}, and an exported variable reaching a child's "
+                   "environment while an unexported one does not - self-test passed.\n\n");
+    }
+
     /* ---- M73 self-test: names, and the first inbound byte ---------------
      *
      * Two halves, and neither of them depends on the machine running QEMU

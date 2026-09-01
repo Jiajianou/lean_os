@@ -309,6 +309,7 @@ REQUIRED_MARKERS=(
   "[m70] the kernel log is readable from user space:"
   "[m71] files worth trusting:"
   "[m72] a script is a program:"
+  "[m86] a shell that is a shell: a function called with a quoted argument,"
   "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m73] names, not numbers:"
   "[m74] the session remembers:"

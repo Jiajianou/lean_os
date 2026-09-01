@@ -43,6 +43,14 @@ long write(int fd, const void *buf, size_t count) {
     return sys_write(fd, buf, count);
 }
 
+void _exit(int status) {
+    /* Deliberately not a call to exit(): see the header. They do the
+     * same thing today and must not be the same name. */
+    sys_exit(status);
+    for (;;) {
+    }
+}
+
 int close(int fd) {
     return (int)sys_close(fd);
 }
