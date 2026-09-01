@@ -1,5 +1,7 @@
 #include "ip.h"
 
+#include "arch/x86_64/io.h"
+
 #include "arp.h"
 #include "drivers/pit.h"
 #include "ethernet.h"
@@ -25,12 +27,9 @@ static uint16_t loop_lens[LOOP_QUEUE_DEPTH];
 static int loop_head, loop_tail, loop_count, loop_draining;
 
 /* Is IF set? The one question that decides whether this code is allowed
- * to wait for anything. */
-static int interrupts_enabled(void) {
-    uint64_t flags;
-    __asm__ volatile("pushfq; pop %0" : "=r"(flags) :: "memory");
-    return (flags & (1u << 9)) != 0;
-}
+ * to wait for anything. Q4: the primitive moved to arch/x86_64/io.h,
+ * where irq_save_disable and the rest of them already were. */
+#define interrupts_enabled() cpu_interrupts_enabled()
 
 /* Resolves dst_ip's neighbour MAC.
  *
@@ -74,7 +73,7 @@ static int resolve_neighbor(uint32_t next_hop_ip, uint8_t mac_out[ETH_ADDR_LEN])
         if (arp_lookup(next_hop_ip, mac_out)) {
             return 1;
         }
-        __asm__ volatile("hlt");
+        cpu_halt();
     }
     return 0;
 }

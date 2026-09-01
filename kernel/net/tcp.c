@@ -371,6 +371,24 @@ static void tcb_dispose(struct tcpcb *t) {
     if (!t) {
         return;
     }
+    /* Q11: whether anybody above ever owned this block.
+     *
+     * A slot is normally freed when two things are both true: the state
+     * machine has finished, and the socket layer has let go
+     * (tcp_release). That is right for every connection the socket layer
+     * has ever held - and wrong for one it never received.
+     *
+     * A tcb created by an arriving SYN belongs to tcp.c until tcp_accept
+     * hands it over. If it dies first - a RST, a timeout, a handshake
+     * that never completes - nobody calls tcp_release, `released` stays
+     * zero, and the slot is never reclaimed. TCP_MAX_TCBS is 16, so
+     * sixteen half-open connections killed before they were accepted
+     * stopped this machine speaking TCP until it rebooted.
+     *
+     * Read before the fields below are cleared, because clearing them is
+     * what would otherwise destroy the evidence. */
+    int never_handed_over = t->pending_accept && t->listener;
+
     t->state = TCP_CLOSED;
     /* Cleared so no arriving segment can match this four-tuple again -
      * a block waiting to be released must not answer for a connection
@@ -379,7 +397,7 @@ static void tcb_dispose(struct tcpcb *t) {
     t->listener = (struct tcpcb *)0;
     t->pending_accept = 0;
     t->rtx_pending = 0;
-    if (t->released) {
+    if (t->released || never_handed_over) {
         t->in_use = 0;
     }
 }
@@ -684,6 +702,12 @@ void tcp_abort(struct tcpcb *t) {
     if (t->state != TCP_LISTEN && t->state != TCP_CLOSED && t->remote_port) {
         emit(t, t->snd_nxt, TCP_RST, (const uint8_t *)0, 0, 0);
     }
+    /* Q11: abort is the caller saying it is finished with this block -
+     * tcp.h calls it "RST and free". It was not freeing: tcb_dispose
+     * only reclaims a slot the socket layer has released, and abort
+     * never said so. A caller following the documented contract leaked a
+     * slot per aborted connection. */
+    t->released = 1;
     tcb_dispose(t);
 }
 
@@ -876,8 +900,36 @@ void tcp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uin
     }
 
     if (flags & TCP_RST) {
+        /* ---- Q11: two things this used to get wrong ------------------
+         *
+         * Both were found by tests/test_tcp_states.c on its first run,
+         * and both are reachable by anybody who can send a segment.
+         *
+         * 1. A RST was believed at any sequence number. RFC 5961 exists
+         *    because that makes tearing down somebody else's connection
+         *    a matter of guessing a four-tuple rather than a four-tuple
+         *    *and* a sequence number - and the second is the part that
+         *    is hard. A RST is only acted on if it lands where the next
+         *    byte was expected; anything else is a segment from a
+         *    connection that no longer exists, or an attack. The
+         *    exception is SYN_SENT, where there is no receive window
+         *    yet and the RST is judged by its acknowledgement instead -
+         *    which the branch above already does.
+         *
+         * 2. A RST on a connection nobody had accepted yet leaked its
+         *    control block. A tcb created by an arriving SYN is owned by
+         *    tcp.c until tcp_accept hands it over; setting the state to
+         *    CLOSED without disposing of it left the slot allocated
+         *    forever. TCP_MAX_TCBS is 16, so sixteen SYN-then-RST pairs
+         *    from anywhere on the network stopped this machine accepting
+         *    TCP connections until it was rebooted. That is a denial of
+         *    service costing an attacker thirty-two packets. */
+        if (seq != t->rcv_nxt) {
+            return;
+        }
         t->reset = 1;
-        if (t->state == TCP_TIME_WAIT || t->state == TCP_LAST_ACK) {
+        if (t->state == TCP_TIME_WAIT || t->state == TCP_LAST_ACK ||
+            t->pending_accept) {
             tcb_dispose(t);
         } else {
             t->state = TCP_CLOSED;

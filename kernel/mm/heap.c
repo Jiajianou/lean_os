@@ -23,7 +23,8 @@
  * machine: a heap that moves when the RAM does is a heap that lands
  * inside the identity map on a machine with 2 GiB. vmm.h now names a
  * fixed address well clear of both. */
-#define HEAP_VIRT_START KERNEL_HEAP_VIRT_BASE
+/* Q2: vmm_kernel_heap_base() rather than the constant. Same value on the
+ * machine; see vmm.h for why it is asked for rather than expanded here. */
 
 typedef struct block_header {
     size_t size; /* usable bytes following this header - excludes the header itself */
@@ -61,10 +62,10 @@ static void *grow_heap(uint64_t pages) {
 }
 
 void heap_init(void) {
-    heap_virt_end = HEAP_VIRT_START;
+    heap_virt_end = vmm_kernel_heap_base();
     heap_head = (block_header_t *)0;
     klog_puts("[heap] kernel heap starts at 0x");
-    klog_put_hex64(HEAP_VIRT_START);
+    klog_put_hex64(heap_virt_end);
     klog_putc('\n');
 }
 

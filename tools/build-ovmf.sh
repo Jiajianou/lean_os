@@ -61,6 +61,22 @@ if [ -z "$LLVM_PREFIX" ] || [ ! -x "$LLVM_PREFIX/bin/llvm-lib" ]; then
     exit 1
 fi
 
+# Q1: a *valid clone*, not merely a directory.
+#
+# This tested `-d "$EDK2_SRC"` alone, and the checkout lives under /tmp -
+# which macOS prunes by age, file by file. What that leaves is not a
+# missing directory and not an intact one: it is a tree with a `.git` that
+# still exists and no longer contains a repository. So the test has to ask
+# git rather than the filesystem - `[ -d .git ]` passes on exactly the
+# broken case, which is how this was found. Before it, the symptom was
+# "fatal: not a git repository" from a later command, naming neither the
+# cause nor the fix.
+if [ -d "$EDK2_SRC" ] && ! git -C "$EDK2_SRC" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "edk2 checkout at $EDK2_SRC is not a usable git repository (a" >&2
+    echo "partially collected /tmp, most likely) - removing it and cloning again." >&2
+    rm -rf "$EDK2_SRC"
+fi
+
 if [ ! -d "$EDK2_SRC" ]; then
     echo "Cloning edk2 ($EDK2_TAG)..."
     git clone --branch "$EDK2_TAG" --depth 1 https://github.com/tianocore/edk2.git "$EDK2_SRC"

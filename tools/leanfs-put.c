@@ -51,78 +51,31 @@
 #include <string.h>
 #include <time.h>
 
-/* ---- kernel/fs/leanfs.h, duplicated - see the header comment --------- */
-/* "LFS4". Bumped by the kernel whenever the on-disk layout moves (M12
- * 0x3153464C -> M53 0x3253464C -> M59 0x3353464C -> M81 this one), and the kernel reformats
- * any disk whose magic is not exactly its own - so a stale value here does
- * not produce a diagnosable error, it produces a filesystem this tool wrote
- * and the next boot silently throws away. It must track kernel/fs/leanfs.c. */
-#define LEANFS_MAGIC             0x3453464Cu
-#define LEANFS_VERSION           4u
-#define LEANFS_START_LBA         8192u /* M83 - must match Makefile's FS_START_LBA and kernel/fs/leanfs.c */
-#define LEANFS_MAX_NAME          255
-#define LEANFS_DIRECT_BLOCKS     16
-#define LEANFS_BLOCK_SIZE        512
-#define LEANFS_INDIRECT_POINTERS (LEANFS_BLOCK_SIZE / (int)sizeof(uint32_t)) /* 128 */
-#define LEANFS_DINDIRECT_BLOCKS  (LEANFS_INDIRECT_POINTERS * LEANFS_INDIRECT_POINTERS)
-#define LEANFS_MAX_FILE_BLOCKS   (LEANFS_DIRECT_BLOCKS + LEANFS_INDIRECT_POINTERS + LEANFS_DINDIRECT_BLOCKS)
-#define LEANFS_MAX_FILE_SIZE     (LEANFS_MAX_FILE_BLOCKS * LEANFS_BLOCK_SIZE)
-#define LEANFS_MAX_INODES        8192
-#define LEANFS_DATA_BLOCKS       65536u
-
-#define LEANFS_TYPE_FREE 0
-#define LEANFS_TYPE_FILE 1
-#define LEANFS_TYPE_DIR  2
-#define ROOT_INODE       0
-
-#define LEANFS_STATE_CLEAN 0u
-
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint32_t inode_table_lba;
-    uint32_t inode_table_sectors;
-    uint32_t bitmap_lba;
-    uint32_t bitmap_sectors;
-    uint32_t data_lba;
-    uint32_t data_blocks;
-    uint32_t state;
-    uint32_t version; /* M81 - see kernel/fs/leanfs.c */
-} leanfs_superblock_t;
-
-typedef struct __attribute__((packed)) {
-    uint32_t type;
-    uint32_t size;
-    uint32_t mtime;
-    uint32_t direct[LEANFS_DIRECT_BLOCKS];
-    uint32_t indirect;
-    uint32_t dindirect;
-    uint8_t  reserved[44]; /* M81: pads the inode to 128 bytes - four per sector */
-} leanfs_inode_t;
-
-/* M81: variable-length, matching kernel/fs/leanfs.h exactly - see that
- * header for the design and for the one rule that makes it work (the last
- * record in a block is stretched to reach the block's end, so records tile
- * each block and none ever straddles one). */
-typedef struct __attribute__((packed)) {
-    uint32_t inode;    /* 0 == free space */
-    uint16_t rec_len;
-    uint8_t  name_len;
-    uint8_t  type;
-    /* char name[name_len] follows, unterminated */
-} leanfs_dirent_t;
-
-#define LEANFS_DIRENT_HDR   8u
-#define LEANFS_DIRENT_ALIGN 4u
-#define LEANFS_DIRENT_NEED(name_len) \
-    ((LEANFS_DIRENT_HDR + (uint32_t)(name_len) + LEANFS_DIRENT_ALIGN - 1u) & ~(LEANFS_DIRENT_ALIGN - 1u))
-
-#define INODE_TABLE_SECTORS ((sizeof(leanfs_inode_t) * LEANFS_MAX_INODES + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE)
-#define BITMAP_SECTORS      (LEANFS_DATA_BLOCKS / 8 / LEANFS_BLOCK_SIZE)
+/* ---- Q3: one definition of the format, not two ----------------------
+ *
+ * Everything between this comment and `static FILE *img` used to be a
+ * hand-copied duplicate of the superblock, the inode and the directory
+ * record, under a comment reading "The structs below still have to match
+ * kernel/fs/leanfs.c byte for byte."
+ *
+ * They did not. This tool was still on M81's format - magic "LFS4",
+ * version 4, 512-byte blocks, 8192 inodes, a 32 MiB data region - when
+ * M93 moved the kernel to "LFS5" with 4096-byte blocks, 131072 inodes and
+ * 2 GiB of data. The tool wrote a perfectly well-formed image of the
+ * wrong format, and the kernel's own recovery path then reformatted it on
+ * the next boot without complaint. That is precisely the failure the old
+ * comment predicted: "a stale value here does not produce a diagnosable
+ * error, it produces a filesystem this tool wrote and the next boot
+ * silently throws away."
+ *
+ * kernel/fs/leanfs_format.h is now the single definition and this file
+ * includes it. There is nothing left to keep in sync. */
+#include "../kernel/fs/leanfs_format.h"
 
 static FILE *img;
 static leanfs_superblock_t sb;
 static leanfs_inode_t inodes[LEANFS_MAX_INODES];
-static uint8_t bitmap[BITMAP_SECTORS * LEANFS_BLOCK_SIZE];
+static uint8_t bitmap[BITMAP_BLOCKS * LEANFS_BLOCK_SIZE];
 static uint8_t dir_block[LEANFS_BLOCK_SIZE]; /* M81: one directory block at a time */
 
 static void die(const char *msg) {
@@ -142,16 +95,22 @@ static void pwrite_at(uint64_t byte_off, const void *buf, size_t len) {
     }
 }
 
-static uint64_t lba_bytes(uint32_t lba) {
-    return (uint64_t)lba * LEANFS_BLOCK_SIZE;
+/* Q3: a leanfs block is 4096 bytes and a disk sector is 512, and until
+ * M93 they were the same number - which is why every name in this file
+ * said "lba" while every value was a block index. They are different
+ * units now, so this takes the unit it is given: block_bytes for
+ * leanfs's own addressing, and LEANFS_START_BLOCK rather than
+ * LEANFS_START_LBA wherever the superblock is reached. */
+static uint64_t block_bytes(uint32_t block) {
+    return (uint64_t)block * LEANFS_BLOCK_SIZE;
 }
 
 static void read_block(uint32_t block, void *buf) {
-    pread_at(lba_bytes(sb.data_lba + block), buf, LEANFS_BLOCK_SIZE);
+    pread_at(block_bytes(sb.data_block + block), buf, LEANFS_BLOCK_SIZE);
 }
 
 static void write_block(uint32_t block, const void *buf) {
-    pwrite_at(lba_bytes(sb.data_lba + block), buf, LEANFS_BLOCK_SIZE);
+    pwrite_at(block_bytes(sb.data_block + block), buf, LEANFS_BLOCK_SIZE);
 }
 
 /* ---- the allocator, matching kernel/fs/leanfs.c exactly --------------- */
@@ -432,11 +391,13 @@ static int dir_lookup(leanfs_inode_t *dir, const char *name) {
 }
 
 static int alloc_inode(uint32_t type) {
-    for (int i = 0; i < LEANFS_MAX_INODES; i++) {
+    /* Q3: LEANFS_MAX_INODES is unsigned in the shared header (it is
+     * 131072u), which the old private copy was not. */
+    for (uint32_t i = 0; i < LEANFS_MAX_INODES; i++) {
         if (inodes[i].type == LEANFS_TYPE_FREE) {
             memset(&inodes[i], 0, sizeof(inodes[i]));
             inodes[i].type = type;
-            return i;
+            return (int)i;
         }
     }
     fprintf(stderr, "leanfs-put: no free inode (this filesystem holds at most %d)\n",
@@ -521,11 +482,11 @@ static void format_fresh(void) {
     memset(&sb, 0, sizeof(sb));
     sb.magic = LEANFS_MAGIC;
     sb.version = LEANFS_VERSION;
-    sb.inode_table_lba = LEANFS_START_LBA + 1;
-    sb.inode_table_sectors = (uint32_t)INODE_TABLE_SECTORS;
-    sb.bitmap_lba = sb.inode_table_lba + (uint32_t)INODE_TABLE_SECTORS;
-    sb.bitmap_sectors = BITMAP_SECTORS;
-    sb.data_lba = sb.bitmap_lba + BITMAP_SECTORS;
+    sb.inode_table_block = LEANFS_START_BLOCK + 1;
+    sb.inode_table_blocks = (uint32_t)INODE_TABLE_BLOCKS;
+    sb.bitmap_block = sb.inode_table_block + (uint32_t)INODE_TABLE_BLOCKS;
+    sb.bitmap_blocks_field = BITMAP_BLOCKS;
+    sb.data_block = sb.bitmap_block + BITMAP_BLOCKS;
     sb.data_blocks = LEANFS_DATA_BLOCKS;
     sb.state = LEANFS_STATE_CLEAN;
 
@@ -538,20 +499,21 @@ static void format_fresh(void) {
      * storage. */
     inodes[ROOT_INODE].type = LEANFS_TYPE_DIR;
     inodes[ROOT_INODE].size = 0;
+    inodes[ROOT_INODE].nlink = 1; /* M93 - the root is nobody's child and still has one name */
 }
 
 static void save_all(void) {
     uint8_t sb_buf[LEANFS_BLOCK_SIZE];
     memset(sb_buf, 0, sizeof(sb_buf));
     memcpy(sb_buf, &sb, sizeof(sb));
-    pwrite_at(lba_bytes(LEANFS_START_LBA), sb_buf, sizeof(sb_buf));
+    pwrite_at(block_bytes(LEANFS_START_BLOCK), sb_buf, sizeof(sb_buf));
 
-    static uint8_t table_buf[INODE_TABLE_SECTORS * LEANFS_BLOCK_SIZE];
+    static uint8_t table_buf[INODE_TABLE_BLOCKS * LEANFS_BLOCK_SIZE];
     memset(table_buf, 0, sizeof(table_buf));
     memcpy(table_buf, inodes, sizeof(inodes));
-    pwrite_at(lba_bytes(sb.inode_table_lba), table_buf, sizeof(table_buf));
+    pwrite_at(block_bytes(sb.inode_table_block), table_buf, sizeof(table_buf));
 
-    pwrite_at(lba_bytes(sb.bitmap_lba), bitmap, sizeof(bitmap));
+    pwrite_at(block_bytes(sb.bitmap_block), bitmap, sizeof(bitmap));
 }
 
 int main(int argc, char **argv) {
@@ -603,7 +565,7 @@ int main(int argc, char **argv) {
     }
 
     uint8_t sb_buf[LEANFS_BLOCK_SIZE];
-    pread_at(lba_bytes(LEANFS_START_LBA), sb_buf, sizeof(sb_buf));
+    pread_at(block_bytes(LEANFS_START_BLOCK), sb_buf, sizeof(sb_buf));
     memcpy(&sb, sb_buf, sizeof(sb));
 
     if (sb.magic == LEANFS_MAGIC) {
@@ -612,26 +574,26 @@ int main(int argc, char **argv) {
          * is buffer sizing, so each one is checked rather than assumed:
          * an image whose tables are bigger than this build expects is a
          * refusal naming the file to fix, not a truncated read. */
-        if (sb.inode_table_sectors > INODE_TABLE_SECTORS) {
+        if (sb.inode_table_blocks > INODE_TABLE_BLOCKS) {
             fprintf(stderr,
-                    "leanfs-put: this image's inode table is %u sectors and this tool is built "
-                    "for %zu.\n            kernel/fs/leanfs.h's LEANFS_MAX_INODES has changed - "
-                    "update the copy in this file.\n",
-                    sb.inode_table_sectors, (size_t)INODE_TABLE_SECTORS);
+                    "leanfs-put: this image's inode table is %u blocks and this tool is built "
+                    "for %zu.\n            The image predates this build's "
+                    "kernel/fs/leanfs_format.h - rebuild the image.\n",
+                    sb.inode_table_blocks, (size_t)INODE_TABLE_BLOCKS);
             exit(1);
         }
-        if (sb.bitmap_sectors > BITMAP_SECTORS || sb.data_blocks > LEANFS_DATA_BLOCKS) {
+        if (sb.bitmap_blocks_field > BITMAP_BLOCKS || sb.data_blocks > LEANFS_DATA_BLOCKS) {
             die("this image's data region is larger than this tool is built for - "
-                "update LEANFS_DATA_BLOCKS in this file from kernel/fs/leanfs.h");
+                "the image predates this build's kernel/fs/leanfs_format.h");
         }
-        static uint8_t table_buf[INODE_TABLE_SECTORS * LEANFS_BLOCK_SIZE];
+        static uint8_t table_buf[INODE_TABLE_BLOCKS * LEANFS_BLOCK_SIZE];
         memset(table_buf, 0, sizeof(table_buf));
-        pread_at(lba_bytes(sb.inode_table_lba), table_buf,
-                  (size_t)sb.inode_table_sectors * LEANFS_BLOCK_SIZE);
+        pread_at(block_bytes(sb.inode_table_block), table_buf,
+                  (size_t)sb.inode_table_blocks * LEANFS_BLOCK_SIZE);
         memcpy(inodes, table_buf, sizeof(inodes));
         memset(bitmap, 0, sizeof(bitmap));
-        pread_at(lba_bytes(sb.bitmap_lba), bitmap,
-                  (size_t)sb.bitmap_sectors * LEANFS_BLOCK_SIZE);
+        pread_at(block_bytes(sb.bitmap_block), bitmap,
+                  (size_t)sb.bitmap_blocks_field * LEANFS_BLOCK_SIZE);
         if (inodes[ROOT_INODE].type != LEANFS_TYPE_DIR) {
             die("this image has a leanfs superblock but no root directory - corrupt");
         }

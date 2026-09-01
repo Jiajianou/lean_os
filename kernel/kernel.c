@@ -26,7 +26,8 @@
 #include "drivers/rtc.h"
 #include "fs/leanfs.h"
 #include "fs/openfile.h"
-#include "dev/tty.h" /* M85 */
+#include "dev/tty.h"
+#include "dev/fwcfg.h" /* Q1 */
 #include "fs/vfs.h"
 #include "ipc/pipe.h"
 #include "ipc/shm.h" /* M50 - shm_count_by_owner, for the kill storm's segment accounting */
@@ -109,7 +110,8 @@
     X(vmtest)                      \
     X(forktest)                    \
     X(exectest)                    \
-    X(jobtest)
+    X(jobtest)                       \
+    X(syscalltest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -215,6 +217,109 @@ static uint8_t *read_program(const char *path, size_t *out_size) {
  * loop is a burst that gets dropped. M56's own editor test injected two
  * characters by hand; a command line is thirty, which is where doing it
  * by hand stops being reasonable. */
+/* ---- Q6: measurements a harness can fail on ---------------------------
+ *
+ * This kernel has measured real things since M69 and printed every one of
+ * them into prose: "1 MiB ... cold in 95000 us and warm from the cache in
+ * 2500 us". A person reading the log learns something. A harness grepping
+ * it learns only that the line exists, which is why the disk could get a
+ * hundred times slower and every test would still pass.
+ *
+ * So each measurement also emits one line in a fixed shape:
+ *
+ *     [perf] <name> <value> <unit>
+ *
+ * tests/budgets.tsv gives each name a ceiling and the commit that ceiling
+ * was measured at, and tools/qemu-serial-test.sh fails the run when one is
+ * exceeded - naming the budget, the measurement and the commit, so a
+ * failure says "the disk got three times slower since b7bb520" rather than
+ * "something is wrong".
+ *
+ * The prose lines stay. They are for the person; these are for the
+ * harness; neither is a substitute for the other. */
+static void klog_perf(const char *name, uint64_t value, const char *unit) {
+    klog_puts("[perf] ");
+    klog_puts(name);
+    klog_putc(' ');
+    /* Every measurement here fits in 32 bits by a wide margin - the
+     * largest is a microsecond count in the millions - and klog has no
+     * 64-bit decimal printer. Clamped rather than truncated, so an
+     * impossible value reads as an obvious ceiling instead of as a small
+     * number that looks fine. */
+    klog_put_dec(value > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)value);
+    klog_putc(' ');
+    klog_puts(unit);
+    klog_putc('\n');
+}
+
+/* ---- Q18: a distribution, not a sample --------------------------------
+ *
+ * The latency numbers this kernel prints were the best of five, and the
+ * comment above the loop that produced them argued for that: an outlier
+ * caused by the test's own spawn traffic is not what the path costs.
+ * That argument is right about the minimum and wrong about what to
+ * report, and the evidence is that consecutive boots of the same image
+ * measured 40581 us and then 13364. A number that moves 3x between runs
+ * is a sample, and a budget guarding a sample is a budget that either
+ * fails at random or is set so wide it means nothing.
+ *
+ * So the same measurement is taken more times and reported as a shape:
+ * the best case (what the path costs when nothing is in the way), the
+ * median (what it usually costs) and the worst (what a person actually
+ * notices, because a desktop is judged by its worst frames rather than
+ * its typical ones).
+ *
+ * Sorted with an insertion sort. N is 16.
+ */
+#define LATENCY_SAMPLES 16
+
+static void latency_sort(uint64_t *a, int n) {
+    for (int i = 1; i < n; i++) {
+        uint64_t v = a[i];
+        int j = i - 1;
+        while (j >= 0 && a[j] > v) {
+            a[j + 1] = a[j];
+            j--;
+        }
+        a[j + 1] = v;
+    }
+}
+
+/* Emits <name>_best_us, <name>_med_us and <name>_worst_us. Samples of 0
+ * are failures to measure and are dropped rather than counted as instant
+ * - a zero in this data would flatter every statistic derived from it. */
+static void klog_perf_distribution(const char *base, uint64_t *samples, int n) {
+    uint64_t good[LATENCY_SAMPLES];
+    int k = 0;
+    for (int i = 0; i < n && k < LATENCY_SAMPLES; i++) {
+        if (samples[i] != 0) {
+            good[k++] = samples[i];
+        }
+    }
+    if (k == 0) {
+        return;
+    }
+    latency_sort(good, k);
+
+    char name[64];
+    int base_len = 0;
+    while (base[base_len] && base_len < 40) {
+        name[base_len] = base[base_len];
+        base_len++;
+    }
+    static const char *suffix[3] = {"_best_us", "_med_us", "_worst_us"};
+    uint64_t value[3] = {good[0], good[k / 2], good[k - 1]};
+    for (int s = 0; s < 3; s++) {
+        int m = base_len;
+        for (int c = 0; suffix[s][c] && m < 62; c++) {
+            name[m++] = suffix[s][c];
+        }
+        name[m] = '\0';
+        klog_perf(name, value[s], "us");
+    }
+}
+
+
 static void selftest_type(const char *s) {
     for (const char *p = s; *p; p++) {
         keyboard_inject(*p, 0);
@@ -944,987 +1049,34 @@ static void m81_storm_name(char *out, int i) {
     out[5] = '\0';
 }
 
-void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys) {
-    klog_init();
-    klog_puts("lean_os kernel: hello from C!\n\n");
-
-    gdt_init();
-    idt_init();
-    pic_remap();
-    klog_puts("GDT/TSS, IDT, and PIC remap initialized.\n");
-
-    /* Self-test: a real trip through the IDT/ISR pipeline (gate -> stub
-     * -> C handler -> iretq) rather than just trusting it compiled.
-     * int3 is the one exception vector that's meant to be resumed, so
-     * this proves the round trip works without ending in a panic. */
-    __asm__ volatile("int3");
-    klog_puts("Resumed after breakpoint self-test.\n\n");
-
-    uint32_t count = *e820_map;
-    if (count == 0) {
-        panic("E820 memory map is empty - cannot continue");
-    }
-
-    e820_entry_t *entries = (e820_entry_t *)((uint8_t *)e820_map + 8);
-
-    klog_puts("E820 memory map (");
-    klog_put_hex32(count);
-    klog_puts(" entries):\n");
-
-    for (uint32_t i = 0; i < count; i++) {
-        klog_puts("  base=0x");
-        klog_put_hex64(entries[i].base);
-        klog_puts(" len=0x");
-        klog_put_hex64(entries[i].length);
-        klog_puts(" type=0x");
-        klog_put_hex32(entries[i].type);
-        klog_putc('\n');
-    }
-    klog_putc('\n');
-
-    pmm_init(e820_map);
-    vmm_init(e820_map);
-    heap_init();
-
-    /* Self-test: map, write through, read back, and unmap a throwaway
-     * virtual address directly via vmm - the same "prove it, don't just
-     * trust it compiled" discipline as the int3 test above. */
-    uint64_t scratch_phys = pmm_alloc_frame();
-    /* M90: 0x50000000 until this milestone, described as "above the 1 GiB
-     * identity map" - which it stopped being the moment the map was sized
-     * from the machine. 1.25 GiB is ordinary RAM on a 4 GiB machine, and
-     * mapping a 4 KiB page inside an existing 2 MiB one is the case
-     * vmm_map_page_in panics on. This address is below the kernel heap
-     * (vmm.h) and far above any physical memory. */
-    uint64_t scratch_virt = KERNEL_HEAP_VIRT_BASE - 0x40000000ULL;
-    vmm_map_page(scratch_virt, scratch_phys, VMM_FLAG_WRITABLE);
-    volatile uint64_t *scratch = (volatile uint64_t *)scratch_virt;
-    *scratch = 0x1122334455667788ULL;
-    if (*scratch != 0x1122334455667788ULL) {
-        panic("vmm self-test: readback mismatch");
-    }
-    vmm_unmap_page(scratch_virt);
-    pmm_free_frame(scratch_phys);
-    klog_puts("[vmm] map/unmap self-test passed.\n");
-
-    /* Self-test: kmalloc/kfree round trip through the heap, which exercises
-     * vmm_map_page again via a completely different code path (heap growth,
-     * not a direct call) than the test above. */
-    uint64_t *test = (uint64_t *)kmalloc(sizeof(uint64_t));
-    if (!test) {
-        panic("kmalloc self-test: allocation failed");
-    }
-    *test = 0xDEADBEEFCAFEBABEULL;
-    if (*test != 0xDEADBEEFCAFEBABEULL) {
-        panic("kmalloc self-test: readback mismatch");
-    }
-    kfree(test);
-    klog_puts("[heap] kmalloc/kfree self-test passed.\n\n");
-
-    /* ---- M90 self-test: a frame above the old ceiling, and a query that
-     * can still say no.
-     *
-     * Three things are worth proving here and "the allocator reports a
-     * big number" is none of them. A bitmap sized from firmware would
-     * report whatever firmware said whether or not a single frame at the
-     * top of it could be touched, and an ordinary pmm_alloc_frame comes
-     * off the bottom of the bitmap - it would pass identically on the
-     * 128 MiB machine this kernel booted on for eighty-nine milestones.
-     *
-     *   1. A frame at a *high* physical address can be allocated, and
-     *      written and read back through the identity map - which is the
-     *      whole claim: tracked and addressable are different properties
-     *      and the old header comment was about the second one.
-     *   2. Freeing it returns the count exactly, so growing the allocator
-     *      did not grow a leak with it.
-     *   3. vmm_identity_covers says NO to an address past the end of
-     *      memory. Without this the first two would pass against a
-     *      function that returns 1 unconditionally, and acpi.c would then
-     *      dereference whatever a firmware table pointed at.
-     *
-     * The floor adapts rather than being 1 GiB, because a kernel that
-     * only works on a big machine has traded one hardcoded size for
-     * another - on a machine smaller than a gigabyte this still tests the
-     * top half of whatever there is. */
-    {
-        uint64_t tracked = pmm_tracked_limit();
-        /* The strongest claim this machine can support. Above 4 GiB is
-         * the genuinely new case - a physical address that does not fit
-         * in 32 bits, which is also what pmm_alloc_frame_dma exists to
-         * keep away from the NIC and the sound card. Above 1 GiB is the
-         * old ceiling. Below that, half of whatever there is, because a
-         * kernel that only works on a big machine has traded one
-         * hardcoded size for another. */
-        uint64_t floor;
-        if (tracked > PMM_DMA_LIMIT) {
-            floor = PMM_DMA_LIMIT;
-        } else if (tracked > 0x40000000ULL) {
-            floor = 0x40000000ULL;
-        } else {
-            floor = tracked / 2;
-        }
-        uint64_t before = pmm_free_frame_count();
-        uint64_t high = pmm_alloc_frame_above(floor);
-        if (high == 0) {
-            panic("[m90] no free frame above the probe floor");
-        }
-        if (high < floor) {
-            panic("[m90] pmm_alloc_frame_above returned a frame below its floor");
-        }
-        if (!vmm_identity_covers(high, 4096)) {
-            panic("[m90] a frame the allocator handed out is not identity-mapped");
-        }
-        volatile uint64_t *probe = (volatile uint64_t *)(uintptr_t)high;
-        probe[0] = 0x9090909090909090ULL;
-        probe[511] = 0x0123456789ABCDEFULL;
-        if (probe[0] != 0x9090909090909090ULL || probe[511] != 0x0123456789ABCDEFULL) {
-            panic("[m90] readback mismatch on a high physical frame");
-        }
-        pmm_free_frame(high);
-        if (pmm_free_frame_count() != before) {
-            panic("[m90] freeing a high frame did not return the count");
-        }
-        /* One byte past the last frame the allocator describes: not RAM,
-         * and the map must say so. */
-        if (vmm_identity_covers(tracked + 0x40000000ULL, 4096)) {
-            panic("[m90] the identity map claims to cover memory that does not exist");
-        }
-        klog_puts("[m90] more than a gigabyte: ");
-        klog_put_hex64(tracked / (1024 * 1024));
-        klog_puts(" MiB tracked in ");
-        klog_put_hex64(pmm_total_frame_count());
-        klog_puts(" frames, a frame at 0x");
-        klog_put_hex64(high);
-        klog_puts(" written and read back through the identity map, freed with the\n"
-                  "      count returning exactly, and an address past the end of memory "
-                  "correctly reported as not mapped.\n\n");
-    }
-
-    /* M16: bring up the linear framebuffer the boot loader's
-     * init_framebuffer set up and described in RSI (fb_info, this
-     * function's second argument) - needs vmm live first, since fb_init
-     * maps the physical framebuffer region in. */
-    fb_init(fb_info);
-    /* M58: probe the display adapter for a runtime mode-setting interface
-     * and build the validated mode list, right after the framebuffer the
-     * firmware handed us is mapped. Finding nothing is an ordinary
-     * outcome, not a failure - on any machine without a Bochs/QEMU DISPI
-     * adapter the answer is "the mode the firmware picked, and nothing on
-     * offer", which is exactly what the Display pane then shows. */
-    dispi_init();
-    /* M59: read the CMOS clock once here so the boot log says up front
-     * whether this machine knows the date - every timestamp below depends
-     * on the answer, and "files are dated zero" is much easier to explain
-     * when the reason is one line near the top of the log. */
-    rtc_init();
-    /* M62: the first sound this OS has ever been able to make. The
-     * speaker is unconditional - PIT channel 2 gated onto port 0x61 is
-     * hardware every PC-compatible machine has - and the AC'97 probe
-     * degrades to "no device found" exactly as M27 decided for the NIC,
-     * because a desktop that cannot find a sound card should still be a
-     * desktop. */
-    pcspk_init();
-    ac97_init();
-
-    /* Self-test: clear to a background color, fill a smaller rectangle
-     * with a different one, then read individual pixels back to confirm
-     * both landed exactly where expected - a memory-correctness proof,
-     * the same "prove it, don't just trust it compiled" discipline as
-     * every earlier milestone's self-tests. (Whether it's actually
-     * *visible* is checked separately via a QEMU screendump - reading
-     * our own writes back only proves the mapping and pixel math are
-     * right, not that anything reaches the emulated display.) */
-    fb_clear(0x001A1A2E);
-    fb_fill_rect(10, 10, 100, 50, 0x00E94560);
-    if (fb_get_pixel(0, 0) != 0x001A1A2E) {
-        panic("fb self-test: background color readback mismatch");
-    }
-    if (fb_get_pixel(59, 34) != 0x00E94560) {
-        panic("fb self-test: rectangle color readback mismatch (inside)");
-    }
-    if (fb_get_pixel(200, 200) != 0x001A1A2E) {
-        panic("fb self-test: rectangle color readback mismatch (outside, should be background)");
-    }
-    klog_puts("[fb] framebuffer clear/fill/readback self-test passed.\n\n");
-
-    /* M58 self-test: a real mode change, in the kernel, before anything
-     * has been built on top of the boot geometry. Three things are worth
-     * proving and only one of them is "the call returned 0":
-     *
-     *   1. The geometry SYS_fb_info would report is the one the device
-     *      actually took, not the one that was asked for.
-     *   2. The *pitch* is the one read back out of the adapter's own
-     *      VIRT_WIDTH register. fb.h has said since M16 that pitch is not
-     *      necessarily width * 4; a mode change that assumed otherwise
-     *      would shear the whole screen, and would do it on a machine
-     *      where the only way to see the damage is to look at it.
-     *   3. The mapping actually grew. A larger mode needs more pages than
-     *      the boot mode's mapping covered, so the far corner of the new
-     *      mode is written and read back - which faults in ring 0 if
-     *      fb_remap did not map through to it, and returns the wrong
-     *      value if the pitch is wrong.
-     *
-     * Then it puts the boot mode back, because everything after this line
-     * (the console, the desktop, every other self-test's pixel
-     * coordinates) is written against it.
-     *
-     * On hardware with no DISPI adapter this is skipped rather than
-     * failed - "this display cannot be resized after boot" is the honest
-     * answer there, and the Display pane says exactly that. */
-    {
-        uint32_t boot_w = fb_width(), boot_h = fb_height(), boot_pitch = fb_pitch_bytes();
-
-        if (!dispi_available()) {
-            klog_puts("[m58] no runtime mode-setting interface on this adapter - "
-                       "resolution stays what the firmware chose (self-test skipped).\n\n");
-        } else {
-            display_mode_t list[DISPLAY_MAX_MODES];
-            int n = dispi_get_modes(list, DISPLAY_MAX_MODES);
-            if (n <= 0) {
-                panic("M58 self-test: a DISPI adapter answered the probe but offers no modes");
-            }
-            /* Any offered mode that is not the one already running - and
-             * preferring a *larger* one, since growing the mapping is the
-             * half that can actually fail. */
-            int pick = -1;
-            for (int i = 0; i < n; i++) {
-                if (list[i].width == boot_w && list[i].height == boot_h) {
-                    continue;
-                }
-                if (pick < 0 || (uint64_t)list[i].width * list[i].height >
-                                 (uint64_t)list[pick].width * list[pick].height) {
-                    pick = i;
-                }
-            }
-            if (pick < 0) {
-                panic("M58 self-test: the only offered mode is the one already running");
-            }
-
-            uint32_t pitch = 0;
-            if (dispi_set_mode(list[pick].width, list[pick].height, &pitch) != 0) {
-                panic("M58 self-test: the adapter refused a mode this driver had already validated");
-            }
-            if (pitch < list[pick].width * 4u) {
-                panic("M58 self-test: the pitch read back from the device is narrower than one row of pixels");
-            }
-            fb_remap(pitch, list[pick].width, list[pick].height);
-
-            if (fb_width() != list[pick].width || fb_height() != list[pick].height) {
-                panic("M58 self-test: fb geometry after a mode change is not the mode that was set");
-            }
-            if (fb_pitch_bytes() != pitch) {
-                panic("M58 self-test: fb pitch is not the one read back from the device");
-            }
-            if (fb_mapped_bytes() < (uint64_t)pitch * fb_height()) {
-                panic("M58 self-test: the framebuffer mapping does not cover the new mode");
-            }
-
-            /* The far corner - the pixel that only exists in the new
-             * mode, at the stride the device chose. */
-            fb_put_pixel(fb_width() - 1, fb_height() - 1, 0x00123456u);
-            if (fb_get_pixel(fb_width() - 1, fb_height() - 1) != 0x00123456u) {
-                panic("M58 self-test: the last pixel of the new mode did not read back");
-            }
-
-            uint32_t back_pitch = 0;
-            if (dispi_set_mode(boot_w, boot_h, &back_pitch) != 0) {
-                panic("M58 self-test: could not restore the boot mode - this is the failure the revert timer exists for");
-            }
-            fb_remap(back_pitch, boot_w, boot_h);
-            if (fb_width() != boot_w || fb_height() != boot_h || fb_pitch_bytes() != boot_pitch) {
-                panic("M58 self-test: the boot mode did not come back exactly as it was");
-            }
-            fb_clear(0x00000000u);
-
-            klog_puts("[m58] display mode set and read back from the device (geometry, "
-                       "device-chosen pitch and a grown mapping), then restored - self-test passed.\n\n");
-        }
-    }
-
-    /* M17: hand logging over to the graphical console (console.h) - from
-     * here on, klog's visual half draws through the framebuffer instead
-     * of VGA text mode. Everything above this line (including the fb
-     * self-test's own deliberately-visible rectangle) only ever reached
-     * VGA text mode, since console_init() needs the framebuffer mapped
-     * first; serial output (tools/qemu-serial-test.sh) is unaffected
-     * either way. */
-    console_init();
-
-    /* M39 self-test: unlike almost every GUI-facing milestone since M18,
-     * this one is fully checkable headlessly - glyph geometry is exact
-     * data, not a mouse hover or a "does it look bold" judgement call.
-     * Two halves:
-     *
-     *   1. The table itself. gen-font.c already enforces M39's shared
-     *      metric at generation time, but that's a host program that
-     *      never boots; this proves the table that actually shipped
-     *      inside the kernel image is the one those checks passed on -
-     *      column 7 reserved blank everywhere, every printable
-     *      codepoint present, control codes blank, and font8x16_bold
-     *      exactly the lossless one-column dilation compositor.c now
-     *      looks up instead of recomputing per pixel.
-     *   2. The rendered result. "Axg" through the real console blit
-     *      path, read back out of the framebuffer: 'A' must start on
-     *      the cap line, 'x' on the x-height line, both must sit on the
-     *      same baseline, 'g' must reach the descender row, and column
-     *      7 of all three cells must stay background. That is M39's
-     *      whole premise - text on one shared baseline with uniform
-     *      spacing - measured in real pixels rather than asserted.
-     *
-     * Runs after console_init() (so the framebuffer holds a cleared
-     * console with the cursor at 0,0) but before klog_use_console(), so
-     * the screen this reads back is exactly what it drew and nothing
-     * else. It re-inits the console afterward to hand a clean screen to
-     * the logging that follows. */
-    {
-        int all_ok = 1;
-
-        for (int code = 0; code < 128 && all_ok; code++) {
-            for (int row = 0; row < FONT_HEIGHT; row++) {
-                if (font8x16[code][row] & 0x01u) {
-                    klog_puts("[font39] glyph 0x");
-                    klog_put_hex32((uint32_t)code);
-                    klog_puts(" has ink in column 7, the reserved advance gap.\n");
-                    all_ok = 0;
-                    break;
-                }
-            }
-        }
-
-        for (int code = 0x21; code <= 0x7E && all_ok; code++) {
-            int blank = 1;
-            for (int row = 0; row < FONT_HEIGHT; row++) {
-                if (font8x16[code][row]) {
-                    blank = 0;
-                    break;
-                }
-            }
-            if (blank) {
-                klog_puts("[font39] printable codepoint 0x");
-                klog_put_hex32((uint32_t)code);
-                klog_puts(" is blank - the table is incomplete.\n");
-                all_ok = 0;
-            }
-        }
-
-        for (int code = 0; code < 128 && all_ok; code++) {
-            if (code > 0x20 && code < 0x7F) {
-                continue; /* printable, checked non-blank above */
-            }
-            for (int row = 0; row < FONT_HEIGHT; row++) {
-                if (font8x16[code][row]) {
-                    klog_puts("[font39] non-printable codepoint 0x");
-                    klog_put_hex32((uint32_t)code);
-                    klog_puts(" should be blank but isn't.\n");
-                    all_ok = 0;
-                    break;
-                }
-            }
-        }
-
-        /* Lossless bold: with column 7 reserved (proved above), nothing
-         * can shift off the end, so the dilation is exactly reversible
-         * in the sense that matters - no ink is dropped. M38's runtime
-         * smear had no such guarantee. */
-        for (int code = 0; code < 128 && all_ok; code++) {
-            for (int row = 0; row < FONT_HEIGHT; row++) {
-                uint8_t bits = font8x16[code][row];
-                if (font8x16_bold[code][row] != (uint8_t)(bits | (bits >> 1))) {
-                    klog_puts("[font39] font8x16_bold disagrees with the dilation of font8x16 at 0x");
-                    klog_put_hex32((uint32_t)code);
-                    klog_putc('\n');
-                    all_ok = 0;
-                    break;
-                }
-            }
-        }
-
-        if (all_ok) {
-            /* Cell 0 row 0 is blank in every glyph (nothing reaches
-             * above FONT_CAP_TOP), so this samples the console's own
-             * background without needing console.c's private constant. */
-            console_puts("Axg");
-            uint32_t bg = fb_get_pixel(0, 0);
-
-            /* top/bottom lit row per cell, and whether column 7 stayed clear */
-            int top[3], bot[3], gap_clear[3];
-            for (int cell = 0; cell < 3; cell++) {
-                top[cell] = -1;
-                bot[cell] = -1;
-                gap_clear[cell] = 1;
-                for (int y = 0; y < FONT_HEIGHT; y++) {
-                    for (int x = 0; x < FONT_WIDTH; x++) {
-                        if (fb_get_pixel((uint32_t)(cell * FONT_WIDTH + x), (uint32_t)y) != bg) {
-                            if (top[cell] < 0) {
-                                top[cell] = y;
-                            }
-                            bot[cell] = y;
-                            if (x == FONT_WIDTH - 1) {
-                                gap_clear[cell] = 0;
-                            }
-                        }
-                    }
-                }
-            }
-
-            struct { const char *what; int got; int want; } checks[] = {
-                { "'A' does not start on the shared cap line",        top[0], FONT_CAP_TOP },
-                { "'A' does not sit on the shared baseline",          bot[0], FONT_BASELINE - 1 },
-                { "'x' does not start on the shared x-height line",   top[1], FONT_X_TOP },
-                { "'x' does not sit on the shared baseline",          bot[1], FONT_BASELINE - 1 },
-                { "'g' does not start on the shared x-height line",   top[2], FONT_X_TOP },
-                { "'g' does not reach the shared descender row",      bot[2], FONT_DESC_LAST },
-                { "'A' drew into its advance gap (column 7)",         gap_clear[0], 1 },
-                { "'x' drew into its advance gap (column 7)",         gap_clear[1], 1 },
-                { "'g' drew into its advance gap (column 7)",         gap_clear[2], 1 },
-            };
-            for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
-                if (checks[i].got != checks[i].want) {
-                    klog_puts("[font39] rendered-pixel check failed: ");
-                    klog_puts(checks[i].what);
-                    klog_puts(" - expected ");
-                    klog_put_hex32((uint32_t)checks[i].want);
-                    klog_puts(" got ");
-                    klog_put_hex32((uint32_t)checks[i].got);
-                    klog_putc('\n');
-                    all_ok = 0;
-                }
-            }
-
-            console_init(); /* clear the sample text back off the screen */
-        }
-
-        if (!all_ok) {
-            panic("M39 font self-test: glyph table and/or rendered text metric is wrong");
-        }
-        klog_puts("[font39] glyph table + shared-baseline render self-test passed.\n\n");
-    }
-
-    klog_use_console();
-    klog_puts("[console] framebuffer text console active - logging switched over from VGA text mode.\n\n");
-
-    /* Every IRQ line has been masked since pic_remap() (M4) - nothing has
-     * needed one until now. IF has actually been set since real mode (the
-     * BIOS leaves it that way and nothing here has touched it), so this
-     * `sti` is defensive documentation more than a state change: from
-     * this point on, unmasked IRQ lines really do fire. */
-    __asm__ volatile("sti");
-
-    pit_init();
-    /* M69: calibrated against the PIT, so it has to come after it. See
-     * arch/x86_64/tsc.h - the PIT is the only clock that knows what a
-     * second is, and the TSC is the only one fine enough to measure a
-     * frame with. */
-    tsc_init();
-    klog_puts("[pit] channel 0 programmed for ");
-    klog_put_hex32(PIT_HZ);
-    klog_puts(" Hz, IRQ0 unmasked.\n");
-
-    /* Self-test: sleep for a bit and confirm the tick counter actually
-     * advanced. This is also an implicit hang test - if IRQ0 never fired
-     * (bad PIC remap, bad IDT gate, bad divisor), pit_sleep_ms's internal
-     * wait loop would never terminate and boot would stop dead right
-     * here instead of printing anything below. */
-    uint64_t before = pit_get_ticks();
-    pit_sleep_ms(50);
-    uint64_t after = pit_get_ticks();
-    klog_puts("[pit] slept 50ms: ticks ");
-    klog_put_hex64(before);
-    klog_puts(" -> ");
-    klog_put_hex64(after);
-    klog_putc('\n');
-
-    keyboard_init();
-    klog_puts("[kbd] IRQ1 unmasked, waiting up to 3s for a test keypress "
-               "(QEMU monitor: 'sendkey <key>')...\n");
-    int key = -1;
-    uint64_t deadline = pit_get_ticks() + 3 * PIT_HZ;
-    while (pit_get_ticks() < deadline) {
-        key = keyboard_read();
-        if (key != -1) {
-            break;
-        }
-        __asm__ volatile("hlt");
-    }
-    if (key != -1) {
-        klog_puts("[kbd] received keypress: '");
-        klog_putc((char)key);
-        klog_puts("'\n");
-    } else {
-        klog_puts("[kbd] no keypress within timeout - driver is installed, "
-                   "just untested interactively this boot.\n");
-    }
-
-    klog_putc('\n');
-
-    /* M18: PS/2 mouse, IRQ12 - same shape of bring-up as the keyboard
-     * self-test just above (bounded wait for real interactive input, a
-     * clean "installed but untested" message on timeout rather than
-     * hanging boot). Cursor starts at screen center, off to one side of
-     * where the console's own text is scrolling (top-left), so the two
-     * don't visibly collide during this test - cursor.c has no real
-     * damage-tracking against console output, that's M20's job once a
-     * compositor owns the framebuffer for real. */
-    mouse_init();
-    cursor_init((int32_t)(fb_width() / 2), (int32_t)(fb_height() / 2));
-    klog_puts("[mouse] IRQ12 unmasked, cursor drawn at screen center. Waiting "
-               "up to 3s for test movement (QEMU monitor: 'mouse_move dx dy' "
-               "/ 'mouse_button val')...\n");
-    int got_mouse_event = 0;
-    mouse_event_t last_ev = {0, 0, 0, 0, 0};
-    uint64_t mouse_deadline = pit_get_ticks() + 3 * PIT_HZ;
-    while (pit_get_ticks() < mouse_deadline) {
-        mouse_event_t ev;
-        while (mouse_read(&ev)) {
-            cursor_move(ev.dx, ev.dy);
-            last_ev = ev;
-            got_mouse_event = 1;
-        }
-        __asm__ volatile("hlt");
-    }
-    if (got_mouse_event) {
-        klog_puts("[mouse] received movement/click - cursor now at (");
-        klog_put_hex32((uint32_t)cursor_x());
-        klog_puts(", ");
-        klog_put_hex32((uint32_t)cursor_y());
-        klog_puts(") buttons=0x");
-        klog_put_hex32(last_ev.buttons);
-        klog_putc('\n');
-    } else {
-        klog_puts("[mouse] no movement within timeout - driver is installed, "
-                   "just untested interactively this boot.\n");
-    }
-    klog_putc('\n');
-
-    /* M63: SSE on, before there is a second task to switch between.
-     * Everything above this line ran with the FPU in whatever state the
-     * firmware left it; from here it is this OS's, and every task carries
-     * its own copy of it. */
-    fpu_init_cpu();
-    sched_init();
-    /* M68: before anything can block. Two, not MAX_CPUS: every AP already
-     * registers its own `cpu-idle` identity in sched_init_ap and that
-     * identity is marked idle too, so the only CPU without one is the BSP.
-     * The spare is headroom, not a requirement. Kept small deliberately -
-     * every task in the table is one more entry in the scans wake_expired
-     * and the idle accounting do on every timer tick, and this is a
-     * hot path measured in a 16 ms frame budget. */
-    sched_spawn_idle_tasks(2);
-    klog_puts("[sched] round-robin scheduler initialized (this context is task 0).\n");
-    task_spawn("demo-a", demo_task, "A");
-    task_spawn("demo-b", demo_task, "B");
-    klog_puts("[sched] spawned tasks A and B; letting them run via "
-               "preemption for ~1.5s...\n");
-    pit_sleep_ms(1500);
-    klog_puts("[sched] back on the main task - preemption round trip verified.\n\n");
-
-    /* Self-test: SYS_getpid and SYS_write via a real `int 0x80` round
-     * trip (gate -> syscall_common_stub -> syscall_handler -> dispatch
-     * table -> back through RAX), the same "prove it, don't just trust
-     * it compiled" discipline as the int3 test above. */
-    long pid = do_syscall(SYS_getpid, 0, 0, 0);
-    klog_puts("[syscall] getpid() = ");
-    klog_put_hex64((uint64_t)pid);
-    klog_putc('\n');
-
-    static const char msg[] = "[syscall] hello via SYS_write\n";
-    long written = do_syscall(SYS_write, 1, (uint64_t)msg, sizeof(msg) - 1);
-    if (written != (long)sizeof(msg) - 1) {
-        panic("syscall self-test: SYS_write returned an unexpected length");
-    }
-
-    task_spawn("syscall-exit", syscall_exit_task, NULL);
-    pit_sleep_ms(200);
-    klog_puts("[syscall] SYS_exit self-test task ran and terminated.\n\n");
-
-    /* M14 self-tests: pipes (both the raw kernel primitive and the
-     * SYS_pipe/SYS_read/SYS_write syscall path), signals (SYS_kill), and
-     * process/wait semantics (SYS_wait(-1) reaping exactly the children
-     * spawned for it, SYS_getpgid) - the same "prove it, don't just trust
-     * it compiled" discipline as every earlier milestone's self-tests. */
-
-    /* Pipe self-test 1: kernel-level pipe_create/pipe_write/pipe_read,
-     * exercising the blocking buffer logic directly (not through a
-     * syscall). The consumer starts before the producer has written
-     * anything, so pipe_read genuinely blocks (cooperatively yields) and
-     * gets woken by later scheduling rather than finding data already
-     * there. */
-    pipe_t *test_pipe = pipe_create();
-    if (!test_pipe) {
-        panic("pipe self-test: pipe_create failed");
-    }
-    task_t *producer = task_spawn("pipe-producer", pipe_producer_task, test_pipe);
-    task_t *consumer = task_spawn("pipe-consumer", pipe_consumer_task, test_pipe);
-    while (producer->state != TASK_TERMINATED || consumer->state != TASK_TERMINATED) {
-        schedule();
-    }
-    kfree(test_pipe);
-    klog_puts("[pipe] kernel-level producer/consumer self-test passed.\n\n");
-
-    /* Pipe self-test 2: the syscall path - SYS_pipe installs a pair of
-     * fds into this very task's own fd table, and SYS_write/SYS_read
-     * move data through them exactly like a real program would, without
-     * ever touching pipe_t directly. */
-    int pipe_fds[2];
-    if (do_syscall(SYS_pipe, (uint64_t)pipe_fds, 0, 0) != 0) {
-        panic("SYS_pipe self-test: pipe creation failed");
-    }
-    static const char pipe_msg[] = "hello through a syscall pipe";
-    long pipe_written = do_syscall(SYS_write, (uint64_t)pipe_fds[1], (uint64_t)pipe_msg, sizeof(pipe_msg) - 1);
-    if (pipe_written != (long)sizeof(pipe_msg) - 1) {
-        panic("SYS_pipe self-test: SYS_write returned an unexpected length");
-    }
-    char pipe_readback[64] = {0};
-    long pipe_read_n = do_syscall(SYS_read, (uint64_t)pipe_fds[0], (uint64_t)pipe_readback, sizeof(pipe_readback) - 1);
-    if (pipe_read_n != (long)sizeof(pipe_msg) - 1 || k_strcmp(pipe_readback, pipe_msg) != 0) {
-        panic("SYS_pipe self-test: SYS_read returned unexpected data");
-    }
-    klog_puts("[pipe] SYS_pipe/SYS_write/SYS_read self-test passed.\n\n");
-
-    /* Signal self-test: a spinner task looping on pure CPU-bound work
-     * (never yields, never syscalls) can only ever stop via a signal
-     * actually being delivered through scheduler_tick's per-tick
-     * pending-signal check (sched.c) - syscall_handler's check (M14)
-     * would never fire for a task that never syscalls. */
-    task_t *spinner = task_spawn("spinner", spinner_task, NULL);
-    pit_sleep_ms(100);
-    if (do_syscall(SYS_kill, (uint64_t)spinner->id, SIGTERM, 0) != 0) {
-        panic("SYS_kill self-test: kill on a live task failed");
-    }
-    while (spinner->state != TASK_TERMINATED) {
-        schedule();
-    }
-    if (spinner->exit_code != 128 + SIGTERM) {
-        panic("SYS_kill self-test: unexpected exit code after SIGTERM");
-    }
-    klog_puts("[signal] SIGTERM self-test passed (spinner task terminated).\n\n");
-
-    /* Process/wait self-test: drain any unreaped children left over from
-     * earlier self-tests, spawn exactly two fresh ones, and confirm
-     * SYS_wait(-1) reaps precisely those two (in either order) before
-     * correctly reporting -1 once none remain - "more complete wait
-     * semantics" (this milestone's own wording), not just the
-     * single-pid form M13 already proved. */
-    while (do_syscall(SYS_wait, (uint64_t)-1, 0, 0) != -1) {
-    }
-    task_t *quick_a = task_spawn("quick", quick_task, NULL);
-    task_t *quick_b = task_spawn("quick", quick_task, NULL);
-    long reaped1 = do_syscall(SYS_wait, (uint64_t)-1, 0, 0);
-    long reaped2 = do_syscall(SYS_wait, (uint64_t)-1, 0, 0);
-    int got_a = (reaped1 == quick_a->id) || (reaped2 == quick_a->id);
-    int got_b = (reaped1 == quick_b->id) || (reaped2 == quick_b->id);
-    if (!got_a || !got_b || reaped1 == reaped2) {
-        panic("SYS_wait(-1) self-test: did not reap exactly the two expected children");
-    }
-    if (do_syscall(SYS_wait, (uint64_t)-1, 0, 0) != -1) {
-        panic("SYS_wait(-1) self-test: expected -1 once no children remain");
-    }
-    klog_puts("[wait] SYS_wait(-1) self-test passed (reaped two children, then -1).\n\n");
-
-    /* Process-group self-test: SYS_getpgid is read-only (no job control
-     * exists to ever change a group), so all there is to prove is that a
-     * spawned task really does inherit its parent's pgid - task 0's own
-     * group (0, set by sched_init) propagating down to a task it spawns
-     * directly.
-     *
-     * M54: this used to ask about quick_a, which the SYS_wait(-1) test
-     * just above had already reaped - fine when a reaped task's slot
-     * stayed valid forever, and a -1 the moment slots started coming
-     * back. Asking about a *live* child is what the test always meant;
-     * the old version only worked because nothing ever died completely.
-     * `spinner_task` is used because it does not exit on its own, so it
-     * is still there to be asked about. */
-    task_t *pgid_child = task_spawn("pgidprobe", spinner_task, NULL);
-    long self_pgid = do_syscall(SYS_getpgid, 0, 0, 0);
-    long child_pgid = do_syscall(SYS_getpgid, (uint64_t)pgid_child->id, 0, 0);
-    do_syscall(SYS_kill, (uint64_t)pgid_child->id, SIGKILL, 0);
-    do_syscall(SYS_wait, (uint64_t)pgid_child->id, 0, 0);
-    if (self_pgid != 0 || child_pgid != self_pgid) {
-        panic("SYS_getpgid self-test: child did not inherit its parent's process group");
-    }
-    klog_puts("[pgid] SYS_getpgid self-test passed (child inherited pgid ");
-    klog_put_hex64((uint64_t)self_pgid);
-    klog_puts(").\n\n");
-
-    /* M92: the block layer, before anything reads a sector. Probes for a
-     * virtio block device and falls back to the ATA PIO driver, then puts
-     * a write-through cache in front of whichever it found. Deliberately
-     * here rather than beside the other drivers at the top of
-     * kernel_main: it allocates 8 MiB, and the frame allocator's own
-     * self-tests run before this point and compare free-frame counts. */
-    blk_init();
-
-    /* M12: bring up the disk filesystem, seeding it with every embedded
-     * program on first boot only - every subsequent load (including the
-     * init spawn just below) reads back from disk like any other file
-     * would be, which is the point. */
-    vfs_init();
-    /* ---- M92 self-test: what the disk costs, measured -----------------
-     *
-     * M87 declined a buffer cache with "no measurement has asked for
-     * one", and M69's rule is that performance work waits for a
-     * measurement. This is the measurement, and it is taken here rather
-     * than described: the same megabyte read twice, once with the cache
-     * empty and once with it warm.
-     *
-     * The cold number is what the device costs. The warm number is what
-     * the cache costs. The ratio between them is the only honest way to
-     * say whether a cache was worth building, and it is printed rather
-     * than asserted against a threshold - a threshold would be this
-     * project guessing what the host it happens to be running on should
-     * manage.
-     *
-     * What IS asserted is correctness, because a fast cache that returns
-     * the wrong bytes is worse than no cache: the warm read has to
-     * produce the same megabyte as the cold one, byte for byte.
-     */
-    {
-        blk_stats_t before, after;
-        static uint8_t cold[64 * 1024];
-        static uint8_t warm[64 * 1024];
-        const uint32_t RUNS = 16; /* 16 x 64 KiB = 1 MiB */
-        const uint32_t SECTORS = sizeof(cold) / BLK_SECTOR_SIZE;
-
-        /* Timed with the TSC, not the PIT, and M69's header says exactly
-         * why: the PIT ticks every 10 ms, and the first version of this
-         * measurement reported "0 ms cold, 0 ms warm" - which is not a
-         * ratio, it is a clock saying the question was below its
-         * resolution. Reading a megabyte over DMA turns out to be one of
-         * the things a 10 ms clock cannot see. */
-        blk_cache_drop();
-        blk_stats(&before);
-        uint64_t c0 = tsc_read();
-        uint32_t sum_cold = 0;
-        for (uint32_t r = 0; r < RUNS; r++) {
-            blk_read(LEANFS_START_LBA + r * SECTORS, SECTORS, cold);
-            for (uint32_t i = 0; i < sizeof(cold); i += 512) {
-                sum_cold += cold[i];
-            }
-        }
-        uint64_t c1 = tsc_read();
-
-        uint32_t sum_warm = 0;
-        for (uint32_t r = 0; r < RUNS; r++) {
-            blk_read(LEANFS_START_LBA + r * SECTORS, SECTORS, warm);
-            for (uint32_t i = 0; i < sizeof(warm); i += 512) {
-                sum_warm += warm[i];
-            }
-        }
-        uint64_t c2 = tsc_read();
-        blk_stats(&after);
-        uint64_t cold_us = tsc_to_us(c1 - c0);
-        uint64_t warm_us = tsc_to_us(c2 - c1);
-
-        if (sum_cold != sum_warm) {
-            panic("M92 self-test: the cache returned different bytes than the device did");
-        }
-        /* The cold pass must actually have gone to the device and the
-         * warm pass must actually not have. Without both of these the
-         * two timings could be measuring the same thing twice - which is
-         * exactly how a cache measurement passes for the wrong reason,
-         * and the same trap M82's frame-count lower bound exists for. */
-        uint64_t dev_reads_cold = after.device_reads - before.device_reads;
-        if (dev_reads_cold < RUNS * SECTORS) {
-            panic("M92 self-test: the cold pass did not read a full megabyte from the device");
-        }
-        if (after.hits <= before.hits) {
-            panic("M92 self-test: the warm pass never hit the cache - it is not caching");
-        }
-
-        klog_puts("[m92] a disk worth reading: 1 MiB through ");
-        klog_puts(blk_backend_name());
-        klog_puts(" cold in ");
-        klog_put_dec((uint32_t)cold_us);
-        klog_puts(" us and warm from the cache in ");
-        klog_put_dec((uint32_t)warm_us);
-        klog_puts(" us, identical byte for byte; 0x");
-        klog_put_hex64(after.hits);
-        klog_puts(" of 0x");
-        klog_put_hex64(after.reads);
-        klog_puts(" reads served without touching the device since boot - self-test passed.\n\n");
-    }
-
-    tty_init(); /* M85: the terminal, before anything can be its foreground job */
-    /* M53: the layout, created before anything is written into it. Each
-     * one is idempotent-by-check rather than by vfs_mkdir returning 0 for
-     * an existing path - see leanfs.h on why "already there" is an error
-     * there rather than a no-op. */
-    {
-        static const char *const LAYOUT[] = {PATH_BIN, PATH_HOME, PATH_ETC, PATH_TMP};
-        for (size_t i = 0; i < sizeof(LAYOUT) / sizeof(LAYOUT[0]); i++) {
-            if (!vfs_exists(LAYOUT[i]) && vfs_mkdir(LAYOUT[i]) != 0) {
-                panic("vfs_mkdir: failed to create the filesystem layout");
-            }
-        }
-    }
-    for (size_t i = 0; i < EMBEDDED_PROGRAM_COUNT; i++) {
-        const embedded_program_t *p = &embedded_programs[i];
-        char path[PATH_MAX_LEN];
-        if (path_join(path, PATH_BIN_DIR, p->name) != 0) {
-            panic("a program name is too long to live in /bin");
-        }
-        if (!vfs_exists(path)) {
-            klog_puts("[fs] seeding disk with '");
-            klog_puts(path);
-            klog_puts("' (first boot only)...\n");
-            size_t size = (size_t)(p->end - p->start);
-            if (vfs_write(path, p->start, size) != 0) {
-                panic("vfs_write: failed to seed a program onto disk");
-            }
-        }
-    }
-    klog_puts("[fs] all user programs present in " PATH_BIN ".\n\n");
-
-    /* M53: one file in /home on a fresh disk. Not decoration - before
-     * this milestone the file manager opened on a namespace that always
-     * had two dozen things in it, and now it opens on a directory that
-     * would otherwise be empty on a machine's first boot, which reads as
-     * "this is broken" rather than "this is new". It also gives the
-     * interactive suite a real file to drag, which is a smaller reason
-     * but a real one. */
-    /* M74: and more than one of them. A fresh disk used to boot to a
-     * desktop with seeded icons and a single file - which is a demo. The
-     * difference between a demo and a machine somebody just got is that
-     * the second one has something in it: a README that says what this
-     * is, a note to edit, and a directory to open. All three exist so
-     * that the first thing a person does - open Files, open the editor -
-     * lands on something rather than on emptiness.
-     *
-     * Written only when absent, so a person's own edits are never
-     * overwritten by a later boot. That is the same rule the program
-     * seeding above follows and it matters more here: these are the only
-     * files on this machine that a person is expected to change. */
-    {
-        static const struct {
-            const char *path;
-            const char *body;
-        } FIRST_BOOT[] = {
-            {PATH_HOME_DIR "readme.txt",
-             "Welcome to lean_os.\n"
-             "\n"
-             "This is /home - your files live here.\n"
-             "Programs live in /bin, settings in /etc.\n"
-             "\n"
-             "Getting around\n"
-             "  Double-click a name in Files to open it, or .. to go up.\n"
-             "  Ctrl+Space opens the launcher; type a few letters and press Enter.\n"
-             "  Ctrl+Shift+Esc opens the task manager.\n"
-             "  Ctrl+Alt+Left/Right move between the four desktops.\n"
-             "\n"
-             "The terminal\n"
-             "  ls, cat, cp, echo, env, cd, pwd - and > to redirect.\n"
-             "  A file starting with #!/bin/sh is a program: run it by name.\n"
-             "\n"
-             "Your windows come back\n"
-             "  Whatever is open when this machine stops is open again when\n"
-             "  it starts, in the same places. /etc/session.conf is the file\n"
-             "  that remembers, and it is plain text.\n"},
-            {PATH_HOME_DIR "notes.txt",
-             "Scratch file.\n"
-             "\n"
-             "The editor has undo (Ctrl+Z), redo (Ctrl+Y), find (Ctrl+F),\n"
-             "cut/copy/paste, and a File menu that can save somewhere else.\n"
-             "\n"
-             "Nothing here is precious - edit it.\n"},
-            {PATH_HOME_DIR "hello.sh",
-             "#!/bin/sh\n"
-             "# A script is a program here. Run it from the terminal as\n"
-             "#   /home/hello.sh\n"
-             "echo \"hello from $SHELL\"\n"
-             "pwd\n"
-             "echo \"there are these programs:\"\n"
-             "ls /bin\n"},
-        };
-        for (size_t i = 0; i < sizeof(FIRST_BOOT) / sizeof(FIRST_BOOT[0]); i++) {
-            if (vfs_exists(FIRST_BOOT[i].path)) {
-                continue;
-            }
-            size_t len = 0;
-            while (FIRST_BOOT[i].body[len]) {
-                len++;
-            }
-            if (vfs_write(FIRST_BOOT[i].path, FIRST_BOOT[i].body, len) != 0) {
-                panic("vfs_write: failed to seed a first-boot file into " PATH_HOME);
-            }
-        }
-    }
-
-    /* M15 self-test: every file up to now (the seeded programs) fits in
-     * leanfs's direct blocks alone (<= 8 KiB), which would never exercise
-     * the new singly-indirect path at all - "compiles" isn't "works", so
-     * round-trip something deliberately bigger than LEANFS_DIRECT_BLOCKS *
-     * LEANFS_BLOCK_SIZE (8 KiB) but within the new LEANFS_MAX_FILE_SIZE
-     * (72 KiB) cap. */
-    {
-        size_t fstest_len = 20000; /* spans 16 direct + ~23 indirect blocks */
-        uint8_t *fstest_buf = (uint8_t *)kmalloc(fstest_len);
-        uint8_t *fstest_readback = (uint8_t *)kmalloc(fstest_len);
-        if (!fstest_buf || !fstest_readback) {
-            panic("out of memory for leanfs indirect-block self-test");
-        }
-        for (size_t i = 0; i < fstest_len; i++) {
-            fstest_buf[i] = (uint8_t)(i * 31 + 7);
-        }
-        if (vfs_write(PATH_TMP_DIR "fstest", fstest_buf, fstest_len) != 0) {
-            panic("leanfs indirect-block self-test: vfs_write failed");
-        }
-        k_memset(fstest_readback, 0, fstest_len);
-        int64_t fstest_size = vfs_read(PATH_TMP_DIR "fstest", fstest_readback, fstest_len);
-        if (fstest_size != (int64_t)fstest_len) {
-            panic("leanfs indirect-block self-test: size mismatch on readback");
-        }
-        for (size_t i = 0; i < fstest_len; i++) {
-            if (fstest_readback[i] != fstest_buf[i]) {
-                panic("leanfs indirect-block self-test: data mismatch on readback");
-            }
-        }
-        kfree(fstest_buf);
-        kfree(fstest_readback);
-        klog_puts("[fs] leanfs indirect-block self-test passed (20000-byte round trip).\n\n");
-    }
-
-    /* M19 self-test: spawn the real ring-3 memtest program (not a
-     * kernel-side stand-in) to prove user-space malloc/free and
-     * cross-process shared memory both actually work - "compiles" isn't
-     * "works", same discipline as every earlier milestone's self-tests.
-     * memtest itself spawns a second copy of itself (the shm reader
-     * role) and reports the combined result via its own exit code, so
-     * this only needs to wait for the one (creator) child and check
-     * that. */
-    {
-        size_t memtest_size_bytes = 0;
-        uint8_t *memtest_image = read_program("/bin/memtest", &memtest_size_bytes);
-        int64_t memtest_size = (int64_t)memtest_size_bytes;
-        task_t *memtest_task = process_spawn("memtest", memtest_image, (size_t)memtest_size, "");
-        kfree(memtest_image);
-        long memtest_status = do_syscall(SYS_wait, (uint64_t)memtest_task->id, 0, 0);
-        if (memtest_status != 0) {
-            panic("memtest self-test: nonzero exit code - malloc or shm is broken");
-        }
-        klog_puts("[memtest] user-space malloc/free and cross-process shm self-tests passed.\n\n");
-    }
-
-    /* M57 self-test: the proportional UI font family, checked from ring 3
-     * because that is the only place it exists - uifont.c is a
-     * user_space library, and the property being proved is that
-     * gfx_text_width() and gfx_draw_text_font() agree about where the
-     * ink lands. fonttest.c renders into its own buffer and measures the
-     * result; see its header for why a table check would not have been
-     * the same test. Spawned and waited on exactly the way memtest above
-     * is. */
-    {
-        size_t fonttest_size_bytes = 0;
-        uint8_t *fonttest_image = read_program("/bin/fonttest", &fonttest_size_bytes);
-        int64_t fonttest_size = (int64_t)fonttest_size_bytes;
-        task_t *fonttest_task = process_spawn("fonttest", fonttest_image, (size_t)fonttest_size, "");
-        kfree(fonttest_image);
-        long fonttest_status = do_syscall(SYS_wait, (uint64_t)fonttest_task->id, 0, 0);
-        if (fonttest_status != 0) {
-            panic("M57 font self-test: a measured text width disagrees with the pixels drawn");
-        }
-        klog_puts("[m57] proportional UI font: per-glyph advances, one shared baseline across three sizes, and every measured width matching the ink drawn - self-test passed.\n\n");
-    }
-
+/* ---- The boot self-tests, and the switch that decides whether they run
+ *
+ * Q1: everything from M20's compositor test to M40's fd-table check used
+ * to run inline in kernel_main on every single boot. That was right for
+ * ninety-three milestones - the tests were microseconds and running them
+ * unconditionally is why no regression in this project has ever survived
+ * a boot. It stopped being right once most of them began spawning a real
+ * process and waiting for it: the boot costs ~140 s and the desktop is
+ * ~4 s of that. Somebody running tools/run-qemu.sh to *use* the machine
+ * was paying for a test suite they had not asked for.
+ *
+ * Split rather than deleted, and gated at boot rather than at compile
+ * time - see kernel/dev/fwcfg.h for why the switch comes from outside the
+ * image instead of from a #ifdef. The image tools/run-tests.sh grades is
+ * byte for byte the image that boots on a disk.
+ *
+ * Two functions and not one, because the ordering constraint is real:
+ * these run *before* smp_init (several of them assume the deterministic
+ * single-core scheduling their own comments describe) and the ones below
+ * run after it.
+ *
+ * What deliberately stayed inline in kernel_main and runs on every boot:
+ * the vmm map/unmap check, the kmalloc round trip, the framebuffer
+ * readback, the font table, the scheduler's preemption round trip and the
+ * first syscall. Those are a power-on self-test - microseconds each, and
+ * a machine that fails one of them should not reach a desktop to tell you
+ * about it. */
+static void boot_selftests_desktop(void) {
     /* M47: pin the desktop's settings to their compiled-in defaults for
      * the whole self-test phase - see selftest_settings_install_defaults
      * for why, and selftest_settings_restore (just before PID 1) for the
@@ -2794,41 +1946,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         }
         klog_puts("[wm38] drop shadow + WM_SETTINGS_PIPE accent-color self-test passed (2/2 checks matched).\n\n");
     }
+}
 
-    /* Stretch goal: SMP. Deliberately brought up *after* every M-numbered
-     * self-test above, not right after M7's scheduler one - several of
-     * those (M20-M22's compositor/client tests especially) rely on
-     * scheduling being deterministic enough that "spawned one at a time"
-     * really does mean one connects before the next starts (see their own
-     * comments), an assumption genuine multi-core parallelism can break
-     * even with generous sleeps in between. Bringing SMP up afterward lets
-     * every earlier milestone keep the exact single-core-equivalent
-     * environment it was written and verified against, while still
-     * standing up real multi-core support as additive capability from
-     * here on - which is honest, not a workaround: nothing before this
-     * point claims to be SMP-tested, and nothing after it needs to be
-     * deterministic across a single core anymore.
-     *
-     * smp_init() has to run after sched_init() (long since true by now) -
-     * an AP becomes a real schedulable task (sched_init_ap) the moment it
-     * checks in, so the scheduler needs to already exist to receive it.
-     * Falls back to single-core (cpu 0 only) if ACPI/the MADT isn't
-     * present - see smp.c's own comment on why that's a normal fallback,
-     * not a panic. */
-    /* M47: whatever the firmware handed the loader, before anything asks
-     * ACPI a question. acpi.c still falls back to its legacy scan if this
-     * is 0, which is what keeps a non-UEFI boot (or a firmware that
-     * publishes no RSDP) on exactly the path it was on before. */
-    acpi_set_rsdp(rsdp_phys);
-
-    smp_init();
-
-    /* M47: reads the FADT once, here, rather than from inside the
-     * shutdown path - walking ACPI tables is exactly the kind of work
-     * that path should not be doing, and this is the same RSDT/XSDT walk
-     * smp_init just did for the MADT. */
-    power_init();
-
+/* The second half - everything after SMP and ACPI are up. See
+ * boot_selftests_desktop above for why this is split in two and why the
+ * switch lives outside the image. */
+static void boot_selftests_system(void) {
     /* Self-test: spawn several genuinely CPU-bound tasks and confirm more
      * than one *physical* CPU actually ran them, not just that the
      * round-robin scheduler still works (M7 already proved that on a
@@ -2890,7 +2013,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * attach one (`-netdev user -device rtl8139`) precisely so this
      * kernel's own QEMU-based development loop still exercises the real
      * path every time. */
-    if (net_init()) {
+    if (net_have_nic()) {
         /* Self-test: a real ICMP echo request/reply round trip against
          * QEMU's usermode-networking gateway (10.0.2.2, net.h's
          * net_gateway_ip()) - exercises the whole stack end to end (NIC
@@ -2924,7 +2047,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_put_hex32(net_gateway_ip());
         klog_puts(" round-tripped).\n\n");
     } else {
-        klog_puts("[net] no RTL8139 NIC found - networking untested this boot "
+        klog_puts("[net] no NIC - the ICMP round-trip self-test was skipped "
                    "(expected on real hardware; see docs/real-hardware.md).\n\n");
     }
 
@@ -7282,13 +6405,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
          * COSTS, and an outlier caused by this test's own spawn traffic
          * is not that. The worst case is what the loaded run below is
          * for. */
+        /* Q18: every sample kept, not just the best one. idle_us stays
+         * the minimum, because the prose line below is about what the
+         * path costs; the distribution goes to the harness. */
+        uint64_t idle_samples[LATENCY_SAMPLES];
         uint64_t idle_us = 0;
-        for (int i = 0; i < 5; i++) {
-            uint64_t us = selftest_input_to_photon_us(200 + i * 20, 200, 2000);
-            if (us == 0) {
-                continue;
-            }
-            if (idle_us == 0 || us < idle_us) {
+        for (int i = 0; i < LATENCY_SAMPLES; i++) {
+            uint64_t us = selftest_input_to_photon_us(200 + (i % 10) * 20, 200, 2000);
+            idle_samples[i] = us;
+            if (us != 0 && (idle_us == 0 || us < idle_us)) {
                 idle_us = us;
             }
         }
@@ -7326,13 +6451,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         }
         pit_sleep_ms(200); /* let them actually get going */
 
+        uint64_t loaded_samples[LATENCY_SAMPLES];
         uint64_t loaded_us = 0;
-        for (int i = 0; i < 5; i++) {
-            uint64_t us = selftest_input_to_photon_us(300 + i * 20, 300, 3000);
-            if (us == 0) {
-                continue;
-            }
-            if (loaded_us == 0 || us < loaded_us) {
+        for (int i = 0; i < LATENCY_SAMPLES; i++) {
+            uint64_t us = selftest_input_to_photon_us(300 + (i % 10) * 20, 300, 3000);
+            loaded_samples[i] = us;
+            if (us != 0 && (loaded_us == 0 || us < loaded_us)) {
                 loaded_us = us;
             }
         }
@@ -7349,6 +6473,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "the measurement is measuring nothing");
         }
 
+        klog_perf("input_to_photon_idle_us", idle_us, "us");
+        klog_perf("input_to_photon_loaded_us", loaded_us, "us");
+        /* Q18: and the shape of both, which is what the budgets in
+         * tests/budgets.tsv are now written against. */
+        klog_perf_distribution("input_to_photon_idle", idle_samples, LATENCY_SAMPLES);
+        klog_perf_distribution("input_to_photon_loaded", loaded_samples, LATENCY_SAMPLES);
         klog_puts("[m69] input-to-photon: ");
         klog_put_dec((uint32_t)idle_us);
         klog_puts(" us idle, ");
@@ -8719,6 +7849,41 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                    "the shape of, S_ISDIR and d_type agreed on every entry, the sizes added "
                    "up, and fstat described a descriptor whose name had changed - "
                    "self-test passed.\n\n");
+    }
+
+    /* ---- Q5 self-test: every syscall told a lie -------------------------
+     *
+     * user_space/bin/syscalltest.c walks all 98 entries of
+     * syscall_table and hands each one a null pointer, a kernel address,
+     * an unmapped user address, an address just below the user/kernel
+     * line, and a length that overflows anything it is added to. It runs
+     * in ring 3 for the same reason badptr.c and captest.c do: the thing
+     * under test is a *boundary at the syscall*, and a check on this side
+     * of it would be testing the wrong side.
+     *
+     * Two claims, and the program's own header is precise about which is
+     * which: every syscall RETURNS (the universal one - a kernel that
+     * panics on a bad argument is a kernel any program can switch off),
+     * and every syscall that reads a user pointer REFUSES a bad one.
+     *
+     * A hang shows up correctly without any timeout here: the marker
+     * below never prints and the serial harness fails on the missing
+     * line, which is what it is for.
+     */
+    {
+        size_t sct_size_bytes = 0;
+        uint8_t *sct_image = read_program("/bin/syscalltest", &sct_size_bytes);
+        task_t *sct_task = process_spawn("syscalltest", sct_image, sct_size_bytes, "");
+        kfree(sct_image);
+        long sct_status = do_syscall(SYS_wait, (uint64_t)sct_task->id, 0, 0);
+        if (sct_status != 0) {
+            panic("[q5] a syscall accepted an argument it should have refused - see the syscalltest lines above");
+        }
+        klog_puts("[q5] every syscall told a lie: all 98 entries handed a null, a "
+                   "kernel address, an unmapped one, an address at the user/kernel line and "
+                   "an overflowing length; every one returned, every pointer argument was "
+                   "refused, every unopened fd and every out-of-range syscall number was "
+                   "rejected - self-test passed.\n\n");
     }
 
     /* ---- M78 self-test: memory that can be given back -------------------
@@ -10632,10 +9797,1075 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_put_hex32((uint32_t)leaked);
         klog_puts(" leaked self-test fd(s) reclaimed before PID 1 inherits the table).\n\n");
     }
+}
+
+void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys) {
+    klog_init();
+    klog_puts("lean_os kernel: hello from C!\n\n");
+
+    /* Q1: before anything else asks whether this is a test boot. Two port
+     * reads on a machine that has the device and four on one that does
+     * not - cheap enough to sit ahead of the memory map. */
+    fwcfg_init();
+    if (boot_selftests_enabled()) {
+        klog_puts("[boot] self-tests ENABLED for this boot "
+                   "(opt/leanos/selftest=1 via fw_cfg).\n\n");
+    } else {
+        klog_puts("[boot] self-tests off - booting straight to the desktop. "
+                   "tools/run-tests.sh turns them on.\n\n");
+    }
+
+    gdt_init();
+    idt_init();
+    pic_remap();
+    klog_puts("GDT/TSS, IDT, and PIC remap initialized.\n");
+
+    /* Self-test: a real trip through the IDT/ISR pipeline (gate -> stub
+     * -> C handler -> iretq) rather than just trusting it compiled.
+     * int3 is the one exception vector that's meant to be resumed, so
+     * this proves the round trip works without ending in a panic. */
+    __asm__ volatile("int3");
+    klog_puts("Resumed after breakpoint self-test.\n\n");
+
+    uint32_t count = *e820_map;
+    if (count == 0) {
+        panic("E820 memory map is empty - cannot continue");
+    }
+
+    e820_entry_t *entries = (e820_entry_t *)((uint8_t *)e820_map + 8);
+
+    klog_puts("E820 memory map (");
+    klog_put_hex32(count);
+    klog_puts(" entries):\n");
+
+    for (uint32_t i = 0; i < count; i++) {
+        klog_puts("  base=0x");
+        klog_put_hex64(entries[i].base);
+        klog_puts(" len=0x");
+        klog_put_hex64(entries[i].length);
+        klog_puts(" type=0x");
+        klog_put_hex32(entries[i].type);
+        klog_putc('\n');
+    }
+    klog_putc('\n');
+
+    pmm_init(e820_map);
+    vmm_init(e820_map);
+    heap_init();
+
+    /* Self-test: map, write through, read back, and unmap a throwaway
+     * virtual address directly via vmm - the same "prove it, don't just
+     * trust it compiled" discipline as the int3 test above. */
+    uint64_t scratch_phys = pmm_alloc_frame();
+    /* M90: 0x50000000 until this milestone, described as "above the 1 GiB
+     * identity map" - which it stopped being the moment the map was sized
+     * from the machine. 1.25 GiB is ordinary RAM on a 4 GiB machine, and
+     * mapping a 4 KiB page inside an existing 2 MiB one is the case
+     * vmm_map_page_in panics on. This address is below the kernel heap
+     * (vmm.h) and far above any physical memory. */
+    uint64_t scratch_virt = KERNEL_HEAP_VIRT_BASE - 0x40000000ULL;
+    vmm_map_page(scratch_virt, scratch_phys, VMM_FLAG_WRITABLE);
+    volatile uint64_t *scratch = (volatile uint64_t *)scratch_virt;
+    *scratch = 0x1122334455667788ULL;
+    if (*scratch != 0x1122334455667788ULL) {
+        panic("vmm self-test: readback mismatch");
+    }
+    vmm_unmap_page(scratch_virt);
+    pmm_free_frame(scratch_phys);
+    klog_puts("[vmm] map/unmap self-test passed.\n");
+
+    /* Self-test: kmalloc/kfree round trip through the heap, which exercises
+     * vmm_map_page again via a completely different code path (heap growth,
+     * not a direct call) than the test above. */
+    uint64_t *test = (uint64_t *)kmalloc(sizeof(uint64_t));
+    if (!test) {
+        panic("kmalloc self-test: allocation failed");
+    }
+    *test = 0xDEADBEEFCAFEBABEULL;
+    if (*test != 0xDEADBEEFCAFEBABEULL) {
+        panic("kmalloc self-test: readback mismatch");
+    }
+    kfree(test);
+    klog_puts("[heap] kmalloc/kfree self-test passed.\n\n");
+
+    /* ---- M90 self-test: a frame above the old ceiling, and a query that
+     * can still say no.
+     *
+     * Three things are worth proving here and "the allocator reports a
+     * big number" is none of them. A bitmap sized from firmware would
+     * report whatever firmware said whether or not a single frame at the
+     * top of it could be touched, and an ordinary pmm_alloc_frame comes
+     * off the bottom of the bitmap - it would pass identically on the
+     * 128 MiB machine this kernel booted on for eighty-nine milestones.
+     *
+     *   1. A frame at a *high* physical address can be allocated, and
+     *      written and read back through the identity map - which is the
+     *      whole claim: tracked and addressable are different properties
+     *      and the old header comment was about the second one.
+     *   2. Freeing it returns the count exactly, so growing the allocator
+     *      did not grow a leak with it.
+     *   3. vmm_identity_covers says NO to an address past the end of
+     *      memory. Without this the first two would pass against a
+     *      function that returns 1 unconditionally, and acpi.c would then
+     *      dereference whatever a firmware table pointed at.
+     *
+     * The floor adapts rather than being 1 GiB, because a kernel that
+     * only works on a big machine has traded one hardcoded size for
+     * another - on a machine smaller than a gigabyte this still tests the
+     * top half of whatever there is. */
+    {
+        uint64_t tracked = pmm_tracked_limit();
+        /* The strongest claim this machine can support. Above 4 GiB is
+         * the genuinely new case - a physical address that does not fit
+         * in 32 bits, which is also what pmm_alloc_frame_dma exists to
+         * keep away from the NIC and the sound card. Above 1 GiB is the
+         * old ceiling. Below that, half of whatever there is, because a
+         * kernel that only works on a big machine has traded one
+         * hardcoded size for another. */
+        uint64_t floor;
+        if (tracked > PMM_DMA_LIMIT) {
+            floor = PMM_DMA_LIMIT;
+        } else if (tracked > 0x40000000ULL) {
+            floor = 0x40000000ULL;
+        } else {
+            floor = tracked / 2;
+        }
+        uint64_t before = pmm_free_frame_count();
+        uint64_t high = pmm_alloc_frame_above(floor);
+        if (high == 0) {
+            panic("[m90] no free frame above the probe floor");
+        }
+        if (high < floor) {
+            panic("[m90] pmm_alloc_frame_above returned a frame below its floor");
+        }
+        if (!vmm_identity_covers(high, 4096)) {
+            panic("[m90] a frame the allocator handed out is not identity-mapped");
+        }
+        volatile uint64_t *probe = (volatile uint64_t *)(uintptr_t)high;
+        probe[0] = 0x9090909090909090ULL;
+        probe[511] = 0x0123456789ABCDEFULL;
+        if (probe[0] != 0x9090909090909090ULL || probe[511] != 0x0123456789ABCDEFULL) {
+            panic("[m90] readback mismatch on a high physical frame");
+        }
+        pmm_free_frame(high);
+        if (pmm_free_frame_count() != before) {
+            panic("[m90] freeing a high frame did not return the count");
+        }
+        /* One byte past the last frame the allocator describes: not RAM,
+         * and the map must say so. */
+        if (vmm_identity_covers(tracked + 0x40000000ULL, 4096)) {
+            panic("[m90] the identity map claims to cover memory that does not exist");
+        }
+        klog_puts("[m90] more than a gigabyte: ");
+        klog_put_hex64(tracked / (1024 * 1024));
+        klog_puts(" MiB tracked in ");
+        klog_put_hex64(pmm_total_frame_count());
+        klog_puts(" frames, a frame at 0x");
+        klog_put_hex64(high);
+        klog_puts(" written and read back through the identity map, freed with the\n"
+                  "      count returning exactly, and an address past the end of memory "
+                  "correctly reported as not mapped.\n\n");
+    }
+
+    /* M16: bring up the linear framebuffer the boot loader's
+     * init_framebuffer set up and described in RSI (fb_info, this
+     * function's second argument) - needs vmm live first, since fb_init
+     * maps the physical framebuffer region in. */
+    fb_init(fb_info);
+    /* M58: probe the display adapter for a runtime mode-setting interface
+     * and build the validated mode list, right after the framebuffer the
+     * firmware handed us is mapped. Finding nothing is an ordinary
+     * outcome, not a failure - on any machine without a Bochs/QEMU DISPI
+     * adapter the answer is "the mode the firmware picked, and nothing on
+     * offer", which is exactly what the Display pane then shows. */
+    dispi_init();
+    /* M59: read the CMOS clock once here so the boot log says up front
+     * whether this machine knows the date - every timestamp below depends
+     * on the answer, and "files are dated zero" is much easier to explain
+     * when the reason is one line near the top of the log. */
+    rtc_init();
+    /* M62: the first sound this OS has ever been able to make. The
+     * speaker is unconditional - PIT channel 2 gated onto port 0x61 is
+     * hardware every PC-compatible machine has - and the AC'97 probe
+     * degrades to "no device found" exactly as M27 decided for the NIC,
+     * because a desktop that cannot find a sound card should still be a
+     * desktop. */
+    pcspk_init();
+    ac97_init();
+
+    /* Self-test: clear to a background color, fill a smaller rectangle
+     * with a different one, then read individual pixels back to confirm
+     * both landed exactly where expected - a memory-correctness proof,
+     * the same "prove it, don't just trust it compiled" discipline as
+     * every earlier milestone's self-tests. (Whether it's actually
+     * *visible* is checked separately via a QEMU screendump - reading
+     * our own writes back only proves the mapping and pixel math are
+     * right, not that anything reaches the emulated display.) */
+    fb_clear(0x001A1A2E);
+    fb_fill_rect(10, 10, 100, 50, 0x00E94560);
+    if (fb_get_pixel(0, 0) != 0x001A1A2E) {
+        panic("fb self-test: background color readback mismatch");
+    }
+    if (fb_get_pixel(59, 34) != 0x00E94560) {
+        panic("fb self-test: rectangle color readback mismatch (inside)");
+    }
+    if (fb_get_pixel(200, 200) != 0x001A1A2E) {
+        panic("fb self-test: rectangle color readback mismatch (outside, should be background)");
+    }
+    klog_puts("[fb] framebuffer clear/fill/readback self-test passed.\n\n");
+
+    /* M58 self-test: a real mode change, in the kernel, before anything
+     * has been built on top of the boot geometry. Three things are worth
+     * proving and only one of them is "the call returned 0":
+     *
+     *   1. The geometry SYS_fb_info would report is the one the device
+     *      actually took, not the one that was asked for.
+     *   2. The *pitch* is the one read back out of the adapter's own
+     *      VIRT_WIDTH register. fb.h has said since M16 that pitch is not
+     *      necessarily width * 4; a mode change that assumed otherwise
+     *      would shear the whole screen, and would do it on a machine
+     *      where the only way to see the damage is to look at it.
+     *   3. The mapping actually grew. A larger mode needs more pages than
+     *      the boot mode's mapping covered, so the far corner of the new
+     *      mode is written and read back - which faults in ring 0 if
+     *      fb_remap did not map through to it, and returns the wrong
+     *      value if the pitch is wrong.
+     *
+     * Then it puts the boot mode back, because everything after this line
+     * (the console, the desktop, every other self-test's pixel
+     * coordinates) is written against it.
+     *
+     * On hardware with no DISPI adapter this is skipped rather than
+     * failed - "this display cannot be resized after boot" is the honest
+     * answer there, and the Display pane says exactly that. */
+    {
+        uint32_t boot_w = fb_width(), boot_h = fb_height(), boot_pitch = fb_pitch_bytes();
+
+        if (!dispi_available()) {
+            klog_puts("[m58] no runtime mode-setting interface on this adapter - "
+                       "resolution stays what the firmware chose (self-test skipped).\n\n");
+        } else {
+            display_mode_t list[DISPLAY_MAX_MODES];
+            int n = dispi_get_modes(list, DISPLAY_MAX_MODES);
+            if (n <= 0) {
+                panic("M58 self-test: a DISPI adapter answered the probe but offers no modes");
+            }
+            /* Any offered mode that is not the one already running - and
+             * preferring a *larger* one, since growing the mapping is the
+             * half that can actually fail. */
+            int pick = -1;
+            for (int i = 0; i < n; i++) {
+                if (list[i].width == boot_w && list[i].height == boot_h) {
+                    continue;
+                }
+                if (pick < 0 || (uint64_t)list[i].width * list[i].height >
+                                 (uint64_t)list[pick].width * list[pick].height) {
+                    pick = i;
+                }
+            }
+            if (pick < 0) {
+                panic("M58 self-test: the only offered mode is the one already running");
+            }
+
+            uint32_t pitch = 0;
+            if (dispi_set_mode(list[pick].width, list[pick].height, &pitch) != 0) {
+                panic("M58 self-test: the adapter refused a mode this driver had already validated");
+            }
+            if (pitch < list[pick].width * 4u) {
+                panic("M58 self-test: the pitch read back from the device is narrower than one row of pixels");
+            }
+            fb_remap(pitch, list[pick].width, list[pick].height);
+
+            if (fb_width() != list[pick].width || fb_height() != list[pick].height) {
+                panic("M58 self-test: fb geometry after a mode change is not the mode that was set");
+            }
+            if (fb_pitch_bytes() != pitch) {
+                panic("M58 self-test: fb pitch is not the one read back from the device");
+            }
+            if (fb_mapped_bytes() < (uint64_t)pitch * fb_height()) {
+                panic("M58 self-test: the framebuffer mapping does not cover the new mode");
+            }
+
+            /* The far corner - the pixel that only exists in the new
+             * mode, at the stride the device chose. */
+            fb_put_pixel(fb_width() - 1, fb_height() - 1, 0x00123456u);
+            if (fb_get_pixel(fb_width() - 1, fb_height() - 1) != 0x00123456u) {
+                panic("M58 self-test: the last pixel of the new mode did not read back");
+            }
+
+            uint32_t back_pitch = 0;
+            if (dispi_set_mode(boot_w, boot_h, &back_pitch) != 0) {
+                panic("M58 self-test: could not restore the boot mode - this is the failure the revert timer exists for");
+            }
+            fb_remap(back_pitch, boot_w, boot_h);
+            if (fb_width() != boot_w || fb_height() != boot_h || fb_pitch_bytes() != boot_pitch) {
+                panic("M58 self-test: the boot mode did not come back exactly as it was");
+            }
+            fb_clear(0x00000000u);
+
+            klog_puts("[m58] display mode set and read back from the device (geometry, "
+                       "device-chosen pitch and a grown mapping), then restored - self-test passed.\n\n");
+        }
+    }
+
+    /* M17: hand logging over to the graphical console (console.h) - from
+     * here on, klog's visual half draws through the framebuffer instead
+     * of VGA text mode. Everything above this line (including the fb
+     * self-test's own deliberately-visible rectangle) only ever reached
+     * VGA text mode, since console_init() needs the framebuffer mapped
+     * first; serial output (tools/qemu-serial-test.sh) is unaffected
+     * either way. */
+    console_init();
+
+    /* M39 self-test: unlike almost every GUI-facing milestone since M18,
+     * this one is fully checkable headlessly - glyph geometry is exact
+     * data, not a mouse hover or a "does it look bold" judgement call.
+     * Two halves:
+     *
+     *   1. The table itself. gen-font.c already enforces M39's shared
+     *      metric at generation time, but that's a host program that
+     *      never boots; this proves the table that actually shipped
+     *      inside the kernel image is the one those checks passed on -
+     *      column 7 reserved blank everywhere, every printable
+     *      codepoint present, control codes blank, and font8x16_bold
+     *      exactly the lossless one-column dilation compositor.c now
+     *      looks up instead of recomputing per pixel.
+     *   2. The rendered result. "Axg" through the real console blit
+     *      path, read back out of the framebuffer: 'A' must start on
+     *      the cap line, 'x' on the x-height line, both must sit on the
+     *      same baseline, 'g' must reach the descender row, and column
+     *      7 of all three cells must stay background. That is M39's
+     *      whole premise - text on one shared baseline with uniform
+     *      spacing - measured in real pixels rather than asserted.
+     *
+     * Runs after console_init() (so the framebuffer holds a cleared
+     * console with the cursor at 0,0) but before klog_use_console(), so
+     * the screen this reads back is exactly what it drew and nothing
+     * else. It re-inits the console afterward to hand a clean screen to
+     * the logging that follows. */
+    {
+        int all_ok = 1;
+
+        for (int code = 0; code < 128 && all_ok; code++) {
+            for (int row = 0; row < FONT_HEIGHT; row++) {
+                if (font8x16[code][row] & 0x01u) {
+                    klog_puts("[font39] glyph 0x");
+                    klog_put_hex32((uint32_t)code);
+                    klog_puts(" has ink in column 7, the reserved advance gap.\n");
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+
+        for (int code = 0x21; code <= 0x7E && all_ok; code++) {
+            int blank = 1;
+            for (int row = 0; row < FONT_HEIGHT; row++) {
+                if (font8x16[code][row]) {
+                    blank = 0;
+                    break;
+                }
+            }
+            if (blank) {
+                klog_puts("[font39] printable codepoint 0x");
+                klog_put_hex32((uint32_t)code);
+                klog_puts(" is blank - the table is incomplete.\n");
+                all_ok = 0;
+            }
+        }
+
+        for (int code = 0; code < 128 && all_ok; code++) {
+            if (code > 0x20 && code < 0x7F) {
+                continue; /* printable, checked non-blank above */
+            }
+            for (int row = 0; row < FONT_HEIGHT; row++) {
+                if (font8x16[code][row]) {
+                    klog_puts("[font39] non-printable codepoint 0x");
+                    klog_put_hex32((uint32_t)code);
+                    klog_puts(" should be blank but isn't.\n");
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+
+        /* Lossless bold: with column 7 reserved (proved above), nothing
+         * can shift off the end, so the dilation is exactly reversible
+         * in the sense that matters - no ink is dropped. M38's runtime
+         * smear had no such guarantee. */
+        for (int code = 0; code < 128 && all_ok; code++) {
+            for (int row = 0; row < FONT_HEIGHT; row++) {
+                uint8_t bits = font8x16[code][row];
+                if (font8x16_bold[code][row] != (uint8_t)(bits | (bits >> 1))) {
+                    klog_puts("[font39] font8x16_bold disagrees with the dilation of font8x16 at 0x");
+                    klog_put_hex32((uint32_t)code);
+                    klog_putc('\n');
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+
+        if (all_ok) {
+            /* Cell 0 row 0 is blank in every glyph (nothing reaches
+             * above FONT_CAP_TOP), so this samples the console's own
+             * background without needing console.c's private constant. */
+            console_puts("Axg");
+            uint32_t bg = fb_get_pixel(0, 0);
+
+            /* top/bottom lit row per cell, and whether column 7 stayed clear */
+            int top[3], bot[3], gap_clear[3];
+            for (int cell = 0; cell < 3; cell++) {
+                top[cell] = -1;
+                bot[cell] = -1;
+                gap_clear[cell] = 1;
+                for (int y = 0; y < FONT_HEIGHT; y++) {
+                    for (int x = 0; x < FONT_WIDTH; x++) {
+                        if (fb_get_pixel((uint32_t)(cell * FONT_WIDTH + x), (uint32_t)y) != bg) {
+                            if (top[cell] < 0) {
+                                top[cell] = y;
+                            }
+                            bot[cell] = y;
+                            if (x == FONT_WIDTH - 1) {
+                                gap_clear[cell] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+
+            struct { const char *what; int got; int want; } checks[] = {
+                { "'A' does not start on the shared cap line",        top[0], FONT_CAP_TOP },
+                { "'A' does not sit on the shared baseline",          bot[0], FONT_BASELINE - 1 },
+                { "'x' does not start on the shared x-height line",   top[1], FONT_X_TOP },
+                { "'x' does not sit on the shared baseline",          bot[1], FONT_BASELINE - 1 },
+                { "'g' does not start on the shared x-height line",   top[2], FONT_X_TOP },
+                { "'g' does not reach the shared descender row",      bot[2], FONT_DESC_LAST },
+                { "'A' drew into its advance gap (column 7)",         gap_clear[0], 1 },
+                { "'x' drew into its advance gap (column 7)",         gap_clear[1], 1 },
+                { "'g' drew into its advance gap (column 7)",         gap_clear[2], 1 },
+            };
+            for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
+                if (checks[i].got != checks[i].want) {
+                    klog_puts("[font39] rendered-pixel check failed: ");
+                    klog_puts(checks[i].what);
+                    klog_puts(" - expected ");
+                    klog_put_hex32((uint32_t)checks[i].want);
+                    klog_puts(" got ");
+                    klog_put_hex32((uint32_t)checks[i].got);
+                    klog_putc('\n');
+                    all_ok = 0;
+                }
+            }
+
+            console_init(); /* clear the sample text back off the screen */
+        }
+
+        if (!all_ok) {
+            panic("M39 font self-test: glyph table and/or rendered text metric is wrong");
+        }
+        klog_puts("[font39] glyph table + shared-baseline render self-test passed.\n\n");
+    }
+
+    klog_use_console();
+    klog_puts("[console] framebuffer text console active - logging switched over from VGA text mode.\n\n");
+
+    /* Every IRQ line has been masked since pic_remap() (M4) - nothing has
+     * needed one until now. IF has actually been set since real mode (the
+     * BIOS leaves it that way and nothing here has touched it), so this
+     * `sti` is defensive documentation more than a state change: from
+     * this point on, unmasked IRQ lines really do fire. */
+    __asm__ volatile("sti");
+
+    pit_init();
+    /* M69: calibrated against the PIT, so it has to come after it. See
+     * arch/x86_64/tsc.h - the PIT is the only clock that knows what a
+     * second is, and the TSC is the only one fine enough to measure a
+     * frame with. */
+    tsc_init();
+    klog_puts("[pit] channel 0 programmed for ");
+    klog_put_hex32(PIT_HZ);
+    klog_puts(" Hz, IRQ0 unmasked.\n");
+
+    /* Self-test: sleep for a bit and confirm the tick counter actually
+     * advanced. This is also an implicit hang test - if IRQ0 never fired
+     * (bad PIC remap, bad IDT gate, bad divisor), pit_sleep_ms's internal
+     * wait loop would never terminate and boot would stop dead right
+     * here instead of printing anything below. */
+    uint64_t before = pit_get_ticks();
+    pit_sleep_ms(50);
+    uint64_t after = pit_get_ticks();
+    klog_puts("[pit] slept 50ms: ticks ");
+    klog_put_hex64(before);
+    klog_puts(" -> ");
+    klog_put_hex64(after);
+    klog_putc('\n');
+
+    keyboard_init();
+    klog_puts("[kbd] IRQ1 unmasked, waiting up to 3s for a test keypress "
+               "(QEMU monitor: 'sendkey <key>')...\n");
+    int key = -1;
+    uint64_t deadline = pit_get_ticks() + 3 * PIT_HZ;
+    while (pit_get_ticks() < deadline) {
+        key = keyboard_read();
+        if (key != -1) {
+            break;
+        }
+        __asm__ volatile("hlt");
+    }
+    if (key != -1) {
+        klog_puts("[kbd] received keypress: '");
+        klog_putc((char)key);
+        klog_puts("'\n");
+    } else {
+        klog_puts("[kbd] no keypress within timeout - driver is installed, "
+                   "just untested interactively this boot.\n");
+    }
+
+    klog_putc('\n');
+
+    /* M18: PS/2 mouse, IRQ12 - same shape of bring-up as the keyboard
+     * self-test just above (bounded wait for real interactive input, a
+     * clean "installed but untested" message on timeout rather than
+     * hanging boot). Cursor starts at screen center, off to one side of
+     * where the console's own text is scrolling (top-left), so the two
+     * don't visibly collide during this test - cursor.c has no real
+     * damage-tracking against console output, that's M20's job once a
+     * compositor owns the framebuffer for real. */
+    mouse_init();
+    cursor_init((int32_t)(fb_width() / 2), (int32_t)(fb_height() / 2));
+    klog_puts("[mouse] IRQ12 unmasked, cursor drawn at screen center. Waiting "
+               "up to 3s for test movement (QEMU monitor: 'mouse_move dx dy' "
+               "/ 'mouse_button val')...\n");
+    int got_mouse_event = 0;
+    mouse_event_t last_ev = {0, 0, 0, 0, 0};
+    uint64_t mouse_deadline = pit_get_ticks() + 3 * PIT_HZ;
+    while (pit_get_ticks() < mouse_deadline) {
+        mouse_event_t ev;
+        while (mouse_read(&ev)) {
+            cursor_move(ev.dx, ev.dy);
+            last_ev = ev;
+            got_mouse_event = 1;
+        }
+        __asm__ volatile("hlt");
+    }
+    if (got_mouse_event) {
+        klog_puts("[mouse] received movement/click - cursor now at (");
+        klog_put_hex32((uint32_t)cursor_x());
+        klog_puts(", ");
+        klog_put_hex32((uint32_t)cursor_y());
+        klog_puts(") buttons=0x");
+        klog_put_hex32(last_ev.buttons);
+        klog_putc('\n');
+    } else {
+        klog_puts("[mouse] no movement within timeout - driver is installed, "
+                   "just untested interactively this boot.\n");
+    }
+    klog_putc('\n');
+
+    /* M63: SSE on, before there is a second task to switch between.
+     * Everything above this line ran with the FPU in whatever state the
+     * firmware left it; from here it is this OS's, and every task carries
+     * its own copy of it. */
+    fpu_init_cpu();
+    sched_init();
+    /* M68: before anything can block. Two, not MAX_CPUS: every AP already
+     * registers its own `cpu-idle` identity in sched_init_ap and that
+     * identity is marked idle too, so the only CPU without one is the BSP.
+     * The spare is headroom, not a requirement. Kept small deliberately -
+     * every task in the table is one more entry in the scans wake_expired
+     * and the idle accounting do on every timer tick, and this is a
+     * hot path measured in a 16 ms frame budget. */
+    sched_spawn_idle_tasks(2);
+    klog_puts("[sched] round-robin scheduler initialized (this context is task 0).\n");
+    task_spawn("demo-a", demo_task, "A");
+    task_spawn("demo-b", demo_task, "B");
+    klog_puts("[sched] spawned tasks A and B; letting them run via "
+               "preemption for ~1.5s...\n");
+    pit_sleep_ms(1500);
+    klog_puts("[sched] back on the main task - preemption round trip verified.\n\n");
+
+    /* Self-test: SYS_getpid and SYS_write via a real `int 0x80` round
+     * trip (gate -> syscall_common_stub -> syscall_handler -> dispatch
+     * table -> back through RAX), the same "prove it, don't just trust
+     * it compiled" discipline as the int3 test above. */
+    long pid = do_syscall(SYS_getpid, 0, 0, 0);
+    klog_puts("[syscall] getpid() = ");
+    klog_put_hex64((uint64_t)pid);
+    klog_putc('\n');
+
+    static const char msg[] = "[syscall] hello via SYS_write\n";
+    long written = do_syscall(SYS_write, 1, (uint64_t)msg, sizeof(msg) - 1);
+    if (written != (long)sizeof(msg) - 1) {
+        panic("syscall self-test: SYS_write returned an unexpected length");
+    }
+
+    task_spawn("syscall-exit", syscall_exit_task, NULL);
+    pit_sleep_ms(200);
+    klog_puts("[syscall] SYS_exit self-test task ran and terminated.\n\n");
+
+    /* M14 self-tests: pipes (both the raw kernel primitive and the
+     * SYS_pipe/SYS_read/SYS_write syscall path), signals (SYS_kill), and
+     * process/wait semantics (SYS_wait(-1) reaping exactly the children
+     * spawned for it, SYS_getpgid) - the same "prove it, don't just trust
+     * it compiled" discipline as every earlier milestone's self-tests. */
+
+    /* Pipe self-test 1: kernel-level pipe_create/pipe_write/pipe_read,
+     * exercising the blocking buffer logic directly (not through a
+     * syscall). The consumer starts before the producer has written
+     * anything, so pipe_read genuinely blocks (cooperatively yields) and
+     * gets woken by later scheduling rather than finding data already
+     * there. */
+    pipe_t *test_pipe = pipe_create();
+    if (!test_pipe) {
+        panic("pipe self-test: pipe_create failed");
+    }
+    task_t *producer = task_spawn("pipe-producer", pipe_producer_task, test_pipe);
+    task_t *consumer = task_spawn("pipe-consumer", pipe_consumer_task, test_pipe);
+    while (producer->state != TASK_TERMINATED || consumer->state != TASK_TERMINATED) {
+        schedule();
+    }
+    kfree(test_pipe);
+    klog_puts("[pipe] kernel-level producer/consumer self-test passed.\n\n");
+
+    /* Pipe self-test 2: the syscall path - SYS_pipe installs a pair of
+     * fds into this very task's own fd table, and SYS_write/SYS_read
+     * move data through them exactly like a real program would, without
+     * ever touching pipe_t directly. */
+    int pipe_fds[2];
+    if (do_syscall(SYS_pipe, (uint64_t)pipe_fds, 0, 0) != 0) {
+        panic("SYS_pipe self-test: pipe creation failed");
+    }
+    static const char pipe_msg[] = "hello through a syscall pipe";
+    long pipe_written = do_syscall(SYS_write, (uint64_t)pipe_fds[1], (uint64_t)pipe_msg, sizeof(pipe_msg) - 1);
+    if (pipe_written != (long)sizeof(pipe_msg) - 1) {
+        panic("SYS_pipe self-test: SYS_write returned an unexpected length");
+    }
+    char pipe_readback[64] = {0};
+    long pipe_read_n = do_syscall(SYS_read, (uint64_t)pipe_fds[0], (uint64_t)pipe_readback, sizeof(pipe_readback) - 1);
+    if (pipe_read_n != (long)sizeof(pipe_msg) - 1 || k_strcmp(pipe_readback, pipe_msg) != 0) {
+        panic("SYS_pipe self-test: SYS_read returned unexpected data");
+    }
+    klog_puts("[pipe] SYS_pipe/SYS_write/SYS_read self-test passed.\n\n");
+
+    /* Signal self-test: a spinner task looping on pure CPU-bound work
+     * (never yields, never syscalls) can only ever stop via a signal
+     * actually being delivered through scheduler_tick's per-tick
+     * pending-signal check (sched.c) - syscall_handler's check (M14)
+     * would never fire for a task that never syscalls. */
+    task_t *spinner = task_spawn("spinner", spinner_task, NULL);
+    pit_sleep_ms(100);
+    if (do_syscall(SYS_kill, (uint64_t)spinner->id, SIGTERM, 0) != 0) {
+        panic("SYS_kill self-test: kill on a live task failed");
+    }
+    while (spinner->state != TASK_TERMINATED) {
+        schedule();
+    }
+    if (spinner->exit_code != 128 + SIGTERM) {
+        panic("SYS_kill self-test: unexpected exit code after SIGTERM");
+    }
+    klog_puts("[signal] SIGTERM self-test passed (spinner task terminated).\n\n");
+
+    /* Process/wait self-test: drain any unreaped children left over from
+     * earlier self-tests, spawn exactly two fresh ones, and confirm
+     * SYS_wait(-1) reaps precisely those two (in either order) before
+     * correctly reporting -1 once none remain - "more complete wait
+     * semantics" (this milestone's own wording), not just the
+     * single-pid form M13 already proved. */
+    while (do_syscall(SYS_wait, (uint64_t)-1, 0, 0) != -1) {
+    }
+    task_t *quick_a = task_spawn("quick", quick_task, NULL);
+    task_t *quick_b = task_spawn("quick", quick_task, NULL);
+    long reaped1 = do_syscall(SYS_wait, (uint64_t)-1, 0, 0);
+    long reaped2 = do_syscall(SYS_wait, (uint64_t)-1, 0, 0);
+    int got_a = (reaped1 == quick_a->id) || (reaped2 == quick_a->id);
+    int got_b = (reaped1 == quick_b->id) || (reaped2 == quick_b->id);
+    if (!got_a || !got_b || reaped1 == reaped2) {
+        panic("SYS_wait(-1) self-test: did not reap exactly the two expected children");
+    }
+    if (do_syscall(SYS_wait, (uint64_t)-1, 0, 0) != -1) {
+        panic("SYS_wait(-1) self-test: expected -1 once no children remain");
+    }
+    klog_puts("[wait] SYS_wait(-1) self-test passed (reaped two children, then -1).\n\n");
+
+    /* Process-group self-test: SYS_getpgid is read-only (no job control
+     * exists to ever change a group), so all there is to prove is that a
+     * spawned task really does inherit its parent's pgid - task 0's own
+     * group (0, set by sched_init) propagating down to a task it spawns
+     * directly.
+     *
+     * M54: this used to ask about quick_a, which the SYS_wait(-1) test
+     * just above had already reaped - fine when a reaped task's slot
+     * stayed valid forever, and a -1 the moment slots started coming
+     * back. Asking about a *live* child is what the test always meant;
+     * the old version only worked because nothing ever died completely.
+     * `spinner_task` is used because it does not exit on its own, so it
+     * is still there to be asked about. */
+    task_t *pgid_child = task_spawn("pgidprobe", spinner_task, NULL);
+    long self_pgid = do_syscall(SYS_getpgid, 0, 0, 0);
+    long child_pgid = do_syscall(SYS_getpgid, (uint64_t)pgid_child->id, 0, 0);
+    do_syscall(SYS_kill, (uint64_t)pgid_child->id, SIGKILL, 0);
+    do_syscall(SYS_wait, (uint64_t)pgid_child->id, 0, 0);
+    if (self_pgid != 0 || child_pgid != self_pgid) {
+        panic("SYS_getpgid self-test: child did not inherit its parent's process group");
+    }
+    klog_puts("[pgid] SYS_getpgid self-test passed (child inherited pgid ");
+    klog_put_hex64((uint64_t)self_pgid);
+    klog_puts(").\n\n");
+
+    /* M92: the block layer, before anything reads a sector. Probes for a
+     * virtio block device and falls back to the ATA PIO driver, then puts
+     * a write-through cache in front of whichever it found. Deliberately
+     * here rather than beside the other drivers at the top of
+     * kernel_main: it allocates 8 MiB, and the frame allocator's own
+     * self-tests run before this point and compare free-frame counts. */
+    blk_init();
+
+    /* M12: bring up the disk filesystem, seeding it with every embedded
+     * program on first boot only - every subsequent load (including the
+     * init spawn just below) reads back from disk like any other file
+     * would be, which is the point. */
+    vfs_init();
+    /* ---- M92 self-test: what the disk costs, measured -----------------
+     *
+     * M87 declined a buffer cache with "no measurement has asked for
+     * one", and M69's rule is that performance work waits for a
+     * measurement. This is the measurement, and it is taken here rather
+     * than described: the same megabyte read twice, once with the cache
+     * empty and once with it warm.
+     *
+     * The cold number is what the device costs. The warm number is what
+     * the cache costs. The ratio between them is the only honest way to
+     * say whether a cache was worth building, and it is printed rather
+     * than asserted against a threshold - a threshold would be this
+     * project guessing what the host it happens to be running on should
+     * manage.
+     *
+     * What IS asserted is correctness, because a fast cache that returns
+     * the wrong bytes is worse than no cache: the warm read has to
+     * produce the same megabyte as the cold one, byte for byte.
+     */
+    {
+        blk_stats_t before, after;
+        static uint8_t cold[64 * 1024];
+        static uint8_t warm[64 * 1024];
+        const uint32_t RUNS = 16; /* 16 x 64 KiB = 1 MiB */
+        const uint32_t SECTORS = sizeof(cold) / BLK_SECTOR_SIZE;
+
+        /* Timed with the TSC, not the PIT, and M69's header says exactly
+         * why: the PIT ticks every 10 ms, and the first version of this
+         * measurement reported "0 ms cold, 0 ms warm" - which is not a
+         * ratio, it is a clock saying the question was below its
+         * resolution. Reading a megabyte over DMA turns out to be one of
+         * the things a 10 ms clock cannot see. */
+        blk_cache_drop();
+        blk_stats(&before);
+        uint64_t c0 = tsc_read();
+        uint32_t sum_cold = 0;
+        for (uint32_t r = 0; r < RUNS; r++) {
+            blk_read(LEANFS_START_LBA + r * SECTORS, SECTORS, cold);
+            for (uint32_t i = 0; i < sizeof(cold); i += 512) {
+                sum_cold += cold[i];
+            }
+        }
+        uint64_t c1 = tsc_read();
+
+        uint32_t sum_warm = 0;
+        for (uint32_t r = 0; r < RUNS; r++) {
+            blk_read(LEANFS_START_LBA + r * SECTORS, SECTORS, warm);
+            for (uint32_t i = 0; i < sizeof(warm); i += 512) {
+                sum_warm += warm[i];
+            }
+        }
+        uint64_t c2 = tsc_read();
+        blk_stats(&after);
+        uint64_t cold_us = tsc_to_us(c1 - c0);
+        uint64_t warm_us = tsc_to_us(c2 - c1);
+
+        if (sum_cold != sum_warm) {
+            panic("M92 self-test: the cache returned different bytes than the device did");
+        }
+        /* The cold pass must actually have gone to the device and the
+         * warm pass must actually not have. Without both of these the
+         * two timings could be measuring the same thing twice - which is
+         * exactly how a cache measurement passes for the wrong reason,
+         * and the same trap M82's frame-count lower bound exists for. */
+        uint64_t dev_reads_cold = after.device_reads - before.device_reads;
+        if (dev_reads_cold < RUNS * SECTORS) {
+            panic("M92 self-test: the cold pass did not read a full megabyte from the device");
+        }
+        if (after.hits <= before.hits) {
+            panic("M92 self-test: the warm pass never hit the cache - it is not caching");
+        }
+
+        klog_perf("disk_1mib_cold_us", cold_us, "us");
+        klog_perf("disk_1mib_warm_us", warm_us, "us");
+        klog_puts("[m92] a disk worth reading: 1 MiB through ");
+        klog_puts(blk_backend_name());
+        klog_puts(" cold in ");
+        klog_put_dec((uint32_t)cold_us);
+        klog_puts(" us and warm from the cache in ");
+        klog_put_dec((uint32_t)warm_us);
+        klog_puts(" us, identical byte for byte; 0x");
+        klog_put_hex64(after.hits);
+        klog_puts(" of 0x");
+        klog_put_hex64(after.reads);
+        klog_puts(" reads served without touching the device since boot - self-test passed.\n\n");
+    }
+
+    tty_init(); /* M85: the terminal, before anything can be its foreground job */
+    /* M53: the layout, created before anything is written into it. Each
+     * one is idempotent-by-check rather than by vfs_mkdir returning 0 for
+     * an existing path - see leanfs.h on why "already there" is an error
+     * there rather than a no-op. */
+    {
+        static const char *const LAYOUT[] = {PATH_BIN, PATH_HOME, PATH_ETC, PATH_TMP};
+        for (size_t i = 0; i < sizeof(LAYOUT) / sizeof(LAYOUT[0]); i++) {
+            if (!vfs_exists(LAYOUT[i]) && vfs_mkdir(LAYOUT[i]) != 0) {
+                panic("vfs_mkdir: failed to create the filesystem layout");
+            }
+        }
+    }
+    for (size_t i = 0; i < EMBEDDED_PROGRAM_COUNT; i++) {
+        const embedded_program_t *p = &embedded_programs[i];
+        char path[PATH_MAX_LEN];
+        if (path_join(path, PATH_BIN_DIR, p->name) != 0) {
+            panic("a program name is too long to live in /bin");
+        }
+        if (!vfs_exists(path)) {
+            klog_puts("[fs] seeding disk with '");
+            klog_puts(path);
+            klog_puts("' (first boot only)...\n");
+            size_t size = (size_t)(p->end - p->start);
+            if (vfs_write(path, p->start, size) != 0) {
+                panic("vfs_write: failed to seed a program onto disk");
+            }
+        }
+    }
+    klog_puts("[fs] all user programs present in " PATH_BIN ".\n\n");
+
+    /* M53: one file in /home on a fresh disk. Not decoration - before
+     * this milestone the file manager opened on a namespace that always
+     * had two dozen things in it, and now it opens on a directory that
+     * would otherwise be empty on a machine's first boot, which reads as
+     * "this is broken" rather than "this is new". It also gives the
+     * interactive suite a real file to drag, which is a smaller reason
+     * but a real one. */
+    /* M74: and more than one of them. A fresh disk used to boot to a
+     * desktop with seeded icons and a single file - which is a demo. The
+     * difference between a demo and a machine somebody just got is that
+     * the second one has something in it: a README that says what this
+     * is, a note to edit, and a directory to open. All three exist so
+     * that the first thing a person does - open Files, open the editor -
+     * lands on something rather than on emptiness.
+     *
+     * Written only when absent, so a person's own edits are never
+     * overwritten by a later boot. That is the same rule the program
+     * seeding above follows and it matters more here: these are the only
+     * files on this machine that a person is expected to change. */
+    {
+        static const struct {
+            const char *path;
+            const char *body;
+        } FIRST_BOOT[] = {
+            {PATH_HOME_DIR "readme.txt",
+             "Welcome to lean_os.\n"
+             "\n"
+             "This is /home - your files live here.\n"
+             "Programs live in /bin, settings in /etc.\n"
+             "\n"
+             "Getting around\n"
+             "  Double-click a name in Files to open it, or .. to go up.\n"
+             "  Ctrl+Space opens the launcher; type a few letters and press Enter.\n"
+             "  Ctrl+Shift+Esc opens the task manager.\n"
+             "  Ctrl+Alt+Left/Right move between the four desktops.\n"
+             "\n"
+             "The terminal\n"
+             "  ls, cat, cp, echo, env, cd, pwd - and > to redirect.\n"
+             "  A file starting with #!/bin/sh is a program: run it by name.\n"
+             "\n"
+             "Your windows come back\n"
+             "  Whatever is open when this machine stops is open again when\n"
+             "  it starts, in the same places. /etc/session.conf is the file\n"
+             "  that remembers, and it is plain text.\n"},
+            {PATH_HOME_DIR "notes.txt",
+             "Scratch file.\n"
+             "\n"
+             "The editor has undo (Ctrl+Z), redo (Ctrl+Y), find (Ctrl+F),\n"
+             "cut/copy/paste, and a File menu that can save somewhere else.\n"
+             "\n"
+             "Nothing here is precious - edit it.\n"},
+            {PATH_HOME_DIR "hello.sh",
+             "#!/bin/sh\n"
+             "# A script is a program here. Run it from the terminal as\n"
+             "#   /home/hello.sh\n"
+             "echo \"hello from $SHELL\"\n"
+             "pwd\n"
+             "echo \"there are these programs:\"\n"
+             "ls /bin\n"},
+        };
+        for (size_t i = 0; i < sizeof(FIRST_BOOT) / sizeof(FIRST_BOOT[0]); i++) {
+            if (vfs_exists(FIRST_BOOT[i].path)) {
+                continue;
+            }
+            size_t len = 0;
+            while (FIRST_BOOT[i].body[len]) {
+                len++;
+            }
+            if (vfs_write(FIRST_BOOT[i].path, FIRST_BOOT[i].body, len) != 0) {
+                panic("vfs_write: failed to seed a first-boot file into " PATH_HOME);
+            }
+        }
+    }
+
+    /* M15 self-test: every file up to now (the seeded programs) fits in
+     * leanfs's direct blocks alone (<= 8 KiB), which would never exercise
+     * the new singly-indirect path at all - "compiles" isn't "works", so
+     * round-trip something deliberately bigger than LEANFS_DIRECT_BLOCKS *
+     * LEANFS_BLOCK_SIZE (8 KiB) but within the new LEANFS_MAX_FILE_SIZE
+     * (72 KiB) cap. */
+    {
+        size_t fstest_len = 20000; /* spans 16 direct + ~23 indirect blocks */
+        uint8_t *fstest_buf = (uint8_t *)kmalloc(fstest_len);
+        uint8_t *fstest_readback = (uint8_t *)kmalloc(fstest_len);
+        if (!fstest_buf || !fstest_readback) {
+            panic("out of memory for leanfs indirect-block self-test");
+        }
+        for (size_t i = 0; i < fstest_len; i++) {
+            fstest_buf[i] = (uint8_t)(i * 31 + 7);
+        }
+        if (vfs_write(PATH_TMP_DIR "fstest", fstest_buf, fstest_len) != 0) {
+            panic("leanfs indirect-block self-test: vfs_write failed");
+        }
+        k_memset(fstest_readback, 0, fstest_len);
+        int64_t fstest_size = vfs_read(PATH_TMP_DIR "fstest", fstest_readback, fstest_len);
+        if (fstest_size != (int64_t)fstest_len) {
+            panic("leanfs indirect-block self-test: size mismatch on readback");
+        }
+        for (size_t i = 0; i < fstest_len; i++) {
+            if (fstest_readback[i] != fstest_buf[i]) {
+                panic("leanfs indirect-block self-test: data mismatch on readback");
+            }
+        }
+        kfree(fstest_buf);
+        kfree(fstest_readback);
+        klog_puts("[fs] leanfs indirect-block self-test passed (20000-byte round trip).\n\n");
+    }
+
+    /* M19 self-test: spawn the real ring-3 memtest program (not a
+     * kernel-side stand-in) to prove user-space malloc/free and
+     * cross-process shared memory both actually work - "compiles" isn't
+     * "works", same discipline as every earlier milestone's self-tests.
+     * memtest itself spawns a second copy of itself (the shm reader
+     * role) and reports the combined result via its own exit code, so
+     * this only needs to wait for the one (creator) child and check
+     * that. */
+    {
+        size_t memtest_size_bytes = 0;
+        uint8_t *memtest_image = read_program("/bin/memtest", &memtest_size_bytes);
+        int64_t memtest_size = (int64_t)memtest_size_bytes;
+        task_t *memtest_task = process_spawn("memtest", memtest_image, (size_t)memtest_size, "");
+        kfree(memtest_image);
+        long memtest_status = do_syscall(SYS_wait, (uint64_t)memtest_task->id, 0, 0);
+        if (memtest_status != 0) {
+            panic("memtest self-test: nonzero exit code - malloc or shm is broken");
+        }
+        klog_puts("[memtest] user-space malloc/free and cross-process shm self-tests passed.\n\n");
+    }
+
+    /* M57 self-test: the proportional UI font family, checked from ring 3
+     * because that is the only place it exists - uifont.c is a
+     * user_space library, and the property being proved is that
+     * gfx_text_width() and gfx_draw_text_font() agree about where the
+     * ink lands. fonttest.c renders into its own buffer and measures the
+     * result; see its header for why a table check would not have been
+     * the same test. Spawned and waited on exactly the way memtest above
+     * is. */
+    {
+        size_t fonttest_size_bytes = 0;
+        uint8_t *fonttest_image = read_program("/bin/fonttest", &fonttest_size_bytes);
+        int64_t fonttest_size = (int64_t)fonttest_size_bytes;
+        task_t *fonttest_task = process_spawn("fonttest", fonttest_image, (size_t)fonttest_size, "");
+        kfree(fonttest_image);
+        long fonttest_status = do_syscall(SYS_wait, (uint64_t)fonttest_task->id, 0, 0);
+        if (fonttest_status != 0) {
+            panic("M57 font self-test: a measured text width disagrees with the pixels drawn");
+        }
+        klog_puts("[m57] proportional UI font: per-glyph advances, one shared baseline across three sizes, and every measured width matching the ink drawn - self-test passed.\n\n");
+    }
+
+    if (boot_selftests_enabled()) {
+        boot_selftests_desktop();
+    }
+
+
+    /* Stretch goal: SMP. Deliberately brought up *after* every M-numbered
+     * self-test above, not right after M7's scheduler one - several of
+     * those (M20-M22's compositor/client tests especially) rely on
+     * scheduling being deterministic enough that "spawned one at a time"
+     * really does mean one connects before the next starts (see their own
+     * comments), an assumption genuine multi-core parallelism can break
+     * even with generous sleeps in between. Bringing SMP up afterward lets
+     * every earlier milestone keep the exact single-core-equivalent
+     * environment it was written and verified against, while still
+     * standing up real multi-core support as additive capability from
+     * here on - which is honest, not a workaround: nothing before this
+     * point claims to be SMP-tested, and nothing after it needs to be
+     * deterministic across a single core anymore.
+     *
+     * smp_init() has to run after sched_init() (long since true by now) -
+     * an AP becomes a real schedulable task (sched_init_ap) the moment it
+     * checks in, so the scheduler needs to already exist to receive it.
+     * Falls back to single-core (cpu 0 only) if ACPI/the MADT isn't
+     * present - see smp.c's own comment on why that's a normal fallback,
+     * not a panic. */
+    /* M47: whatever the firmware handed the loader, before anything asks
+     * ACPI a question. acpi.c still falls back to its legacy scan if this
+     * is 0, which is what keeps a non-UEFI boot (or a firmware that
+     * publishes no RSDP) on exactly the path it was on before. */
+    acpi_set_rsdp(rsdp_phys);
+
+    smp_init();
+
+    /* M47: reads the FADT once, here, rather than from inside the
+     * shutdown path - walking ACPI tables is exactly the kind of work
+     * that path should not be doing, and this is the same RSDT/XSDT walk
+     * smp_init just did for the MADT. */
+    power_init();
+
+    /* Networking is real init and comes up on every boot, self-tests or
+     * not - a desktop with no network is a different machine. net_init()
+     * (rtl8139_init underneath) returns 0 rather than panicking if no
+     * RTL8139 NIC is attached: unlike every hardware-assumed-present
+     * driver elsewhere in this kernel, an RTL8139 specifically is a
+     * legacy chip real machines (docs/real-hardware.md) essentially never
+     * have, so treating its absence as fatal would block every
+     * real-hardware boot outright. Degrades the same way the
+     * keyboard/mouse probes above do: log it, skip what depends on it,
+     * keep booting.
+     *
+     * Q1: this used to sit inside the self-test region with the ICMP
+     * round-trip test nested in its `if`. Gating that region would have
+     * silently taken the network with it. */
+    if (!net_init()) {
+        klog_puts("[net] no RTL8139 NIC found - networking unavailable this boot "
+                   "(expected on real hardware; see docs/real-hardware.md).\n\n");
+    }
+
+    if (boot_selftests_enabled()) {
+        boot_selftests_system();
+    }
+
 
     /* M47: whatever the user had chosen, back where they left it - the
-     * self-tests above have been running against pinned defaults. */
-    selftest_settings_restore();
+     * self-tests above have been running against pinned defaults. Q1:
+     * paired with the install in boot_selftests_desktop, so a boot that
+     * ran no self-tests never touched the file and has nothing to put
+     * back. Restoring unconditionally would overwrite a user's settings
+     * with whatever the *last test boot* saved. */
+    if (boot_selftests_enabled()) {
+        selftest_settings_restore();
+    }
 
     /* M48: how much of the fixed task table the self-tests above have
      * spent before the desktop even starts. Slots are never recycled
@@ -10701,9 +10931,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * false failure is for the boot to say. It is also the number that
      * tells you whether replacing fixed sleeps with condition waits is
      * paying for itself. */
-    klog_puts("[boot] reached the desktop handoff in ");
-    klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ) / 1000));
-    klog_puts(" s\n");
+    {
+        uint64_t boot_s = pit_get_ticks() * (1000 / PIT_HZ) / 1000;
+        klog_perf("boot_to_desktop_s", boot_s, "s");
+        klog_puts("[boot] reached the desktop handoff in ");
+        klog_put_dec((uint32_t)boot_s);
+        klog_puts(" s\n");
+    }
     klog_puts("[init] PID 1 spawned - handing off to the desktop shell.\n\n");
 
     /* M68: from here task 0 is the BSP's idle identity and nothing else.

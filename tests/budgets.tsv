@@ -1,0 +1,44 @@
+# tests/budgets.tsv - Q6: performance budgets, and where each came from.
+#
+# One row per measurement the kernel emits as a `[perf] name value unit`
+# line. tools/qemu-serial-test.sh reads this and fails the run when a
+# measurement exceeds its ceiling.
+#
+# Every number here is a CEILING with stated headroom over a MEASURED
+# value, in the same discipline SECONDS_TO_RUN's comment history in
+# qemu-serial-test.sh already applies to itself. The `measured` and
+# `commit` columns are what make a failure diagnosable: "the disk got
+# three times slower since b7bb520" is a starting point, "too slow" is
+# not.
+#
+# A budget that has sat at 2x slack for ten milestones is a bug in the
+# budget. Re-measure and tighten it, and say so here when you do.
+#
+# These were measured on QEMU under macOS on Apple Silicon, which is not
+# the same machine CI will use - see Q10. The first CI run is expected to
+# move several of these, and moving them with a recorded reason is the
+# process working.
+#
+# Q18: the `input_to_photon_*_{best,med,worst}` rows replaced a single
+# number that swung 3x between consecutive runs of the same image. The
+# `measured` column for those six is now a real observation, and the
+# first one taught something the single number could not: within one
+# boot the idle path is tight (40757 / 42303 / 43475 us - a 7% spread),
+# while the loaded worst frame is twice the loaded median (81547 against
+# 40742). So the 3x swing that motivated this milestone was *between*
+# boots, not within one, and it is the boot conditions that vary rather
+# than the path. That is a different problem, it is now visible, and it
+# is what these rows exist to keep visible.
+#
+# name<TAB>ceiling<TAB>unit<TAB>measured<TAB>commit<TAB>note
+boot_to_desktop_s	600	s	192	b7bb520	The full self-test boot. Dominated by tests that spawn a process and wait for it, so it is variable rather than merely large - the ceiling is set against a busy host, not a quiet one. An ordinary boot with self-tests off is ~8s and is not this number.
+disk_1mib_cold_us	400000	us	5208	b7bb520	1 MiB through virtio-blk, cache dropped first. The README quotes 5.6 ms for virtio and 95 ms for the ATA PIO fallback; the ceiling covers both paths plus headroom, because QEMU_DISK=ide runs the same marker.
+disk_1mib_warm_us	100000	us	2406	b7bb520	The same megabyte out of M92's write-through cache. Generous headroom on purpose: this is a memcpy whose cost is dominated by whatever else the host is doing.
+input_to_photon_idle_us	200000	us	40581	b7bb520	Cursor motion to a changed pixel, TSC-measured, on an idle machine. M69's own note says the observer competes, so this is an upper bound rather than a measurement of the path alone.
+input_to_photon_loaded_us	500000	us	37657	b7bb520	The same, with CPU-bound tasks running. The number that matters for "does the desktop stay usable under load", and the one most sensitive to the host.
+input_to_photon_idle_best_us	200000	us	40757	b7bb520	Q18: the shape rather than a sample. The best case is what the path costs when nothing is in the way.
+input_to_photon_idle_med_us	250000	us	42303	b7bb520	Q18: what it usually costs. This is the row a regression in the ordinary path moves.
+input_to_photon_idle_worst_us	400000	us	43475	b7bb520	Q18: what a person actually notices. A desktop is judged by its worst frames, so this is the row with an opinion in it.
+input_to_photon_loaded_best_us	400000	us	38879	b7bb520	Q18: as above, with CPU-bound tasks running.
+input_to_photon_loaded_med_us	500000	us	40742	b7bb520	Q18: the median under load.
+input_to_photon_loaded_worst_us	900000	us	81547	b7bb520	Q18: the worst frame under load, which is the number that decides whether the desktop stays usable. Deliberately the widest here: it is also the noisiest, and the first CI run is expected to move it.

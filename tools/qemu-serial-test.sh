@@ -80,7 +80,9 @@ set -euo pipefail
 # on a quiet host and past 180s on a busy one, because most of the added
 # time is self-tests waiting on real processes and those wait on the
 # scheduler rather than on a fixed clock. This is a ceiling, not an
-# estimate; the run stops as soon as the last marker appears. Five milestones, five new self-tests, and three of
+# estimate; as of Q1 the run really does stop as soon as the last marker
+# appears, which is what the rest of this sentence claimed for several
+# milestones before anything implemented it. Five milestones, five new self-tests, and three of
 # them are the slow kind for the same unavoidable reason: proving
 # something about a *process* means starting one and waiting for it. M52
 # spawns a program that deliberately faults 1.2s in and then waits for
@@ -189,15 +191,60 @@ qemu-system-x86_64 \
   "${DISK_ARGS[@]}" -display none \
   -netdev user,id=net0 -device rtl8139,netdev=net0 \
   -audiodev none,id=snd0 -device AC97,audiodev=snd0 \
+  -fw_cfg name=opt/leanos/selftest,string=1 \
   -serial file:"$LOG" -monitor none ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} &
 QEMU_PID=$!
 disown "$QEMU_PID" 2>/dev/null || true
 
-sleep "$SECONDS_TO_RUN"
+# Q1: wait for the boot to *finish*, not for the budget to expire.
+#
+# This was `sleep "$SECONDS_TO_RUN"` - unconditionally, for the whole
+# budget - while the comment block above claimed "the run stops as soon as
+# the last marker appears". It did not. The boot has printed its own
+# duration since M69 and the answer was ~140 s against a 400 s budget, so
+# every run of this script donated a little over four minutes to a machine
+# that had finished. That sentence was the only untrue one in this file
+# and this loop is what makes it true.
+#
+# SECONDS_TO_RUN is now what its name always implied - a ceiling - and the
+# two ways out are the two real outcomes: the boot reached its last marker,
+# or it panicked. Nothing is graded here; a boot that ends either way still
+# goes through the full marker check below, so an early exit can never turn
+# a failure into a pass.
+FINAL_MARKER="[init] PID 1 spawned"
+deadline=$(( $(date +%s) + SECONDS_TO_RUN ))
+outcome="timeout"
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+    outcome="qemu exited"
+    break
+  fi
+  if grep -qF "$FINAL_MARKER" "$LOG" 2>/dev/null; then
+    outcome="reached the desktop handoff"
+    # The handoff line is not quite the end of the log: [m68]'s idle-tick
+    # measurement and anything else that runs on the way out still has to
+    # land. A second is enough for lines already in flight and is not a
+    # guess about work that has not started - every REQUIRED_MARKERS entry
+    # is printed before this one.
+    sleep 1
+    break
+  fi
+  if grep -qF "*** KERNEL PANIC:" "$LOG" 2>/dev/null; then
+    outcome="kernel panic"
+    sleep 1
+    break
+  fi
+  sleep 1
+done
+elapsed=$(( $(date +%s) - (deadline - SECONDS_TO_RUN) ))
+
 kill "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
 
 cat "$LOG"
+
+echo
+echo "[harness] $outcome after ${elapsed}s (ceiling ${SECONDS_TO_RUN}s)."
 
 # M29: every boot-time self-test's own "passed"/"verified" klog line -
 # kept as literal substrings of kernel/kernel.c's own klog_puts calls
@@ -268,6 +315,7 @@ REQUIRED_MARKERS=(
   "[m75] environment and a place to stand:"
   "[m76] a signal a program can catch:"
   "[m77] POSIX names for what is already here:"
+  "[q5] every syscall told a lie:"
   "[m78] memory that can be given back:"
   "[m79] two threads, one address space:"
   "[m81] a filesystem that can hold somebody else's program:"
@@ -306,6 +354,54 @@ if grep -qF "[wm] animation missed its frame budget" "$LOG"; then
   echo "FAIL: $(grep -F '[wm] animation missed its frame budget' "$LOG" | head -1)"
 fi
 
+# ---- Q6: the measurements, graded ------------------------------------
+#
+# The kernel emits `[perf] name value unit` for everything it measures
+# (see klog_perf in kernel/kernel.c). tests/budgets.tsv gives each name a
+# ceiling and the commit it was measured at. Until Q6 these numbers were
+# printed and nothing read them, so the disk could have got a hundred
+# times slower with every test still green.
+#
+# A measurement with no budget row is reported, not failed: a new
+# measurement should be visible immediately and should not break the build
+# before anyone has had a chance to choose its ceiling.
+mkdir -p build
+if [ ! -f build/perf-history.tsv ]; then
+  printf 'when\tcommit\tmeasurement\tvalue\tunit\tceiling\n' > build/perf-history.tsv
+fi
+BUDGETS="tests/budgets.tsv"
+perf_lines="$(grep -aoE '^\[perf\] [a-z0-9_]+ [0-9]+ [a-z]+' "$LOG" || true)"
+if [ -n "$perf_lines" ]; then
+  echo
+  echo "Measurements this boot (ceiling from $BUDGETS):"
+  while read -r _tag name value unit; do
+    [ -n "${name:-}" ] || continue
+    row="$(awk -F'\t' -v n="$name" '$1 == n {print; exit}' "$BUDGETS" 2>/dev/null || true)"
+    if [ -z "$row" ]; then
+      printf '  %-28s %10s %-3s  (no budget yet - add a row to %s)\n' \
+        "$name" "$value" "$unit" "$BUDGETS"
+      continue
+    fi
+    ceiling="$(printf '%s' "$row" | cut -f2)"
+    measured="$(printf '%s' "$row" | cut -f4)"
+    at="$(printf '%s' "$row" | cut -f5)"
+    if [ "$value" -gt "$ceiling" ] 2>/dev/null; then
+      pass=0
+      printf '  %-28s %10s %-3s  OVER BUDGET (ceiling %s, measured %s at %s)\n' \
+        "$name" "$value" "$unit" "$ceiling" "$measured" "$at"
+    else
+      printf '  %-28s %10s %-3s  ok (ceiling %s, was %s at %s)\n' \
+        "$name" "$value" "$unit" "$ceiling" "$measured" "$at"
+    fi
+    # Q6: every measurement, every run. A threshold cannot see a trend -
+    # ten commits each 5%% slower pass every check.
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+      "perf:$name" "$value" "$unit" "$ceiling" >> build/perf-history.tsv
+  done <<< "$perf_lines"
+fi
+
 missing=()
 for marker in "${REQUIRED_MARKERS[@]}"; do
   if ! grep -qF "$marker" "$LOG"; then
@@ -320,6 +416,23 @@ if [ "${#missing[@]}" -gt 0 ]; then
     echo "  - $marker"
   done
 fi
+
+# Q6: one row per run, so a trend is visible rather than only a threshold.
+# The boot prints its own duration; this records it next to the commit that
+# produced it, which is the difference between "is this slow" and "when did
+# it get slow".
+mkdir -p build
+boot_secs="$(sed -n 's/.*reached the desktop handoff in \([0-9][0-9]*\) s.*/\1/p' "$LOG" | tail -1)"
+if [ ! -f build/test-history.tsv ]; then
+  printf 'when\tcommit\tharness\tverdict\twall_s\tboot_s\n' > build/test-history.tsv
+fi
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+  "serial" \
+  "$([ "$pass" -eq 1 ] && echo pass || echo fail)" \
+  "$elapsed" \
+  "${boot_secs:-}" >> build/test-history.tsv
 
 rm -f "$LOG" "$OVMF_VARS_RUNTIME"
 

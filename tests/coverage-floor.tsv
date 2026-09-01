@@ -1,0 +1,29 @@
+# tests/coverage-floor.tsv - Q11: coverage may not go down.
+#
+# One row per file the host tier builds: the line-coverage percentage
+# below which `make coverage-check` fails. Raised by hand, with the
+# commit that raised it, exactly like tests/budgets.tsv - and lowered by
+# hand too, because deleting a test can be the right call and should have
+# to be said out loud rather than happening quietly.
+#
+# Q8 deliberately set no coverage *target*, and that still stands: the
+# absolute number is whatever the tests honestly reach. This constrains
+# only the direction.
+#
+# A caveat worth carrying next to these numbers: line coverage is the
+# weaker of the two instruments here. `net/ethernet.c` sat at 100% lines
+# with a **0%** mutation score until Q12 looked - every line ran and
+# nothing asserted what any of them did. Read this file next to
+# `make mutate`, never instead of it.
+#
+# file<TAB>line_coverage_floor<TAB>commit<TAB>note
+lib/libk.c	100.00	b7bb520	Every line. Mutation score 73.8%, which is the more interesting number.
+mm/heap.c	100.00	b7bb520	Mutation score 89.4% after Q12's split and coalescing tests.
+fs/leanfs.c	55.00	b7bb520	The error paths are covered; the indirect and double-indirect block chains largely are not.
+net/arp.c	83.00	b7bb520	Mutation score 76.6%.
+net/ip.c	62.00	b7bb520	The send path was entirely unexercised until Q12.
+net/icmp.c	74.00	b7bb520	Mutation score 59.4%; the unreachable part is the error-message paths.
+net/udp.c	96.00	b7bb520	Was 28% before Q12's checksum tests. Mutation score 80.5%.
+net/ethernet.c	100.00	b7bb520	Was 90% lines at a 0% mutation score - the file that proved why this table is not enough on its own.
+net/tcp.c	62.00	b7bb520	Was 3.74% and the largest hole in the suite from Q8 until Q11. tests/test_tcp_states.c drives the eleven-state machine one segment at a time and found two remotely-triggerable defects on its first run.
+dev/fwcfg.c	97.00	b7bb520	Added with tests, which is why it starts high.

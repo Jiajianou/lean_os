@@ -25,10 +25,20 @@
 #
 # Each test boots its own guest, which is what makes them independent and
 # also what makes a full run slow. Several guests run at once (a third of
-# the machine's cores, capped at four - see default_jobs), which took a
-# full run from about an hour to about twenty minutes; `--quick` is eight
-# tests covering the most ground per minute, for the "did I break the
-# desktop" question you want answered before a commit rather than after.
+# the machine's cores, capped at four - see default_jobs).
+#
+# Q1: a full run is about eight minutes - 47 tests in 458 s, measured.
+# This comment said "about twenty minutes" for several milestones and was
+# right when it was written; what changed is that the boot self-tests
+# stopped running on every boot (kernel/dev/fwcfg.h), which took the boot
+# from ~190 s to ~8 and took roughly two thirds off every test here as a
+# side effect. Re-measured rather than adjusted by reasoning, and worth
+# keeping honest: a stale number in this header is how somebody decides
+# not to run this.
+#
+# `--quick` is nine tests covering the most ground per minute, for the
+# "did I break the desktop" question you want answered before a commit
+# rather than after.
 #
 # Run the full one alongside qemu-serial-test.sh before every milestone -
 # neither one subsumes the other.

@@ -309,6 +309,10 @@ uint64_t vmm_kernel_pml4_phys(void) {
     return kernel_pml4_phys;
 }
 
+uint64_t vmm_kernel_heap_base(void) {
+    return KERNEL_HEAP_VIRT_BASE;
+}
+
 int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
     uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);

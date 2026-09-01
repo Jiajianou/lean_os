@@ -70,6 +70,12 @@ int shm_create(size_t size, int owner_task_id) {
     if (size == 0) {
         return -1;
     }
+    /* Q5: before anything is allocated, including the bookkeeping array.
+     * See SHM_MAX_SEGMENT_BYTES in shm.h - a user-supplied size reached
+     * kmalloc unbounded, and kmalloc panics rather than failing. */
+    if ((uint64_t)size > SHM_MAX_SEGMENT_BYTES) {
+        return -1;
+    }
     uint64_t flags = spin_lock_irqsave(&shm_lock);
     int id = find_free_slot();
     if (id < 0) {

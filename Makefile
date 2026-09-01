@@ -3,9 +3,29 @@
 # Toolchain is dev-time only (see docs/toolchain.md) — nothing here ships
 # inside the OS image.
 
+# Q10: overridable from the environment, but only from the environment.
+#
+# These were `:=`, which beats the environment in GNU make and made the
+# toolchain unchangeable without editing this file. That is fine on a
+# developer's machine and exactly wrong in CI, where x86_64-elf-gcc is not
+# a package and the distribution's x86_64-linux-gnu cross-compiler
+# produces the same freestanding objects for these flags.
+#
+# `?=` is NOT the fix and was tried first: AS, CC and LD are built-in make
+# variables with default values, so `?=` sees them as already defined and
+# does nothing - which silently left AS as `as` and handed nasm's
+# arguments to clang. Testing the *origin* is the version that works:
+# `default` means make invented it and we should override; `environment`
+# or `command line` means somebody chose it and we should not.
+ifeq ($(origin AS),default)
 AS      := nasm
+endif
+ifeq ($(origin CC),default)
 CC      := x86_64-elf-gcc
+endif
+ifeq ($(origin LD),default)
 LD      := x86_64-elf-ld
+endif
 OBJCOPY := x86_64-elf-objcopy
 NM      := x86_64-elf-nm
 QEMU    := qemu-system-x86_64
@@ -149,7 +169,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # alongside its own" is only true if there is no special path for them.
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
@@ -163,7 +183,7 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run leanfs-put preseed font font-check clean
+.PHONY: all run leanfs-put preseed font font-check clean distclean
 
 all: $(IMAGE)
 
@@ -486,6 +506,224 @@ preseed: $(IMAGE) $(LEANFS_PUT)
 		$(LEANFS_PUT) $(IMAGE) $(BUILD)/$$p.elf /bin/$$p; \
 	done
 
+
+# ---- Q2: the host test tier -----------------------------------------
+#
+# Everything above this line builds an operating system for x86_64 and is
+# checked by booting it. This builds a handful of that kernel's *units*
+# for the machine you are sitting at, and runs them in a fraction of a
+# second.
+#
+# The two tiers answer different questions and neither replaces the
+# other. `make test-fast` asks "is this function still correct", including
+# on the error paths a booted machine cannot reach without genuinely
+# running out of something. tools/run-tests.sh asks "does the machine
+# still work", which is the only question that can be answered by a
+# machine. See tests/check.h for the longer version of that argument.
+#
+# -Itests/fakes comes FIRST, so a header placed there shadows the kernel's
+# own - which is used exactly once, for lib/spinlock.h, whose real version
+# is x86 inline assembly. Every other seam is a fake .c file linked in
+# place of the real one, so the code under test is the code that ships.
+TEST_BUILD  := $(BUILD)/tests
+TEST_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Werror \
+               -fno-omit-frame-pointer \
+               -Itests -Itests/fakes -Ikernel -Isystem_api/include
+
+# Sanitizers are on by default and that is a decision, not an oversight.
+# The whole reason to run kernel code on a host is to get instruments the
+# kernel cannot have: on the real machine a one-byte overrun corrupts a
+# neighbour and is found some number of milestones later (see kernel.c's
+# M81 stack-guard note for what that costs). Here it is a stack trace.
+# TEST_SAN=0 turns them off for a timing run.
+ifneq ($(TEST_SAN),0)
+TEST_CFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all
+endif
+
+TEST_FAKES := tests/fakes/fake_panic.c tests/fakes/fake_klog.c \
+              tests/fakes/fake_spinlock.c tests/fakes/fake_pmm.c \
+              tests/fakes/fake_vmm.c tests/fakes/fake_blk.c \
+              tests/fakes/fake_rtc.c tests/fakes/fake_net.c \
+              tests/fakes/fake_pit.c tests/fakes/fake_socket.c \
+              tests/fakes/fake_fwcfg.c
+
+# The kernel sources under test, compiled unmodified.
+TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
+                    kernel/net/arp.c kernel/net/ip.c kernel/net/icmp.c \
+                    kernel/net/udp.c kernel/net/ethernet.c kernel/net/tcp.c \
+                    kernel/dev/fwcfg.c
+
+TEST_SRCS := tests/runner.c $(wildcard tests/test_*.c) $(TEST_FAKES) \
+             $(TEST_KERNEL_SRCS)
+
+TEST_BIN := $(TEST_BUILD)/leanos-tests
+
+$(TEST_BUILD):
+	mkdir -p $@
+
+# Q12: the sanitizer setting is part of what this binary *is*, so
+# switching it has to rebuild. Without this stamp, `make test-fast
+# TEST_SAN=0` (which the mutation harness uses) leaves a non-sanitized
+# binary that a later plain `make test-fast` considers up to date - and
+# then reports "no ASan findings" about a build ASan was never in.
+TEST_SAN_STAMP := $(TEST_BUILD)/.san-$(if $(filter 0,$(TEST_SAN)),off,on)
+
+$(TEST_SAN_STAMP): | $(TEST_BUILD)
+	@rm -f $(TEST_BUILD)/.san-* && touch $@
+
+$(TEST_BIN): $(TEST_SRCS) $(wildcard tests/*.h) $(wildcard tests/fakes/lib/*.h) $(TEST_SAN_STAMP) | $(TEST_BUILD)
+	$(HOSTCC) $(TEST_CFLAGS) -o $@ $(TEST_SRCS)
+
+# The fast tier. Deliberately does not depend on `all` - the point is that
+# it runs without a cross-toolchain, which is also what lets it be the
+# check that runs on every push in CI.
+test-fast: $(TEST_BIN)
+	@$(TEST_BIN) $(TEST_FILTER)
+
+# ---- Q8: coverage, measured rather than argued ------------------------
+#
+# The same move M92 made for the disk and M69 made for latency, applied to
+# the tests themselves. This covers only what the host tier builds - the
+# units in TEST_KERNEL_SRCS - and says so: it is not a number for the
+# whole kernel and must not be quoted as one. The QEMU-only code is
+# covered by the boot markers, which is a different instrument and gets a
+# different treatment (see Q8 in milestones.md).
+#
+# `make coverage` prints a per-file percentage and writes an HTML report
+# when llvm-cov is available.
+COV_BUILD  := $(BUILD)/coverage
+# Apple's bundled clang ships neither libFuzzer nor llvm-profdata, so both
+# this and the fuzz targets below look for a real LLVM first. Defined here
+# because coverage comes first in this file; the fuzz section reuses it.
+LLVM_CC    := $(shell for c in /opt/homebrew/opt/llvm/bin/clang \
+                               /usr/local/opt/llvm/bin/clang \
+                               clang; do \
+                        command -v $$c >/dev/null 2>&1 && echo $$c && break; \
+                      done)
+COV_CC     := $(LLVM_CC)
+COV_CFLAGS := -std=c11 -g -O0 -Wall -Wextra \
+              -fprofile-instr-generate -fcoverage-mapping \
+              -Itests -Itests/fakes -Ikernel -Isystem_api/include
+
+$(COV_BUILD):
+	mkdir -p $@
+
+# Q11: the ratchet. `make coverage` reports; `make coverage-check` fails
+# a commit that lowers the number.
+#
+# The floor lives in tests/coverage-floor.tsv and is raised by hand, with
+# the commit that raised it recorded - the same discipline
+# tests/budgets.tsv uses, and for the same reason: a number that moves on
+# its own is a number nobody trusts. Lowering one is allowed and has to
+# be deliberate, because deleting a test can be the right call.
+COVERAGE_FLOOR := tests/coverage-floor.tsv
+
+coverage-check: coverage
+	@python3 tools/coverage-ratchet.py $(COV_BUILD)/report.txt $(COVERAGE_FLOOR)
+
+coverage: | $(COV_BUILD)
+	@$(COV_CC) $(COV_CFLAGS) -o $(COV_BUILD)/tests $(TEST_SRCS)
+	@cd $(COV_BUILD) && LLVM_PROFILE_FILE=tests.profraw ./tests --slow >/dev/null || true
+	@PROFDATA=$$(dirname $(COV_CC))/llvm-profdata; COV=$$(dirname $(COV_CC))/llvm-cov; \
+	 if [ ! -x "$$PROFDATA" ]; then PROFDATA=llvm-profdata; COV=llvm-cov; fi; \
+	 $$PROFDATA merge -sparse $(COV_BUILD)/tests.profraw -o $(COV_BUILD)/tests.profdata && \
+	 $$COV report $(COV_BUILD)/tests -instr-profile=$(COV_BUILD)/tests.profdata \
+	   $(TEST_KERNEL_SRCS) | tee $(COV_BUILD)/report.txt && \
+	 $$COV show $(COV_BUILD)/tests -instr-profile=$(COV_BUILD)/tests.profdata \
+	   $(TEST_KERNEL_SRCS) -format=html -o $(COV_BUILD)/html >/dev/null && \
+	 echo "" && echo "line-by-line report: $(COV_BUILD)/html/index.html"
+
+# ---- Q12: mutation testing -------------------------------------------
+#
+# Coverage says which lines ran. This says whether anything would have
+# noticed if they were wrong - see tools/mutate.py, and Q7 in
+# milestones.md for the test that passed against a build with the bug
+# still in it, which is why this exists.
+#
+#   make mutate                        every file the host tier builds
+#   make mutate FILE=kernel/mm/heap.c  one of them
+#   make mutate MUTANTS=40             a sample rather than the census
+#
+# MUTANTS samples per file with a fixed seed, so a sampled run is
+# repeatable and two runs are comparable.
+FILE    ?= $(TEST_KERNEL_SRCS)
+MUTANTS ?= 0
+mutate:
+	@python3 tools/mutate.py $(FILE) --limit $(MUTANTS)
+
+# ---- Q4: fuzzing -----------------------------------------------------
+#
+# The parsers that read bytes off the wire, and the one that reads a
+# superblock somebody else wrote. libFuzzer is a clang flag rather than a
+# dependency - clang is already needed for the EFI app - and nothing here
+# is linked into anything that ships.
+#
+# `make fuzz-run` is a 60-second dose per target, which is a smoke test
+# rather than a campaign: enough to catch something a change just broke,
+# not enough to find something subtle. A real run is
+# `build/fuzz/fuzz_net -max_total_time=3600 tests/corpus/net`, and Q10
+# schedules one nightly.
+#
+# A crashing input lands in tests/corpus/<target>/ as crash-<hash>, put
+# there by -artifact_prefix rather than dropped in the working directory.
+# That matters for two reasons: the repo root stays clean, and - the
+# important one - a finding lands somewhere git will show it. The corpus
+# itself is ignored and the crash-*/leak-*/timeout-*/oom-* files
+# deliberately are not, so a fuzzer that finds something produces exactly
+# one new file in `git status` and it is the one worth keeping.
+FUZZ_BUILD  := $(BUILD)/fuzz
+# Apple's bundled clang does not ship libFuzzer's runtime
+# (libclang_rt.fuzzer_osx.a is simply absent), so this looks for a real
+# LLVM first and falls back to whatever `clang` is - which works on Linux,
+# where the distribution clang has it. `make fuzz` says so plainly rather
+# than failing with a linker error about a missing archive.
+FUZZ_CC     := $(LLVM_CC)
+FUZZ_CFLAGS := -std=c11 -g -O1 -Wall -Wextra \
+               -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
+               -Itests -Itests/fakes -Ikernel -Isystem_api/include
+FUZZ_FAKES  := tests/fakes/fake_panic_abort.c tests/fakes/fake_klog.c \
+               tests/fakes/fake_spinlock.c tests/fakes/fake_pmm.c \
+               tests/fakes/fake_vmm.c tests/fakes/fake_blk.c \
+               tests/fakes/fake_rtc.c tests/fakes/fake_net.c \
+               tests/fakes/fake_pit.c tests/fakes/fake_socket.c \
+              tests/fakes/fake_fwcfg.c
+FUZZ_TARGETS := $(FUZZ_BUILD)/fuzz_net $(FUZZ_BUILD)/fuzz_leanfs
+
+$(FUZZ_BUILD):
+	mkdir -p $@
+
+$(FUZZ_BUILD)/fuzz_net: tests/fuzz/fuzz_net.c $(FUZZ_FAKES) $(TEST_KERNEL_SRCS) | $(FUZZ_BUILD)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_FAKES) $(TEST_KERNEL_SRCS)
+
+$(FUZZ_BUILD)/fuzz_leanfs: tests/fuzz/fuzz_leanfs.c $(FUZZ_FAKES) $(TEST_KERNEL_SRCS) | $(FUZZ_BUILD)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_FAKES) $(TEST_KERNEL_SRCS)
+
+fuzz: $(FUZZ_TARGETS)
+	@echo "fuzz targets built with $(FUZZ_CC)"
+
+FUZZ_SECONDS ?= 60
+fuzz-run: $(FUZZ_TARGETS)
+	@for t in $(FUZZ_TARGETS); do \
+		name=$$(basename $$t | sed 's/^fuzz_//'); \
+		corpus=tests/corpus/$$name; \
+		mkdir -p $$corpus; \
+		echo "== $$t ($(FUZZ_SECONDS)s, corpus $$corpus)"; \
+		$$t -max_total_time=$(FUZZ_SECONDS) -print_final_stats=1 \
+		   -artifact_prefix=$$corpus/ $$corpus || exit 1; \
+	done
+	@echo "fuzzing found nothing in $(FUZZ_SECONDS)s per target."
+
+# The two tiers above the fast one. tools/run-tests.sh is the single
+# source of truth for what each contains - these are here so that `make
+# test` works, because that is what people type.
+test:
+	@./tools/run-tests.sh
+
+test-full:
+	@./tools/run-tests.sh --full
+
+.PHONY: test-fast test test-full test-visual coverage coverage-check fuzz fuzz-run mutate
+
 # Lets tools/build-user-program.sh (and anyone else) read this Makefile's
 # own variables - e.g. `make print-USER_CFLAGS` - instead of hardcoding a
 # second copy of flags that would silently drift out of sync with the
@@ -498,5 +736,18 @@ print-%:
 # doesn't warn about every one.
 -include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
+# Q1: everything except the firmware.
+#
+# `rm -rf $(BUILD)` took build/ovmf with it, which is the one thing under
+# build/ that costs several minutes to recreate (tools/build-ovmf.sh
+# clones and builds edk2) and the one thing that never changes - it is
+# not this project's output, it is a dependency that happens to live
+# here. A `make clean` that silently sets up a ten-minute rebuild is a
+# `make clean` people avoid running.
+#
+# `make distclean` is the one that takes it too.
 clean:
+	rm -rf $(filter-out $(BUILD)/ovmf,$(wildcard $(BUILD)/*))
+
+distclean:
 	rm -rf $(BUILD)

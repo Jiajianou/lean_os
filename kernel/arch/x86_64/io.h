@@ -103,3 +103,27 @@ static inline uint64_t irq_save_disable(void) {
 static inline void irq_restore(uint64_t flags) {
     __asm__ volatile("push %0; popfq" ::"r"(flags) : "memory", "cc");
 }
+
+/* Q4: two primitives that were written inline in kernel/net/ip.c.
+ *
+ * Whether interrupts are on, and halting until the next one, are facts
+ * about this architecture rather than about IPv4 - and io.h is where
+ * every other one of them already lives (irq_save_disable above is the
+ * same `pushfq` this reads). ip.c had its own copies because it needed
+ * them and nothing here offered them.
+ *
+ * Moving them also makes the IPv4 parse path compile somewhere other than
+ * x86_64, which is what lets tests/test_net.c feed it malformed packets
+ * on the host. That is a side effect of putting the code where it goes,
+ * not the reason for it - but it is the reason it happened now. */
+static inline int cpu_interrupts_enabled(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0" : "=r"(flags) :: "memory");
+    return (flags & (1u << 9)) != 0;
+}
+
+/* Halt until the next interrupt. Only correct with interrupts enabled -
+ * see cpu_interrupts_enabled, which every caller here checks first. */
+static inline void cpu_halt(void) {
+    __asm__ volatile("hlt");
+}

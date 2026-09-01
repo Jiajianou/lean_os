@@ -76,6 +76,7 @@ EFI app), `mtools` and `qemu-system-x86_64`. See
 
 ```sh
 ./tools/run-qemu.sh          # builds everything, fetches OVMF the first time, boots
+./tools/run-qemu.sh --selftests   # ...and runs the boot self-test battery on the way
 ```
 
 The disk image is 2 GiB and sparse - a few megabytes on disk until
@@ -86,17 +87,52 @@ not fallbacks.
 
 ## Tests
 
-Two harnesses, and neither subsumes the other. Run both.
+One command, three tiers. Each is a superset of the one above it.
 
 ```sh
-./tools/qemu-serial-test.sh  # boots headless, grades the serial log: 79 boot markers
-./tools/qemu-input-test.sh   # drives real clicks and keys, grades real pixels: 45 tests
+./tools/run-tests.sh --fast    # host unit tests. No QEMU. Under a second.
+./tools/run-tests.sh           # ...plus a graded boot and the quick input subset. Minutes.
+./tools/run-tests.sh --full    # ...plus the whole input suite and the slow host tests.
 ```
 
-The first proves every subsystem still works from the inside. The second
-proves the path a person's hands take to reach it - a distinction that
-was learned the hard way (see M40 in
-[milestones.md](milestones.md)).
+`make test` and `make test-fast` are the same thing for people who type
+that instead.
+
+Four instruments, and none of them subsumes another:
+
+- **Host unit tests** (`tests/`) compile kernel units - `libk`, the heap,
+  leanfs, every network parser - for the machine you are sitting at and
+  run them under ASan and UBSan in under a second. They exist to reach
+  the error paths a booted machine cannot: a full disk, a failed
+  allocation, a corrupt superblock, a malformed packet. 66 tests.
+- **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
+  image and grade the serial log against 80 markers and five performance
+  budgets. They prove every subsystem still works from the inside.
+- **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
+  keys through QEMU's monitor and grades real framebuffer pixels. It
+  proves the path a person's hands take - a distinction learned the hard
+  way (M40). Most of its tests check that something *did* change; two of
+  them check the opposite, that nothing else did, which is the only way to
+  catch a flicker (Q7).
+- **Fuzzers** (`make fuzz-run`) feed the network parsers and the
+  filesystem mount path arbitrary bytes. The network target manages about
+  150,000 inputs a second.
+- **A mutation harness** (`make mutate`) breaks the kernel on purpose,
+  one small change at a time, and reports whether the tests noticed. It
+  is the only instrument here that grades the *tests* rather than the
+  machine, and the first thing it found was a file at 100% line coverage
+  whose mutation score was zero.
+- **A crash test** (`tools/crash-test.sh`) cuts the power mid-write with
+  `SIGKILL`, reboots, and checks the filesystem with an independent
+  reader. Sixteen cuts across the heaviest metadata window; the
+  filesystem has survived all of them.
+
+Booting the machine is no longer the same thing as testing it. `make run`
+boots to the desktop in about eight seconds; the ~190-second self-test
+battery runs only when something asks for it, which
+`tools/qemu-serial-test.sh` does and `tools/run-qemu.sh` does not. The
+image is identical either way - see `kernel/dev/fwcfg.h` for why the
+switch comes from outside the image rather than from a `#ifdef`.
 
 ## Where things are
 

@@ -11,6 +11,43 @@
 
 static int use_console = 0;
 
+/* ---- Q7: the screen has one owner, and after the handoff it is not us --
+ *
+ * The bug this fixes is the one a person actually sees: launch an app and
+ * the whole desktop jumps sixteen pixels and snaps back.
+ *
+ * The cause is two owners of one framebuffer. A process's stdout is
+ * FD_STDOUT, which is klog, which is console.c, which paints glyphs
+ * straight into the framebuffer the compositor is composing into - and
+ * when the console's cursor is on the bottom row, console_putc *scrolls
+ * the entire framebuffer up by one text row* to make space. The
+ * compositor repaints on its next frame and puts everything back, so the
+ * whole thing is one frame long and reads as a flicker.
+ *
+ * It is not specific to launching. Any program writing to stdout does it;
+ * launching is simply the case that happens most, because the compositor
+ * logs "[wm] session: N window(s) saved" every time a window opens.
+ *
+ * So the console lets go. The moment a process maps the framebuffer
+ * (SYS_fb_map - there is exactly one such process, the compositor, and
+ * CAP_FRAMEBUFFER is what keeps it that way), the kernel stops drawing
+ * text on it. Nothing is lost: serial still gets every byte, the M70 ring
+ * buffer still gets every byte, and `Console` reads that ring - which is
+ * what M70 built it for.
+ *
+ * A panic still paints. panic_render draws through fb_fill_rect and the
+ * raw font rather than through console.c, deliberately and for its own
+ * reasons, so the one case M70 cared about - "the last words of this
+ * kernel were written somewhere nobody could read" - is untouched by
+ * this.
+ *
+ * One-way on purpose. If the compositor dies, the console does not come
+ * back and start scribbling over the frozen desktop it left behind; the
+ * replacement compositor (M55 proves there is one) repaints. A machine
+ * with no serial and no desktop still gets a panic screen, which is the
+ * case that matters. */
+static int console_released = 0;
+
 void klog_init(void) {
     vga_clear();
     serial_init();
@@ -18,6 +55,14 @@ void klog_init(void) {
 
 void klog_use_console(void) {
     use_console = 1;
+}
+
+void klog_release_console(void) {
+    console_released = 1;
+}
+
+int klog_console_released(void) {
+    return console_released;
 }
 
 /* console.c's cursor position (cur_col/cur_row) is shared mutable state
@@ -42,6 +87,38 @@ void klog_use_console(void) {
  * sched_lock, for the same "keep this CPU's own interrupt handlers out of
  * a critical section it already holds" reason. */
 static spinlock_t klog_lock;
+
+/* ---- Q2: the one caller that must not wait for this lock --------------
+ *
+ * panic() opens by calling klog_puts, and panic.c's own M70 comment lists
+ * "take no lock" among the three constraints a panic runs under, on the
+ * grounds that "a panic that deadlocks is strictly worse than one that
+ * prints nothing". That was true of panic_render, which carefully uses
+ * neither console.c nor the heap - and not of the klog_puts two lines
+ * above it, which takes klog_lock unconditionally.
+ *
+ * The reachable case is the halt broadcast. A panicking CPU sends an NMI
+ * to every other core; isr_handler treats an NMI as fatal and calls
+ * panic(); and NMI is, by definition, not blocked by the irq_save_disable
+ * above - panic.c says so itself. So a core interrupted *inside* this
+ * lock re-enters klog_puts and spins forever on a lock its own stack is
+ * holding. It never reaches the `cli; hlt` it was told to reach: the
+ * machine stops with one core wedged in a spin rather than halted, which
+ * is precisely the "strictly worse" outcome.
+ *
+ * The fix is the standard one and is deliberately blunt. Once a panic is
+ * under way, correctness of the log ordering stops mattering and getting
+ * the last words out starts being the only thing that does: klog stops
+ * locking. A garbled final line is a fine trade for a line that appears
+ * at all.
+ *
+ * Set by panic() before its first klog call, and never cleared - nothing
+ * after a panic is expected to run. */
+static volatile int klog_panicking;
+
+void klog_enter_panic(void) {
+    klog_panicking = 1;
+}
 
 /* ---- M70: the ring buffer ---------------------------------------------
  *
@@ -78,7 +155,9 @@ static uint64_t klog_written; /* total bytes ever emitted */
 /* The body, with the lock already held. Split out by M93 so a whole
  * string can be written under one acquisition - see klog_puts. */
 static void klog_emit_locked(char c, int also_console) {
-    if (also_console) {
+    /* Q7: not once the framebuffer belongs to somebody else. Serial and
+     * the ring below are unaffected - only the *screen* is given up. */
+    if (also_console && !console_released) {
         if (use_console) {
             console_putc(c);
         } else {
@@ -101,6 +180,11 @@ static void klog_emit(char c, int also_console) {
      * itself - the identical mistake sched_lock had, see sched.c's own
      * note on why. */
     uint64_t flags = irq_save_disable();
+    if (klog_panicking) {
+        klog_emit_locked(c, also_console);
+        irq_restore(flags);
+        return;
+    }
     spin_lock(&klog_lock);
     klog_emit_locked(c, also_console);
     spin_unlock(&klog_lock);
@@ -139,6 +223,13 @@ void klog_putc(char c) {
  * the serial port was always the bottleneck it appears to be. */
 void klog_puts(const char *s) {
     uint64_t flags = irq_save_disable();
+    if (klog_panicking) {
+        while (*s) {
+            klog_emit_locked(*s++, 1);
+        }
+        irq_restore(flags);
+        return;
+    }
     spin_lock(&klog_lock);
     while (*s) {
         klog_emit_locked(*s++, 1);

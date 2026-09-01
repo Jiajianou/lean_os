@@ -4,9 +4,39 @@
 # currently in the working tree, and bootstraps OVMF firmware on first run
 # if it isn't there yet - so a completely fresh checkout only needs this
 # one script, no separate `make` step.
+#
+# ---- Q1: this script boots the machine. It does not test it -----------
+#
+# Until Q1 there was no difference, because the kernel ran every one of
+# its ~80 boot self-tests on every boot and there was no way to say
+# otherwise. Most of those tests spawn a real process and wait for it, so
+# a boot cost ~140 s of which the desktop was about four - and somebody
+# who typed `run-qemu.sh` to *use* the machine waited out a test suite
+# they had not asked for.
+#
+# The tests are not gone and are not compiled out; see kernel/dev/fwcfg.h.
+# They are off unless the machine is told to run them, and
+# tools/run-tests.sh is what tells it. The image is identical either way,
+# which is the point: the artifact the harness grades is the artifact that
+# boots here.
+#
+# Usage:
+#   tools/run-qemu.sh                # build and boot
+#   tools/run-qemu.sh --selftests    # ...with the boot self-tests on
+#   tools/run-qemu.sh -- -smp 4      # extra arguments straight to QEMU
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+SELFTESTS=0
+EXTRA_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftests) SELFTESTS=1; shift ;;
+    --) shift; EXTRA_ARGS=("$@"); break ;;
+    *) echo "unknown argument: $1 (see this script's header)" >&2; exit 2 ;;
+  esac
+done
 
 make all
 
@@ -59,10 +89,21 @@ else
   DISK_ARGS=(-drive "if=none,id=disk0,format=raw,file=$IMAGE"
              -device virtio-blk-pci,drive=disk0)
 fi
+# Q1: the one thing that tells the guest this is a test boot. Absent
+# here, so kernel/dev/fwcfg.c's boot_selftests_enabled() reads no such
+# file and returns 0. tools/run-tests.sh passes it.
+FWCFG_ARGS=()
+if [ "$SELFTESTS" -eq 1 ]; then
+  FWCFG_ARGS=(-fw_cfg name=opt/leanos/selftest,string=1)
+  echo "Booting WITH boot self-tests (expect ~140s to the desktop)." >&2
+fi
+
 qemu-system-x86_64 \
   -m "$QEMU_MEM" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
   "${DISK_ARGS[@]}" \
   -netdev user,id=net0 -device rtl8139,netdev=net0 \
-  -audiodev none,id=snd0 -device AC97,audiodev=snd0
+  -audiodev none,id=snd0 -device AC97,audiodev=snd0 \
+  ${FWCFG_ARGS[@]+"${FWCFG_ARGS[@]}"} \
+  ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}

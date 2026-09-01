@@ -30,6 +30,18 @@
 void klog_init(void);
 void klog_putc(char c);
 void klog_puts(const char *s);
+
+/* Q7: hand the screen over. Called when a process maps the framebuffer
+ * (SYS_fb_map); after it, klog writes to serial and to the M70 ring
+ * buffer only, and never paints. See klog.c for the flicker this fixes
+ * and for why it is one-way. */
+void klog_release_console(void);
+int klog_console_released(void);
+
+/* Q2: stops klog taking its lock, for the rest of this machine's life.
+ * Called by panic() before it says anything. See klog.c for the deadlock
+ * this exists to prevent - a core told to halt, wedged in a spin instead. */
+void klog_enter_panic(void);
 void klog_put_hex32(uint32_t value);
 /* M59: the first thing in this project that genuinely wants base ten. A
  * hex date reads as gibberish - "[rtc] 000007EA-00000008-00000019" is a

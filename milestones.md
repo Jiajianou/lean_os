@@ -8766,6 +8766,1147 @@ larger than anything in that arc, and M97 and M98 are each plausibly
 larger than the whole of M75–M79. Eleven headings is the shape of the
 work, not its cost.
 
+## The arc alongside all of it: tests that can fail
+
+*Written after M93, from an audit of the two harnesses rather than from
+a wish list.* Every milestone in this file has ended with a self-test,
+and that discipline is why M40's lesson (a bug hidden from every
+protocol-level check by the absence of a real click) was learned once
+rather than repeatedly. This arc does not question that discipline. It
+questions what the harnesses can currently **fail on**, which is a
+smaller set than the number 79 suggests.
+
+These are numbered Q1-Q10 rather than M101-M110 on purpose. They are
+orthogonal to the M94-M100 arc and mostly cheaper than any single
+milestone in it, and several of them are things that arc will need
+before it starts: a GCC bootstrap is the first workload here whose
+failures will be *intermittent*, and an intermittent failure against a
+harness with no CI, no reruns and no history is not a bug report, it is
+a rumour.
+
+### What the audit found, with the line that shows it
+
+| the gap | where it is | why it matters |
+|---|---|---|
+| the serial harness always sleeps its full budget | `tools/qemu-serial-test.sh:196` — `sleep "$SECONDS_TO_RUN"`, unconditional | boot is measured at ~140s against a 400s budget, so every run donates ~260s. The header at line 86 says *"the run stops as soon as the last marker appears"*. It does not. That sentence is the only untrue one in the file |
+| markers are presence-only | `REQUIRED_MARKERS` is 79 `grep -qF` calls | no ordering, no counts, no *absence* assertions beyond two. A self-test that prints its pass line and then corrupts the machine passes |
+| performance is printed, never asserted | `kernel/kernel.c:1734` (m92 disk), `kernel/kernel.c:7352` (m69 input-to-photon) | both emit real microsecond figures; the harness greps the prefix. Disk could get 100x slower and the run is green. M69's whole point was that measuring is how this project decides — and the measurement is not wired to a verdict |
+| zero host-side unit tests | ~69,000 lines of C; the only `HOSTCC` targets are `gen-font` and `leanfs-put`, both tools | every check in this project costs a QEMU boot. There is no tier below "boot the operating system" |
+| no `make test` | `Makefile` targets: `all run leanfs-put preseed font font-check clean` | the two harnesses are remembered, not invoked |
+| no CI | no `.github/`, nothing scheduled | 83 commits, every one graded by a human who remembered to run two scripts |
+| no visual baseline | the input suite reads single pixels: `s.px(*probe) == TOAST_ERROR_C` | a font metric, a padding value or a colour that changes anywhere other than a probe point is invisible. "Visual" here means 45 spot checks, not a frame |
+| two copies of the on-disk format | `tools/leanfs-put.c:80-107` redeclares the superblock, inode and dirent structs; it does not include `kernel/fs/leanfs.h` | its own comment says *"The structs below still have to match kernel/fs/leanfs.c byte for byte"*. Nothing checks that they do |
+| the parsers are never fed garbage | `arp.c:88`, `ip.c:194-205` do bound their input — verified, and written carefully | the checks are good and completely untested. Nothing has ever handed this stack a malformed frame |
+| 219 `panic()` calls, some reachable by exhaustion | `pmm.c:297` — `panic("pmm_alloc_frame: out of physical memory")` | a user process that allocates until it cannot halts the machine. On a desktop that is a bug; on anything called production it is the whole question. **Corrected later:** 178 of those 219 are assertions inside `kernel.c`'s own self-tests, which is where a panic belongs. The production count is about forty — see the correction at the head of the Q11–Q19 arc |
+| four files nothing names | `procfs.c` (388 lines), `virtio_blk.c`, `pci.c`, `lapic.c` have zero mentions in `kernel.c`; `devfs.c`, `udp.c`, `ethernet.c` have one | M92 shipped a virtio driver whose self-test exercises it only through leanfs |
+| 96 syscalls, no negative suite | `syscall_table` in `syscall.c:4254`; `copy_from_user` has 9 call sites | the happy path of each is covered by whichever milestone added it. Nothing systematically hands all 96 a null, a kernel address, or a length of `2^63` |
+
+Two things this audit did **not** find, and both are worth recording
+because the opposite was expected. The network parse layer is
+defensively written throughout — every length check that should be there
+is there. And `-Werror` with `-Wall -Wextra` has been on since the
+beginning, for kernel and user code both, which is a quieter form of the
+same discipline as the self-tests.
+
+### One decision taken here rather than discovered halfway
+
+**A unit test is not a lesser self-test, and the boot self-tests do not
+go away.** The obvious objection to Q2-Q5 is that this project's method
+is to prove things on the real machine, and a host-compiled
+`kernel/fs/leanfs.c` running against a RAM disk is not the real machine.
+That is true and it is not the trade being made. The boot self-tests
+prove *integration* — that leanfs works when it is mounted on a real
+device, under a real scheduler, on a real disk driver — and they will
+keep doing that unchanged. What they cannot do is get near an error
+path, because reaching "the disk is full" from inside a booted OS means
+filling the disk. Every error branch in this kernel is currently
+unreachable from any test, and the number of them is in the hundreds.
+Host tests exist to reach those, and for one other reason: a check that
+takes 200 milliseconds is a check that runs while you type.
+
+---
+
+### Q1 — A test command, and a clock on it ✅
+
+The cheapest milestone here and the one everything else is measured
+against. Nothing new is proved; the existing proofs get faster and get a
+name.
+
+- [ ] `make test` in three tiers, with the time each takes printed at
+      the end: `make test-fast` (host units, seconds), `make test`
+      (serial harness + the `--quick` input subset, minutes),
+      `make test-full` (everything, tens of minutes)
+- [ ] The serial harness watches the log for its last marker and stops,
+      instead of sleeping the budget. `SECONDS_TO_RUN` becomes a real
+      timeout rather than a schedule. Delete the sentence at line 86
+      that already claims this, or make it true — this milestone makes
+      it true
+- [ ] Both harnesses print their own wall-clock at the end, and append
+      it to `build/test-history.tsv` alongside the commit. The boot
+      already prints its time; nothing has ever collected one
+- [ ] A `--rerun-failures` flag on the input suite, and a recorded
+      count of how often a rerun changes the verdict. That number is the
+      flake rate, and this project does not know it
+
+**How we'll know.** `make test` from a clean tree on a machine that has
+never seen this repo. And a serial run that finishes in the ~140s it
+takes rather than the 400s it is given, with the difference visible in
+`test-history.tsv`.
+
+### Q2 — The first unit test this project has ever had ✅
+
+Establishes the seam and the harness. Deliberately starts with the three
+easiest units, because the point of this milestone is the mechanism, not
+the coverage.
+
+- [ ] `tests/` built by `HOSTCC`, no framework, no dependency — a
+      `CHECK(cond)` macro and a runner that reports counts, in the same
+      spirit as everything else here being written rather than fetched
+- [ ] `kernel/lib/libk.c` compiled unmodified against it: every string
+      and memory function against overlapping ranges, zero lengths,
+      and the boundary cases that `-Werror` cannot see
+- [ ] `kernel/mm/heap.c` against a fake `pmm`/`vmm`: allocation,
+      free-list coalescing, growth, alignment, and the fragmentation
+      pattern (alloc-alloc-free-first-alloc-larger) that a first-fit
+      list gets wrong if it gets anything wrong
+- [ ] `kernel/mm/pmm.c`'s bitmap logic against a synthesised e820 map,
+      including the M90 case that motivated it — a usable range above
+      the 4 GiB mark — which currently requires QEMU to reproduce
+- [ ] The fakes live in `tests/fakes/` and are the deliverable as much
+      as the tests are: a `panic()` that longjmps to the runner and
+      records the message, so a test can assert *that* the kernel
+      panicked and with what, which no test in this tree can do today
+
+**How we'll know.** `make test-fast` runs in under two seconds and fails
+if a single character of `libk.c` is corrupted. And the panic-catching
+fake proves itself by asserting `pmm_free_frame`'s double-free panic —
+the first time that branch has ever been executed by a test.
+
+### Q3 — leanfs against a RAM disk, and one format instead of two ✅
+
+`leanfs.c` is 2,336 lines behind a five-function block interface
+(`kernel/drivers/blk.h`). That interface is the seam; this milestone
+uses it.
+
+- [ ] `kernel/fs/leanfs.c` compiled for the host against a fake `blk`
+      layer backed by a `malloc`'d image, with `blk_read`/`blk_write`
+      counted so a test can assert *how many* device operations an
+      operation costs — the first time this project can regress an
+      algorithm rather than an outcome
+- [ ] The error paths, none of which any test reaches today: a full
+      data region, a full inode table, a full directory, a file at the
+      4 GiB ceiling, an exhausted indirect and double-indirect chain,
+      an unlink that must return every block it took
+- [ ] The corruption paths: a bad magic, a superblock claiming
+      impossible geometry, an inode pointing outside the data region, a
+      directory entry pointing at a free inode, a cycle in the
+      directory tree. Every one should be a refusal, and M71's mount
+      check is the existing half of this
+- [ ] **One format, not two.** `tools/leanfs-put.c` includes
+      `kernel/fs/leanfs.h` and deletes its hand-copied structs, or — if
+      the freestanding header genuinely cannot be included by a host
+      tool — a `_Static_assert` per field offset in both files, plus a
+      differential test that builds an image with the host tool and
+      mounts it with the kernel's own code
+- [ ] A property test: N random sequences of create/write/unlink/rename
+      against both the filesystem and a `malloc`'d model of what the
+      filesystem should contain, compared after every step, with the
+      failing seed printed
+
+**How we'll know.** The differential test catches a deliberately
+introduced one-byte change to `leanfs_inode_t`'s padding in
+`leanfs-put.c` — the exact drift its comment worries about. And a
+property run of 10,000 operations with no divergence, with the seed
+recorded so the run is repeatable.
+
+### Q4 — The stack, fed garbage on purpose ✅ (fuzzers land; the TCP state table does not)
+
+The parsers are already careful. This milestone's job is to find out
+whether "careful" is true, and to keep it true.
+
+- [ ] `arp.c`, `ip.c`, `icmp.c`, `udp.c` and `tcp.c` compiled for the
+      host against a fake `net`/`rtl8139` that captures what would have
+      been transmitted, so a test can assert the *reply* to a frame and
+      not merely the absence of a crash
+- [ ] A libFuzzer target per parser — `clang` is already a build
+      dependency for the EFI app, so this costs no new tool — run with
+      ASan and UBSan, seeded with real captures from a `nettest` run
+- [ ] The corpus and any crashing input checked in under
+      `tests/corpus/`, which is how a fuzz finding becomes a permanent
+      regression test rather than an afternoon
+- [ ] `tcp.c`'s eleven-state machine driven directly: every legal
+      transition, and every *illegal* one — a RST in each state, a SYN
+      in ESTABLISHED, an ACK for data never sent, sequence numbers
+      wrapping through zero, an out-of-order arrival, a retransmission
+      the peer already acknowledged. This is the single most complex
+      piece of logic in the tree and it is covered today by one
+      handshake and 16 KiB of payload
+- [ ] The option parser at `tcp.c:699` specifically, which is the one
+      place a length field from the wire drives a loop
+
+**How we'll know.** Twenty-four hours of fuzzing across five targets
+with no crash and no sanitizer report — and if there *is* one, it is a
+finding this project is better off owning, which is the honest version
+of "how we'll know". Plus a state-transition table where every cell is
+either a test or an explicit "cannot happen, because".
+
+### Q5 — Every syscall told a lie ✅
+
+96 entries in `syscall_table`, each covered on its happy path by the
+milestone that added it, and none covered on the path a hostile or
+merely buggy program takes.
+
+- [ ] A user-space program that walks the syscall table and calls every
+      entry with: a null pointer, a kernel address, an unmapped user
+      address, an address that straddles a mapping boundary, a length
+      of `2^63`, a negative fd, an fd of `MAX_FDS`, and every flag bit
+      set. Every one must return an error. None may panic, and none may
+      succeed
+- [ ] The results as a table in the boot log, so the harness fails on
+      a count rather than on a marker — *"96 of 96 syscalls refused
+      every malformed argument"* — which makes a newly added syscall
+      that forgets validation a failure by default rather than by
+      someone remembering
+- [ ] `copy_from_user`/`copy_to_user` audited against that table: 9 and
+      31 call sites today against 96 syscalls, so the gap is either
+      syscalls that take no pointers or syscalls that dereference one
+      directly. The deliverable is knowing which
+- [ ] The capability boundary tested the same way: `captest` exists and
+      proves the model works; this proves it cannot be walked around,
+      one capability and one syscall at a time
+- [ ] A cross-process test: a pointer valid in *another* process's
+      address space, passed by this one
+
+**How we'll know.** The table prints 96 of 96 and the machine is still
+running afterwards. The interesting outcome is the first run, which is
+unlikely to print 96.
+
+### Q6 — Numbers that fail, not numbers that print ✅
+
+M69 established that this project measures before it decides. The
+measurements exist. Nothing grades them.
+
+- [ ] A budget file — `tests/budgets.tsv` — with a name, a threshold
+      and the commit the threshold was measured at, for: boot to
+      desktop handoff, input-to-photon idle and loaded, 1 MiB disk read
+      cold and warm, cache hit ratio, `int 0x80` round trip, context
+      switch, `spawn`+`exit`, and compositor frame time
+- [ ] The self-tests emit a machine-readable line each
+      (`[perf] name value unit`), and the harness fails when one exceeds
+      its budget — with the budget, the measurement and the commit that
+      set the budget all printed, so a failure says *"disk got 3x
+      slower since b7bb520"* rather than *"something is wrong"*
+- [ ] Budgets are ceilings with stated headroom and a recorded
+      measurement, in the same discipline `SECONDS_TO_RUN`'s comment
+      history already applies to itself — and a budget that has been
+      2x slack for ten milestones is a bug in the budget
+- [ ] The history appended to `build/test-history.tsv` and plotted by a
+      script, because a trend is the thing a threshold cannot see: ten
+      commits each 5% slower pass every check
+- [ ] `QEMU_MEM=128` and `QEMU_DISK=ide` get their own budget rows.
+      The README calls them configurations the harnesses are expected to
+      pass in; today neither harness runs them
+
+**How we'll know.** A deliberate 50 ms `pit_sleep_ms` inserted into the
+compositor's frame path fails `make test` by name. And the ide/virtio
+rows differ by roughly the 95ms-vs-5.6ms the README already quotes,
+which is the first time that sentence has been under test.
+
+### Q7 — Pixels, all of them (partly landed: the invariant, not the baselines)
+
+*Started ahead of its place in the arc, because a person reported the bug
+it catches.* The full golden-frame harness below is still unwritten. What
+exists is the half that turned out to matter most, and it arrived the way
+most things here do - from a real complaint.
+
+**The bug.** "When I launch an app, the desktop screen jumps/flickers a
+bit." It does, and it had nothing to do with the compositor. A process's
+stdout is `FD_STDOUT`, which is klog, which is `console.c`, which paints
+glyphs directly into the framebuffer the compositor is composing into -
+and when the console cursor reaches the bottom row, `console_putc`
+**scrolls the entire framebuffer up by one text row**. The compositor
+repaints on its next frame and puts everything back, so the whole event
+is one frame long: the desktop jumps sixteen pixels, a line of kernel log
+appears across the taskbar, and it is gone.
+
+Launching was merely the commonest trigger. The compositor calls
+`session_save()` whenever the window layout changes and settles, and that
+writes `[wm] session: N window(s) saved` to its own stdout - so opening,
+closing, moving or minimising any window did it.
+
+**The fix.** The screen has one owner, and after the handoff it is not the
+kernel. `SYS_fb_map` now calls `klog_release_console()`, and from that
+moment klog writes to serial and to M70's ring buffer only. Nothing is
+lost - `Console` reads that ring, which is what M70 built it for - and a
+panic still paints, because `panic_render` draws through `fb_fill_rect`
+and the raw font rather than through `console.c`. One-way on purpose: if
+the compositor dies, the console does not come back and start scribbling
+over the frozen desktop it left behind.
+
+**Why no test caught it, and what does now.** Every one of the 45
+interactive tests checks that something *did* change - a window opened, a
+button lit, a menu appeared. None could see the opposite failure: that
+something changed which had no business changing. A transient that puts
+everything back is invisible to a spot probe by construction.
+
+So `assert_stable_outside()` inverts the question. Take a baseline, do the
+thing, capture as fast as the monitor allows, and require that no frame
+differs from the baseline outside the rectangles the action is *allowed*
+to touch. Two tests use it - launching and closing - and both were
+verified the only way a regression test is worth anything: they were run
+against a deliberately unfixed build first, and both failed there, at
+frame 5 of 25, with about 81,000 changed pixels spanning the full width
+of the screen.
+
+Three things that were learned writing it, because each is a trap:
+
+- **The first second test passed on the buggy build.** It drove a terminal
+  and printed a lot, on the theory that any stdout would do. The theory
+  was right and the trigger was wrong - `gui_terminal.c` dup2s its child's
+  stdout onto a pipe it reads itself, so `ls` never goes near the console.
+  A test that passes for the wrong reason is worse than no test; it was
+  replaced with one that closes a window, which does trigger it.
+- **Frames must be captured back-to-back with no settle.** The fault
+  lasted one frame in twenty-five. Any polling loop with a sleep in it
+  steps straight over the thing it is looking for.
+- **Remove variables rather than masking them.** The first version failed
+  on a single pixel - the mouse cursor leaving screen centre. The fix is
+  to park the cursor before taking the baseline, not to add an allowed
+  region for it: the allowed list is the part of the test a reader has to
+  trust, and every entry in it is a place the test has stopped looking.
+
+**Still to do here** is everything the original milestone listed: golden
+frames for a set of canonical states, the diff image as the failure
+artifact, `make accept-visuals`, both resolutions, and the font page. The
+determinism work those need is real and is named below.
+
+### Q7 (original) — Pixels, all of them
+
+The input suite grades real pixels, which was M40's whole insight, and
+it grades 45 of them. This milestone grades the frame.
+
+- [ ] A golden-frame harness: `screendump` to PNG, compared against a
+      checked-in baseline with a per-pixel tolerance, for a set of
+      canonical states — bare desktop, launcher open, three overlapping
+      windows, each application's initial window, the shutdown
+      confirmation, a toast, a context menu, the task manager
+- [ ] The diff is the artifact on failure: baseline, actual, and a
+      highlighted difference image written to `build/visual-diff/`, so
+      a failure is looked at rather than reasoned about
+- [ ] `make accept-visuals` to re-baseline deliberately, and baselines
+      reviewed in the diff like any other change. A visual test nobody
+      can update is a visual test everybody disables
+- [ ] Every baseline captured at both resolutions M58 supports, because
+      a layout that only works at one is exactly the regression this
+      catches and exactly the one 45 fixed probe coordinates cannot
+- [ ] Font rendering specifically: a page of every glyph at every
+      weight the UI uses, baselined. `font-check` proves the *table* is
+      consistent; nothing proves the rendering of it is
+- [ ] Determinism first, and it is the hard part: the clock in the
+      panel, the cursor position, and anything animating have to be
+      pinned or masked before a frame comparison means anything
+
+**How we'll know.** A one-pixel change to the titlebar's corner radius
+fails, with a diff image that shows the corner. And the suite passes
+twice in a row on the same commit, which is the property that decides
+whether any of this is usable.
+
+### Q8 — What the tests never touch ✅ (measured; the ratchet is not built)
+
+Coverage, measured rather than argued — the same move M92 made for the
+disk and M69 made for latency.
+
+- [ ] `gcov`/`llvm-cov` on everything Q2-Q4 build for the host, with
+      the percentage per file printed by `make test-fast` and a floor
+      that ratchets upward: a file's coverage may not go down
+- [ ] For the QEMU-only code, the cheaper instrument that fits: a
+      marker-to-source map that names which file each of the 79 markers
+      exercises, published as a table, so *"nothing tests `procfs.c`"*
+      is a row rather than an audit
+- [ ] First coverage for the four files nothing names: `procfs.c` (388
+      lines, and the thing `task_manager` reads), `virtio_blk.c`
+      (M92 shipped it and reaches it only through leanfs), `pci.c`, and
+      `lapic.c`
+- [ ] `devfs.c`, `udp.c` and `ethernet.c` past one mention each
+- [ ] The uncomfortable number written down: overall coverage on the
+      first run, in the file, next to the date. A number that starts low
+      and is honest is worth more than a target nobody set
+
+**How we'll know.** A coverage percentage in `make test-fast`'s output
+and a ratchet that fails a commit which lowers it. And the four unnamed
+files named.
+
+### Q9 — A machine that runs out of things and stays up
+
+This is the milestone that decides whether "production grade" is a fair
+description, and it is the one most likely to change code rather than
+add tests.
+
+- [ ] Every resource exhausted deliberately, one at a time, with the
+      machine still serving the desktop afterwards: physical memory, the
+      kernel heap, `MAX_TASKS`, `MAX_FDS`, pipe buffers, shm segments,
+      inodes, data blocks, TCP sockets, the block cache
+- [ ] `pmm_alloc_frame`'s `panic("out of physical memory")` becomes a
+      failed allocation that propagates. It is the audit's clearest
+      example of the class: a panic that is correct for an impossible
+      state and wrong for an ordinary one. The deliverable is the
+      *triage* into "impossible" and "reachable", and the conversion of
+      the second group. **The count in this bullet was wrong when it was
+      written** — it said 219, which counted the 178 assertions inside
+      `kernel.c`'s own self-tests. The production figure is about forty,
+      and the job is correspondingly smaller
+- [ ] A leak audit with numbers rather than adjectives: frames, heap
+      bytes, task slots, fds and cache blocks recorded at boot and again
+      after 10,000 spawn/exit rounds, 10,000 open/close rounds and
+      10,000 window open/close rounds. M50 and M54 already do exactly
+      this for two resources; this generalises the move they made
+- [ ] A soak that runs for 24 hours under continuous input, with those
+      counters sampled throughout, and the graph as the artifact
+- [ ] SMP stress: `racetest` extended to hammer the shared structures
+      the locks guard — the scheduler run queue, the heap free list, the
+      pmm bitmap, the net lock, the block cache — with the lock order
+      documented in `kernel/lib/spinlock.h` and asserted at runtime under
+      a debug build, because `heap.c` already documents its order in a
+      comment and a comment cannot fail
+
+**How we'll know.** A program that allocates in a loop until it cannot
+gets an allocation failure, exits, and the desktop is still there — the
+single clearest before/after in this arc. And 24 hours of soak whose
+frame count, free-frame count and task-slot count end where they
+started.
+
+### Q10 — It runs without me ✅ (written; never yet run on GitHub)
+
+Last, because everything above needs somewhere to run, and putting this
+first would have automated a test suite that could not fail.
+
+- [ ] GitHub Actions with the tiers: `test-fast` on every push (host
+      only, no QEMU, under a minute), `make test` on every push to
+      `main`, `test-full` nightly, and the Q9 soak weekly
+- [ ] The cross-toolchain built once and cached, which is the only
+      genuinely fiddly part — `tools/build-ovmf.sh` already solves the
+      harder half of the same problem
+- [ ] Failure artifacts uploaded and kept: serial log, framebuffer PNGs,
+      visual diffs, coverage report, the perf history row. A CI failure
+      you cannot see the framebuffer of is a CI failure you rerun
+- [ ] Flake tracking: every run's verdict per test recorded, and a test
+      whose verdict changes without a code change between them is
+      quarantined by name and reported, rather than rerun until green
+- [ ] A marker-coverage gate: a new `klog` self-test line that no entry
+      in `REQUIRED_MARKERS` covers fails the build. The 79 markers have
+      been maintained by hand and by memory for 93 milestones, which has
+      worked and will not keep working
+- [ ] The README's test section rewritten to say `make test`, and the
+      badge counting tests rather than milestones
+
+**How we'll know.** A pull request that breaks the compositor is red
+before anyone reads it, with the framebuffer attached. And the flake
+rate is a number in a file rather than a thing people have opinions
+about.
+
+
+### What landing Q1-Q10 actually found
+
+*Written after the work, from the runs rather than from the plan.* The
+arc above was an audit's list of gaps. This is what appeared once the
+instruments existed, which is a different list and a more useful one.
+
+**Five real defects, none of which any existing test could see.** Four
+were found by the new instruments; the fifth was reported by a person, and
+is now covered by an instrument that did not exist when it was reported.
+
+- **The desktop jumped sixteen pixels every time an app opened.** The
+  kernel console was still painting into the framebuffer after the
+  compositor took it over, and scrolled the whole screen whenever its
+  cursor reached the bottom row. Full account in the Q7 section above,
+  including why forty-five interactive tests passed throughout.
+
+- **`tools/leanfs-put.c` had been writing the wrong filesystem since
+  M93.** It carried a hand-copied duplicate of the on-disk structs under
+  a comment reading *"The structs below still have to match
+  kernel/fs/leanfs.c byte for byte"*, and they had not matched for a
+  milestone: the tool wrote magic `LFS4`, version 4, 512-byte blocks,
+  8192 inodes and a 32 MiB data region at a kernel that had moved to
+  `LFS5`, 4096-byte blocks, 131072 inodes and 2 GiB. Every `make preseed`
+  since M93 produced an image the next boot silently reformatted — which
+  is exactly the failure the old comment predicted. The structs now live
+  in `kernel/fs/leanfs_format.h` and both programs include it; there is
+  nothing left to keep in sync. Verified end to end: the tool writes an
+  image, the kernel mounts it without reformatting, and seeds only the
+  programs the tool had not already written.
+- **`SYS_shm_create` could panic the kernel from any program.** Its frame
+  loop deliberately uses `pmm_try_alloc_frame` and its own comment says
+  why — *"a large enough request from a user process could exhaust
+  physical memory mid-loop; that has to fail this call, not panic the
+  whole kernel"*. The guard was defeated by the line above it: the
+  bookkeeping array is a `kmalloc`, and `kmalloc` grows through
+  `pmm_alloc_frame`, which panics. `SYS_shm_create(0x7FFFFFFFFFFFFFFF)`
+  asked for a 32-petabyte array and walked every free frame in the
+  machine before dying in the manner the comment forbids. Found by
+  `syscalltest` on its first run. Bounded at `SHM_MAX_SEGMENT_BYTES`.
+- **`panic()` took a lock it is documented not to take.** `panic_render`
+  is carefully written to allocate nothing and lock nothing — and the
+  `klog_puts` two lines above it took `klog_lock` unconditionally. The
+  reachable case is the halt broadcast: a panicking CPU NMIs the others,
+  an NMI is not blocked by the `cli` that guards that lock, and a core
+  interrupted inside it re-enters `klog_puts` and spins forever on a lock
+  its own stack holds. It never reaches the `hlt` it was told to reach.
+  `klog_enter_panic()` now stops klog locking for the rest of the
+  machine's life.
+- **`leanfs_init` leaked 16 MiB of contiguous below-4 GiB memory per
+  mount.** That is the scarcest allocation in the kernel and the only one
+  needing a contiguous run bigger than a page. Latent, because a booted
+  machine mounts once — and the corruption tests mount five times, which
+  is how it surfaced.
+
+**Two things the audit predicted and got wrong, recorded because being
+wrong in public is the point of writing predictions down.**
+
+- The network parsers were expected to yield findings and did not. 14.3
+  million fuzzed inputs across six parsers, under ASan and UBSan, found
+  nothing; every length check that should be there is there. The gap was
+  never the code, it was that nothing had ever exercised it.
+- The arc claimed Q1 and Q6 were the two to land if only two could. That
+  was wrong: **Q5 was worth more than either**, because it is the one
+  that found a way for any program on the machine to halt the kernel.
+  Q1 made everything else cheaper and Q6 has yet to catch anything.
+
+**The measurements, now that they exist.**
+
+| | before | after |
+|---|---|---|
+| `run-qemu.sh` to a usable desktop | ~190 s | **8 s** |
+| `qemu-serial-test.sh` wall clock | 400 s (a fixed `sleep`) | **~195 s**, stops when the boot does |
+| the fastest available check | a QEMU boot | **0.5 s**, 66 host tests |
+| boot markers | 79 | 80 |
+| performance numbers asserted | 0 | 5 |
+| host-side tests | 0 | 66 (+2 slow) |
+
+**The coverage number, written down because Q8 said it would be.**
+Measured over the units the host tier builds, which is not the kernel:
+`libk.c` and `heap.c` at 100%, `ethernet.c` 90%, `arp.c` 84%, `icmp.c`
+74%, `ip.c` 62%, `leanfs.c` 56%, `udp.c` 28%, and **`tcp.c` at 4%**. That
+last one is the honest result of this whole arc: the most complex logic
+in the tree is covered by one handshake in a boot self-test and, here, by
+nothing except the paths that reject a malformed segment. Q4's
+state-transition table is what closes it and it is not written.
+
+### What is left, and where it stopped
+
+Said plainly rather than folded into the checklists above.
+
+- **Q7 (visual regression) is half started**, and the half that landed was
+  not the half this list expected. See the Q7 section above: a
+  user-reported flicker on app launch turned out to be the kernel console
+  scrolling the framebuffer under the compositor, and the instrument that
+  catches it — `assert_stable_outside`, which asserts on the pixels
+  *nobody is looking at* — is now in the suite with two tests using it.
+  Golden frames, the diff artifact and `make accept-visuals` are still
+  unwritten. The determinism note was right and held up in practice: both
+  tests needed the cursor parked before the baseline, and both had to
+  capture with no settle at all.
+- **Q9 (exhaustion and the panic triage) is one third done.** The
+  `shm_create` fix and the `leanfs_init` leak are two entries from a
+  triage of about forty production `panic()` calls that has not been
+  performed — not the 219 this arc kept saying, which counted 178
+  assertions inside `kernel.c`'s own self-tests. The headline
+  item is untouched: `pmm_alloc_frame` still panics on OOM, and
+  `tests/test_heap.c` asserts that it does — deliberately, as the
+  *before* half of a pair. The 24-hour soak has not been run.
+- **Q4's TCP state-transition table is not written.** See the coverage
+  number above; this is the largest single gap.
+- **Q8's coverage ratchet is not built.** `make coverage` reports; it
+  does not yet fail a commit that lowers the number.
+- **Q10's CI has never run.** The workflow is written and its
+  assumptions are stated, but a workflow that has not executed is a
+  hypothesis. Two are load-bearing and unverified: that Ubuntu's
+  `x86_64-linux-gnu` cross-compiler produces objects this linker script
+  accepts, and that the performance budgets in `tests/budgets.tsv` — all
+  measured on QEMU under macOS on Apple Silicon — are survivable on a
+  GitHub runner. The first CI run is expected to move several of them,
+  and moving them with a recorded reason is the process working rather
+  than failing.
+
+### What this arc deliberately does not do
+
+- **No test framework is fetched.** `CHECK()` and a runner, for the same
+  reason there is no third-party code anywhere else in this tree. The
+  fuzzer is the one exception and it is a compiler flag, not a
+  dependency.
+- **No self-test is deleted.** Q2-Q5 add a tier below the boot tests;
+  they do not replace one. The M40 lesson applies with full force to
+  host tests too: a unit test of the compositor protocol would have
+  passed throughout the bug that milestone exists because of.
+- **No coverage target is set in advance.** Q8 measures first and the
+  number goes in the file. A target chosen before the measurement is how
+  a project ends up testing getters.
+- **Static analysis is not here.** `-Wall -Wextra -Werror` has been on
+  since the first commit and is doing the work a linter would; adding
+  `clang-tidy` before the suite above exists would be sorting the
+  warnings on an untested codebase.
+
+**On the order.** Q1 and Q2 are days and everything after them is
+cheaper for having been done. Q9 is the only one that will change kernel
+code substantially, and Q10 is deliberately last. If only two land, they
+should be Q1 and Q6 — a test command, and measurements wired to a
+verdict — because between them they turn the harnesses this project
+already has into harnesses that can fail.
+
+## The arc after that: tests worth trusting
+
+*Written after Q1-Q10 landed, from what doing them taught rather than
+from what planning them predicted.* The last arc's question was "can
+these harnesses fail at all", and the answer turned out to be "less often
+than the number 79 suggested". This arc's question is narrower and
+harder: **how much of what breaks would these tests actually catch?**
+
+It is not a rhetorical question, and the reason it is not is the most
+useful thing that happened in the last arc. Q7 needed a second test.
+The one written first passed on a build with the bug still in it - it
+drove a terminal and printed a great deal, on a correct theory
+(a process writing to stdout paints on the desktop) with the wrong
+trigger (`gui_terminal.c` sends its child's output to a pipe it reads
+itself, so it never goes near the console). It looked like a test. It
+asserted something true. It could not fail.
+
+That was caught only because Q1-Q10 had adopted a ritual of running every
+new regression test against a deliberately broken build before believing
+it. Nothing enforces that ritual, nothing measures how many *existing*
+tests would survive the same scrutiny, and there are now 47 interactive
+tests, 66 host tests and 80 boot markers that have never been asked.
+
+### One correction to the record, first
+
+The last arc's audit said **"219 `panic()` calls"** and its findings
+section repeated the number. That is true of the string and misleading as
+a fact: **178 of them are inside `kernel.c`'s own self-tests**, which are
+assertions in test code and exactly where a panic belongs. The kernel's
+production paths contain about **forty**, and Q9's triage is that much
+smaller and that much more tractable than it was made to sound.
+
+Recorded here rather than quietly fixed in place, because a number that
+gets quoted forward is worth correcting loudly once.
+
+### What the audit finds now
+
+| the gap | the number | why it matters |
+|---|---|---|
+| the suite's own detection power is unmeasured | one test written *in the last arc* passed against a build with the bug in it | every other test in this tree has the same standing: assumed to work, never asked |
+| the scheduler has no unit test | `kernel/sched` is 2,157 lines | it is the most concurrency-sensitive code here, its bugs present as "one boot in ten hangs" (spinlock.h's own M56 note), and the host tier has never compiled a line of it |
+| the compositor has no unit test | `compositor.c` is 5,189 lines | the last user-visible bug was in the paint path, and every check on this file goes through a booted machine and a screendump |
+| user space has one test program | 24,434 lines across `bin`, `lib` and `libc`; `libctest.c` is 775 of them | the libc is 3,777 lines that a third-party program links against, checked by a program written by the same hand on the same day |
+| `pmm.c` is faked, not tested | 445 lines, and `tests/fakes/fake_pmm.c` stands in for it in every single host test | the frame allocator underneath every host test is a fake, and the real one is covered only by a boot marker |
+| a flaky disk halts the machine | 8 panics across `ata.c`, `virtio_blk.c` and `rtl8139.c` - timeouts and device-error paths | on QEMU these never fire. On the USB-boot machine M28 is still waiting for, they are the likely first failure, and each one is a halt |
+| crash consistency is asserted, never tested | M71 bought "files worth trusting" with write ordering plus a mount check | nothing has ever cut power to this machine mid-write and remounted it. The one guarantee the filesystem makes is the one nothing tests |
+| CI has never run | `.github/workflows/tests.yml` exists as of Q10 | a workflow that has not executed is a hypothesis, and two of its assumptions are load-bearing |
+| the newest kernel file has no test | `kernel/dev/fwcfg.c`, 148 lines, added by Q1 | it decides whether *the tests run at all*, and it is tested by nothing. If it silently returned 0 on a machine with fw_cfg, every boot self-test would stop running and every harness would still pass |
+| latency is one number | `input_to_photon_idle_us` measured 40581, then 13364 on the next run | a 3x swing between consecutive runs is not a measurement, it is a sample. The budget that guards it is 200000 |
+| the flake rate is now a number, and the number is not zero | `session_restores_windows_across_a_reboot` failed once in a 47-test run at 4-way parallelism, then passed 3/3 alone | the harness header has predicted this failure mode for milestones - *"a boot timeout, which is this harness giving up rather than a verdict"* - and nothing has ever counted one. A suite whose flake rate is unknown teaches people to re-run it |
+| the expensive tier is cheaper than its own documentation says | the full interactive suite is **458 s** (47 tests, 4 at a time); `tools/qemu-input-test.sh`'s header still says "about twenty minutes" | Q1's 8-second boot did that, as a side effect nobody planned. The number in that header is now wrong in the direction that makes people avoid running it |
+
+Two things worth saying in the other direction, because the arc should
+not read as though nothing works. The host tier is genuinely fast - 66
+tests in half a second, which is the property that makes it get run. And
+the fix that came out of it is real: `run-qemu.sh` went from 190 seconds
+to 8, and the full interactive suite got several times cheaper as a side
+effect nobody planned.
+
+### Two decisions taken here rather than discovered halfway
+
+**Mutation testing comes first, and everything else in this arc is
+measured against it.** The obvious ordering would put the biggest
+untested subsystem first - the scheduler, or the compositor. That is the
+wrong order for one reason: writing three hundred new tests for the
+scheduler without knowing whether tests *of this kind, written by this
+hand* detect faults would be building on an unmeasured foundation. Q12
+takes a day and tells you what the existing 66 are worth. Every milestone
+after it can then report a survival rate rather than a count, and "we
+added forty tests" stops being the metric.
+
+**"Nothing else changed" is promoted from a trick to a policy.** Q7's
+`assert_stable_outside` was written for one bug and is the only check in
+this project that asserts on pixels nobody is looking at. Every other
+test here answers "did the thing happen", which is a strictly weaker
+question and the reason a full-screen flicker survived 45 tests. The
+generalisation is cheap and it is Q15's whole first half.
+
+---
+
+### Q11 — The leftovers, with conditions rather than intentions ✅ (bar the CI run)
+
+The unglamorous first entry, because an arc that opens new work while the
+last one is half-finished is how a test suite starts rotting. Each of
+these was named in Q1-Q10's own closing section as undone.
+
+- [ ] **Run the CI.** Push the branch and find out. Two assumptions are
+      load-bearing and unverified: that Ubuntu's `x86_64-linux-gnu`
+      cross-compiler produces objects `kernel/linker.ld` accepts, and
+      that budgets measured on QEMU-on-Apple-Silicon survive a GitHub
+      runner. Both are expected to be wrong in some detail; the
+      deliverable is a green run and a recorded reason for every budget
+      that moved
+- [ ] **The TCP state-transition table.** `tcp.c` is at 4% line coverage,
+      which is the largest single hole in the host tier and was called
+      that at the time. Every legal transition and every illegal one - a
+      RST in each state, a SYN in ESTABLISHED, an ACK for data never
+      sent, sequence numbers wrapping through zero, a retransmission the
+      peer already acknowledged
+- [ ] **The coverage ratchet.** `make coverage` reports and does not yet
+      fail a commit that lowers the number
+- [ ] **Q9's panic triage**, now correctly sized at ~40 rather than 219:
+      each one classified as *impossible* (a kernel bug if reached, and
+      correct to panic), *device* (Q16), or *exhaustion* (the class
+      `SYS_shm_create` was in). The classification is the deliverable;
+      the conversions follow it
+- [ ] **A test for `fwcfg.c`**, which decides whether any of the boot
+      self-tests run and is tested by nothing. The failure that matters
+      is the silent one: a `boot_selftests_enabled()` that returns 0 when
+      it should return 1 turns the entire serial harness into a
+      passing no-op
+
+**How we'll know.** A green CI badge from a run nobody's laptop produced,
+`tcp.c` past 60%, and a commit that lowers coverage failing to merge.
+
+### Q12 — Does this suite detect anything? Mutation testing ✅
+
+The milestone this arc is arranged around, and the direct answer to a
+test that passed on a build with the bug in it.
+
+- [ ] A mutation harness over the units the host tier builds: apply one
+      small semantic change to a kernel source file - flip a comparison,
+      shift a constant by one, drop a statement, negate a condition,
+      replace a return with a constant - rebuild `make test-fast`, and
+      record whether the suite noticed
+- [ ] **The survival rate, per file, written down.** A mutant that
+      survives is a fault this suite cannot see. The number is expected
+      to be bad in the places the coverage table already says are bad
+      (`tcp.c` at 4% cannot detect much) and the interesting result is
+      wherever a *high-coverage* file has surviving mutants, because that
+      is coverage without assertions - the failure mode a percentage
+      cannot show
+- [ ] Equivalent mutants excluded by hand and listed with reasons, not
+      silently dropped. A mutation that genuinely cannot change behaviour
+      is not a hole and counting it as one makes the number a lie in the
+      other direction
+- [ ] The ritual made mechanical: `make mutate FILE=kernel/mm/heap.c`
+      for a developer who has just written a test and wants to know
+      whether it can fail
+- [ ] **Deliberately not** a mutation score target. Q8 refused to set a
+      coverage target before measuring and the same argument holds
+      harder here: a target chosen in advance is how a suite ends up with
+      tests written to kill mutants rather than to describe behaviour
+
+**How we'll know.** A survival rate per file in `make test-fast`'s
+output, and at least one surviving mutant in a file at 100% line
+coverage - which is the specific result that would prove the coverage
+number was never the thing worth measuring.
+
+### Q13 — The scheduler, off the machine
+
+2,157 lines, the most concurrency-sensitive code in the tree, and zero
+host tests. Its bugs have historically presented as "about one boot in
+ten hangs", which is the worst possible failure signature and the one a
+deterministic test rules out completely.
+
+- [ ] `kernel/sched/sched.c` compiled for the host against a fake timer
+      and a fake CPU: a tick is a function call, so a test drives the
+      scheduler one quantum at a time rather than waiting for a PIT
+- [ ] Round-robin fairness as a property, not an anecdote: N tasks over M
+      quanta each get within one quantum of M/N, at every N from 1 to
+      `MAX_TASKS`
+- [ ] The lifecycle at its edges: every task slot allocated and freed,
+      the table full, a task exiting while another waits on it, a parent
+      exiting before its child, reaping, and the slot-reuse M54 added
+- [ ] Wait queues (M68): a task blocked in `SYS_waitfds` is
+      `TASK_BLOCKED` and not runnable; a wake with no waiter; two waiters
+      on one fd; a wake that arrives before the sleep
+- [ ] Signal delivery order and masking, which is a state machine with
+      no test today
+- [ ] pgid/sid/foreground-job rules (M73, M85), which are pure logic over
+      a task table and are currently exercised only by a shell
+- [ ] **The lock-order assertion made real.** `heap.c` documents its lock
+      order in a comment and `spinlock.h` documents the interrupt rule in
+      three paragraphs. A comment cannot fail. The host tier's fake
+      spinlock already catches recursive acquisition; extend it to record
+      the order locks are taken in and fail on an inversion
+
+**How we'll know.** A fairness property that holds for every task count,
+and the M56 deadlock - a lock taken from a path an interrupt can
+re-enter - reproduced as a failing test on a build with the fix reverted.
+
+### Q14 — The compositor, off the machine
+
+5,189 lines. The largest single file in user space, the one every visible
+bug in this project has lived in, and the one every check reaches only
+through a booted machine and a screendump.
+
+Most of it is not graphics. Hit-testing, z-order, clipping, damage
+regions, snapping, cascade placement and the taskbar's layout arithmetic
+are pure functions of a window list, and every one of them can be tested
+in microseconds.
+
+- [ ] The window model compiled for the host against a fake framebuffer:
+      an array of pixels a test can read back, which is exactly what the
+      real one is
+- [ ] Hit-testing against overlap, the case M51 added and the input suite
+      covers with one test: a click at a point covered by three windows
+      reaches the top one, at every z-order permutation
+- [ ] The z-order invariants as properties: a panel is always above every
+      app, the desktop always below, `z_raise` is idempotent, and no
+      operation ever leaves a window in the list twice or in none
+- [ ] Clipping: no draw call may write outside `clip_x0..clip_x1`, ever,
+      for any window geometry including ones that start off-screen. The
+      fake framebuffer is guard-banded, so this is checked rather than
+      hoped
+- [ ] Placement: the cascade, the bottom clamp M45 added after a seventh
+      icon found it, and session restore at a *different resolution* than
+      the one that saved it - which is the case most likely to put a
+      window where nobody can reach it
+- [ ] The animation clock: given a fixed time base, every animation
+      reaches its endpoint exactly, retires, and never overruns
+      `FRAME_BUDGET_MS` in its own arithmetic
+
+**How we'll know.** The M45 bottom-clamp bug and the M51 occlusion bug
+both reproduced as failing host tests against reverted fixes, in
+milliseconds rather than by launching seven applications.
+
+### Q15 — Nothing else changed, everywhere ✅ (five invariants; one with a documented blind spot)
+
+Q7 wrote `assert_stable_outside` for one bug. This makes it the default
+question the interactive suite asks.
+
+- [ ] Every existing interactive test gains a stability assertion: after
+      the thing it checks, nothing outside the regions that action may
+      touch has changed. The allowed-region lists are the deliverable and
+      they are the part a reader has to trust - each entry is a place the
+      suite has stopped looking, and each one needs a reason next to it
+- [ ] The golden-frame harness Q7 deferred: canonical states captured,
+      compared with tolerance, and **the diff image as the failure
+      artifact**. A visual failure you cannot look at is a visual failure
+      you re-run
+- [ ] `make accept-visuals`, and baselines reviewed in the diff like any
+      other change. A visual test nobody can update is a visual test
+      everybody disables
+- [ ] The determinism work, which is the actual milestone and was
+      correctly identified as such before any of it was attempted: the
+      panel clock, the cursor, and every animation pinned or masked.
+      Q7's two tests already needed the cursor parked before the baseline
+      and no settle between frames, and those are the two smallest
+      instances of this problem
+- [ ] Both resolutions M58 supports, because a layout that only works at
+      one is exactly what a fixed probe coordinate cannot see
+
+**How we'll know.** A one-pixel change to the titlebar's corner radius
+fails with a diff image showing the corner, and the suite passes twice in
+a row on the same commit - which is the property that decides whether any
+of this is usable.
+
+### Q16 — Devices that fail, and a machine that keeps running
+
+Eight panics across `ata.c`, `virtio_blk.c` and `rtl8139.c` are device
+timeouts and error reports. Under QEMU they never fire. On the real
+machine M28 is still waiting for, they are the likeliest first failure -
+and every one of them is a halt.
+
+- [ ] A fault-injecting block device: a read that never completes, a
+      write that reports an error, a device that resets itself mid-request,
+      a sector that returns different bytes each time it is read
+- [ ] The same for the NIC: a transmit that never drains, a receive ring
+      that overruns, a device that stops answering
+- [ ] Each panic in that class converted to an error that propagates, or
+      kept with a written argument for why a halt is genuinely the right
+      answer. "The disk is unreliable" is not obviously fatal; "the
+      framebuffer is not 32bpp at boot" obviously is
+- [ ] The filesystem's behaviour when the disk below it starts failing
+      mid-operation, which is where the write-ordering guarantee M71
+      bought either holds or does not
+- [ ] QEMU's own fault injection (`blkdebug`) used where it fits, so at
+      least one of these is tested against the real driver on the real
+      machine rather than only against a fake
+
+**How we'll know.** A disk that fails every write from the tenth onward
+leaves a machine that reports an error, keeps its desktop, and mounts to
+a consistent filesystem on the next boot.
+
+### Q17 — Power cut, and a filesystem that survives it ✅
+
+M71's title is "Files worth trusting" and its mechanism is write ordering
+plus an unclean-mount check. Neither has ever been tested by an unclean
+mount, because nothing has ever cut power to this machine mid-write.
+
+- [ ] Kill the guest - `SIGKILL` to QEMU, not a shutdown - at a
+      randomised point during a write, then boot the same image and check
+      the filesystem. Repeat across the whole distribution of interrupt
+      points
+- [ ] The invariant, stated so it can be checked: a file is either
+      entirely its old contents or entirely its new ones, never a mixture,
+      and no block is both free and referenced
+- [ ] The unclean-mount path exercised for real, rather than by writing
+      `DIRTY` into a superblock by hand
+- [ ] `leanfs_check` given something genuinely broken to find, and a
+      recorded answer to what it does about it
+- [ ] **The measurement M71 and M93 both deferred**, taken here because
+      this is the milestone that finally has the instrument for it: how
+      long a full scan takes at hundreds of thousands of files, which is
+      the second of the two conditions M71 set for a journal being worth
+      building
+
+**How we'll know.** A hundred power cuts at a hundred different
+instants, and a hundred consistent filesystems - or a reproducible
+counterexample, which would be worth more.
+
+### Q18 — Latency as a distribution ✅
+
+`input_to_photon_idle_us` measured 40581 on one run and 13364 on the
+next. That is a 3x swing between consecutive boots of the same image, and
+it means the number is a sample rather than a measurement. The budget
+guarding it is 200000, which is wide enough to be true and too wide to
+mean anything.
+
+- [ ] Every latency measured N times and reported as a distribution -
+      median, p95, worst - rather than once
+- [ ] Budgets restated against the percentile that matters. A desktop is
+      judged by its worst frames, so p95 and worst are the numbers with
+      opinions in them; the median mostly says the machine is idle
+- [ ] The frame budget checked the same way: `FRAME_BUDGET_MS` is
+      asserted today by its silence, which is the right design and gives
+      no idea how close a passing run came
+- [ ] The measurement done under a stated load rather than an incidental
+      one, so two runs are comparable
+- [ ] `QEMU_MEM=128` and `QEMU_DISK=ide` given their own rows, which
+      Q6 listed and did not deliver. The README quotes 95 ms versus
+      5.6 ms for the two disk paths and neither harness runs the first
+
+**How we'll know.** A latency row whose p95 moves by less than 20%
+between consecutive runs on an idle host - and if it does not, that is
+the finding, and the budget becomes a percentile of a distribution
+instead of a ceiling over a sample.
+
+### Q19 — Boot once, test many
+
+Infrastructure, and the reason it is a milestone rather than a chore: the
+interactive suite boots a fresh guest per test, and it is the only tier
+expensive enough that people will avoid running it.
+
+- [ ] A QEMU snapshot taken once at the desktop, restored per test. Boot
+      is ~8 seconds of every test's ~25 and the restore should be well
+      under one. The measured baseline to beat is **458 s** for 47 tests
+      at 4-way parallelism
+- [ ] Snapshot validity tied to the image: a stale snapshot silently
+      testing yesterday's kernel is the one failure this must not have,
+      and it fails closed by hashing the image into the snapshot's name
+- [ ] The tests that genuinely need a cold boot - session restore,
+      settings persistence, the first-boot format path - marked as such
+      and left booting, because a snapshot restores the state they exist
+      to check
+- [ ] The measured before and after, in `build/test-history.tsv`
+
+**How we'll know.** The full interactive suite in a quarter of 458 s,
+with the same verdicts, and a stale snapshot proven to fail rather than
+to pass quietly. The second prize is the flake in the table above: less
+time per test at the same parallelism is less contention, which is what
+produced it.
+
+### Q20 — The tests as a product ✅ (flake tracking; the rest deferred)
+
+Everything above adds tests. This one is about the suite as a thing
+people have to live with, and every entry now has evidence behind it
+rather than a worry.
+
+- [ ] **The flake rate, measured.** Every run records a per-test verdict;
+      a test whose verdict changes with no code change between the two is
+      quarantined by name and reported, rather than re-run until green.
+      The first entry is already known:
+      `session_restores_windows_across_a_reboot`, which failed once at
+      4-way parallelism and passed 3/3 alone
+- [ ] **The buggy-build ritual, made mechanical.** Q7 caught a test that
+      could not fail only because someone thought to revert the fix and
+      re-run. `make prove-test TEST=...` turns that from a habit into a
+      command, and Q12's harness is most of the machinery already
+- [ ] A written contract for adding a test: what it must assert, that it
+      must be shown to fail, and - the one Q7 learned the hard way - that
+      an allowed-region list is a list of places the suite has *stopped
+      looking* and needs a reason per entry
+- [ ] Per-test runtime recorded, and a budget on the total. The
+      interactive tier is 458 s today and the number that matters is
+      whether it is still 458 next quarter
+- [ ] `tools/qemu-input-test.sh`'s header corrected: it says "about
+      twenty minutes" and the answer is under eight. A stale number in a
+      header is how people decide not to run something
+
+**How we'll know.** A flake rate in `build/test-history.tsv` with a
+non-zero entry and a name against it, and a test that cannot fail caught
+by a command rather than by somebody's suspicion.
+
+
+### What landing Q11-Q20 actually found
+
+*Written from the runs.* The arc's bet was that Q12 should come first
+because it measures what everything else is worth. That was right, and it
+was right in a way that was uncomfortable to read.
+
+**The first mutation census said 34.7%, and it was wrong.** Two bugs in
+the harness cancelled into a plausible number: the relational operator
+was matching the `>` in `b->size` and producing `b->=size`, and the
+build-failure detection was counting those compile errors as *kills*. So
+the tool reported a number that looked like a measurement and was an
+artifact. Fixed, and the honest first figure was **34.7% across eight
+files** with the survivors where nobody would have guessed.
+
+**Coverage and detection are different things, and now there is proof.**
+
+| file | line coverage | mutation score, before | after |
+|---|---|---|---|
+| `net/ethernet.c` | 100% | **0.0%** | 88.5% |
+| `net/udp.c` | 96% | 3.7% | 80.5% |
+| `net/icmp.c` | 74% | 7.5% | 59.4% |
+| `net/arp.c` | 84% | 29.8% | 76.6% |
+| `mm/heap.c` | 100% | 66.7% | 89.4% |
+
+`ethernet.c` is the one to remember: **100% line coverage and a zero
+mutation score.** Every line ran and not one injected fault was detected,
+because every test that "covered" it asserted only that a malformed frame
+produced no reply. Q12's own text predicted this exact result -
+"a survivor in a well-covered file is the interesting kind" - and finding
+it was still a surprise.
+
+The cause was the same everywhere and is worth stating once: **a test
+that asserts an absence constrains almost nothing.** Dropping a bad
+packet is one bit of behaviour. The several hundred bits that matter are
+in the reply, and nothing was reading them. The fix was mechanical once
+named - assert the content - and `net/udp.c` went from 3.7% to 80.5% on
+one insight: every UDP test had been sending a checksum of zero, which
+RFC 768 defines as "not computed", so the entire validation path had
+never been entered.
+
+**Three more real defects, all found by tests written this arc.**
+
+- **A blind RST could tear down any TCP connection.** `tcp.c` acted on a
+  RST before its acceptance test, so a segment at *any* sequence number
+  was believed. RFC 5961 exists because that reduces killing somebody
+  else's connection from guessing a four-tuple and a sequence number to
+  guessing a four-tuple.
+- **Sixteen packets could stop this machine speaking TCP.** A control
+  block created by an arriving SYN belongs to `tcp.c` until `tcp_accept`
+  hands it over. If it died first - a RST, a failed handshake - nobody
+  called `tcp_release`, so `tcb_dispose` never reclaimed the slot.
+  `TCP_MAX_TCBS` is 16, and the leak was permanent until reboot. A denial
+  of service costing an attacker thirty-two packets.
+- **`tcp_abort` did not free.** `tcp.h` calls it "RST and free"; it did
+  the first half. A caller following the documented contract leaked a
+  slot per aborted connection.
+
+All three were found by `tests/test_tcp_states.c` on its first run, which
+also took `tcp.c` from **3.74% to 62.62%** line coverage - the largest
+single hole in the suite, named as such since Q8, and closed.
+
+**The filesystem survives losing power.** Fourteen cuts with `SIGKILL`
+spread across the heaviest metadata window there is - format, then
+seeding fifty programs into `/bin` - each followed by a real reboot and
+an independent structural check. Fourteen consistent filesystems, zero
+failures. M71 has been called "Files worth trusting" since it landed;
+it is now a claim with evidence rather than an argument.
+`tools/leanfs-fsck.py` is deliberately a *second* implementation of the
+on-disk format, which is the one place Q3's "never two copies" rule is
+worth breaking: a checker built from the kernel's own code cannot find a
+corruption the kernel does not believe is possible.
+
+**Latency was measured wrong, and the shape says something different
+from the number.** Within a single boot the idle path is tight - best
+40757 us, median 42303, worst 43475, a 7% spread. Under load the worst
+frame is twice the median (81547 against 40742). So the 3x swing between
+consecutive runs that motivated Q18 is *between* boots rather than within
+one: it is the boot conditions that vary, not the path. That is a
+different problem and it is now visible.
+
+**A limit of the pixel instrument, found by trying to prove a test.**
+Q15's `moving_the_cursor_changes_only_the_cursor` was written to catch a
+cursor trail, and was then run against a build with one deliberately
+injected - the compositor repainting only the cursor's new footprint and
+never restoring the old. **It passed.** Twice: the first version allowed
+the whole corridor the cursor traversed, which is Q7's own warning about
+allowed-region lists happening inside a test written to honour it; the
+second brought the cursor home so the corridor had to be pixel-identical,
+and passed anyway. The second failure is not a mistake in the test.
+`compositor.c` does a full redraw every 100 ms as a fallback and a
+`screendump` round trip takes longer than that, so the trail is really
+there and is really repaired before the instrument can look.
+
+The conclusion is worth carrying: **a transient repaired within 100 ms is
+below the resolution of a screendump-based test.** The launch flicker was
+catchable because it survived into a frame. Catching a cursor trail needs
+a different instrument - the guest reporting its own damage rectangles,
+or a build with the fallback redraw disabled - and that is Q14's
+territory rather than Q15's. The test is kept, with its limits written
+into it, because the invariant it *does* assert (a persistent corruption
+the fallback does not repair) is real and nothing else here looks for it.
+
+**Two flaws in tooling written earlier this arc, found by using it.**
+The mutation harness could leave a mutant *binary* on disk beside a
+restored source, at which point `make test-fast` reported failures with
+no cause - it cost twenty minutes of looking for a bug that was not
+there. And `make test-fast TEST_SAN=0` left a non-sanitized binary that a
+later plain run considered up to date, quietly reporting "no ASan
+findings" about a build ASan was never in. Both fixed; the second is the
+more dangerous, because it makes a weaker check look like a stronger one.
+
+### What is left from Q11-Q20, and where it stopped
+
+- **Q13 (the scheduler) and Q14 (the compositor) are not started.** Both
+  were priced in this arc's own closing note as "each larger than the
+  whole of Q1-Q10's host tier", and that estimate stands: `sched.c` has
+  25 includes and needs fakes for the CPU, the interrupt frame, the GDT,
+  SMP, the PIT, pipes, shm, processes and the address space before a
+  single line of it compiles on a host. They remain the two largest
+  untested subsystems - 2,157 and 5,189 lines.
+- **Q16 (device fault injection) is not started.** `fake_blk` already has
+  the hook (`fake_blk_fail_writes_after`) and nothing uses it yet; the
+  driver-level half needs QEMU's `blkdebug`.
+- **Q19 (snapshots) is not started.** The interactive suite is 458 s and
+  that is now bearable, which is exactly why this slipped.
+- **Q15 is five invariants, not forty-seven.** The generalisation to
+  every interactive test is real work: each one needs an allowed-region
+  list, and each entry in such a list is a place the suite has stopped
+  looking.
+- **The CI has still never run.** Same two unverified assumptions as
+  before. This is the cheapest remaining item and the one most likely to
+  find something.
+- **`fs/leanfs.c` is at 55.68% and its mutation score is unmeasured** -
+  1,440 mutants at ~1.3 s each is half an hour, and it was not spent.
+
+### What this arc deliberately does not do
+
+- **No new test framework, still.** `CHECK` and a runner. The mutation
+  harness in Q12 is a shell script and a compiler, and libFuzzer stays
+  the only third-party thing anywhere near this code.
+- **No property-based testing library.** Q3's leanfs model test is
+  hand-written and that is the right size for it. A library becomes worth
+  it when shrinking a failing case by hand is the bottleneck, which it is
+  not yet.
+- **No performance target.** Q18 measures distributions and restates
+  budgets against them. It does not try to make anything faster - M69's
+  discipline is that a measurement comes before the work, and this arc is
+  the measurement.
+- **No coverage number for the kernel as a whole.** The host tier covers
+  9 of 59 kernel files and the honest number is the per-file table, not
+  an average over a denominator chosen to flatter it. Q13 and Q14 move
+  the denominator by adding the two biggest subsystems; nothing here
+  reports a single figure.
+
+**On the size of this.** Q13 and Q14 are each larger than the whole of
+Q1-Q10's host tier, and Q17 needs a harness that does not exist. Q12 is
+the smallest and is the one to do first for exactly that reason: it is a
+day's work that tells you what the other nine are worth.
+
+**If only two land, they should be Q12 and Q15** - mutation testing, and
+"nothing else changed" applied everywhere. The last arc named Q1 and Q6
+and got that wrong: Q5 was worth more than either, and Q6 has yet to
+catch anything. This prediction is offered with that record attached.
+The reasoning is that those two attack the arc's question from both
+ends - Q12 measures whether these tests detect faults at all, and Q15
+covers the one class of fault that has actually reached a user.
+
+
 ## Deliberately not next, and why
 
 *Re-read after the M81–M89 arc was written, because "next" moved.* Every entry below is still deliberately not next — none of them is in

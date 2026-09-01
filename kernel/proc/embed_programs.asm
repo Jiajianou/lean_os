@@ -338,3 +338,9 @@ global jobtest_elf_end
 jobtest_elf_start:
     incbin "build/jobtest.elf"
 jobtest_elf_end:
+
+global syscalltest_elf_start
+global syscalltest_elf_end
+syscalltest_elf_start:
+    incbin "build/syscalltest.elf"
+syscalltest_elf_end:

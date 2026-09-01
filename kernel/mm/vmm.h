@@ -89,6 +89,19 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 void vmm_unmap_page(uint64_t virt);
 uint64_t vmm_kernel_pml4_phys(void);
 
+/* Q2: where the kernel heap starts, asked rather than assumed.
+ *
+ * heap.c used to expand KERNEL_HEAP_VIRT_BASE itself, and heap.c's own
+ * M90 comment is a paragraph about how deriving that address wrongly put
+ * the heap inside the identity map on a machine with 2 GiB. An address
+ * the heap gets from the module that owns the address space is one fewer
+ * place for that to happen again.
+ *
+ * It is also what makes the heap testable off the machine: 256 GiB is not
+ * an address a host process can map, so a heap that hardcodes it can only
+ * ever be exercised by booting. See tests/fakes/fake_vmm.c. */
+uint64_t vmm_kernel_heap_base(void);
+
 /* Per-address-space variant: pml4_phys need not be the currently loaded
  * CR3 - safe to call from kernel context to build up a new process's
  * mappings before ever switching to it (every pmm-allocated frame,

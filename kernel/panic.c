@@ -100,6 +100,11 @@ void panic_render(const char *msg) {
 }
 
 void panic(const char *msg) {
+    /* Q2: before the first word. panic_render below was already written
+     * to take no lock; klog_puts was not, and the NMI this function is
+     * about to broadcast can land on a core that is holding klog_lock.
+     * See klog.c's own note. */
+    klog_enter_panic();
     klog_puts("\n*** KERNEL PANIC: ");
     klog_puts(msg);
     klog_puts(" ***\n");

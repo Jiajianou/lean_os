@@ -2028,6 +2028,12 @@ static long sys_fb_map(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint6
         vmm_map_page_in(cur->pml4_phys, USER_FB_BASE + i * PAGE_SIZE, phys_base + i * PAGE_SIZE,
                          VMM_FLAG_WRITABLE | VMM_FLAG_USER);
     }
+    /* Q7: the screen now has a user-space owner, so the kernel console
+     * stops writing to it. Until this line, every process's stdout was
+     * painting glyphs into the framebuffer the compositor was composing
+     * into - and scrolling the whole thing up sixteen pixels whenever the
+     * console cursor reached the bottom row. See klog.c. */
+    klog_release_console();
     return (long)USER_FB_BASE;
 }
 

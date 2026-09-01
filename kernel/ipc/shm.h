@@ -40,6 +40,33 @@
  * `owner_task_id` is only ever used later, by shm_free_by_owner - it's
  * not a permission check, just bookkeeping for reclaiming the segment
  * once its owner is gone. */
+/* ---- Q5: the ceiling on a segment, and why there has to be one -------
+ *
+ * `size` comes straight from SYS_shm_create's first argument, which means
+ * it comes straight from a user process. shm_create was written knowing
+ * that - its frame loop deliberately uses pmm_try_alloc_frame rather than
+ * pmm_alloc_frame, and its own comment says why: "a large enough request
+ * from a user process could exhaust physical memory mid-loop; that has to
+ * fail this call, not panic the whole kernel."
+ *
+ * The guard was defeated by the line above it. Before reaching that loop,
+ * shm_create kmallocs one uint64_t per page to hold the frame list - and
+ * kmalloc grows the kernel heap through pmm_alloc_frame, which panics.
+ * So SYS_shm_create(0x7FFFFFFFFFFFFFFF) asks for a 32-petabyte bookkeeping
+ * array, and the kernel walks every free frame in the machine mapping heap
+ * for it before dying in exactly the way the comment below it forbids.
+ * Found by user_space/bin/syscalltest.c on its first run, which is the
+ * kind of thing that program exists for.
+ *
+ * 256 MiB is chosen against the only real caller: the compositor's
+ * framebuffer-sized surfaces. 3840x2160 at 4 bytes is 33 MiB, so this is
+ * most of an order of magnitude of headroom over the largest thing this
+ * desktop has ever asked for, and eight orders below the number that
+ * broke it. It is a ceiling rather than a policy - there is no accounting
+ * here and no per-process quota, and that is Q9's problem, not this
+ * one. */
+#define SHM_MAX_SEGMENT_BYTES (256ULL * 1024 * 1024)
+
 int shm_create(size_t size, int owner_task_id);
 
 /* Frees every live segment owned by `owner_task_id` - called once from
