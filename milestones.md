@@ -9175,7 +9175,7 @@ single clearest before/after in this arc. And 24 hours of soak whose
 frame count, free-frame count and task-slot count end where they
 started.
 
-### Q10 — It runs without me ✅ (written; never yet run on GitHub)
+### Q10 — It runs without me ✅ (written, never run, then withdrawn — see *Testing is local*)
 
 Last, because everything above needs somewhere to run, and putting this
 first would have automated a test suite that could not fail.
@@ -9317,15 +9317,14 @@ Said plainly rather than folded into the checklists above.
   number above; this is the largest single gap.
 - **Q8's coverage ratchet is not built.** `make coverage` reports; it
   does not yet fail a commit that lowers the number.
-- **Q10's CI has never run.** The workflow is written and its
-  assumptions are stated, but a workflow that has not executed is a
-  hypothesis. Two are load-bearing and unverified: that Ubuntu's
+- **Q10's CI never ran, and has since been withdrawn.** The workflow was
+  written and its assumptions were stated, but a workflow that has not
+  executed is a hypothesis, and this one stayed one for its whole life.
+  Two assumptions were load-bearing and were never tested: that Ubuntu's
   `x86_64-linux-gnu` cross-compiler produces objects this linker script
   accepts, and that the performance budgets in `tests/budgets.tsv` — all
   measured on QEMU under macOS on Apple Silicon — are survivable on a
-  GitHub runner. The first CI run is expected to move several of them,
-  and moving them with a recorded reason is the process working rather
-  than failing.
+  hosted runner. Neither will be answered now. See *Testing is local*.
 
 ### What this arc deliberately does not do
 
@@ -9398,7 +9397,7 @@ gets quoted forward is worth correcting loudly once.
 | `pmm.c` is faked, not tested | 445 lines, and `tests/fakes/fake_pmm.c` stands in for it in every single host test | the frame allocator underneath every host test is a fake, and the real one is covered only by a boot marker |
 | a flaky disk halts the machine | 8 panics across `ata.c`, `virtio_blk.c` and `rtl8139.c` - timeouts and device-error paths | on QEMU these never fire. On the USB-boot machine M28 is still waiting for, they are the likely first failure, and each one is a halt |
 | crash consistency is asserted, never tested | M71 bought "files worth trusting" with write ordering plus a mount check | nothing has ever cut power to this machine mid-write and remounted it. The one guarantee the filesystem makes is the one nothing tests |
-| CI has never run | `.github/workflows/tests.yml` exists as of Q10 | a workflow that has not executed is a hypothesis, and two of its assumptions are load-bearing |
+| there is no CI | Q10 wrote a workflow, nothing ever ran it, and it has since been deleted | every tier is graded by a person who remembered to run a script — the arrangement all 93 milestones were built under, now stated rather than half-denied by a file in `.github/` |
 | the newest kernel file has no test | `kernel/dev/fwcfg.c`, 148 lines, added by Q1 | it decides whether *the tests run at all*, and it is tested by nothing. If it silently returned 0 on a machine with fw_cfg, every boot self-test would stop running and every harness would still pass |
 | latency is one number | `input_to_photon_idle_us` measured 40581, then 13364 on the next run | a 3x swing between consecutive runs is not a measurement, it is a sample. The budget that guards it is 200000 |
 | the flake rate is now a number, and the number is not zero | `session_restores_windows_across_a_reboot` failed once in a 47-test run at 4-way parallelism, then passed 3/3 alone | the harness header has predicted this failure mode for milestones - *"a boot timeout, which is this harness giving up rather than a verdict"* - and nothing has ever counted one. A suite whose flake rate is unknown teaches people to re-run it |
@@ -9432,19 +9431,18 @@ generalisation is cheap and it is Q15's whole first half.
 
 ---
 
-### Q11 — The leftovers, with conditions rather than intentions ✅ (bar the CI run)
+### Q11 — The leftovers, with conditions rather than intentions ✅ (the CI item withdrawn, not done)
 
 The unglamorous first entry, because an arc that opens new work while the
 last one is half-finished is how a test suite starts rotting. Each of
 these was named in Q1-Q10's own closing section as undone.
 
-- [ ] **Run the CI.** Push the branch and find out. Two assumptions are
-      load-bearing and unverified: that Ubuntu's `x86_64-linux-gnu`
-      cross-compiler produces objects `kernel/linker.ld` accepts, and
-      that budgets measured on QEMU-on-Apple-Silicon survive a GitHub
-      runner. Both are expected to be wrong in some detail; the
-      deliverable is a green run and a recorded reason for every budget
-      that moved
+- [~] **Run the CI.** *Withdrawn.* The two load-bearing assumptions —
+      that Ubuntu's `x86_64-linux-gnu` cross-compiler produces objects
+      `kernel/linker.ld` accepts, and that budgets measured on
+      QEMU-on-Apple-Silicon survive a hosted runner — are now permanently
+      unanswered, because the workflow they belonged to is gone. See
+      *Testing is local*
 - [ ] **The TCP state-transition table.** `tcp.c` is at 4% line coverage,
       which is the largest single hole in the host tier and was called
       that at the time. Every legal transition and every illegal one - a
@@ -9464,8 +9462,9 @@ these was named in Q1-Q10's own closing section as undone.
       it should return 1 turns the entire serial harness into a
       passing no-op
 
-**How we'll know.** A green CI badge from a run nobody's laptop produced,
-`tcp.c` past 60%, and a commit that lowers coverage failing to merge.
+**How we'll know.** `tcp.c` past 60%, and a commit that lowers coverage
+failing to merge. (The green-CI-badge half of this is withdrawn — see
+*Testing is local*.)
 
 ### Q12 — Does this suite detect anything? Mutation testing ✅
 
@@ -9868,9 +9867,9 @@ more dangerous, because it makes a weaker check look like a stronger one.
   every interactive test is real work: each one needs an allowed-region
   list, and each entry in such a list is a place the suite has stopped
   looking.
-- **The CI has still never run.** Same two unverified assumptions as
-  before. This is the cheapest remaining item and the one most likely to
-  find something.
+- **The CI still never ran, and now never will.** Same two unverified
+  assumptions as before, retired unanswered along with the workflow. See
+  *Testing is local*.
 - **`fs/leanfs.c` is at 55.68% and its mutation score is unmeasured** -
   1,440 mutants at ~1.3 s each is half an hour, and it was not spent.
 
@@ -10005,3 +10004,37 @@ Everything else below is unchanged or changed only in place.
   needs hands. M70's painting panic and M71's mount check both make the
   day it happens go better, which is a nice side effect and not a reason
   to reorder anything.
+
+## Testing is local
+
+`.github/` is gone: the workflow Q10 wrote, and every reference in this
+tree that spoke as though a hosted runner existed. Nothing was ever run
+on one.
+
+**What changed.** Deleted `.github/workflows/tests.yml`. Reworded the
+comments that had been written against it — `CLAUDE.md`'s test section,
+the `Makefile` header's account of why `AS`/`CC`/`LD` are overridable
+from the environment, `tools/run-qemu.sh`'s note on the `none` audiodev,
+`tests/runner.c`'s note on `slow_` tests, `tests/budgets.tsv`'s header,
+and `tests/corpus/README.md` — so each states its actual reason rather
+than deferring to a runner. The Q10 and Q11 entries above keep their
+history and are marked withdrawn.
+
+**What it costs.** The two assumptions Q10 named are now permanently
+untested: that a distribution's `x86_64-linux-gnu` cross-compiler
+produces objects `kernel/linker.ld` accepts, and that budgets measured
+on QEMU-on-Apple-Silicon hold anywhere else. The budgets stay a claim
+about *this* machine, and `tests/budgets.tsv` now says so.
+
+**What it taught.** The reasons in those comments were mostly good ones
+that had been attributed to the wrong cause. `test-fast` is worth
+keeping cross-toolchain-free because that is what makes it get run on
+every edit, not because a runner needed it; `-audiodev none` is right
+because it makes the run headless, not because a runner had no sound
+card. A comment that justifies a constraint by naming a thing outside
+the tree is a comment that goes stale the day that thing leaves — and
+this one had never even arrived.
+
+The `git remote` still points at GitHub. That is where the repository is
+stored, not something the build or the tests touch, and removing it is
+the user's call rather than this entry's.

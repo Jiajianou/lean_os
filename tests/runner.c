@@ -66,9 +66,9 @@ int main(int argc, char **argv) {
      * the property the fast tier exists for.
      *
      * So a test whose name begins with "slow_" runs only when asked for:
-     * `--slow`, or a filter that names it. They are NOT excluded from
-     * CI - tools/run-tests.sh --full passes --slow. The split is about
-     * the edit-compile-test loop, not about what gets checked. */
+     * `--slow`, or a filter that names it. They are NOT excluded from the
+     * graded run - tools/run-tests.sh --full passes --slow. The split is
+     * about the edit-compile-test loop, not about what gets checked. */
     const char *filter = NULL;
     int run_slow = 0;
     for (int i = 1; i < argc; i++) {

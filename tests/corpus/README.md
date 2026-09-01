@@ -43,6 +43,7 @@ is one nobody is prompted to commit. It sits in a working tree until the
 tree is thrown away, and the bug it reproduces gets found again the hard
 way.
 
-If a committed corpus ever becomes worth it - to seed CI, say - the way
+If a committed corpus ever becomes worth it - to seed a longer campaign,
+say - the way
 to do it is a *minimised* one (`-merge=1` into a fresh directory) added
 on purpose, not the accumulated output of whoever ran the fuzzer last.

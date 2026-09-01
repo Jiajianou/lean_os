@@ -63,8 +63,8 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 #
 # M62: -device AC97 is the sound card kernel/drivers/ac97.c drives. The
 # `none` audiodev means QEMU emulates the controller without opening a
-# host audio device - which is what makes this safe to run headlessly and
-# in CI, and is enough for everything the driver's self-test asserts (the
+# host audio device - which is what makes this safe to run headlessly,
+# and is enough for everything the driver's self-test asserts (the
 # device consumed the buffer it was handed). Swap it for `coreaudio`,
 # `pa` or `sdl` to actually hear the thing.
 # M90: the machine's memory size, stated rather than defaulted. Every

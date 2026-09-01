@@ -7,9 +7,9 @@
 #
 # These were `:=`, which beats the environment in GNU make and made the
 # toolchain unchangeable without editing this file. That is fine on a
-# developer's machine and exactly wrong in CI, where x86_64-elf-gcc is not
-# a package and the distribution's x86_64-linux-gnu cross-compiler
-# produces the same freestanding objects for these flags.
+# developer's machine and exactly wrong on a machine where x86_64-elf-gcc
+# is not installed and a distribution's x86_64-linux-gnu cross-compiler,
+# which produces the same freestanding objects for these flags, is.
 #
 # `?=` is NOT the fix and was tried first: AS, CC and LD are built-in make
 # variables with default values, so `?=` sees them as already defined and
@@ -575,8 +575,8 @@ $(TEST_BIN): $(TEST_SRCS) $(wildcard tests/*.h) $(wildcard tests/fakes/lib/*.h) 
 	$(HOSTCC) $(TEST_CFLAGS) -o $@ $(TEST_SRCS)
 
 # The fast tier. Deliberately does not depend on `all` - the point is that
-# it runs without a cross-toolchain, which is also what lets it be the
-# check that runs on every push in CI.
+# it runs without a cross-toolchain, which is what makes it the check worth
+# running on every edit.
 test-fast: $(TEST_BIN)
 	@$(TEST_BIN) $(TEST_FILTER)
 

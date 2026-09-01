@@ -14,10 +14,10 @@
 # A budget that has sat at 2x slack for ten milestones is a bug in the
 # budget. Re-measure and tighten it, and say so here when you do.
 #
-# These were measured on QEMU under macOS on Apple Silicon, which is not
-# the same machine CI will use - see Q10. The first CI run is expected to
-# move several of these, and moving them with a recorded reason is the
-# process working.
+# These were measured on QEMU under macOS on Apple Silicon. There is no
+# hosted runner behind them and there is not meant to be one: they are a
+# claim about this machine. Measured somewhere else they will move, and
+# moving them with a recorded reason is the process working.
 #
 # Q18: the `input_to_photon_*_{best,med,worst}` rows replaced a single
 # number that swung 3x between consecutive runs of the same image. The
@@ -41,4 +41,4 @@ input_to_photon_idle_med_us	250000	us	42303	b7bb520	Q18: what it usually costs. 
 input_to_photon_idle_worst_us	400000	us	43475	b7bb520	Q18: what a person actually notices. A desktop is judged by its worst frames, so this is the row with an opinion in it.
 input_to_photon_loaded_best_us	400000	us	38879	b7bb520	Q18: as above, with CPU-bound tasks running.
 input_to_photon_loaded_med_us	500000	us	40742	b7bb520	Q18: the median under load.
-input_to_photon_loaded_worst_us	900000	us	81547	b7bb520	Q18: the worst frame under load, which is the number that decides whether the desktop stays usable. Deliberately the widest here: it is also the noisiest, and the first CI run is expected to move it.
+input_to_photon_loaded_worst_us	900000	us	81547	b7bb520	Q18: the worst frame under load, which is the number that decides whether the desktop stays usable. Deliberately the widest here: it is also the noisiest, and a different host will move it.
