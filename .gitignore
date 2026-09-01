@@ -130,3 +130,4 @@ dkms.conf
 .DS_Store
 __pycache__/
 *.pyc
+CLAUDE.md
