@@ -36,6 +36,41 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* ---- M93 (second attempt): /.image-manifest ---------------------------
+ *
+ * A host tool writes a tree onto this disk (tools/leanfs-put.c -r) and the
+ * machine has to be able to say whether it agrees. The manifest is how:
+ * a small text file at /.image-manifest naming the tree and stating, in
+ * numbers, what the host put in it. kernel.c walks the tree at boot and
+ * compares. See the self-test there for what each number proves.
+ *
+ * The hash below is why this lives in the shared format header rather
+ * than in either program. It is not part of the on-disk *format* - it is
+ * part of the contract between the writer and the reader of one file -
+ * but it has exactly the property that made Q3 delete the tool's private
+ * copy of the structs: two implementations of it, kept in agreement by a
+ * comment, would disagree one day and the symptom would be a self-test
+ * failing on a correct image.
+ *
+ * FNV-1a, and deliberately not a CRC: no table, no dependency, and the
+ * only thing being defended against is a file that did not survive the
+ * trip. The aggregate over a tree is a wrapping SUM of one hash per name,
+ * which makes it independent of the order the two sides walk in - the
+ * host sorts its entries and the machine reads directory records in the
+ * order they were written, and requiring those to match would be
+ * requiring something neither side promises.
+ */
+#define LEANFS_FNV1A_INIT 0x811C9DC5u
+
+static inline uint32_t leanfs_fnv1a(uint32_t h, const void *data, size_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    for (size_t i = 0; i < len; i++) {
+        h ^= p[i];
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
 #define LEANFS_MAGIC     0x3553464Cu /* "LFS5". M93: bumped from M81's 0x3453464C, and for the same reason M81 bumped it - every region moved. A block is 4096 bytes rather than 512, the inode table went from 8192 entries to 131072, and the data region from 32 MiB to 2 GiB. An old disk read with this layout would resolve garbage block numbers, so it is reformatted rather than misread. The version field below still cannot help: the geometry is what changed, and there is nowhere on a 35 MiB disk to stand while relocating it into a 2 GiB one. Previously: "LFS4". M81: bumped from M59's 0x3353464C (itself M53's 0x3253464C, itself M12's 0x3153464C). Every region moved: the inode table grew from 32 sectors to 2048, which pushes the bitmap and the whole data region down the disk, and directory records stopped being fixed-size. An old disk read with this layout would resolve garbage block numbers, so it is reformatted rather than misread - see leanfs_init, where M81 also adds the version field that makes a *future* bump able to do better than that. */
 #define LEANFS_VERSION   5u          /* M93: 4 -> 5, alongside the magic. M81: see sb.version. Bumped only when the on-disk meaning changes; the magic is bumped only when the geometry does. */
 /* M92: moved to leanfs.h - kernel.c's block-layer self-test needs an

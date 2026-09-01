@@ -6358,7 +6358,13 @@ real change to every path that touches a descriptor, and nothing has
 asked for it yet. `<pthread.h>` says so at the top rather than leaving it
 to be discovered.
 
-### M80 — Somebody else's language [~] attempted; every core file compiles, nothing links
+### M80 — Somebody else's language [⊘] superseded by M99; not being resumed
+
+*Superseded rather than pending — see "Before M94" below. M99 is this
+same program built the other way round, on the machine with the
+machine's own compiler, which is the inverse of what was attempted here
+and the reason this one never linked. The bullets below stay as the
+record of the attempt; nobody is going back to them.*
 
 - [ ] Pick the program and let it decide the surface, M63's rule at a
       larger scale: CPython, and whatever `./configure` and the link
@@ -7309,6 +7315,14 @@ and a process is what the removed test could not drive safely.
 
 ### M86 — A shell that is a shell
 
+*Scheduled second of the five before M94 — see "Before M94" below. Two
+corrections to the bullets, from reading `sh.c` rather than this entry:
+`&&`, `||` and `$?` shipped in M72 and the third bullet should not claim
+them, and `jobs`/`fg`/`bg` are dropped from this milestone — they need
+M85's pty, which this arc deliberately holds until M98. What that costs
+is stated in the notes at the end of this entry rather than left as a
+quiet omission.*
+
 - [ ] `sh.c`'s own header is the specification. It says what is missing:
       *"job control, `&`, subshells, functions, and `|`"* — the last one
       meaning more than a single pipe. All five, now that M83 and M85
@@ -7334,7 +7348,29 @@ A script written here to exercise the new features proves that they were
 implemented, which is a much weaker claim than that they were
 implemented *right*.
 
-### M87 — Files with a type, a place, and more than one name [~] five of seven; see the notes
+#### What dropping job control costs, and why it is affordable here
+
+`jobs`/`fg`/`bg` need a controlling terminal that can hand the foreground
+process group around, which is M85's pty and `tcsetpgrp` — the one bullet
+M85 has left, and the one this arc deliberately holds until M98 because
+that is the first milestone with a build long enough to want `^C`.
+Building the pty here to satisfy a bullet would be doing M98's work early
+so that M86 could look complete.
+
+What it costs is exactly one thing: a `configure` run cannot be
+suspended and resumed from this shell. It can still be interrupted, and
+it can still be run from `gui_terminal`, so the grading test is
+unaffected — which is the check that made this affordable rather than
+merely convenient. If a configure script turns out to need a foreground
+process group for something other than interactivity, the pty comes
+forward to here and this note is the record of the bet that it would not.
+
+### M87 — Files with a type, a place, and more than one name [~] five of seven; the `*at()` family is now M89's
+
+*The two unfinished bullets were absorbed into M93 and did not land
+there. They move to M89 — see "Before M94" below — on the grounds that a
+ported userland asks for `openat` by name, which is a better reason to
+build it than a format rewrite happening to be open at the time.*
 
 - [x] `kernel/fs/vfs.h` calls itself *"the seam a second filesystem type
       would plug into if this project ever needed one"* and says the
@@ -7537,6 +7573,11 @@ coalesces.
 
 ### M88 — Everything else a ported program calls [~] poll and the identity/limits calls; the rest is open
 
+*Reopened third of the five before M94 — see "Before M94" below. The
+second attempt is UTF-8 and the `getrlimit`/`getrusage`/`times`/
+`statvfs`/`utime` group only. `O_NONBLOCK` and `AF_UNIX` stay absorbed
+into M100, where the arc put them and for the reason it gave.*
+
 - [~] `poll()` **shipped**; `select()` did not. Built over `SYS_waitfds` (syscall 68),
       which is genuinely the same idea under a lean_os name — so this is
       a header and a shim, not a kernel feature, and should be the
@@ -7667,6 +7708,10 @@ cause is gone" for a symptom already known to be load-dependent. The
 check is the first user of the `poll(NULL, 0, ms)` sleep above.
 
 ### M89 — Somebody else's userland
+
+*Scheduled fourth of the five before M94 — see "Before M94" below, which
+also hands this milestone M87's unlanded `*at()` family. This is where
+that surface gets asked for by a program instead of by a checklist.*
 
 - [ ] Port **toybox** (or busybox) — M63's rule at the largest scale it
       goes: its build's own errors are the specification, and no patch
@@ -8020,6 +8065,13 @@ nothing in this milestone was supposed to reach them.
 
 ### M91 — An address space that is a set of mappings [~] six of seven; MAP_SHARED, file-backed and mremap are the three left
 
+*Reopened fifth and last of the five before M94 — see "Before M94"
+below. The second attempt is `MAP_SHARED` and file-backed mappings,
+because M95 cannot exist without them. `mremap` is not in it: nothing
+has measured a need for one, which is M69's rule and the same reason the
+header line above should stop reading as though all three were one
+backlog. The NX bit in the third bullet shipped.*
+
 - [~] Per-process VMAs replace `proc.h`'s fixed layout. The heap, the
       stack, the image and the mmap arena stop being six constants with
       "generous gaps" between them and become entries in a list that the
@@ -8362,7 +8414,12 @@ is worth repeating before it becomes a sentence in this file.
 within 2% across runs (95405, 97280), which is what makes the ratio a
 measurement rather than a sample.
 
-### M93 — A filesystem that can hold a source tree [~] the format, hard links and fsync; the image builder and the journal measurement are open
+### M93 — A filesystem that can hold a source tree ✅ (second attempt)
+
+*The first attempt shipped the format, hard links and `fsync` and left
+the image builder and the journal measurement open. Both landed in the
+second, which is the first of the five prerequisites before M94 — see
+"Before M94" in the arc below. The format was not touched.*
 
 - [~] leanfs v3: a file ceiling in the gigabytes (~~a triple-indirect
       block is the cheap answer~~ — **a bigger block turned out to be
@@ -8382,17 +8439,21 @@ measurement rather than a sample.
 - [~] Hard links **and** `fsync` — **shipped**; the `*at()` family —
       **not**. M87's three unfinished bullets, absorbed here because this
       milestone is already rewriting the format they touch
-- [ ] A host-side image builder. Today every program reaches the disk by
+- [x] A host-side image builder. Today every program reaches the disk by
       being `incbin`'d into the kernel and seeded on first boot
       (`kernel/proc/embed_programs.asm` says so at the top: *"there's no
       way to get them onto the disk filesystem... other than the kernel
       seeding them there itself"*). A source tree is 800 MB and cannot
       live inside a kernel image; a tool that writes a leanfs image from
-      a host directory is how a tarball gets here at all
-- [ ] The journal deferral, re-measured rather than re-argued. M81 said
+      a host directory is how a tarball gets here at all. **Shipped as a
+      second mode of `tools/leanfs-put.c` rather than as a second tool,
+      for the reason Q3 exists**
+- [x] The journal deferral, re-measured rather than re-argued. M81 said
       thousands of files makes "a full scan gets slow" *nearly* true and
       that "nearly" is not a measurement. Hundreds of thousands of files
-      is where the measurement gets taken, with M92's numbers in hand
+      is where the measurement gets taken, with M92's numbers in hand.
+      **Taken — see the second attempt's notes. The number is small
+      enough that the deferral holds, and it is now a number**
 
 #### Progress notes
 
@@ -8551,6 +8612,220 @@ own count of the same tarball — then check a SHA of a file deeper than
 any path this filesystem could previously express. A tree small enough
 to have fitted in v2 proves nothing, and the test should be written so
 it cannot accidentally be one.
+
+#### Second attempt: the road onto the disk, and the measurement it made takeable
+
+**What shipped.** `tools/leanfs-put.c` grew a `-r` mode that writes a host
+directory tree into a leanfs image, and that is the whole of the "image
+builder" bullet. A second program was the obvious shape and is the wrong
+one: everything a tree needs — the allocator, the block map, the
+directory records, the format — was already in this file and already
+correct, and Q3 exists because a second copy of exactly that code drifted
+from the kernel's for twelve milestones without anybody noticing. A
+`leanfs-mkimage.c` would have been the third copy.
+
+Alongside it: `tools/leanfs-fsck.py --compare-tree`, which reads the
+image back and compares it to the directory it came from;
+`selftest_image_manifest` in `kernel.c`, which walks the tree from inside
+the machine and hashes every byte of it; and `tools/image-tree-test.sh`,
+which runs both against one image because neither alone is the claim.
+
+**The two halves, and why one of them is not enough.** A host-side check
+proves the image parses on the host — which is the weaker of the two
+claims available, and the one a tool grading its own output would make.
+The claim that matters is that the machine the image was built *for* can
+read it, and only the machine can make it. So the builder leaves
+`/.image-manifest` saying what it put there and the kernel walks the tree
+and compares: directories, file names, symlinks, total bytes, depth, and
+a hash over every name and everything it holds. The hash is the part that
+grades the *data*: counts and sizes come out of the inode table, and an
+image whose directory records were right and whose data blocks were wrong
+would satisfy every one of the other five.
+
+That self-test is conditional, which almost nothing else in this kernel
+is. A normal build has no manifest, because a normal build has no
+source tree on its disk. The precedent is Q1's fw_cfg switch — a
+self-test whose trigger comes from outside the image rather than from an
+`#ifdef` — and the discipline is the same one: the branch that did *not*
+run says so in the log, so "this passed" and "this did not apply" cannot
+be confused by reading the serial output.
+
+**Six things were wrong, and the interesting thing is where they were.**
+Only one was in the new code.
+
+1. **`tools/leanfs-fsck.py` could not read a large directory.** It walked
+   a directory's sixteen *direct* blocks and stopped. The first directory
+   this project ever made that needed an indirect block was one this
+   builder wrote, and the checker reported 17280 of its 20000 entries as
+   unreachable inodes — under a `note:` reading *"expected after an
+   interrupted create"* — and then printed `consistent`. A checker that
+   under-reads and then explains away what it missed is worse than one
+   that cannot read at all, because the second kind gets fixed. It walks
+   the full block map now.
+2. **The tool had never set `nlink`.** M93 added the field and Q3 moved
+   the structs into a shared header, and neither made the tool write a 1
+   into it. Every file `make preseed` has ever written has a link count of
+   zero. Nothing had broken yet, and the way it would have is worth
+   stating: `leanfs_link` on such a file makes the count 1 with two names
+   on it, and the second `unlink` then frees a file a name still reaches.
+3. **`dir_add` stamped `time(NULL)`.** Found by the property rather than
+   by a symptom: two images built from one tree a second apart differ at
+   byte 4198409, which is the root inode's `mtime`. Every timestamp comes
+   from the host's `stat` now and the walk is sorted, so the same tree
+   builds the same image byte for byte — which is a stronger thing to be
+   able to check than "it parses".
+4. **Empty files were an error** ("local-file is empty, unreadable"),
+   which is a plausible check for a tool that writes programs and a wrong
+   one for anything that has met a Python package.
+5. **Symlinks would have been followed** and hard links copied, either of
+   which produces an image that reads the same and is a different tree.
+6. **A directory count off by one**, and this is the one in the new code —
+   the builder counted the directories it created, the walker counted
+   itself as well. It was caught by the machine, on the first boot that
+   ran the check, with every other field including the content hash in
+   agreement: `dirs 6/7`. That is the check doing precisely what it was
+   written for, on its first outing, against its own author.
+
+**And a seventh, in the instrument rather than in the machine.** The new
+host tests were run against a deliberately broken hash to check that they
+could fail — the ritual Q1–Q10 adopted — and they passed. `make test-fast`
+does not rebuild when a *kernel header* changes: the test binary's
+prerequisites were the test sources and `tests/*.h`, and these tests exist
+to compile kernel units, most of what they assert lives in a kernel
+header. Every header-only edit since Q2 has been graded by whatever binary
+happened to be lying in `build/tests`. The Makefile now depends on every
+header under `kernel/`, `system_api/` and `tests/`; the same broken hash
+now fails without a manual clean. Two of the last three arcs' worst bugs
+have been in the machinery that reports results rather than in the
+machinery that produces them, and this is the third.
+
+**The journal measurement, finally taken.** M71 deferred a journal and
+named two conditions: multiple writers, and a full scan getting slow. M81
+said thousands of files makes the second *nearly* true and that "nearly is
+not a measurement". M93's fifth bullet said the measurement gets taken at
+hundreds of thousands of files — and it could not be taken, because
+nothing could put hundreds of thousands of files on this disk. That is the
+real reason the two bullets shipped together: the builder is what makes
+the measurement takeable at all.
+
+A tree of **100,000 files** written into an image by the builder, booted,
+and `leanfs_check` — the full scan an unclean mount runs before the
+filesystem is trusted — driven directly:
+
+| | |
+|---|---|
+| full scan at 100,000 files | **30 ms** |
+| the same tree walked and every byte of it hashed, from inside | 49.4 s |
+| the 4007-file synthetic tree, same walk | 5.4 s |
+
+**The deferral holds, and now it is a number rather than a judgement.**
+30 ms is not a wait anybody has after a power cut, and the reason it is so
+small is structural rather than lucky: the inode table is held in memory
+in full (M93's own choice, and the one that caps this filesystem at
+131072 inodes), so the scan is a pass over RAM plus one read per
+double-indirect block. The condition for revisiting this has moved with
+it, and should be written down as such: **a journal becomes worth
+building when the inode table stops being resident** — the work M93's own
+header already schedules for the day a tree needs more than 131072 files
+at once — because that is the day this 30 ms becomes a disk-bound scan of
+a table that no longer fits.
+
+The other number worth keeping is the one that is *not* small: 49.4 s to
+read a hundred thousand files back. That is 2.2 MB of data, so it is not
+bandwidth — it is per-file cost, a path resolution and an open per name,
+and it is the first workload this machine has run where that dominates.
+Nothing is being optimized on it today, in M69's spirit; it is written
+down because M98 is a build, a build is millions of `open` calls, and this
+is the measurement that will be pointed at when that gets slow.
+
+**One deviation from "How we'll know", stated rather than quietly taken.**
+That paragraph says to unpack GCC's tarball *on the machine*. Nothing here
+can unpack a tarball — `tar` is M89's — so the host unpacks and the
+builder writes the tree, which is the arrangement the bullet actually
+asked for ("a tool that writes a leanfs image from a host directory is how
+a tarball gets here at all"). What was kept is the part that makes the
+test worth anything: the counting and the hashing happen *on the machine*,
+against numbers the host wrote down before the image ever booted, over a
+tree that could not have existed under any earlier version of this
+filesystem.
+
+*Verified.* `tools/image-tree-test.sh` PASS end to end: 4007 file names in
+7 directories, one symlink, one hard link, a 255-byte name and a non-ASCII
+one, the whole battery's `qemu-serial-test.sh` markers still green, and
+the machine's own hash equal to the host's. The same run at 100,000 files
+also PASS. `make test-fast` 123/123 with two new host tests over the shared
+hash — known answers, and the chunk-size independence the two sides
+actually rest on, since the builder hashes 4096 bytes at a time and the
+kernel 32768. Both were checked against a broken hash before being
+believed, which is how the Makefile bug above was found.
+
+### Before M94: the five things this arc named and did not schedule
+
+*Written after M93 landed, from re-reading this arc's own prerequisites
+against the tree rather than against the plan.* The section that opens
+this arc names four pieces of unfinished M81–M89 work and says what
+each one blocks. It then schedules M94 first anyway. That is exactly the
+drift this file exists to catch, so it gets caught here rather than at
+the bottom of somebody's `config.log`.
+
+M94's grading test is `./configure --host=x86_64-lean_os && make` on a
+project nobody here wrote. Two things stand between this tree and that
+command and neither of them is a target triple:
+
+- **Nothing can get a source tree onto the disk.**
+  `kernel/proc/embed_programs.asm` says at the top that the kernel
+  seeding files itself is the only road there is. A tarball is not
+  `incbin`-able, and M93's fourth bullet — the one that says so — is
+  still open.
+- **`/bin/sh` cannot run a configure script.** No `if`, no `for`, no
+  command substitution, no multi-stage `|`. The arc's own prerequisite
+  note states this in one sentence — *"Nothing from M94 onward is
+  attemptable through a shell without `if`, `&&`, command substitution
+  and a real `|`"* — and then M86 stayed unscheduled anyway.
+
+The next five milestones are those prerequisites, ordered by which one
+blocks the next. **The first is done** — see M93's second-attempt notes,
+which also record that the journal deferral finally has a number behind
+it (30 ms at a hundred thousand files) instead of an argument. They keep their own numbers rather than becoming
+M101–M105, because none of this is new scope and M68 and M74 already set
+the precedent for a milestone reopened under the number it was given.
+
+| order | milestone | what closes | why here and not later |
+|---|---|---|---|
+| 1 | M93 (2nd) ✅ | the host-side image builder, and the journal measurement | nothing else in the arc can begin until a tarball can reach the disk |
+| 2 | M86 | the shell | M94's grading test *is* a shell script |
+| 3 | M88 (2nd) | UTF-8, and the calls a build probes for | every source tree in this arc has non-ASCII bytes in it |
+| 4 | M89 | toybox | a configure run shells out to `sed`, `grep`, `install`; `/bin` has six programs |
+| 5 | M91 (2nd) | `MAP_SHARED` and file-backed `mmap` | M91's own words: *"there is no version of M95 that does not need this first"* |
+
+**What this ordering assumes, written down so it can be wrong.** That
+M89 belongs before M91: toybox is static and needs no loader, and
+putting it first means M94's configure test has real utilities beneath
+it rather than six programs. If toybox's own build turns out to want
+`MAP_SHARED`, the two swap — and this paragraph is what says that was
+allowed rather than a plan quietly rewritten after the fact.
+
+**What it does not change.** M92's writeback cache and AHCI, M91's
+`mremap`, and `O_NONBLOCK`/`AF_UNIX` all stay exactly where they were
+left. The first three are deferred for want of a measurement, which is
+M69's rule and not a backlog; the last two were absorbed into M100 on
+purpose and collecting them here would be this arc doing the thing the
+"Deliberately not next" section warns arcs about.
+
+**And three entries whose status is corrected rather than reopened:**
+
+- **M80 is superseded, not pending.** M99 is the same program done the
+  other way round — built on the machine instead of cross-compiled and
+  frozen — and leaving M80 at `[~] attempted` implies somebody is going
+  back to a build that never linked. Nobody is.
+- **M87's `*at()` family was absorbed into M93 and did not land there.**
+  It moves to M89, where toybox asks for it by name, rather than staying
+  where a format rewrite made it look convenient.
+- **M85's pty stays where this arc put it** — M98, for `^C` on an
+  hour-long build — and M86 gives up `jobs`/`fg`/`bg` to keep it there.
+  See M86's entry for that re-scope and what it costs.
+
+---
 
 ### M94 — A target this compiler knows by name
 

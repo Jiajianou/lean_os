@@ -34,12 +34,28 @@ Structural invariants, none of which the kernel is asked about:
   * every inode with a nonzero type is reachable by some name
   * a file's size agrees with the blocks it holds
 
+---- M93 (second attempt): --compare-tree -----------------------------
+
+The structural checks above answer "is this image well-formed". A
+host-side image builder needs the other question answered too: "is this
+the tree it was given". Those are different claims and the first does not
+imply the second - an image that dropped every file whose name contained
+a non-ASCII byte would pass every check in the list above.
+
+So --compare-tree walks the image and the host directory together and
+compares names, types, sizes, contents, symlink targets, and which names
+share an inode. It lives here rather than in a new tool because this is
+already the reader that does not share the writer's assumptions, which is
+the whole property the comparison needs.
+
 Usage:
     tools/leanfs-fsck.py build/os-image.bin
     tools/leanfs-fsck.py --quiet image      # exit status only
+    tools/leanfs-fsck.py image --compare-tree ./gcc-15.1.0 --at /src
 """
 
 import argparse
+import os
 import struct
 import sys
 
@@ -78,10 +94,13 @@ class Image:
 
 
 class Fsck:
-    def __init__(self, path):
+    def __init__(self, path, compare_against=None):
         self.img = Image(path)
         self.problems = []
         self.notes = []
+        self.compared = None
+        # (host directory, image path) to compare, or None.
+        self.compare_against = compare_against
 
     def bad(self, fmt, *a):
         self.problems.append(fmt % a if a else fmt)
@@ -233,19 +252,66 @@ class Fsck:
 
     # ---- directories -----------------------------------------------------
 
+    def logical_blocks(self, idx, count):
+        """The first `count` blocks of an inode, in logical order.
+
+        M93 (second attempt): this did not exist, and dir_entries below
+        walked `ino["direct"]` - the sixteen direct blocks and nothing
+        else. A directory bigger than 64 KiB therefore had most of its
+        entries silently unread, and the inodes they name were then
+        reported as unreachable under a note reading "expected after an
+        interrupted create", with the image still declared consistent.
+
+        A checker that under-reads and then explains away what it missed
+        is worse than one that cannot read at all, because the second kind
+        gets fixed. It was found by the host-side image builder writing a
+        directory of twenty thousand files, which is the first directory
+        in this project's history to need a single indirect block."""
+        out = []
+        ino = self.inodes[idx]
+
+        def take(b):
+            out.append(b if 0 < b < self.data_blocks else 0)
+
+        for b in ino["direct"][:count]:
+            take(b)
+        if len(out) >= count:
+            return out[:count]
+
+        if 0 < ino["indirect"] < self.data_blocks:
+            table = self.img.block(self.data_block + ino["indirect"])
+            for j in range(INDIRECT_POINTERS):
+                if len(out) >= count:
+                    return out[:count]
+                take(struct.unpack_from("<I", table, j * 4)[0])
+        if len(out) >= count:
+            return out[:count]
+
+        if 0 < ino["dindirect"] < self.data_blocks:
+            l1 = self.img.block(self.data_block + ino["dindirect"])
+            for j in range(INDIRECT_POINTERS):
+                b1 = struct.unpack_from("<I", l1, j * 4)[0]
+                if not 0 < b1 < self.data_blocks:
+                    continue
+                l2 = self.img.block(self.data_block + b1)
+                for k in range(INDIRECT_POINTERS):
+                    if len(out) >= count:
+                        return out[:count]
+                    take(struct.unpack_from("<I", l2, k * 4)[0])
+        if len(out) < count:
+            self.bad("inode %d says it is %d block(s) long but only %d are "
+                     "mapped - reading it would run off the end",
+                     idx, count, len(out))
+        return out
+
     def dir_entries(self, idx):
         """(name, inode, type) for a directory, checking the record
         invariants as it walks."""
         ino = self.inodes[idx]
-        blocks = ino["direct"] + ([] if not ino["indirect"] else [])
         out = []
         nblocks = (ino["size"] + BLOCK - 1) // BLOCK
-        logical = 0
-        for b in ino["direct"]:
-            if logical >= nblocks:
-                break
-            logical += 1
-            if b == 0 or b >= self.data_blocks:
+        for b in self.logical_blocks(idx, nblocks):
+            if b == 0:
                 continue
             data = self.img.block(self.data_block + b)
             off = 0
@@ -326,6 +392,114 @@ class Fsck:
                          "%d block(s) - reading it would run off the end",
                          idx, ino["size"], need, have)
 
+    # ---- M93 (second attempt): the image against the tree it came from --
+
+    def read_file(self, idx):
+        """An inode's contents, by the same block map a directory walk
+        uses. Returns bytes of exactly `size`."""
+        ino = self.inodes[idx]
+        nblocks = (ino["size"] + BLOCK - 1) // BLOCK
+        data = bytearray()
+        for b in self.logical_blocks(idx, nblocks):
+            if b == 0:
+                data += b"\0" * BLOCK
+            else:
+                data += self.img.block(self.data_block + b)
+        return bytes(data[:ino["size"]])
+
+    def resolve(self, path):
+        """The inode an absolute path names, or None. Does not follow a
+        final symlink - a comparison is about the link, not its target."""
+        idx = ROOT_INODE
+        for comp in [c for c in path.split("/") if c]:
+            if self.inodes[idx]["type"] != TYPE_DIR:
+                return None
+            hit = [i for n, i, _t in self.dir_entries(idx) if n == comp]
+            if not hit:
+                return None
+            idx = hit[0]
+        return idx
+
+    def compare_tree(self, host_dir, at):
+        idx = self.resolve(at)
+        if idx is None:
+            self.bad("--compare-tree: %s does not exist in this image", at)
+            return
+        # (host dev, host ino) -> image inode, so that two host names for
+        # one file are required to be two image names for one inode. A
+        # builder that silently copied the data instead would otherwise
+        # compare equal on every byte.
+        self.shared = {}
+        self.compared = {"dirs": 0, "files": 0, "links": 0, "bytes": 0}
+        self._compare_dir(host_dir, idx, at)
+
+    def _compare_dir(self, host_dir, idx, path):
+        self.compared["dirs"] += 1
+        image = {}
+        for name, child, _t in self.dir_entries(idx):
+            if name in image:
+                self.bad("%s: the name %r appears twice in one directory",
+                         path, name)
+            image[name] = child
+
+        host = {}
+        for e in os.scandir(host_dir):
+            host[e.name] = e.path
+
+        for name in sorted(set(host) - set(image)):
+            self.bad("%s/%s is on the host and not in the image", path, name)
+        for name in sorted(set(image) - set(host)):
+            self.bad("%s/%s is in the image and not on the host", path, name)
+
+        for name in sorted(set(host) & set(image)):
+            hp = host[name]
+            child = image[name]
+            ino = self.inodes[child]
+            st = os.lstat(hp)
+            sub = "%s/%s" % (path.rstrip("/"), name)
+
+            if os.path.islink(hp):
+                if ino["type"] != TYPE_LINK:
+                    self.bad("%s is a symlink on the host and type %d here",
+                             sub, ino["type"])
+                    continue
+                want = os.readlink(hp).encode()
+                got = self.read_file(child)
+                if got != want:
+                    self.bad("%s points at %r here and %r on the host",
+                             sub, got, want)
+                self.compared["links"] += 1
+            elif os.path.isdir(hp):
+                if ino["type"] != TYPE_DIR:
+                    self.bad("%s is a directory on the host and type %d here",
+                             sub, ino["type"])
+                    continue
+                self._compare_dir(hp, child, sub)
+            else:
+                if ino["type"] != TYPE_FILE:
+                    self.bad("%s is a regular file on the host and type %d here",
+                             sub, ino["type"])
+                    continue
+                key = (st.st_dev, st.st_ino)
+                if st.st_nlink > 1:
+                    first = self.shared.get(key)
+                    if first is None:
+                        self.shared[key] = (child, sub)
+                    elif first[0] != child:
+                        self.bad("%s and %s are one file on the host and two "
+                                 "inodes here (%d and %d) - the hard link "
+                                 "became a copy", first[1], sub, first[0], child)
+                if ino["size"] != st.st_size:
+                    self.bad("%s is %d bytes here and %d on the host",
+                             sub, ino["size"], st.st_size)
+                    continue
+                with open(hp, "rb") as f:
+                    want = f.read()
+                if self.read_file(child) != want:
+                    self.bad("%s has different contents here than on the host", sub)
+                self.compared["files"] += 1
+                self.compared["bytes"] += st.st_size
+
     def run(self):
         if not self.read_super():
             return False
@@ -334,6 +508,8 @@ class Fsck:
         self.check_blocks()
         self.check_tree()
         self.check_sizes()
+        if self.compare_against:
+            self.compare_tree(*self.compare_against)
         return not self.problems
 
 
@@ -341,12 +517,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("image")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--compare-tree", metavar="HOSTDIR",
+                    help="also check that the image holds exactly this host "
+                         "directory tree, byte for byte")
+    ap.add_argument("--at", metavar="LEANFS_PATH", default="/",
+                    help="where in the image that tree was written "
+                         "(default: /)")
     args = ap.parse_args()
 
-    fs = Fsck(args.image)
+    compare = (args.compare_tree, args.at) if args.compare_tree else None
+    fs = Fsck(args.image, compare)
     ok = fs.run()
 
     if not args.quiet:
+        if fs.compared:
+            print("compared: %d dirs, %d files (%d bytes), %d symlinks"
+                  % (fs.compared["dirs"], fs.compared["files"],
+                     fs.compared["bytes"], fs.compared["links"]))
         for n in fs.notes:
             print("note: %s" % n)
         for p in fs.problems:

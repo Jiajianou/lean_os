@@ -21,6 +21,7 @@ make all                                          # 1. build the OS as usual
 make preseed                                      # 2. one time per disk image, see below
 tools/build-user-program.sh path/to/myapp.c myapp # 3. compile against user_space/lib
 build/leanfs-put build/os-image.bin build/myapp.elf /bin/myapp  # 4. write it onto the disk
+                                                  #    (-r copies a whole tree; see step 4)
 make run                                          # 5. boot - 'myapp' is just another file now
 ```
 
@@ -43,12 +44,32 @@ for the smallest real example) — no libc, same as everything else here.
 
 A small host program (ordinary hosted C, built with your system `cc` —
 it never runs as part of the OS) that speaks leanfs's on-disk format
-directly and writes a file into an existing disk image's filesystem
-region. It duplicates the two on-disk structs from
-[`kernel/fs/leanfs.c`](../kernel/fs/leanfs.c) byte-for-byte (see that
-file if the format ever changes) and implements the same allocate/free
-logic, so a file it writes reads back through the kernel's own
-`leanfs_read` exactly as if the kernel had written it itself.
+directly and writes into an existing disk image's filesystem region,
+using the same allocate/free logic the kernel does — so a file it writes
+reads back through `leanfs_read` exactly as if the kernel had written it.
+
+It gets the on-disk format from
+[`kernel/fs/leanfs_format.h`](../kernel/fs/leanfs_format.h), the header
+the kernel itself includes. It used to carry its own hand-copied structs
+under a comment saying they had to match byte for byte; they did not, and
+had not since M93 — see Q3 in [milestones.md](../milestones.md) for what
+that cost and why there is now one definition rather than two.
+
+**A whole directory tree, not just a file** (M93):
+
+```sh
+build/leanfs-put -r build/os-image.bin ./my-source-tree /src
+```
+
+Copies the tree in, preserving symbolic links, hard links and
+modification times, and writes `/.image-manifest` describing what it put
+there. The machine checks that manifest against its own walk of the tree
+on the next boot with self-tests enabled, and
+[`tools/image-tree-test.sh`](../tools/image-tree-test.sh) is the harness
+that does both halves — see M93's second-attempt notes. This is the only
+way a source tree gets onto this disk: every other road runs through
+`kernel/proc/embed_programs.asm`, and a tarball cannot be `incbin`'d into
+a kernel.
 
 ## Why `make preseed` first
 
@@ -77,14 +98,25 @@ that seeding loop already skips any program that's already present.
 
 ## Limits worth knowing
 
-- **72 KiB max file size** (`LEANFS_MAX_FILE_SIZE` - 16 direct blocks +
-  one 128-pointer indirect block, all 512-byte blocks). Plenty for a
-  coreutils-sized program; not for anything with large embedded assets.
-- **32 files total** (`LEANFS_MAX_INODES`), shared with every built-in
-  program - `make preseed` alone uses 14 of them.
-- **27-character filenames** (`LEANFS_MAX_NAME`).
-- leanfs is flat (no subdirectories) - your program's name has to be
-  unique across the whole disk.
+*These were 72 KiB, 32 files, 27-character names and "no subdirectories"
+until M93, which is four separate numbers this page went on repeating
+after each of them had moved. They are read off
+`kernel/fs/leanfs.h` as of M93:*
+
+- **4 GiB max file size** (`LEANFS_MAX_FILE_SIZE`), capped by the
+  inode's 32-bit `size` field rather than by the block tree, which
+  reaches a little further.
+- **131072 files total** (`LEANFS_MAX_INODES`), shared with every
+  built-in program — `make preseed` uses about fifty of them. The cap is
+  the inode table being held in memory in full (16 MiB); past this, the
+  answer is not a bigger array but reading inodes through the block
+  cache, which is work with a trigger rather than a date.
+- **2 GiB data region** (`LEANFS_DATA_BLOCKS` at 4 KiB blocks). The image
+  file is sparse, so this costs what is actually stored.
+- **255-byte filenames** (`LEANFS_MAX_NAME`) and **4096-byte paths**
+  (`LEANFS_MAX_PATH`).
+- Directories, since M53. Names are unique within a directory, not across
+  the disk.
 
 ---
 

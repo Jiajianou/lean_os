@@ -104,7 +104,7 @@ Four instruments, and none of them subsumes another:
   leanfs, every network parser - for the machine you are sitting at and
   run them under ASan and UBSan in under a second. They exist to reach
   the error paths a booted machine cannot: a full disk, a failed
-  allocation, a corrupt superblock, a malformed packet. 66 tests.
+  allocation, a corrupt superblock, a malformed packet. 123 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
   image and grade the serial log against 80 markers and five performance
   budgets. They prove every subsystem still works from the inside.
@@ -122,6 +122,13 @@ Four instruments, and none of them subsumes another:
   is the only instrument here that grades the *tests* rather than the
   machine, and the first thing it found was a file at 100% line coverage
   whose mutation score was zero.
+- **An image-tree test** (`tools/image-tree-test.sh`) has a host tool
+  write a directory tree into a leanfs image, compares the image with an
+  independent reader against the tree it came from, then boots it and has
+  the machine walk that tree and hash every byte of it against what the
+  host wrote down. It is how a source tree reaches this disk at all, and
+  both halves are needed: the host half alone is a well-formed image
+  nothing has opened.
 - **A crash test** (`tools/crash-test.sh`) cuts the power mid-write with
   `SIGKILL`, reboots, and checks the filesystem with an independent
   reader. Sixteen cuts across the heaviest metadata window; the

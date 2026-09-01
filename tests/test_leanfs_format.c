@@ -131,3 +131,61 @@ TEST(leanfs_format, a_file_can_address_every_block_the_size_field_can_name) {
     /* And the size field itself must be able to hold it. */
     CHECK(LEANFS_MAX_FILE_SIZE <= 0xFFFFFFFFu);
 }
+
+/* ---- M93 (second attempt): the image manifest's hash ------------------
+ *
+ * leanfs_fnv1a is the one piece of the /.image-manifest contract that
+ * both sides compute rather than read: tools/leanfs-put.c hashes each
+ * file as it writes it, and kernel/kernel.c hashes it again as it reads
+ * it back. Two things about it are load-bearing and neither is obvious
+ * from looking at the function.
+ */
+
+TEST(leanfs_format, the_manifest_hash_is_the_algorithm_it_claims_to_be) {
+    /* Known answers, so that "the two sides agree" cannot be satisfied by
+     * both of them being wrong in the same new way. These are FNV-1a
+     * 32-bit's published vectors. */
+    CHECK_EQ(leanfs_fnv1a(LEANFS_FNV1A_INIT, "", 0), 0x811C9DC5u);
+    CHECK_EQ(leanfs_fnv1a(LEANFS_FNV1A_INIT, "a", 1), 0xE40C292Cu);
+    CHECK_EQ(leanfs_fnv1a(LEANFS_FNV1A_INIT, "foobar", 6), 0xBF9CF968u);
+}
+
+TEST(leanfs_format, the_manifest_hash_does_not_depend_on_the_chunk_size) {
+    /* The property the two sides actually rest on, and the one that would
+     * break silently. The builder hashes a file 4096 bytes at a time,
+     * because that is a leanfs block; the kernel hashes it 32768 at a
+     * time, because that is the buffer it allocated. If those produced
+     * different answers, every manifest check would fail on a file larger
+     * than one block and pass on every file smaller - which reads like a
+     * corrupt image rather than like a broken hash. */
+    static uint8_t data[10000];
+    for (size_t i = 0; i < sizeof(data); i++) {
+        data[i] = (uint8_t)(i * 7 + (i >> 5));
+    }
+
+    uint32_t whole = leanfs_fnv1a(LEANFS_FNV1A_INIT, data, sizeof(data));
+
+    uint32_t in_blocks = LEANFS_FNV1A_INIT;
+    for (size_t off = 0; off < sizeof(data); off += LEANFS_BLOCK_SIZE) {
+        size_t n = sizeof(data) - off;
+        if (n > LEANFS_BLOCK_SIZE) {
+            n = LEANFS_BLOCK_SIZE;
+        }
+        in_blocks = leanfs_fnv1a(in_blocks, data + off, n);
+    }
+    CHECK_EQ(in_blocks, whole);
+
+    uint32_t byte_at_a_time = LEANFS_FNV1A_INIT;
+    for (size_t i = 0; i < sizeof(data); i++) {
+        byte_at_a_time = leanfs_fnv1a(byte_at_a_time, data + i, 1);
+    }
+    CHECK_EQ(byte_at_a_time, whole);
+
+    /* And it is not order-blind: the aggregate over a tree is a sum of
+     * per-name hashes precisely because a single running hash would
+     * depend on walk order, so this one had better not be usable that
+     * way by accident. */
+    uint8_t swapped[4] = { data[1], data[0], data[2], data[3] };
+    CHECK_NE(leanfs_fnv1a(LEANFS_FNV1A_INIT, swapped, 4),
+             leanfs_fnv1a(LEANFS_FNV1A_INIT, data, 4));
+}

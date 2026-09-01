@@ -183,7 +183,7 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run leanfs-put preseed font font-check clean distclean
+.PHONY: all run leanfs-put preseed print-user-programs font font-check clean distclean
 
 all: $(IMAGE)
 
@@ -506,6 +506,14 @@ preseed: $(IMAGE) $(LEANFS_PUT)
 		$(LEANFS_PUT) $(IMAGE) $(BUILD)/$$p.elf /bin/$$p; \
 	done
 
+# M93 (second attempt): the same list, for a script that preseeds an image
+# that is not $(IMAGE). tools/image-tree-test.sh builds a copy and fills it
+# itself, and the order matters for the reason the paragraph above gives -
+# so it asks for the list rather than keeping a second one that would be
+# right until this line changes.
+print-user-programs:
+	@echo $(USER_PROGRAMS)
+
 
 # ---- Q2: the host test tier -----------------------------------------
 #
@@ -571,7 +579,27 @@ TEST_SAN_STAMP := $(TEST_BUILD)/.san-$(if $(filter 0,$(TEST_SAN)),off,on)
 $(TEST_SAN_STAMP): | $(TEST_BUILD)
 	@rm -f $(TEST_BUILD)/.san-* && touch $@
 
-$(TEST_BIN): $(TEST_SRCS) $(wildcard tests/*.h) $(wildcard tests/fakes/lib/*.h) $(TEST_SAN_STAMP) | $(TEST_BUILD)
+# M93 (second attempt): the kernel's own headers are prerequisites too.
+#
+# They were not, and the hole is the kind this tier exists to catch rather
+# than to have: these tests compile kernel *units*, most of what they
+# assert lives in a kernel header, and editing one did not rebuild them.
+# `make test-fast` after a header-only change re-ran the previous binary
+# and reported a pass for code that no longer existed.
+#
+# Found by breaking kernel/fs/leanfs_format.h's hash on purpose to check
+# that a new test could fail: it did not, until the build directory was
+# deleted by hand. A test tier that cannot notice an edit is a slower way
+# of writing "PASS".
+#
+# One `find` over every header rather than -MMD dependency files: this
+# recipe compiles all of TEST_SRCS in a single command, so there is no
+# per-object .d to include, and the whole binary builds in under a second
+# - a rebuild that is occasionally unnecessary costs less than a
+# dependency graph that is occasionally wrong.
+TEST_HDRS := $(shell find kernel system_api tests -name '*.h' 2>/dev/null)
+
+$(TEST_BIN): $(TEST_SRCS) $(TEST_HDRS) $(TEST_SAN_STAMP) | $(TEST_BUILD)
 	$(HOSTCC) $(TEST_CFLAGS) -o $@ $(TEST_SRCS)
 
 # The fast tier. Deliberately does not depend on `all` - the point is that

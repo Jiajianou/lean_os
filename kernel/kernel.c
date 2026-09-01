@@ -25,6 +25,7 @@
 #include "drivers/pit.h"
 #include "drivers/rtc.h"
 #include "fs/leanfs.h"
+#include "fs/leanfs_format.h" /* M93 (second attempt): leanfs_fnv1a, shared with tools/leanfs-put.c so the image manifest's hash has one definition */
 #include "fs/openfile.h"
 #include "dev/tty.h"
 #include "dev/fwcfg.h" /* Q1 */
@@ -1951,6 +1952,336 @@ static void boot_selftests_desktop(void) {
 /* The second half - everything after SMP and ACPI are up. See
  * boot_selftests_desktop above for why this is split in two and why the
  * switch lives outside the image. */
+/* ---- M93 (second attempt): the image a host tool built ----------------
+ *
+ * M93's fourth bullet asked for a host-side image builder, because
+ * kernel/proc/embed_programs.asm is the only road onto this disk and a
+ * source tree is not something that can be incbin'd into a kernel. The
+ * builder is tools/leanfs-put.c's -r mode; this is the half of its test
+ * that the machine performs.
+ *
+ * The host can check its own work - tools/leanfs-fsck.py --compare-tree
+ * reads the image back and compares it to the directory it came from -
+ * but that proves the image parses on the host, which is the weaker of
+ * the two claims available. The one that matters is that the machine the
+ * image was built FOR can read it, and only the machine can make it.
+ *
+ * So the builder leaves /.image-manifest saying what it put there, and
+ * this walks the tree it names and compares: the number of directories,
+ * the number of file names, the number of symlinks, the total bytes, how
+ * deep it goes, and a hash over every name and everything it holds. The
+ * hash is what makes this a check on the DATA rather than on the
+ * bookkeeping - counts and sizes come from the inode table, and an image
+ * whose directory records were right and whose data blocks were wrong
+ * would pass every one of them.
+ *
+ * Conditional, and that is the unusual part. Almost every marker in this
+ * kernel is in tools/qemu-serial-test.sh's REQUIRED_MARKERS and a boot
+ * without it fails. This one cannot be: a normal build has no manifest
+ * on its disk, because a normal build does not have somebody else's
+ * source tree on it. The precedent is Q1's fw_cfg switch - a self-test
+ * whose trigger comes from outside the image rather than from a #ifdef -
+ * and the discipline that keeps it honest is the same: the branch that
+ * did not run says so in the log, so "this check passed" and "this check
+ * was not applicable" can never be confused by reading the serial output.
+ * tools/image-tree-test.sh is what puts a tree there and greps for the
+ * marker below.
+ */
+#define MANIFEST_PATH   "/.image-manifest"
+#define MANIFEST_MAX    1024u
+#define MANIFEST_DEPTH  48
+
+static int manifest_num(const char *text, const char *key, uint64_t *out) {
+    /* Every key is at the start of a line and the first line is the
+     * format's own name, so a needle of "\nkey " cannot match inside a
+     * value or inside a path. */
+    char needle[32];
+    needle[0] = '\n';
+    k_strlcpy(needle + 1, key, sizeof(needle) - 3);
+    size_t n = k_strlen(needle);
+    needle[n] = ' ';
+    needle[n + 1] = '\0';
+
+    const char *at = k_strstr(text, needle);
+    if (!at) {
+        return 0;
+    }
+    at += k_strlen(needle);
+    if (*at < '0' || *at > '9') {
+        return 0;
+    }
+    uint64_t v = 0;
+    while (*at >= '0' && *at <= '9') {
+        v = v * 10 + (uint64_t)(*at - '0');
+        at++;
+    }
+    *out = v;
+    return 1;
+}
+
+/* One frame of the walk. An explicit stack rather than recursion: a
+ * kernel stack is 32 KiB and a path is 4 KiB, so a recursive walker with
+ * a path buffer per frame would run out of stack at a depth a source tree
+ * reaches. One path buffer is shared and each frame remembers how long it
+ * was when the frame was pushed. */
+typedef struct {
+    int      handle;
+    uint32_t cookie;
+    uint32_t path_len;
+} manifest_frame_t;
+
+static void selftest_image_manifest(void) {
+    if (!vfs_exists(MANIFEST_PATH)) {
+        klog_puts("[m93] no " MANIFEST_PATH " on this disk - nothing was built into this "
+                  "image by a host tool, so the image-manifest check does not apply to "
+                  "this boot.\n\n");
+        return;
+    }
+
+    uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+
+    char *text = (char *)kmalloc(MANIFEST_MAX);
+    char *path = (char *)kmalloc(LEANFS_MAX_PATH);
+    uint8_t *buf = (uint8_t *)kmalloc(LEANFS_BLOCK_SIZE * 8);
+    manifest_frame_t *stack =
+        (manifest_frame_t *)kmalloc(sizeof(manifest_frame_t) * MANIFEST_DEPTH);
+    if (!text || !path || !buf || !stack) {
+        panic("M93 image-manifest self-test: out of memory before it could start");
+    }
+
+    int64_t got = vfs_read(MANIFEST_PATH, text, MANIFEST_MAX - 1);
+    if (got <= 0 || (uint64_t)got >= MANIFEST_MAX - 1) {
+        panic("M93 image-manifest self-test: " MANIFEST_PATH " is unreadable or too large");
+    }
+    text[got] = '\0';
+
+    /* The tree this manifest describes. Its own line rather than a
+     * convention, because the builder can be told to write anywhere. */
+    const char *tree_at = k_strstr(text, "\ntree ");
+    if (!tree_at) {
+        panic("M93 image-manifest self-test: the manifest names no tree");
+    }
+    tree_at += 6;
+    size_t tree_len = 0;
+    while (tree_at[tree_len] && tree_at[tree_len] != '\n') {
+        tree_len++;
+    }
+    if (tree_len == 0 || tree_len >= LEANFS_MAX_PATH) {
+        panic("M93 image-manifest self-test: the manifest's tree path is unusable");
+    }
+    k_memcpy(path, tree_at, tree_len);
+    path[tree_len] = '\0';
+
+    uint64_t want_dirs = 0, want_names = 0, want_links = 0;
+    uint64_t want_bytes = 0, want_depth = 0, want_hash = 0;
+    if (!manifest_num(text, "dirs", &want_dirs) ||
+        !manifest_num(text, "names", &want_names) ||
+        !manifest_num(text, "links", &want_links) ||
+        !manifest_num(text, "bytes", &want_bytes) ||
+        !manifest_num(text, "depth", &want_depth) ||
+        !manifest_num(text, "hash", &want_hash)) {
+        panic("M93 image-manifest self-test: the manifest is missing a field this build needs");
+    }
+
+    /* Where the tree's own path ends, so that a name's hash is over its
+     * position IN the tree and not over where the tree happens to sit -
+     * an image built to /src and an image built to /gcc hold the same
+     * tree and must hash the same. */
+    uint32_t root_len = (uint32_t)tree_len;
+    if (root_len == 1) {
+        root_len = 0; /* the tree is "/" and every path is already relative to it */
+    }
+
+    uint64_t dirs = 0, names = 0, links = 0, bytes = 0;
+    uint32_t deepest = 0, hash = 0;
+    int depth = 0;
+
+    int root = vfs_dir_open(path);
+    if (root < 0) {
+        panic("M93 image-manifest self-test: the tree the manifest names is not a directory");
+    }
+    stack[0].handle = root;
+    stack[0].cookie = 0;
+    stack[0].path_len = (uint32_t)tree_len;
+    depth = 1;
+    dirs = 1; /* the tree's own root, which the builder counts too */
+
+    while (depth > 0) {
+        manifest_frame_t *f = &stack[depth - 1];
+        path[f->path_len] = '\0';
+
+        leanfs_dir_entry_t entry;
+        if (vfs_readdir_at(f->handle, &f->cookie, &entry) != 1) {
+            depth--;
+            continue;
+        }
+
+        uint32_t at = f->path_len;
+        if (at + 1 + k_strlen(entry.name) >= LEANFS_MAX_PATH) {
+            panic("M93 image-manifest self-test: a path in this tree is longer than PATH_MAX");
+        }
+        path[at++] = '/';
+        k_memcpy(path + at, entry.name, k_strlen(entry.name));
+        at += (uint32_t)k_strlen(entry.name);
+        path[at] = '\0';
+
+        /* lstat, not stat: a symlink is counted as a symlink. Following
+         * one here would count its target a second time and, if it
+         * pointed outside the tree, count something that is not in it. */
+        leanfs_stat_t st;
+        if (vfs_lstat(path, &st) != 0) {
+            panic("M93 image-manifest self-test: a name in this tree does not resolve");
+        }
+
+        if (st.is_dir) {
+            dirs++;
+            if (depth >= MANIFEST_DEPTH) {
+                panic("M93 image-manifest self-test: this tree is deeper than the walk allows");
+            }
+            int h = vfs_dir_open(path);
+            if (h < 0) {
+                panic("M93 image-manifest self-test: a directory in this tree would not open");
+            }
+            stack[depth].handle = h;
+            stack[depth].cookie = 0;
+            stack[depth].path_len = at;
+            depth++;
+            if ((uint32_t)depth > deepest) {
+                deepest = (uint32_t)depth;
+            }
+            continue;
+        }
+
+        /* The name's own contribution, hashed over its path within the
+         * tree and then over what it holds - see leanfs_fnv1a in
+         * kernel/fs/leanfs_format.h, which both sides of this comparison
+         * include so that neither can drift from the other. */
+        const char *rel = path + root_len + 1;
+        uint32_t h = leanfs_fnv1a(LEANFS_FNV1A_INIT, rel, k_strlen(rel));
+
+        if (st.is_link) {
+            int64_t n = vfs_readlink(path, (char *)buf, LEANFS_BLOCK_SIZE * 8);
+            if (n < 0) {
+                panic("M93 image-manifest self-test: a symlink in this tree would not read");
+            }
+            hash += leanfs_fnv1a(h, buf, (size_t)n);
+            links++;
+            continue;
+        }
+
+        int fh = vfs_open(path, 0);
+        if (fh < 0) {
+            panic("M93 image-manifest self-test: a file in this tree would not open");
+        }
+        uint32_t off = 0;
+        while (off < st.size) {
+            uint32_t chunk = st.size - off;
+            if (chunk > LEANFS_BLOCK_SIZE * 8) {
+                chunk = LEANFS_BLOCK_SIZE * 8;
+            }
+            int64_t n = vfs_handle_read(fh, buf, chunk, off);
+            if (n != (int64_t)chunk) {
+                panic("M93 image-manifest self-test: a file in this tree read short");
+            }
+            h = leanfs_fnv1a(h, buf, (size_t)n);
+            off += chunk;
+        }
+        hash += h;
+        names++;
+        bytes += st.size;
+    }
+
+    int agree = (dirs == want_dirs && names == want_names && links == want_links &&
+                 bytes == want_bytes && (uint64_t)deepest == want_depth &&
+                 (uint64_t)hash == want_hash);
+    if (!agree) {
+        klog_puts("[m93] the tree on this disk is not the tree the host wrote. want/got: dirs ");
+        klog_put_dec((uint32_t)want_dirs);
+        klog_puts("/");
+        klog_put_dec((uint32_t)dirs);
+        klog_puts(", names ");
+        klog_put_dec((uint32_t)want_names);
+        klog_puts("/");
+        klog_put_dec((uint32_t)names);
+        klog_puts(", links ");
+        klog_put_dec((uint32_t)want_links);
+        klog_puts("/");
+        klog_put_dec((uint32_t)links);
+        klog_puts(", bytes ");
+        klog_put_dec((uint32_t)want_bytes);
+        klog_puts("/");
+        klog_put_dec((uint32_t)bytes);
+        klog_puts(", depth ");
+        klog_put_dec((uint32_t)want_depth);
+        klog_puts("/");
+        klog_put_dec(deepest);
+        klog_puts(", hash 0x");
+        klog_put_hex32((uint32_t)want_hash);
+        klog_puts("/0x");
+        klog_put_hex32(hash);
+        klog_puts("\n");
+        panic("M93 image-manifest self-test: this image is not what the host built");
+    }
+
+    uint32_t took_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms;
+
+    /* ---- M93's other open bullet: the journal deferral, measured -------
+     *
+     * M71 deferred a journal and named two conditions for revisiting it:
+     * multiple writers, and a full scan getting slow. M81 said thousands
+     * of files makes the second one "nearly" true and that "nearly is not
+     * a measurement". M93's fifth bullet then said the measurement gets
+     * taken at hundreds of thousands of files - and could not be taken,
+     * because nothing could put hundreds of thousands of files on this
+     * disk. The image builder is what makes it takeable, which is why the
+     * measurement lives here, in the check that only runs when a host
+     * tool has built a tree onto this image.
+     *
+     * leanfs_check IS the full scan: every allocated inode's block tree
+     * walked, a shadow bitmap built, and the two compared. It is what an
+     * unclean mount runs before the filesystem is trusted, so its cost is
+     * exactly what "a full scan gets slow" is about. Driven directly here
+     * rather than by faking a dirty superblock, which is what leanfs.h
+     * exposes it for.
+     *
+     * The number this prints is the deliverable. It is reported and not
+     * graded - a budget would be a claim about a tree size that varies
+     * with whatever was built into the image. */
+    uint32_t check_started = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+    vfs_check();
+    uint32_t check_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - check_started;
+
+    kfree(stack);
+    kfree(buf);
+    kfree(path);
+    kfree(text);
+
+    klog_puts("[m93] a tree a host tool built into this image, read back from inside the "
+              "machine: ");
+    klog_put_dec((uint32_t)names);
+    klog_puts(" file names in ");
+    klog_put_dec((uint32_t)dirs);
+    klog_puts(" directories, ");
+    klog_put_dec((uint32_t)links);
+    klog_puts(" symlinks, ");
+    klog_put_dec((uint32_t)bytes);
+    klog_puts(" bytes, ");
+    klog_put_dec(deepest);
+    klog_puts(" deep, and every byte of it hashing to the 0x");
+    klog_put_hex32(hash);
+    klog_puts(" the host wrote down - image-manifest self-test passed (");
+    klog_put_dec(took_ms);
+    klog_puts(" ms).\n");
+    klog_puts("[m93] full-scan mount check (leanfs_check) over this filesystem: ");
+    klog_put_dec(check_ms);
+    klog_puts(" ms, with ");
+    klog_put_dec((uint32_t)names);
+    klog_puts(" file names in the tree and ");
+    klog_put_dec(vfs_free_blocks());
+    klog_puts(" data blocks still free - the journal measurement M71 and M81 both "
+              "deferred, reported rather than graded.\n\n");
+}
+
 static void boot_selftests_system(void) {
     /* Self-test: spawn several genuinely CPU-bound tasks and confirm more
      * than one *physical* CPU actually ran them, not just that the
@@ -8603,6 +8934,11 @@ static void boot_selftests_system(void) {
         klog_put_dec(took_ms);
         klog_puts(" ms).\n\n");
     }
+
+    /* M93 (second attempt): and the tree a host tool built, if this image
+     * has one. See selftest_image_manifest for why this one is allowed to
+     * be conditional when almost nothing else here is. */
+    selftest_image_manifest();
 
     /* ---- M82 self-test: a page that arrives when it is asked for -------
      *
