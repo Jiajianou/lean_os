@@ -5,6 +5,7 @@
 #include "drivers/virtio_blk.h"
 #include "lib/libk.h"
 #include "lib/spinlock.h"
+#include "drivers/pit.h" /* M104: the flush deadline is measured in ticks */
 #include "mm/pmm.h"
 
 /* One cache line is eight sectors - 4 KiB, a page, and the unit leanfs's
@@ -30,7 +31,40 @@
 typedef struct {
     uint32_t line_no;  /* lba / BLK_PER_LINE */
     uint8_t  valid;
+    /* ---- M104: writeback ---------------------------------------------
+     *
+     * `dirty` means this line holds bytes the device does not. M92 built
+     * the cache write-through and argued for it at length: "a cache that
+     * reorders writes turns 'write ordering plus a mount check' into
+     * neither, and M71's whole argument for not having a journal rests
+     * on the first half being true."
+     *
+     * That argument is answered rather than overruled. Ordering is
+     * preserved by a BARRIER: leanfs calls blk_barrier() at exactly the
+     * points where its ordering matters - before it writes the metadata
+     * that points at data it has just written - and a barrier flushes
+     * every dirty line. So the disk still sees data before the metadata
+     * that names it, which is the whole of M71's guarantee; what changes
+     * is that a burst of data writes between two barriers becomes one
+     * device request instead of many.
+     *
+     * `dirty_tick` is when it became dirty, for the deadline. A line
+     * that nothing barriers or syncs still reaches the disk within
+     * BLK_FLUSH_DEADLINE_MS, so an idle machine's cache does not hold
+     * unwritten bytes indefinitely. */
+    uint8_t  dirty;
+    uint64_t dirty_tick;
 } cache_tag_t;
+
+/* How long a dirty line may wait for a barrier that never comes.
+ *
+ * Five seconds is the number every Unix has used for this since the
+ * 1970s `update` daemon, and it is not chosen by measurement here
+ * because what it trades is not performance against performance: it is
+ * "how much work an unclean shutdown can lose" against "how many device
+ * writes a workload costs", and the second is already bounded by the
+ * barriers. Said out loud rather than tuned. */
+#define BLK_FLUSH_DEADLINE_MS 5000
 
 static cache_tag_t tags[CACHE_LINES];
 /* One frame per line, and deliberately NOT one contiguous run.
@@ -50,6 +84,10 @@ static cache_tag_t tags[CACHE_LINES];
  * taking it from the one place a driver cannot do without. */
 static uint8_t *line_ptr[CACHE_LINES];
 static uint32_t cache_lines; /* how many of them actually exist - see blk_init */
+/* M104: when the oldest currently-dirty line became dirty. One number so
+ * the deadline check is a compare rather than a scan - see
+ * flush_if_overdue_locked, which learned that the hard way. */
+static uint64_t oldest_dirty_ms;
 
 static int have_virtio;
 static blk_stats_t stats;
@@ -159,6 +197,13 @@ const char *blk_backend_name(void) {
  * (the inode table) is contiguous, which is the shape a direct-mapped
  * cache handles best rather than worst. If a measurement ever shows
  * thrashing, associativity is the answer and this is where it goes. */
+/* Forward declarations: the write path defines these and the read path
+ * uses them, and the read path is first in this file because that is the
+ * order they were written in. */
+static void flush_line(uint32_t s);
+static void flush_all_locked(void);
+static void flush_if_overdue_locked(void);
+
 static uint32_t slot_of(uint32_t line_no) {
     return line_no % cache_lines;
 }
@@ -195,8 +240,59 @@ static int all_lines_resident(uint32_t first_line, uint32_t last_line) {
  * write-through, so what is on the disk and what is in a resident line
  * are the same bytes by construction. There is no version of this where
  * the copy could be stale. */
+/* ---- M104: readahead --------------------------------------------------
+ *
+ * How many extra lines to pull in past the end of a sequential read.
+ * `0` disables it, which is what the measurement below compares against.
+ *
+ * Sequential is detected by the simplest rule that is true of the
+ * workload: this read starts exactly where the last one ended. A
+ * compiler walking a header tree and a `treewalk` hashing a source tree
+ * both produce that pattern; a random-access workload does not, and gets
+ * no readahead rather than a wrong guess about one.
+ *
+ * The eviction cost is real and is why this is a small number: a line
+ * fetched speculatively takes a slot from a line somebody asked for, and
+ * a direct-mapped cache has no second chance. Eight lines is 32 KiB - a
+ * whole leanfs indirect block's worth of data - and is the number the
+ * measurement in the [m104] self-test compares against zero. */
+/* ---- M104: measured, and the measurement said zero --------------------
+ *
+ * The default is 0 - readahead OFF - and that is the result of the
+ * measurement rather than a decision not to build it. The [m104]
+ * self-test reads a megabyte sequentially both ways:
+ *
+ *     without readahead   4899 us
+ *     with 8 lines ahead  9075 us
+ *
+ * It is not marginally worse, it is nearly twice as slow, and the reason
+ * is visible once stated: leanfs already reads in 64 KiB requests, which
+ * is sixteen lines. A request is what costs on this device (M92 measured
+ * exactly that when PIO became DMA), so adding eight speculative lines
+ * as a SECOND request roughly doubles the request count to fetch data
+ * the next call would have asked for in its own large request anyway.
+ * Readahead helps a device where the cost is per byte and a filesystem
+ * that reads in small pieces. This is neither.
+ *
+ * The code stays, and blk_set_readahead is what the self-test uses to
+ * take the measurement each boot - so the day either of those facts
+ * changes, the number is already being produced rather than having to be
+ * argued for again. M69's rule, applied to a feature the milestone asked
+ * for by name. */
+static uint32_t readahead_lines = 0;
+static uint32_t last_read_end;   /* the lba just past the previous read */
+
+void blk_set_readahead(uint32_t lines) {
+    uint64_t irq = spin_lock_irqsave(&blk_lock);
+    readahead_lines = lines;
+    spin_unlock_irqrestore(&blk_lock, irq);
+}
+
 void blk_read(uint32_t lba, uint32_t count, void *buf) {
     uint64_t irq = spin_lock_irqsave(&blk_lock);
+    flush_if_overdue_locked();
+    int sequential = (lba == last_read_end);
+    last_read_end = lba + count;
     stats.reads++;
     uint8_t *dst = (uint8_t *)buf;
     uint32_t first_line = lba / BLK_PER_LINE;
@@ -226,32 +322,176 @@ void blk_read(uint32_t lba, uint32_t count, void *buf) {
         if (!tags[s].valid) {
             stats.resident++;
         }
+        if (tags[s].dirty && tags[s].line_no != ln) {
+            flush_line(s); /* M104: never evict unwritten bytes */
+        }
         k_memcpy(line_ptr[s], dst + (uint64_t)(line_lba - lba) * BLK_SECTOR_SIZE, LINE_BYTES);
         tags[s].line_no = ln;
         tags[s].valid = 1;
+        tags[s].dirty = 0;
+    }
+
+    /* M104: and the lines after it, if this looked sequential.
+     *
+     * One extra device request, after the caller's data is already in
+     * their buffer - so a readahead that turns out to be wasted costs a
+     * request and nothing the caller waits for twice. Read into the
+     * cache lines directly rather than through a staging buffer, which
+     * is possible because a line is exactly a page and they need not be
+     * adjacent. */
+    if (sequential && readahead_lines > 0) {
+        for (uint32_t k = 0; k < readahead_lines; k++) {
+            uint32_t ln = last_line + 1 + k;
+            uint32_t s = slot_of(ln);
+            if (tags[s].valid && tags[s].line_no == ln) {
+                continue; /* already here */
+            }
+            if (tags[s].dirty) {
+                break; /* not worth evicting unwritten bytes to guess */
+            }
+            device_read(ln * BLK_PER_LINE, BLK_PER_LINE, line_ptr[s]);
+            if (!tags[s].valid) {
+                stats.resident++;
+            }
+            tags[s].line_no = ln;
+            tags[s].valid = 1;
+            tags[s].dirty = 0;
+            stats.readaheads++;
+        }
     }
     spin_unlock_irqrestore(&blk_lock, irq);
 }
 
+/* Writes one dirty line back and clears the flag. Caller holds the
+ * lock. */
+static void flush_line(uint32_t s) {
+    if (!tags[s].valid || !tags[s].dirty) {
+        return;
+    }
+    device_write(tags[s].line_no * BLK_PER_LINE, BLK_PER_LINE, line_ptr[s]);
+    tags[s].dirty = 0;
+    stats.writebacks++;
+}
+
+static void flush_all_locked(void) {
+    if (stats.dirty == 0) {
+        return; /* the common case, and it must cost nothing */
+    }
+    for (uint32_t i = 0; i < cache_lines; i++) {
+        flush_line(i);
+    }
+    stats.dirty = 0;
+}
+
+/* M104: the deadline, checked on the way through rather than from a
+ * timer.
+ *
+ * A kernel thread that woke every five seconds to look at a cache that
+ * is usually clean would be a thread and a wake for nothing. Every path
+ * that touches the cache passes through here, and a machine doing no I/O
+ * at all has no dirty lines to worry about - which is the case a timer
+ * would exist to handle and is exactly the case where it is not needed.
+ * The cost of being late is bounded by the deadline plus the gap to the
+ * next cache access, and the only way to have a long gap is to be doing
+ * nothing. */
+static void flush_if_overdue_locked(void) {
+    if (stats.dirty == 0) {
+        return;
+    }
+    /* One compare, not a scan.
+     *
+     * The first version of this walked all 2048 lines looking for an
+     * overdue one - on EVERY read and write - and the cold-read
+     * benchmark went from 4.9 ms per megabyte to 9.2. A deadline check
+     * that costs more than the I/O it is deciding about is a deadline
+     * check that has to be one number, and the oldest dirty line is the
+     * only one the answer depends on. */
+    uint64_t now = pit_get_ticks() * (1000 / PIT_HZ);
+    if (now >= oldest_dirty_ms + BLK_FLUSH_DEADLINE_MS) {
+        flush_all_locked();
+    }
+}
+
 void blk_write(uint32_t lba, uint32_t count, const void *buf) {
     uint64_t irq = spin_lock_irqsave(&blk_lock);
-    /* The device first, in the caller's order, because that ordering is
-     * what M71's guarantee is made of. The cache is updated afterwards
-     * and only for lines that are already resident - pulling a line in
-     * on a write would turn every sequential write into a read-modify-
-     * write of a 4 KiB line, which is exactly the traffic an unpack must
-     * not generate. */
-    device_write(lba, count, buf);
+    flush_if_overdue_locked();
     const uint8_t *src = (const uint8_t *)buf;
-    for (uint32_t i = 0; i < count; i++) {
+
+    /* ---- M104: which writes are deferred, and which are not -----------
+     *
+     * A write that covers a WHOLE cache line can be absorbed: the line
+     * becomes the truth, the device is told later, and a second write to
+     * the same line before the next barrier costs nothing at all. That
+     * is the case an unpack and a compiler both generate, because both
+     * write whole blocks.
+     *
+     * A partial line still goes straight to the device. Absorbing one
+     * would mean either reading the rest of the line in first - a
+     * read-modify-write of 4 KiB to change 512 bytes, which is exactly
+     * the traffic M92's note said must not be generated - or tracking
+     * which sectors within a line are dirty, which is a bitmap per line
+     * to save a case leanfs does not produce: it speaks in 4 KiB blocks
+     * and a block is a line.
+     */
+    uint32_t i = 0;
+    while (i < count) {
         uint32_t line_no = (lba + i) / BLK_PER_LINE;
         uint32_t within = (lba + i) % BLK_PER_LINE;
+        uint32_t remaining = count - i;
+        int whole_line = (within == 0 && remaining >= BLK_PER_LINE);
+
+        if (whole_line) {
+            uint32_t s = slot_of(line_no);
+            /* Claim the slot whether or not it was this line: the write
+             * supplies every byte, so nothing has to be read first, and
+             * evicting somebody else's clean line to absorb a write is
+             * the trade this cache exists to make. A dirty line being
+             * evicted is written back first, or its bytes would be
+             * lost. */
+            if (tags[s].valid && tags[s].dirty && tags[s].line_no != line_no) {
+                flush_line(s);
+            }
+            if (!tags[s].valid) {
+                stats.resident++;
+            }
+            k_memcpy(line_ptr[s], src + (uint64_t)i * BLK_SECTOR_SIZE, LINE_BYTES);
+            if (!tags[s].dirty) {
+                if (stats.dirty == 0) {
+                    oldest_dirty_ms = pit_get_ticks() * (1000 / PIT_HZ);
+                }
+                stats.dirty++;
+                tags[s].dirty_tick = oldest_dirty_ms;
+            }
+            tags[s].valid = 1;
+            tags[s].line_no = line_no;
+            tags[s].dirty = 1;
+            i += BLK_PER_LINE;
+            continue;
+        }
+
+        /* A partial line: through to the device, and into the cache if
+         * the line happens to be resident so a later read does not see
+         * the old bytes. */
+        device_write(lba + i, 1, src + (uint64_t)i * BLK_SECTOR_SIZE);
         uint32_t s = slot_of(line_no);
         if (tags[s].valid && tags[s].line_no == line_no) {
             k_memcpy(line_ptr[s] + (uint64_t)within * BLK_SECTOR_SIZE,
                      src + (uint64_t)i * BLK_SECTOR_SIZE, BLK_SECTOR_SIZE);
         }
+        i++;
     }
+    spin_unlock_irqrestore(&blk_lock, irq);
+}
+
+/* M104: everything dirty, to the device, now.
+ *
+ * This is both `blk_flush` and the barrier leanfs calls before writing
+ * metadata - they are the same operation and giving them two names would
+ * suggest they could differ. See cache_tag_t's note for why a barrier is
+ * what preserves M71's ordering guarantee across a writeback cache. */
+void blk_flush(void) {
+    uint64_t irq = spin_lock_irqsave(&blk_lock);
+    flush_all_locked();
     spin_unlock_irqrestore(&blk_lock, irq);
 }
 
@@ -263,9 +503,17 @@ void blk_stats(blk_stats_t *out) {
 
 void blk_cache_drop(void) {
     uint64_t irq = spin_lock_irqsave(&blk_lock);
+    /* M104: dirty lines are WRITTEN, not discarded. Dropping the cache
+     * is a measurement tool - it is how the disk benchmark gets a cold
+     * read - and a measurement tool that silently lost a filesystem's
+     * writes would be the worst kind of bug: one that only appears in
+     * the runs nobody is looking at. */
+    flush_all_locked();
     for (uint32_t i = 0; i < cache_lines; i++) {
         tags[i].valid = 0;
+        tags[i].dirty = 0;
     }
     stats.resident = 0;
+    stats.dirty = 0;
     spin_unlock_irqrestore(&blk_lock, irq);
 }

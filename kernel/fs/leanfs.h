@@ -347,6 +347,27 @@ int leanfs_exists(const char *path);
 
 /* 1 if the path resolves to a directory specifically - what a path bar
  * needs in order to know whether entering it means anything. */
+/* ---- M104: somewhere safe to benchmark the block layer ----------------
+ *
+ * Returns the LBA of a run of `blocks` blocks at the END of the data
+ * region, or 0 if any of them is allocated.
+ *
+ * The M104 write benchmark has to write real sectors - measuring the
+ * cache through the filesystem would be measuring the filesystem - and
+ * the first version of it picked an offset that looked far enough past
+ * the start. It was not: leanfs's data region covers the whole image, so
+ * "512 MiB in" is live space, and the benchmark quietly overwrote it.
+ * Nothing noticed on an ordinary boot, because the programs are seeded
+ * before the self-tests run; the crash test noticed immediately, because
+ * its recovery boot seeds afterwards and the seed failed.
+ *
+ * The last blocks of the data region are the last ones the allocator
+ * reaches, and this refuses rather than guesses: if the bitmap says any
+ * of them is in use, the answer is 0 and the benchmark skips. Writing to
+ * a free block cannot corrupt anything - no name points at it - which is
+ * what makes this safe even if the power goes mid-benchmark. */
+uint32_t leanfs_free_scratch_lba(uint32_t blocks);
+
 int leanfs_is_dir(const char *path);
 
 /* Creates one directory. Its parent must exist; an existing path of

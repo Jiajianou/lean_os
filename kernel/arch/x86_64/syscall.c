@@ -20,6 +20,7 @@
 #include "ipc/clipboard.h"
 #include "ipc/pipe.h"
 #include "ipc/shm.h"
+#include "drivers/blk.h" /* M104: blk_flush, for fsync and sync */
 #include "mm/filemap.h" /* M91 (second attempt): shared file pages */
 #include "mm/heap.h"
 #include "mm/pmm.h"
@@ -1583,7 +1584,12 @@ static long sys_fsync(uint64_t fd, uint64_t a2, uint64_t a3,
     if (sched_current()->fds[fd].type != FD_FILE) {
         return -1;
     }
+    /* M104: and the block cache under it, which is where a file's bytes
+     * may now be sitting. vfs_sync marks the superblock clean; without
+     * the flush this would be a promise about a disk that had not been
+     * written. */
     vfs_sync();
+    blk_flush();
     return 0;
 }
 

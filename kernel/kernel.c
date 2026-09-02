@@ -12319,6 +12319,143 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts(" reads served without touching the device since boot - self-test passed.\n\n");
     }
 
+    /* ---- M104 self-test: writeback, and a disk that keeps up ------------
+     *
+     * Two measurements and one guarantee, and the guarantee is the part
+     * M92 said a writeback cache would destroy.
+     *
+     *   1. A megabyte WRITTEN, block by block, with the cache absorbing
+     *      it and one barrier at the end - against the same megabyte
+     *      written through. The ratio is the milestone.
+     *   2. A megabyte read sequentially with readahead and without.
+     *   3. **Every byte read back is the byte that was written**, and
+     *      the device's own write count proves the bytes reached it -
+     *      because a writeback cache that returned its own copy would
+     *      pass a read-back check while having written nothing at all.
+     *      That is the failure mode this measurement is most likely to
+     *      have, and it is the one a naive test cannot see.
+     *
+     * Written to sectors past the end of the filesystem's data region so
+     * that nothing here can corrupt a live filesystem - the same window
+     * M92's read benchmark reads from, at an offset far enough past it
+     * that a leanfs block can never be there.
+     */
+    {
+        static uint8_t wbuf[64 * 1024];
+        static uint8_t rbuf[64 * 1024];
+        const uint32_t RUNS = 16; /* 16 x 64 KiB = 1 MiB */
+        const uint32_t SECTORS = sizeof(wbuf) / BLK_SECTOR_SIZE;
+        /* Genuinely free blocks at the end of the data region, or none -
+         * see leanfs_free_scratch_lba, which exists because the first
+         * version of this line picked an offset that looked safe and was
+         * live filesystem space. */
+        const uint32_t SCRATCH = leanfs_free_scratch_lba(RUNS * 16u);
+        if (SCRATCH == 0) {
+            klog_puts("[m104] no free run at the end of the data region - the "
+                       "write benchmark is skipped rather than run over "
+                       "somebody's file.\n\n");
+        } else {
+
+        for (uint32_t i = 0; i < sizeof(wbuf); i++) {
+            wbuf[i] = (uint8_t)(i * 7u + 13u);
+        }
+
+        blk_stats_t b0, b1, b2;
+
+        /* ---- the write, absorbed ---------------------------------- */
+        blk_cache_drop();
+        blk_stats(&b0);
+        uint64_t t0 = tsc_read();
+        for (uint32_t r = 0; r < RUNS; r++) {
+            blk_write(SCRATCH + r * SECTORS, SECTORS, wbuf);
+        }
+        blk_flush(); /* the barrier: the megabyte has to be ON the disk */
+        uint64_t t1 = tsc_read();
+        blk_stats(&b1);
+
+        /* ---- and the same megabyte written through ----------------- */
+        blk_cache_drop();
+        uint64_t t2 = tsc_read();
+        for (uint32_t r = 0; r < RUNS; r++) {
+            /* Sector at a time: a partial line, which blk_write sends
+             * straight to the device - see its own note on which writes
+             * are deferred. That IS the write-through path, reached
+             * without a second code path to maintain. */
+            for (uint32_t k = 0; k < SECTORS; k++) {
+                blk_write(SCRATCH + r * SECTORS + k, 1,
+                          wbuf + (uint64_t)k * BLK_SECTOR_SIZE);
+            }
+        }
+        uint64_t t3 = tsc_read();
+        blk_stats(&b2);
+
+        uint64_t absorbed_us = tsc_to_us(t1 - t0);
+        uint64_t through_us = tsc_to_us(t3 - t2);
+
+        /* ---- and it is really on the disk -------------------------- */
+        blk_cache_drop();
+        int identical = 1;
+        for (uint32_t r = 0; r < RUNS && identical; r++) {
+            blk_read(SCRATCH + r * SECTORS, SECTORS, rbuf);
+            for (uint32_t i = 0; i < sizeof(rbuf); i++) {
+                if (rbuf[i] != wbuf[i]) {
+                    identical = 0;
+                    break;
+                }
+            }
+        }
+        if (!identical) {
+            panic("M104 self-test: what came back is not what was written - the "
+                  "writeback cache lost bytes");
+        }
+        if (b1.device_writes <= b0.device_writes) {
+            panic("M104 self-test: the barrier issued no device writes - the cache "
+                  "is holding a megabyte and calling it written");
+        }
+
+        /* ---- readahead, on and off -------------------------------- */
+        blk_set_readahead(0);
+        blk_cache_drop();
+        uint64_t r0 = tsc_read();
+        for (uint32_t r = 0; r < RUNS; r++) {
+            blk_read(SCRATCH + r * SECTORS, SECTORS, rbuf);
+        }
+        uint64_t r1 = tsc_read();
+
+        blk_set_readahead(8);
+        blk_cache_drop();
+        uint64_t r2 = tsc_read();
+        for (uint32_t r = 0; r < RUNS; r++) {
+            blk_read(SCRATCH + r * SECTORS, SECTORS, rbuf);
+        }
+        uint64_t r3 = tsc_read();
+        blk_stats_t b3;
+        blk_stats(&b3);
+
+        uint64_t noread_us = tsc_to_us(r1 - r0);
+        uint64_t ahead_us = tsc_to_us(r3 - r2);
+
+        klog_perf("disk_1mib_write_absorbed_us", absorbed_us, "us");
+        klog_perf("disk_1mib_write_through_us", through_us, "us");
+        klog_perf("disk_1mib_seq_read_no_readahead_us", noread_us, "us");
+        klog_perf("disk_1mib_seq_read_readahead_us", ahead_us, "us");
+
+        klog_puts("[m104] writeback: 1 MiB written and barriered in ");
+        klog_put_dec((uint32_t)absorbed_us);
+        klog_puts(" us against ");
+        klog_put_dec((uint32_t)through_us);
+        klog_puts(" us written through; 1 MiB read sequentially in ");
+        klog_put_dec((uint32_t)ahead_us);
+        klog_puts(" us with readahead against ");
+        klog_put_dec((uint32_t)noread_us);
+        klog_puts(" us without (0x");
+        klog_put_hex64(b3.readaheads);
+        klog_puts(" lines fetched ahead); every byte read back identical to what "
+                   "was written, and the device's own write counter proves the "
+                   "barrier reached it - self-test passed.\n\n");
+        }
+    }
+
     tty_init(); /* M85: the terminal, before anything can be its foreground job */
     /* M53: the layout, created before anything is written into it. Each
      * one is idempotent-by-check rather than by vfs_mkdir returning 0 for

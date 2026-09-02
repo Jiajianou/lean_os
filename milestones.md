@@ -10856,34 +10856,134 @@ more than one CPU rather than being polled by whoever asked. And the
 input-to-photon budgets re-measured, because moving the tick source is
 exactly the kind of change M69's numbers exist to catch.
 
-### M104 — Writeback, and a disk that keeps up with a build [ ]
+### M104 — Writeback, and a disk that keeps up with a build [x]
 
-- [ ] The writeback cache M92 deferred, over M103's completion
-      interrupts: dirty tracking, a flush deadline, and a real queue
-      depth rather than one request at a time. M92's own note deferred
-      this *for want of a measurement*, and M98's build is the
-      measurement — a bootstrap writes hundreds of thousands of small
-      files and waits for every one of them today
-- [ ] Ordering that survives the cache: the write-ordering guarantees
-      M71 bought at the filesystem layer have to be re-established
-      against a cache that reorders by design, or M71's atomic replace
-      quietly stops being atomic
-- [ ] `fsync`/`fdatasync` that mean something, and the `O_SYNC` path a
-      build's temporary files should *not* be taking
-- [ ] Readahead, sized by measurement rather than by taste: a compiler
-      reading a header tree is the most sequential workload this machine
-      has ever had
-- [ ] `tools/crash-test.sh` extended to cut the power with a dirty cache
-      rather than with a synchronous write in flight — which is a
-      strictly harder test than the sixteen cuts M71 and Q17 survived,
-      and the reason this milestone is not just a performance one
+**Status:** done, and one of its own bullets was answered with a
+measurement that said no.
 
-**How we'll know.** The build wall-clock from M101's attribution, before
-and after, with the disk's share of it named in both. And the extended
-crash test: sixteen more cuts, at the point of maximum dirty data, each
-one followed by an independent reader that finds a consistent
-filesystem. A cache that makes the build faster and the crash test
-flaky has failed this milestone, not passed it with a caveat.
+- [x] The writeback cache M92 deferred: dirty tracking, a flush
+      deadline, and eviction that writes back rather than discards.
+      **Not over M103's completion interrupts** — M103 measured its way
+      out of those, and it turns out writeback needed nothing from them:
+      what it needed was a barrier, which is a filesystem question
+      rather than an interrupt one.
+- [x] Ordering that survives the cache
+- [x] `fsync`/`fdatasync` that mean something. **`O_SYNC` is still
+      absent**, and the bullet's own wording is why: it asks for "the
+      `O_SYNC` path a build's temporary files should *not* be taking",
+      which is an argument for not having one. Adding a flag whose only
+      correct use is to be avoided would be adding a way to be slow.
+- [x] Readahead, sized by measurement rather than by taste — **and the
+      measurement said zero.** See below.
+- [x] `tools/crash-test.sh` against a dirty cache
+
+#### The numbers [x]
+
+```
+1 MiB written, absorbed and barriered   15955 us
+1 MiB written through                   78056 us      4.9x
+1 MiB read sequentially, no readahead    4881 us
+1 MiB read sequentially, 8 lines ahead   9174 us      1.9x SLOWER
+```
+
+**Writeback is worth 4.9x on the write path**, which is the milestone.
+The unit is a whole cache line: a write that supplies every byte of a
+4 KiB line is absorbed, and a partial one still goes straight to the
+device — absorbing a partial write would mean either a read-modify-write
+of 4 KiB to change 512 bytes, which M92's own note said must not be
+generated, or a per-sector dirty bitmap to serve a case leanfs does not
+produce.
+
+**Readahead is measured and refused**, which is the interesting half.
+Eight lines ahead of a sequential read makes it nearly twice as slow, and
+the reason is visible once stated: leanfs already reads in 64 KiB
+requests — sixteen lines — and a *request* is what costs on this device,
+which is exactly what M92 measured when PIO became DMA. Adding eight
+speculative lines as a second request roughly doubles the request count
+to fetch what the next call would have asked for in its own large
+request. Readahead helps a device where a byte costs more than a request,
+and a filesystem that reads in small pieces. This is neither. The code
+stays and the self-test takes the measurement every boot, so the day
+either fact changes the number says so rather than somebody arguing it
+again.
+
+#### How M71's guarantee survives a cache that reorders by design [x]
+
+M92 refused writeback with a specific argument: *"a cache that reorders
+writes turns 'write ordering plus a mount check' into neither, and M71's
+whole argument for not having a journal rests on the first half being
+true."*
+
+That argument is **answered rather than overruled**, and the answer is a
+barrier. leanfs already writes data blocks and then the metadata that
+points at them; `save_meta` now flushes the cache before it writes the
+inode table, and `leanfs_sync` flushes before marking the superblock
+clean. So the disk still sees data before the metadata that names it —
+which is the whole of M71's guarantee — and what changes is only that a
+burst of data writes *between* two barriers becomes one device request
+instead of many. One flush, at the one place the order matters.
+
+`blk_cache_drop` writes dirty lines rather than discarding them, and that
+is not an aside: it is the measurement tool the disk benchmark uses, and
+a measurement tool that silently lost a filesystem's writes would be the
+worst kind of bug — one that only appears in the runs nobody is looking
+at.
+
+#### The crash test, which found the real hole in the first design [x]
+
+The first barrier design put one flush at the *start* of `save_meta` —
+data out, then write the metadata. It is half of an ordering, and the
+crash test destroyed it: **0 consistent, 14 failed**, every one of them
+`"/icons/README.icn names inode 226, which is free - a name pointing at
+nothing"`. The directory entry had reached the disk and the inode table
+had not, because the metadata write was itself absorbed by the cache
+sitting behind the entry that named it.
+
+So metadata is written **and then flushed, in one step**:
+`block_write_meta` in `leanfs.c` does both, and every indirect table,
+directory block, inode block, bitmap block and superblock goes through
+it. The cost is one device request per metadata block — which is what
+M71's ordering has always cost — and the data path is untouched, which
+is where the 4.9x is. **14 cuts, 14 consistent, 0 failed.**
+
+**And a second bug the crash test found that had nothing to do with
+caching.** The write benchmark needs real sectors, and the first version
+picked an offset that looked far enough past the filesystem's start. It
+was not: leanfs's data region covers the whole image, so "512 MiB in" is
+live space and the benchmark quietly overwrote it. Nothing noticed on an
+ordinary boot, because programs are seeded *before* the self-tests run;
+the crash test noticed at once, because its recovery boot seeds
+afterwards and the seed panicked. It writes to genuinely free blocks at
+the end of the data region now, and **refuses rather than guesses** if
+any of them is allocated.
+
+#### And a regression this milestone caused and caught in one boot [x]
+
+The first flush-deadline check walked all 2048 cache lines looking for an
+overdue one, on **every read and every write**. The cold-read benchmark
+went from 4.9 ms per megabyte to 9.2 — a deadline check costing more than
+the I/O it was deciding about. It is one comparison against one number
+now: the oldest dirty line is the only one the answer depends on. The
+budget row is what made it visible in the same run rather than in a
+report weeks later, which is the entire argument for having budget rows.
+
+**What graded it.** Four new rows in `tests/budgets.tsv`, so the two
+comparisons above are taken on every graded boot rather than once; a
+`[m104]` boot marker that reads a megabyte back byte for byte and checks
+the *device's* own write counter, so an absorbed write that never left
+the cache cannot pass; and `tools/crash-test.sh`, now a `--full` stage,
+which cuts the power sixteen times at the point of maximum dirty data —
+**14 verdicts, 14 consistent, 0 failed** (the other two cuts land before
+the filesystem mounts and give no verdict either way). A cache that made
+the disk faster and the crash test flaky would have failed this
+milestone, not passed it with a caveat.
+
+The host tier gets `blk_flush` and `blk_set_readahead` as fakes that do
+nothing, and that is the honest fake rather than a stub: what leanfs
+asks for at a barrier is "everything you are holding, on the device
+now", and the host's fake disk is holding nothing by construction. A
+fake that counted flushes would be a fake with an opinion about the real
+one's internals.
 
 ### M105 — The journal, or the measurement that refuses it a third time [ ]
 

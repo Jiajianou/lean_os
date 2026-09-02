@@ -58,6 +58,10 @@ typedef struct {
     uint64_t device_writes; /* ...and writes */
     uint32_t resident;   /* cache blocks currently holding data */
     uint32_t capacity;   /* cache blocks in total */
+    /* M104 */
+    uint32_t dirty;      /* lines holding bytes the device does not have */
+    uint64_t writebacks; /* lines written back by a barrier, a deadline or an eviction */
+    uint64_t readaheads; /* lines fetched speculatively past a sequential read */
 } blk_stats_t;
 
 void blk_stats(blk_stats_t *out);
@@ -67,4 +71,22 @@ void blk_stats(blk_stats_t *out);
  * Exists so a self-test can measure a COLD read, which is the number that
  * says what the device costs; a warm one says what the cache costs and
  * the pair is the measurement. */
+/* ---- M104: write everything dirty to the device, now -------------------
+ *
+ * Also the barrier leanfs uses to keep M71's write ordering across a
+ * writeback cache: it is called before the metadata that points at data
+ * is written, so the disk sees them in that order however the cache
+ * absorbed them. They are one function because they are one operation,
+ * and two names would suggest they could differ.
+ *
+ * Called by vfs_sync, SYS_fsync, SYS_sync, the shutdown path, and by
+ * leanfs's own save_meta and save_superblock. */
+void blk_flush(void);
+
+/* M104: how many lines to fetch past the end of a sequential read. 0
+ * disables it, which is what the milestone's own measurement compares
+ * against - see blk.c for how "sequential" is decided and why the
+ * number is small. */
+void blk_set_readahead(uint32_t lines);
+
 void blk_cache_drop(void);

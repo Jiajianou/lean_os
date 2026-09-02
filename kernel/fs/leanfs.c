@@ -44,6 +44,7 @@ _Static_assert((sizeof(leanfs_inode_t) * LEANFS_MAX_INODES) % LEANFS_BLOCK_SIZE 
 
 static void block_read(uint32_t block, void *dst);
 static void block_write(uint32_t block, const void *src);
+static void block_write_meta(uint32_t block, const void *src); /* M104 */
 
 static void inodes_alloc(void) {
     uint64_t frames = (sizeof(leanfs_inode_t) * (uint64_t)LEANFS_MAX_INODES) / 4096;
@@ -109,7 +110,7 @@ static void save_superblock(void) {
     uint8_t buf[LEANFS_BLOCK_SIZE];
     k_memset(buf, 0, sizeof(buf));
     k_memcpy(buf, &sb, sizeof(sb));
-    block_write(LEANFS_START_BLOCK, buf);
+    block_write_meta(LEANFS_START_BLOCK, buf);
 }
 
 /* ---- M59: dirty-sector metadata tracking ------------------------------
@@ -195,6 +196,32 @@ static void block_write(uint32_t block, const void *src) {
     blk_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, src);
 }
 
+/* ---- M104: a metadata block, and why it is a different function -------
+ *
+ * The writeback cache absorbs a whole-block write. That is exactly what
+ * makes it worth 4.9x on data, and it is exactly what must NOT happen to
+ * a block that points at other blocks.
+ *
+ * M71's guarantee is an ordering: data reaches the disk before the
+ * metadata that names it. A barrier before the metadata write is only
+ * half of that - it gets the data out, and then leaves the metadata
+ * sitting in the cache. A crash there produces a filesystem whose
+ * DIRECTORY entry survived and whose INODE did not, which is a name
+ * pointing at a free inode. The crash test found precisely that, on
+ * fourteen of sixteen cuts, on the first run against a writeback cache.
+ *
+ * So metadata is written and then flushed, in one step, by this
+ * function. Every indirect table, every directory block, the inode
+ * table, the bitmap and the superblock go through it. The cost is one
+ * device request per metadata block instead of one per barrier - which
+ * is what M71's ordering costs and has always cost, and the data path is
+ * untouched.
+ */
+static void block_write_meta(uint32_t block, const void *src) {
+    blk_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, src);
+    blk_flush();
+}
+
 static void write_run(uint32_t block, size_t blocks, const uint8_t *src) {
     blk_write(block * LEANFS_SECTORS_PER_BLOCK,
               (uint32_t)blocks * LEANFS_SECTORS_PER_BLOCK, src);
@@ -208,7 +235,26 @@ static void read_run(uint32_t block, size_t blocks, uint8_t *dst) {
 /* Writes only what changed. Runs of adjacent dirty sectors go out as one
  * write_run call, because a run is exactly as cheap as a single sector to
  * set up and this is the path a whole-file write takes. */
+/* The inode table and the bitmap, written by write_run and then flushed
+ * for the reason block_write_meta gives - they are metadata and must not
+ * sit in the cache behind the directory entries that depend on them. */
 static void save_meta(void) {
+    /* ---- M104: the barrier that keeps M71's guarantee -----------------
+     *
+     * Every data block this operation wrote is in the cache and may not
+     * be on the disk yet. The inode table about to go out is what POINTS
+     * at those blocks - so if the metadata reached the disk first and
+     * the power went, the filesystem would name data that is not there,
+     * which is precisely the failure M71's write ordering exists to
+     * prevent and precisely what M92 said a writeback cache would
+     * destroy.
+     *
+     * One flush, here, at the one place the order matters. That is what
+     * makes writeback affordable AND keeps the guarantee: a burst of
+     * data writes between two barriers is absorbed, and the barrier is
+     * where the disk catches up. */
+    blk_flush();
+
     const uint8_t *inode_bytes = (const uint8_t *)inodes;
 
     for (size_t i = 0; i < INODE_TABLE_BLOCKS; ) {
@@ -242,6 +288,13 @@ static void save_meta(void) {
         meta_writes += (uint32_t)run;
         i += run;
     }
+    /* M104: and out to the device. The barrier at the top of this
+     * function got the DATA out; this gets the metadata out, and both
+     * halves are needed - a barrier that only flushes what came before
+     * leaves the inode table in the cache behind the directory entry
+     * that names it. See block_write_meta for what that looks like when
+     * the power goes. */
+    blk_flush();
 }
 
 uint32_t leanfs_meta_writes(void) {
@@ -514,7 +567,7 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
             return -1;
         }
         k_memset(table, 0, sizeof(table));
-        block_write(sb.data_block + (uint32_t)t, (const uint8_t *)table);
+        block_write_meta(sb.data_block + (uint32_t)t, (const uint8_t *)table);
         root = (uint32_t)t;
         if (use_dindirect) {
             inode->dindirect = root;
@@ -538,10 +591,10 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
                 return -1;
             }
             table[outer] = (uint32_t)t;
-            block_write(sb.data_block + root, (const uint8_t *)table);
+            block_write_meta(sb.data_block + root, (const uint8_t *)table);
             static uint32_t empty[LEANFS_INDIRECT_POINTERS];
             k_memset(empty, 0, sizeof(empty));
-            block_write(sb.data_block + (uint32_t)t, (const uint8_t *)empty);
+            block_write_meta(sb.data_block + (uint32_t)t, (const uint8_t *)empty);
         }
         table_block = table[outer];
     }
@@ -558,7 +611,7 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
         return -1;
     }
     table[slot] = (uint32_t)blk;
-    block_write(sb.data_block + table_block, (const uint8_t *)table);
+    block_write_meta(sb.data_block + table_block, (const uint8_t *)table);
     return blk;
 }
 
@@ -907,7 +960,7 @@ static int dir_block_write(int idx, uint32_t logical) {
     if (blk < 0) {
         return -1;
     }
-    block_write(sb.data_block + (uint32_t)blk, dir_block);
+    block_write_meta(sb.data_block + (uint32_t)blk, dir_block);
     inodes[idx].mtime = rtc_now();
     mark_inode(idx);
     return 0;
@@ -1499,6 +1552,19 @@ int leanfs_exists(const char *path) {
     return inode_valid(resolve(path));
 }
 
+uint32_t leanfs_free_scratch_lba(uint32_t blocks) {
+    if (blocks == 0 || blocks >= sb.data_blocks) {
+        return 0;
+    }
+    uint32_t first = sb.data_blocks - blocks;
+    for (uint32_t b = first; b < sb.data_blocks; b++) {
+        if (bitmap_test(b)) {
+            return 0; /* in use - see the header note: refuse, do not guess */
+        }
+    }
+    return (sb.data_block + first) * LEANFS_SECTORS_PER_BLOCK;
+}
+
 int leanfs_is_dir(const char *path) {
     int idx = resolve(path);
     return inode_valid(idx) && inodes[idx].type == LEANFS_TYPE_DIR;
@@ -1817,8 +1883,15 @@ void leanfs_debug_orphan(const char *path) {
 
 /* M71: see leanfs.h. */
 void leanfs_sync(void) {
+    /* M104: everything the cache is holding, before the superblock says
+     * the filesystem was unmounted cleanly. Marking it clean over a
+     * cache full of unwritten blocks would be the single most dangerous
+     * thing this file could do - the next mount would skip the check
+     * that exists to notice exactly that. */
+    blk_flush();
     sb.state = LEANFS_STATE_CLEAN;
     save_superblock();
+    blk_flush();
 }
 
 int leanfs_rename_replace(const char *old_path, const char *new_path) {
@@ -2141,7 +2214,7 @@ static void clear_block_pointer(int idx, uint32_t logical) {
         }
         block_read(sb.data_block + inode->indirect, (uint8_t *)table);
         table[logical] = 0;
-        block_write(sb.data_block + inode->indirect, (const uint8_t *)table);
+        block_write_meta(sb.data_block + inode->indirect, (const uint8_t *)table);
         return;
     }
     logical -= (uint32_t)LEANFS_INDIRECT_POINTERS;
@@ -2160,7 +2233,7 @@ static void clear_block_pointer(int idx, uint32_t logical) {
     }
     block_read(sb.data_block + mid, (uint8_t *)table);
     table[inner] = 0;
-    block_write(sb.data_block + mid, (const uint8_t *)table);
+    block_write_meta(sb.data_block + mid, (const uint8_t *)table);
 }
 
 int leanfs_handle_truncate(int handle) {

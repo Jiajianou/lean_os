@@ -127,3 +127,18 @@ void blk_stats(blk_stats_t *out) {
     out->device_reads = reads;
     out->device_writes = writes;
 }
+
+/* M104: the host tier's disk has no cache, so a flush is a no-op - and
+ * that is the right fake rather than a stub, because what leanfs asks
+ * for at a barrier is "everything you are holding, on the device now",
+ * and this device is holding nothing by construction. A fake that
+ * counted flushes would be a fake with an opinion about an
+ * implementation detail of the real one. */
+void blk_flush(void) {
+}
+
+/* Likewise: there is nothing to read ahead OF. Accepted so that a unit
+ * under test which sets it compiles and behaves identically. */
+void blk_set_readahead(uint32_t lines) {
+    (void)lines;
+}
