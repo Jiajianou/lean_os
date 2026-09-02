@@ -111,6 +111,17 @@ fi
 # particular needs that and a boot marker will not do.
 run_stage "the shell, against $(basename "${REFERENCE_SH:-/bin/sh}")" ./tools/sh-test.sh
 
+# ---- M89: the regex engine, against an engine nobody here wrote ------
+#
+# The same instrument and the same argument, applied to the other place
+# in this tree where "correct" means "agrees with everyone else". A
+# regular expression engine that decided its own spans would be wrong in
+# a way no self-written test could see - so the host's own <regex.h>
+# decides, and tests/regex/cases.tsv says nothing about what the answers
+# should be. In every tier for the same reason as the shell: about a
+# second, and it grades something a boot marker cannot.
+run_stage "the regex engine, against the host's" ./tools/regex-test.sh
+
 # ---- Q11/Q12: the instruments that grade the tests themselves --------
 #
 # Only in --full. Both are minutes rather than seconds, and both answer a

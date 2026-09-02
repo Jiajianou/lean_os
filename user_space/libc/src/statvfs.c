@@ -3,6 +3,7 @@
  * `statvfs`, over SYS_statvfs. See <sys/statvfs.h> for why f_files and
  * f_ffree are real numbers here rather than the zeros they usually are.
  */
+#include <sys/statfs.h>
 #include <sys/statvfs.h>
 #include <errno.h>
 #include <string.h>
@@ -50,6 +51,42 @@ int statvfs(const char *path, struct statvfs *buf) {
  *
  * If something ports that needs it, the fix is a descriptor-to-mount
  * lookup in the kernel rather than an inference in libc. */
+/* M89: Linux's older spelling, over the same syscall. See
+ * <sys/statfs.h> for the one field that is not in statvfs and why it
+ * reports leanfs's own magic rather than borrowing a Linux one. */
+int statfs(const char *path, struct statfs *buf) {
+    if (!path || !buf) {
+        errno = EFAULT;
+        return -1;
+    }
+    os_statvfs_t st;
+    if (sys_statvfs(path, &st) != 0) {
+        errno = ENOENT;
+        return -1;
+    }
+    memset(buf, 0, sizeof(*buf));
+    buf->f_type = LEANFS_SUPER_MAGIC;
+    buf->f_bsize = st.block_size;
+    buf->f_frsize = st.block_size;
+    buf->f_blocks = st.total_blocks;
+    buf->f_bfree = st.free_blocks;
+    buf->f_bavail = st.free_blocks;
+    buf->f_files = st.total_inodes;
+    buf->f_ffree = st.free_inodes;
+    buf->f_namelen = st.name_max;
+    return 0;
+}
+
+int fstatfs(int fd, struct statfs *buf) {
+    /* Refused for the same reason fstatvfs is, and it is the same
+     * missing piece: nothing maps a descriptor back to the mount it was
+     * opened on. See fstatvfs below. */
+    (void)fd;
+    (void)buf;
+    errno = ENOSYS;
+    return -1;
+}
+
 int fstatvfs(int fd, struct statvfs *buf) {
     (void)fd;
     (void)buf;

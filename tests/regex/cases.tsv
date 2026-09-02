@@ -1,0 +1,138 @@
+# tests/regex/cases.tsv - M89
+#
+# One case per line: flags <TAB> pattern <TAB> subject.
+#
+# Nothing here says what the right answer is. tools/regex-test.sh runs
+# each case through this project's engine and through the host's own
+# <regex.h>, and they must agree - offsets of the whole match and of
+# every captured group, or "nomatch", or "error". That is the only
+# useful standard for a program whose entire job is to decide the same
+# spans every other engine decides.
+#
+# flags: E extended (ERE)  I icase  N newline  S nosub
+#        b notbol  e noteol      (empty means basic, BRE)
+# In the subject, \n means a real newline.
+#
+# ---- literals and the empty pattern
+	abc	abc
+	abc	xabcx
+	abc	ab
+	a		
+# ---- any
+	a.c	abc
+	a.c	a c
+	a.c	ac
+	...	ab
+# ---- BRE star
+	a*	aaa
+	a*	bbb
+	ab*c	ac
+	ab*c	abbbc
+	a*a*	aaaa
+	.*	hello
+# ---- anchors
+	^abc	abcdef
+	^abc	xabcdef
+	abc$	xxabc
+	abc$	abcxx
+	^$	
+	^a*$	aaa
+# ---- BRE groups and backreferences, which no automaton can do
+	\(a\)\1	aa
+	\(a\)\1	ab
+	\(ab\)\1	abab
+	\(a*\)b\1	aabaa
+	\(.\)\(.\)\2\1	abba
+	\(.\)\(.\)\2\1	abab
+# ---- BRE intervals
+	a\{3\}	aaaa
+	a\{2,\}	aaaa
+	a\{2,3\}	aaaaa
+	a\{4\}	aaa
+# ---- BRE literal specials
+	a+b	a+b
+	a?b	a?b
+	(x)	(x)
+	a|b	a|b
+# ---- ERE
+E	a+	aaa
+E	a+	bbb
+E	ab?c	ac
+E	ab?c	abc
+E	a{2,3}	aaaa
+E	(ab)+	ababab
+E	(a|b)+	abba
+E	x(a|b)y	xay
+E	x(a|b)y	xby
+E	x(a|b)y	xcy
+# ---- leftmost-longest, which is where a Perl-style engine disagrees
+E	(a|ab)	ab
+E	(ab|a)	ab
+E	a|ab	ab
+E	(a*)(a*)	aaa
+E	(a+)(a*)	aaa
+E	.*b	aabab
+# ---- alternation with anchors
+E	^(a|b)c$	ac
+E	^(a|b)c$	bc
+E	^(a|b)c$	cc
+# ---- classes
+	[abc]	b
+	[abc]	d
+	[a-z]*	hello
+	[^a-z]	Q
+	[]]	]
+	[^]]	a
+	[a-]	-
+	[0-9]\{3\}	x123y
+	[[:digit:]]*	42
+	[[:alpha:]]*	abc123
+	[[:space:]]	 
+	[[:upper:]]	Q
+	[z-a]	m
+# ---- two cases deliberately NOT graded, and why
+#
+# POSIX leaves both of these undefined or ambiguous, so the host's answer
+# is one conforming answer rather than the right one, and a differential
+# test cannot grade a question with two correct answers. Each is listed
+# here with the choice this engine makes, so that "not tested" does not
+# quietly become "not decided".
+#
+#   		abc
+# An empty pattern. POSIX: "the use of an empty BRE/ERE is undefined."
+# The host's engine rejects it; this one accepts it and matches the empty
+# string at position 0. Chosen deliberately: `grep ""` is a thing people
+# type and a thing scripts generate, and matching every line is far more
+# useful than an error. See regex.h.
+#
+#   # A backreference under REG_ICASE. The host compares the referenced text
+# case-sensitively even with ICASE on; this engine folds, so \1 matches
+# "A" after \(a\) matched "a". Chosen because REG_ICASE says to ignore
+# case when matching and a backreference is matching. See regex.h.
+# ---- icase
+I	ABC	abc
+I	[a-z]	Q
+EI	(ab)+	ABab
+# ---- nosub
+S	a*	aaa
+S	zzz	aaa
+# ---- notbol / noteol
+b	^a	abc
+e	c$	abc
+b	a	abc
+# ---- newline mode
+N	.	\n
+N	^b	a\nb
+N	a$	a\nb
+	^b	a\nb
+# ---- errors: each must be rejected by both
+	a\{	x
+	[abc	x
+E	(abc	x
+E	a{2,1}	x
+	\(a	x
+E	*a	x
+	\1	x
+# ---- pathological but bounded
+E	(a*)*b	aaaaaaaaaab
+E	(a|a)*b	aaaaaaaab

@@ -83,6 +83,19 @@ extern int errno;
 #define EALREADY 114
 #define ECONNRESET 104
 #define ECONNABORTED 103
+/* M89: the rest of the socket errors, at Linux's numbers like the others
+ * above. These ones ARE set: <sys/socket.h>'s refusals report through
+ * them - a family this stack does not have, an option it cannot set, a
+ * peer it cannot name. */
+#define ENOTCONN        107
+#define EAFNOSUPPORT    97
+#define ESOCKTNOSUPPORT 94
+#define EPROTONOSUPPORT 93
+#define ENOPROTOOPT     92
+#define EDESTADDRREQ    89
+#define EMSGSIZE        90
+#define ENETUNREACH     101
+#define ENETDOWN        100
 #define ENOTSUP EOPNOTSUPP
 #define EHOSTUNREACH 113
 #define ENETUNREACH 101

@@ -12,5 +12,12 @@ static inline int isalnum(int c) { return isalpha(c) || isdigit(c); }
 static inline int isprint(int c) { return c >= 0x20 && c < 0x7F; }
 static inline int ispunct(int c) { return isprint(c) && c != ' ' && !isalnum(c); }
 static inline int iscntrl(int c) { return c < 0x20 || c == 0x7F; }
+/* M89: the two C89 classifications this header had never needed. isgraph
+ * is isprint without the space - "has ink" - and isblank is the space and
+ * the tab and nothing else, which is the distinction a program splitting
+ * fields cares about. Both are asked for by name by <regex.h>'s
+ * [[:graph:]] and [[:blank:]]. */
+static inline int isgraph(int c) { return isprint(c) && c != ' '; }
+static inline int isblank(int c) { return c == ' ' || c == '\t'; }
 static inline int toupper(int c) { return islower(c) ? c - 'a' + 'A' : c; }
 static inline int tolower(int c) { return isupper(c) ? c - 'A' + 'a' : c; }

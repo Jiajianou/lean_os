@@ -8078,6 +8078,134 @@ over a tree that could not have existed before M81, interruptible with
 `^C` by M85. One command line that is false if any milestone in the arc
 is incomplete.
 
+#### Progress — the libc surface, and the wall that is not a surface [~]
+
+*In progress. Toybox does not build yet, and this entry is written at
+the point where what remains stopped being a category and became a
+list.*
+
+**The method worked exactly as the bullet said it would.** *"Its build's
+own errors are the specification"* - so the loop was: run toybox's own
+`make` against this libc, read the first error, write what it named, run
+it again. Twenty-four headers came out of that loop rather than out of a
+checklist, and the order they were needed in was decided by a program
+nobody here wrote.
+
+**What landed**
+
+- `<regex.h>` and a POSIX engine behind it - the largest single piece of
+  this C library, and the one with a real test (below)
+- `<fnmatch.h>`, `<termios.h>` over M85's ioctls, `<grp.h>`,
+  `<libgen.h>`, `<syslog.h>`, `<wctype.h>`, `<byteswap.h>`,
+  `<endian.h>`, `<paths.h>`, `<limits.h>`, `<strings.h>`, `<sched.h>`,
+  `<pty.h>`, `<sys/{socket,ioctl,uio,utsname,un,mount,statfs,syscall,ttydefaults}.h>`,
+  `<netdb.h>`, `<arpa/inet.h>`, `<netinet/{in,tcp}.h>`, `<net/if.h>`
+- The BSD socket names over M64 and M66's stack. M88's bullet had
+  already said the interesting thing: *"The stack is real; only the
+  names are missing."* `socket.c` is the one seam where network byte
+  order meets this kernel's host-order ABI, and it is one file on
+  purpose
+- `getaddrinfo` and `gethostbyname` over M73's DNS client
+
+**Five of the headers toybox demands by name were M88's**, shipped
+hours earlier: `pwd.h`, `sys/resource.h`, `sys/statvfs.h`,
+`sys/times.h`, `utime.h`. The "Before M94" table put M88 ahead of M89 on
+the theory that a real build would ask for them. It does, by name, which
+is the ordering being confirmed by the thing it was a guess about.
+
+**The regex engine, and the instrument that grades it.** M86 built the
+shell differential test on one argument: *"a shell nobody here wrote
+decides, which is the only useful standard for a program whose whole job
+is to agree with every other shell about what a script means."* A
+regular expression engine is the other program in this tree with that
+property, and it gets the same instrument. `tools/regex-test.sh`
+compiles the engine for the host, runs `tests/regex/cases.tsv` through
+it *and* through the host's own `<regex.h>`, and requires identical
+output - the offsets of the whole match and of every captured group.
+Nothing in the fixture file says what the right answer is. It runs in
+every tier, next to the shell test and for the same reason.
+
+**It found three real bugs on its first run,** and the first is the one
+worth keeping:
+
+- **An empty final repetition overwrote the capture set.** `(a*)*b`
+  against `aaaaaaaaaab` reported group 1 as `10-10` instead of `0-10`.
+  The *overall* match was right, which is exactly why nothing else would
+  have caught it: a test written here would have checked that the
+  pattern matched, and it did. The cause is that a repetition whose body
+  matches the empty string runs one last pass that consumes nothing and
+  writes its own offsets over the group's. The fix is to run the
+  continuation from that pass only when it is the iteration that met the
+  minimum - at any higher count the enclosing iteration already tried
+  the same position with the right captures.
+- BRE `a\{` was a literal brace rather than an unterminated interval.
+- ERE `*a` was a literal asterisk rather than `REG_BADRPT` - and the
+  same pattern in BRE genuinely *is* a literal, which is the one place
+  the two grammars disagree about something other than spelling.
+
+**Two cases are documented as ungraded rather than deleted.** An empty
+pattern, and `REG_ICASE` applied to a backreference: POSIX leaves the
+first undefined and the second ambiguous, so the host's answer is *a*
+conforming answer rather than *the* one, and a differential test cannot
+grade a question with two correct answers. Both are recorded in
+`cases.tsv` and in `<regex.h>` with the choice this engine makes and why
+- so that "not tested" does not quietly become "not decided".
+
+**The wall, which was not a surface.** The arc assumed what stood
+between this tree and toybox was a *surface* - calls a program names.
+That was right for twenty-four headers and wrong about the thing that
+actually stopped the build. `lib/portability.c` has three sites shaped
+like this:
+
+```c
+#if defined(__linux__) ... #elif defined(__APPLE__) ...
+#elif defined(__FreeBSD__) || defined(__OpenBSD__) ... #else #error #endif
+```
+
+**Toybox supports a closed set of operating systems, and lean_os is not
+one of them.** It does not fail to link for want of a function; it
+refuses to compile, deliberately, with the author telling you to come
+and add your case. That is the right design for a portability layer, and
+it means porting toybox is *editing toybox* - which the first
+non-negotiable forbids doing in `third_party/`.
+
+**Resolved the way M94 already writes down, rather than by a new rule.**
+That milestone's own bullet distinguishes the two things: *"a target
+port is upstream-shaped configuration; a patch to the compiler's own
+passes is the thing M63's rule exists to forbid."* Adding an OS to a
+portability layer is the first kind. So `third_party/toybox` stays
+byte-identical to the published tarball, and
+`tools/toybox-port/0001-teach-toybox-about-lean_os.patch` - 69 lines,
+covering three device-number encodings, one filesystem name and one
+header - is applied to a build copy by `tools/build-toybox.sh`. The
+property that buys is the one editing in place would destroy: a diff
+against the tarball still means something.
+
+**What remains, as a list rather than a category.** The build now runs
+to completion and fails on functions:
+
+`openat`, `fstatat`, `mkdirat`, `readlinkat` (M87's unlanded `*at()`
+family, which the "Before M94" table hands to this milestone), `getline`,
+`getdelim`, `sscanf`, `dprintf`, `umask`, `fchmod`, `fchmodat`,
+`fchown`, `fdopendir`, `nanosleep`, `cfmakeraw`, `cfsetspeed`, the `_r`
+forms of the passwd and group lookups - plus `sigjmp_buf`, `<mntent.h>`,
+and a `sockaddr_in6` that exists only to be declared.
+
+**One host tool was added, and it is the first in `docs/toolchain.md`
+that this project's own build never invokes.** Toybox's code-generation
+scripts are written against GNU sed; on a Mac they fail at the first
+step with a message that says nothing about the cause. Porting somebody
+else's software means accepting their build's requirements, and that is
+the first one.
+
+**And a bug in this project's own code, found by writing tests for the
+new headers.** `dirname("/")` returned `"."` - the all-slashes path
+collapsed to an empty range before the component scan could see it, and
+`"."` is the answer for a bare relative name, which `"/"` certainly is
+not. Every case in `tests/test_fnmatch.c` is one POSIX tabulates, which
+is how it was caught: the table has four inputs a first implementation
+gets wrong and this was one of them.
+
 ### Where this leaves M80, and the deferral M89 is likely to collect
 
 **M80 becomes attemptable again after M84**, not after M89.

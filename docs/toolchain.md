@@ -12,6 +12,21 @@ ground rules in [milestones.md](../milestones.md)).
 | `clang` + `lld-link` | any recent | compiles/links `kernel/boot/uefi`'s `BOOTX64.EFI` (M24) | `brew install lld` (clang: Apple's own is enough) |
 | `mtools` | any recent | formats the UEFI boot path's FAT ESP directly inside the disk image | `brew install mtools` |
 | `llvm` (full keg) + `acpica` | any recent | only for `tools/build-ovmf.sh` (builds OVMF firmware from source) | `brew install llvm acpica` |
+| `gsed` (GNU sed) | 4.10 | only for `tools/build-toybox.sh` (M89) — toybox's own build scripts need GNU sed | `brew install gnu-sed` |
+
+## M89: GNU sed, and why a host tool for somebody else's build is listed here
+
+`gsed` is the first entry in that table that this project's own build
+never invokes. It is there because `tools/build-toybox.sh` drives
+**toybox's** build system, and toybox's code-generation scripts are
+written against GNU sed — on a Mac they fail at the first step, with a
+`sed: 1: "...": invalid command code T` that says nothing useful about
+the cause. Toybox looks for GNU sed under the name `gsed` specifically
+(`scripts/portability.sh`), which is what Homebrew installs it as.
+
+It ends up in the image no more than `nasm` or `qemu` does. Porting
+somebody else's software means accepting their build's requirements, and
+that is the first one.
 
 ## M24: the UEFI toolchain is a separate, parallel one
 
