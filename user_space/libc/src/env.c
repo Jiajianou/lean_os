@@ -127,7 +127,16 @@ void setprogname(const char *name) {
     program_invocation_short_name = (char *)(slash ? slash + 1 : name);
 }
 
+/* M96: thread-local storage, before anything that might use it. */
+extern void *__lean_tls_setup(void);
+
 int __lean_start(int argc, char **argv, char **envp) {
+    /* FIRST, before environ, before the program name, before any
+     * constructor: `errno` is a `__thread` variable now, and every line
+     * below this one might set it. A constructor that ran before the
+     * thread pointer existed would write through %fs:0 with a base of
+     * zero, which is a null dereference wearing a segment override. */
+    (void)__lean_tls_setup();
     environ = envp;
     /* Before the constructors: a constructor that logs is entitled to
      * know the program's name, and there is nothing here that needs to

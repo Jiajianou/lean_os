@@ -119,7 +119,8 @@
     X(syscalltest)                 \
     X(profile)                     \
     X(proftest)                    \
-    X(oomtest)
+    X(oomtest)                                                                \
+    X(futextest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -9441,6 +9442,70 @@ static void boot_selftests_system(void) {
                    "million, memory written by one thread read by the other, separate tids "
                    "under one pid, each thread's floating-point state surviving the other's, "
                    "and every frame back when the last of them left - self-test passed.\n\n");
+    }
+
+    /* ---- M96 self-test: a thread with its own variables, and a wait
+     *      that costs nothing -----------------------------------------
+     *
+     * M79 proved two threads can run in one address space. This proves
+     * the two things that make that usable by a C runtime rather than by
+     * a demo:
+     *
+     *   1. a `__thread` variable is one variable PER THREAD. Sixteen
+     *      threads each count to 200 and each reports 200 - a shared
+     *      variable would report 3200 once and a wrong number fifteen
+     *      times, which is a difference no amount of "it ran" detects.
+     *   2. **a waiting thread costs nothing.** The measurement is the
+     *      CPU time the process used, not its throughput, and M96's own
+     *      bullet says why: a throughput number passes with the spin
+     *      loop still in place. Only the disappearance of that cost is
+     *      evidence that the wait became a wait.
+     *
+     * The fixture reports both numbers before it exits, so the log has
+     * the measurement in it rather than only a verdict - which is what
+     * M69 set as the rule for anything performance-shaped.
+     */
+    {
+        size_t image_bytes = 0;
+        uint8_t *image = read_program(PATH_BIN_DIR "futextest", &image_bytes);
+        if (!image) {
+            panic("m96: /bin/futextest is not on the disk");
+        }
+        task_t *t = process_spawn("futextest", image, image_bytes, "");
+        kfree(image);
+        if (!t) {
+            panic("M96 self-test: could not spawn the futex fixture");
+        }
+        int id = t->id;
+        /* Generous: the long-hold round deliberately holds the lock for
+         * a measurable time, sixteen threads go through it two hundred
+         * times each, and three more primitives are checked after that.
+         * A ceiling rather than a guess - see selftest_wait_until. */
+        uint64_t deadline = pit_get_ticks() + 6000;
+        while (sched_task_by_id(id) && sched_task_by_id(id)->state != TASK_TERMINATED) {
+            if (pit_get_ticks() > deadline) {
+                panic("M96 self-test: the futex fixture never finished - a waiter is "
+                      "asleep with nothing to wake it");
+            }
+            pit_sleep_ms(10);
+        }
+        task_t *done = sched_task_by_id(id);
+        int code = done ? done->exit_code : -1;
+        selftest_reap(done);
+        if (code != 0) {
+            klog_puts("[m96] the fixture exited 0x");
+            klog_put_hex32((uint32_t)code);
+            klog_puts(" - see user_space/bin/futextest.c for what each code means\n");
+            panic("M96 self-test: threads do not have their own variables, or a "
+                  "waiting thread still costs a core");
+        }
+        klog_puts("[m96] a thread with its own variables, and a wait that costs nothing: "
+                   "sixteen threads on one contended mutex each reporting its own "
+                   "__thread count, a blocked waiter measured in CPU ticks rather than "
+                   "in throughput because throughput passes with a spin loop still in "
+                   "place, a broadcast that woke every waiter, eight threads through "
+                   "four barrier rounds, and a writer that never overlapped a reader - "
+                   "self-test passed.\n\n");
     }
 
     /* M81 self-test: a filesystem that can hold somebody else's program.

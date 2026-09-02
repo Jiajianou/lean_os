@@ -362,3 +362,9 @@ global oomtest_elf_end
 oomtest_elf_start:
     incbin "build/oomtest.elf"
 oomtest_elf_end:
+
+global futextest_elf_start
+global futextest_elf_end
+futextest_elf_start:
+    incbin "build/futextest.elf"
+futextest_elf_end:

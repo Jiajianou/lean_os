@@ -340,6 +340,8 @@ REQUIRED_MARKERS=(
   "[q5] every syscall told a lie:"
   "[m78] memory that can be given back:"
   "[m79] two threads, one address space:"
+  # M96: the two things that make M79's threads usable by a C runtime.
+  "[m96] a thread with its own variables, and a wait that costs nothing:"
   "[m81] a filesystem that can hold somebody else's program:"
   "[m82] a page that arrives when it is asked for:"
   "[m83] two processes from one:"

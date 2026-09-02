@@ -26,6 +26,17 @@ PHDRS
 {
     text PT_LOAD FLAGS(5); /* PF_R | PF_X */
     data PT_LOAD FLAGS(6); /* PF_R | PF_W */
+    /* M96: the thread-local segment.
+     *
+     * PT_TLS is not loaded - the kernel's ELF loader maps PT_LOAD and
+     * nothing else, and .tdata below is inside the data PT_LOAD, which
+     * is where its initialization image lives. What PT_TLS is FOR is the
+     * linker: it is how ld knows there is a TLS block at all, and
+     * therefore how it resolves `%fs:`-relative references to
+     * `__thread` variables. Without it, every such reference is an
+     * error at link time rather than a wrong answer at run time, which
+     * is the good direction to fail in. */
+    tls  PT_TLS  FLAGS(4); /* PF_R */
 }
 
 ENTRY(_start)
@@ -101,6 +112,50 @@ SECTIONS
 
     .ctors : { KEEP(*(SORT(.ctors))) } :data
     .dtors : { KEEP(*(SORT(.dtors))) } :data
+
+    /* ---- M96: thread-local storage -------------------------------
+     *
+     * .tdata holds the initialized `__thread` variables and .tbss the
+     * zeroed ones, and together they are the *template* every thread
+     * gets its own copy of. The symbols around them are what
+     * user_space/libc/src/tls.c reads to make that copy; ld defines no
+     * standard ones, so they are defined here.
+     *
+     * .tbss is NOBITS and occupies no space in the image, which is why
+     * `__lean_tls_total` is computed from where .tbss ENDS rather than
+     * from where the next section starts - the two differ by exactly the
+     * bytes .tbss would have taken, and that difference is the part of
+     * the block a thread has to zero.
+     *
+     * Both sections belong to two program headers: :data because their
+     * bytes have to be in the loadable image, and :tls because that is
+     * what tells ld a TLS block exists. That double assignment is the
+     * whole trick and looks like a mistake if you have not seen it. */
+    . = ALIGN(64);
+    __lean_tls_init_start = .;
+    .tdata : {
+        *(.tdata .tdata.*)
+    } :data :tls
+    __lean_tls_init_end = .;
+    .tbss : {
+        *(.tbss .tbss.*)
+        *(.tcommon)
+    } :data :tls
+    /* NOT `.` - and this is the trap.
+     *
+     * .tbss is NOBITS, so the location counter does not advance across
+     * it: `.` here is exactly where .tdata ended, and a `__lean_tls_end
+     * = .` reports a TLS block of zero bytes however many `__thread`
+     * variables the program has. The first program built this way had a
+     * four-byte errno and a computed total of 0, which means every
+     * thread's TLS block is a TCB and nothing else - and `errno` then
+     * lands in whatever is below it.
+     *
+     * ADDR + SIZEOF is exact and is what the location counter cannot
+     * be. It is also why .data below starts at the same address .tbss
+     * did, which looks wrong in `readelf -S` and is correct: .tbss
+     * occupies no space in the image. */
+    __lean_tls_end = ADDR(.tbss) + SIZEOF(.tbss);
 
     .data : {
         *(.data*)

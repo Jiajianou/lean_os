@@ -9989,24 +9989,97 @@ not the fact that both programs ran, which a static build also achieves.
 And `dlopen` of a shared object compiled *after* the program that loads
 it, resolving a symbol by name.
 
-### M96 — A thread with its own variables, and a wait that costs nothing [ ]
+### M96 — A thread with its own variables, and a wait that costs nothing [x]
 
-- [ ] Thread-local storage properly: `%fs` base per task, `arch_prctl`
+**Status:** done, with two deliberate exclusions named below rather than
+left open: the general-dynamic TLS model belongs to M95's loader, and
+`clone` is refused rather than approximated.
+
+- [~] Thread-local storage properly: `%fs` base per task, `arch_prctl`
       (`ARCH_SET_FS`/`ARCH_GET_FS`), the TLS segment from `PT_TLS`, and
-      the initial-exec, local-exec and general-dynamic models with
-      `__tls_get_addr`. `__thread` and C++'s `thread_local` are not
-      optional for libstdc++ and they do not exist here in any form
-- [ ] `errno` becomes genuinely per-thread, over that
-- [ ] A futex: `FUTEX_WAIT`, `FUTEX_WAKE`, and a wait queue keyed on a
-      user address. `pthread.h` asks for it by name — *"There are no
-      futexes here... a waiter also burns CPU while it waits, which a
-      futex would not"* — and every mutex, condition variable and
-      barrier in this libc is a spin-then-yield loop until this exists
-- [ ] Real `pthread_mutex`, `pthread_cond`, `pthread_rwlock`,
-      `pthread_barrier` and `sem_*` over the futex, replacing the spin
-      loops rather than sitting beside them
-- [ ] `clone`-shaped thread creation with the flags a ported runtime
-      passes, over M79's `SYS_thread_create`
+      the initial-exec and local-exec models — **all shipped**. The
+      **general-dynamic** model and `__tls_get_addr` did not, and
+      deliberately: a `dlopen`ed object's TLS block does not exist until
+      the object is loaded, which is the entire reason that model
+      exists, so it belongs with the loader (M95) and not here. Nothing
+      this machine can produce today needs it — every binary is static.
+- [x] `errno` becomes genuinely per-thread, over that
+- [x] A futex: `FUTEX_WAIT`, `FUTEX_WAKE`, and a wait queue keyed on a
+      user address
+- [x] Real `pthread_mutex`, `pthread_cond`, `pthread_rwlock` and
+      `pthread_barrier` over the futex, replacing the spin loops rather
+      than sitting beside them. **`sem_*` is not here**: a POSIX
+      semaphore is a counter and a futex and would be twenty lines, and
+      nothing has asked for one — which is M63's rule, and the four that
+      are here arrived because every wait in `<pthread.h>` was a spin
+      loop rather than because a program named them.
+- [~] `clone`-shaped thread creation with the flags a ported runtime
+      passes, over M79's `SYS_thread_create`. **Not built.** `clone`'s
+      flag set is a menu of sharing decisions - address space, fd table,
+      signal handlers, filesystem root, each independently - and this
+      kernel makes all of them the same way for every thread. A `clone`
+      that accepted the flags and ignored them would be the exact lie
+      this project keeps refusing; one that honoured them is five
+      independent features nothing has asked for. The condition: a
+      runtime that fails to build without it.
+
+#### The measurement, which is the milestone [x]
+
+```
+futextest: brief hold  cpu=0 ticks   wall=40 ms
+futextest: long hold   cpu=14 ticks  wall=460 ms
+futextest: a waiting thread costs nothing -
+           14 cpu ticks against 46 wall ticks across 16 threads
+```
+
+Sixteen threads contend for one mutex, each holding it long enough that
+the other fifteen genuinely have to sleep. The run takes 460 ms of wall
+clock and **14 centiseconds of CPU**. With the spin-then-yield mutex this
+replaces, all sixteen waiters are runnable for the whole run, so the CPU
+figure approaches `wall x cores` — it would have been in the hundreds.
+M96's own bullet insisted the measurement be CPU time rather than
+throughput, and this is why: the old mutex handed the lock over perfectly
+well, it just burned a core doing it, and a throughput number would have
+passed.
+
+#### Four things worth writing down [x]
+
+**The three-state mutex, which is the whole reason a futex is worth
+having.** 0 free, 1 held, 2 held-and-somebody-may-be-waiting. The
+uncontended paths — take a free lock, release one nobody wants — are one
+atomic instruction each and never enter the kernel; only a thread that
+actually has to wait writes 2 and calls `futex(WAIT)`, and only an unlock
+that finds 2 calls `futex(WAKE)`. The syscall is on the contended path,
+where a syscall is cheap next to the wait it replaces. The 2 is sticky
+and an unnecessary wake is the cheap side of that trade: clearing it
+accurately needs a waiter count, and a missed wake is a hang.
+
+**`sched_wake_n`, so that "wake one" means one.** `pthread_cond_signal`
+used to wake every waiter — legal, and M79 said so honestly — which is
+N-1 context switches wasted per handoff. `FUTEX_WAKE` takes a count, so
+signal and broadcast are finally two different operations.
+
+**The TLS layout is upside down, and getting it backwards looks like
+memory corruption.** The thread pointer points at a TCB and the block
+sits *below* it at negative offsets, with `%fs:0` a self-pointer. A
+`__thread int` becomes `mov %fs:-4, %eax`, and the -4 is computed by the
+LINKER from the `PT_TLS` segment — which is why `user_space/lib/user.ld`
+declares one even though nothing loads it.
+
+**And a linker-script trap that cost an hour.** `.tbss` is NOBITS, so the
+location counter does **not** advance across it: `__lean_tls_end = .`
+after it reports a TLS block of zero bytes however many `__thread`
+variables the program has. The first program built this way had a
+four-byte `errno` and a computed total of 0 — every thread's block would
+have been a TCB and nothing else, with `errno` landing in whatever was
+below. `ADDR(.tbss) + SIZEOF(.tbss)` is exact and the location counter
+cannot be.
+
+**What `errno` being `__thread` closes**, stated because it is specific:
+two threads whose syscalls interleave used to overwrite each other's
+`errno` between the failing call and the check of it, so a thread could
+read a diagnosis of somebody else's failure — or of its own success.
+That is not a race a program can defend against.
 
 **How we'll know.** Sixteen threads on a contended mutex, and the
 measurement that matters is the *CPU time a blocked waiter consumes*,

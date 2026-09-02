@@ -10,6 +10,7 @@
  */
 #include <pthread.h>
 #include <time.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 
@@ -29,7 +30,17 @@ typedef struct {
     volatile int finished;
     void *stack_base;   /* the mmap the whole thing lives in */
     size_t stack_bytes;
+    /* M96: this thread's TLS block, allocated by the thread itself (see
+     * thread_trampoline) and freed by the joiner along with the stack -
+     * a thread cannot free the block its own %fs points at while it is
+     * still using it. */
+    void *tls;
 } thread_block_t;
+
+/* M96: user_space/libc/src/tls.c. Declared rather than included because
+ * it is this library's own internal entry point and has no header - the
+ * only two callers are here and in env.c's __lean_start. */
+extern void *__lean_tls_setup(void);
 
 /* MAX_THREADS join slots. A joiner needs the block after the thread is
  * gone, and the block lives in the stack the thread was running on - so
@@ -493,6 +504,23 @@ int pthread_equal(pthread_t a, pthread_t b) {
  * return. A start routine that returns falls into pthread_exit here,
  * which is exactly what POSIX says returning means. */
 static void thread_trampoline(thread_block_t *tb) {
+    /* M96: this thread's own TLS block, before its first instruction of
+     * the program's code.
+     *
+     * It has to happen HERE rather than in pthread_create, because
+     * ARCH_SET_FS is per task and pthread_create runs on the creating
+     * thread - setting it there would give the creator the new thread's
+     * errno. That is the kind of bug that presents as one thread seeing
+     * another's failure, which is precisely what per-thread errno exists
+     * to stop.
+     *
+     * A failure here is not fatal and is not reported: the thread runs
+     * with whatever %fs it inherited, which for a fresh task is 0. That
+     * is a null dereference at the first `__thread` access, and it is
+     * the honest outcome of "there was no memory for a TLS block" -
+     * there is nowhere to report it to, because the thread has not
+     * started and pthread_create has already returned. */
+    tb->tls = __lean_tls_setup();
     void *r = tb->start(tb->arg);
     tb->retval = r;
     tb->finished = 1;
@@ -529,6 +557,7 @@ int pthread_create(pthread_t *out, const pthread_attr_t *attr,
     tb->finished = 0;
     tb->stack_base = mem;
     tb->stack_bytes = bytes;
+    tb->tls = 0; /* M96 - filled by the thread itself, see the trampoline */
 
     unsigned long stack_top = ((unsigned long)tb) & ~15UL;
 
@@ -613,6 +642,7 @@ int pthread_join(pthread_t thread, void **retval) {
     }
     void *base = tb->stack_base;
     size_t bytes = tb->stack_bytes;
+    void *tls = tb->tls; /* M96 - freed below, for the same reason */
 
     pthread_mutex_lock(&registry_lock);
     registry[slot].block = 0;
@@ -622,6 +652,11 @@ int pthread_join(pthread_t thread, void **retval) {
     /* Freed here and not by the thread itself, for the reason above: a
      * thread cannot unmap the stack it is standing on. This is the whole
      * reason pthread_join exists in every implementation of it. */
+    /* M96: and its TLS block, for exactly the reason above - a thread
+     * cannot free the memory its own %fs points at. Freed before the
+     * stack only because `tb` lives in the stack mapping and this read
+     * it already. */
+    free(tls);
     munmap(base, bytes);
     return 0;
 }

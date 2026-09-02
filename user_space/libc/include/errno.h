@@ -28,7 +28,11 @@
  */
 #pragma once
 
-extern int errno;
+/* M96: thread-local. See errno.c, which had been asking for this since
+ * M80 and says what hazard it closes. `__thread` rather than a macro
+ * over a function call: the compiler turns it into one `%fs:`-relative
+ * access, which is what makes a per-thread errno cost nothing. */
+extern __thread int errno;
 
 #define EPERM   1
 #define ENOENT  2
