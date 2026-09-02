@@ -146,6 +146,17 @@ IMAGE="${LEANOS_IMAGE:-build/os-image.bin}"
 OVMF_CODE="build/ovmf/OVMF_CODE.fd"
 OVMF_VARS_TEMPLATE="build/ovmf/OVMF_VARS.fd"
 OVMF_VARS_RUNTIME="$(mktemp -t qemu-serial-ovmf-vars-XXXXXX.fd)"
+# M103: LEANOS_IOAPIC=1 routes every legacy line through the I/O APIC
+# instead of the 8259. Off by default because it costs roughly a factor
+# of two under QEMU and nothing at all on real hardware - the numbers are
+# in kernel/dev/fwcfg.h, next to the switch itself. `--full` turns it on
+# for a second pass, which is what makes "the whole battery green with
+# the PIC masked" a thing this project has actually run.
+IOAPIC_FWCFG=""
+if [ "${LEANOS_IOAPIC:-0}" = "1" ]; then
+  IOAPIC_FWCFG="-fw_cfg name=opt/leanos/ioapic,string=1"
+fi
+
 LOG="${LEANOS_SERIAL_LOG:-$(mktemp -t qemu-serial-XXXXXX.log)}"
 # Emptied before QEMU is started, and this is not tidiness. The wait loop
 # below decides the boot is over by grepping this file for a panic or for
@@ -198,6 +209,7 @@ qemu-system-x86_64 \
   -netdev user,id=net0 -device rtl8139,netdev=net0 \
   -audiodev none,id=snd0 -device AC97,audiodev=snd0 \
   -fw_cfg name=opt/leanos/selftest,string=1 \
+  $IOAPIC_FWCFG \
   -serial file:"$LOG" -monitor none ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} &
 QEMU_PID=$!
 disown "$QEMU_PID" 2>/dev/null || true
@@ -400,7 +412,22 @@ fi
 # all. "An animation that stutters is worse than none", made into
 # something a harness can fail on rather than something you have to watch
 # for.
-if grep -qF "[wm] animation missed its frame budget" "$LOG"; then
+#
+# M103: and it is asserted only on the default interrupt path. The frame
+# budget is 16 ms of WALL CLOCK measured inside the guest, and routing
+# every line through the I/O APIC makes QEMU emulate this machine at
+# roughly half speed - kernel/dev/fwcfg.h has the numbers, including the
+# one that shows the guest's own instruction stream is unchanged
+# (syscall_null_cycles does not move while every wall figure doubles).
+# Failing here on that run would be failing the compositor for something
+# the compositor did not do; ignoring it silently would be worse. So it
+# is reported, and says which.
+if [ "${LEANOS_IOAPIC:-0}" = "1" ] &&
+   grep -qF "[wm] animation missed its frame budget" "$LOG"; then
+  echo "NOTE: $(grep -F '[wm] animation missed its frame budget' "$LOG" | head -1)"
+  echo "      - not graded on the I/O APIC path: the budget is wall-clock and"
+  echo "        this emulator runs at about half speed with an enabled APIC."
+elif grep -qF "[wm] animation missed its frame budget" "$LOG"; then
   pass=0
   echo "FAIL: $(grep -F '[wm] animation missed its frame budget' "$LOG" | head -1)"
 fi

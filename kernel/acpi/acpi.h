@@ -12,10 +12,44 @@
 
 #include "arch/x86_64/cpu.h"
 
+/* ---- M103: the I/O APIC entries this parser used to skip -------------
+ *
+ * The MADT's comment said I/O APIC and Interrupt Source Override entries
+ * were "out of scope for the minimal 'start every enabled core' job".
+ * They are the scope now: routing a legacy line through the I/O APIC
+ * needs the first, and getting the RIGHT line needs the second.
+ *
+ * **The overrides are the part that is not optional.** The ISA timer is
+ * IRQ 0 by convention and is routed to global system interrupt 2 on
+ * essentially every PC ever built - so a kernel that programmed GSI 0
+ * for the timer would program a line nothing is connected to and get no
+ * ticks. That override is not an oddity; it is the normal case, and it
+ * is why the MADT has the entry type at all.
+ */
+#define MAX_IOAPICS 4
+#define MAX_IRQ_OVERRIDES 16
+
+typedef struct {
+    uint8_t id;
+    uint32_t address;   /* physical, and inside the identity map */
+    uint32_t gsi_base;  /* the first global system interrupt this one serves */
+} acpi_ioapic_t;
+
+typedef struct {
+    uint8_t source;     /* the ISA IRQ number a driver knows */
+    uint32_t gsi;       /* the global system interrupt it is actually on */
+    uint16_t flags;     /* polarity and trigger mode, MADT-encoded */
+} acpi_irq_override_t;
+
 typedef struct {
     uint64_t lapic_base;
     int cpu_count; /* number of *enabled* Processor Local APIC entries found, capped at MAX_CPUS */
     uint32_t cpu_apic_ids[MAX_CPUS];
+    /* M103 */
+    int ioapic_count;
+    acpi_ioapic_t ioapics[MAX_IOAPICS];
+    int override_count;
+    acpi_irq_override_t overrides[MAX_IRQ_OVERRIDES];
 } acpi_madt_info_t;
 
 /* M47: tells this module where the firmware said the RSDP is, before

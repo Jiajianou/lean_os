@@ -227,8 +227,8 @@ void mouse_init(void) {
      * line, so this is redundant - kept because it is also *documented*
      * here (see CASCADE_IRQ) and because a driver saying which lines it
      * needs is not the wrong thing for it to say. */
-    pic_clear_mask(CASCADE_IRQ);
-    pic_clear_mask(MOUSE_IRQ);
+    irq_enable_line(CASCADE_IRQ);
+    irq_enable_line(MOUSE_IRQ);
 }
 
 void mouse_inject(int32_t dx, int32_t dy, uint8_t buttons, int32_t wheel) {

@@ -193,7 +193,7 @@ void keyboard_init(void) {
     last_read_mods = 0;
     extended_prefix = 0;
     irq_register_handler(KEYBOARD_IRQ, keyboard_irq);
-    pic_clear_mask(KEYBOARD_IRQ);
+    irq_enable_line(KEYBOARD_IRQ);
 }
 
 int keyboard_modifiers(void) {

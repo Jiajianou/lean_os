@@ -517,9 +517,13 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
          * read. Its bytes are leanfs's own records, and handing those to
          * a program would be exporting the on-disk format through a
          * call that promises file contents. SYS_getdents is the call
-         * that reads a directory, and it takes a path. */
-        leanfs_stat_t st;
-        if (vfs_handle_stat(slot->file->handle, &st) == 0 && st.is_dir) {
+         * that reads a directory, and it takes a path.
+         *
+         * M91: read from the open-file entry rather than by asking the
+         * filesystem. This was a vfs_handle_stat on every read - a lock
+         * and an inode fetch per call - and it doubled the cost of
+         * reading a megabyte. See openfile_t's own note. */
+        if (slot->file->is_dir) {
             return -1;
         }
         int64_t n = vfs_handle_read(slot->file->handle, dst, (size_t)len, slot->file->offset);
@@ -2940,7 +2944,8 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
      * is a question about the caller's flags and leanfs_open does not
      * see them. A write to a directory that succeeded would be writing
      * over its records. */
-    if (vfs_is_dir(path) &&
+    int opening_dir = vfs_is_dir(path);
+    if (opening_dir &&
         (flags & (OPEN_WRITE | OPEN_TRUNCATE | OPEN_APPEND | OPEN_CREATE))) {
         return -1;
     }
@@ -2952,7 +2957,7 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
     if (fd < 0) {
         return -1;
     }
-    openfile_t *of = openfile_alloc(handle, writable, path);
+    openfile_t *of = openfile_alloc(handle, writable, path, opening_dir);
     if (!of) {
         return -1;
     }

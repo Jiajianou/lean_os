@@ -430,6 +430,32 @@ static void apply_rela(Object *o, const Rela *r, u64 count) {
 
         const Sym *sym = &o->symtab[symi];
         const char *name = o->strtab + sym->st_name;
+
+        /* ---- a relocation with no symbol -------------------------------
+         *
+         * Symbol index 0 is STN_UNDEF and names nothing. For most types
+         * that would be a malformed object, but TPOFF64 uses it
+         * routinely: a `static __thread` variable is LOCAL, so the
+         * linker resolves it at link time and leaves a relocation that
+         * says only "this object's TLS block, at this addend". That is
+         * the common case for a library with any thread-local of its
+         * own - libc.so's errno is exactly one - and it has to be
+         * handled where the symbol lookup would otherwise be asked for
+         * the empty string.
+         *
+         * Found the hard way: `errno` became a `static __thread int`
+         * behind `__errno_location()` in M97, its TPOFF64 lost its
+         * symbol name, and the loader failed with "undefined symbol: "
+         * and nothing after the colon. */
+        if (symi == 0 && type == R_X86_64_TPOFF64) {
+            if (o->tls_offset == 0) {
+                dl_fail("a thread-local relocation in an object with no TLS "
+                        "block", o->name);
+            }
+            *where = (u64)(-(i64)o->tls_offset) + (u64)r[i].r_addend;
+            continue;
+        }
+
         int found = 0;
         u64 value = lookup(name, 0, &found);
         if (!found) {

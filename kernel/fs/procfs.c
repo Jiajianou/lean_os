@@ -18,6 +18,8 @@
  */
 #include "vfsops.h"
 #include "vfs.h" /* M89: vfs_mount_info, for /proc/mounts */
+#include "arch/x86_64/ioapic.h" /* M103: the per-vector counters */
+#include "arch/x86_64/smp.h"    /* M103: smp_cpu_count */
 
 #include "drivers/pit.h"
 #include "lib/libk.h"
@@ -106,6 +108,7 @@ enum {
     P_UPTIME,     /* /proc/uptime */
     P_MEMINFO,    /* /proc/meminfo */
     P_MOUNTS,     /* /proc/mounts - M89 */
+    P_INTERRUPTS, /* /proc/interrupts - M103 */
     P_PIDDIR,     /* /proc/N or /proc/self */
     P_STATUS,     /* /proc/N/status */
     P_CMDLINE,    /* /proc/N/cmdline */
@@ -119,7 +122,13 @@ enum {
  * PROC_MAX_OPEN of them: giving /proc/self/status the profile's buffer
  * would cost 128 KiB of heap to hold six lines. */
 static uint32_t buf_cap_for(int kind) {
-    return (kind == P_PROFILE || kind == P_SYSCALLS) ? PROC_BUF_LARGE : PROC_BUF_SMALL;
+    /* M103: /proc/interrupts joins the large ones. A row per live vector
+     * across up to eight CPUs is more than the small buffer holds, and a
+     * truncated interrupt table is a table with a device missing from
+     * the bottom of it. */
+    return (kind == P_PROFILE || kind == P_SYSCALLS || kind == P_INTERRUPTS)
+               ? PROC_BUF_LARGE
+               : PROC_BUF_SMALL;
 }
 
 /* Splits "/self/status" into kind=P_STATUS, pid=<caller>. Returns P_NONE
@@ -145,6 +154,14 @@ static int classify(const char *rel, int *out_pid) {
      * to see it from outside the kernel. */
     if (k_strcmp(p, "mounts") == 0) {
         return P_MOUNTS;
+    }
+    /* M103. The file exists because "an interrupt that stops arriving is
+     * otherwise indistinguishable from a device that has nothing to
+     * say" - which is the milestone's own bullet, and is the difference
+     * between an idle disk and a line routed to a CPU that is not
+     * listening. */
+    if (k_strcmp(p, "interrupts") == 0) {
+        return P_INTERRUPTS;
     }
     /* M101. Readable by anyone who can open the file, unlike SYS_profile
      * which is gated on CAP_PROCESS_LIST - and that difference is
@@ -252,6 +269,39 @@ static void generate(proc_file_t *f, int kind, int pid) {
             at = put_str(f->buf, at, cap, " ");
             at = put_str(f->buf, at, cap, type);
             at = put_str(f->buf, at, cap, " rw 0 0\n");
+        }
+        break;
+    }
+    case P_INTERRUPTS: {
+        /* One row per vector that has ever fired, one column per CPU -
+         * the shape /proc/interrupts has everywhere, because a program
+         * that reads it splits on whitespace and counts columns. Only
+         * vectors with a nonzero total are listed: 256 rows of zeros
+         * would bury the four that matter. */
+        at = put_str(f->buf, at, cap, "     ");
+        for (int c = 0; c < smp_cpu_count && c < MAX_CPUS; c++) {
+            at = put_str(f->buf, at, cap, "     CPU");
+            at = put_dec(f->buf, at, cap, (uint64_t)c);
+        }
+        at = put_str(f->buf, at, cap, "\n");
+        for (int v = 0; v < 256; v++) {
+            uint64_t total = 0;
+            for (int c = 0; c < MAX_CPUS; c++) {
+                total += ioapic_irq_count((uint8_t)v, c);
+            }
+            if (total == 0) {
+                continue;
+            }
+            at = put_dec(f->buf, at, cap, (uint64_t)v);
+            at = put_str(f->buf, at, cap, ":");
+            for (int c = 0; c < smp_cpu_count && c < MAX_CPUS; c++) {
+                at = put_str(f->buf, at, cap, " ");
+                at = put_dec(f->buf, at, cap, ioapic_irq_count((uint8_t)v, c));
+            }
+            /* The controller, so a reader can tell which world this
+             * machine is in without a second file. */
+            at = put_str(f->buf, at, cap,
+                         ioapic_available() ? "  IO-APIC\n" : "  XT-PIC\n");
         }
         break;
     }
@@ -489,8 +539,8 @@ static int proc_handle_stat(int handle, leanfs_stat_t *out) {
  * task; a pid directory lists its three files. The cookie is an index
  * into whichever of those two lists applies. */
 static const char *const PID_FILES[] = {"status", "cmdline", "exe"};
-static const char *const ROOT_FILES[] = {"uptime", "meminfo", "mounts", "profile",
-                                         "syscalls"};
+static const char *const ROOT_FILES[] = {"uptime", "meminfo", "mounts",
+                                         "interrupts", "profile", "syscalls"};
 #define ROOT_FILE_COUNT ((uint32_t)(sizeof(ROOT_FILES) / sizeof(ROOT_FILES[0])))
 
 static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *out) {

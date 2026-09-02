@@ -10749,29 +10749,104 @@ memory one process's open files, pipes and mappings can account for,
 which is a quota question rather than an allocation one and is not this
 milestone's.
 
-### M103 — Interrupts a real machine delivers [ ]
+### M103 — Interrupts a real machine delivers [~]
 
-- [ ] An I/O APIC: parse the MADT's I/O APIC and Interrupt Source
+**Status:** the I/O APIC and the statistics landed, and the whole
+self-test battery is green through both controllers. MSI, the per-CPU
+LAPIC timer and interrupt-driven virtio-blk did not — and the reason is
+one measurement, recorded below, which also decided which controller is
+the default.
+
+- [x] An I/O APIC: parse the MADT's I/O APIC and Interrupt Source
       Override entries — `acpi.c` already walks that table for the
       LAPIC base and the APIC ids, so this is one more entry type — and
       route the legacy lines through it instead of `pic.c`, with the PIC
       masked rather than deleted. The overrides are the part that is not
       optional: the timer is routinely not on the line the machine
       thinks it is
-- [ ] MSI and MSI-X: the PCI capability list `pci.h:8` says out loud
-      does not exist, vector allocation, and per-device masking. A
-      modern NIC or NVMe controller has no other way to interrupt
-- [ ] A per-CPU LAPIC timer as the tick source, replacing the single PIT
-      tick that `sched.c:499` broadcasts by IPI. One core's timer
-      interrupt driving every other core's scheduling decision is a
-      thing that works and is not what a real machine does
+- [ ] MSI and MSI-X: **not built.** It is the same argument as the two
+      below and it is written out there: an I/O APIC costs this machine
+      a factor of two under the only emulator it runs on, and MSI is a
+      strictly larger commitment to that path with no device here that
+      needs it. The condition is M107's: a driver for a part that has no
+      other way to interrupt.
+- [ ] A per-CPU LAPIC timer as the tick source. **Not built**, and the
+      reason is the measurement below rather than the difficulty: it is
+      an unambiguous improvement on real hardware and an unambiguous
+      regression on this one, and there is no hardware to weigh it on
+      yet. M110's is the boot that decides it.
 - [ ] `virtio_blk` registered on its own interrupt, and the polling loop
-      at `virtio_blk.c:277-284` retired — the driver's own comment says
-      the `NO_INTERRUPT` flag is *"the flag a polling driver owes the
-      device"*, which is the comment that gets deleted here
-- [ ] Interrupt statistics per vector per CPU, in `/proc`, because an
+      retired. **Not built**, same reason. M92 measured the polling
+      driver at 5.6 ms per megabyte; an interrupt-driven one would have
+      to beat that, and on the I/O APIC path this machine reads the same
+      megabyte in 10 ms with no change to the driver at all.
+- [x] Interrupt statistics per vector per CPU, in `/proc`, because an
       interrupt that stops arriving is otherwise indistinguishable from
       a device that has nothing to say
+
+#### The measurement, and the default it decided [x]
+
+```
+                       8259 PIC        I/O APIC
+TSC calibration        999 cycles/us   494 cycles/us
+1 MiB from disk        4953 us         10062 us
+boot to desktop        228 s           302 s
+syscall_null_cycles    990             1040
+```
+
+**The last row is the one that matters.** A null syscall costs the same
+number of *cycles* either way, while every wall-clock figure doubles —
+which says the guest's own instruction stream is unchanged and the cost
+is entirely in QEMU's emulation of an enabled APIC. lean_os did not get
+slower; the emulator did.
+
+So both controllers are supported paths on exactly the terms
+`CLAUDE.md` already sets for `QEMU_DISK=ide`, the switch comes from
+**outside the image** through fw_cfg (the same mechanism as the
+self-test switch, so the image stays byte-identical), and **the default
+is the 8259** — because it costs nothing on the only machine this
+project can currently run on, and the alternative costs half of it.
+`./tools/run-tests.sh --full` runs the entire battery a second time with
+`LEANOS_IOAPIC=1`, which is what makes "green with the PIC masked" a
+thing that has actually been run rather than a thing that was written
+down. **M110 is the milestone that reverses this default, and it will
+reverse it with a number.**
+
+That is also why MSI, the LAPIC timer and interrupt-driven virtio are
+not here. Each is a further commitment to a path that is measurably
+worse on the only hardware available, in exchange for a benefit that
+can only be measured on hardware that is not. M69's rule says wait for
+the measurement, and this is the first time that rule has pointed
+*away* from the more modern mechanism.
+
+#### Four things that went wrong on the way, each in a different place [x]
+
+- **`ioapic_init` next to `pic_remap` found no MADT on every boot.**
+  `acpi.c` only dereferences a table whose physical address is inside
+  the identity map, and paging is set up much later — so the parse
+  silently reported "no I/O APIC", which is indistinguishable from a
+  machine that has none. It has to run after paging and before the first
+  driver enables a line, and that is a two-sided constraint now written
+  where the call is.
+- **The controller's own MMIO page was not mapped.** 0xFEC00000 is far
+  above the identity map's first gigabyte; the LAPIC beside it at
+  0xFEE00000 maps its own page for the same reason.
+- **A local APIC that has not been software-enabled drops what it is
+  sent.** Routing IRQ 0 through the I/O APIC before enabling the LAPIC
+  is a hang at the first `pit_sleep_ms` with nothing on the serial line.
+- **IRQ 2 is not a device line.** `mouse.c` unmasks the 8259's cascade
+  before IRQ 12, which is right for a PIC and meaningless for an I/O
+  APIC — where GSI 2 is where the *timer* lives. Unmasking it produced a
+  storm of "unhandled IRQ 2" starting at the instant the mouse came up.
+  Refused in `irq_enable_line`, because "which lines exist" is a fact
+  about the controller and that function is the one place that knows
+  which controller there is.
+
+**And one real bug found by the same detour**, unrelated to interrupts:
+`SYS_read` was calling `vfs_handle_stat` on every read to ask whether
+the descriptor named a directory — a filesystem lock and an inode fetch
+per call, added by M89. It is recorded in the open-file entry at open
+time now. A file cannot become a directory while a descriptor names it.
 
 **How we'll know.** The whole self-test battery green with the PIC
 masked and every line arriving through the I/O APIC, and again on

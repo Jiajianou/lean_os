@@ -40,7 +40,7 @@ static void ensure_init(void) {
     initialized = 1;
 }
 
-openfile_t *openfile_alloc(int handle, int writable, const char *path) {
+openfile_t *openfile_alloc(int handle, int writable, const char *path, int is_dir) {
     uint64_t flags = spin_lock_irqsave(&openfile_lock);
     ensure_init();
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -49,6 +49,7 @@ openfile_t *openfile_alloc(int handle, int writable, const char *path) {
             table[i].offset = 0;
             table[i].writable = (uint8_t)(writable != 0);
             table[i].refcount = 1;
+            table[i].is_dir = (uint8_t)(is_dir != 0);
             /* M89: all of it or none of it - see OPENFILE_PATH_MAX. */
             table[i].path[0] = 0;
             if (path) {

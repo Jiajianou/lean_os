@@ -54,12 +54,21 @@ typedef struct openfile {
     uint8_t writable;
     int refcount;      /* how many fd-table slots, across all tasks, point here */
     char path[OPENFILE_PATH_MAX]; /* absolute and normalized; "" if it did not fit - M89 */
+    /* M91: is this a directory?
+     *
+     * Recorded at open rather than asked at every read, and the
+     * difference is measurable: SYS_read called vfs_handle_stat on every
+     * call to make this check, which takes the filesystem lock and reads
+     * an inode - and the disk benchmark went from 5 ms per megabyte to
+     * 10. A file cannot become a directory while a descriptor names it,
+     * so the answer at open is the answer forever. */
+    uint8_t is_dir;
 } openfile_t;
 
 /* Claims a free entry for `handle`, refcount 1. NULL if the table is
  * full. `path` is the absolute path it was opened with and may be NULL
  * for a file that has none. */
-openfile_t *openfile_alloc(int handle, int writable, const char *path);
+openfile_t *openfile_alloc(int handle, int writable, const char *path, int is_dir);
 
 /* One more descriptor now names this file (SYS_dup2, and a spawn
  * inheriting its parent's table). */

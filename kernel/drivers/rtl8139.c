@@ -159,7 +159,7 @@ int rtl8139_init(void) {
     outb(io_base + REG_CMD, CMD_RE | CMD_TE);
 
     irq_register_handler(dev.irq_line, rtl8139_irq);
-    pic_clear_mask(dev.irq_line);
+    irq_enable_line(dev.irq_line);
 
     klog_puts("[net] rtl8139 found at PCI ");
     klog_put_hex32(dev.bus);

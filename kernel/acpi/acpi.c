@@ -363,12 +363,15 @@ int acpi_find_madt(acpi_madt_info_t *out) {
      * (4 bytes), flags (4 bytes), then a stream of variable-length
      * entries (Intel ACPI spec 5.2.12). Only types this kernel acts on:
      * type 0 (Processor Local APIC) and type 5 (Local APIC Address
-     * Override) - everything else (I/O APIC, interrupt source overrides,
-     * x2APIC entries for >255 CPUs, ...) is out of scope for the minimal
-     * "start every enabled core" job this does. */
+     * Override), plus - M103 - type 1 (I/O APIC) and type 2 (Interrupt
+     * Source Override), which this parser skipped while the PIC was the
+     * only interrupt controller. x2APIC entries for more than 255 CPUs
+     * are still out of scope, and MAX_CPUS is 8. */
     const uint8_t *madt_body = (const uint8_t *)madt + sizeof(acpi_sdt_header_t);
     out->lapic_base = *(const uint32_t *)madt_body;
     out->cpu_count = 0;
+    out->ioapic_count = 0;
+    out->override_count = 0;
 
     const uint8_t *p = madt_body + 8;
     const uint8_t *end = (const uint8_t *)madt + madt->length;
@@ -384,6 +387,20 @@ int acpi_find_madt(acpi_madt_info_t *out) {
             if ((flags & 1) && out->cpu_count < MAX_CPUS) {
                 out->cpu_apic_ids[out->cpu_count++] = apic_id;
             }
+        } else if (type == 1 && len >= 12) { /* M103: I/O APIC */
+            if (out->ioapic_count < MAX_IOAPICS) {
+                acpi_ioapic_t *io = &out->ioapics[out->ioapic_count++];
+                io->id = p[2];
+                io->address = *(const uint32_t *)(p + 4);
+                io->gsi_base = *(const uint32_t *)(p + 8);
+            }
+        } else if (type == 2 && len >= 10) { /* M103: Interrupt Source Override */
+            if (out->override_count < MAX_IRQ_OVERRIDES) {
+                acpi_irq_override_t *ov = &out->overrides[out->override_count++];
+                ov->source = p[3];
+                ov->gsi = *(const uint32_t *)(p + 4);
+                ov->flags = *(const uint16_t *)(p + 8);
+            }
         } else if (type == 5 && len >= 12) { /* Local APIC Address Override */
             out->lapic_base = *(const uint64_t *)(p + 4);
         }
@@ -394,6 +411,10 @@ int acpi_find_madt(acpi_madt_info_t *out) {
     klog_put_hex64(out->lapic_base);
     klog_puts(", ");
     klog_put_hex32((uint32_t)out->cpu_count);
-    klog_puts(" enabled CPU(s) listed.\n");
+    klog_puts(" enabled CPU(s), ");
+    klog_put_hex32((uint32_t)out->ioapic_count);
+    klog_puts(" I/O APIC(s), ");
+    klog_put_hex32((uint32_t)out->override_count);
+    klog_puts(" interrupt source override(s).\n");
     return 1;
 }

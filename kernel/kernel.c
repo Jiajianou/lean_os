@@ -4,6 +4,7 @@
 #include "acpi/acpi.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
+#include "arch/x86_64/ioapic.h" /* M103 */
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/tsc.h"
@@ -8346,6 +8347,89 @@ static void boot_selftests_system(void) {
         }
     }
 
+    /* ---- M103 self-test: interrupts a real machine delivers -------------
+     *
+     * Three claims, and the third is the one that could not be made
+     * before this milestone:
+     *
+     *   1. the machine is running on the I/O APIC, with the 8259 masked.
+     *   2. the interrupts a booted machine depends on are ARRIVING
+     *      through it - the timer above all, whose line is the one the
+     *      firmware's override table exists for.
+     *   3. **the /proc file says so, per vector per CPU.** M103's own
+     *      bullet: "an interrupt that stops arriving is otherwise
+     *      indistinguishable from a device that has nothing to say."
+     *      The counters are the difference, and printing them here puts
+     *      the number in the log rather than a verdict.
+     *
+     * Not a panic when there is no I/O APIC: a machine whose firmware
+     * reports none is a machine this kernel still boots, on the PIC, and
+     * that is a supported configuration rather than a failure.
+     */
+    {
+        static char ints[8192]; /* procfs.c PROC_BUF_LARGE - see /proc/interrupts */
+        k_memset(ints, 0, sizeof(ints));
+        int64_t n = vfs_read("/proc/interrupts", ints, sizeof(ints) - 1);
+        if (n <= 0) {
+            panic("M103 self-test: /proc/interrupts is empty");
+        }
+        ints[n] = '\0';
+        klog_puts("[m103] /proc/interrupts:\n");
+        klog_puts(ints);
+
+        if (!ioapic_available()) {
+            /* The default path. Not a skip and not a failure: the 8259
+             * is a supported configuration on exactly the terms
+             * CLAUDE.md sets for QEMU_DISK=ide, and the counters are
+             * checked here too - they are what makes an interrupt that
+             * stopped arriving visible, whichever controller delivered
+             * it. */
+            uint64_t timer = 0;
+            for (int c = 0; c < MAX_CPUS; c++) {
+                timer += ioapic_irq_count(0x20, c);
+            }
+            if (timer < 100 || !selftest_contains(ints, "XT-PIC")) {
+                panic("M103 self-test: the 8259 path is not being counted");
+            }
+            klog_puts("[m103] interrupts a real machine delivers: this boot is on "
+                       "the 8259, which is the measured default (see "
+                       "kernel/dev/fwcfg.h) - every vector counted per CPU in "
+                       "/proc/interrupts, and LEANOS_IOAPIC=1 runs the same "
+                       "battery through the I/O APIC - self-test passed.\n\n");
+        } else {
+            int all_ok = 1;
+            /* The timer's vector. If this is zero the machine would not
+             * have got here at all - which is the point: a routing
+             * mistake on IRQ 0 is a hang, not a wrong number, and the
+             * assertion exists so that the counter itself is proven to
+             * work before anything relies on it. */
+            uint64_t timer = 0;
+            for (int c = 0; c < MAX_CPUS; c++) {
+                timer += ioapic_irq_count(0x20, c);
+            }
+            if (timer < 100) {
+                klog_puts("[m103] the timer's vector has counted 0x");
+                klog_put_hex64(timer);
+                klog_puts(" interrupts - either it is not arriving through the "
+                           "I/O APIC or the counter is not being kept\n");
+                all_ok = 0;
+            }
+            if (!selftest_contains(ints, "IO-APIC")) {
+                klog_puts("[m103] /proc/interrupts does not name the controller\n");
+                all_ok = 0;
+            }
+            if (!all_ok) {
+                panic("M103 self-test: the interrupt path is not what it says it is");
+            }
+            klog_puts("[m103] interrupts a real machine delivers: every legacy line "
+                       "routed through the I/O APIC with the 8259 masked, the "
+                       "firmware's interrupt source overrides applied so the timer "
+                       "is on the line it is actually wired to, acknowledged at the "
+                       "local APIC, and counted per vector per CPU in "
+                       "/proc/interrupts - self-test passed.\n\n");
+        }
+    }
+
     /* ---- M95 self-test: code that is loaded, not linked -----------------
      *
      * Two claims, and M95's own "how we'll know" names both:
@@ -11417,6 +11501,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     gdt_init();
     idt_init();
     pic_remap();
+    /* M103: ACPI is told where the RSDP is HERE rather than three
+     * thousand lines further down, because ioapic_init below asks it a
+     * question and a setter with no side effects has no reason to wait.
+     * The call at the old site is gone; this is the only one. */
+    acpi_set_rsdp(rsdp_phys);
     klog_puts("GDT/TSS, IDT, and PIC remap initialized.\n");
 
     /* Self-test: a real trip through the IDT/ISR pipeline (gate -> stub
@@ -11875,6 +11964,24 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * `sti` is defensive documentation more than a state change: from
      * this point on, unmasked IRQ lines really do fire. */
     __asm__ volatile("sti");
+
+    /* ---- M103: the I/O APIC, if this machine has one ------------------
+     *
+     * Here, and the position is load-bearing in both directions. It has
+     * to be AFTER paging: acpi.c dereferences the tables' physical
+     * addresses and only reads them when they fall inside the identity
+     * map, so an ioapic_init next to pic_remap() found "no MADT" on
+     * every boot and quietly stayed on the PIC - which looks exactly
+     * like a machine that has no I/O APIC. And it has to be BEFORE
+     * pit_init: a driver's init is what asks for its line to be enabled,
+     * and the answer depends on which controller is in charge.
+     *
+     * The PIC is NOT deleted. pic_remap has already masked every line,
+     * which is what "masked rather than deleted" means in M103's bullet;
+     * kernel/arch/x86_64/ioapic.h says why a machine with no I/O APIC
+     * still has to boot and why the spurious-interrupt vectors still
+     * need a handler. */
+    ioapic_init();
 
     pit_init();
     /* M69: calibrated against the PIT, so it has to come after it. See
@@ -12418,12 +12525,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * Falls back to single-core (cpu 0 only) if ACPI/the MADT isn't
      * present - see smp.c's own comment on why that's a normal fallback,
      * not a panic. */
-    /* M47: whatever the firmware handed the loader, before anything asks
-     * ACPI a question. acpi.c still falls back to its legacy scan if this
-     * is 0, which is what keeps a non-UEFI boot (or a firmware that
-     * publishes no RSDP) on exactly the path it was on before. */
-    acpi_set_rsdp(rsdp_phys);
-
+    /* M47's acpi_set_rsdp used to be here, "before anything asks ACPI a
+     * question". M103 made something ask one much earlier - the I/O APIC
+     * needs the MADT before the first driver enables a line - so the
+     * call moved up to just after pic_remap(). The rule it stated is
+     * unchanged and is now satisfied by a wider margin. */
     smp_init();
 
     /* M47: reads the FADT once, here, rather than from inside the

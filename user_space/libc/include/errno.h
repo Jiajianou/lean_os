@@ -28,11 +28,30 @@
  */
 #pragma once
 
-/* M96: thread-local. See errno.c, which had been asking for this since
- * M80 and says what hazard it closes. `__thread` rather than a macro
- * over a function call: the compiler turns it into one `%fs:`-relative
- * access, which is what makes a per-thread errno cost nothing. */
-extern __thread int errno;
+/* ---- M97: errno is a MACRO, and that is not cosmetic -----------------
+ *
+ * It was `extern __thread int errno;` from M96, which is a per-thread
+ * variable and works. What it is not is what every other C library
+ * provides, and the difference is load-bearing: portable code guards its
+ * own fallback declaration with `#ifndef errno`, because `errno` being a
+ * macro is what the C standard actually specifies. GCC's own
+ * `gcc/tsystem.h` does exactly that -
+ *
+ *     #ifndef errno
+ *     extern int errno;
+ *     #endif
+ *
+ * - and a variable declaration does not satisfy a macro test, so libgcc
+ * declared a NON-thread-local `errno` over ours and would not compile.
+ * That is how this was found: building GCC's own runtime for this
+ * target.
+ *
+ * Still one int per thread. `__errno_location` is a leaf function that
+ * returns the address of a `__thread` int, which the compiler turns into
+ * one `%fs:`-relative lea - the same cost M96's note claimed, with the
+ * spelling every other libc uses. */
+int *__errno_location(void);
+#define errno (*__errno_location())
 
 #define EPERM   1
 #define ENOENT  2

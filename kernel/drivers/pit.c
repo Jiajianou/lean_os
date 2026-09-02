@@ -52,7 +52,7 @@ void pit_init(void) {
     outb(PIT_CHANNEL0_DATA, (divisor >> 8) & 0xFF);
 
     irq_register_handler(PIT_IRQ, pit_irq);
-    pic_clear_mask(PIT_IRQ);
+    irq_enable_line(PIT_IRQ);
 }
 
 uint64_t pit_get_ticks(void) {

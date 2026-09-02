@@ -19,4 +19,10 @@
  * the failing call and the check of it, so a thread could read a
  * diagnosis of somebody else's failure - or of its own success. That is
  * not a race a program can defend against. */
-__thread int errno;
+/* The variable itself, under a name nothing outside this file uses -
+ * `errno` is the macro in <errno.h> and expands to a call. */
+static __thread int lean_errno;
+
+int *__errno_location(void) {
+    return &lean_errno;
+}

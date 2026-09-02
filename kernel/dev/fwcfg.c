@@ -46,8 +46,11 @@ static uint16_t be16(const uint8_t *p) {
     return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
 }
 
-/* Reset by fwcfg_init - see boot_selftests_enabled. */
+/* Reset by fwcfg_init - see boot_selftests_enabled and
+ * boot_ioapic_enabled. */
 static int selftest_cached = -1;
+/* M103 - see boot_ioapic_enabled. */
+static int ioapic_cached = -1;
 
 void fwcfg_init(void) {
     /* Q11: a re-probe invalidates the cached answer. On the machine
@@ -55,6 +58,7 @@ void fwcfg_init(void) {
      * because a cache that survives a re-probe is a cache that reports
      * the previous device's answer about this one. */
     selftest_cached = -1;
+    ioapic_cached = -1; /* M103 */
 
     uint8_t sig[4];
     fwcfg_select(FWCFG_SIGNATURE);
@@ -134,6 +138,23 @@ int fwcfg_read_file(const char *name, void *dst, uint32_t max) {
         fwcfg_skip(found_size - want);
     }
     return (int)want;
+}
+
+/* ---- M103: which interrupt controller this boot uses ------------------
+ *
+ * Same mechanism, same reasons, and the same cached shape as the
+ * self-test switch below. What it selects and WHY the default is what it
+ * is are in fwcfg.h, next to the measurement.
+ */
+int boot_ioapic_enabled(void) {
+    if (ioapic_cached >= 0) {
+        return ioapic_cached;
+    }
+    char buf[8];
+    k_memset(buf, 0, sizeof(buf));
+    int n = fwcfg_read_file("opt/leanos/ioapic", buf, sizeof(buf) - 1);
+    ioapic_cached = (n == 1 && buf[0] == '1') ? 1 : 0;
+    return ioapic_cached;
 }
 
 int boot_selftests_enabled(void) {

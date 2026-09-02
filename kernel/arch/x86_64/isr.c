@@ -3,7 +3,10 @@
 #include "drivers/klog.h"
 #include "panic.h"
 #include "mm/pmm.h"   /* M102 - the free-frame count in the OOM line */
+#include "ioapic.h" /* M103 - which controller this machine has */
+#include "lapic.h"  /* M103 - lapic_send_eoi */
 #include "pic.h"
+#include "smp.h"    /* M103 - smp_current_cpu, for the per-CPU counters */
 #include "sched/sched.h" /* M52 - task_exit_with_code/sched_current, so a ring-3 fault kills one task instead of the machine */
 #include "signal.h"      /* system_api/include/signal.h - SIGSEGV, the exit code a killed-for-faulting task gets */
 
@@ -179,6 +182,46 @@ void irq_register_handler(uint8_t irq, irq_handler_fn handler) {
     irq_handlers[irq] = handler;
 }
 
+/* M103 - see isr.h. Routed to the boot CPU's LAPIC: spreading interrupts
+ * across cores is a policy, and M69's rule is that a policy without a
+ * measurement is a guess. The measurement now exists per vector per CPU
+ * (/proc/interrupts), so the day it says the boot CPU is saturated, this
+ * is the line that changes. */
+void irq_enable_line(uint8_t irq) {
+    /* IRQ 2 is the 8259's cascade: the wire that carries the second
+     * PIC's output into the first, which is why mouse.c unmasks it
+     * before IRQ 12. An I/O APIC has no cascade - there is one
+     * controller, and GSI 2 is where the TIMER lives on every PC (see
+     * ioapic.h on the override table). Enabling it here would unmask a
+     * second entry for the timer's line with a vector nothing handles,
+     * which is exactly what happened once: a storm of "unhandled IRQ 2"
+     * beginning at the instant the mouse came up.
+     *
+     * Refused here rather than in mouse.c, because "which lines exist"
+     * is a fact about the controller and this is the function that knows
+     * which controller there is. */
+    if (ioapic_available() && irq == 2) {
+        return;
+    }
+    if (ioapic_available()) {
+        /* This CPU's LAPIC id, read from the LAPIC itself rather than
+         * from a table - every driver's init runs on the boot CPU, so
+         * this is the boot CPU's id, and asking the hardware avoids a
+         * second place that has to agree about which id that is. */
+        ioapic_route_irq(irq, (uint8_t)lapic_id());
+    } else {
+        pic_clear_mask(irq);
+    }
+}
+
+void irq_disable_line(uint8_t irq) {
+    if (ioapic_available()) {
+        ioapic_mask_irq(irq);
+    } else {
+        pic_set_mask(irq);
+    }
+}
+
 /* irq_handler: dispatch for remapped PIC IRQs (vectors 32-47). A line with
  * no registered handler (still masked by pic_remap(), or simply nothing
  * cares about it) falls back to a generic "unhandled" print instead of
@@ -196,7 +239,22 @@ void irq_register_handler(uint8_t irq, irq_handler_fn handler) {
  * regardless of whether or when this call ever "returns". */
 void irq_handler(isr_regs_t *r) {
     uint8_t irq = (uint8_t)(r->vector - 32);
-    pic_send_eoi(irq);
+    /* M103: whichever controller delivered it gets the acknowledgement.
+     * The LAPIC's EOI is a single register write with no line number in
+     * it - the local APIC knows which vector it is servicing - which is
+     * why this is a choice of function rather than a choice of argument.
+     *
+     * Still BEFORE dispatching, for exactly the reason the paragraph
+     * above gives about the scheduler's tick hook never returning. */
+    if (ioapic_available()) {
+        lapic_send_eoi();
+    } else {
+        pic_send_eoi(irq);
+    }
+    /* M103: counted per vector per CPU, because an interrupt that stops
+     * arriving is otherwise indistinguishable from a device that has
+     * nothing to say. Read out through /proc/interrupts. */
+    ioapic_count_irq(r->vector, smp_current_cpu());
     if (irq_handlers[irq]) {
         irq_handlers[irq](r);
     } else {

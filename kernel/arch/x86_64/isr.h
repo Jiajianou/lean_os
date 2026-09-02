@@ -54,3 +54,19 @@ void lapic_vector_handler(isr_regs_t *regs);
  * their own. Line still has to be unmasked separately via
  * pic_clear_mask(). */
 void irq_register_handler(uint8_t irq, irq_handler_fn handler);
+
+/* ---- M103: one place that knows which interrupt controller this is ----
+ *
+ * Every driver used to end its init with `pic_clear_mask(MY_IRQ)`, which
+ * was right while the 8259 was the only controller. It is not any more,
+ * and the choice between "unmask a PIC line" and "program an I/O APIC
+ * redirection entry, applying the firmware's override table first" is
+ * exactly the kind of decision that must live in one place rather than
+ * in every driver.
+ *
+ * A driver still passes the ISA IRQ number it knows. What that becomes
+ * is this function's problem - see kernel/arch/x86_64/ioapic.h for why
+ * the number a driver knows and the line it is on are routinely
+ * different. */
+void irq_enable_line(uint8_t irq);
+void irq_disable_line(uint8_t irq);

@@ -69,3 +69,34 @@ int fwcfg_read_file(const char *name, void *dst, uint32_t max);
  * false - see the header comment on why "off" is the right default for
  * the ambiguous cases rather than "on". */
 int boot_selftests_enabled(void);
+
+/* ---- M103: the I/O APIC, and a default chosen by measurement ----------
+ *
+ * True when `-fw_cfg name=opt/leanos/ioapic,string=1` was passed.
+ *
+ * **The default is the 8259, and that is a measurement rather than a
+ * preference.** With every legacy line routed through the I/O APIC and
+ * acknowledged at the local APIC, this machine runs at roughly HALF
+ * speed under QEMU:
+ *
+ *     TSC calibration   999 cycles/us (PIC)   494 cycles/us (I/O APIC)
+ *     1 MiB from disk   4953 us               10062 us
+ *     boot to desktop   228 s                 302 s
+ *
+ * and `syscall_null_cycles` did not move (990 -> 1040), which is what
+ * says the guest's own instruction stream is unchanged: the cost is in
+ * QEMU's emulation of an enabled APIC, not in lean_os. On real hardware
+ * the trade is the other way round entirely - an I/O APIC is how a
+ * modern machine delivers interrupts at all, and MSI (M107, M108) has no
+ * other route.
+ *
+ * So both are supported paths on exactly the terms CLAUDE.md already
+ * sets for `QEMU_DISK=ide`, and the one that costs nothing on the only
+ * machine this project can currently run on is the default. M110 is the
+ * milestone that reverses it, and it will reverse it with a number.
+ *
+ * The switch comes from OUTSIDE the image rather than from a build flag,
+ * for the same reason the self-test switch does: the image is
+ * byte-identical either way, so "the tested image is the shipped image"
+ * stays true. */
+int boot_ioapic_enabled(void);
