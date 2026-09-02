@@ -327,6 +327,11 @@ REQUIRED_MARKERS=(
   # compiler itself was never built, which gcc-test.sh says out loud and
   # which is why this marker is checked by name rather than by prefix.
   "[m94] a target this compiler knows by name"
+  # M95. Two lines, because "it ran" and "there is one copy of the
+  # library" are two claims and the second is the one the milestone is
+  # actually about.
+  "[m95] code that is loaded, not linked:"
+  "shared library pages held:"
   # M94's own bar, and a separate marker so that "the compiler works" and
   # "somebody else's project builds and runs" are two claims in the log
   # rather than one sentence that could lose half of itself.

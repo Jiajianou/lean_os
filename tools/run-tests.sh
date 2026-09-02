@@ -111,6 +111,14 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
     echo "the target port produced something that will not link or run" >&2
     exit 1
   fi
+  # M95: the dynamic linker, the shared libc, and the two fixtures. Same
+  # shape and the same reason as the stage above - it needs the compiler
+  # M94 built, and skips with a message when that is not there.
+  run_stage "the dynamic loader and a program that needs it" ./tools/build-dynamic.sh
+  if [ "$OVERALL" -ne 0 ]; then
+    echo "the dynamic linker or something it loads would not build" >&2
+    exit 1
+  fi
 fi
 
 # ---- Stage 1: the host tier ------------------------------------------

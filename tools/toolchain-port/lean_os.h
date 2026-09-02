@@ -91,12 +91,32 @@
 #undef LIB_SPEC
 #define LIB_SPEC "-lc"
 
-/* The link. Static always, because there is no dynamic loader on this
+/* ---- the link, and the three cases it now has ------------------------
+ *
+ * M94 wrote "static always, because there is no dynamic loader on this
  * machine yet - M95 is where that changes and where this line grows a
- * -dynamic-linker. The script is the one every lean_os program has
- * always linked with; it lives in the sysroot beside libc.a. */
+ * -dynamic-linker." This is that line, grown.
+ *
+ *   -shared        a shared object. ld's own default script, because
+ *                  that is what produces .dynamic, .interp and the
+ *                  `_DYNAMIC` symbol a dynamic linker needs to find
+ *                  itself. Passing -T here was M94's one real mistake in
+ *                  this file: the fixed script has no .dynamic, so every
+ *                  -shared link failed with "undefined reference to
+ *                  _DYNAMIC" - a symbol nobody wrote and the linker
+ *                  normally defines.
+ *   -pie           a position-independent executable. Same reasoning:
+ *                  ld's default script, and the kernel places it (see
+ *                  elf_load_at). It gets an interpreter, which is what
+ *                  makes it a dynamic program at all.
+ *   otherwise      static, at 512 GiB, under the script every lean_os
+ *                  program has always linked with.
+ */
 #undef LINK_SPEC
-#define LINK_SPEC "%{!shared:-static} -T lean_os.ld%s"
+#define LINK_SPEC                                                       \
+  "%{shared:-shared} "                                                  \
+  "%{!shared:%{pie:-pie -dynamic-linker /lib/ld-lean.so}"               \
+  "%{!pie:-static -T lean_os.ld%s}}"
 
 /* Where the driver looks. Empty rather than /usr/lib, because
  * --sysroot supplies the prefix and a second copy of the path here would

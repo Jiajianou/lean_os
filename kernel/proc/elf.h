@@ -41,3 +41,33 @@ uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size);
  * space it would otherwise have to abandon (nothing in this project can
  * free one - see vmm.h). */
 uint64_t elf_validate(const uint8_t *image, size_t image_size);
+
+/* ---- M95: shared objects, and the program that loads them -------------
+ *
+ * Everything below exists so that an image can be placed somewhere other
+ * than where it says. An ET_DYN's p_vaddr values are offsets rather than
+ * addresses, so loading one is loading it AT a base - which is what a
+ * position-independent executable, a shared library and the dynamic
+ * linker itself all are.
+ */
+
+/* Maps `image` with `bias` added to every address. `bias` must be 0 for
+ * an ET_EXEC, which names its own addresses and cannot be moved. */
+uint64_t elf_load_at(uint64_t pml4_phys, const uint8_t *image, size_t image_size,
+                     uint64_t bias);
+
+/* Is this a shared object rather than a fixed executable? */
+int elf_is_dyn(const uint8_t *image, size_t image_size);
+
+/* The interpreter this image asks for, if any: 1 and a NUL-terminated
+ * path in `out`, or 0. That interpreter is the program the kernel runs
+ * INSTEAD of this one, handed this one to finish loading. */
+int elf_interp(const uint8_t *image, size_t image_size, char *out, size_t cap);
+
+/* Where the program-header table lands in the address space once the
+ * image is loaded at `bias`, and how many entries it has. The dynamic
+ * linker needs both - they are how it finds the program's own PT_DYNAMIC
+ * without re-reading the file - and they travel to it as AT_PHDR and
+ * AT_PHNUM in the auxiliary vector. */
+uint64_t elf_phdr_vaddr(const uint8_t *image, size_t image_size, uint64_t bias);
+uint16_t elf_phnum(const uint8_t *image, size_t image_size);

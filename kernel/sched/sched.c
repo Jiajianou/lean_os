@@ -786,6 +786,17 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
         t->mmaps[i].base = 0;
         t->mmaps[i].pages = 0;
     }
+    /* M96: and the thread pointer, which is per TASK and must not be
+     * inherited by whoever gets this slot next.
+     *
+     * Found by M95: a recycled slot kept the previous task's fs_base,
+     * libc's TLS setup saw a thread pointer already set and stood down
+     * (which is exactly what it should do in a dynamic program - see
+     * tls.c), and the new process then read `errno` through a pointer
+     * into a dead address space. It presented as a null-ish page fault
+     * in whatever function first touched a __thread variable, three
+     * subsystems away from the cause. */
+    t->fs_base = 0;
     /* M79: a process is its own thread group; a thread belongs to the
      * group of whoever created it. */
     t->tgid = thread_of ? thread_of->tgid : t->id;
@@ -1639,6 +1650,7 @@ void sched_reap_slot(task_t *t) {
         t->mmaps[i].base = 0;
         t->mmaps[i].pages = 0;
     }
+    t->fs_base = 0; /* M96 - see the note at the other reset site */
     t->is_thread = 0;
     t->exiting = 0;
     t->tgid = 0;

@@ -3,7 +3,9 @@
 #include "caps.h" /* system_api/include/caps.h - caps_for_program, M65 */
 
 #include "arch/x86_64/gdt.h"
+#include "drivers/klog.h" /* M95: a refused interpreter says why */
 #include "elf.h"
+#include "fs/vfs.h"       /* M95: the interpreter is read off the disk */
 #include "lib/libk.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
@@ -111,6 +113,52 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
     if (elf_validate(image, image_size) == 0) {
         return 0;
     }
+    /* ---- M95: is this a program that needs a dynamic linker? ----------
+     *
+     * Read BEFORE the address space exists, because the interpreter's
+     * path is a string in the file and this is the last moment the whole
+     * file is in kernel memory. If there is one, the interpreter is read
+     * off the disk now too, so a missing one fails here rather than
+     * halfway through building a process.
+     */
+    static char interp_path[128];
+    uint8_t *interp_image = 0;
+    size_t interp_bytes = 0;
+    int has_interp = elf_interp(image, image_size, interp_path, sizeof(interp_path));
+    if (has_interp) {
+        if (k_strcmp(interp_path, USER_INTERP_PATH) != 0) {
+            /* One dynamic linker, and a program asking for a different
+             * one is asking for something that is not here. Refused
+             * rather than substituted: silently running a different
+             * linker than the one a program was built against is how a
+             * symbol resolves to the wrong definition. */
+            klog_debug("[elf] refused: unknown interpreter ");
+            klog_debug(interp_path);
+            klog_debug("\n");
+            return 0;
+        }
+        leanfs_stat_t ist;
+        int64_t n = (vfs_stat(interp_path, &ist) == 0) ? (int64_t)ist.size : -1;
+        if (n <= 0) {
+            klog_debug("[elf] refused: " USER_INTERP_PATH " is not on this disk\n");
+            return 0;
+        }
+        interp_bytes = (size_t)n;
+        interp_image = (uint8_t *)kmalloc(interp_bytes);
+        if (!interp_image) {
+            return 0;
+        }
+        if (vfs_read(interp_path, interp_image, interp_bytes) != (int64_t)interp_bytes) {
+            kfree(interp_image);
+            return 0;
+        }
+        if (!elf_is_dyn(interp_image, interp_bytes)) {
+            klog_debug("[elf] refused: the interpreter is not a shared object\n");
+            kfree(interp_image);
+            return 0;
+        }
+    }
+
     uint64_t pml4_phys = vmm_create_address_space();
     if (pml4_phys == 0) {
         /* M102: no frame even for the new PML4. The cheapest possible
@@ -118,7 +166,12 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
          * read, mapped or claimed yet. */
         return 0;
     }
-    uint64_t entry = elf_load(pml4_phys, image, image_size);
+    /* M95: an ET_DYN program is placed at the image base, an ET_EXEC
+     * names its own. elf_load already chooses between them; the bias is
+     * recomputed here because the auxiliary vector below has to report
+     * it. */
+    uint64_t prog_bias = elf_is_dyn(image, image_size) ? USER_IMAGE_BASE : 0;
+    uint64_t entry = elf_load_at(pml4_phys, image, image_size, prog_bias);
     if (entry == 0) {
         /* Only reachable now by running out of physical memory partway
          * through mapping (elf.c). M54: whatever it did manage to build
@@ -126,8 +179,25 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
          * give it back *to* - an abandoned address space was simply lost
          * for the machine's uptime, which is the leak M29 documented and
          * M50 measured. */
+        kfree(interp_image);
         process_destroy_address_space(pml4_phys);
         return 0;
+    }
+
+    /* M95: and the interpreter, at its own base, becoming the entry
+     * point. The program is loaded and mapped; what runs first is the
+     * linker, which finishes the job from inside the address space and
+     * then jumps to AT_ENTRY. */
+    uint64_t interp_entry = 0;
+    if (has_interp) {
+        interp_entry = elf_load_at(pml4_phys, interp_image, interp_bytes,
+                                   USER_INTERP_BASE);
+        kfree(interp_image);
+        interp_image = 0;
+        if (interp_entry == 0) {
+            process_destroy_address_space(pml4_phys);
+            return 0;
+        }
     }
 
     /* M91: still eager, and still only USER_STACK_PAGES of it.
@@ -209,7 +279,9 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
         /* Both pointer arrays sit between argc and the strings, so where
          * the strings start depends on how many of each there are. Two
          * NULL terminators, one per vector. */
-        size_t strings_off = sizeof(uint64_t) * (size_t)(1 + argc + 1 + envc + 1);
+        /* M95: +14 for the auxiliary vector, which sits after envp's
+         * NULL and before the strings. */
+        size_t strings_off = sizeof(uint64_t) * (size_t)(1 + argc + 1 + envc + 1 + 14);
         size_t at = strings_off;
         if (at > USER_ARG_BYTES) {
             /* More pointers than the region holds, before a single string
@@ -260,6 +332,44 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
             env_stored++;
         }
         header[env_base + (size_t)env_stored] = 0;
+
+        /* ---- M95: the auxiliary vector ------------------------------
+         *
+         * Immediately after envp's NULL, which is where every SysV
+         * runtime looks - see system_api/include/proc.h for the list and
+         * for why each entry is one the linker cannot compute itself.
+         * Written for every process, not only dynamic ones: a static
+         * program never reads it, and a vector that appeared only
+         * sometimes would be a second layout to get right. */
+        size_t aux_base = env_base + (size_t)env_stored + 1;
+        uint64_t aux[14];
+        int an = 0;
+        aux[an++] = AT_PHDR;
+        aux[an++] = elf_phdr_vaddr(image, image_size, prog_bias);
+        aux[an++] = AT_PHENT;
+        aux[an++] = 56; /* sizeof(Elf64_Phdr) - checked by elf_validate */
+        aux[an++] = AT_PHNUM;
+        aux[an++] = elf_phnum(image, image_size);
+        aux[an++] = AT_PAGESZ;
+        aux[an++] = PAGE_SIZE;
+        aux[an++] = AT_BASE;
+        aux[an++] = has_interp ? USER_INTERP_BASE : 0;
+        aux[an++] = AT_ENTRY;
+        aux[an++] = entry;
+        aux[an++] = AT_NULL;
+        aux[an++] = 0;
+        for (int i = 0; i < an; i++) {
+            if ((aux_base + (size_t)i + 1) * sizeof(uint64_t) > strings_off) {
+                /* No room. The vector is terminated where it stands,
+                 * which a runtime reads as "nothing more to say" - and a
+                 * dynamic program in that state will fail to find its
+                 * own headers and say so, rather than reading past the
+                 * end of the region. */
+                header[aux_base + (size_t)i] = AT_NULL;
+                break;
+            }
+            header[aux_base + (size_t)i] = aux[i];
+        }
         arg_used = at;
     }
     arg_pages = (int)((arg_used + PAGE_SIZE - 1) / PAGE_SIZE);
@@ -307,7 +417,10 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
         }
     }
     kfree(block);
-    *out_entry = entry;
+    /* M95: the linker runs first when there is one. AT_ENTRY in the
+     * auxiliary vector is where it jumps afterwards, which is why the
+     * program's own entry had to be computed before this. */
+    *out_entry = has_interp ? interp_entry : entry;
     return pml4_phys;
 }
 

@@ -4771,7 +4771,15 @@ static long sys_execve(isr_regs_t *regs) {
         self->mmaps[i].base = 0;
         self->mmaps[i].pages = 0;
         self->mmaps[i].prot = 0;
+        self->mmaps[i].handle = -1; /* M91 */
+        self->mmaps[i].file_page = 0;
+        self->mmaps[i].shared = 0;
     }
+    /* M96: and the thread pointer. It points into the address space
+     * that has just been replaced, so carrying it across an exec would
+     * hand the new program a %fs into memory that is gone - which is the
+     * same failure a recycled task slot had, in a different place. */
+    self->fs_base = 0;
 
     /* M84: the descriptors that said they should not survive this. */
     for (int i = 0; i < MAX_FDS; i++) {

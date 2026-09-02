@@ -165,3 +165,55 @@ typedef struct {
  */
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
+
+/* ---- M95: the auxiliary vector -----------------------------------------
+ *
+ * What the kernel tells the dynamic linker about the program it is being
+ * asked to finish loading. It sits immediately after envp's NULL in the
+ * argument region, which is where every SysV runtime since 1988 looks
+ * for it - the same convention that puts envp one slot past argv's NULL,
+ * and for the same reason: a runtime that had to be told a second
+ * address would need a second mechanism to be told it with.
+ *
+ * Each entry is a pair of 64-bit words, terminated by a pair whose first
+ * word is AT_NULL. The numbers are Linux's, like every other number in
+ * system_api where there is a convention to match.
+ *
+ * Only six, and each is here because the linker cannot compute it:
+ *
+ *   AT_PHDR/AT_PHNUM  where the PROGRAM's headers are, which is how the
+ *                     linker finds its PT_DYNAMIC without opening the
+ *                     file it was loaded from - and it could not open
+ *                     it, because it does not know the path.
+ *   AT_PHENT          the size of one, so a mismatched toolchain is a
+ *                     refusal rather than a walk over garbage.
+ *   AT_BASE           where the LINKER itself was placed, which is what
+ *                     it needs in order to relocate itself before it can
+ *                     do anything at all.
+ *   AT_ENTRY          the program's entry point, which is where the
+ *                     linker jumps once it is done.
+ *   AT_PAGESZ         because everything else about a mapping is derived
+ *                     from it.
+ */
+#define AT_NULL   0
+#define AT_PHDR   3
+#define AT_PHENT  4
+#define AT_PHNUM  5
+#define AT_PAGESZ 6
+#define AT_BASE   7
+#define AT_ENTRY  9
+
+/* M95: where the dynamic linker is placed. Inside the image window and
+ * far enough from USER_IMAGE_BASE that a program of any plausible size
+ * cannot reach it - 32 GiB in, against a window of 64. Fixed rather than
+ * chosen per process, and deliberately: this kernel has no address-space
+ * randomisation and inventing one place to put a thing that has one
+ * place would be a number to keep in step with nothing. */
+#define USER_INTERP_BASE 0x0000008800000000ULL
+
+/* The path the kernel looks for an interpreter at, when a program's
+ * PT_INTERP names one. Compared rather than resolved: this kernel runs
+ * ONE dynamic linker, and a program asking for a different one is asking
+ * for something that is not here - which is a refusal rather than a
+ * substitution. */
+#define USER_INTERP_PATH "/lib/ld-lean.so"

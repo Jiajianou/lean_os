@@ -60,12 +60,20 @@ extern int main(int argc, char **argv, char **envp);
  * The symbols come from user_space/lib/user.ld, and are PROVIDE_HIDDEN
  * there so that a program with no constructors links with the two
  * bounds equal rather than undefined. */
-extern void _init(void);
-extern void _fini(void);
-extern void (*__init_array_start[])(int, char **, char **);
-extern void (*__init_array_end[])(int, char **, char **);
-extern void (*__fini_array_start[])(void);
-extern void (*__fini_array_end[])(void);
+/* M95: weak, because in a DYNAMIC program none of them is visible from
+ * here. These symbols are defined by user_space/lib/user.ld, which links
+ * a static executable; a shared object is linked without it, and the
+ * program's own arrays live in the executable where libc.so cannot see
+ * them. The dynamic linker runs the program's initializers instead - it
+ * has the program's DT_INIT_ARRAY, which is the same information by the
+ * other route - so what this file must do in that case is nothing, and a
+ * weak-undefined symbol resolving to 0 is how it finds out. */
+extern void _init(void) __attribute__((weak));
+extern void _fini(void) __attribute__((weak));
+extern void (*__init_array_start[])(int, char **, char **) __attribute__((weak));
+extern void (*__init_array_end[])(int, char **, char **) __attribute__((weak));
+extern void (*__fini_array_start[])(void) __attribute__((weak));
+extern void (*__fini_array_end[])(void) __attribute__((weak));
 
 /* ---- M94: atexit ------------------------------------------------------
  *
@@ -103,10 +111,14 @@ void __lean_run_exit_handlers(void) {
          * calls exit() again does not run itself forever. */
         fn();
     }
-    for (void (**p)(void) = __fini_array_end; p > __fini_array_start;) {
-        (*--p)();
+    if (__fini_array_start && __fini_array_end) {
+        for (void (**p)(void) = __fini_array_end; p > __fini_array_start;) {
+            (*--p)();
+        }
     }
-    _fini();
+    if (_fini) {
+        _fini();
+    }
 }
 
 /* M94: what this program is called - see <stdlib.h> for why both
@@ -146,10 +158,14 @@ int __lean_start(int argc, char **argv, char **envp) {
     }
     /* _init first, then the array: that is the order every ELF runtime
      * uses, and it matters for an object that contributes to both. */
-    _init();
-    for (void (**p)(int, char **, char **) = __init_array_start;
-         p < __init_array_end; p++) {
-        (*p)(argc, argv, envp);
+    if (_init) {
+        _init();
+    }
+    if (__init_array_start && __init_array_end) {
+        for (void (**p)(int, char **, char **) = __init_array_start;
+             p < __init_array_end; p++) {
+            (*p)(argc, argv, envp);
+        }
     }
     int rc = main(argc, argv, envp);
     /* Falling off the end of main is a call to exit(), not to _exit() -

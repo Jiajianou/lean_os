@@ -46,15 +46,27 @@
 /* Defined by the linker script. `__lean_tls_init_*` bracket the bytes to
  * copy; `__lean_tls_end` is where the zeroed part stops. All three are
  * addresses in this image, not sizes. */
-extern char __lean_tls_init_start[];
-extern char __lean_tls_init_end[];
-extern char __lean_tls_end[];
+/* Weak, so that this file links into a SHARED object too. A shared
+ * object is linked without user.ld and these three symbols do not exist
+ * there - the dynamic linker owns the TLS block when there is one, and
+ * this file's job in a dynamic program is to notice that and stand down.
+ * Weak-undefined resolves to 0, which the size functions below read as
+ * "no template", which is exactly right. */
+extern char __lean_tls_init_start[] __attribute__((weak));
+extern char __lean_tls_init_end[] __attribute__((weak));
+extern char __lean_tls_end[] __attribute__((weak));
 
 size_t __lean_tls_init_size(void) {
+    if (!__lean_tls_init_start || !__lean_tls_init_end) {
+        return 0;
+    }
     return (size_t)(__lean_tls_init_end - __lean_tls_init_start);
 }
 
 size_t __lean_tls_total_size(void) {
+    if (!__lean_tls_init_start || !__lean_tls_end) {
+        return 0;
+    }
     return (size_t)(__lean_tls_end - __lean_tls_init_start);
 }
 
@@ -72,6 +84,24 @@ size_t __lean_tls_total_size(void) {
  * ELF header this program cannot see.
  */
 void *__lean_tls_setup(void) {
+    /* M95: stand down if something already set a thread pointer.
+     *
+     * In a dynamic program the linker builds the static TLS block -
+     * it has to, because the program is not the only contributor to it -
+     * and sets %fs before the program's first instruction. Building a
+     * second block here would give this thread a fresh copy of the
+     * program's variables and none of libc.so's, which is a program
+     * whose errno works and whose library's does not.
+     *
+     * Asked rather than assumed: there is no other way to tell a static
+     * program from a dynamic one from inside, and a flag either side
+     * would have to set is a flag one of them would forget. */
+    unsigned long existing = 0;
+    if (sys_arch_prctl(ARCH_GET_FS, (unsigned long)&existing) == 0 &&
+        existing != 0) {
+        return 0;
+    }
+
     size_t total = __lean_tls_total_size();
     size_t init = __lean_tls_init_size();
     /* The TCB is one pointer, and the block is what precedes it. Rounded

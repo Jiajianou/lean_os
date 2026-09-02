@@ -15,8 +15,18 @@
 #define ELFCLASS64 2
 
 #define ET_EXEC   2
+/* M95: a shared object, which is what a position-independent executable
+ * and every shared library is. The difference from ET_EXEC is entirely
+ * one of interpretation: its p_vaddr values are offsets from wherever it
+ * is placed rather than addresses, so loading one means choosing a base
+ * and adding it to everything. */
+#define ET_DYN    3
 #define EM_X86_64 62
 #define PT_LOAD   1
+/* M95: the path of the program that should be run INSTEAD of this one,
+ * and handed this one to finish loading. That program is the dynamic
+ * linker. */
+#define PT_INTERP 3
 /* Segment permission bits from the ELF spec (M91). */
 #define PF_X 0x1
 #define PF_W 0x2
@@ -71,7 +81,16 @@ static uint64_t reject(const char *why) {
     return 0;
 }
 
-uint64_t elf_validate(const uint8_t *image, size_t image_size) {
+/* M95: the common half of validate, parameterised by the load bias.
+ *
+ * `bias` is what is added to every p_vaddr and to the entry: 0 for an
+ * ET_EXEC, and the chosen base for an ET_DYN. Everything else - the
+ * magic, the class, the machine, the bounds - is the same question
+ * either way, which is why there is one function rather than two that
+ * would drift.
+ */
+static uint64_t elf_validate_biased(const uint8_t *image, size_t image_size,
+                                    uint64_t bias) {
     if (image_size < sizeof(elf64_ehdr_t)) {
         return reject("smaller than an ELF header");
     }
@@ -83,13 +102,17 @@ uint64_t elf_validate(const uint8_t *image, size_t image_size) {
     if (eh->e_ident[EI_CLASS] != ELFCLASS64) {
         return reject("not ELFCLASS64");
     }
-    if (eh->e_type != ET_EXEC) {
-        return reject("not ET_EXEC (static, non-PIE) - the only type supported here");
+    if (eh->e_type != ET_EXEC && eh->e_type != ET_DYN) {
+        return reject("not ET_EXEC or ET_DYN");
+    }
+    if (eh->e_type == ET_EXEC && bias != 0) {
+        return reject("an ET_EXEC cannot be relocated - it names its own addresses");
     }
     if (eh->e_machine != EM_X86_64) {
         return reject("not an x86_64 image");
     }
-    if (eh->e_entry < USER_IMAGE_BASE || eh->e_entry >= USER_IMAGE_LIMIT) {
+    if (eh->e_entry + bias < USER_IMAGE_BASE ||
+        eh->e_entry + bias >= USER_IMAGE_LIMIT) {
         return reject("entry point outside the user image window");
     }
     if (eh->e_phnum != 0 && eh->e_phentsize != sizeof(elf64_phdr_t)) {
@@ -110,7 +133,7 @@ uint64_t elf_validate(const uint8_t *image, size_t image_size) {
         if (ph[i].p_type != PT_LOAD) {
             continue;
         }
-        uint64_t vaddr = ph[i].p_vaddr;
+        uint64_t vaddr = ph[i].p_vaddr + bias;
         uint64_t filesz = ph[i].p_filesz;
         uint64_t memsz = ph[i].p_memsz;
         uint64_t offset = ph[i].p_offset;
@@ -129,10 +152,115 @@ uint64_t elf_validate(const uint8_t *image, size_t image_size) {
         }
     }
 
-    return eh->e_entry;
+    return eh->e_entry + bias;
+}
+
+uint64_t elf_validate(const uint8_t *image, size_t image_size) {
+    /* An ET_DYN validated with no bias is validated as though it were
+     * loaded at 0, which its entry point (usually a small offset) will
+     * fail. So the default bias for one is the image base - the same
+     * place elf_load_at puts it when a caller does not choose. */
+    if (image_size >= sizeof(elf64_ehdr_t) &&
+        ((const elf64_ehdr_t *)image)->e_type == ET_DYN) {
+        return elf_validate_biased(image, image_size, USER_IMAGE_BASE);
+    }
+    return elf_validate_biased(image, image_size, 0);
+}
+
+/* M95: is this image a shared object rather than a fixed executable? */
+int elf_is_dyn(const uint8_t *image, size_t image_size) {
+    if (image_size < sizeof(elf64_ehdr_t)) {
+        return 0;
+    }
+    return ((const elf64_ehdr_t *)image)->e_type == ET_DYN;
+}
+
+/* M95: the interpreter this image asks for, if it asks for one.
+ *
+ * Returns 1 and fills `out` with the NUL-terminated path, or 0. The
+ * string lives in the file rather than in a section this loader has
+ * mapped, so it is copied out here where the whole image is still in
+ * kernel memory - by the time the address space exists, the only thing
+ * that could read it is the program itself.
+ */
+int elf_interp(const uint8_t *image, size_t image_size, char *out, size_t cap) {
+    if (image_size < sizeof(elf64_ehdr_t) || !out || cap == 0) {
+        return 0;
+    }
+    const elf64_ehdr_t *eh = (const elf64_ehdr_t *)image;
+    if (eh->e_phentsize != sizeof(elf64_phdr_t)) {
+        return 0;
+    }
+    uint64_t ph_bytes = (uint64_t)eh->e_phnum * sizeof(elf64_phdr_t);
+    if (eh->e_phoff > image_size || ph_bytes > (uint64_t)image_size - eh->e_phoff) {
+        return 0;
+    }
+    const elf64_phdr_t *ph = (const elf64_phdr_t *)(image + eh->e_phoff);
+    for (uint16_t i = 0; i < eh->e_phnum; i++) {
+        if (ph[i].p_type != PT_INTERP) {
+            continue;
+        }
+        if (ph[i].p_offset > image_size ||
+            ph[i].p_filesz > (uint64_t)image_size - ph[i].p_offset ||
+            ph[i].p_filesz == 0 || ph[i].p_filesz > cap) {
+            return 0;
+        }
+        const char *src = (const char *)(image + ph[i].p_offset);
+        /* NUL-terminated in the file by convention; terminated here
+         * regardless, because "by convention" is not a bound. */
+        size_t n = 0;
+        while (n < ph[i].p_filesz - 1 && src[n]) {
+            out[n] = src[n];
+            n++;
+        }
+        out[n] = '\0';
+        return n > 0;
+    }
+    return 0;
+}
+
+/* M95: where this image's program headers end up in the address space,
+ * so the interpreter can find them - which is what AT_PHDR is for.
+ *
+ * The header table is inside the first PT_LOAD on every image any
+ * toolchain produces, so this finds the segment containing e_phoff and
+ * reports the corresponding virtual address. 0 if no segment covers it,
+ * which is an image no dynamic linker could load anyway. */
+uint64_t elf_phdr_vaddr(const uint8_t *image, size_t image_size, uint64_t bias) {
+    if (image_size < sizeof(elf64_ehdr_t)) {
+        return 0;
+    }
+    const elf64_ehdr_t *eh = (const elf64_ehdr_t *)image;
+    if (eh->e_phentsize != sizeof(elf64_phdr_t)) {
+        return 0;
+    }
+    const elf64_phdr_t *ph = (const elf64_phdr_t *)(image + eh->e_phoff);
+    for (uint16_t i = 0; i < eh->e_phnum; i++) {
+        if (ph[i].p_type != PT_LOAD) {
+            continue;
+        }
+        if (eh->e_phoff >= ph[i].p_offset &&
+            eh->e_phoff < ph[i].p_offset + ph[i].p_filesz) {
+            return ph[i].p_vaddr + bias + (eh->e_phoff - ph[i].p_offset);
+        }
+    }
+    return 0;
+}
+
+uint16_t elf_phnum(const uint8_t *image, size_t image_size) {
+    if (image_size < sizeof(elf64_ehdr_t)) {
+        return 0;
+    }
+    return ((const elf64_ehdr_t *)image)->e_phnum;
 }
 
 uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size) {
+    return elf_load_at(pml4_phys, image, image_size,
+                       elf_is_dyn(image, image_size) ? USER_IMAGE_BASE : 0);
+}
+
+uint64_t elf_load_at(uint64_t pml4_phys, const uint8_t *image, size_t image_size,
+                     uint64_t bias) {
     /* Validate the whole image before mapping any of it, so a rejected
      * one never allocates a frame or leaves a half-populated address
      * space behind (there is no unmap-and-free path to undo one with -
@@ -140,7 +268,7 @@ uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size) {
      * address space at all call elf_validate directly; doing it again
      * here costs one pass over a handful of program headers and means
      * elf_load is never unsafe on its own. */
-    uint64_t entry = elf_validate(image, image_size);
+    uint64_t entry = elf_validate_biased(image, image_size, bias);
     if (entry == 0) {
         return 0;
     }
@@ -152,7 +280,7 @@ uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size) {
             continue;
         }
 
-        uint64_t vaddr = ph[i].p_vaddr;
+        uint64_t vaddr = ph[i].p_vaddr + bias;
         uint64_t filesz = ph[i].p_filesz;
         uint64_t memsz = ph[i].p_memsz;
         uint64_t offset = ph[i].p_offset;
@@ -209,8 +337,8 @@ uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size) {
     }
 
     klog_debug("[elf] loaded, entry = 0x");
-    klog_log_hex64(KLOG_DEBUG, eh->e_entry);
+    klog_log_hex64(KLOG_DEBUG, eh->e_entry + bias);
     klog_debug("\n");
 
-    return eh->e_entry;
+    return eh->e_entry + bias;
 }

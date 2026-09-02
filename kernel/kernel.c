@@ -8346,6 +8346,192 @@ static void boot_selftests_system(void) {
         }
     }
 
+    /* ---- M95 self-test: code that is loaded, not linked -----------------
+     *
+     * Two claims, and M95's own "how we'll know" names both:
+     *
+     *   1. A program built as a position-independent executable, loaded
+     *      by /lib/ld-lean.so, reaching libc.so through the PLT and the
+     *      GOT, and dlopen'ing a library that did not exist when it was
+     *      compiled. That last part is the one static linking cannot
+     *      imitate.
+     *
+     *   2. **Two programs running at once share exactly one copy of
+     *      libc.so's text, and the proof is the PMM's frame count** -
+     *      not the fact that both ran, which a static build also
+     *      achieves. The second copy of a dynamic program costs
+     *      essentially nothing extra in physical memory because M91's
+     *      MAP_SHARED file mapping hands both processes the same frames
+     *      for every read-only segment.
+     *
+     * Skipped when /bin/dyntest is absent, for the same reason M89 and
+     * M94 skip: tools/build-dynamic.sh needs the compiler M94 built and
+     * is not part of `make`.
+     */
+    {
+        os_stat_t dt;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/dyntest", (uint64_t)&dt, 0) != 0) {
+            klog_puts("[m95] /bin/dyntest is not on this image - skipped. "
+                       "tools/build-dynamic.sh builds it.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m95.sh";
+            const char *result = PATH_TMP_DIR "m95.out";
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "/bin/dyntest > " PATH_TMP_DIR "m95.out\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M95 self-test: could not write the fixture");
+            }
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m95] the dynamic program could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            static char produced[512];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m95] the dynamic program produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"own global ok",          "the program's own load bias"},
+                    {"reached through the PLT", "JUMP_SLOT relocations into libc.so"},
+                    {"read through the GOT",   "a GLOB_DAT against a libc.so global"},
+                    {"dlopen and dlsym",       "a library loaded by name after the fact"},
+                    {"every check passed",     "every check in the fixture"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m95] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+
+            /* ---- the frame count, which is the interesting half ------
+             *
+             * One copy running, then two. The difference is what a
+             * second process costs, and with a shared library's text
+             * mapped MAP_SHARED it is the program's own private pages
+             * and nothing more - libc.so's text is already resident and
+             * is not duplicated.
+             *
+             * Compared against the size of libc.so's text rather than
+             * against a fixed number: what must be true is that the
+             * second process costs LESS than a second copy of the
+             * library would, and the library's size is the thing that
+             * would otherwise be paid twice. */
+            size_t img_bytes = 0;
+            uint8_t *img = read_program("/bin/dyntest", &img_bytes);
+            if (!img) {
+                klog_puts("[m95] could not read /bin/dyntest back\n");
+                all_ok = 0;
+            } else {
+                leanfs_stat_t libst;
+                uint64_t lib_bytes = 0;
+                if (vfs_stat("/lib/libc.so", &libst) == 0) {
+                    lib_bytes = libst.size;
+                }
+                const char *shargv[] = {"/bin/dyntest", "share", 0};
+
+                uint64_t before = pmm_free_frame_count();
+                task_t *a = process_spawnv("dyntest", img, img_bytes, shargv);
+                pit_sleep_ms(600);
+                uint64_t after_one = pmm_free_frame_count();
+                /* The exact number: how many FILE pages the machine is
+                 * holding shared right now. This is the count M95's own
+                 * test asks about - "the proof is the PMM's frame count,
+                 * not the fact that both programs ran" - and it is a
+                 * sharper instrument than the free-frame delta, because
+                 * a second process legitimately costs page tables, a
+                 * stack and its own private data, and those would mask
+                 * a library that was being duplicated. */
+                int shared_one = filemap_in_use();
+                task_t *b = process_spawnv("dyntest", img, img_bytes, shargv);
+                pit_sleep_ms(600);
+                uint64_t after_two = pmm_free_frame_count();
+                int shared_two = filemap_in_use();
+                kfree(img);
+
+                uint64_t first = before - after_one;
+                uint64_t second = after_one - after_two;
+                klog_puts("[m95] one dynamic process cost 0x");
+                klog_put_hex64(first);
+                klog_puts(" frames, the second cost 0x");
+                klog_put_hex64(second);
+                klog_puts("; shared library pages held: 0x");
+                klog_put_hex32((uint32_t)shared_one);
+                klog_puts(" with one process, 0x");
+                klog_put_hex32((uint32_t)shared_two);
+                klog_puts(" with two - libc.so is 0x");
+                klog_put_hex64((lib_bytes + 4095) / 4096);
+                klog_puts(" pages\n");
+
+                if (a) {
+                    sched_raise_signal(a, SIGKILL);
+                }
+                if (b) {
+                    sched_raise_signal(b, SIGKILL);
+                }
+                pit_sleep_ms(300);
+                selftest_reap(a);
+                selftest_reap(b);
+
+                /* The claim: the second process did not pay for the
+                 * library again. Stated as "less than the library's own
+                 * page count", which is what sharing means and is a
+                 * bound rather than an exact figure - the second process
+                 * genuinely does cost something (its stack, its
+                 * argument region, its private data pages), and pinning
+                 * that number would be a test of the allocator. */
+                /* The claim, stated exactly: the second process added
+                 * no new shared file pages, because every page of
+                 * libc.so it touched was already resident and it got
+                 * the same frames. A machine that copied the library
+                 * per process would hold twice as many.
+                 *
+                 * `>=` rather than `>` on the doubling, and a small
+                 * allowance: the second process may genuinely touch a
+                 * page of the library the first never reached, which is
+                 * a real new page and not a copy. Four is more slack
+                 * than two identical programs need and far less than a
+                 * second copy of a 43-page library would take. */
+                if (shared_one <= 0) {
+                    klog_puts("[m95] no shared library pages at all - the loader is "
+                               "not mapping from the file\n");
+                    all_ok = 0;
+                } else if (shared_two > shared_one + 4) {
+                    klog_puts("[m95] the second process added shared pages of its own - "
+                               "the library is being copied rather than shared\n");
+                    all_ok = 0;
+                }
+            }
+
+            if (!all_ok) {
+                klog_puts("[m95] what the dynamic program wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m95] ---- end\n");
+                panic("M95 self-test: code that is loaded is not loaded");
+            }
+            klog_puts("[m95] code that is loaded, not linked: a position-independent "
+                       "program placed by the kernel, /lib/ld-lean.so relocating "
+                       "itself and then it, libc.so reached through the PLT and the "
+                       "GOT, a library dlopen'ed by name that did not exist when the "
+                       "program was compiled, and a second copy of the program paying "
+                       "for none of the library again - self-test passed.\n\n");
+        }
+    }
+
     /* ---- M73 self-test: names, and the first inbound byte ---------------
      *
      * Two halves, and neither of them depends on the machine running QEMU

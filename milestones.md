@@ -9966,22 +9966,101 @@ interesting:
   standard says is, to a build, indistinguishable from not having it** —
   and that sentence is the whole lesson of this milestone's second half.
 
-### M95 — Code that is loaded, not linked [ ]
+### M95 — Code that is loaded, not linked [x]
 
-- [ ] ELF `ET_DYN` and `PT_INTERP` in `kernel/proc/elf.c`, which today
-      maps `PT_LOAD` at fixed addresses and checks them against
-      `USER_IMAGE_BASE`/`LIMIT`. A position-independent executable has
-      no fixed address by construction
-- [ ] `/lib/ld-lean.so`: relocation processing (`R_X86_64_RELATIVE`,
-      `GLOB_DAT`, `JUMP_SLOT`, `COPY`, `TPOFF64`), symbol lookup across
-      a search scope, `DT_NEEDED`, lazy PLT binding, and `LD_LIBRARY_PATH`
-- [ ] `dlopen`/`dlsym`/`dlclose`/`dlerror`
-- [ ] `libc.so`, `libgcc_s.so` and later `libstdc++.so` as real shared
-      objects, with the static archives kept — the kernel and anything
-      that runs before the loader will always be static
-- [ ] This collects the deferral M89's closing note scheduled: *"a
-      second and third static binary duplicating the same libc."* By the
-      time this milestone starts, `/bin` is full of them
+**Status:** done. A position-independent program, placed by the kernel,
+loaded by `/lib/ld-lean.so`, calling into `libc.so` through the PLT, and
+`dlopen`ing a library that did not exist when it was compiled — and a
+second copy of it paying for **none** of the library again, measured
+exactly.
+
+- [x] ELF `ET_DYN` and `PT_INTERP` in `kernel/proc/elf.c`, plus an
+      auxiliary vector (`system_api/include/proc.h`), which is how the
+      linker is told the four things it cannot work out
+- [x] `/lib/ld-lean.so`: relocation processing (`R_X86_64_RELATIVE`,
+      `GLOB_DAT`, `JUMP_SLOT`, `64`, `COPY`, `TPOFF64`), symbol lookup
+      across a search scope, `DT_NEEDED`, `LD_LIBRARY_PATH`, and a
+      static TLS layout across every object loaded at startup.
+      **Binding is eager, and lazy PLT binding is refused rather than
+      missing** — it buys start-up time in exchange for a resolver that
+      runs on an arbitrary stack in the middle of a call, and nothing
+      here has measured a start-up cost. M69's rule.
+- [x] `dlopen`/`dlsym`/`dlclose`/`dlerror` — in the linker rather than
+      in libc, because they are its data structures; a libc copy would
+      be a second loader. `dlclose` does not unmap, which is written
+      down in `<dlfcn.h>` with the condition that would change it.
+- [~] `libc.so` as a real shared object, with the static archive kept.
+      **`libgcc_s.so` did not** and is not needed yet: nothing dynamic
+      here uses the parts of libgcc that have to be shared (the unwinder
+      and its exception tables), and those arrive with C++ in M97, which
+      is where that half belongs.
+- [x] This collects the deferral M89's closing note scheduled: *"a
+      second and third static binary duplicating the same libc."*
+
+#### The measurement, and four bugs that each looked like something else [x]
+
+```
+[m95] one dynamic process cost 0x42 frames, the second cost 0x33;
+      shared library pages held: 0xF with one process, 0xF with two
+      - libc.so is 0x2B pages
+```
+
+Fifteen shared file pages held with one process running, and **fifteen
+with two**. The second copy of the program added not one page of the
+library. That is M95's own test — "the proof is the PMM's frame count,
+not the fact that both programs ran" — and the instrument is
+`filemap_in_use()` rather than the free-frame delta, because a second
+process legitimately costs page tables, a stack and its own private data,
+and those would mask a library that was quietly being duplicated.
+
+**M91 is what made it possible, and this is where that milestone paid
+for itself.** The loader maps a read-only segment `MAP_SHARED` and a
+writable one `MAP_PRIVATE` — one line apart in `load_object` — and the
+sharing falls out of the file-backed mapping M91 built. Without it every
+process would have its own copy of every page and this milestone's
+headline claim would have been unmakeable.
+
+**Four bugs, and none of them announced itself:**
+
+- **A recycled task slot kept the previous task's thread pointer.**
+  `fs_base` was never cleared on slot reuse or on exec, so libc's TLS
+  setup saw a pointer already set, correctly stood down — that is
+  exactly what it must do in a dynamic program — and the new process
+  read `errno` through a pointer into a **dead address space**. It
+  presented as a page fault in `utf8_decode`, three subsystems from the
+  cause. M96 wrote the field; M95 found that nothing reset it.
+- **The fourth syscall argument is in RCX here, not R10.** Written from
+  Linux muscle memory, the loader's six-argument stub passed garbage as
+  `flags` to `mmap`. `system_api/include/syscall.h` says why this OS
+  differs — `int 0x80` does not clobber rcx — and saying it in a header
+  did not stop it being got wrong in the one file that could not include
+  the wrappers.
+- **`DT_INIT` with a value of 0 is not an initializer.** ld emits it for
+  an object linked without `crti.o`; adding the base gives the object's
+  own ELF header, and calling it executes `\x7fELF` as instructions.
+  The fault looked like a corrupt library.
+- **The linker has to register itself BEFORE walking `DT_NEEDED`.** A
+  program that uses `dlopen` names `ld-lean.so` among its needed
+  objects, so the loader found no such object already present and loaded
+  a **second copy of itself** at a fresh base. The program's `dlopen`
+  then resolved to that copy, whose `next_lib_base` had never been set,
+  and the first mapping it attempted was at address zero.
+
+**And one correction to M94, made here.** Its `LINK_SPEC` passed
+`-T lean_os.ld` unconditionally, including for `-shared`. That script has
+no `.dynamic`, so every shared link failed with "undefined reference to
+`_DYNAMIC`" — a symbol nobody writes and the linker normally defines. The
+spec now has three cases: shared, PIE (which also gets
+`-dynamic-linker /lib/ld-lean.so`), and static.
+
+**What is deliberately not supported**, each with the reason rather than
+a shrug: lazy binding (above); `dlclose` unmapping (an object a program
+may still hold a pointer into); symbol versioning (one libc, built with
+the program); `LD_PRELOAD` (an interposition mechanism with no user);
+and **thread-local storage in a `dlopen`ed object** — which needs the
+general-dynamic model and `__tls_get_addr` over a per-module list, and
+is refused by name at the relocation rather than computed wrongly. M96's
+entry names the same boundary from the other side.
 
 **How we'll know.** Two different programs running at once share exactly
 one copy of `libc.so`'s text, and the proof is the PMM's frame count —
