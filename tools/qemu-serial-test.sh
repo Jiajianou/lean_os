@@ -327,6 +327,10 @@ REQUIRED_MARKERS=(
   # compiler itself was never built, which gcc-test.sh says out loud and
   # which is why this marker is checked by name rather than by prefix.
   "[m94] a target this compiler knows by name"
+  # M94's own bar, and a separate marker so that "the compiler works" and
+  # "somebody else's project builds and runs" are two claims in the log
+  # rather than one sentence that could lose half of itself.
+  "[m94] somebody else's project: bzip2, built with"
   "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m73] names, not numbers:"
   "[m74] the session remembers:"

@@ -67,6 +67,16 @@ UEFI firmware
 - **Somebody else's program.** The 1972 Whetstone benchmark, ported
   unmodified, running on an SSE-enabled kernel against a libc written
   here. See [docs/third-party-programs.md](docs/third-party-programs.md).
+- **A compiler that knows this OS by name.** `x86_64-lean_os` is a real
+  target triple in binutils and GCC, built by
+  `tools/build-toolchain.sh` from a nine-edit port. `x86_64-lean_os-gcc
+  hello.c -o hello` produces a program this machine runs with **no flag
+  supplied by hand** — the load address, code model, red zone and startup
+  files all come from the target description, because every flag invented
+  by hand is a flag someone else's build system will not pass. `bzip2`
+  and `GNU hello` are built with it, the second through
+  `./configure --host=x86_64-lean_os && make`, and both run here. See M94
+  in [milestones.md](milestones.md).
 - **Somebody else's *userland*.** Toybox, built for this machine from
   the published tarball with no edit to its source, installed as one
   static binary and 143 command names in `/bin`: `find`, `grep`, `sed`,

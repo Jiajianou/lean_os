@@ -8247,6 +8247,95 @@ static void boot_selftests_system(void) {
                 panic("M94 self-test: a program this compiler produced does not run here");
             }
 
+            /* ---- and two programs nobody here wrote --------------
+             *
+             * The fixture above is a program written here. These two
+             * were not, and they are M94's own bar: bzip2 built with
+             * `make CC=x86_64-lean_os-gcc`, and GNU hello built with
+             * `./configure --host=x86_64-lean_os && make` - about fifty
+             * gnulib modules whose entire job is to probe a system and
+             * substitute what it lacks.
+             *
+             * bzip2 is run on real data rather than asked for its
+             * version: it compresses a file and decompresses it back,
+             * and the check is that the bytes returned are the bytes
+             * that went in. A `--version` would prove the program
+             * started; a round trip proves it worked.
+             *
+             * Skipped independently of the fixture, because
+             * tools/build-thirdparty.sh needs the network and the
+             * toolchain does not.
+             */
+            os_stat_t tp;
+            if (do_syscall(SYS_stat, (uint64_t)"/bin/bzip2", (uint64_t)&tp, 0) == 0 &&
+                do_syscall(SYS_stat, (uint64_t)"/bin/gnuhello", (uint64_t)&tp, 0) == 0) {
+                int third_ok = 1;
+                const char *tscript = PATH_TMP_DIR "m94b.sh";
+                static const char TSCRIPT[] =
+                    "#!/bin/sh\n"
+                    "d=" PATH_TMP_DIR "m94t\n"
+                    "rm -rf $d 2>/dev/null\n"
+                    "mkdir -p $d\n"
+                    /* Something with structure, so the compressor has
+                     * something to find - a file of one repeated byte
+                     * would compress correctly through a broken
+                     * Huffman table. */
+                    "for i in 1 2 3 4 5 6 7 8; do\n"
+                    "  echo \"the quick brown fox $i jumps over the lazy dog $i\" >> $d/in\n"
+                    "done\n"
+                    "cp $d/in $d/keep\n"
+                    "/bin/bzip2 -z $d/in\n"
+                    "/bin/bzip2 -d $d/in.bz2\n"
+                    "cmp $d/in $d/keep && echo bzip2:roundtrip > " PATH_TMP_DIR "m94b.out\n"
+                    "/bin/gnuhello >> " PATH_TMP_DIR "m94b.out\n";
+                if (do_syscall(SYS_writefile, (uint64_t)tscript, (uint64_t)TSCRIPT,
+                                sizeof(TSCRIPT) - 1) != 0) {
+                    panic("M94 self-test: could not write the third-party fixture");
+                }
+                long tpid = do_syscall(SYS_spawn, (uint64_t)tscript, 0, 0);
+                if (tpid < 0) {
+                    klog_puts("[m94] the third-party fixture could not be spawned\n");
+                    third_ok = 0;
+                } else {
+                    do_syscall(SYS_wait, (uint64_t)tpid, 0, 0);
+                }
+                static char tout[512];
+                k_memset(tout, 0, sizeof(tout));
+                int64_t tn = vfs_read(PATH_TMP_DIR "m94b.out", tout, sizeof(tout) - 1);
+                if (tn <= 0) {
+                    klog_puts("[m94] neither ported program produced output\n");
+                    third_ok = 0;
+                } else {
+                    tout[tn] = '\0';
+                    if (!selftest_contains(tout, "bzip2:roundtrip")) {
+                        klog_puts("[m94] bzip2 did not compress and decompress back to "
+                                   "the same bytes\n");
+                        third_ok = 0;
+                    }
+                    if (!selftest_contains(tout, "Hello, world")) {
+                        klog_puts("[m94] GNU hello did not say hello\n");
+                        third_ok = 0;
+                    }
+                }
+                do_syscall(SYS_unlink, (uint64_t)tscript, 0, 0);
+                do_syscall(SYS_unlink, (uint64_t)PATH_TMP_DIR "m94b.out", 0, 0);
+                if (!third_ok) {
+                    klog_puts("[m94] what they wrote:\n");
+                    klog_puts(tout);
+                    klog_puts("[m94] ---- end\n");
+                    panic("M94 self-test: a program built for this OS by this OS's "
+                          "compiler does not run here");
+                }
+                klog_puts("[m94] somebody else's project: bzip2, built with "
+                           "`make CC=x86_64-lean_os-gcc`, compressing a file and "
+                           "decompressing it back to the same bytes; and GNU hello, "
+                           "built with `./configure --host=x86_64-lean_os && make` "
+                           "through fifty gnulib modules, saying hello.\n");
+            } else {
+                klog_puts("[m94] no ported third-party programs on this image - "
+                           "tools/build-thirdparty.sh builds them.\n");
+            }
+
             klog_puts("[m94] a target this compiler knows by name: a program compiled by "
                        "x86_64-lean_os-gcc with no flag supplied by hand - constructor and "
                        "atexit handler both run, malloc through libc.a out of the sysroot, "

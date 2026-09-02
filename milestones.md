@@ -9924,15 +9924,47 @@ and that floating point works through a libgcc built for this target. It
 skips with a message when the toolchain is absent, for the same reason
 M89 skips without toybox.
 
-**What is NOT claimed, and this is the bullet's own bar.** M94 says the
-test is `./configure --host=x86_64-lean_os && make` on a small autotools
-project. That has not been run. What has been proven is everything the
-configure script would depend on — a driver that needs no flags, a
-sysroot it can find headers and a libc in, startup files by name, and a
-program that runs — and the honest statement is that the remaining step
-is a `configure` invocation nobody here has typed yet. It is written down
-this way rather than ticked, because "the configure script's own log is
-the evidence" is M94's own sentence and there is no log.
+**And the bar itself, which is met.** M94's own test is
+`./configure --host=x86_64-lean_os && make` on a project nobody here
+wrote. `tools/build-thirdparty.sh` runs it on **GNU hello 2.12.1** — and
+it is a much harder test than the name suggests, because hello drags in
+about fifty gnulib modules whose entire job is to probe a system and
+substitute what it lacks. It also builds **bzip2 1.0.8**, which has no
+configure and therefore tests the compiler and the libc and nothing about
+autotools. Both are on the disk and the `[m94]` self-test runs them:
+bzip2 compresses a file and decompresses it back to the same bytes, and
+hello says hello.
+
+Neither source is vendored. The ONE edit either needs is a line added to
+its bundled `config.sub`, which is older than the toolchain's and refuses
+`--host=x86_64-lean_os` before doing anything else — replacing a
+project's config.sub is what every distribution does, and this adds a
+name to the copy that is there through the same anchored edit the
+toolchain port uses.
+
+**Five more gaps, every one named by a build rather than a checklist.**
+This is M63's rule at the scale M94 was for, and the last one is the most
+interesting:
+
+- **`wprintf` and the wide stdio family.** `src/hello.c`'s own first
+  statement. Built on the narrow formatter rather than beside it — the
+  format is converted to multibyte once and handed to `vsnprintf`, which
+  learned `%ls` and `%lc` because those are what a *narrow* printf does
+  with wide arguments anyway. One formatter, one set of bugs.
+- **`getprogname` / `program_invocation_name`**, from a gnulib per-OS
+  `#error`. Real rather than invented: crt0 already has argv.
+- **`__fpending`**, likewise. Always 0, and that is the true answer —
+  this stdio has no buffer at all.
+- **`pthread_kill` and the `pthread_mutexattr_*` family**, which is the
+  one that was not a call at all. gnulib decides whether a system has a
+  usable pthread API by *compiling a probe* that names three functions;
+  failing it made gnulib substitute its own `mbrtowc`, which then hit a
+  per-OS `#error` of its own two modules later. The failure was three
+  files away from its cause.
+- **`wcwidth` declared in `<wchar.h>`.** It existed, in `<wctype.h>`
+  only. **A header that has a function and does not declare it where the
+  standard says is, to a build, indistinguishable from not having it** —
+  and that sentence is the whole lesson of this milestone's second half.
 
 ### M95 — Code that is loaded, not linked [ ]
 

@@ -161,6 +161,48 @@ int pthread_barrier_init(pthread_barrier_t *b, const void *attr,
 int pthread_barrier_destroy(pthread_barrier_t *b);
 int pthread_barrier_wait(pthread_barrier_t *b);
 
+/* ---- M94: the attribute objects, and a signal to a thread -------------
+ *
+ * Not new capability - every one of these describes something this
+ * library either already does or truthfully cannot. They are here
+ * because a `./configure` script *probes* for them: gnulib decides
+ * whether a system has a usable pthread API by compiling a program that
+ * calls `pthread_kill`, `pthread_mutex_lock` and
+ * `pthread_mutexattr_init`, and a system that fails that probe is told
+ * to use its own replacement machinery instead - which is how GNU
+ * hello's build reached a `#error` in gnulib rather than in anything
+ * this project wrote.
+ *
+ * `pthread_kill` is the one with real behaviour behind it, and it is
+ * exact rather than approximate: a thread here IS a task with its own id
+ * (M79), so sending it a signal is SYS_kill with that id. On a system
+ * where threads share one pid this would be the hard one; here it is the
+ * easy one.
+ *
+ * The mutex TYPES are a truthful refusal. PTHREAD_MUTEX_RECURSIVE and
+ * _ERRORCHECK need a mutex that records its owner and a count, and this
+ * one is a word - so `settype` accepts NORMAL/DEFAULT and refuses the
+ * other two, rather than accepting them and behaving like NORMAL, which
+ * would deadlock a program that relied on recursion.
+ */
+#define PTHREAD_MUTEX_NORMAL     0
+#define PTHREAD_MUTEX_DEFAULT    0
+#define PTHREAD_MUTEX_RECURSIVE  1
+#define PTHREAD_MUTEX_ERRORCHECK 2
+
+int pthread_kill(pthread_t thread, int sig);
+
+int pthread_attr_destroy(pthread_attr_t *attr);
+int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *out);
+
+int pthread_mutexattr_init(pthread_mutexattr_t *attr);
+int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
+int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type);
+int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *out);
+
+int pthread_condattr_init(pthread_condattr_t *attr);
+int pthread_condattr_destroy(pthread_condattr_t *attr);
+
 int pthread_attr_init(pthread_attr_t *attr);
 int pthread_attr_setstacksize(pthread_attr_t *attr, size_t size);
 

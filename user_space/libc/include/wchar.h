@@ -112,3 +112,40 @@ size_t wcsrtombs(char *dst, const wchar_t **src, size_t n, mbstate_t *ps);
  * incomplete one. The oldest of these calls and the one a configure
  * script probes for by name. */
 int mblen(const char *s, size_t n);
+
+/* ---- M94: the wide stdio family ---------------------------------------
+ *
+ * Built on the narrow printf rather than beside it - see wchar.c for why
+ * that is the design and not a shortcut, and for what the stream
+ * orientation rules would mean on a stdio with no buffering.
+ *
+ * Asked for by GNU hello, whose `wprintf (L"%ls\n", ...)` is the first
+ * thing in this tree to need one. M63's rule, arriving at the
+ * formatter.
+ */
+#include <stdarg.h>
+#include <stdio.h>
+
+int wprintf(const wchar_t *fmt, ...);
+int fwprintf(FILE *f, const wchar_t *fmt, ...);
+int swprintf(wchar_t *out, size_t n, const wchar_t *fmt, ...);
+int vwprintf(const wchar_t *fmt, va_list ap);
+int vfwprintf(FILE *f, const wchar_t *fmt, va_list ap);
+/* Note `n` is a count of WIDE CHARACTERS including the NUL, and that a
+ * result which does not fit is -1 rather than the length it would have
+ * needed. Both differ from snprintf, and both are what C specifies. */
+int vswprintf(wchar_t *out, size_t n, const wchar_t *fmt, va_list ap);
+
+int fputwc(wchar_t c, FILE *f);
+int putwc(wchar_t c, FILE *f);
+int putwchar(wchar_t c);
+int fputws(const wchar_t *ws, FILE *f);
+
+/* M94: POSIX declares these in <wchar.h> and this project had them only
+ * in <wctype.h>, which is where the ctype-shaped ones live. gnulib's
+ * wcwidth replacement includes <wchar.h> and nothing else, and would not
+ * compile - a header that has the function and does not declare it where
+ * the standard says is indistinguishable, to a build, from not having
+ * it. The definitions are in wctype.c and are unchanged. */
+int wcwidth(wchar_t c);
+int wcswidth(const wchar_t *s, size_t n);

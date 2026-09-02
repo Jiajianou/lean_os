@@ -65,3 +65,18 @@ if [ -f "$IMAGE" ]; then
   build/leanfs-put "$IMAGE" "$OUT" /bin/gcctest >/dev/null || exit 1
   echo "gcc-test: installed as /bin/gcctest - the [m94] boot self-test runs it"
 fi
+
+# ---- and the two programs nobody here wrote ---------------------------
+#
+# M94's own bar is `./configure --host=x86_64-lean_os && make` on a
+# project nobody here wrote. tools/build-thirdparty.sh does exactly that
+# for GNU hello and builds bzip2 beside it; if they are there, they go on
+# the image too, and the [m94] self-test runs them. Not built here,
+# because they need the network - see that script.
+for prog in gnuhello bzip2; do
+  src="build/thirdparty/$prog"
+  if [ -f "$IMAGE" ] && [ -x "$src" ]; then
+    build/leanfs-put "$IMAGE" "$src" "/bin/$prog" >/dev/null || exit 1
+    echo "gcc-test: installed /bin/$prog"
+  fi
+done

@@ -109,8 +109,32 @@ void __lean_run_exit_handlers(void) {
     _fini();
 }
 
+/* M94: what this program is called - see <stdlib.h> for why both
+ * spellings are here and which build asked for them. */
+char *program_invocation_name = (char *)"";
+char *program_invocation_short_name = (char *)"";
+
+const char *getprogname(void) {
+    return program_invocation_short_name;
+}
+
+void setprogname(const char *name) {
+    if (!name) {
+        return;
+    }
+    program_invocation_name = (char *)name;
+    const char *slash = strrchr(name, '/');
+    program_invocation_short_name = (char *)(slash ? slash + 1 : name);
+}
+
 int __lean_start(int argc, char **argv, char **envp) {
     environ = envp;
+    /* Before the constructors: a constructor that logs is entitled to
+     * know the program's name, and there is nothing here that needs to
+     * happen before this. */
+    if (argc > 0 && argv && argv[0]) {
+        setprogname(argv[0]);
+    }
     /* _init first, then the array: that is the order every ELF runtime
      * uses, and it matters for an object that contributes to both. */
     _init();

@@ -575,3 +575,153 @@ wchar_t *wcstok(wchar_t *s, const wchar_t *delim, wchar_t **saveptr) {
     *saveptr = p;
     return start;
 }
+
+/* ---- M94: the wide stdio family --------------------------------------
+ *
+ * Built on the narrow one rather than beside it, and the reason is worth
+ * a paragraph because "a second formatter for wide strings" is the
+ * obvious design and is the wrong one.
+ *
+ * A wide printf's format is a wchar_t string and its conversions are the
+ * same conversions. So: the format is converted to multibyte once, and
+ * handed to vsnprintf - which M94 taught `%ls` and `%lc`, because those
+ * are what a NARROW printf does with wide arguments anyway. One
+ * formatter, one set of bugs, and `wprintf(L"%ls\n", s)` and
+ * `printf("%ls\n", s)` cannot disagree because they are the same code.
+ *
+ * The output is bytes, in this locale's encoding, which is UTF-8 (M88).
+ * That is what a wide printf is specified to produce on a stream: the
+ * wideness is in the arguments, not on the wire.
+ *
+ * What is NOT here: the stream orientation rules (fwide, and the rule
+ * that a stream used once wide may not then be used narrow). This stdio
+ * has no buffering and no per-stream state to orient - see stdio.c - so
+ * there is nothing for an orientation to mean, and a program that mixes
+ * the two gets exactly what it asked for in the order it asked.
+ */
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+/* The longest wide format this converts. A format string is written by
+ * the programmer rather than by input, so this is a bound on source
+ * text; anything past it is truncated, which shows up immediately as a
+ * missing tail rather than as a wrong value. */
+#define WFMT_MAX 1024
+
+static int wfmt_to_mb(const wchar_t *fmt, char *out, size_t cap) {
+    size_t at = 0;
+    for (size_t i = 0; fmt[i]; i++) {
+        char mb[8];
+        int n = (int)wcrtomb(mb, fmt[i], (mbstate_t *)0);
+        if (n <= 0 || at + (size_t)n + 1 >= cap) {
+            break;
+        }
+        for (int k = 0; k < n; k++) {
+            out[at++] = mb[k];
+        }
+    }
+    out[at] = '\0';
+    return (int)at;
+}
+
+int vfwprintf(FILE *f, const wchar_t *fmt, va_list ap) {
+    char narrow[WFMT_MAX];
+    if (!fmt) {
+        return -1;
+    }
+    wfmt_to_mb(fmt, narrow, sizeof(narrow));
+    return vfprintf(f, narrow, ap);
+}
+
+int fwprintf(FILE *f, const wchar_t *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vfwprintf(f, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+int vwprintf(const wchar_t *fmt, va_list ap) {
+    return vfwprintf(stdout, fmt, ap);
+}
+
+int wprintf(const wchar_t *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vwprintf(fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+/* swprintf writes WIDE characters into a wide buffer, so unlike the
+ * stream forms it has to convert back. `n` is a count of wide
+ * characters including the NUL, which is the one place swprintf differs
+ * from snprintf in more than spelling - snprintf's is bytes. */
+int vswprintf(wchar_t *out, size_t n, const wchar_t *fmt, va_list ap) {
+    char narrow_fmt[WFMT_MAX];
+    static char narrow_out[4096];
+    if (!out || n == 0 || !fmt) {
+        return -1;
+    }
+    wfmt_to_mb(fmt, narrow_fmt, sizeof(narrow_fmt));
+    int produced = vsnprintf(narrow_out, sizeof(narrow_out), narrow_fmt, ap);
+    if (produced < 0) {
+        return -1;
+    }
+    mbstate_t st;
+    memset(&st, 0, sizeof(st));
+    const char *src = narrow_out;
+    size_t written = mbsrtowcs(out, &src, n - 1, &st);
+    if (written == (size_t)-1) {
+        return -1;
+    }
+    out[written] = L'\0';
+    /* -1 when it did not all fit, which is what C specifies for
+     * swprintf and is NOT what snprintf does (that returns what it would
+     * have written). The difference is real and is the reason a caller
+     * cannot size a buffer by calling swprintf with n == 0. */
+    return src ? -1 : (int)written;
+}
+
+int swprintf(wchar_t *out, size_t n, const wchar_t *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vswprintf(out, n, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+int fputwc(wchar_t c, FILE *f) {
+    char mb[8];
+    int n = (int)wcrtomb(mb, c, (mbstate_t *)0);
+    if (n <= 0) {
+        return WEOF;
+    }
+    for (int i = 0; i < n; i++) {
+        if (fputc(mb[i], f) == EOF) {
+            return WEOF;
+        }
+    }
+    return (int)c;
+}
+
+int putwc(wchar_t c, FILE *f) {
+    return fputwc(c, f);
+}
+
+int putwchar(wchar_t c) {
+    return fputwc(c, stdout);
+}
+
+int fputws(const wchar_t *ws, FILE *f) {
+    if (!ws) {
+        return -1;
+    }
+    for (size_t i = 0; ws[i]; i++) {
+        if (fputwc(ws[i], f) == WEOF) {
+            return -1;
+        }
+    }
+    return 0;
+}

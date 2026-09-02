@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h> /* M94: %ls and %lc, which wprintf is built on */
 
 #include "syscall_wrappers.h"
 
@@ -513,7 +514,47 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
             emit_str(&b, "0x", 2);
             emit_str(&b, nbuf, nlen);
         } else if (conv == 'c') {
-            emit(&b, (char)va_arg(ap, int));
+            /* M94: `%lc` is a wide character and converts to whatever
+             * bytes it takes in this locale's encoding, which is UTF-8
+             * (M88). Written here rather than in a second wide formatter
+             * because `%lc` is what a NARROW printf does with one, and
+             * <wchar.h>'s wprintf is built on this same call. */
+            if (lng) {
+                char mb[8];
+                int mn = (int)wcrtomb(mb, (wchar_t)va_arg(ap, unsigned int),
+                                      (mbstate_t *)0);
+                if (mn > 0) {
+                    emit_str(&b, mb, mn);
+                }
+            } else {
+                emit(&b, (char)va_arg(ap, int));
+            }
+        } else if (conv == 's' && lng) {
+            /* M94: `%ls` - a wide string, converted. GNU hello's
+             * `wprintf (L"%ls\n", ...)` is what asked for it, which is
+             * M63's rule reaching the formatter: a conversion nobody
+             * here would have written, named by a program somebody else
+             * wrote.
+             *
+             * The precision is in BYTES of the converted output, not in
+             * wide characters, which is what C specifies and is the one
+             * thing about `%.*ls` that is easy to get backwards. */
+            const wchar_t *ws = va_arg(ap, const wchar_t *);
+            if (!ws) {
+                emit_str(&b, "(null)", 6);
+            } else {
+                for (int i = 0; ws[i]; i++) {
+                    char mb[8];
+                    int mn = (int)wcrtomb(mb, ws[i], (mbstate_t *)0);
+                    if (mn <= 0) {
+                        break;
+                    }
+                    if (prec >= 0 && (int)b.len + mn > prec) {
+                        break;
+                    }
+                    emit_str(&b, mb, mn);
+                }
+            }
         } else if (conv == 's') {
             const char *str = va_arg(ap, const char *);
             if (!str) {
@@ -731,4 +772,9 @@ long getline(char **lineptr, size_t *n, FILE *f) {
 
 int vprintf(const char *fmt, va_list ap) {
     return vfprintf(stdout, fmt, ap);
+}
+
+size_t __fpending(FILE *f) {
+    (void)f;
+    return 0; /* there is no buffer - see <stdio.h> */
 }

@@ -610,12 +610,24 @@ toybox: $(TOYBOX_BIN) $(IMAGE) $(LEANFS_PUT) preseed
 # **every flag invented by hand is a flag someone else's build system
 # will not pass.**
 #
-#   usr/include   this project's own headers, both trees. system_api's
-#                 are second because <signal.h> and <termios.h> exist in
-#                 both and the libc one #include_next's the other - see
-#                 those files. Copied rather than symlinked so that a
-#                 sysroot handed to somebody is a sysroot.
-#   usr/lib       libc.a, crt1.o, crti.o, crtn.o, and the linker script.
+#   usr/local/include   user_space/libc/include
+#   usr/include         system_api/include
+#   usr/lib             libc.a, crt1.o, crti.o, crtn.o, the linker script
+#
+# **Two directories and not one, and that is load-bearing.** `signal.h`
+# and `termios.h` exist in BOTH header trees, and the libc one reaches
+# the system_api one with `#include_next` - which continues the search
+# from after wherever the first was found. Copied into one directory,
+# the second copy simply overwrites the first and `#include_next` finds
+# nothing: `<signal.h>` then declares `sighandler_t` and no `signal()`,
+# and a program that includes it compiles until the line that calls one.
+# That is what happened to bzip2, at bzip2.c:1808, and it is why the
+# split is here rather than a tidier single directory.
+#
+# usr/local/include is searched BEFORE usr/include by this compiler (see
+# `x86_64-lean_os-gcc -E -Wp,-v -`), which is the order those two
+# headers need. Copied rather than symlinked so that a sysroot handed to
+# somebody is a sysroot.
 #
 # **crt1.o and not crt0.o.** The file is called crt0.asm here and the ELF
 # convention is crt1.o; the driver looks for the latter by name, so the
@@ -639,8 +651,8 @@ $(LIBC_A): $(LIBC_A_OBJS)
 
 sysroot: $(LIBC_A) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
 	@rm -rf $(SYSROOT)
-	@mkdir -p $(SYSROOT)/usr/include $(SYSROOT)/usr/lib
-	@cp -R user_space/libc/include/. $(SYSROOT)/usr/include/
+	@mkdir -p $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include $(SYSROOT)/usr/lib
+	@cp -R user_space/libc/include/. $(SYSROOT)/usr/local/include/
 	@cp -R system_api/include/. $(SYSROOT)/usr/include/
 	@cp user_space/lib/syscall_wrappers.h $(SYSROOT)/usr/include/
 	@cp $(LIBC_A) $(SYSROOT)/usr/lib/libc.a
@@ -648,7 +660,7 @@ sysroot: $(LIBC_A) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
 	@cp $(UOBJ)/crti.o $(SYSROOT)/usr/lib/crti.o
 	@cp $(UOBJ)/crtn.o $(SYSROOT)/usr/lib/crtn.o
 	@cp user_space/lib/user.ld $(SYSROOT)/usr/lib/lean_os.ld
-	@echo "sysroot: $(SYSROOT) - $$(ls $(SYSROOT)/usr/include | wc -l | tr -d ' ') top-level headers, libc.a $$(du -h $(LIBC_A) | cut -f1)"
+	@echo "sysroot: $(SYSROOT) - $$(ls $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include | grep -c . ) header entries, libc.a $$(du -h $(LIBC_A) | cut -f1)"
 
 # M93 (second attempt): the same list, for a script that preseeds an image
 # that is not $(IMAGE). tools/image-tree-test.sh builds a copy and fills it

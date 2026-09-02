@@ -49,15 +49,22 @@ def edit(path, anchor, replacement, why):
 
 
 # The OS name, added to the list config.sub validates against. Both trees
-# ship their own copy and both have to be told. `lean_os*` rather than
+# ship their own copy and both have to be told, and so does every
+# autotools project - see port_config_sub. `lean_os*` rather than
 # `leanos*` because the triple this project chose is x86_64-lean_os and
 # the underscore is part of the name.
+#
+# The anchor is a line that ends differently between vintages, so it is
+# matched WITHOUT its tail: `| nsk* | powerunix* | genode* | zvmoe* |
+# qnx* | emx*` is followed by ` | zephyr* \` in one copy and by `)` in
+# another. Matching the shared prefix and re-emitting it is what lets one
+# edit apply to a 2019 config.sub and a 2024 one.
 # The two trees ship config.sub at different vintages and the list ends
 # differently in each, which is why the anchor is the one line both have
 # rather than the last line of either.
-CONFIG_SUB_ANCHOR = "\t     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx* | zephyr* \\"
+CONFIG_SUB_ANCHOR = "\t     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx*"
 CONFIG_SUB_EDIT = ("\t     | lean_os* \\\n"
-                   "\t     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx* | zephyr* \\")
+                   "\t     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx*")
 
 
 def port_binutils(root):
@@ -151,9 +158,36 @@ def port_gcc(root, header_src):
     return out
 
 
+def port_config_sub(path):
+    """Teach one project's bundled config.sub about lean_os.
+
+    Every autotools project ships its own copy of config.sub, usually
+    older than the one in the toolchain, and it validates --host before
+    doing anything else - so `./configure --host=x86_64-lean_os` stops at
+    "OS `lean_os' not recognized" no matter how good the compiler is.
+
+    Replacing a bundled config.sub is what every distribution does and
+    what the autotools manual tells you to do; this does the smaller
+    thing and adds one name to the copy that is there. Nothing
+    third-party is vendored into this repository as a result, which is
+    the reason it is an edit rather than a file.
+    """
+    return edit(path, CONFIG_SUB_ANCHOR, CONFIG_SUB_EDIT,
+                "the list of operating system names config.sub accepts")
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--config-sub":
+        try:
+            print("  %-40s %s" % (sys.argv[2], port_config_sub(sys.argv[2])))
+        except MissingAnchor as e:
+            print("toolchain-port: %s" % e, file=sys.stderr)
+            return 1
+        return 0
     if len(sys.argv) != 3:
-        print("usage: apply.py <binutils-dir> <gcc-dir>", file=sys.stderr)
+        print("usage: apply.py <binutils-dir> <gcc-dir>\n"
+              "       apply.py --config-sub <path/to/config.sub>",
+              file=sys.stderr)
         return 2
     here = os.path.dirname(os.path.abspath(__file__))
     try:

@@ -81,6 +81,20 @@ int snprintf(char *out, size_t n, const char *fmt, ...) __attribute__((format(pr
 int vsnprintf(char *out, size_t n, const char *fmt, va_list ap);
 int vfprintf(FILE *f, const char *fmt, va_list ap);
 int vprintf(const char *fmt, va_list ap);
+
+/* M94: how many bytes this stream has buffered and not yet written.
+ *
+ * Always 0, and that is the true answer rather than a stub: this stdio
+ * has no buffer at all - every fputc is a write(2), which stdio.c says
+ * at length. gnulib's fpending module has a per-platform `#error
+ * "Please port fpending.c to your platform!"` and reaches for this
+ * symbol first, which is how it arrived; a program uses it to decide
+ * whether an fclose can still fail, and on this machine it cannot fail
+ * for that reason because there is nothing left to flush.
+ *
+ * The double underscore is the name every libc uses for it, and it is
+ * not this project's choice. */
+size_t __fpending(FILE *f);
 int vsprintf(char *out, const char *fmt, va_list ap);
 
 /* ---- M89: printf to a descriptor, without a FILE ---------------------

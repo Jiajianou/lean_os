@@ -753,3 +753,77 @@ void pthread_exit(void *retval) {
         /* Unreachable. */
     }
 }
+
+/* ---- M94: the attribute objects, and a signal to a thread ------------
+ *
+ * See <pthread.h> for why these arrived (a configure probe, not a
+ * program) and for which of them is a truthful refusal.
+ */
+int pthread_kill(pthread_t thread, int sig) {
+    /* A thread is a task with its own id here, so this is exact rather
+     * than approximate - see <pthread.h>. sig 0 asks only whether the
+     * thread is still there, which is what every "is it alive" check
+     * uses and what SYS_kill already answers. */
+    return sys_kill((int)thread, sig) == 0 ? 0 : 3 /* ESRCH */;
+}
+
+int pthread_attr_destroy(pthread_attr_t *attr) {
+    (void)attr;
+    return 0; /* nothing was allocated */
+}
+
+int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *out) {
+    if (!attr || !out) {
+        return 22;
+    }
+    *out = attr->stack_size ? attr->stack_size : PTHREAD_STACK_DEFAULT;
+    return 0;
+}
+
+int pthread_mutexattr_init(pthread_mutexattr_t *attr) {
+    if (!attr) {
+        return 22;
+    }
+    attr->unused = PTHREAD_MUTEX_DEFAULT;
+    return 0;
+}
+
+int pthread_mutexattr_destroy(pthread_mutexattr_t *attr) {
+    (void)attr;
+    return 0;
+}
+
+int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
+    if (!attr) {
+        return 22;
+    }
+    if (type != PTHREAD_MUTEX_NORMAL && type != PTHREAD_MUTEX_DEFAULT) {
+        /* Refused rather than accepted-and-ignored. A recursive mutex
+         * this library treated as normal deadlocks the first time a
+         * program relies on the recursion, somewhere far from here. */
+        return 22;
+    }
+    attr->unused = type;
+    return 0;
+}
+
+int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *out) {
+    if (!attr || !out) {
+        return 22;
+    }
+    *out = attr->unused;
+    return 0;
+}
+
+int pthread_condattr_init(pthread_condattr_t *attr) {
+    if (!attr) {
+        return 22;
+    }
+    attr->unused = 0;
+    return 0;
+}
+
+int pthread_condattr_destroy(pthread_condattr_t *attr) {
+    (void)attr;
+    return 0;
+}

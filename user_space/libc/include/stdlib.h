@@ -19,6 +19,27 @@ void *realloc(void *ptr, size_t size);
  * none of these - see <unistd.h>. */
 int atexit(void (*fn)(void));
 
+/* ---- M94: what this program is called ---------------------------------
+ *
+ * `getprogname` is BSD's and `program_invocation_name` is glibc's, and
+ * portable code checks for one and then the other - gnulib's
+ * `getprogname` module has a per-OS `#error "not ported to this OS"` and
+ * that error is how this arrived, in GNU hello's own build. Both
+ * spellings are here because both are cheap and a program that finds
+ * neither writes its own.
+ *
+ * Real, not invented: crt0 already receives argv, and `__lean_start`
+ * publishes it. The short form is the part after the last '/', which is
+ * what a program prints in its own error messages.
+ *
+ * `setprogname` exists so a program that wants to be called something
+ * else in its diagnostics can say so, which is the only thing anybody
+ * uses it for. */
+const char *getprogname(void);
+void setprogname(const char *name);
+extern char *program_invocation_name;
+extern char *program_invocation_short_name;
+
 void exit(int status) __attribute__((noreturn));
 void abort(void) __attribute__((noreturn));
 
