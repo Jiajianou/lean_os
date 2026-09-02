@@ -4,7 +4,228 @@ This file is the living progress record for the project. Update the status
 and notes on a milestone as soon as it's reached — this is the source of
 truth for "where are we" across sessions.
 
-Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
+## How to read this file
+
+**Two identifier series, one scheme.**
+
+- **`M<n>` — build milestones.** The main line: bootloader, kernel,
+  drivers, filesystem, desktop, userland. One at a time, in order.
+- **`Q<n>` — the testing arc.** Work on the instruments rather than on
+  the machine. It runs alongside the M line rather than inside it, which
+  is why it carries its own numbers. `Q` identifiers are referenced from
+  [Makefile](Makefile) and from [docs/](docs/), so they are stable and
+  are not renumbered into the M series.
+
+Commits are always `M<n>: <what changed>`. Q work commits under whichever
+M number it landed alongside — there has never been a `Q<n>:` commit.
+
+**Status is always a bracketed mark at the end of the heading:**
+
+`[ ]` not started · `[~]` partly done · `[x]` done · `[⊘]` abandoned
+
+The same four marks are used for the checklist items inside an entry. Any
+entry that is not a plain `[x]` carries a **Status:** line directly under
+its heading saying what is left, or what replaced it.
+
+**Heading depth:** `##` an arc · `###` a milestone · `####` a section
+within a milestone.
+
+**Lowercase `[m50]`, `[m92]`, `[wm30]` and the like are not milestone
+references.** They are the literal marker tags the boot self-tests grep
+for in the serial log — see
+[tools/qemu-serial-test.sh](tools/qemu-serial-test.sh). They keep their
+own casing on purpose, because changing them would break the harness.
+
+## Index
+
+Every milestone, in order, with its status. `[ ]` not started ·
+`[~]` partly done · `[x]` done · `[⊘]` abandoned.
+
+- `[x]` [M0 — Project scaffolding & toolchain](#m0--project-scaffolding--toolchain-x)
+- `[x]` [M1 — Boot sector (stage 1)](#m1--boot-sector-stage-1-x)
+- `[x]` [M2 — Stage 2: protected mode → long mode](#m2--stage-2-protected-mode--long-mode-x)
+- `[x]` [M3 — Minimal freestanding kernel](#m3--minimal-freestanding-kernel-x)
+- `[x]` [M4 — CPU fundamentals in the kernel](#m4--cpu-fundamentals-in-the-kernel-x)
+- `[x]` [M5 — Memory management](#m5--memory-management-x)
+- `[x]` [M6 — Timer & core drivers](#m6--timer--core-drivers-x)
+- `[x]` [M7 — Multitasking basics](#m7--multitasking-basics-x)
+- `[x]` [M8 — System call interface (`system_api/`)](#m8--system-call-interface-system_api-x)
+- `[x]` [M9 — User mode & process loading](#m9--user-mode--process-loading-x)
+- `[x]` [M10 — User-space runtime](#m10--user-space-runtime-x)
+- `[x]` [M11 — First user program end-to-end](#m11--first-user-program-end-to-end-x)
+- `[x]` [M12 — Storage & filesystem](#m12--storage--filesystem-x)
+- `[x]` [M13 — Init & shell](#m13--init--shell-x)
+- `[x]` [M14 — IPC & process management](#m14--ipc--process-management-x)
+
+**[Path to a desktop environment (M15+)](#path-to-a-desktop-environment-m15)**
+
+- `[x]` [M15 — Filesystem headroom](#m15--filesystem-headroom-x)
+- `[x]` [M16 — Linear framebuffer & graphics primitives](#m16--linear-framebuffer--graphics-primitives-x)
+- `[x]` [M17 — Framebuffer text console + font rendering](#m17--framebuffer-text-console--font-rendering-x)
+- `[x]` [M18 — PS/2 mouse driver & cursor](#m18--ps2-mouse-driver--cursor-x)
+- `[x]` [M19 — User-space heap allocator & shared memory](#m19--user-space-heap-allocator--shared-memory-x)
+- `[x]` [M20 — Windowing compositor](#m20--windowing-compositor-x)
+- `[x]` [M21 — App UI toolkit + input routing](#m21--app-ui-toolkit--input-routing-x)
+- `[x]` [M22 — Desktop shell](#m22--desktop-shell-x)
+- `[x]` [M23 — Desktop icon + GUI terminal](#m23--desktop-icon--gui-terminal-x)
+- `[x]` [M24 — UEFI boot path](#m24--uefi-boot-path-x)
+- `[x]` [M25 — Package/build tooling for third-party user programs](#m25--packagebuild-tooling-for-third-party-user-programs-x)
+- `[x]` [M26 — UEFI-only boot, BIOS path removed](#m26--uefi-only-boot-bios-path-removed-x)
+- `[x]` [M27 — Networking stack + NIC driver](#m27--networking-stack--nic-driver-x)
+- `[~]` [M28 — Port to real hardware (USB boot test)](#m28--port-to-real-hardware-usb-boot-test-)
+
+**[Path to a usable OS (M29+)](#path-to-a-usable-os-m29)**
+
+- `[x]` [M29 — Robustness & foundational cleanup](#m29--robustness--foundational-cleanup-x)
+- `[x]` [M30 — Window chrome: close / minimize / maximize](#m30--window-chrome-close--minimize--maximize-x)
+- `[x]` [M31 — Window dragging & resizing](#m31--window-dragging--resizing-x)
+- `[x]` [M32 — Desktop & input polish](#m32--desktop--input-polish-x)
+- `[x]` [M33 — Core usable-OS app baseline](#m33--core-usable-os-app-baseline-x)
+
+**[Path to a polished desktop UI (M34+)](#path-to-a-polished-desktop-ui-m34)**
+
+- `[x]` [M34 — Reusable widget primitives](#m34--reusable-widget-primitives-x)
+- `[x]` [M35 — Menus (menu bars + context menus)](#m35--menus-menu-bars--context-menus-x)
+- `[x]` [M36 — Dialogs & the file save flow](#m36--dialogs--the-file-save-flow-x)
+- `[x]` [M37 — Text selection & scrollbars](#m37--text-selection--scrollbars-x)
+- `[x]` [M38 — Visual chrome polish](#m38--visual-chrome-polish-x)
+- `[x]` [M39 — Sharper system text everywhere](#m39--sharper-system-text-everywhere-x)
+
+**[Path to a polished Windows/macOS hybrid desktop (M40+)](#path-to-a-polished-windowsmacos-hybrid-desktop-m40)**
+
+- `[x]` [M40 — Robustness pass + real interactive-input test harness](#m40--robustness-pass--real-interactive-input-test-harness-x)
+- `[x]` [M41 — macOS-style top menu bar](#m41--macos-style-top-menu-bar-x)
+- `[x]` [M42 — Windows-style bottom taskbar (redesigned; replaces M41's top bar)](#m42--windows-style-bottom-taskbar-redesigned-replaces-m41s-top-bar-x)
+- `[x]` [M43 — Spotlight-style launcher + window snapping](#m43--spotlight-style-launcher--window-snapping-x)
+- `[x]` [M44 — Desktop visual polish](#m44--desktop-visual-polish-x)
+
+**[Path to a daily-usable desktop (M45+) [x]](#path-to-a-daily-usable-desktop-m45-x)**
+
+- `[x]` [M45 — Process control: task manager, Force Quit, app context menus](#m45--process-control-task-manager-force-quit-app-context-menus-x)
+- `[x]` [M46 — Window chrome & control details](#m46--window-chrome--control-details-x)
+- `[x]` [M47 — Session lifecycle: shutdown, restart, persistent settings](#m47--session-lifecycle-shutdown-restart-persistent-settings-x)
+- `[x]` [M48 — System feedback: notifications, errors, no silent failures](#m48--system-feedback-notifications-errors-no-silent-failures-x)
+- `[x]` [M49 — Input completeness: scroll wheel, keyboard chords, drag & drop](#m49--input-completeness-scroll-wheel-keyboard-chords-drag--drop-x)
+- `[x]` [M50 — Robustness & resource hygiene](#m50--robustness--resource-hygiene-x)
+
+**[Path to a dependable desktop (M51+)](#path-to-a-dependable-desktop-m51)**
+
+- `[x]` [M51 — Z-order: raising, occlusion-correct hit-testing, focus that means something](#m51--z-order-raising-occlusion-correct-hit-testing-focus-that-means-something-x)
+- `[x]` [M52 — Kernel hardening: validated user pointers, no user-triggerable panic](#m52--kernel-hardening-validated-user-pointers-no-user-triggerable-panic-x)
+- `[x]` [M53 — Directories in leanfs, and a namespace that isn't a junk drawer](#m53--directories-in-leanfs-and-a-namespace-that-isnt-a-junk-drawer-x)
+- `[x]` [M54 — Reclaiming what dies: address spaces, task slots, real uptime](#m54--reclaiming-what-dies-address-spaces-task-slots-real-uptime-x)
+- `[x]` [M55 — Session resilience: supervise every client, survive a compositor crash](#m55--session-resilience-supervise-every-client-survive-a-compositor-crash-x)
+- `[x]` [M56 — Depth where people actually spend time](#m56--depth-where-people-actually-spend-time-x)
+
+**[Path to a desktop someone would choose to use (M57+) [x]](#path-to-a-desktop-someone-would-choose-to-use-m57-x)**
+
+- `[x]` [M57 — Type that isn't 8x16](#m57--type-that-isnt-8x16-x)
+- `[x]` [M58 — Display settings: change the resolution without rebooting](#m58--display-settings-change-the-resolution-without-rebooting-x)
+- `[x]` [M59 — Files without limits, and a machine that knows the date](#m59--files-without-limits-and-a-machine-that-knows-the-date-x)
+- `[x]` [M60 — The two apps people live in, finished](#m60--the-two-apps-people-live-in-finished-x)
+- `[x]` [M61 — Motion, and a compositor that meets a deadline](#m61--motion-and-a-compositor-that-meets-a-deadline-x)
+- `[x]` [M62 — The first sound this OS has ever made](#m62--the-first-sound-this-os-has-ever-made-x)
+- `[x]` [M63 — Somebody else's program](#m63--somebody-elses-program-x)
+- `[x]` [M64 — A network user space can reach](#m64--a-network-user-space-can-reach-x)
+- `[x]` [M65 — A permission model, finally worth having](#m65--a-permission-model-finally-worth-having-x)
+- `[x]` [M66 — TCP](#m66--tcp-x)
+
+**[Stretch goals (unordered, orthogonal to the desktop path)](#stretch-goals-unordered-orthogonal-to-the-desktop-path)**
+
+
+**[Where this is, and what M67+ is for](#where-this-is-and-what-m67-is-for)**
+
+- `[x]` [M67 — A kernel that can be interrupted](#m67--a-kernel-that-can-be-interrupted-x)
+- `[x]` [M68 — Wait queues, and the end of the busy loop](#m68--wait-queues-and-the-end-of-the-busy-loop-x)
+- `[x]` [M69 — Latency you can feel](#m69--latency-you-can-feel-x)
+- `[x]` [M70 — A machine that says what happened](#m70--a-machine-that-says-what-happened-x)
+- `[x]` [M71 — Files worth trusting](#m71--files-worth-trusting-x)
+- `[x]` [M72 — One shell, and it can be scripted](#m72--one-shell-and-it-can-be-scripted-x)
+- `[x]` [M73 — Names, not numbers](#m73--names-not-numbers-x)
+- `[x]` [M74 — The session that remembers](#m74--the-session-that-remembers-x)
+
+**[The next arc: Unix-shaped enough to run somebody else's software](#the-next-arc-unix-shaped-enough-to-run-somebody-elses-software)**
+
+- `[x]` [M75 — Environment, and a place to stand](#m75--environment-and-a-place-to-stand-x)
+- `[x]` [M76 — A signal a program can catch](#m76--a-signal-a-program-can-catch-x)
+- `[x]` [M77 — POSIX names for what is already here](#m77--posix-names-for-what-is-already-here-x)
+- `[x]` [M78 — Memory that can be given back](#m78--memory-that-can-be-given-back-x)
+- `[x]` [M79 — Two threads, one address space](#m79--two-threads-one-address-space-x)
+- `[⊘]` [M80 — Somebody else's language](#m80--somebody-elses-language-)
+
+**[The arc after that: the things underneath the names](#the-arc-after-that-the-things-underneath-the-names)**
+
+- `[x]` [M81 — A filesystem that can hold somebody else's program](#m81--a-filesystem-that-can-hold-somebody-elses-program-x)
+- `[x]` [M82 — A page that arrives when it is asked for](#m82--a-page-that-arrives-when-it-is-asked-for-x)
+- `[x]` [M83 — Two processes from one](#m83--two-processes-from-one-x)
+- `[x]` [M84 — A program that replaces itself](#m84--a-program-that-replaces-itself-x)
+- `[~]` [M85 — A terminal that is a device](#m85--a-terminal-that-is-a-device-)
+- `[x]` [M86 — A shell that is a shell](#m86--a-shell-that-is-a-shell-x)
+- `[~]` [M87 — Files with a type, a place, and more than one name](#m87--files-with-a-type-a-place-and-more-than-one-name-)
+- `[~]` [M88 — Everything else a ported program calls](#m88--everything-else-a-ported-program-calls-)
+- `[~]` [M89 — Somebody else's userland](#m89--somebody-elses-userland-)
+
+**[And the arc after that: a machine big enough to build on](#and-the-arc-after-that-a-machine-big-enough-to-build-on)**
+
+- `[x]` [M90 — More than a gigabyte](#m90--more-than-a-gigabyte-x)
+- `[~]` [M91 — An address space that is a set of mappings](#m91--an-address-space-that-is-a-set-of-mappings-)
+- `[~]` [M92 — A disk worth reading, and a cache in front of it](#m92--a-disk-worth-reading-and-a-cache-in-front-of-it-)
+- `[x]` [M93 — A filesystem that can hold a source tree](#m93--a-filesystem-that-can-hold-a-source-tree-x)
+- `[ ]` [M94 — A target this compiler knows by name](#m94--a-target-this-compiler-knows-by-name--)
+- `[ ]` [M95 — Code that is loaded, not linked](#m95--code-that-is-loaded-not-linked--)
+- `[ ]` [M96 — A thread with its own variables, and a wait that costs nothing](#m96--a-thread-with-its-own-variables-and-a-wait-that-costs-nothing--)
+- `[ ]` [M97 — C++](#m97--c--)
+- `[ ]` [M98 — A compiler that runs here](#m98--a-compiler-that-runs-here--)
+- `[ ]` [M99 — Python, built here](#m99--python-built-here--)
+- `[ ]` [M100 — What a browser actually needs, measured rather than argued](#m100--what-a-browser-actually-needs-measured-rather-than-argued--)
+
+**[And the arc after that: the other half of the goal sentence](#and-the-arc-after-that-the-other-half-of-the-goal-sentence)**
+
+- `[x]` [M101 — Where the time actually goes](#m101--where-the-time-actually-goes-x)
+- `[x]` [M102 — Memory that runs out honestly](#m102--memory-that-runs-out-honestly-x)
+- `[ ]` [M103 — Interrupts a real machine delivers](#m103--interrupts-a-real-machine-delivers--)
+- `[ ]` [M104 — Writeback, and a disk that keeps up with a build](#m104--writeback-and-a-disk-that-keeps-up-with-a-build--)
+- `[ ]` [M105 — The journal, or the measurement that refuses it a third time](#m105--the-journal-or-the-measurement-that-refuses-it-a-third-time--)
+- `[ ]` [M106 — Cores a build can use](#m106--cores-a-build-can-use--)
+- `[ ]` [M107 — The devices a real machine has](#m107--the-devices-a-real-machine-has--)
+- `[ ]` [M108 — A real NIC, and the TCP deferrals it prices](#m108--a-real-nic-and-the-tcp-deferrals-it-prices--)
+- `[ ]` [M109 — lean_os built on lean_os](#m109--lean_os-built-on-lean_os--)
+- `[ ]` [M110 — The boot that has never happened](#m110--the-boot-that-has-never-happened--)
+
+**[The arc alongside all of it: tests that can fail](#the-arc-alongside-all-of-it-tests-that-can-fail)**
+
+- `[x]` [Q1 — A test command, and a clock on it](#q1--a-test-command-and-a-clock-on-it-x)
+- `[x]` [Q2 — The first unit test this project has ever had](#q2--the-first-unit-test-this-project-has-ever-had-x)
+- `[x]` [Q3 — leanfs against a RAM disk, and one format instead of two](#q3--leanfs-against-a-ram-disk-and-one-format-instead-of-two-x)
+- `[x]` [Q4 — The stack, fed garbage on purpose](#q4--the-stack-fed-garbage-on-purpose-x)
+- `[x]` [Q5 — Every syscall told a lie](#q5--every-syscall-told-a-lie-x)
+- `[x]` [Q6 — Numbers that fail, not numbers that print](#q6--numbers-that-fail-not-numbers-that-print-x)
+- `[~]` [Q7 — Pixels, all of them (partly landed: the invariant, not the baselines)](#q7--pixels-all-of-them-partly-landed-the-invariant-not-the-baselines-)
+- `[x]` [Q8 — What the tests never touch](#q8--what-the-tests-never-touch-x)
+- `[ ]` [Q9 — A machine that runs out of things and stays up](#q9--a-machine-that-runs-out-of-things-and-stays-up--)
+- `[x]` [Q10 — It runs without me](#q10--it-runs-without-me-x)
+
+**[The arc after that: tests worth trusting](#the-arc-after-that-tests-worth-trusting)**
+
+- `[x]` [Q11 — The leftovers, with conditions rather than intentions](#q11--the-leftovers-with-conditions-rather-than-intentions-x)
+- `[x]` [Q12 — Does this suite detect anything? Mutation testing](#q12--does-this-suite-detect-anything-mutation-testing-x)
+- `[ ]` [Q13 — The scheduler, off the machine](#q13--the-scheduler-off-the-machine--)
+- `[ ]` [Q14 — The compositor, off the machine](#q14--the-compositor-off-the-machine--)
+- `[x]` [Q15 — Nothing else changed, everywhere](#q15--nothing-else-changed-everywhere-x)
+- `[ ]` [Q16 — Devices that fail, and a machine that keeps running](#q16--devices-that-fail-and-a-machine-that-keeps-running--)
+- `[x]` [Q17 — Power cut, and a filesystem that survives it](#q17--power-cut-and-a-filesystem-that-survives-it-x)
+- `[x]` [Q18 — Latency as a distribution](#q18--latency-as-a-distribution-x)
+- `[ ]` [Q19 — Boot once, test many](#q19--boot-once-test-many--)
+- `[x]` [Q20 — The tests as a product](#q20--the-tests-as-a-product-x)
+
+**[Deliberately not next, and why](#deliberately-not-next-and-why)**
+
+
+**[Testing is local](#testing-is-local)**
+
+
+**[The next ten, and where they actually start](#the-next-ten-and-where-they-actually-start)**
+
 
 ## Ground rules / assumptions
 
@@ -45,7 +266,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ---
 
-## M0 — Project scaffolding & toolchain ✅
+### M0 — Project scaffolding & toolchain [x]
 
 - [x] Create `kernel/`, `system_api/`, `user_space/`, `tools/`, `docs/` dirs
 - [x] Decide and document assembler (NASM — see [docs/toolchain.md](docs/toolchain.md))
@@ -54,14 +275,14 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Top-level `Makefile` that can (currently) build nothing but runs
 - [x] `tools/run-qemu.sh` script stub
 
-## M1 — Boot sector (stage 1) ✅
+### M1 — Boot sector (stage 1) [x]
 
 - [x] 512-byte MBR boot sector in 16-bit real mode
 - [x] BIOS `INT 13h` disk read to load stage 2 into memory
 - [x] Print a message via BIOS `INT 10h` teletype to prove it's alive
 - [x] Boots in QEMU and shows the message
 
-## M2 — Stage 2: protected mode → long mode ✅
+### M2 — Stage 2: protected mode → long mode [x]
 
 - [x] Enable the A20 line
 - [x] Build and load a minimal GDT, enter 32-bit protected mode
@@ -71,39 +292,39 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Jump into the kernel's entry point with a defined handoff (memory
       map pointer, etc.)
 
-## M3 — Minimal freestanding kernel ✅
+### M3 — Minimal freestanding kernel [x]
 
 - [x] `kernel/` linker script + entry stub in assembly
 - [x] First C code runs (freestanding: `-ffreestanding -nostdlib`, no libc)
 - [x] VGA text-mode driver for `kprintf`-style debug output
 - [x] Panic handler (halt + message)
 
-## M4 — CPU fundamentals in the kernel ✅
+### M4 — CPU fundamentals in the kernel [x]
 
 - [x] Kernel-owned GDT/TSS setup (bootloader's GDT was temporary)
 - [x] IDT + interrupt/exception handlers (divide-by-zero, GPF, page fault,
       double fault at minimum)
 - [x] PIC remap (or APIC if you want to skip legacy PIC)
 
-## M5 — Memory management ✅
+### M5 — Memory management [x]
 
 - [x] Physical frame allocator, seeded from the E820 map
 - [x] Virtual memory manager (page table manipulation, map/unmap)
 - [x] Kernel heap allocator (`kmalloc`/`kfree`)
 
-## M6 — Timer & core drivers ✅
+### M6 — Timer & core drivers [x]
 
 - [x] PIT or APIC timer, tick counter, `sleep`-style busy wait
 - [x] Serial port (COM1) driver for debug logging (parallel to VGA)
 - [x] PS/2 keyboard driver
 
-## M7 — Multitasking basics ✅
+### M7 — Multitasking basics [x]
 
 - [x] Task/thread control block struct
 - [x] Context switch (assembly) between kernel threads
 - [x] Simple round-robin scheduler driven by the timer interrupt
 
-## M8 — System call interface (`system_api/`) ✅
+### M8 — System call interface (`system_api/`) [x]
 
 - [x] Define syscall ABI: numbering, register convention, `syscall`/`sysret`
       (or `int 0x80`) entry
@@ -111,41 +332,41 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Kernel-side syscall dispatch table
 - [x] First syscalls: `write`, `exit`, `getpid`
 
-## M9 — User mode & process loading ✅
+### M9 — User mode & process loading [x]
 
 - [x] Ring 3 transition, TSS configured for privilege-level switches
 - [x] Minimal ELF64 loader in the kernel
 - [x] User stack + address space setup per process
 
-## M10 — User-space runtime ✅
+### M10 — User-space runtime [x]
 
 - [x] `user_space/lib` crt0 (`_start`) for user binaries
 - [x] Thin syscall wrapper functions (built from `system_api/` headers)
 - [x] Bare string/mem helpers (`memcpy`, `strlen`, ...) — hand-written, no
       external libc
 
-## M11 — First user program end-to-end ✅
+### M11 — First user program end-to-end [x]
 
 - [x] "Hello world" built against `user_space/lib` + `system_api`
 - [x] Kernel loads and runs it, output visible via syscall `write`
 - [x] This is the milestone that proves the whole stack (boot → kernel →
       syscall → user space) works together
 
-## M12 — Storage & filesystem ✅
+### M12 — Storage & filesystem [x]
 
 - [x] ATA (PIO mode) disk driver
 - [x] Minimal custom filesystem format (or a simple FAT-like layout) + VFS
       layer in the kernel
 - [x] Load user binaries from disk instead of an embedded/in-memory blob
 
-## M13 — Init & shell ✅
+### M13 — Init & shell [x]
 
 - [x] `fork`/`exec`-equivalent syscalls, `wait`
 - [x] `user_space/init` as PID 1
 - [x] Minimal shell (`user_space/shell`)
 - [x] A couple of coreutils-style programs (`ls`, `cat`, `echo`)
 
-## M14 — IPC & process management ✅
+### M14 — IPC & process management [x]
 
 - [x] Pipes
 - [x] Signals (basic set: kill, term, etc.)
@@ -160,7 +381,7 @@ zero dependencies preserved throughout (BIOS VBE calls are dev-time boot
 handoff, same category as the existing E820/disk-read BIOS calls — not a
 runtime dependency).
 
-## M15 — Filesystem headroom ✅
+### M15 — Filesystem headroom [x]
 
 - [x] Current cap (`LEANFS_MAX_FILE_SIZE` = 16 direct blocks x 512 B = 8 KiB)
       is already tight: existing user ELFs are ~7 KiB. Raise it before
@@ -169,7 +390,7 @@ runtime dependency).
       leanfs; grow the data region accordingly
 - [x] Re-verify M12/M13's persistence tests still pass at the new limits
 
-## M16 — Linear framebuffer & graphics primitives ✅
+### M16 — Linear framebuffer & graphics primitives [x]
 
 - [x] Extend stage2 to set a VBE/VESA linear framebuffer mode (`INT 10h
       AX=4F02h`) and query mode info (`AX=4F01h`) for physical base/pitch/
@@ -183,7 +404,7 @@ runtime dependency).
       to M17 (framebuffer console), since VGA text is still the only
       logging surface until then; klog/serial are untouched either way
 
-## M17 — Framebuffer text console + font rendering ✅
+### M17 — Framebuffer text console + font rendering [x]
 
 - [x] Embed a fixed-width bitmap font in the kernel image
 - [x] Software glyph renderer + scrolling text console drawn over the
@@ -191,14 +412,14 @@ runtime dependency).
 - [x] Route existing klog output through it, so all prior boot logging
       stays visible without touching every call site again
 
-## M18 — PS/2 mouse driver & cursor ✅
+### M18 — PS/2 mouse driver & cursor [x]
 
 - [x] IRQ12 driver, 3-byte packet decode (dx/dy/buttons) — same shape as
       M6's keyboard driver
 - [x] Cursor sprite draw/erase over the framebuffer (save/restore pixels
       underneath; no compositor yet to own this properly)
 
-## M19 — User-space heap allocator & shared memory ✅
+### M19 — User-space heap allocator & shared memory [x]
 
 - [x] `SYS_sbrk`-style syscall to grow a process's address space on demand
 - [x] `user_space/lib` malloc/free (mirrors the kernel heap's design) so
@@ -206,7 +427,7 @@ runtime dependency).
 - [x] A shared-memory syscall (compositor <-> app pixel buffers) — pipes
       are the wrong tool for whole-frame pixel data
 
-## M20 — Windowing compositor ✅
+### M20 — Windowing compositor [x]
 
 - [x] User-space compositor process owns the framebuffer exclusively
 - [x] IPC protocol for apps to create a window (request a shared pixel
@@ -217,7 +438,7 @@ runtime dependency).
       borders/title bars — z-order exists structurally (a window list,
       painted in order) but is unproven beyond one window; see M21
 
-## M21 — App UI toolkit + input routing ✅
+### M21 — App UI toolkit + input routing [x]
 
 - [x] `user_space/lib` drawing API (rects, lines, text) targeting an app's
       window buffer
@@ -226,14 +447,14 @@ runtime dependency).
 - [x] 1-2 demo GUI apps (clock, simple paint) proving the full pipeline
       end to end
 
-## M22 — Desktop shell ✅
+### M22 — Desktop shell [x]
 
 - [x] Taskbar/dock listing running apps, click to focus/minimize
 - [x] App launcher reading the filesystem for available executables
 - [x] This is the milestone where "desktop environment running custom
       apps" is genuinely true, not aspirational
 
-## M23 — Desktop icon + GUI terminal ✅
+### M23 — Desktop icon + GUI terminal [x]
 
 - [x] `wm_create_request_t.desktop`: a chrome-less, full-screen, always-
       on-*bottom* window kind (compositor.c's mirror image of M22's
@@ -257,7 +478,7 @@ runtime dependency).
 - [x] `init.c` now also spawns `desktop_icons` alongside the compositor
       and desktop shell, torn down and respawned together
 
-## M24 — UEFI boot path ✅
+### M24 — UEFI boot path [x]
 
 - [x] `kernel/boot/uefi/{efi.h,efi_proto.h}`: hand-written UEFI base types
       and the handful of protocols needed (Simple Text Output, Boot
@@ -306,7 +527,7 @@ runtime dependency).
       spec-safe `EfiLoaderData` instead; there was never a real need for
       a custom type
 
-## M25 — Package/build tooling for third-party user programs ✅
+### M25 — Package/build tooling for third-party user programs [x]
 
 - [x] `tools/build-user-program.sh`: compiles a standalone third-party
       `.c` file against `user_space/lib` (crt0 + syscall_wrappers +
@@ -342,7 +563,7 @@ runtime dependency).
       broken since M53 and nothing noticed, because nothing runs it -
       `make preseed` is optional and no self-test uses it.
 
-### The drift M25's tooling was found in (repaired after M79)
+#### The drift M25's tooling was found in (repaired after M79)
 
 `tools/leanfs-put.c` duplicates leanfs's on-disk format, and duplication
 drifts. Found still speaking the M15-era format: an inode with a `name`
@@ -383,7 +604,7 @@ an image that already has one (no duplicate directory records, no leaked
 blocks - the bitmap matches block reachability exactly). Both boot
 69/69.
 
-## M26 — UEFI-only boot, BIOS path removed ✅
+### M26 — UEFI-only boot, BIOS path removed [x]
 
 - [x] Deleted `kernel/boot/stage1.asm` and `stage2.asm`;
       `kernel/boot/uefi/boot.c` is now the only boot loader - it already
@@ -405,7 +626,7 @@ blocks - the bitmap matches block reachability exactly). Both boot
 - [x] `docs/flow.md` rewritten to walk through the UEFI boot flow in place
       of the removed BIOS stage1/stage2 deep-dive
 
-## M27 — Networking stack + NIC driver ✅
+### M27 — Networking stack + NIC driver [x]
 
 - [x] `kernel/drivers/pci.h/.c`: brute-force PCI config-space enumeration
       (bus/slot/function, port 0xCF8/0xCFC) - just enough to find a device
@@ -453,7 +674,7 @@ blocks - the bitmap matches block reachability exactly). Both boot
       but-unexercised hardware. Verified both ways: boots and pings the
       gateway with a NIC attached, boots cleanly through to init with none.
 
-## M28 — Port to real hardware (USB boot test) [~]
+### M28 — Port to real hardware (USB boot test) [~]
 
 Preparation and tooling are done and verified as far as anything without
 a physical machine and USB port can go; the actual boot-on-real-hardware
@@ -513,7 +734,11 @@ right code (as opposed to the code itself being correct, which every
 kernel-side self-test above does verify) is manual/interactive-only,
 same boundary this project drew starting at M18's mouse driver.
 
-## M29 — Robustness & foundational cleanup ✅ (except the one manual step)
+### M29 — Robustness & foundational cleanup [x]
+
+**Status:** done except the one manual step it shares with M28 — booting a
+physical machine from USB, which needs hardware this environment does not
+have.
 
 - [x] Client-crash cleanup: `SYS_task_alive` (`system_api/include/syscall.h`,
       non-reaping, distinguishes a clean `SYS_exit(0)` from a nonzero/
@@ -599,7 +824,7 @@ same boundary this project drew starting at M18's mouse driver.
       that has to happen outside this environment; everything the runbook
       (`docs/real-hardware.md`) needs from the software side is done
 
-## M30 — Window chrome: close / minimize / maximize ✅
+### M30 — Window chrome: close / minimize / maximize [x]
 
 - [x] Titlebar close/minimize/maximize hit-boxes: three flat-colored
       14x14 squares, right-aligned in the titlebar (`draw_titlebar_buttons`/
@@ -635,7 +860,7 @@ same boundary this project drew starting at M18's mouse driver.
       same category M21's own self-test already deferred focus-follows-
       click to
 
-## M31 — Window dragging & resizing ✅
+### M31 — Window dragging & resizing [x]
 
 - [x] Mouse-down-on-titlebar (excluding the M30 buttons) starts a real
       move-drag state machine (`drag_mode`/`drag_window` and friends,
@@ -670,7 +895,7 @@ same boundary this project drew starting at M18's mouse driver.
       still passes with zero behavior change to anything upstream of
       this.
 
-## M32 — Desktop & input polish ✅
+### M32 — Desktop & input polish [x]
 
 - [x] Multiple desktop icons with a real grid layout: `ICONS[]`
       (`user_space/bin/desktop_icons.c`) now lists Terminal/Clock/Paint,
@@ -710,7 +935,7 @@ same boundary this project drew starting at M18's mouse driver.
       the same boundary M18/M21/M22/M31 already drew for click- and
       key-driven behavior this headless build has no way to fabricate
 
-## M33 — Core usable-OS app baseline ✅
+### M33 — Core usable-OS app baseline [x]
 
 - [x] Text editor (`user_space/bin/text_editor.c`): real multi-line,
       cursor-addressable editing (Up/Down/Left/Right/Backspace/typing
@@ -789,7 +1014,7 @@ gui_terminal.c's output view still has no real scrollback buffer to
 put a scrollbar on (M37) - both real, separate features this arc
 didn't also take on.
 
-## M34 — Reusable widget primitives ✅
+### M34 — Reusable widget primitives [x]
 
 - [x] `user_space/lib/gfx.{h,c}` gained `gfx_point_in_rect` (pure
       geometry - no `gfx_ctx_t` needed) and `gfx_draw_button` (filled
@@ -821,7 +1046,7 @@ didn't also take on.
       markers, no panic, zero behavior change to anything upstream of
       this milestone
 
-## M35 — Menus (menu bars + context menus) ✅
+### M35 — Menus (menu bars + context menus) [x]
 
 - [x] Scope trim, decided up front rather than discovered mid-
       milestone: a compositor-owned popup surface (a new WM protocol
@@ -864,7 +1089,7 @@ didn't also take on.
       every mouse-driven behavior since M18, manual/interactive-only
       verification this headless build has no way to fabricate
 
-## M36 — Dialogs & the file save flow ✅
+### M36 — Dialogs & the file save flow [x]
 
 - [x] Same scope trim as M35, for the same reason: no compositor-owned
       modal surface. Both prompts below are a centered overlay drawn
@@ -918,7 +1143,7 @@ didn't also take on.
       can't fabricate. Verified via `tools/qemu-serial-test.sh`:
       23/23 required boot markers, no panic
 
-## M37 — Text selection & scrollbars ✅
+### M37 — Text selection & scrollbars [x]
 
 - [x] Click-drag text selection with highlight rendering in both
       `text_editor.c` (over its `lines[]` buffer, grid coordinates
@@ -957,7 +1182,7 @@ didn't also take on.
       every mouse-driven behavior since M18, manual/interactive-only
       verification this headless build can't fabricate
 
-## M38 — Visual chrome polish ✅
+### M38 — Visual chrome polish [x]
 
 - [x] Window titles, drawn on the titlebar for the first time ever -
       a real, pre-existing gap found while scoping this milestone:
@@ -1019,7 +1244,7 @@ didn't also take on.
       `tools/qemu-serial-test.sh`: 24/24 required boot markers, no
       panic
 
-## M39 — Sharper system text everywhere ✅
+### M39 — Sharper system text everywhere [x]
 
 The premise this milestone started from, found while scoping it: the
 reason text looked soft across this OS was never the renderer, it was
@@ -1163,7 +1388,7 @@ from the taskbar's Start button or a global keychord - and window
 edge-snapping. M44 remains a final visual-consistency pass across
 whatever M41-M43 actually shipped.
 
-## M40 — Robustness pass + real interactive-input test harness ✅
+### M40 — Robustness pass + real interactive-input test harness [x]
 
 - [x] QEMU-monitor-driven input-injection harness: real
       `sendkey`/`mouse_move`/`mouse_button` HMP commands against a booted
@@ -1267,7 +1492,7 @@ whatever M41-M43 actually shipped.
 - [x] Full `tools/qemu-serial-test.sh` pass (27/27 markers, zero
       regressions) and `tools/qemu-input-test.sh` pass (7/7)
 
-## M41 — macOS-style top menu bar ✅
+### M41 — macOS-style top menu bar [x]
 
 - [x] `user_space/bin/menu_bar.c`: an always-on-top, screen-*top*-docked
       panel showing the focused app's name on the left. Reuses
@@ -1333,7 +1558,7 @@ whatever M41-M43 actually shipped.
 - [x] Full `tools/qemu-serial-test.sh` pass (28/28) and
       `tools/qemu-input-test.sh` pass (9/9)
 
-## M42 — Windows-style bottom taskbar (redesigned; replaces M41's top bar) ✅
+### M42 — Windows-style bottom taskbar (redesigned; replaces M41's top bar) [x]
 
 Originally scoped as a macOS-style Dock (icon tiles, centered, growing/
 shrinking around the middle). Direct design feedback redirected this
@@ -1422,7 +1647,7 @@ git history was never touched by it, since none of it was committed.
       the intermittent panic above) and `tools/qemu-input-test.sh` pass
       (11/11)
 
-## M43 — Spotlight-style launcher + window snapping ✅
+### M43 — Spotlight-style launcher + window snapping [x]
 
 - [x] Global launcher keychord (Ctrl+Space, reusing M32's
       `keyboard_modifiers()` infra already added for Alt-Tab) *or* a
@@ -1477,7 +1702,7 @@ git history was never touched by it, since none of it was committed.
 - [x] Full `tools/qemu-serial-test.sh` pass (29/29) and
       `tools/qemu-input-test.sh` pass (15/15)
 
-## M44 — Desktop visual polish ✅
+### M44 — Desktop visual polish [x]
 
 - [x] The flat desktop background is now an integer-interpolated vertical
       gradient (`user_space/lib/wallpaper.c` - no floating point, same
@@ -1544,7 +1769,7 @@ git history was never touched by it, since none of it was committed.
 - [x] Full `tools/qemu-serial-test.sh` pass (30/30) and
       `tools/qemu-input-test.sh` pass (15/15)
 
-## Path to a daily-usable desktop (M45+) ✅
+## Path to a daily-usable desktop (M45+) [x]
 
 M40-M44 got the desktop looking right, and proved for the first time
 that real clicks and keystrokes reach the code meant to handle them.
@@ -1600,7 +1825,7 @@ Three of the six were found *by* this arc's own new features - the task
 manager, the spawn error codes and the toast surface between them - which
 is the argument for having built them.
 
-## M45 — Process control: task manager, Force Quit, app context menus ✅
+### M45 — Process control: task manager, Force Quit, app context menus [x]
 
 The headline gap: there was no way for a person using this OS to stop a
 program. Everything needed underneath already existed - `SYS_kill`,
@@ -1723,7 +1948,7 @@ syscall. What was missing was entirely above the kernel.
 - [x] Full `tools/qemu-serial-test.sh` pass (31/31) and
       `tools/qemu-input-test.sh` pass (19/19)
 
-## M46 — Window chrome & control details ✅
+### M46 — Window chrome & control details [x]
 
 The layout had stopped moving, so the details were worth paying for. The
 house rule for this milestone, and the answer to "which OS is this
@@ -1812,7 +2037,7 @@ hit-test, M42's tests and every user's muscle memory all still apply.
 - [x] Full `tools/qemu-serial-test.sh` pass (32/32) and
       `tools/qemu-input-test.sh` pass (22/22)
 
-## M47 — Session lifecycle: shutdown, restart, persistent settings ✅
+### M47 — Session lifecycle: shutdown, restart, persistent settings [x]
 
 Every session of this OS before this milestone ended by killing QEMU.
 There was no way to turn the machine off from inside it, and nothing it
@@ -1919,7 +2144,7 @@ picker for.
 - [x] Full `tools/qemu-serial-test.sh` pass (33/33) and
       `tools/qemu-input-test.sh` pass (25/25)
 
-## M48 — System feedback: notifications, errors, no silent failures ✅
+### M48 — System feedback: notifications, errors, no silent failures [x]
 
 M40 spent an entire milestone chasing a bug whose only symptom was
 "double-clicking that icon does nothing." The bug was fixed; the class of
@@ -2018,7 +2243,7 @@ symptom was not. This system had no way to tell its user anything.
 - [x] Full `tools/qemu-serial-test.sh` pass (34/34) and
       `tools/qemu-input-test.sh` pass (27/27)
 
-## M49 — Input completeness: scroll wheel, keyboard chords, drag & drop ✅
+### M49 — Input completeness: scroll wheel, keyboard chords, drag & drop [x]
 
 - [x] PS/2 wheel support: the IntelliMouse 4-byte protocol negotiated at
       init with the 200/100/80 sample-rate knock, falling back to the
@@ -2120,7 +2345,7 @@ symptom was not. This system had no way to tell its user anything.
 - [x] Full `tools/qemu-serial-test.sh` pass (35/35) and
       `tools/qemu-input-test.sh` pass (31/31)
 
-## M50 — Robustness & resource hygiene ✅
+### M50 — Robustness & resource hygiene [x]
 
 The pass this arc's new syscalls, new long-lived UI and new ways to kill
 things needed - M29 and M40's shape, applied to what M45-M49 added.
@@ -2336,7 +2561,7 @@ than in the stretch list where it started. M55 is the supervision this
 session has needed since init learned to watch exactly one of its three
 children. M56 is depth in the apps people actually spend time in.
 
-## M51 — Z-order: raising, occlusion-correct hit-testing, focus that means something ✅
+### M51 — Z-order: raising, occlusion-correct hit-testing, focus that means something [x]
 
 The compositor's own header comment has described this as a
 "simplification" since M20 and every hit-test in the file repeats the
@@ -2444,7 +2669,7 @@ than merely absent: a click can land on a window nobody can see.
       is the same "assert on a guest-side state signal, not on elapsed
       time" pattern M45 and M48 each had to learn
 
-## M52 — Kernel hardening: validated user pointers, no user-triggerable panic ✅
+### M52 — Kernel hardening: validated user pointers, no user-triggerable panic [x]
 
 `sys_write`'s comment - "buf is trusted as-is for now; validating that a
 ring-3 pointer is actually mapped and owned by the caller is left for
@@ -2574,7 +2799,7 @@ itself.
       desktop", since a hung guest would keep showing its last frame
 - [x] Full regression: 38/38 serial markers and 36/36 interactive tests
 
-## M53 — Directories in leanfs, and a namespace that isn't a junk drawer ✅
+### M53 — Directories in leanfs, and a namespace that isn't a junk drawer [x]
 
 The filesystem was flat, and it showed up in three apps at once: the file
 manager listed this OS's own executables next to your text files, the
@@ -2703,7 +2928,7 @@ same list.
       built for, six milestones later
 - [x] Full regression: 39/39 serial markers and 37/37 interactive tests
 
-## M54 — Reclaiming what dies: address spaces, task slots, real uptime ✅
+### M54 — Reclaiming what dies: address spaces, task slots, real uptime [x]
 
 M29 documented the leak, M50 measured it, and neither fixed it: ~15
 frames per dead process, forever, plus a task slot that was never
@@ -2812,7 +3037,7 @@ self-tests alone spent **79 of 128 slots** before PID 1 started.
       kernel recycling a reaped slot, and the desktop actually reaping
 - [x] Full regression: 40/40 serial markers and 37/37 interactive tests
 
-## M55 — Session resilience: supervise every client, survive a compositor crash ✅
+### M55 — Session resilience: supervise every client, survive a compositor crash [x]
 
 init waited on `desktop_shell` and restarted the whole session if it
 exited. A compositor or `desktop_icons` that died on its own was not
@@ -2935,7 +3160,7 @@ not killed, but wedged, because a window was the only thing holding them.
       (36 in one pass, plus two re-runs - see M56's note on the orphaned
       QEMU processes those two "hangs" turned out to be)
 
-## M56 — Depth where people actually spend time ✅
+### M56 — Depth where people actually spend time [x]
 
 Every app in this project is a demonstration of a mechanism. Three of
 them are things a person would genuinely use, and each was one feature
@@ -3237,7 +3462,7 @@ and every desktop client is supervised (M55). What remains:
   it is a pattern rather than something the harness makes hard to get
   wrong
 
-## Path to a desktop someone would choose to use (M57+) ✅
+## Path to a desktop someone would choose to use (M57+) [x]
 
 M51-M56 made this desktop dependable. It raises and occludes correctly,
 it survives a compositor crash, a bad pointer kills one task instead of
@@ -3301,7 +3526,7 @@ makes the compositor meet a deadline. M62 is a capability that has never
 existed. M63 is the one the others make possible: running a program
 nobody in this repo wrote.
 
-## M57 — Type that isn't 8x16 ✅
+### M57 — Type that isn't 8x16 [x]
 
 M39 proved the property this milestone depends on: there is one font
 table and every text path in the project blits it, so fixing the table
@@ -3415,7 +3640,7 @@ the font cost: `hello.elf` went from 29 KiB to 5 KiB and `kernel.bin`
 from 926 KiB to 402 KiB. The three faces are separate objects, so a
 program that only uses one only carries one.
 
-## M58 — Display settings: change the resolution without rebooting ✅
+### M58 — Display settings: change the resolution without rebooting [x]
 
 The resolution this desktop runs at was chosen by `boot.c` before the
 kernel existed, out of a list the firmware offered: it prefers 1024x768
@@ -3553,7 +3778,7 @@ this milestone grew the Settings window, at which point tests were
 clicking 76 pixels below everything they meant to click. It mirrors
 `content_bottom_limit()` now.
 
-## M59 — Files without limits, and a machine that knows the date ✅
+### M59 — Files without limits, and a machine that knows the date [x]
 
 `SYS_readfile`'s own comment had said "no open/close/fd-table/lseek yet"
 since M13 and scoped that to what M13 needed. Six arcs later it was the
@@ -3669,7 +3894,7 @@ and a create touches the parent directory as well. Four is tight enough
 that a return to whole-table flushes (31) fails instantly and loose
 enough not to be a tripwire on where an inode happens to land.
 
-## M60 — The two apps people live in, finished ✅
+### M60 — The two apps people live in, finished [x]
 
 M56 called these "one feature short of being usable for real work" and
 shipped undo, paste and scrollback into them. Both were still one feature
@@ -3787,7 +4012,7 @@ written when nothing produced such a path, and the test that asserted it
 had to move from the refusal table to an assertion of its own, in both
 directions: honoured on a directory, still refused on a file.
 
-## M61 — Motion, and a compositor that meets a deadline ✅
+### M61 — Motion, and a compositor that meets a deadline [x]
 
 Windows in this OS appeared and disappeared instantly. That was not a
 missing polish detail so much as missing information: a minimized window
@@ -3873,7 +4098,7 @@ from moving the nine-row Shortcuts list into M57's 12-row face - which is
 what that face is for, and which nothing had used it for outside the file
 manager and the task manager.
 
-## M62 — The first sound this OS has ever made ✅
+### M62 — The first sound this OS has ever made [x]
 
 M48 built an entire notification system in which an error arrives in
 complete silence. Nothing here had ever driven a speaker, which makes
@@ -3967,7 +4192,7 @@ it. **An I/O APIC is now the honest prerequisite for any device this
 kernel wants to be interrupt-driven by**, and it is not written down
 anywhere else.
 
-## M63 — Somebody else's program ✅
+### M63 — Somebody else's program [x]
 
 Every binary this OS had ever run was written in this repo. This is the
 milestone that changed that, and it is the reason `argv` is in M60 and
@@ -4075,7 +4300,7 @@ near zero and wrong by 5e-8 near pi. Reducing to quadrants puts the
 argument under pi/4 where the same eight terms are good to 1e-16. A test
 that had only checked `sin(0)` and `cos(0)` would have passed throughout.
 
-## M64 — A network user space can reach ✅
+### M64 — A network user space can reach [x]
 
 M27 shipped a NIC driver, Ethernet, ARP, IPv4 and ICMP. For the
 thirty-six milestones after it, the only thing that ever used any of it
@@ -4138,7 +4363,7 @@ was already done for other reasons.
       identical, so a DHCP client that did nothing at all would produce
       an indistinguishable `[net]` log line
 
-### Progress notes
+#### Progress notes
 
 *This milestone found two ways to stop the machine, in the same eight
 lines of M27 code, and both were invisible for thirty-six milestones for
@@ -4208,7 +4433,7 @@ was handed instead of pretending to use it. And a network is exactly the
 thing that makes the permission-model entry below stop being theoretical
 - any process can now open a socket and talk to anything.
 
-## M65 — A permission model, finally worth having ✅
+### M65 — A permission model, finally worth having [x]
 
 This project declined to build one four times, in writing, and was right
 each time. `SYS_shutdown`'s own comment names what the alternative would
@@ -4269,7 +4494,7 @@ of the sentence it was waiting on have now happened.
 - [x] `caps` and `caps -a` on the command line, for the same reason
       `netconf` exists: a rule nobody can see is a rule nobody can check
 
-### Progress notes
+#### Progress notes
 
 *The grant table got shorter as it was written, and that is the finding.*
 The first draft gave `desktop_shell` `CAP_POWER` - it has "Shut down" on
@@ -4301,7 +4526,7 @@ something its launcher never intended - which is the failure a downloaded
 program actually presents, and the only one a model with no users can
 honestly claim to address.
 
-## M66 — TCP ✅
+### M66 — TCP [x]
 
 The stretch-goal entry that asked for this is one sentence long and it
 set the terms: *"Retransmission, congestion control and an eleven-state
@@ -4349,7 +4574,7 @@ somebody else's - not a loopback toy with the interesting parts left out.
       into the scheduler to get a timer is a networking milestone with a
       scheduler change hidden in it
 
-### Progress notes
+#### Progress notes
 
 *M64 argued in writing against a `type` parameter on `SYS_socket` -
 "three parameters that only ever take one value each are three ways to be
@@ -4549,7 +4774,7 @@ go-back-N retransmission is the right match for the receiver this has.
 
 ---
 
-# Where this is, and what M67+ is for
+## Where this is, and what M67+ is for
 
 Sixty-six milestones answered one question over and over: *can this be
 built from scratch?* Bootloader, long mode, paging, SMP, a filesystem
@@ -4599,7 +4824,7 @@ true, this is the thing that will cost someone their work.
 M67–M74 close those three, in that order of foundation, and then spend
 what they unlock. Nothing below needs a physical machine.
 
-## The arcs
+### The arcs
 
 | | Milestones | The claim it earns |
 |---|---|---|
@@ -4609,7 +4834,7 @@ what they unlock. Nothing below needs a physical machine.
 
 ---
 
-## M67 — A kernel that can be interrupted ✅
+### M67 — A kernel that can be interrupted [x]
 
 M64 found this, named it, and deliberately refused to fix it inside a
 networking milestone: *"The real fix is a trap gate on vector 0x80 so
@@ -4664,7 +4889,7 @@ is a performance change, and this project has never measured syscall
 cost. Changing the entry mechanism and the interrupt discipline in the
 same milestone would leave neither one bisectable.
 
-### Progress notes
+#### Progress notes
 
 *The one-line half took one line, and the audit it forces found that most
 of the work had already been done - by SMP, years of milestones ago, for
@@ -4727,7 +4952,10 @@ they are measuring. A self-test that had merely *slept* for a fixed
 interval instead would have been the fragile one.
 
 
-## M68 — Wait queues, and the end of the busy loop ✅ (second attempt)
+### M68 — Wait queues, and the end of the busy loop [x]
+
+**Status:** done on the second attempt. The first is recorded below, with
+what it found and why it was reverted.
 
 The foundational milestone of this arc, and the one everything after it
 gets cheaper because of. It needs M67 first: blocking correctly means
@@ -4770,7 +4998,7 @@ the compositor could meet a deadline. It cannot meaningfully meet one
 while every other process on the machine is permanently runnable and
 round-robin gives each of them 50 ms. M69 is not possible without this.
 
-### First attempt — what it found, and why it was reverted
+#### First attempt — what it found, and why it was reverted
 
 **Status of the FIRST attempt: implemented in full, verified as a mechanism, and reverted.** It landed on the second, after M69 built the measurement and the condition-waits it needed. Both accounts are kept, because the first one is where the bugs are.
 The work is preserved in a git stash rather than deleted. This entry is
@@ -4845,7 +5073,7 @@ itself. The stash holds the whole thing and is worth re-reading rather
 than re-deriving - the three bugs above are the expensive part, and they
 will all be waiting again.
 
-### Second attempt — what actually made it land
+#### Second attempt — what actually made it land
 
 Landed with **62/62 boot markers** and the interactive suite green,
 including pipe blocking, which is the piece that destabilised everything
@@ -4906,7 +5134,7 @@ signal to classify.
 
 
 
-## M69 — Latency you can feel ✅
+### M69 — Latency you can feel [x]
 
 **Reordered after M68's attempt.** This entry used to open "with M68
 done"; it now goes first, and M68's attempt notes above explain why in
@@ -4957,7 +5185,7 @@ copy in flight. The second is the one that matters — it is the case that
 is visibly broken today and cannot be fixed by making the compositor
 faster.
 
-### Priorities: three attempts, and what finally made them work
+#### Priorities: three attempts, and what finally made them work
 
 **They landed on the third, and the fix was not in the scheduler.**
 
@@ -5008,7 +5236,7 @@ that this milestone's instrument cannot show them paying off. The
 mechanism is right, the classification is now unfakeable in both
 directions, and the measurement to judge a better probe against exists.
 
-### Second attempt at priorities, after M68 — and the sharper conclusion
+#### Second attempt at priorities, after M68 — and the sharper conclusion
 
 Retried once M68 gave tasks a real blocked state, on the theory that
 **"this task was BLOCKED and something woke it"** is a signal a spinning
@@ -5035,7 +5263,7 @@ loop - and every wmclient program's - from poll-and-yield to
 `SYS_waitfds`. Priorities become possible the moment that lands and not
 before, and the measurement to judge them by now exists.
 
-### Progress notes
+#### Progress notes
 
 **The number, measured for the first time:**
 
@@ -5120,7 +5348,10 @@ second one.
 
 
 
-## M70 — A machine that says what happened ✅ (log, Console, painting panic)
+### M70 — A machine that says what happened [x]
+
+**Status:** done — the kernel log, the Console app, and a panic that paints
+itself.
 
 Cheap, and it unblocks the debugging of everything after it. This is the
 milestone that stops the desktop being a machine you can only diagnose
@@ -5157,7 +5388,7 @@ framebuffer, and asserts the panic text is on it — because the entire
 point is the case where the log has nowhere else to go. And a second one
 that reboots afterward and finds the crash record.
 
-### Progress notes
+#### Progress notes
 
 *What landed:* a 64 KiB ring in `klog.c` written under the lock that
 already serialised the serial port and the console, so the ring can never
@@ -5216,7 +5447,9 @@ one-slow-boot-from-a-false-failure margin that number exists to avoid.
 
 
 
-## M71 — Files worth trusting ✅ (atomic replace, unclean-mount check)
+### M71 — Files worth trusting [x]
+
+**Status:** done — atomic replace and the unclean-mount check.
 
 The trust milestone, and the one with the clearest failure story: today,
 a power cut while `text_editor` saves loses both the new document and the
@@ -5262,7 +5495,7 @@ loop at randomised offsets. Nothing else in this file has ever tested a
 failure the machine did not choose, and that is precisely the class of
 failure a filesystem exists to survive.
 
-### Progress notes
+#### Progress notes
 
 *The failure this milestone exists for, stated precisely.* `SYS_writefile`
 opens with `OPEN_TRUNCATE` and then streams. From the instant the
@@ -5331,7 +5564,7 @@ change rather than a kernel one.
 
 
 
-## Fixed — the editor could not paste, and the manifest was dead letter
+#### Fixed — the editor could not paste, and the manifest was dead letter
 
 Reported as "Ctrl+V does nothing in the text editor", failing on every
 interactive run since M67 began and reproducing on `7311549`. The cause
@@ -5377,7 +5610,7 @@ launch to be a request to the compositor**, the way the Start menu and
 shutdown already are; that is a WM-protocol change and is the right
 follow-up.
 
-### Also fixed: modifiers now travel in the event
+#### Also fixed: modifiers now travel in the event
 
 `wm_event_t` carried `time_ms` with a comment explaining exactly why - "a
 client timing a gesture has to use this rather than calling
@@ -5388,7 +5621,7 @@ same argument, never applied. It now carries `mods`, filled by the
 compositor at the instant it read the key, and `gui_terminal` and
 `text_editor` read it from the event.
 
-### Also fixed: a redirect that only worked once per process
+#### Also fixed: a redirect that only worked once per process
 
 See M72's notes. `sys_open` returns the lowest free descriptor, and the
 shell parked stdout *after* opening its redirect target - so the second
@@ -5397,7 +5630,9 @@ overwritten. Parking first makes it impossible. The kernel-side cycle is
 now a permanent self-test (`[fd]` marker), because this was blamed on the
 kernel first and the test is what makes that blame checkable.
 
-## M72 — One shell, and it can be scripted ✅ (/bin/sh, scripts, `#!`)
+### M72 — One shell, and it can be scripted [x]
+
+**Status:** done — `/bin/sh`, scripts, and `#!`.
 
 There are two shells in this repo and neither is a shell.
 [user_space/shell/shell.c](user_space/shell/shell.c) is 109 lines, takes
@@ -5437,7 +5672,7 @@ programs get rewritten as scripts and still pass. That is the honest
 test of a shell: not that it runs a command, but that something which
 used to need a compiler now does not.
 
-### Progress notes
+#### Progress notes
 
 *What landed.* `/bin/sh` is a real program - the file is
 `user_space/shell/sh.c`, renamed from `shell.c` because `#!/bin/sh` is
@@ -5537,7 +5772,7 @@ them and having children not see them is the other kind of honesty.
 
 
 
-## M73 — Names, not numbers ✅
+### M73 — Names, not numbers [x]
 
 M64 shipped `SYS_netconf` returning a DNS server address and wrote,
 carefully, that it prints *"the DNS server it was handed instead of
@@ -5580,7 +5815,7 @@ where M64 got its ratio right: a name that does not exist, a server that
 refuses, a redirect loop, a body that exceeds the cap, and a truncated
 response.
 
-### Progress notes
+#### Progress notes
 
 *The whole thing passed on the first boot it was run on*, which is worth
 recording because almost nothing in this arc did - and the reason is that
@@ -5637,7 +5872,10 @@ ordinary program does not.
 
 
 
-## M74 — The session that remembers ✅ (second attempt)
+### M74 — The session that remembers [x]
+
+**Status:** done on the second attempt. The first was built, self-tested and
+not shipped; both are recorded below.
 
 The last one, and the only one on this list that is purely about how the
 machine feels. It is last because it depends on M71 being trustworthy —
@@ -5672,7 +5910,7 @@ virtual-desktop test used, and for the same reason: a compositor that
 
 ---
 
-### First attempt — built, self-tested, and not shipped
+#### First attempt — built, self-tested, and not shipped
 
 **Status: window save/restore is implemented and its boot self-test
 passes. It is not in the tree, because it breaks seven interactive tests
@@ -5729,7 +5967,7 @@ unsaved work vetoing a shutdown, "recently opened", and a non-empty
 first-boot desktop. All three are independent of the restore mechanism
 and none was started.
 
-### Second attempt — and the milestone that made it work
+#### Second attempt — and the milestone that made it work
 
 **The gate stopped being an argument, and that was the whole fix.**
 
@@ -5970,7 +6208,7 @@ them had to answer a real question honestly rather than plausibly -
 A header written from a standard would have said the comfortable thing
 in all four places.
 
-### M75 — Environment, and a place to stand ✅
+### M75 — Environment, and a place to stand [x]
 
 - [x] `SYS_spawn` carries an `envp` alongside M60's `argv`, inherited by
       a child by default and overridable — the "environment inherited
@@ -6056,7 +6294,7 @@ kernel with an opinion about a user space it cannot see. So `init` sets
 `HOME`, `PATH`, `TMPDIR` and `SHELL` and `chdir`s to `/home`, and
 everything on the desktop descends from that.
 
-### M76 — A signal a program can catch ✅
+### M76 — A signal a program can catch [x]
 
 - [x] `SYS_signal`/`SYS_sigaction`: install a user-mode handler for
       `SIGINT`/`SIGCHLD`/`SIGTERM` and friends, invoked through a kernel
@@ -6082,7 +6320,7 @@ driven Ctrl+C is asserted to run the handler and leave the process
 alive — still listed in `SYS_taskinfo` afterward — rather than
 disappearing the way every process on this machine does today.
 
-### M77 — POSIX names for what is already here ✅
+### M77 — POSIX names for what is already here [x]
 
 - [x] `<dirent.h>`: `opendir`/`readdir`/`closedir` over `SYS_listdir`'s
       newline-separated names (M53), which already tags a directory
@@ -6152,7 +6390,7 @@ where what a process may do is decided by its capability set and never by
 a file mode, "may I write this" has no answer a `stat` could give. A
 program that wants to know should try and read the error.
 
-### M78 — Memory that can be given back ✅
+### M78 — Memory that can be given back [x]
 
 - [x] `SYS_mmap(len, prot, flags)` for anonymous mappings, `SYS_munmap`
       — a second memory primitive next to M19's `SYS_sbrk`, inside the
@@ -6232,7 +6470,7 @@ heap leaves 4 MiB this process holds until it exits. The self-test
 allocates and frees 1 MiB twenty times and requires the same address back
 every time — before this milestone that loop was the bug, not the test.
 
-### M79 — Two threads, one address space ✅
+### M79 — Two threads, one address space [x]
 
 - [x] A second schedulable context inside *one* address space — not
       `SYS_spawn`'s fresh process; the first time two of this
@@ -6358,7 +6596,10 @@ real change to every path that touches a descriptor, and nothing has
 asked for it yet. `<pthread.h>` says so at the top rather than leaving it
 to be discovered.
 
-### M80 — Somebody else's language [⊘] superseded by M99; not being resumed
+### M80 — Somebody else's language [⊘]
+
+**Status:** abandoned. Superseded by M99 and not being resumed; the attempt
+notes below record how far it got.
 
 *Superseded rather than pending — see "Before M94" below. M99 is this
 same program built the other way round, on the machine with the
@@ -6516,7 +6757,7 @@ guessed, and every one of them checked by `libctest`.
 
 
 
-## Cleanup pass — duplication, dead code, and one measurement that said no
+### Cleanup pass — duplication, dead code, and one measurement that said no
 
 Not a milestone: a sweep for things that had accumulated, done after M79
 with the same rule the rest of this file follows - a change is kept
@@ -6680,7 +6921,7 @@ static, for the same reason M80's Python was going to be. See the
 closing note for why M89 is probably the milestone that finally collects
 that deferral rather than restating it.
 
-### M81 — A filesystem that can hold somebody else's program ✅
+### M81 — A filesystem that can hold somebody else's program [x]
 
 - [x] leanfs v2 on-disk format. `LEANFS_MAX_INODES` is **192** — that is
       not a per-directory limit, it is every file on the disk — and a
@@ -6862,7 +7103,7 @@ version and geometry all agree) and `/bin` lists 48 entries where the
 build ships 47 — the one extra being the file the tool wrote, which is
 the kernel reading the tool's variable-length records correctly.
 
-### M82 — A page that arrives when it is asked for ✅
+### M82 — A page that arrives when it is asked for [x]
 
 - [x] A page-fault handler that **populates** rather than kills.
       `SYS_mmap`'s own comment is the specification: *"Backed by real
@@ -6974,7 +7215,7 @@ machine's 128 MiB of RAM, which is the property the test needs; going
 further means moving the shm window and the framebuffer's fixed mapping
 address, which is a bigger change than this milestone needs.
 
-### M83 — Two processes from one ✅
+### M83 — Two processes from one [x]
 
 - [x] `fork()`, with copy-on-write over M82's fault handler and M82's
       frame refcounts. The child gets its own address space, its own
@@ -7101,7 +7342,7 @@ free two frames. Fixing it changed the boot by 0.1 s. The fix is kept on
 its own merits and the comment says plainly that it did not buy what it
 was written to buy.
 
-### M84 — A program that replaces itself ✅
+### M84 — A program that replaces itself [x]
 
 - [x] `execve`, which tears down the calling task's address space and
       loads a new image into the same task — same pid, same cwd, same
@@ -7198,7 +7439,9 @@ goes through; exec is the call a program makes about itself, and a
 program that wants to run a script can run its interpreter. A kernel with
 an opinion about interpreters is a kernel doing the shell's job.
 
-### M85 — A terminal that is a device [~] five of six; the pty is the one left
+### M85 — A terminal that is a device [~]
+
+**Status:** five of six. The pty is the one left.
 
 - [x] A real terminal device with a line discipline: canonical mode,
       echo, erase, kill, and the raw mode an editor needs.
@@ -7313,7 +7556,7 @@ call over a buffer, which is what makes it cheap and also what makes the
 untested half untested - job control is the part that needs a process,
 and a process is what the removed test could not drive safely.
 
-### M86 — A shell that is a shell ✅
+### M86 — A shell that is a shell [x]
 
 *Was scheduled second of the five before M94 — see "Before M94" below. Two
 corrections to the bullets, from reading `sh.c` rather than this entry:
@@ -7489,7 +7732,9 @@ merely convenient. If a configure script turns out to need a foreground
 process group for something other than interactivity, the pty comes
 forward to here and this note is the record of the bet that it would not.
 
-### M87 — Files with a type, a place, and more than one name [~] five of seven; the `*at()` family is now M89's
+### M87 — Files with a type, a place, and more than one name [~]
+
+**Status:** five of seven. The `*at()` family moved to M89.
 
 *The two unfinished bullets were absorbed into M93 and did not land
 there. They move to M89 — see "Before M94" below — on the grounds that a
@@ -7695,7 +7940,10 @@ bad, which is exactly when it is being asked. It extrapolates from the
 TSC now, which counts cycles the CPU actually executed and which nothing
 coalesces.
 
-### M88 — Everything else a ported program calls [~] UTF-8, poll, the identity/limits/time calls and statvfs shipped; `O_NONBLOCK` and `AF_UNIX` are M100's
+### M88 — Everything else a ported program calls [~]
+
+**Status:** UTF-8, `poll`, the identity/limits/time calls and `statvfs`
+shipped. `O_NONBLOCK` and `AF_UNIX` moved to M100.
 
 *Reopened third of the five before M94 — see "Before M94" below. The
 second attempt is UTF-8 and the `getrlimit`/`getrusage`/`times`/
@@ -7831,7 +8079,7 @@ before them too, and "the symptom did not reproduce" was treated as "the
 cause is gone" for a symptom already known to be load-dependent. The
 check is the first user of the `poll(NULL, 0, ms)` sleep above.
 
-#### Second attempt — UTF-8, and the calls a build probes for ✅
+#### Second attempt — UTF-8, and the calls a build probes for [x]
 
 *Taken as the head of the queue the "next ten" section at the bottom of
 this file sets. The scope is the one that section names and no more:
@@ -8044,7 +8292,10 @@ that now knows what a character is. No number moved in `tests/budgets.tsv`:
 the tick accounting is two increments inside an interrupt that was
 already running, and the text path decodes bytes it was already reading.
 
-### M89 — Somebody else's userland
+### M89 — Somebody else's userland [~]
+
+**Status:** the libc surface toybox asks for has landed; the wall behind it
+has not. See the progress note below.
 
 *Scheduled fourth of the five before M94 — see "Before M94" below, which
 also hands this milestone M87's unlanded `*at()` family. This is where
@@ -8206,7 +8457,7 @@ not. Every case in `tests/test_fnmatch.c` is one POSIX tabulates, which
 is how it was caught: the table has four inputs a first implementation
 gets wrong and this was one of them.
 
-### Where this leaves M80, and the deferral M89 is likely to collect
+#### Where this leaves M80, and the deferral M89 is likely to collect
 
 **M80 becomes attemptable again after M84**, not after M89.
 `posixmodule.c`'s list — `fork`, `execv`, `waitpid`, `pipe2`, `select`,
@@ -8330,7 +8581,7 @@ answer is what this machine reports.
 
 ---
 
-### M90 — More than a gigabyte ✅
+### M90 — More than a gigabyte [x]
 
 - [x] `PMM_TRACKED_MEMORY` stops being a constant. The frame bitmap is
       sized from the e820 map at boot and allocated out of the memory it
@@ -8528,7 +8779,10 @@ was written as the real test and it stayed the real test:
 `tools/qemu-input-test.sh` passes unchanged — it grades pixels, and
 nothing in this milestone was supposed to reach them.
 
-### M91 — An address space that is a set of mappings [~] six of seven; MAP_SHARED, file-backed and mremap are the three left
+### M91 — An address space that is a set of mappings [~]
+
+**Status:** six of seven. `MAP_SHARED`, file-backed mappings and `mremap`
+are the three left.
 
 *Reopened fifth and last of the five before M94 — see "Before M94"
 below. The second attempt is `MAP_SHARED` and file-backed mappings,
@@ -8751,7 +9005,10 @@ of all five runs, which is what says that a mapping placed, replaced,
 reprotected, dropped and torn down gives every frame back through four
 different unmap paths.
 
-### M92 — A disk worth reading, and a cache in front of it [~] the driver and the cache; interrupts and AHCI deliberately not, writeback deliberately not
+### M92 — A disk worth reading, and a cache in front of it [~]
+
+**Status:** the driver and the cache landed. Interrupts, AHCI and writeback
+were all deliberately left out — see M103 and M104.
 
 - [~] A DMA block driver ~~with interrupts~~ — virtio-blk first because
       it is the smallest real one and QEMU always has it, ~~with AHCI as
@@ -8879,7 +9136,10 @@ is worth repeating before it becomes a sentence in this file.
 within 2% across runs (95405, 97280), which is what makes the ratio a
 measurement rather than a sample.
 
-### M93 — A filesystem that can hold a source tree ✅ (second attempt)
+### M93 — A filesystem that can hold a source tree [x]
+
+**Status:** done on the second attempt — see the second-attempt section below
+for the road onto the disk.
 
 *The first attempt shipped the format, hard links and `fsync` and left
 the image builder and the journal measurement open. Both landed in the
@@ -9259,8 +9519,8 @@ the precedent for a milestone reopened under the number it was given.
 
 | order | milestone | what closes | why here and not later |
 |---|---|---|---|
-| 1 | M93 (2nd) ✅ | the host-side image builder, and the journal measurement | nothing else in the arc can begin until a tarball can reach the disk |
-| 2 | M86 ✅ | the shell | M94's grading test *is* a shell script |
+| 1 | M93 (2nd) `[x]` | the host-side image builder, and the journal measurement | nothing else in the arc can begin until a tarball can reach the disk |
+| 2 | M86 `[x]` | the shell | M94's grading test *is* a shell script |
 | 3 | M88 (2nd) | UTF-8, and the calls a build probes for | every source tree in this arc has non-ASCII bytes in it |
 | 4 | M89 | toybox | a configure run shells out to `sed`, `grep`, `install`; `/bin` has six programs |
 | 5 | M91 (2nd) | `MAP_SHARED` and file-backed `mmap` | M91's own words: *"there is no version of M95 that does not need this first"* |
@@ -9306,7 +9566,7 @@ purpose and collecting them here would be this arc doing the thing the
 
 ---
 
-### M94 — A target this compiler knows by name
+### M94 — A target this compiler knows by name [ ]
 
 - [ ] `x86_64-lean_os` as a real triple in binutils and GCC: a config
       fragment, an OS name, and the default library and startup-file
@@ -9335,7 +9595,7 @@ producing a binary that runs, with zero flags supplied by hand and zero
 edits to its source. The configure script's own log is the evidence,
 because it records every test it ran and which ones this OS failed.
 
-### M95 — Code that is loaded, not linked
+### M95 — Code that is loaded, not linked [ ]
 
 - [ ] ELF `ET_DYN` and `PT_INTERP` in `kernel/proc/elf.c`, which today
       maps `PT_LOAD` at fixed addresses and checks them against
@@ -9358,7 +9618,7 @@ not the fact that both programs ran, which a static build also achieves.
 And `dlopen` of a shared object compiled *after* the program that loads
 it, resolving a symbol by name.
 
-### M96 — A thread with its own variables, and a wait that costs nothing
+### M96 — A thread with its own variables, and a wait that costs nothing [ ]
 
 - [ ] Thread-local storage properly: `%fs` base per task, `arch_prctl`
       (`ARCH_SET_FS`/`ARCH_GET_FS`), the TLS segment from `PT_TLS`, and
@@ -9386,7 +9646,7 @@ independent across a `dlopen`ed object, which is the case the
 general-dynamic model exists for and the one a local-exec-only
 implementation silently gets wrong.
 
-### M97 — C++
+### M97 — C++ [ ]
 
 - [ ] libstdc++ (GCC's own) built for the target: `operator new`/`delete`,
       static initialization and `__cxa_atexit`, `std::string`,
@@ -9411,7 +9671,7 @@ skipping a destructor is the bug this gets wrong and it looks like
 success. And a C++ program nobody here wrote, with templates,
 containers and iostreams, run unmodified.
 
-### M98 — A compiler that runs here
+### M98 — A compiler that runs here [ ]
 
 - [ ] binutils built *for* lean_os and running *on* it: `as`, `ld`, `ar`,
       `nm`, `objdump`, `strip`
@@ -9439,7 +9699,7 @@ would catch. If a full bootstrap does not fit this machine, the honest
 outcome is the *number* that says by how much, and a stage-1 compiler
 that builds a real program.
 
-### M99 — Python, built here
+### M99 — Python, built here [ ]
 
 - [ ] `./configure && make` for CPython **on the machine**, with the
       machine's own compiler — the inverse of M80, which cross-compiled
@@ -9463,7 +9723,7 @@ then the bar it said mattered more: a real script with a dict, a class,
 a loop and a file open. Then the regression suite's own numbers, which
 is a bar M80 never got to name.
 
-### M100 — What a browser actually needs, measured rather than argued
+### M100 — What a browser actually needs, measured rather than argued [ ]
 
 - [ ] Build the stack a browser links against, in dependency order, each
       one unmodified: zlib, libpng, libjpeg, freetype, harfbuzz, expat,
@@ -9635,7 +9895,7 @@ tier"* and never started.
 
 ---
 
-### M101 — Where the time actually goes ✅
+### M101 — Where the time actually goes [x]
 
 - [x] A sampling profiler in the kernel (`kernel/profile/sampler.c`): the
       PIT interrupt records the interrupted RIP into a hash table keyed
@@ -9848,7 +10108,7 @@ sample is reported as a pid and an address — resolving those needs the
 same generator pointed at each `.elf`, which is small work waiting for a
 reason.
 
-### M102 — Memory that runs out honestly ✅
+### M102 — Memory that runs out honestly [x]
 
 - [x] `pmm_alloc_frame` no longer halts the machine on any path a program
       can reach. The panicking forms stay for the boot-time callers whose
@@ -9966,7 +10226,7 @@ memory one process's open files, pipes and mappings can account for,
 which is a quota question rather than an allocation one and is not this
 milestone's.
 
-### M103 — Interrupts a real machine delivers
+### M103 — Interrupts a real machine delivers [ ]
 
 - [ ] An I/O APIC: parse the MADT's I/O APIC and Interrupt Source
       Override entries — `acpi.c` already walks that table for the
@@ -9998,7 +10258,7 @@ more than one CPU rather than being polled by whoever asked. And the
 input-to-photon budgets re-measured, because moving the tick source is
 exactly the kind of change M69's numbers exist to catch.
 
-### M104 — Writeback, and a disk that keeps up with a build
+### M104 — Writeback, and a disk that keeps up with a build [ ]
 
 - [ ] The writeback cache M92 deferred, over M103's completion
       interrupts: dirty tracking, a flush deadline, and a real queue
@@ -10027,7 +10287,7 @@ one followed by an independent reader that finds a consistent
 filesystem. A cache that makes the build faster and the crash test
 flaky has failed this milestone, not passed it with a caveat.
 
-### M105 — The journal, or the measurement that refuses it a third time
+### M105 — The journal, or the measurement that refuses it a third time [ ]
 
 - [ ] Re-measure M71's two conditions with M104's cache in place and a
       parallel build running. The first condition — *"multiple
@@ -10055,7 +10315,7 @@ scans — proven by the replay being *faster* than the scan it replaces on
 a filesystem with a build tree in it, because a journal that costs more
 than the scan is a journal that failed.
 
-### M106 — Cores a build can use
+### M106 — Cores a build can use [ ]
 
 - [ ] Per-CPU run queues, replacing the single `sched_lock` at
       `sched.c:126` that every scheduling decision on every core
@@ -10081,7 +10341,7 @@ budgets under a full parallel build, which is the first time this
 machine has had a genuinely CPU-saturated background load and the
 honest test of whether the desktop survives one.
 
-### M107 — The devices a real machine has
+### M107 — The devices a real machine has [ ]
 
 - [ ] **AHCI**, the driver M92 named and declined: port command lists,
       a command FIS, NCQ deep enough to matter, and hotplug ignored on
@@ -10112,7 +10372,7 @@ absent from the QEMU command line entirely, which is the only way to
 prove the USB path is carrying the keys rather than sitting beside a
 PS/2 driver that still works.
 
-### M108 — A real NIC, and the TCP deferrals it prices
+### M108 — A real NIC, and the TCP deferrals it prices [ ]
 
 - [ ] A driver for a NIC that exists in physical machines — Intel
       `e1000e`/`igb` or Realtek `r8169` — with descriptor rings, MSI-X
@@ -10136,7 +10396,7 @@ Then the throughput number on that link, with and without whichever of
 the three deferrals the measurement selected — and if the measurement
 selects none of them, that sentence, with the number that says so.
 
-### M109 — lean_os built on lean_os
+### M109 — lean_os built on lean_os [ ]
 
 - [ ] The kernel compiled by the compiler M98 put on this machine:
       `kernel/`, `system_api/`, `user_space/`, `tools/`, the linker
@@ -10171,7 +10431,7 @@ purpose. Failing this test with a named cause is a good outcome; passing
 it is the end of the sentence M72 started when it said some of what
 needed a cross-compiler needs a script instead.
 
-### M110 — The boot that has never happened
+### M110 — The boot that has never happened [ ]
 
 - [ ] M28's fourth box, open since M28 and the oldest unfinished line in
       this file: write `build/os-image.bin` to a USB drive with the
@@ -10292,7 +10552,7 @@ takes 200 milliseconds is a check that runs while you type.
 
 ---
 
-### Q1 — A test command, and a clock on it ✅
+### Q1 — A test command, and a clock on it [x]
 
 The cheapest milestone here and the one everything else is measured
 against. Nothing new is proved; the existing proofs get faster and get a
@@ -10319,7 +10579,7 @@ never seen this repo. And a serial run that finishes in the ~140s it
 takes rather than the 400s it is given, with the difference visible in
 `test-history.tsv`.
 
-### Q2 — The first unit test this project has ever had ✅
+### Q2 — The first unit test this project has ever had [x]
 
 Establishes the seam and the harness. Deliberately starts with the three
 easiest units, because the point of this milestone is the mechanism, not
@@ -10348,7 +10608,7 @@ if a single character of `libk.c` is corrupted. And the panic-catching
 fake proves itself by asserting `pmm_free_frame`'s double-free panic —
 the first time that branch has ever been executed by a test.
 
-### Q3 — leanfs against a RAM disk, and one format instead of two ✅
+### Q3 — leanfs against a RAM disk, and one format instead of two [x]
 
 `leanfs.c` is 2,336 lines behind a five-function block interface
 (`kernel/drivers/blk.h`). That interface is the seam; this milestone
@@ -10385,7 +10645,9 @@ introduced one-byte change to `leanfs_inode_t`'s padding in
 property run of 10,000 operations with no divergence, with the seed
 recorded so the run is repeatable.
 
-### Q4 — The stack, fed garbage on purpose ✅ (fuzzers land; the TCP state table does not)
+### Q4 — The stack, fed garbage on purpose [x]
+
+**Status:** done. The fuzzers landed; the TCP state table did not.
 
 The parsers are already careful. This milestone's job is to find out
 whether "careful" is true, and to keep it true.
@@ -10416,7 +10678,7 @@ finding this project is better off owning, which is the honest version
 of "how we'll know". Plus a state-transition table where every cell is
 either a test or an explicit "cannot happen, because".
 
-### Q5 — Every syscall told a lie ✅
+### Q5 — Every syscall told a lie [x]
 
 96 entries in `syscall_table`, each covered on its happy path by the
 milestone that added it, and none covered on the path a hostile or
@@ -10447,7 +10709,7 @@ merely buggy program takes.
 running afterwards. The interesting outcome is the first run, which is
 unlikely to print 96.
 
-### Q6 — Numbers that fail, not numbers that print ✅
+### Q6 — Numbers that fail, not numbers that print [x]
 
 M69 established that this project measures before it decides. The
 measurements exist. Nothing grades them.
@@ -10478,7 +10740,10 @@ compositor's frame path fails `make test` by name. And the ide/virtio
 rows differ by roughly the 95ms-vs-5.6ms the README already quotes,
 which is the first time that sentence has been under test.
 
-### Q7 — Pixels, all of them (partly landed: the invariant, not the baselines)
+### Q7 — Pixels, all of them (partly landed: the invariant, not the baselines) [~]
+
+**Status:** partly landed — the invariant, not the baselines. The original,
+fuller plan is kept below.
 
 *Started ahead of its place in the arc, because a person reported the bug
 it catches.* The full golden-frame harness below is still unwritten. What
@@ -10546,7 +10811,7 @@ frames for a set of canonical states, the diff image as the failure
 artifact, `make accept-visuals`, both resolutions, and the font page. The
 determinism work those need is real and is named below.
 
-### Q7 (original) — Pixels, all of them
+#### The original Q7, before it was cut down
 
 The input suite grades real pixels, which was M40's whole insight, and
 it grades 45 of them. This milestone grades the frame.
@@ -10577,7 +10842,9 @@ fails, with a diff image that shows the corner. And the suite passes
 twice in a row on the same commit, which is the property that decides
 whether any of this is usable.
 
-### Q8 — What the tests never touch ✅ (measured; the ratchet is not built)
+### Q8 — What the tests never touch [x]
+
+**Status:** done — measured. The ratchet is not built.
 
 Coverage, measured rather than argued — the same move M92 made for the
 disk and M69 made for latency.
@@ -10602,7 +10869,7 @@ disk and M69 made for latency.
 and a ratchet that fails a commit which lowers it. And the four unnamed
 files named.
 
-### Q9 — A machine that runs out of things and stays up
+### Q9 — A machine that runs out of things and stays up [ ]
 
 This is the milestone that decides whether "production grade" is a fair
 description, and it is the one most likely to change code rather than
@@ -10641,7 +10908,10 @@ single clearest before/after in this arc. And 24 hours of soak whose
 frame count, free-frame count and task-slot count end where they
 started.
 
-### Q10 — It runs without me ✅ (written, never run, then withdrawn — see *Testing is local*)
+### Q10 — It runs without me [x]
+
+**Status:** done, then withdrawn — written, never run, and removed again.
+See *Testing is local* at the end of this file.
 
 Last, because everything above needs somewhere to run, and putting this
 first would have automated a test suite that could not fail.
@@ -10897,7 +11167,9 @@ generalisation is cheap and it is Q15's whole first half.
 
 ---
 
-### Q11 — The leftovers, with conditions rather than intentions ✅ (the CI item withdrawn, not done)
+### Q11 — The leftovers, with conditions rather than intentions [x]
+
+**Status:** done, with the CI item withdrawn rather than completed.
 
 The unglamorous first entry, because an arc that opens new work while the
 last one is half-finished is how a test suite starts rotting. Each of
@@ -10932,7 +11204,7 @@ these was named in Q1-Q10's own closing section as undone.
 failing to merge. (The green-CI-badge half of this is withdrawn — see
 *Testing is local*.)
 
-### Q12 — Does this suite detect anything? Mutation testing ✅
+### Q12 — Does this suite detect anything? Mutation testing [x]
 
 The milestone this arc is arranged around, and the direct answer to a
 test that passed on a build with the bug in it.
@@ -10966,7 +11238,7 @@ output, and at least one surviving mutant in a file at 100% line
 coverage - which is the specific result that would prove the coverage
 number was never the thing worth measuring.
 
-### Q13 — The scheduler, off the machine
+### Q13 — The scheduler, off the machine [ ]
 
 2,157 lines, the most concurrency-sensitive code in the tree, and zero
 host tests. Its bugs have historically presented as "about one boot in
@@ -10999,7 +11271,7 @@ deterministic test rules out completely.
 and the M56 deadlock - a lock taken from a path an interrupt can
 re-enter - reproduced as a failing test on a build with the fix reverted.
 
-### Q14 — The compositor, off the machine
+### Q14 — The compositor, off the machine [ ]
 
 5,189 lines. The largest single file in user space, the one every visible
 bug in this project has lived in, and the one every check reaches only
@@ -11035,7 +11307,9 @@ in microseconds.
 both reproduced as failing host tests against reverted fixes, in
 milliseconds rather than by launching seven applications.
 
-### Q15 — Nothing else changed, everywhere ✅ (five invariants; one with a documented blind spot)
+### Q15 — Nothing else changed, everywhere [x]
+
+**Status:** done — five invariants, one of them with a documented blind spot.
 
 Q7 wrote `assert_stable_outside` for one bug. This makes it the default
 question the interactive suite asks.
@@ -11066,7 +11340,7 @@ fails with a diff image showing the corner, and the suite passes twice in
 a row on the same commit - which is the property that decides whether any
 of this is usable.
 
-### Q16 — Devices that fail, and a machine that keeps running
+### Q16 — Devices that fail, and a machine that keeps running [ ]
 
 Eight panics across `ata.c`, `virtio_blk.c` and `rtl8139.c` are device
 timeouts and error reports. Under QEMU they never fire. On the real
@@ -11093,7 +11367,7 @@ and every one of them is a halt.
 leaves a machine that reports an error, keeps its desktop, and mounts to
 a consistent filesystem on the next boot.
 
-### Q17 — Power cut, and a filesystem that survives it ✅
+### Q17 — Power cut, and a filesystem that survives it [x]
 
 M71's title is "Files worth trusting" and its mechanism is write ordering
 plus an unclean-mount check. Neither has ever been tested by an unclean
@@ -11120,7 +11394,7 @@ mount, because nothing has ever cut power to this machine mid-write.
 instants, and a hundred consistent filesystems - or a reproducible
 counterexample, which would be worth more.
 
-### Q18 — Latency as a distribution ✅
+### Q18 — Latency as a distribution [x]
 
 `input_to_photon_idle_us` measured 40581 on one run and 13364 on the
 next. That is a 3x swing between consecutive boots of the same image, and
@@ -11147,7 +11421,7 @@ between consecutive runs on an idle host - and if it does not, that is
 the finding, and the budget becomes a percentile of a distribution
 instead of a ceiling over a sample.
 
-### Q19 — Boot once, test many
+### Q19 — Boot once, test many [ ]
 
 Infrastructure, and the reason it is a milestone rather than a chore: the
 interactive suite boots a fresh guest per test, and it is the only tier
@@ -11172,7 +11446,9 @@ to pass quietly. The second prize is the flake in the table above: less
 time per test at the same parallelism is less contention, which is what
 produced it.
 
-### Q20 — The tests as a product ✅ (flake tracking; the rest deferred)
+### Q20 — The tests as a product [x]
+
+**Status:** done — flake tracking. The rest is deferred.
 
 Everything above adds tests. This one is about the suite as a thing
 people have to live with, and every entry now has evidence behind it
@@ -11566,7 +11842,7 @@ This section is that line.
 **A correction, recorded rather than quietly fixed.** The M101–M110
 arc's opening sentence says *"the M94–M100 arc is planned and unbuilt,
 and nothing below starts before it finishes."* Two things below it
-started anyway: M101 and M102 are both ✅ and both landed ahead of every
+started anyway: M101 and M102 are both `[x]` and both landed ahead of every
 milestone in the table above. That was not a decision anybody wrote
 down, so it gets written down now, and the cost is already visible in
 those two entries rather than hypothetical — **each of them shipped with
