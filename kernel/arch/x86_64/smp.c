@@ -13,6 +13,7 @@
 #include "mm/heap.h"
 #include "mm/vmm.h"
 #include "panic.h"
+#include "profile/sampler.h"
 #include "sched/sched.h"
 
 cpu_info_t smp_cpus[MAX_CPUS];
@@ -42,6 +43,7 @@ static volatile int initialized;
  *   offset 26  (8 bytes)  gdt_base   /  (gdt.c's gdt_get_table_ptr)
  *   offset 34  (4 bytes)  cpu_id       - this AP's index into smp_cpus[]/sched.c's per-CPU arrays
  *   offset 38  (4 bytes)  ap_ready     - 0 until ap_entry_asm_stub is done reading everything above
+ *   offset 42  (1 byte)   nx           - M106: nonzero if the BSP enabled NX, so the AP can set EFER.NXE BEFORE it turns on paging with tables that carry bit 63
  */
 #define AP_PARAMS_ADDR       0x7000ULL
 #define AP_OFF_CR3           0
@@ -51,7 +53,8 @@ static volatile int initialized;
 #define AP_OFF_GDT_BASE      26
 #define AP_OFF_CPU_ID        34
 #define AP_OFF_AP_READY      38
-#define AP_PARAMS_SIZE       42
+#define AP_OFF_NX            42
+#define AP_PARAMS_SIZE       43
 
 #define AP_TRAMPOLINE_LOAD_ADDR 0x8000ULL
 /* SIPI's vector operand IS the target physical address divided by 4 KiB -
@@ -63,6 +66,8 @@ extern const uint8_t ap_trampoline_start[];
 extern const uint8_t ap_trampoline_end[]; /* kernel/proc/embed_ap_trampoline.asm */
 extern void ap_entry_asm_stub(void);      /* kernel/arch/x86_64/ap_entry.asm */
 
+static void verify_cpu_identity(uint32_t cpu_id); /* M106 - defined below */
+
 static inline void ap_params_write64(uint64_t offset, uint64_t value) {
     *(volatile uint64_t *)(uintptr_t)(AP_PARAMS_ADDR + offset) = value;
 }
@@ -71,6 +76,9 @@ static inline void ap_params_write32(uint64_t offset, uint32_t value) {
 }
 static inline void ap_params_write16(uint64_t offset, uint16_t value) {
     *(volatile uint16_t *)(uintptr_t)(AP_PARAMS_ADDR + offset) = value;
+}
+static inline void ap_params_write8(uint64_t offset, uint8_t value) {
+    *(volatile uint8_t *)(uintptr_t)(AP_PARAMS_ADDR + offset) = value;
 }
 static inline uint32_t ap_params_read32(uint64_t offset) {
     return *(volatile uint32_t *)(uintptr_t)(AP_PARAMS_ADDR + offset);
@@ -101,6 +109,7 @@ void ap_main(uint32_t cpu_id) {
      * it. */
     vmm_enable_nx_this_cpu();
     lapic_init_this_cpu();
+    verify_cpu_identity(cpu_id); /* M106 - before anything is indexed by it */
     sched_init_ap((int)cpu_id);
 
     smp_cpus[cpu_id].online = 1;
@@ -119,13 +128,43 @@ void ap_main(uint32_t cpu_id) {
 }
 
 int smp_current_cpu(void) {
+    /* M106: `str`, not a LAPIC read and a table scan. See
+     * gdt.h's gdt_current_cpu for the whole argument - the short version
+     * is that the old one returned 0 for a core it did not recognise,
+     * which aliases that core's current_task, its TSS rsp0 and its slice
+     * counter onto the boot CPU's, and that is a corruption with no
+     * message attached to it.
+     *
+     * The two answers are cross-checked once per boot, from ap_main, so
+     * that "the TSS selector and the MADT agree about who this is" is a
+     * fact this kernel has established rather than one it assumes. */
+    return gdt_current_cpu();
+}
+
+/* M106: the check that makes replacing the lookup honest. Run once per
+ * core, at bring-up, while both answers are still available. */
+static void verify_cpu_identity(uint32_t cpu_id) {
     uint32_t id = lapic_id();
+    int by_tss = gdt_current_cpu();
+    int by_lapic = -1;
     for (int i = 0; i < MAX_CPUS; i++) {
-        if (smp_cpus[i].online && smp_cpus[i].apic_id == id) {
-            return i;
+        if (smp_cpus[i].apic_id == id && (i == 0 || (uint32_t)i <= cpu_id)) {
+            by_lapic = i;
+            break;
         }
     }
-    return 0;
+    if (by_tss != (int)cpu_id || by_lapic != (int)cpu_id) {
+        klog_puts("[smp] this core was started as cpu ");
+        klog_put_dec(cpu_id);
+        klog_puts(" but its task register says ");
+        klog_put_dec((uint32_t)by_tss);
+        klog_puts(" and its LAPIC id 0x");
+        klog_put_hex32(id);
+        klog_puts(" maps to ");
+        klog_put_dec((uint32_t)by_lapic);
+        klog_putc('\n');
+        panic("smp: a core does not agree with the kernel about which core it is");
+    }
 }
 
 int smp_is_initialized(void) {
@@ -170,6 +209,11 @@ static int start_ap(int cpu_id, uint32_t apic_id) {
     ap_params_write16(AP_OFF_GDT_LIMIT, gdt_limit);
     ap_params_write64(AP_OFF_GDT_BASE, gdt_base);
     ap_params_write32(AP_OFF_CPU_ID, (uint32_t)cpu_id);
+    /* M106: read by the trampoline before it sets CR0.PG. ap_main's
+     * vmm_enable_nx_this_cpu stays - it is still what keeps EFER.NXE set
+     * once C is running - but it can only run on a core that got here,
+     * and without this byte no core ever did. */
+    ap_params_write8(AP_OFF_NX, vmm_nx_enabled() ? 1u : 0u);
 
     /* AP_TRAMPOLINE_LOAD_ADDR is <1 MiB, always identity-mapped - see
      * vmm.c's phys_to_table for why every low-memory address is safe to
@@ -262,6 +306,26 @@ void smp_init(void) {
 void lapic_vector_handler(isr_regs_t *regs) {
     lapic_send_eoi();
     if (regs->vector == IPI_SCHEDULE_VECTOR) {
+        /* M106: this core's share of the SAMPLE, and it was missing.
+         *
+         * M101 put profile_sample in pit.c, which runs on the BSP alone -
+         * the 8259 delivers IRQ 0 to one CPU. So the profiler sampled one
+         * core out of however many, and what it reported was that core's
+         * view of the machine. On four cores the kernel busy loop in
+         * M101's own self-test migrated off the BSP and every sample the
+         * BSP took was of an idle task: samples counted, histogram empty,
+         * and the self-test panicked - which is the right outcome and the
+         * first time it could ever have happened, because every harness
+         * in this project ran -smp 1 until M106.
+         *
+         * Here rather than in a LAPIC timer of its own: this IPI is
+         * already the per-CPU tick, broadcast by the BSP's PIT, so it
+         * arrives at PIT_HZ on every core and needs no second timer to
+         * be programmed and calibrated. Ahead of the scheduler hook for
+         * exactly the reason pit.c gives - a tick that ends in a context
+         * switch never comes back to this function, so anything that must
+         * see THIS tick's interrupted RIP has to read it first. */
+        profile_sample(regs);
         /* M88: this core's share of the tick, charged before the hook
          * that may switch away from the task it belongs to. The BSP's
          * copy of this is in pit.c, next to profile_sample and for the

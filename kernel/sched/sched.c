@@ -92,6 +92,9 @@ static uint32_t aging_ticks; /* M69: BSP-only counter driving the anti-starvatio
  * from there would be re-entering the scheduler at an arbitrary point.
  * The cost of the indirection is at most one tick. */
 static volatile int need_resched[MAX_CPUS];
+
+/* M106 - see sched_peak_live_tasks, defined with the other accessors. */
+static int peak_live_tasks;
 static uint64_t loaded_pml4_phys[MAX_CPUS]; /* mirrors whatever schedule() last loaded into this CPU's own CR3, so same-address-space switches (the common case: plain kernel tasks) skip a needless TLB-flushing reload */
 
 /* Guards `tasks`/`task_count` and the pick-next/state-transition half of
@@ -143,6 +146,7 @@ static uint64_t event_seq;
 static int blocked_count;
 
 static task_t *pick_next(task_t *from);
+void sched_dump_cpus(void); /* M106 - defined below, used by the switch check */
 static void wake_expired(uint64_t now_ms);
 static void fire_expired_alarms(uint64_t now_ms); /* M89 */
 static void unblock_self(task_t *self);
@@ -194,7 +198,24 @@ void sched_debug_dump(const char *label) {
 /* Per-CPU, because "which CPU is halted" is the question - and only the
  * CPU itself ever writes its own entry, from a context that is by
  * definition not concurrent with itself. */
-static int idle_depth[MAX_CPUS];
+/* M106: deleted, and the deletion is the fix.
+ *
+ * This counter was incremented by sched_idle_enter on the CPU the task
+ * was running on and decremented by sched_idle_exit on the CPU it was
+ * running on *when it woke up*. Those are the same CPU only if the task
+ * was never migrated while it slept - which on one core is always, and on
+ * four is a coin flip. Every migration across a sleep leaked one count
+ * onto the entering CPU and swallowed one on the leaving CPU (the
+ * decrement is floor-guarded at zero), so within a few seconds of boot
+ * some CPU's depth was permanently above zero and every tick it took was
+ * counted as idle. The machine reported cores that were busy as asleep.
+ *
+ * The per-task counter M101 added right beside it has no such problem -
+ * it travels with the task, which is the thing that is actually waiting -
+ * so the per-CPU question "was this CPU idle on this tick" is answered by
+ * asking the task this CPU is running. One counter, owned by the thing it
+ * describes, and no way for a migration to desynchronise it from
+ * anything. */
 
 void sched_sleep_until(uint64_t deadline_ms) {
     int cpu = smp_current_cpu();
@@ -220,9 +241,10 @@ void sched_idle_enter(void) {
      * hundreds of times a boot - and M101's own profile is what made
      * that cost visible. */
     int cpu = smp_current_cpu();
-    idle_depth[cpu]++;
-    /* M101: the same bracket, recorded on the task as well as on the
-     * CPU. The per-CPU counter is M68's and answers "is this CPU
+    /* M106: the same bracket, recorded on the task alone. The per-CPU
+     * counter this used to raise beside it is gone - see above. The
+     * comment below is M101's and is kept because it is what explains why
+     * the per-task one is the right one: "is THIS task waiting
      * halted"; a task can be scheduled away from inside the bracket, so
      * only the per-task one answers "is THIS task waiting". Both are
      * kept because they are different questions - see task_t's field. */
@@ -243,9 +265,6 @@ int sched_task_is_idle_waiting(const task_t *t) {
 void sched_idle_exit(void) {
     uint64_t flags = irq_save_disable();
     int cpu = smp_current_cpu();
-    if (idle_depth[cpu] > 0) {
-        idle_depth[cpu]--;
-    }
     task_t *self = current_task[cpu];
     if (self && self->idle_wait_depth > 0) {
         self->idle_wait_depth--;
@@ -454,7 +473,7 @@ void scheduler_tick_cpu(int cpu) {
      * is the only clock this kernel has that fires whether or not
      * anything is running. */
     total_ticks[cpu]++;
-    if (t->is_idle || idle_depth[cpu] > 0) {
+    if (t->is_idle || sched_task_is_idle_waiting(t)) {
         /* "...and there is no real work waiting" - which needs the lock,
          * because it walks the table. An idle task running while real
          * work is queued behind it is not idle time, and counting it as
@@ -549,7 +568,15 @@ void scheduler_tick_cpu(int cpu) {
 }
 
 static void scheduler_tick(void) {
-    scheduler_tick_cpu(0); /* the BSP - the only CPU the real PIT interrupt ever reaches */
+    /* M106: whichever CPU this interrupt actually landed on, not a
+     * hardcoded 0. IRQ 0 does reach the boot CPU on both interrupt
+     * controllers this kernel drives - the 8259 has nowhere else to send
+     * it, and M103's I/O APIC routes it to the boot CPU's LAPIC on
+     * purpose - so the constant was true. It was true by a fact stated in
+     * two other files, about a path where being wrong means charging one
+     * core's tick to another core's task and demoting it on another
+     * core's behalf. `str` costs one instruction and cannot be wrong. */
+    scheduler_tick_cpu(smp_current_cpu());
     smp_broadcast_schedule_tick(); /* everyone else, via IPI - no-op single-core */
 }
 
@@ -808,6 +835,32 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
      * caller that forgets gets the *old* behaviour rather than a process
      * with no capabilities that fails in a confusing way. */
     t->caps = caller->caps;
+    /* ---- M106: and a clean scheduling class -------------------------
+     *
+     * `prio`, `full_slices` and `last_block_tick` were never set here.
+     * A slot is recycled, and M69 demotes a task that burns its slices
+     * without blocking to PRIO_BATCH - so a slot whose last occupant was
+     * a compute job handed the next occupant that demotion at birth.
+     * pick_next only returns a PRIO_BATCH task when nothing interactive
+     * wants a CPU at all, so such a task can sit TASK_READY behind a
+     * poll loop indefinitely.
+     *
+     * Found by M55's self-test on two cores, immediately after M54's 384
+     * spawn/reap rounds had left the table full of slots demoted by
+     * exactly that rule: two freshly spawned window clients were READY
+     * for five seconds and never ran once. Every other field here that a
+     * recycled slot could poison - the signal table, the mmap arena,
+     * fs_base, the CPU-time counters - was found the same way, by
+     * something that started life holding a dead task's state, and each
+     * has its own note above saying so. This is the sixth.
+     *
+     * INTERACTIVE rather than BATCH as the starting class, and the
+     * asymmetry is deliberate: M69's demotion is evidence a task gathers
+     * about itself by running, and a task that has never run has none. */
+    t->prio = PRIO_INTERACTIVE;
+    t->full_slices = 0;
+    t->last_block_tick = pit_get_ticks();
+
     /* M63: a clean FPU, not an inherited one. Deliberately *not* copied
      * from the caller the way the fd table above is: descriptors are
      * something a child is meant to inherit and floating-point registers
@@ -857,6 +910,20 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     *(--sp) = 0; /* r14 */
     *(--sp) = 0; /* r15 */
     t->rsp = (uint64_t)sp;
+
+    /* M106 - see sched_peak_live_tasks. Inside the same critical section
+     * that publishes the task, so the count includes it. */
+    {
+        int live = 0;
+        for (int i = 0; i < task_count; i++) {
+            if (tasks[i].state != TASK_FREE) {
+                live++;
+            }
+        }
+        if (live > peak_live_tasks) {
+            peak_live_tasks = live;
+        }
+    }
 
     spin_unlock(&sched_lock);
     irq_restore(flags);
@@ -1281,6 +1348,33 @@ void schedule(void) {
         return;
     }
 
+    /* ---- M106: two CPUs must never be on one stack -----------------
+     *
+     * The invariant this kernel's whole SMP design rests on, and the one
+     * nothing checked: a task is RUNNING on at most one CPU. Everything
+     * else follows from it - a task's kernel stack, its saved rsp, its
+     * FPU area and its TSS rsp0 are all single-owner state, and two cores
+     * resuming one task means two cores executing on one stack, which
+     * presents as a garbage rip in low memory and rflags with NT and DF
+     * set. That is exactly what the first four-core boot produced.
+     *
+     * Checked rather than argued because it costs MAX_CPUS compares under
+     * a lock that is already held, on a path that is already doing a
+     * CR3 reload and an FPU save. If it ever fires it names the two CPUs,
+     * which is a diagnosis rather than a symptom. */
+    for (int c = 0; c < MAX_CPUS; c++) {
+        if (c != cpu && current_task[c] == next) {
+            klog_puts("[sched] cpu ");
+            klog_put_dec((uint32_t)cpu);
+            klog_puts(" picked task '");
+            klog_puts(next->name[0] ? next->name : "(unnamed)");
+            klog_puts("' which cpu ");
+            klog_put_dec((uint32_t)c);
+            klog_puts(" is already running\n");
+            panic("sched: one task, two CPUs - a stack with two owners");
+        }
+    }
+
     if (prev->state == TASK_RUNNING) {
         prev->state = TASK_READY;
     }
@@ -1312,6 +1406,40 @@ void schedule(void) {
      * a path somebody adds later. */
     cpu_write_msr(MSR_FS_BASE, next->fs_base);
 
+    /* ---- M106: is this CPU standing where it thinks it is? ---------
+     *
+     * context_switch writes the CURRENT stack pointer into prev->rsp. If
+     * `prev` is not the task whose stack this CPU is actually on, that
+     * write puts one task's resume point inside another task's stack, and
+     * the machine dies later, somewhere else, in a way that looks like a
+     * scheduler bug one step removed from wherever it started. Three
+     * boots of chasing exactly that is why this is here.
+     *
+     * Only for a task with a stack this table owns: task 0 is on the boot
+     * stack and an AP's cpu-idle identity is on its own boot stack, and
+     * neither is described by kernel_stack_top (both are 0, deliberately
+     * - see sched_init_ap). */
+    if (prev->kernel_stack_top != 0) {
+        uint64_t sp;
+        __asm__ volatile("movq %%rsp, %0" : "=r"(sp));
+        uint64_t base = (uint64_t)(uintptr_t)prev->stack_base;
+        if (sp < base || sp >= prev->kernel_stack_top) {
+            klog_puts("[sched] cpu ");
+            klog_put_dec((uint32_t)cpu);
+            klog_puts(" is switching away from '");
+            klog_puts(prev->name[0] ? prev->name : "(unnamed)");
+            klog_puts("' (stack 0x");
+            klog_put_hex64(base);
+            klog_puts("..0x");
+            klog_put_hex64(prev->kernel_stack_top);
+            klog_puts(") while standing on rsp=0x");
+            klog_put_hex64(sp);
+            klog_putc('\n');
+            sched_dump_cpus();
+            panic("sched: this CPU is not on the stack of the task it thinks it is running");
+        }
+    }
+
     /* sched_lock is still held here on purpose - see its own header
      * comment for why, and for exactly where/how it gets released once
      * `prev` (this exact call frame) is resumed. */
@@ -1330,6 +1458,30 @@ void schedule(void) {
      * handler (scheduler_tick_cpu). */
     spin_unlock(&sched_lock);
     irq_restore(flags);
+}
+
+/* M106: every CPU's idea of what it is running, printed beside a fault.
+ * A fault report on four cores that names only the faulting core cannot
+ * distinguish "this task went wrong" from "this CPU's view of the world
+ * went wrong", and those have completely different causes. Reads without
+ * the lock deliberately: it is called from a fault handler, where taking
+ * a lock another core may hold is how a diagnostic turns into a hang. */
+void sched_dump_cpus(void) {
+    for (int c = 0; c < MAX_CPUS; c++) {
+        task_t *t = current_task[c];
+        if (!t) {
+            continue;
+        }
+        klog_puts("  cpu");
+        klog_put_dec((uint32_t)c);
+        klog_puts("=");
+        klog_puts(t->name[0] ? t->name : "(unnamed)");
+        klog_puts("/0x");
+        klog_put_hex32((uint32_t)t->id);
+        klog_puts(" kstack=0x");
+        klog_put_hex64(t->kernel_stack_top);
+    }
+    klog_putc('\n');
 }
 
 void sched_deliver_pending_signal(void) {
@@ -1524,6 +1676,46 @@ int sched_task_count(void) {
     return task_count;
 }
 
+/* ---- M106: the two ceilings, watched rather than guessed ------------
+ *
+ * M106's own bullet asks for MAX_TASKS and MAX_FDS "raised to whatever a
+ * parallel build actually asks for" and adds "the new numbers are set by
+ * the failure, not by rounding up". There is no failure to set them by:
+ * nothing on this machine has ever come close to either. So instead of
+ * rounding up, the peaks are recorded and reported on every graded boot,
+ * and the day something does approach a ceiling the number says so.
+ *
+ * The task peak is maintained at spawn, where a table walk is already
+ * cheap next to an address space. The fd high-water is a walk of the
+ * whole table and is asked for only at the marker. */
+int sched_peak_live_tasks(void) {
+    return peak_live_tasks;
+}
+
+int sched_fd_high_water(int *which_task_out) {
+    int best = 0;
+    uint64_t f = spin_lock_irqsave(&sched_lock);
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_FREE) {
+            continue;
+        }
+        int used = 0;
+        for (int k = 0; k < MAX_FDS; k++) {
+            if (tasks[i].fds[k].type != FD_NONE) {
+                used++;
+            }
+        }
+        if (used > best) {
+            best = used;
+            if (which_task_out) {
+                *which_task_out = tasks[i].id;
+            }
+        }
+    }
+    spin_unlock_irqrestore(&sched_lock, f);
+    return best;
+}
+
 int sched_live_task_count(void) {
     int n = 0;
     for (int i = 0; i < task_count; i++) {
@@ -1550,8 +1742,60 @@ void sched_reap_slot(task_t *t) {
     if (!t || t->state != TASK_TERMINATED) {
         return;
     }
-    uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    /* ---- M106: wait until it is actually off its stack ---------------
+     *
+     * task_exit_with_code marks a task TERMINATED and wakes its parent
+     * BEFORE calling schedule(), so on more than one core the parent can
+     * arrive here while the corpse is still executing on the kernel stack
+     * this function is about to hand back to the frame allocator. What
+     * that produced is in M106's notes: two contexts on one stack, and a
+     * context_switch that popped somebody else's frame.
+     *
+     * "Has it left its stack" is asked directly rather than tracked with
+     * a flag, and the second attempt is why. The first kept an `on_cpu`
+     * bit handed from the outgoing task to the incoming one across every
+     * switch; it leaked - a task ended up TERMINATED, current on no CPU,
+     * and still marked on - and a flag that can be wrong about this is
+     * worse than no flag, because the thing it guards is a stack.
+     *
+     * The exact question is "is this task current on any CPU", and
+     * sched_lock is what makes the answer exact. A task stops being
+     * current only inside schedule(), which holds this lock across the
+     * switch - so a corpse that is not current while we hold the lock
+     * cannot be mid-switch either. The lock is taken and dropped around
+     * each attempt rather than held across the wait, because the corpse's
+     * own route off its stack goes through schedule(), which needs it.
+     */
+    uint64_t flags;
+    {
+        uint64_t deadline = pit_get_ticks() + PIT_HZ; /* 1s - a ceiling, not a guess */
+        for (;;) {
+            flags = irq_save_disable();
+            spin_lock(&sched_lock);
+            int still_running = 0;
+            for (int c = 0; c < MAX_CPUS; c++) {
+                if (current_task[c] == t) {
+                    still_running = 1;
+                    break;
+                }
+            }
+            if (!still_running) {
+                break; /* the lock stays held - the reap body runs under it */
+            }
+            spin_unlock(&sched_lock);
+            irq_restore(flags);
+            if (pit_get_ticks() > deadline) {
+                klog_puts("[sched] '");
+                klog_puts(t->name[0] ? t->name : "(unnamed)");
+                klog_puts("' pid 0x");
+                klog_put_hex32((uint32_t)t->id);
+                klog_puts(" is terminated and still on a CPU\n");
+                sched_dump_cpus();
+                panic("sched_reap_slot: a terminated task never left its kernel stack");
+            }
+            __asm__ volatile("pause");
+        }
+    }
     /* The kernel stack goes back rather than at exit, because at exit the
      * task was still running on it. By now it has been switched away from
      * for good - a TERMINATED task is never picked again, and the
@@ -1629,6 +1873,9 @@ void sched_reap_slot(task_t *t) {
     t->child_user_ticks = 0;
     t->child_sys_ticks = 0;
     t->exit_signal = 0; /* M84: not killed until something kills it */
+    t->exit_code = 0;   /* M106: a free slot holds no verdict either - a stale one made M55's diagnostic report a segfault that never happened */
+    t->prio = PRIO_INTERACTIVE; /* M106 - see the note at the spawn site */
+    t->full_slices = 0;
     t->parent_id = -1;
     t->caps = 0; /* M65: a free slot holds no authority, so a stale pointer to one cannot lend any */
     sched_reset_fds_to_std(t);

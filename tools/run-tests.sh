@@ -178,6 +178,14 @@ else
   run_stage "boot self-tests, graded against every marker" \
     ./tools/qemu-serial-test.sh
 
+  # M106: four cores. A separate harness rather than a flag on the one
+  # above, and tools/smp-test.sh's own header says why at length - the
+  # short version is that this kernel had never started a second core in
+  # a test, and what that hid was five real bugs. In the default tier
+  # because it is a two-minute boot and it is the only thing standing
+  # between the multi-core path and rotting again the same way.
+  run_stage "four cores, and the work shared between them" ./tools/smp-test.sh
+
   # M103: and the same battery again with every legacy line routed
   # through the I/O APIC instead of the 8259. In `--full` only, because
   # it is a second ~250-second boot and because the default path is the

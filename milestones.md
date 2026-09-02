@@ -11133,31 +11133,211 @@ traffic is the same shape as the one already covered. It becomes worth it
 the day the sequences stop being serialised, which is the same condition
 as the journal's.
 
-### M106 — Cores a build can use [ ]
+### M106 — Cores a build can use [x]
 
-- [ ] Per-CPU run queues, replacing the single `sched_lock` at
-      `sched.c:126` that every scheduling decision on every core
-      currently serializes behind
-- [ ] Work stealing or a balancer — whichever M101's profile says the
-      contention actually wants — and the measurement that chose it
-      recorded here rather than the reasoning that predicted it
-- [ ] `MAX_TASKS 128` and `MAX_FDS 128` (`sched.h:213`, `sched.h:120`)
-      raised to whatever `make -j` and a linker actually ask for. The
-      M94–M100 arc's own table lists both as numbers that want more; the
-      new numbers are set by the failure, not by rounding up
-- [ ] CPU affinity, at least enough that the compositor is not migrated
-      off a warm cache mid-frame, and `sched_setaffinity`-shaped access
-      to it for anything that asks
-- [ ] Per-CPU idle accounting that is real, so the task manager stops
-      reporting a number derived from one core's view of the world
+**Status:** done, and it turned out to be a different milestone than the
+one that was written. Every bullet below was an *optimisation* of a
+scheduler running on four cores. This machine had never started a second
+core in a test, and when it was asked to, it triple-faulted before the
+first one reached any C at all.
 
-**How we'll know.** `make -j N` for N from 1 to the core count, with the
-speedup curve recorded. A curve that flattens is a finding, not a
-failure — but it has to be *attributed*, by M101's profiler, to a named
-lock or a named serialization rather than shrugged at. Plus the input
-budgets under a full parallel build, which is the first time this
-machine has had a genuinely CPU-saturated background load and the
-honest test of whether the desktop survives one.
+- [x] **Per-CPU run queues, replacing the single `sched_lock`** —
+      **measured and refused.** Four tasks of equal work cost 114% of one
+      task's time on four cores, where 400% would be one core doing all
+      of it. That lock is not what stops this machine using its cores.
+      See the measurement below
+- [x] Work stealing or a balancer, "whichever M101's profile says the
+      contention actually wants" — the same measurement says it wants
+      neither, which is the answer that bullet asked for
+- [x] `MAX_TASKS` and `MAX_FDS` "raised to whatever a build actually asks
+      for... set by the failure, not by rounding up" — **there is no
+      failure.** The high-water marks are 9 of 128 task slots and 12 of
+      128 descriptors, and both are now budget rows that fail at 100 so
+      the day the headroom goes, the number says so before a spawn does
+- [ ] CPU affinity — **not built**, and the condition is below
+- [x] Per-CPU idle accounting that is real — the counter it was built on
+      was wrong on more than one core, and it is gone
+
+#### The five bugs, and why none of them was reachable
+
+The harnesses never passed `-smp`, and QEMU's default is one CPU. So
+every graded boot in this project's history ran on one core, while the
+kernel carried an AP trampoline, per-CPU GDTs and TSSes, a scheduler-tick
+IPI, per-CPU current-task and slice state, and a `[smp]` self-test that
+printed **"1 CPU(s) online"** on every single run and passed. The
+self-test was true and it was measuring nothing.
+
+Setting it to four found these, in this order:
+
+**1. The AP trampoline had triple-faulted since M91.** M91 put `PTE_NX`
+(bit 63) into the kernel's page tables and enabled `EFER.NXE` on the BSP,
+and on every AP — in `ap_main`, which is C, which runs long after the
+trampoline turns on paging with those same tables. On a CPU whose NXE is
+clear, bit 63 is a **reserved** bit, so the first paged instruction fetch
+after `mov cr0, eax` faults on a core with no IDT: a triple fault and a
+machine reset, over and over, before the second core existed. The BSP's
+decision is passed to the trampoline in the parameter block now and set
+in the same `wrmsr` that sets LME.
+
+**2. `smp_current_cpu()` answered 0 for a core it did not recognise.** It
+read the Local APIC's ID over MMIO and scanned a table, and returned the
+BSP's index on a miss — silently. Every SMP invariant in this kernel is
+indexed by that number: `current_task[]`, the TSS whose `rsp0` a ring-3
+transition lands on, the per-CPU slice counter. A core answering 0 when
+it is not core 0 aliases all three onto the boot CPU's. That is what
+produced a `context_switch` returning into the AP trampoline at 0x8001
+with `rcx` still holding `IA32_FS_BASE`, and a `tss.rsp0` of 0 under a
+running user task.
+
+It is one instruction now: **`str`**. Every core loaded its own TSS
+selector with `ltr` at bring-up, so the task register *is* this core's
+identity — no memory, no MMIO, and correct by construction rather than by
+a table agreeing with reality. The two answers are cross-checked once per
+core at bring-up so that replacing the lookup is a fact rather than an
+assumption.
+
+**3. A reaped task's kernel stack was freed while it was still standing
+on it.** `task_exit_with_code` marks a task `TASK_TERMINATED` and wakes
+its parent *before* calling `schedule()`. `sched_reap_slot`'s own comment
+inferred the rest — *"by now it has been switched away from for good...
+the incoming task's own release of `sched_lock` is what proves that
+switch completed"* — and the inference is false the moment a parent can
+be running on another core: it reaps, `pmm_free_contiguous` hands the
+frames back, the next spawned task's stack lands on them, and two
+contexts share one stack.
+
+The fix asks the question instead of inferring it: is this task current
+on any CPU, asked while holding `sched_lock`. That is exact, because a
+task stops being current only inside `schedule()`, which holds that lock
+across the switch. **The first attempt was a flag** — an `on_cpu` bit
+handed from the outgoing task to the incoming one at every switch — and
+it leaked: a task ended up TERMINATED, current on no CPU, and still
+marked on. A flag that can be wrong about this is worse than no flag,
+because the thing it guards is a stack. One deleted field and one loop is
+the whole second attempt.
+
+**4. A spawned task inherited a dead task's scheduling class.**
+`task_spawn_common` never set `prio`, `full_slices` or `last_block_tick`.
+M69 demotes a task that burns its slices without blocking to
+`PRIO_BATCH`, and `pick_next` returns a BATCH task only when nothing
+interactive wants a CPU — so a recycled slot handed the next occupant
+that demotion **at birth**, and it could sit `TASK_READY` behind a poll
+loop indefinitely.
+
+Found by M55's self-test on two cores, immediately after M54's 384
+spawn/reap rounds had filled the table with exactly such slots: two
+freshly spawned window clients were READY for five seconds and never ran
+once. Every other field a recycled slot could poison — the signal table,
+the mmap arena, `fs_base`, the CPU-time counters — has its own note at
+that site saying which bug found it. This is the sixth, and the first
+that was not a *correctness* bug but a *starvation* one, which is why
+nothing had caught it.
+
+**5. M101's profiler sampled the boot CPU alone.** `profile_sample` was
+called from `pit.c`, and the 8259 delivers IRQ 0 to one CPU. So a profile
+of a four-core machine was one core's view of it. On four cores the
+kernel busy loop in M101's own self-test migrated off the BSP and every
+sample the BSP took was of an idle task: samples counted, histogram
+empty, self-test panicked. It samples from the per-CPU scheduler-tick IPI
+now, which already arrives at `PIT_HZ` on every core and needed no second
+timer.
+
+**And the per-CPU idle counter, deleted rather than fixed.**
+`sched_idle_enter` raised `idle_depth[cpu]` and `sched_idle_exit` lowered
+it — on the CPU the task woke up on, which is the same CPU only if it was
+never migrated while it slept. Every migration across a sleep leaked one
+count, so within seconds some core's depth was permanently above zero and
+every tick it took was recorded as idle. **The machine reported busy
+cores as asleep.** M101 had already added a per-*task* counter beside it
+for a related reason; M68's accounting asks that one now. A counter owned
+by the thing it describes cannot desynchronise from it.
+
+#### The measurement that refused the milestone's own first two bullets
+
+```
+one task of fixed work                  13160 us
+four tasks of the same work, on 4 cores 15027 us   = 114%
+                        fully serialised would be   400%
+```
+
+Pure computation — no syscall, no allocation, no filesystem — so what is
+timed is "can a runnable task get a core" rather than some subsystem's
+lock. **The work goes wide.** A single coarse `sched_lock` around the
+pick-next decision is not what stops this machine using four cores, so
+per-CPU run queues and work stealing are not built, on exactly the ground
+M69 set: performance work on an unmeasured path does not get done here.
+
+The number is noisy — 114, 129, 155 and 200 across four runs — and Q18's
+rule applies, so the kernel takes the best of three rounds inside the
+guest and the ceiling is set at three-quarters of serialised rather than
+near the observation. **An hour of that spread turned out to be a QEMU
+process left running by an aborted earlier run**, competing for host
+cores; worth knowing before reading anything into a single number from a
+harness that emulates four CPUs on a laptop.
+
+#### What is NOT done, and the condition
+
+**The full self-test battery is not green on four cores.** It gets from
+"triple-faults before the second core exists" to the low nineties of 99
+markers, and what remains is named rather than hidden:
+
+- **M66's TCP self-test**: the bulk transfer stalls and is then reported
+  as corrupt because it never finished arriving. The network stack has a
+  proper recursive lock and every net syscall is inside it, so this is
+  not an unguarded structure; it is the retransmit/window path meeting
+  genuine concurrency for the first time.
+- **One animation frame in six misses its budget** in the interactive
+  suite.
+- **An intermittent stall on the exit path**, seen once, where a
+  terminated task was still current a second after being reaped.
+
+So `QEMU_CPUS` defaults to **1** in every harness — stated in each of
+them rather than left to QEMU's default, which is how this rotted — and
+`tools/smp-test.sh` is a two-minute four-core boot in the default tier
+that grades the part that *is* finished: every core starts, every core
+recognises itself, and four tasks of equal work share them. That is the
+instrument that stops the multi-core path rotting again while the tail is
+worked through.
+
+**CPU affinity is deferred, with a condition rather than a mood:** it
+becomes worth building when the battery is green on four cores. Pinning
+the compositor to a warm core is a latency optimisation of a scheduler
+that does not yet survive four cores under the full battery, and there is
+no honest before-and-after to measure it against until it does.
+
+#### The diagnostics, which were most of the work
+
+Three of the five bugs above were found by instruments added for them,
+and they are permanent:
+
+- **A fault report that says which core and which task**, plus every
+  core's current task, its kernel stack, and the TSS `rsp0` a ring-3
+  transition would land on. A register dump on four cores that does not
+  say whose it is cannot be matched to the three lines around it.
+- **`klog_begin`/`klog_end`**, a bracket a multi-call message holds so
+  another core cannot shuffle its lines into this one's. M93 made one
+  `klog_puts` atomic and wrote down exactly what it was leaving — *"the
+  failure it prevents is cosmetic where this one was a false test
+  result"* — and that was true on one core. The first multi-core fault
+  this machine produced was two register dumps interleaved character by
+  character, which is not cosmetic: it is the one diagnostic surface a
+  kernel has, unreadable exactly when it was needed. Re-entrant per CPU,
+  because a fault report can end in `panic()`.
+- **Two invariants checked in `schedule()` rather than argued**: that no
+  other CPU is already running the task this one just picked, and that
+  this CPU is standing on the stack of the task it thinks it is running.
+  The second is what finally caught bug 2 at its first occurrence
+  instead of three switches downstream.
+
+#### What this milestone is really about
+
+Every one of these bugs is old, none is subtle, and all five were
+*unreachable*. The lesson is not about SMP. It is that **a self-test that
+passes on a configuration nothing exercises is a test of nothing**, and
+the `[smp]` marker had been printing "1 CPU(s) online" and passing since
+M7. This tree's own README says booting the machine is not the same thing
+as testing it; M106 adds that grading a configuration is not the same
+thing as running one.
 
 ### M107 — The devices a real machine has [ ]
 

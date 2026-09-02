@@ -9,7 +9,9 @@
  *
  * Sampling happens at PIT_HZ per CPU: 800 acquisitions a second on an
  * eight-core machine, each holding the lock for a hash and a short
- * probe. Sharding would remove contention that has never been measured
+ * probe. (M106: "per CPU" became true rather than aspirational - until
+ * then profile_sample was only called from pit.c, which is the BSP's
+ * interrupt alone. See smp.c's lapic_vector_handler.) Sharding would remove contention that has never been measured
  * and would multiply this table's memory by MAX_CPUS, for a structure
  * whose whole job is to be read as one merged histogram anyway. If a
  * profile of the profiler ever shows this lock, that is a measurement

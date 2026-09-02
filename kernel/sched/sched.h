@@ -522,14 +522,21 @@ typedef struct task {
     /* M101: how deep this TASK is inside a sched_idle_enter/exit bracket
      * - a task halted waiting for the clock, which pit_sleep_ms does.
      *
-     * There is already a per-CPU idle_depth doing M68's accounting, and
-     * the profiler tried to use it first. It cannot: the bracket in
+     * There was a per-CPU idle_depth doing M68's accounting, and the
+     * profiler tried to use it first. It could not: the bracket in
      * pit_sleep_ms wraps a `hlt` loop that the timer interrupt can
      * schedule *away* from, so the next task to run on that CPU finds
      * the counter still raised and looks idle while it is working. That
      * mistake classified an entire kernel busy loop as idle time and was
      * caught by this milestone's own self-test. The counter that answers
-     * "is this task waiting" has to live on the task. */
+     * "is this task waiting" has to live on the task.
+     *
+     * M106 deleted the per-CPU counter outright and made M68's own idle
+     * accounting ask this one instead. On four cores it had a second and
+     * worse failure: enter and exit ran on different CPUs whenever a task
+     * migrated while it slept, so the count leaked upward on one core
+     * until every tick it took was recorded as idle. A counter owned by
+     * the thing it describes cannot desynchronise from it. */
     uint8_t idle_wait_depth;
     /* ---- M75: a place to stand, and something to stand there with -----
      *
@@ -1069,6 +1076,11 @@ int sched_task_count(void);
 /* M54: how many slots are currently occupied. What "[sched] task table at
  * handoff" reports now, and the number MAX_TASKS is a ceiling on. */
 int sched_live_task_count(void);
+/* M106: the high-water marks behind MAX_TASKS and MAX_FDS, so the day
+ * either ceiling is approached the number says so rather than a spawn
+ * failing. See sched.c. */
+int sched_peak_live_tasks(void);
+int sched_fd_high_water(int *which_task_out);
 
 /* M54: releases a terminated task's slot back to the table - its kernel
  * stack freed and its generation bumped, so its pid can never be
@@ -1085,6 +1097,7 @@ int sched_live_task_count(void);
  * before; the population that stopped consuming the table is the one that
  * was always reaped and never gave anything back - the boot self-tests. */
 void sched_reap_slot(task_t *t);
+void sched_dump_cpus(void); /* M106 - see sched.c */
 
 /* M40: drops every fd this task holds except stdin/stdout, restoring the
  * table a freshly-spawned process would have started with.

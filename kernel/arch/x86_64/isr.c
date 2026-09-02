@@ -6,6 +6,8 @@
 #include "ioapic.h" /* M103 - which controller this machine has */
 #include "lapic.h"  /* M103 - lapic_send_eoi */
 #include "pic.h"
+#include "gdt.h"
+#include "mm/vmm.h"
 #include "smp.h"    /* M103 - smp_current_cpu, for the per-CPU counters */
 #include "sched/sched.h" /* M52 - task_exit_with_code/sched_current, so a ring-3 fault kills one task instead of the machine */
 #include "signal.h"      /* system_api/include/signal.h - SIGSEGV, the exit code a killed-for-faulting task gets */
@@ -34,6 +36,24 @@ static uint64_t read_cr2(void) {
 }
 
 static void dump_regs(isr_regs_t *r) {
+    /* M106: which core, and which task. On one CPU both were implicit;
+     * on four, a register dump that does not say whose it is cannot be
+     * matched to the other three lines around it. */
+    {
+        task_t *t = sched_current();
+        klog_puts("  cpu=");
+        klog_put_dec((uint32_t)smp_current_cpu());
+        klog_puts(" task=");
+        klog_puts(t && t->name[0] ? t->name : "(none)");
+        klog_puts(" pid=0x");
+        klog_put_hex32((uint32_t)(t ? t->id : -1));
+        klog_puts(" tss.rsp0=0x");
+        klog_put_hex64(tss_get_rsp0(smp_current_cpu()));
+        klog_puts(" kstack_top=0x");
+        klog_put_hex64(t ? t->kernel_stack_top : 0);
+        klog_putc('\n');
+        sched_dump_cpus(); /* M106 - every core's view, not just this one */
+    }
     klog_puts("  vector=0x");
     klog_put_hex64(r->vector);
     klog_puts(" error_code=0x");
@@ -51,6 +71,46 @@ static void dump_regs(isr_regs_t *r) {
     if (r->vector == PAGE_FAULT_VECTOR) {
         klog_puts("\n  cr2=0x");
         klog_put_hex64(read_cr2());
+    }
+    /* M106: the general registers, which this dump never had. A fault at
+     * an address that is one byte inside an instruction says the control
+     * transfer that got there was wrong, and the only way to tell a bad
+     * `ret` from a bad `call *%rax` apart is to see what was in the
+     * registers. */
+    klog_puts("\n  rax=0x");
+    klog_put_hex64(r->rax);
+    klog_puts(" rbx=0x");
+    klog_put_hex64(r->rbx);
+    klog_puts(" rcx=0x");
+    klog_put_hex64(r->rcx);
+    klog_puts("\n  rdx=0x");
+    klog_put_hex64(r->rdx);
+    klog_puts(" rsi=0x");
+    klog_put_hex64(r->rsi);
+    klog_puts(" rdi=0x");
+    klog_put_hex64(r->rdi);
+    klog_puts("\n  rbp=0x");
+    klog_put_hex64(r->rbp);
+    klog_puts(" r10=0x");
+    klog_put_hex64(r->r10);
+    /* M106: the bytes AT the faulting rip. A fault whose rip is one byte
+     * inside a known instruction has two possible causes that look
+     * identical in a register dump - a control transfer that went to the
+     * wrong place, or a text page that is no longer this program's - and
+     * sixteen bytes of memory tells them apart in one boot instead of
+     * three. Only for a fault whose rip is mapped in the address space
+     * this CPU is already running under, so reading it cannot fault. */
+    {
+        task_t *ft = sched_current();
+        if (r->rip != 0 && ft &&
+            vmm_user_range_ok(ft->pml4_phys, r->rip, 16, 0)) {
+            const uint8_t *code = (const uint8_t *)(uintptr_t)r->rip;
+            klog_puts("\n  code@rip=");
+            for (int i = 0; i < 16; i++) {
+                klog_put_hex32(code[i]);
+                klog_putc(' ');
+            }
+        }
     }
     klog_putc('\n');
 }
@@ -78,8 +138,10 @@ static void dump_regs(isr_regs_t *r) {
  * which it was. */
 void isr_handler(isr_regs_t *r) {
     if (r->vector == BREAKPOINT_VECTOR) {
+        uint64_t msg = klog_begin();
         klog_puts("[isr] breakpoint (int3) hit - resuming\n");
         dump_regs(r);
+        klog_end(msg);
         return;
     }
 
@@ -152,6 +214,10 @@ void isr_handler(isr_regs_t *r) {
      * has always carried. */
     if ((r->cs & 3) == 3) {
         task_t *t = sched_current();
+        /* M106: one report, not four cores' worth of lines shuffled
+         * together. See klog.c on why this bracket exists and why it has
+         * to be re-entrant - the same report can end in panic(). */
+        uint64_t msg = klog_begin();
         klog_puts("\n[isr] ring-3 fault: ");
         klog_puts(exception_name(r->vector));
         klog_puts(" in task ");
@@ -160,6 +226,7 @@ void isr_handler(isr_regs_t *r) {
         klog_put_hex32((uint32_t)(t ? t->id : -1));
         klog_puts(" - terminating it, not the machine\n");
         dump_regs(r);
+        klog_end(msg);
         /* noreturn: a TERMINATED task is never scheduled again, so the
          * interrupt frame this was called from is simply abandoned along
          * with the rest of that task's kernel stack. Exactly what the
@@ -169,10 +236,12 @@ void isr_handler(isr_regs_t *r) {
         task_exit_with_signal(SIGSEGV);
     }
 
+    uint64_t msg = klog_begin();
     klog_puts("\n*** UNHANDLED CPU EXCEPTION: ");
     klog_puts(exception_name(r->vector));
     klog_puts(" ***\n");
     dump_regs(r);
+    klog_end(msg);
     panic("unrecoverable CPU exception");
 }
 

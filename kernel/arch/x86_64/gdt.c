@@ -125,6 +125,14 @@ void gdt_init_ap(int cpu_id) {
     tss_flush(gdt_tss_selector(cpu_id));
 }
 
+/* M106: what the CPU will actually use for a ring-3 -> ring-0 transition.
+ * A double fault whose first fault was "could not push an interrupt frame"
+ * is indistinguishable from any other double fault unless the dump says
+ * what rsp0 was, so the fault reporter asks. */
+uint64_t tss_get_rsp0(int cpu_id) {
+    return tss[cpu_id].rsp0;
+}
+
 void tss_set_rsp0(int cpu_id, uint64_t rsp0) {
     tss[cpu_id].rsp0 = rsp0;
 }

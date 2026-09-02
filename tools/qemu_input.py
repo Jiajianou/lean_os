@@ -210,6 +210,14 @@ class Machine:
 
         self._proc = subprocess.Popen([
             "qemu-system-x86_64",
+            # M106: stated rather than defaulted, for the reason
+            # tools/qemu-serial-test.sh's QEMU_CPUS note gives at length.
+            # This suite grades real pixels, so it is the instrument that
+            # would notice a compositor racing with itself across cores -
+            # and it has never had the chance. QEMU_CPUS=4 gives it one,
+            # and is not the default because the battery is not green
+            # there yet.
+            "-smp", os.environ.get("QEMU_CPUS", "1"),
             "-drive", "if=pflash,format=raw,readonly=on,file=" + OVMF_CODE,
             "-drive", "if=pflash,format=raw,file=" + vars_rt,
             # snapshot=on: guest writes (leanfs formats the disk on its

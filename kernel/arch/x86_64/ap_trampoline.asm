@@ -43,6 +43,7 @@ AP_OFF_CR3       equ 0
 AP_OFF_ENTRY64   equ 16
 AP_OFF_GDT_LIMIT equ 24
 AP_OFF_GDT_BASE  equ 26
+AP_OFF_NX        equ 42          ; M106: nonzero if the BSP turned NX on
 
 CODE32_SEL equ trampoline_gdt_code32 - trampoline_gdt_start
 DATA32_SEL equ trampoline_gdt_data32 - trampoline_gdt_start
@@ -97,9 +98,32 @@ ap_start32:
                                 ; PML4[0] is shared by every address space
                                 ; in this kernel (see vmm.c)
 
+    ; ---- M106: EFER.NXE, and it has to be HERE ---------------------
+    ;
+    ; M91 put PTE_NX (bit 63) into the kernel's page tables and enabled
+    ; EFER.NXE on the BSP and, in smp.c's ap_main, on every AP. ap_main
+    ; is far too late: on a CPU whose EFER.NXE is clear, bit 63 of a
+    ; page-table entry is a RESERVED bit, so the very first paged
+    ; instruction fetch after `mov cr0, eax` below faults - on a core
+    ; with no IDT loaded yet, which is a triple fault and a machine
+    ; reset. The AP never reached any C at all.
+    ;
+    ; It cost nothing for four milestones because every harness in this
+    ; project runs QEMU's default -smp 1, so no AP was ever started. See
+    ; M106's notes.
+    ;
+    ; The BSP's decision is passed in rather than re-derived with CPUID
+    ; here: what has to be true is "these page tables carry bit 63",
+    ; which is what vmm.c decided, and asking the hardware again would
+    ; get the same answer for a reason (identical cores) rather than by
+    ; construction.
     mov ecx, 0xC0000080        ; IA32_EFER
     rdmsr
     or eax, 1 << 8              ; EFER.LME
+    cmp byte [AP_PARAMS_ADDR + AP_OFF_NX], 0
+    je .no_nx
+    or eax, 1 << 11             ; EFER.NXE
+.no_nx:
     wrmsr
 
     mov eax, cr0

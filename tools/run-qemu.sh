@@ -78,6 +78,11 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 # entirely below the hole and would have tested nothing that 1 GiB did
 # not.
 QEMU_MEM=${QEMU_MEM:-4096}
+# M106: stated rather than defaulted, same as tools/qemu-serial-test.sh -
+# see the long note there. 1 matches what the battery grades, because a
+# desktop that differs from what is tested is worse than a slow one.
+# QEMU_CPUS=4 boots the same image on four cores.
+QEMU_CPUS=${QEMU_CPUS:-1}
 # M92: the disk is a virtio block device rather than the IDE drive a bare
 # `-drive` gives on the `pc` machine. kernel/drivers/virtio_blk.c drives
 # it; kernel/drivers/ata.c stays as the fallback for anything that has no
@@ -99,7 +104,7 @@ if [ "$SELFTESTS" -eq 1 ]; then
 fi
 
 qemu-system-x86_64 \
-  -m "$QEMU_MEM" \
+  -m "$QEMU_MEM" -smp "$QEMU_CPUS" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
   "${DISK_ARGS[@]}" \

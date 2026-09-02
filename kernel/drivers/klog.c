@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "arch/x86_64/io.h" /* irq_save_disable/irq_restore */
+#include "arch/x86_64/smp.h" /* M106: smp_current_cpu - the message bracket is re-entrant per CPU */
 #include "console.h"
 #include "lib/spinlock.h"
 #include "serial.h"
@@ -88,6 +89,75 @@ int klog_console_released(void) {
  * a critical section it already holds" reason. */
 static spinlock_t klog_lock;
 
+/* ---- M106: a whole MESSAGE under one lock ----------------------------
+ *
+ * M93 made one klog_puts atomic and wrote down exactly what it was
+ * leaving: "a message assembled from several calls (a string, a number,
+ * another string) can still interleave at those seams and deliberately is
+ * not addressed here... the failure it prevents is cosmetic where this
+ * one was a false test result."
+ *
+ * That was true on one core. M106 gave the harnesses four, and the first
+ * multi-core fault this machine produced looked like this:
+ *
+ *     [isr] ring-3 fault: Page fault in task
+ *     [isr] ring-3 fault: Page fault in task compositordesktop_shell pid
+ *      pid 0x00000B05 - terminating it, not the machine
+ *       vector=0x...E error_code=0x...15
+ *       cr2=0x
+ *       cr2=0x00000000000000000000000000000000
+ *
+ * Two register dumps shuffled into each other. Not cosmetic: it is the
+ * one diagnostic surface a kernel has, and on a machine that can fault on
+ * four cores at once it was unreadable exactly when it was needed.
+ *
+ * A per-CPU line buffer is what M93 said this would take, and it is not
+ * what this is. This is a bracket a multi-call message holds across all
+ * of its calls - so the caller says where the message begins and ends,
+ * which it knows and klog cannot. No buffer, no allocation, no size
+ * limit on a message, and nothing changes for the single-call markers
+ * that make up almost all of this log.
+ *
+ * Re-entrant per CPU, and that part is load-bearing: the fault reporter
+ * holds this bracket and can end in panic(), which prints too. A plain
+ * spinlock would deadlock a dying CPU against itself. The owner is
+ * recorded so a nested begin on the same core is a depth count rather
+ * than an acquire.
+ *
+ * `klog_panicking` bypasses this exactly as it bypasses klog_lock, and
+ * for the reason Q2 wrote down: a panic that deadlocks is strictly worse
+ * than one that prints nothing. */
+static volatile int klog_panicking; /* set by klog_enter_panic below */
+static spinlock_t klog_msg_lock;
+static volatile int klog_msg_owner = -1;
+static volatile int klog_msg_depth;
+
+uint64_t klog_begin(void) {
+    uint64_t flags = irq_save_disable();
+    if (klog_panicking) {
+        return flags;
+    }
+    int cpu = smp_current_cpu();
+    if (klog_msg_owner == cpu) {
+        klog_msg_depth++;
+        return flags;
+    }
+    spin_lock(&klog_msg_lock);
+    klog_msg_owner = cpu;
+    klog_msg_depth = 1;
+    return flags;
+}
+
+void klog_end(uint64_t flags) {
+    if (!klog_panicking) {
+        if (--klog_msg_depth == 0) {
+            klog_msg_owner = -1;
+            spin_unlock(&klog_msg_lock);
+        }
+    }
+    irq_restore(flags);
+}
+
 /* ---- Q2: the one caller that must not wait for this lock --------------
  *
  * panic() opens by calling klog_puts, and panic.c's own M70 comment lists
@@ -114,7 +184,6 @@ static spinlock_t klog_lock;
  *
  * Set by panic() before its first klog call, and never cleared - nothing
  * after a panic is expected to run. */
-static volatile int klog_panicking;
 
 void klog_enter_panic(void) {
     klog_panicking = 1;

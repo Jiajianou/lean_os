@@ -58,7 +58,11 @@ boot_for() {
   local img="$1" secs="$2" log="$3"
   local vars="$WORK/vars.fd"
   cp "$OVMF_VARS" "$vars"
-  qemu-system-x86_64 -m 4096 \
+  # M106: stated rather than defaulted, matching qemu-serial-test.sh.
+  # QEMU_CPUS=4 makes each cut land on a machine where more than one CPU
+  # can be inside the filesystem, which is a stronger cut - and is not the
+  # default for the reason that harness's own note gives.
+  qemu-system-x86_64 -m 4096 -smp "${QEMU_CPUS:-1}" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$vars" \
     -drive if=none,id=d0,format=raw,file="$img" -device virtio-blk-pci,drive=d0 \

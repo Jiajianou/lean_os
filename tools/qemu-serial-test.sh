@@ -192,6 +192,30 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 # entirely below the hole and would have tested nothing that 1 GiB did
 # not.
 QEMU_MEM=${QEMU_MEM:-4096}
+# M106: the number of cores, stated rather than defaulted - and the reason
+# is the same one M90 gave for stating the memory size, with a much worse
+# bill attached.
+#
+# Every graded boot in this project's history ran on ONE core, because
+# nothing here ever passed -smp and QEMU's default is 1. This kernel has
+# had SMP since M7: an AP trampoline, per-CPU GDTs and TSSes, a
+# scheduler-tick IPI, per-CPU current-task and slice state, and a [smp]
+# self-test that printed "1 CPU(s) online" every single time and passed.
+# The self-test was true and it was measuring nothing.
+#
+# What that hid, found within a day of setting this to 4: the AP
+# trampoline had triple-faulted the machine since M91, `smp_current_cpu`
+# aliased an unrecognised core onto cpu 0, a reaped task's kernel stack
+# was freed while it was still standing on it, a spawned task inherited a
+# dead task's scheduling class, and M101's profiler sampled the boot CPU
+# alone. See M106's notes for all five.
+#
+# The default is 1 and not 4, and that is a statement about where this
+# stands rather than a preference: the battery is green on one core and
+# is NOT yet green on more - the remaining failures are named in
+# milestones.md. tools/smp-test.sh is the multi-core stage that IS green,
+# and it grades the part this milestone finished.
+QEMU_CPUS=${QEMU_CPUS:-1}
 # M92: virtio-blk rather than the default IDE drive - see tools/run-qemu.sh.
 # QEMU_DISK=ide runs the same image through kernel/drivers/ata.c instead,
 # which is how the two numbers in the [m92] line get compared.
@@ -202,7 +226,7 @@ else
              -device virtio-blk-pci,drive=disk0)
 fi
 qemu-system-x86_64 \
-  -m "$QEMU_MEM" \
+  -m "$QEMU_MEM" -smp "$QEMU_CPUS" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
   "${DISK_ARGS[@]}" -display none \
@@ -359,6 +383,11 @@ REQUIRED_MARKERS=(
   "[m79] two threads, one address space:"
   # M96: the two things that make M79's threads usable by a C runtime.
   "[m96] a thread with its own variables, and a wait that costs nothing:"
+  # M106: the cores. Required on every boot, one core or four - on one
+  # it is the serial baseline the four-core number is a ratio against,
+  # and it is the only place MAX_TASKS' and MAX_FDS' high-water marks are
+  # reported at all.
+  "[m106] cores this machine can use:"
   # M105: the journal's two conditions. The marker is required rather
   # than the numbers alone because the numbers pass a boot where the
   # writers never ran - the sentence only prints when four of them did,

@@ -31,6 +31,12 @@ void klog_init(void);
 void klog_putc(char c);
 void klog_puts(const char *s);
 
+/* M106: a bracket a multi-call message holds so another core cannot
+ * shuffle its lines into this one's. Re-entrant per CPU - a fault report
+ * that ends in panic() must not deadlock against itself. See klog.c. */
+uint64_t klog_begin(void);
+void klog_end(uint64_t flags);
+
 /* Q7: hand the screen over. Called when a process maps the framebuffer
  * (SYS_fb_map); after it, klog writes to serial and to the M70 ring
  * buffer only, and never paints. See klog.c for the flicker this fixes
