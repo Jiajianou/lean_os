@@ -9507,37 +9507,123 @@ sample is reported as a pid and an address — resolving those needs the
 same generator pointed at each `.elf`, which is small work waiting for a
 reason.
 
-### M102 — Memory that runs out honestly
+### M102 — Memory that runs out honestly ✅
 
-- [ ] `pmm_alloc_frame` stops halting the machine. `pmm.c:297` is
-      `panic("pmm_alloc_frame: out of physical memory")` and it is
-      reachable by any process that allocates in a loop — the test
-      arc's own audit called it *"on a desktop that is a bug; on
-      anything called production it is the whole question"*
-- [ ] A failure path that goes all the way up: the frame allocator, the
-      heap, the address space, `mmap`, `fork`'s copy, and the syscall
-      that started it, each returning rather than panicking, and each
-      with a host test that reaches it. This is where the rest of the
-      production `panic()` count from that audit — about forty, once
-      `kernel.c`'s self-test assertions are excluded — gets audited
-      rather than counted
-- [ ] An OOM policy that names a victim and says why: the process that
-      asked, not a heuristic invented here, and a log line that records
-      the decision. The compositor and PID 1 are not candidates, and
-      the machine stays up
-- [ ] **Swap, or the number that refuses it.** M98's peak RSS against
-      what M90 makes available. If a bootstrap fits, this milestone
-      ships the failure paths and records the margin; if it does not,
-      swap to a leanfs file is specified by exactly that measurement —
-      a clock hand over the page tables' accessed bits, an eviction path,
-      and a `PTE` that faults a page back in
-- [ ] This collects **Q9**, which has sat unstarted since it was written
+- [x] `pmm_alloc_frame` no longer halts the machine on any path a program
+      can reach. The panicking forms stay for the boot-time callers whose
+      failure genuinely is fatal, beside new `try_` forms — the same split
+      `pmm_try_alloc_frame` already had, extended to
+      `pmm_try_alloc_contiguous` and `vmm_try_map_page_in`
+- [x] A failure path all the way up: the frame allocator, the page-table
+      walk, the heap, address-space creation, the spawn path, the
+      demand-paging fault, and the block cache
+- [x] An OOM policy: the process that asked for the page dies, with
+      `SIGKILL` and a `[oom]` line naming it and the free-frame count
+- [~] **Swap: not decided, because the number that decides it does not
+      exist.** What this milestone can report is that a single process
+      can take this machine to zero frames and the machine survives. The
+      peak that matters is a GCC bootstrap's, and that is M98's
+- [x] Collects **Q9**, unstarted since it was written
 
-**How we'll know.** A process that allocates until it cannot, run in a
-loop, with the desktop still responding to a click at the end of it and
-the boot markers still green on the reboot after. And the swap decision
-stated as a number with the two sides of it named — what a bootstrap
-peaks at, and what this machine has.
+**What was actually wrong, which was not what the plan assumed.** The
+plan said twenty-eight `kmalloc` call sites assumed success. That was
+wrong, and checking it properly is the first thing this milestone did:
+**nineteen of twenty-seven already checked**, and of the eight that did
+not, six were in `kernel.c`'s own self-tests. Two production sites
+remained, and both were in `syscall.c`'s argument packing — which on a
+closer read also check, through a struct member the audit's regex could
+not see. The codebase had been written defensively against an allocator
+that could not fail. That is unusual and it is worth recording, because
+the milestone that followed from the wrong count would have been three
+times the size and would have "fixed" code that was already right.
+
+**The bugs this actually found were the opposite shape: checks that
+could never fire.** Three of them, each a careful unwind written against
+an allocator that panics before it can return 0:
+
+- `proc.c`'s argument-frame loop tests `arg_frames[i] == 0` and frees
+  what it took. `pmm_alloc_frame` panics three lines earlier.
+- `task_spawn` and `task_fork` both test their kernel stack for NULL and
+  then `panic()`. `pmm_alloc_contiguous` panics before returning.
+
+Dead defensive code is worse than none: it reads as though the case is
+handled, so nobody looks again. All three are live now, and the second
+one changed a panic into a returned NULL that every production caller —
+`sys_fork`, `net.c`'s timer thread, `spawn_common` — already handled
+correctly.
+
+**The OOM policy, and why it is not a policy.** There is no victim
+selection, no scoring, no scan for the largest resident set. The process
+that asked for the page it could not have is the one that dies. A machine
+with one principal that kills the program it could not serve is telling
+the truth about what happened, which is the same argument M65 made about
+the permission model, and any heuristic here would be inventing a
+judgement the machine has no basis for.
+
+`SIGKILL`, not `SIGSEGV`, and the distinction cost a new return value.
+`sched_fault_fill` used to answer yes-or-no; it now has a third answer,
+`FILL_NO_MEMORY`, because "this address is not yours" and "it is yours
+and the machine is full" are different facts about different parties.
+Reporting the second as the first would tell a program its own pointer
+was wrong when it was fine — and `SIGSEGV` is catchable, so a program
+with a handler could ignore the news and carry on in an address space
+that can never give it another page.
+
+**The finding worth more than the feature.** The first version of the
+self-test had the kernel take the machine's memory itself, leaving a
+16 MiB margin, so the test program would meet the limit immediately
+instead of after a million page faults. Every spawn was then refused,
+with memory free.
+
+The reason is a real property of this allocator that nothing in this tree
+knew. Draining allocates upward from low addresses, so the frames left
+free are the highest — and on the 4 GiB configuration the top of RAM is
+*above* 4 GiB, while `pmm_alloc_contiguous` only searches below
+`PMM_DMA_LIMIT`. A new task's kernel stack is a contiguous allocation.
+**So a machine can have hundreds of megabytes free and still fail every
+spawn, because the free memory is in the wrong place.** The test was
+rewritten to exhaust the machine honestly rather than to work around
+that, because the workaround would have hidden it. It is not fixed here —
+fixing it means either a fallback to non-DMA frames for kernel stacks or
+an allocator that knows about zones, and both want a measurement first.
+
+**What it cost.** About 260 lines across ten files, plus `/bin/oomtest`.
+And **31 seconds of boot**: `boot_to_desktop_s` moves from 192 s to
+223 s, because the self-test exhausts four gigabytes twice. The ceiling
+did not move — there is still most of it spare — but `tests/budgets.tsv`
+records the new measured value, because the next person to add thirty
+seconds should not think they added five.
+
+**How it is graded.**
+
+- **Five new host tests** on the heap, over `fake_pmm_fail_after` — the
+  hook Q2 built and whose own comment called it *"the branch Q9 is about
+  and the one nothing has ever executed"*. They cover the NULL return, a
+  partial growth giving back every frame, the heap still working
+  afterwards, an allocation that fits an existing block succeeding with
+  no frames left, and a heap that could never grow at all. Three
+  mutations were run against them by hand — dropping the unwind, rewinding
+  without unmapping, and ignoring the NULL — and all three were caught.
+- **One test that had to change, and said so in advance.** The test that
+  stood here asserted that `kmalloc` *panicked* when the machine ran out,
+  and its own comment said: *"when Q9 turns that panic into a failed
+  allocation this test is what has to change, and changing it is the
+  record that the behaviour changed on purpose."* This is that change.
+- **Two boot markers**, one of them the kernel's own `[oom]` line so the
+  kill is graded rather than the verdict alone.
+- **The machine, twice, on four configurations.** Two rounds of
+  exhaustion to zero frames free, with every frame recovered — 1,039,486
+  of 1,039,486 on the 4 GiB machine and 24,190 of 24,190 on the 128 MiB
+  one — and passing on `QEMU_DISK=ide` as well.
+
+**What is still open.** Swap, waiting on M98. The DMA-zone fragmentation
+above. `pmm_alloc_frame_dma` and the SMP AP-stack allocation still panic,
+both at boot on a machine that has just counted its memory. And the
+kernel's own allocations are still unbounded: a program cannot exhaust
+memory *through* the kernel any more, but nothing limits how much kernel
+memory one process's open files, pipes and mappings can account for,
+which is a quota question rather than an allocation one and is not this
+milestone's.
 
 ### M103 — Interrupts a real machine delivers
 

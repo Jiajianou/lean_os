@@ -633,9 +633,13 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
      * kmalloc it replaces was (see heap.c's note): the PMM takes its own
      * lock, and these two are never nested in the other order anywhere. */
     _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
-    uint8_t *stack_base = (uint8_t *)(uintptr_t)pmm_alloc_contiguous(TASK_STACK_SIZE / 4096);
+    /* M102: try_, so the check below is reachable. It was written
+     * against pmm_alloc_contiguous, which panics rather than returning 0,
+     * so it has been dead code since it was written - the same shape of
+     * dead guard this milestone found in proc.c's argument frames. */
+    uint8_t *stack_base = (uint8_t *)(uintptr_t)pmm_try_alloc_contiguous(TASK_STACK_SIZE / 4096);
     if (!stack_base) {
-        panic("task_spawn: out of physical memory for a task stack");
+        return (task_t *)0;
     }
 
     uint64_t flags = irq_save_disable();
@@ -1586,13 +1590,25 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
 
     uint64_t phys = pmm_try_alloc_frame();
     if (phys == 0) {
-        return 0;
+        /* M102: FILL_NO_MEMORY, not 0. The difference matters at the
+         * fault handler: 0 means "this address is not yours", which is a
+         * bug in the program and earns SIGSEGV, and this means "it is
+         * yours and the machine has nothing left", which is not the
+         * program's fault and must not be reported as though it were. */
+        return FILL_NO_MEMORY;
     }
     /* Zeroed, for the reason M78 gave when it did this eagerly:
      * anonymous memory that handed a process the previous owner's bytes
      * would leak one program's data into another's. */
     k_memset((void *)phys, 0, PAGE_SIZE);
-    vmm_map_page_in(self->pml4_phys, page, phys, flags);
+    /* M102: the page table this needs is a frame too, and on a full
+     * machine it is the one that is missing. Returning 0 sends the fault
+     * handler down the same path as "no frame for the page itself",
+     * which kills the faulting process rather than the machine. */
+    if (vmm_try_map_page_in(self->pml4_phys, page, phys, flags) != 0) {
+        pmm_free_frame(phys);
+        return FILL_NO_MEMORY;
+    }
     return 1;
 }
 
@@ -1788,9 +1804,13 @@ void sched_prefault_range(uint64_t addr, uint64_t len, int for_write) {
  */
 task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
-    uint8_t *stack_base = (uint8_t *)(uintptr_t)pmm_alloc_contiguous(TASK_STACK_SIZE / 4096);
+    /* M102: try_, so the check below is reachable. It was written
+     * against pmm_alloc_contiguous, which panics rather than returning 0,
+     * so it has been dead code since it was written - the same shape of
+     * dead guard this milestone found in proc.c's argument frames. */
+    uint8_t *stack_base = (uint8_t *)(uintptr_t)pmm_try_alloc_contiguous(TASK_STACK_SIZE / 4096);
     if (!stack_base) {
-        panic("task_fork: out of physical memory for a task stack");
+        return (task_t *)0;
     }
 
     uint64_t flags = irq_save_disable();

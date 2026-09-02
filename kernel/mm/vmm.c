@@ -138,8 +138,18 @@ static inline uint64_t *phys_to_table(uint64_t phys) {
     return (uint64_t *)phys;
 }
 
-static uint64_t alloc_table(void) {
-    uint64_t phys = pmm_alloc_frame();
+/* M102: 0 when there is no frame to be had, rather than a panic.
+ *
+ * Every intermediate page table this kernel builds comes through here, so
+ * this is the single place where "the machine is out of memory" enters
+ * the mapping layer. It used to leave through panic(); now it leaves
+ * through a return value, and table_walk above it is what turns that into
+ * a NULL the callers have to look at. */
+static uint64_t try_alloc_table(void) {
+    uint64_t phys = pmm_try_alloc_frame();
+    if (!phys) {
+        return 0;
+    }
     uint64_t *table = phys_to_table(phys);
     for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++) {
         table[i] = 0;
@@ -163,7 +173,22 @@ static uint64_t *table_walk(uint64_t *table, uint64_t index, int allocate, uint6
         if (!allocate) {
             return (uint64_t *)0;
         }
-        uint64_t phys = alloc_table();
+        uint64_t phys = try_alloc_table();
+        if (!phys) {
+            /* M102: out of memory part way down a walk. The caller gets
+             * NULL and must not proceed.
+             *
+             * Any level already allocated above this one stays linked
+             * into the hierarchy, empty. That is deliberate rather than a
+             * leak: it is reachable, it is freed with the address space
+             * it belongs to, and unwinding it here would mean deciding
+             * whether a table that was empty *before* this walk should
+             * also go - a question with no local answer. An empty page
+             * table is 4 KiB of address space that costs nothing to
+             * leave; getting the unwind wrong frees a table another
+             * mapping is using. */
+            return (uint64_t *)0;
+        }
         table[index] = phys | PTE_PRESENT | PTE_WRITABLE | extra_flags;
         return phys_to_table(phys);
     }
@@ -204,7 +229,15 @@ void vmm_init(const uint32_t *e820_map) {
     nx_enabled = cpu_has_nx();
     vmm_enable_nx_this_cpu();
 
-    uint64_t pml4_phys = alloc_table();
+    /* M102: the one allocation in this file that is still allowed to be
+     * fatal. This is the kernel's own PML4, built during vmm_init on a
+     * machine that has just counted its memory; a failure here is not
+     * "out of memory" in the sense the rest of this milestone is about,
+     * it is a machine that cannot run at all. */
+    uint64_t pml4_phys = try_alloc_table();
+    if (!pml4_phys) {
+        panic("vmm_init: no frame for the kernel's own PML4");
+    }
     kernel_pml4 = phys_to_table(pml4_phys);
     kernel_pml4_phys = pml4_phys;
 
@@ -368,21 +401,50 @@ uint64_t vmm_unmap_page_take(uint64_t pml4_phys, uint64_t virt) {
     return phys;
 }
 
-void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
+/* M102: the same mapping, reporting failure instead of halting.
+ *
+ * Returns 0 on success and -1 when a page table could not be allocated.
+ * The huge-page case stays a panic: that is a caller asking to map an
+ * address inside a range this kernel deliberately mapped as 2 MiB, which
+ * is a bug in the caller rather than a machine that ran out of anything,
+ * and the two must not be conflated - the whole point of this milestone
+ * is that running out is an ordinary event and a bug is not. */
+int vmm_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);
     uint64_t extra = flags & PTE_USER;
 
     uint64_t *pdpt = table_walk(pml4, PML4_INDEX(virt), 1, extra);
-    uint64_t *pd = table_walk(pdpt, PDPT_INDEX(virt), 1, extra);
+    uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(virt), 1, extra) : (uint64_t *)0;
+    if (!pd) {
+        spin_unlock_irqrestore(&vmm_lock, irq_flags);
+        return -1;
+    }
     if (pd[PD_INDEX(virt)] & PTE_HUGE) {
         panic("vmm_map_page_in: address falls inside a 2 MiB huge-mapped range");
     }
     uint64_t *pt = table_walk(pd, PD_INDEX(virt), 1, extra);
+    if (!pt) {
+        spin_unlock_irqrestore(&vmm_lock, irq_flags);
+        return -1;
+    }
 
     pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | leaf_flags(flags);
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
+    return 0;
+}
+
+/* The panicking form, kept for the callers whose failure genuinely is
+ * fatal - the framebuffer and the Local APIC, both mapped once at boot on
+ * a machine that has just been told how much memory it has. Same shape as
+ * pmm_alloc_frame beside pmm_try_alloc_frame, and for the same reason:
+ * some callers can do something about it and some cannot, and which is
+ * which should be visible at the call site. */
+void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
+    if (vmm_try_map_page_in(pml4_phys, virt, phys, flags) != 0) {
+        panic("vmm_map_page_in: out of memory for a page table");
+    }
 }
 
 /* M91: change the permissions of every page already present in
@@ -842,7 +904,15 @@ int vmm_cow_break(uint64_t pml4_phys, uint64_t virt) {
 
 uint64_t vmm_create_address_space(void) {
     uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
-    uint64_t new_phys = alloc_table();
+    uint64_t new_phys = try_alloc_table();
+    if (!new_phys) {
+        /* M102: 0, and the caller checks. This is the first allocation a
+         * spawn makes, so it is also the cheapest place for a spawn on a
+         * full machine to fail - before an image has been read, an
+         * address space populated or a task slot claimed. */
+        spin_unlock_irqrestore(&vmm_lock, irq_flags);
+        return 0;
+    }
     uint64_t *new_pml4 = phys_to_table(new_phys);
     new_pml4[0] = kernel_pml4[0]; /* share the kernel's identity map + heap */
     spin_unlock_irqrestore(&vmm_lock, irq_flags);

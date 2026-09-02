@@ -112,6 +112,12 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
         return 0;
     }
     uint64_t pml4_phys = vmm_create_address_space();
+    if (pml4_phys == 0) {
+        /* M102: no frame even for the new PML4. The cheapest possible
+         * point for a spawn on a full machine to fail - nothing has been
+         * read, mapped or claimed yet. */
+        return 0;
+    }
     uint64_t entry = elf_load(pml4_phys, image, image_size);
     if (entry == 0) {
         /* Only reachable now by running out of physical memory partway
@@ -137,9 +143,23 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
      * needed that to be true before, because nothing could express it. */
     uint64_t stack_bottom = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
     for (uint64_t va = stack_bottom; va < USER_STACK_TOP; va += PAGE_SIZE) {
-        uint64_t phys = pmm_alloc_frame();
+        /* M102: this used to be pmm_alloc_frame, which halted the machine
+         * rather than returning. A spawn that cannot get a stack is an
+         * ordinary failure of one spawn. */
+        uint64_t phys = pmm_try_alloc_frame();
+        if (phys == 0) {
+            process_destroy_address_space(pml4_phys);
+            return 0;
+        }
         k_memset((void *)phys, 0, PAGE_SIZE);
-        vmm_map_page_in(pml4_phys, va, phys, VMM_FLAG_WRITABLE | VMM_FLAG_USER);
+        if (vmm_try_map_page_in(pml4_phys, va, phys,
+                                VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
+            /* The frame is not in the address space, so tearing that down
+             * will not find it. It has to go back by hand, here. */
+            pmm_free_frame(phys);
+            process_destroy_address_space(pml4_phys);
+            return 0;
+        }
     }
 
     /* ---- M60/M75: the argument region ---------------------------------
@@ -160,7 +180,12 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
      */
     uint64_t arg_frames[USER_ARG_PAGES];
     for (int i = 0; i < USER_ARG_PAGES; i++) {
-        arg_frames[i] = pmm_alloc_frame();
+        /* M102: pmm_try_alloc_frame, which is what makes the check below
+         * reachable. It was written against pmm_alloc_frame, which panics
+         * rather than returning 0 - so this careful unwind has been dead
+         * code since it was written, and the machine halted three lines
+         * earlier instead. */
+        arg_frames[i] = pmm_try_alloc_frame();
         if (arg_frames[i] == 0) {
             /* Out of frames partway through. Give back whatever was
              * taken and fail the spawn - the address space goes with it
@@ -253,8 +278,23 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
     }
     for (int i = 0; i < USER_ARG_PAGES; i++) {
         k_memcpy((void *)arg_frames[i], block + (size_t)i * PAGE_SIZE, PAGE_SIZE);
-        vmm_map_page_in(pml4_phys, USER_ARG_ADDR + (uint64_t)i * PAGE_SIZE, arg_frames[i],
-                         VMM_FLAG_WRITABLE | VMM_FLAG_USER);
+        /* M102: the last mapping on this path that could halt the
+         * machine. A page table is a frame like any other, and the
+         * argument region is the last thing built before a spawn
+         * succeeds - so this is the narrowest window in which a spawn can
+         * fail, and it still has to fail rather than stop the machine. */
+        if (vmm_try_map_page_in(pml4_phys, USER_ARG_ADDR + (uint64_t)i * PAGE_SIZE,
+                                arg_frames[i], VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
+            /* Frames not yet mapped are not reachable from the address
+             * space, so they go back by hand; the ones already mapped go
+             * with it. */
+            for (int j = i; j < USER_ARG_PAGES; j++) {
+                pmm_free_frame(arg_frames[j]);
+            }
+            kfree(block);
+            process_destroy_address_space(pml4_phys);
+            return 0;
+        }
     }
     kfree(block);
     *out_entry = entry;
@@ -291,7 +331,12 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
      * address space. */
     user_launch_args_t *args = (user_launch_args_t *)kmalloc(sizeof(user_launch_args_t));
     if (!args) {
-        panic("process_spawn: out of memory for launch args");
+        /* M102: the last panic on the spawn path, and the only one that
+         * was ever reachable from a user program. Everything this
+         * function built is given back and the spawn fails, which is what
+         * every other failure here already did. */
+        process_destroy_address_space(pml4_phys);
+        return (task_t *)0;
     }
     args->entry = entry;
     args->user_stack_top = USER_STACK_TOP;
@@ -300,10 +345,16 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
     task_t *t = task_spawn_in(name, pml4_phys, user_task_launcher, args,
                                USER_HEAP_START, USER_SHM_BASE);
     if (!t) {
-        /* Fixed MAX_TASKS table (sched.c) is full - task_spawn_in already
-         * reports this cleanly (NULL, not a panic - unlike out-of-memory
-         * above, a full task table is a normal, recoverable condition a
-         * caller might hit and retry from). Every caller of process_spawn
+        /* Two reasons now, and both are ordinary. The MAX_TASKS table
+         * (sched.c) is full, or there was no contiguous run of frames
+         * left for the new task's kernel stack.
+         *
+         * M102 corrected the second half of this comment rather than
+         * leaving it: it used to say "unlike out-of-memory above, a full
+         * task table is a normal, recoverable condition", which was true
+         * when running out of memory halted the machine and is not true
+         * now. Both conditions arrive here as the same NULL, and both
+         * are recovered from the same way. Every caller of process_spawn
          * (sys_spawn in syscall.c, and kernel.c's own self-tests) already
          * treats a NULL/-1 result as an ordinary failure, so propagate
          * cleanly instead of dereferencing NULL below.

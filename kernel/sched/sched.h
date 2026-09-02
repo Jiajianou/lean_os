@@ -916,6 +916,19 @@ task_t *sched_vm_owner(task_t *t);
  * because the stack now grows on a fault and "is this a stack access"
  * cannot be answered from the address alone - see STACK_GROW_SLACK in
  * sched.c. */
+/* M102: three outcomes, not two.
+ *
+ *   1               filled - the fault is answered, resume the program
+ *   0               not this task's address - a real fault, SIGSEGV
+ *   FILL_NO_MEMORY  it WAS this task's address and there is no memory
+ *
+ * The third used to be unreachable, because the allocator halted the
+ * machine instead. Now that it is reachable it has to be told apart from
+ * the second: "your pointer is wrong" and "the machine is full" are
+ * different facts about different parties, and reporting the second as
+ * the first would tell a program its own code is broken when it is not -
+ * and would let it catch and ignore the news. */
+#define FILL_NO_MEMORY (-1)
 int sched_fault_fill(uint64_t addr, uint64_t error_code, uint64_t user_rsp);
 
 /* M82: build every page of `addr`..`addr+len` that is a reserved-but-

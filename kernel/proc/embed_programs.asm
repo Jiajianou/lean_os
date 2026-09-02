@@ -356,3 +356,9 @@ global proftest_elf_end
 proftest_elf_start:
     incbin "build/proftest.elf"
 proftest_elf_end:
+
+global oomtest_elf_start
+global oomtest_elf_end
+oomtest_elf_start:
+    incbin "build/oomtest.elf"
+oomtest_elf_end:

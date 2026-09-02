@@ -100,6 +100,11 @@ uint64_t pmm_alloc_frame_above(uint64_t min_phys);
  * stack does not care - and one rule that is always safe beats two rules
  * where the unsafe one is the default. */
 uint64_t pmm_alloc_contiguous(uint64_t count);
+
+/* M102: the same, returning 0 rather than halting when no run that long
+ * is free. A kernel stack for a new task comes from here, so this is the
+ * difference between a spawn that fails and a machine that stops. */
+uint64_t pmm_try_alloc_contiguous(uint64_t count);
 void pmm_free_contiguous(uint64_t phys_addr, uint64_t count);
 
 /* ---- M82: frame ownership --------------------------------------------

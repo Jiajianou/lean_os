@@ -31,6 +31,11 @@ void panic(const char *msg);
 
 static uint8_t *region;
 static uint8_t mapped[MAX_PAGES];
+/* M102: the frame each page holds, so vmm_unmap_page_take can hand it
+ * back. Recording it is what lets a test assert that a *failed* heap
+ * growth is frame-neutral - which is the property that decides whether
+ * running out of memory twice costs more than running out once. */
+static uint64_t mapped_phys[MAX_PAGES];
 static uint64_t mapped_count;
 
 void fake_vmm_reset(void);
@@ -57,6 +62,7 @@ void fake_vmm_reset(void) {
     ensure_region();
     for (uint64_t i = 0; i < MAX_PAGES; i++) {
         mapped[i] = 0;
+        mapped_phys[i] = 0;
     }
     mapped_count = 0;
     /* Discard the old contents so a test never sees the previous test's
@@ -81,14 +87,46 @@ static uint64_t page_index(uint64_t virt) {
 }
 
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
-    (void)phys;
     (void)flags;
     uint64_t i = page_index(virt);
     if (mapped[i]) {
         panic("vmm_map_page: address already mapped");
     }
     mapped[i] = 1;
+    mapped_phys[i] = phys;
     mapped_count++;
+}
+
+/* M102: the failable form the heap now uses.
+ *
+ * It never fails here, and that is correct rather than a gap. On the
+ * machine this returns -1 when there is no frame for a *page table*; the
+ * fake has no page tables, so the only way a mapping can fail in this
+ * tier is the one the heap already checks separately - pmm having no
+ * frame for the page itself, which fake_pmm_fail_after drives. Making
+ * this fail too would be inventing a failure mode the fake cannot
+ * honestly model. */
+int vmm_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
+    (void)pml4_phys;
+    vmm_map_page(virt, phys, flags);
+    return 0;
+}
+
+/* M102: unmap and hand the frame back, which is how the heap unwinds a
+ * partial growth. Returns 0 for a page that was not mapped, exactly as
+ * the real one does, rather than panicking - the caller is in a cleanup
+ * loop and a cleanup that can fail is a cleanup nobody will act on. */
+uint64_t vmm_unmap_page_take(uint64_t pml4_phys, uint64_t virt) {
+    (void)pml4_phys;
+    uint64_t i = page_index(virt);
+    if (!mapped[i]) {
+        return 0;
+    }
+    uint64_t phys = mapped_phys[i];
+    mapped[i] = 0;
+    mapped_phys[i] = 0;
+    mapped_count--;
+    return phys;
 }
 
 void vmm_unmap_page(uint64_t virt) {
@@ -97,6 +135,7 @@ void vmm_unmap_page(uint64_t virt) {
         panic("vmm_unmap_page: address not mapped");
     }
     mapped[i] = 0;
+    mapped_phys[i] = 0;
     mapped_count--;
 }
 

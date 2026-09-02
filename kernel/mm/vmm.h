@@ -109,6 +109,17 @@ uint64_t vmm_kernel_heap_base(void);
  * mapped first 1 GiB - see vmm.c's phys_to_table). */
 void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
 
+/* M102: the same mapping, returning -1 instead of halting the machine
+ * when there is no frame left for a page table. 0 on success.
+ *
+ * The panicking form above stays, and which one a call site uses is a
+ * statement about that site: the framebuffer and the Local APIC are
+ * mapped once at boot and a failure there means the machine cannot run,
+ * while a process growing its heap is an ordinary thing that can
+ * ordinarily fail. Same split as pmm_alloc_frame and
+ * pmm_try_alloc_frame, which this mirrors deliberately. */
+int vmm_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
+
 /* M50: vmm_map_page_in's counterpart, and the piece SYS_shm_free needed.
  * vmm_unmap_page above walks the *kernel* PML4 and panics on anything it
  * doesn't find, which is right for kernel mappings and exactly wrong here:
@@ -203,5 +214,7 @@ int vmm_cow_break(uint64_t pml4_phys, uint64_t virt);
  * code - interrupt/syscall handlers - keeps working no matter which
  * process's CR3 is loaded) and everything else zeroed, ready for
  * process-private mappings via vmm_map_page_in. */
+/* A fresh address space, or **0** when there is no frame for its PML4.
+ * M102: it used to panic, and every caller has to check now. */
 uint64_t vmm_create_address_space(void);
 void vmm_switch_address_space(uint64_t pml4_phys);

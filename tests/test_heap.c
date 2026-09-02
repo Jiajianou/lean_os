@@ -20,6 +20,11 @@
 #include <string.h>
 
 #define HEAP_ALIGN 8u
+/* M102: page-sized requests, to make the heap grow by more than one page
+ * and so reach the partial-failure unwind. Spelled here rather than
+ * included from mm/pmm.h because this file tests the heap's contract,
+ * not the machine's page size, and 4096 is the number heap.c grows in. */
+#define PAGE_SIZE 4096u
 
 static void heap_fixture(void) {
     fake_pmm_reset();
@@ -192,19 +197,105 @@ TEST(heap, every_allocation_is_backed_by_a_frame_that_came_from_the_pmm) {
     kfree(p);
 }
 
-TEST(heap, running_out_of_physical_memory_panics_with_the_real_message) {
+/* ---- M102: the after half of the pair -------------------------------
+ *
+ * The test that used to stand here asserted that kmalloc *panicked* when
+ * the machine ran out of physical memory, and its own comment said so on
+ * purpose: "when Q9 turns that panic into a failed allocation this test
+ * is what has to change, and changing it is the record that the behaviour
+ * changed on purpose."
+ *
+ * This is that change. kmalloc returns NULL now.
+ */
+TEST(heap, running_out_of_physical_memory_returns_null_rather_than_halting) {
     heap_fixture();
-    /* Q9's headline, reached here for the first time. kmalloc has no way
-     * to report failure - it grows through pmm_alloc_frame(), which
-     * panics rather than returning 0 - so a user process that allocates
-     * until the machine cannot takes the machine with it.
-     *
-     * This test asserts the CURRENT behaviour, deliberately. It is the
-     * before half of the pair; when Q9 turns that panic into a failed
-     * allocation this test is what has to change, and changing it is the
-     * record that the behaviour changed on purpose. */
     fake_pmm_fail_after(0);
-    CHECK_PANIC(kmalloc(64), "out of physical memory");
+    void *p = kmalloc(64);
+    CHECK(p == NULL);
+}
+
+/* The property that decides whether running out twice costs more than
+ * running out once.
+ *
+ * Growing the heap by several pages and failing part way used to be
+ * impossible. Now it is ordinary, and the pages already mapped have to go
+ * back - otherwise every failed allocation on a nearly-full machine eats
+ * the memory it could not use, and the machine grinds to a halt through a
+ * path that reports success at every step. */
+TEST(heap, a_failed_growth_gives_back_every_frame_it_took) {
+    heap_fixture();
+
+    /* Three frames available, and an allocation that needs more than
+     * three pages. The growth takes all three, fails on the fourth, and
+     * must give the three back. */
+    fake_pmm_fail_after(3);
+    void *p = kmalloc(PAGE_SIZE * 8);
+    CHECK(p == NULL);
+    CHECK_EQ(fake_pmm_outstanding(), 0);
+    CHECK_EQ(fake_vmm_mapped_pages(), 0);
+}
+
+/* A failed allocation must not poison the heap. The next one, for
+ * something that fits, has to work. */
+TEST(heap, the_heap_still_works_after_an_allocation_fails) {
+    heap_fixture();
+
+    fake_pmm_fail_after(2);
+    CHECK(kmalloc(PAGE_SIZE * 8) == NULL);
+    CHECK_EQ(fake_pmm_outstanding(), 0);
+
+    /* Memory is available again. The failure point has to be lifted
+     * explicitly because fake_pmm_fail_after counts allocations *ever*
+     * rather than frames outstanding - so the frames the unwind gave back
+     * do not move it, and without this line the next kmalloc would fail
+     * for a reason that has nothing to do with the heap. Getting that
+     * wrong once is what this comment is for. */
+    fake_pmm_fail_after(-1);
+
+    /* Usable, not merely non-NULL: a bookkeeping-only unwind that
+     * rewound heap_virt_end without unmapping would hand back a pointer
+     * into memory that is no longer there. */
+    void *ok = kmalloc(64);
+    REQUIRE(ok != NULL);
+    for (int i = 0; i < 64; i++) {
+        ((volatile uint8_t *)ok)[i] = (uint8_t)i;
+    }
+    CHECK_EQ(((volatile uint8_t *)ok)[63], 63);
+    kfree(ok);
+}
+
+/* An allocation that fits a block already on the free list must not care
+ * that the machine has no frames left: it never grows. A kmalloc that
+ * consulted the allocator before its own free list would fail here, and
+ * would do it under exactly the memory pressure where reusing what you
+ * already hold matters most. */
+TEST(heap, an_allocation_that_fits_an_existing_block_succeeds_with_no_frames_left) {
+    heap_fixture();
+
+    void *big = kmalloc(2048);
+    REQUIRE(big != NULL);
+    kfree(big);
+
+    fake_pmm_fail_after(0);
+    void *small = kmalloc(512);
+    CHECK(small != NULL);
+    kfree(small);
+}
+
+/* Zero frames from the very first call. The heap has nothing at all, and
+ * has to say so rather than dereferencing the NULL it just produced. */
+TEST(heap, a_heap_that_could_never_grow_at_all_fails_cleanly) {
+    heap_fixture();
+    fake_pmm_fail_after(0);
+    CHECK(kmalloc(1) == NULL);
+    CHECK(kmalloc(PAGE_SIZE * 100) == NULL);
+    CHECK_EQ(fake_pmm_outstanding(), 0);
+    CHECK_EQ(fake_vmm_mapped_pages(), 0);
+    /* And it recovers the moment there is memory again. */
+    fake_pmm_fail_after(-1);
+    void *p = kmalloc(1);
+    CHECK(p != NULL);
+    kfree(p);
 }
 
 /* ---- Q12: what the mutation census found here -------------------------

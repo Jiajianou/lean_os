@@ -340,6 +340,11 @@ REQUIRED_MARKERS=(
   "[m101] /proc/profile and /proc/syscalls both answer."
   "[m101] ring-3 half passed:"
   "[m101] the report above is /bin/profile's"
+  # M102: two markers. The first is the kernel's own OOM line, which
+  # proves the kill happened and names the victim; the second is the
+  # verdict, which proves the machine was still there to print it.
+  "[oom] out of physical memory filling"
+  "[m102] out of memory, twice:"
   "[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"

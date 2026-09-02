@@ -31,7 +31,7 @@
 # is what these rows exist to keep visible.
 #
 # name<TAB>ceiling<TAB>unit<TAB>measured<TAB>commit<TAB>note
-boot_to_desktop_s	600	s	192	b7bb520	The full self-test boot. Dominated by tests that spawn a process and wait for it, so it is variable rather than merely large - the ceiling is set against a busy host, not a quiet one. An ordinary boot with self-tests off is ~8s and is not this number.
+boot_to_desktop_s	600	s	223	HEAD	The full self-test boot. Dominated by tests that spawn a process and wait for it, so it is variable rather than merely large - the ceiling is set against a busy host, not a quiet one. An ordinary boot with self-tests off is ~8s and is not this number. M102 moved the measured value from 192 s to 223 s on purpose: its self-test exhausts the machine's physical memory twice, and on the 4 GiB configuration that is about a million page faults per round. The ceiling did not move - there is still most of it spare - but the measured column has to say what a run now costs, or the next person to add thirty seconds will think they added five.
 disk_1mib_cold_us	400000	us	5208	b7bb520	1 MiB through virtio-blk, cache dropped first. The README quotes 5.6 ms for virtio and 95 ms for the ATA PIO fallback; the ceiling covers both paths plus headroom, because QEMU_DISK=ide runs the same marker.
 disk_1mib_warm_us	100000	us	2406	b7bb520	The same megabyte out of M92's write-through cache. Generous headroom on purpose: this is a memcpy whose cost is dominated by whatever else the host is doing.
 input_to_photon_idle_us	200000	us	40581	b7bb520	Cursor motion to a changed pixel, TSC-measured, on an idle machine. M69's own note says the observer competes, so this is an upper bound rather than a measurement of the path alone.

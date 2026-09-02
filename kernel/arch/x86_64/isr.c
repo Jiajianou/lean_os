@@ -2,6 +2,7 @@
 
 #include "drivers/klog.h"
 #include "panic.h"
+#include "mm/pmm.h"   /* M102 - the free-frame count in the OOM line */
 #include "pic.h"
 #include "sched/sched.h" /* M52 - task_exit_with_code/sched_current, so a ring-3 fault kills one task instead of the machine */
 #include "signal.h"      /* system_api/include/signal.h - SIGSEGV, the exit code a killed-for-faulting task gets */
@@ -100,8 +101,46 @@ void isr_handler(isr_regs_t *r) {
      * except as a syscall argument. sched_fault_fill still consults the
      * *current task's* arena, so this cannot fill anything for a fault in
      * kernel memory. */
-    if (r->vector == PAGE_FAULT_VECTOR && sched_fault_fill(read_cr2(), r->error_code, r->rsp)) {
-        return;
+    if (r->vector == PAGE_FAULT_VECTOR) {
+        int filled = sched_fault_fill(read_cr2(), r->error_code, r->rsp);
+        if (filled == 1) {
+            return;
+        }
+        if (filled == FILL_NO_MEMORY) {
+            /* M102: the machine is out of memory, and this process is the
+             * one that asked for the page it could not have.
+             *
+             * The victim is the asking process, chosen by not choosing:
+             * no heuristic, no scoring, no scan for the largest resident
+             * set. A machine with one principal that kills the program
+             * that could not be given what it asked for is telling the
+             * truth about what happened, which is the same argument M65
+             * made about the permission model.
+             *
+             * SIGKILL rather than SIGSEGV, and the two lines below are
+             * why: SIGSEGV says "your pointer was wrong", which is a
+             * statement about the program and is false here - and it is
+             * catchable, so a program with a handler could ignore the
+             * news and carry on in an address space that cannot give it
+             * another page. SIGKILL is uncatchable and says what
+             * happened.
+             *
+             * Logged unconditionally. An OOM kill that leaves no record
+             * is indistinguishable from a crash, and the first question
+             * anybody asks about a process that vanished is which of the
+             * two it was. */
+            task_t *t = sched_current();
+            klog_puts("\n[oom] out of physical memory filling 0x");
+            klog_put_hex64(read_cr2());
+            klog_puts(" for task ");
+            klog_puts(t && t->name[0] ? t->name : "(unnamed)");
+            klog_puts(" pid 0x");
+            klog_put_hex32((uint32_t)(t ? t->id : -1));
+            klog_puts(" - killing it, not the machine. ");
+            klog_put_dec((uint32_t)pmm_free_frame_count());
+            klog_puts(" frames free.\n");
+            task_exit_with_signal(SIGKILL);
+        }
     }
 
     /* The low two bits of the saved CS are the privilege level the fault

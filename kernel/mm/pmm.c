@@ -357,7 +357,7 @@ uint64_t pmm_tracked_limit(void) {
  * driver init, not on any hot path, so the extra scan cost doesn't matter.
  *
  * M90: bounded at dma_frames rather than total_frames - see pmm.h. */
-uint64_t pmm_alloc_contiguous(uint64_t count) {
+uint64_t pmm_try_alloc_contiguous(uint64_t count) {
     uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
     uint64_t run_start = 0;
     uint64_t run_len = 0;
@@ -383,7 +383,22 @@ uint64_t pmm_alloc_contiguous(uint64_t count) {
             run_len = 0;
         }
     }
-    panic("pmm_alloc_contiguous: no contiguous run of that size found");
+    spin_unlock_irqrestore(&pmm_lock, irq_flags);
+    return 0;
+}
+
+/* M102: the panicking form, for the callers that genuinely cannot carry
+ * on - and there are none left in this kernel. It is kept because the
+ * pattern is the point: pmm_alloc_frame beside pmm_try_alloc_frame, and
+ * this beside pmm_try_alloc_contiguous, so a call site says which kind of
+ * caller it is. A kernel stack for a new task was the last user of this
+ * one, and a spawn that cannot get a stack is an ordinary failed spawn. */
+uint64_t pmm_alloc_contiguous(uint64_t count) {
+    uint64_t phys = pmm_try_alloc_contiguous(count);
+    if (!phys) {
+        panic("pmm_alloc_contiguous: no contiguous run of that size found");
+    }
+    return phys;
 }
 
 void pmm_free_contiguous(uint64_t phys_addr, uint64_t count) {

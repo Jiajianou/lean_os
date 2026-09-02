@@ -113,10 +113,25 @@ void blk_init(void) {
         cache_lines = 64; /* below this it is not a cache, it is a buffer */
     }
 
+    /* M102: a cache that gets fewer lines rather than a machine that
+     * halts. This runs at boot on a machine that has just counted its
+     * memory and asks for a sixteenth of it, so a failure here should be
+     * impossible - but "should be impossible" is what pmm_alloc_frame's
+     * panic was asserting, and a cache is the one structure on this
+     * machine that is by definition optional. Whatever it gets, it uses;
+     * the number is logged either way, so a short cache is visible rather
+     * than silent. */
+    uint32_t got = 0;
     for (uint32_t i = 0; i < cache_lines; i++) {
-        line_ptr[i] = (uint8_t *)(uintptr_t)pmm_alloc_frame();
+        uint64_t frame = pmm_try_alloc_frame();
+        if (!frame) {
+            break;
+        }
+        line_ptr[i] = (uint8_t *)(uintptr_t)frame;
         tags[i].valid = 0;
+        got++;
     }
+    cache_lines = got;
     stats.capacity = cache_lines;
 
     klog_puts("[blk] ");

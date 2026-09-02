@@ -48,17 +48,51 @@ static uint64_t align_up(uint64_t x, uint64_t a) {
 }
 
 /* Maps `pages` more frames onto the end of the heap's virtual range and
- * returns a pointer to the start of that new space. The heap only ever
- * grows (no page is ever unmapped on kfree) - reclaiming address space is
- * future work once something actually needs it. */
+ * returns a pointer to the start of that new space, or NULL if the
+ * machine has no memory left. The heap only ever grows (no page is ever
+ * unmapped on kfree) - reclaiming address space is future work once
+ * something actually needs it.
+ *
+ * ---- M102: what a partial failure has to do -------------------------
+ *
+ * Growing by eight pages and failing on the sixth used to be impossible,
+ * because the allocator halted the machine instead. Now it is an ordinary
+ * outcome, and the five pages already mapped have to go back - otherwise
+ * every failed kmalloc on a nearly-full machine would consume the memory
+ * it could not use, and the second failure would be cheaper than the
+ * first only because the first had eaten everything. That is the shape of
+ * bug that turns "out of memory" into "wedged".
+ *
+ * heap_virt_end is rewound too. The address space above it is untouched
+ * and available again, which matters because these mappings are in the
+ * kernel's own PML4 and would otherwise be permanently spoken for. */
 static void *grow_heap(uint64_t pages) {
     uint64_t start = heap_virt_end;
+    uint64_t mapped = 0;
     for (uint64_t i = 0; i < pages; i++) {
-        uint64_t phys = pmm_alloc_frame();
-        vmm_map_page(heap_virt_end, phys, VMM_FLAG_WRITABLE);
+        uint64_t phys = pmm_try_alloc_frame();
+        if (!phys) {
+            break;
+        }
+        if (vmm_try_map_page_in(vmm_kernel_pml4_phys(), heap_virt_end, phys,
+                                VMM_FLAG_WRITABLE) != 0) {
+            pmm_free_frame(phys);
+            break;
+        }
         heap_virt_end += PAGE_SIZE;
+        mapped++;
     }
-    return (void *)start;
+    if (mapped == pages) {
+        return (void *)start;
+    }
+    for (uint64_t i = 0; i < mapped; i++) {
+        heap_virt_end -= PAGE_SIZE;
+        uint64_t phys = vmm_unmap_page_take(vmm_kernel_pml4_phys(), heap_virt_end);
+        if (phys) {
+            pmm_free_frame(phys);
+        }
+    }
+    return (void *)0;
 }
 
 void heap_init(void) {
@@ -106,6 +140,16 @@ void *kmalloc(size_t size) {
     size_t needed = sizeof(block_header_t) + size;
     uint64_t pages = (needed + PAGE_SIZE - 1) / PAGE_SIZE;
     block_header_t *b = (block_header_t *)grow_heap(pages);
+    if (!b) {
+        /* M102: NULL, and every caller of kmalloc has to look at it.
+         * There were twenty-eight call sites when this became possible
+         * and not one of them checked, because until now it could not
+         * happen - which is exactly why turning the panic into a NULL
+         * without auditing them all would have replaced one halt with
+         * twenty-eight worse ones. */
+        spin_unlock_irqrestore(&heap_lock, irq_flags);
+        return (void *)0;
+    }
     b->size = (size_t)(pages * PAGE_SIZE) - sizeof(block_header_t);
     b->free = 0;
     b->next = (block_header_t *)0;

@@ -117,7 +117,8 @@
     X(jobtest)                       \
     X(syscalltest)                 \
     X(profile)                     \
-    X(proftest)
+    X(proftest)                    \
+    X(oomtest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -2627,6 +2628,150 @@ static void selftest_profile(void) {
     }
 }
 
+/* ---- M102: the machine runs out of memory and stays up ---------------
+ *
+ * Q9's headline, and the first time anything in this tree has actually
+ * run the machine out of physical memory on purpose.
+ *
+ * Before this milestone the outcome was not in doubt and was not worth
+ * testing: pmm_alloc_frame panicked, so a program that allocated until
+ * it could not took the machine with it. The whole of M102 is the
+ * difference between that and this test passing.
+ *
+ * What is graded, in order of what would be worst to get wrong:
+ *
+ *   1. The machine is still running afterwards. Everything below this
+ *      line in kernel_main is that assertion, implicitly and much more
+ *      convincingly than any check here could be.
+ *   2. The greedy process is dead, and dead of the right thing.
+ *   3. Memory came back. A machine that survives an OOM by permanently
+ *      losing the memory has converted a halt into a slow leak, which is
+ *      harder to notice and no better.
+ *   4. It can be done twice. Once could be luck; the second round proves
+ *      the recovery is a state the machine returns to rather than a
+ *      one-off.
+ */
+/* ---- Why this test lets the program do the exhausting ---------------
+ *
+ * The obvious way to make this cheap is for the self-test to take the
+ * machine's memory itself, leaving a small margin, so the program below
+ * meets the limit in a fraction of a second instead of after a million
+ * page faults. That was written, run, and taken back out, and the reason
+ * it failed is worth more than the time it saved.
+ *
+ * Draining allocates from low addresses upward, so the frames left free
+ * are the *highest* ones - and on this machine the top of RAM is above
+ * 4 GiB, while pmm_alloc_contiguous only searches below it
+ * (PMM_DMA_LIMIT). A new task's kernel stack is a contiguous allocation.
+ * So the drain left plenty of memory free and *no kernel stack could be
+ * allocated from it*, and every spawn was refused before the test could
+ * begin.
+ *
+ * That is a real property of this allocator and not a quirk of the test:
+ * a machine with memory free can still fail a spawn because the free
+ * memory is in the wrong place, and nothing in this tree knew that. It
+ * is written down here and in M102's entry rather than worked around,
+ * because the workaround would have hidden it.
+ *
+ * So the program exhausts the machine honestly. It costs a few seconds
+ * on the 4 GiB configuration and less on the 128 MiB one, and it tests
+ * the same thing on both.
+ */
+static void selftest_oom(void) {
+    uint64_t before = pmm_free_frame_count();
+
+    size_t image_bytes = 0;
+    uint8_t *image = read_program("/bin/oomtest", &image_bytes);
+    if (!image) {
+        panic("m102: /bin/oomtest is not on the disk");
+    }
+
+    int killed_rounds = 0;
+    int refused_rounds = 0;
+
+    for (int round = 0; round < 2; round++) {
+        task_t *t = process_spawn("oomtest", image, image_bytes, "");
+        if (!t) {
+            /* A spawn that fails because the machine is already full is
+             * itself a pass for this milestone - it is the path M102
+             * built - but it means this round proved nothing about the
+             * fault handler, so say so rather than counting it. */
+            klog_puts("[m102] round ");
+            klog_put_dec((uint32_t)round);
+            klog_puts(": the spawn itself was refused, which is the other "
+                      "half of this milestone working.\n");
+            continue;
+        }
+        long code = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+
+        if (code == 128 + SIGKILL) {
+            killed_rounds++;
+        } else if (code == 0) {
+            refused_rounds++;
+        } else {
+            klog_puts("[m102] oomtest exited with 0x");
+            klog_put_hex32((uint32_t)code);
+            klog_putc('\n');
+            if (code == 128 + SIGSEGV) {
+                /* The specific wrong answer this milestone exists to
+                 * prevent, and the reason the fault path distinguishes
+                 * the two: SIGSEGV blames the program for a pointer that
+                 * was fine. */
+                panic("m102: an out-of-memory kill was reported as a segfault");
+            }
+            panic("m102: oomtest neither ran out cleanly nor was killed for it");
+        }
+    }
+
+    kfree(image);
+
+    if (killed_rounds == 0 && refused_rounds == 0) {
+        panic("m102: nothing was exhausted - this machine did not run out of memory");
+    }
+
+    /* The memory came back. Not an equality: the two rounds ran real
+     * programs, and the boot has other things going on - but a machine
+     * that gave a greedy process a hundred megabytes and got none of it
+     * back has leaked, and a tolerance of a few hundred frames is far
+     * tighter than the tens of thousands an actual leak would show. */
+    uint64_t after = pmm_free_frame_count();
+    if (after + 512 < before) {
+        klog_puts("[m102] free frames before 0x");
+        klog_put_hex32((uint32_t)before);
+        klog_puts(", after 0x");
+        klog_put_hex32((uint32_t)after);
+        klog_putc('\n');
+        panic("m102: the machine survived running out of memory but did not get it back");
+    }
+
+    klog_puts("[m102] out of memory, twice: ");
+    klog_put_dec((uint32_t)killed_rounds);
+    klog_puts(" round(s) ended in an OOM kill and ");
+    klog_put_dec((uint32_t)refused_rounds);
+    klog_puts(" in a refused allocation. The machine is still running and ");
+    klog_put_dec((uint32_t)after);
+    klog_puts(" of its ");
+    klog_put_dec((uint32_t)before);
+    klog_puts(" free frames came back.\n");
+
+    /* ---- The measurement the swap decision needs ---------------------
+     *
+     * M102's own entry says swap is decided by a number: what the
+     * machine's largest workload peaks at, against what M90 makes
+     * available. The bootstrap that was supposed to supply the first half
+     * does not exist yet (M98), so what is reported here is the second
+     * half and the largest single demand this machine has actually seen -
+     * which is oomtest, by construction, since it asks until refused.
+     *
+     * Printed rather than graded. A budget on this would be a budget on
+     * how much memory QEMU was started with. */
+    klog_puts("[m102] this machine tracks ");
+    klog_put_dec((uint32_t)(pmm_total_frame_count() * 4 / 1024));
+    klog_puts(" MiB of physical memory and a single process was able to take "
+              "it to exhaustion - the swap decision needs M98's peak, not "
+              "this one.\n\n");
+}
+
 static void boot_selftests_system(void) {
     /* Self-test: spawn several genuinely CPU-bound tasks and confirm more
      * than one *physical* CPU actually ran them, not just that the
@@ -2674,6 +2819,12 @@ static void boot_selftests_system(void) {
         }
         klog_puts("[smp] self-test passed.\n\n");
     }
+
+    /* M102: after M101 because it is the noisiest test in this function -
+     * it deliberately takes the machine to the edge - and putting it
+     * after the profiler means the profiler is known good before
+     * anything runs the machine out of the memory it samples into. */
+    selftest_oom();
 
     /* M101, and first in this function after the SMP probe on purpose:
      * the profiler is the instrument the rest of this arc is graded by,
