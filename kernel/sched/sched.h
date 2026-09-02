@@ -459,6 +459,26 @@ typedef struct task {
      * thread (kernel/net/net.c's tcp-timer is already one). Used only to
      * decide whether a tick counts as idle time. */
     uint8_t is_idle;
+    /* M88: where this task's CPU time went, in PIT ticks, split by the
+     * privilege level the timer interrupted. `times()` and `getrusage()`
+     * are the first callers this machine has ever had for either number,
+     * and until this milestone nothing anywhere counted them - the task
+     * manager's percentages were derived from a CPU's idle counter, so
+     * "how much of that was this process" had no answer at all.
+     *
+     * Ticks rather than microseconds because a tick is what this machine
+     * actually observes: the counter is incremented by the timer, so a
+     * finer unit would be arithmetic on a number that was never measured.
+     * _SC_CLK_TCK reports the same 100 Hz, which is what makes a clock_t
+     * from times() mean something on the receiving side.
+     *
+     * The child counters hold what has been REAPED, which is what
+     * `times()` specifies and is also the only version that can be
+     * correct: an unreaped child's time is still accruing. */
+    uint64_t user_ticks;
+    uint64_t sys_ticks;
+    uint64_t child_user_ticks;
+    uint64_t child_sys_ticks;
     /* M101: how deep this TASK is inside a sched_idle_enter/exit bracket
      * - a task halted waiting for the clock, which pit_sleep_ms does.
      *
@@ -736,6 +756,19 @@ void sched_debug_dump(const char *label);
 
 uint64_t sched_idle_ticks(int cpu);
 uint64_t sched_total_ticks(int cpu);
+
+/* M88: charge one timer tick to whatever this CPU is currently running.
+ * `user` is the privilege level the timer interrupted, which is the only
+ * place that distinction is available - by the time the scheduler hook
+ * runs, the interrupted frame is gone.
+ *
+ * Called from the interrupt handlers themselves (pit.c for the BSP,
+ * smp.c's lapic_vector_handler for every other core) rather than from
+ * scheduler_tick_cpu, because that function takes a CPU index and not an
+ * interrupt frame - and a tick that ends in a context switch never comes
+ * back to be accounted afterwards. Same reason profile_sample sits where
+ * it does. */
+void sched_account_tick(int user);
 
 /* Allocates a kernel stack and a task_t, marks it READY, and adds it to
  * the round-robin rotation. Runs in the kernel's own (shared) address

@@ -91,25 +91,117 @@ const ui_font_t *gfx_ui_font(void) {
     return ui_font_current;
 }
 
+/* ---- M88: UTF-8, and the box that stands for what this font lacks ----
+ *
+ * The encoding is UTF-8 everywhere now (see <wchar.h>), and this font is
+ * 128 glyphs. Those two facts meet here, and the way they met before this
+ * milestone was the worst of the three options: a byte over 0x7F drew
+ * nothing and advanced nothing, so a filename with an accent in it did
+ * not render as wrong text - it rendered as *shorter* text, silently, and
+ * a name that differed only above U+007F was indistinguishable from one
+ * that did not.
+ *
+ * Three things change. The text walkers decode UTF-8 rather than stepping
+ * one byte at a time, so a multi-byte character is one character. Anything
+ * this font has no glyph for draws as a hollow box, which is the
+ * convention every system uses and which says "there is a character here
+ * that I cannot show you" rather than saying nothing. And a malformed
+ * byte gets the same box and advances exactly one byte, so a decoder
+ * cannot be walked off the end of a string by bad input.
+ *
+ * This is not the glyphs. The font is still ASCII, and a font that covers
+ * more is a font project rather than a libc one - see <wchar.h>'s note on
+ * where that split is drawn.
+ */
+#define GFX_REPLACEMENT 0xFFFDu /* what a code point with no glyph becomes */
+
+/* Decodes one character, stores it through `out`, and returns the number
+ * of BYTES it consumed - always at least 1, which is the property that
+ * makes every loop below terminate. A malformed or truncated sequence
+ * yields the replacement code point and consumes a single byte, so the
+ * next character is still found if the damage was one bad byte. */
+static int32_t utf8_step(const char *p, uint32_t *out) {
+    uint8_t b0 = (uint8_t)p[0];
+    if (b0 < 0x80u) {
+        *out = b0;
+        return 1;
+    }
+    int32_t need;
+    uint32_t wc;
+    if (b0 >= 0xC2u && b0 < 0xE0u) {
+        need = 1;
+        wc = b0 & 0x1Fu;
+    } else if (b0 >= 0xE0u && b0 < 0xF0u) {
+        need = 2;
+        wc = b0 & 0x0Fu;
+    } else if (b0 >= 0xF0u && b0 < 0xF5u) {
+        need = 3;
+        wc = b0 & 0x07u;
+    } else {
+        *out = GFX_REPLACEMENT; /* a continuation byte with nothing to continue, or an overlong lead */
+        return 1;
+    }
+    for (int32_t i = 1; i <= need; i++) {
+        uint8_t b = (uint8_t)p[i];
+        if ((b & 0xC0u) != 0x80u) {
+            *out = GFX_REPLACEMENT; /* truncated - including by the string's own NUL */
+            return 1;
+        }
+        wc = (wc << 6) | (b & 0x3Fu);
+    }
+    *out = wc;
+    return need + 1;
+}
+
+/* The box is as wide as a digit and as tall as the font's ascent, which
+ * makes a run of them line up with the text around them. Digits are the
+ * one class of glyph a proportional font keeps at a single width, which
+ * is why '0' is the measurement rather than 'M' or an average. */
+static int32_t box_advance(const ui_font_t *font) {
+    return font->advance['0'];
+}
+
+int32_t gfx_glyph_advance(const ui_font_t *font, uint32_t cp) {
+    if (cp >= 128) {
+        return box_advance(font);
+    }
+    return font->advance[cp];
+}
+
 int32_t gfx_char_advance(const ui_font_t *font, char c) {
     uint8_t code = (uint8_t)c;
     if (code >= 128) {
-        return 0;
+        /* A single byte out of context: it is either part of a sequence
+         * this caller is walking one byte at a time, or it is malformed.
+         * Either way it is the box's width, which is what the decoding
+         * walkers above would charge for it. */
+        return box_advance(font);
     }
     return font->advance[code];
 }
 
 int32_t gfx_text_width_n(const ui_font_t *font, const char *s, int32_t n) {
     int32_t w = 0, widest = 0;
-    for (int32_t i = 0; i < n && s[i]; i++) {
+    for (int32_t i = 0; i < n && s[i];) {
         if (s[i] == '\n') {
             if (w > widest) {
                 widest = w;
             }
             w = 0;
+            i++;
             continue;
         }
-        w += gfx_char_advance(font, s[i]);
+        uint32_t cp;
+        int32_t used = utf8_step(s + i, &cp);
+        /* `n` counts BYTES, which is what every caller of this has always
+         * passed it. A sequence that would run past the limit is charged
+         * as one box rather than being decoded out of bounds. */
+        if (i + used > n) {
+            w += box_advance(font);
+            break;
+        }
+        i += used;
+        w += gfx_glyph_advance(font, cp);
     }
     return w > widest ? w : widest;
 }
@@ -118,15 +210,21 @@ int32_t gfx_text_width(const ui_font_t *font, const char *s) {
     return gfx_text_width_n(font, s, (int32_t)strlen(s));
 }
 
+/* Returns a BYTE count, and one that never lands inside a character -
+ * every caller uses it to truncate a string, and a cut through the middle
+ * of a sequence would produce bytes that are not text. */
 int32_t gfx_text_fit(const ui_font_t *font, const char *s, int32_t max_w) {
     int32_t w = 0;
     int32_t i = 0;
-    for (; s[i]; i++) {
-        int32_t adv = gfx_char_advance(font, s[i]);
+    while (s[i]) {
+        uint32_t cp;
+        int32_t used = utf8_step(s + i, &cp);
+        int32_t adv = gfx_glyph_advance(font, cp);
         if (w + adv > max_w) {
             break;
         }
         w += adv;
+        i += used;
     }
     return i;
 }
@@ -138,12 +236,37 @@ void gfx_text_measure(const ui_font_t *font, const char *s, gfx_text_metrics_t *
     out->descent = font->height - font->baseline;
 }
 
-void gfx_draw_char_font(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color,
-                         const ui_font_t *font, int bold) {
-    uint8_t code = (uint8_t)c;
-    if (code >= 128) {
+/* The hollow box, drawn where a glyph would have gone. Inset by a pixel
+ * on each side so two adjacent boxes read as two characters rather than
+ * as one grid. */
+static void draw_box(gfx_ctx_t *ctx, int32_t x, int32_t y, uint32_t color,
+                     const ui_font_t *font) {
+    int32_t w = box_advance(font) - 1;
+    int32_t top = font->height - font->baseline;
+    int32_t h = font->baseline - 1;
+    if (w < 3 || h < 3) {
         return;
     }
+    for (int32_t col = 0; col < w; col++) {
+        gfx_put_pixel(ctx, x + col, y + top, color);
+        gfx_put_pixel(ctx, x + col, y + top + h - 1, color);
+    }
+    for (int32_t row = 1; row < h - 1; row++) {
+        gfx_put_pixel(ctx, x, y + top + row, color);
+        gfx_put_pixel(ctx, x + w - 1, y + top + row, color);
+    }
+}
+
+/* M88: the code-point form. gfx_draw_char_font below is this with a
+ * single byte widened, which is what every caller that draws one
+ * character at a time is really doing. */
+void gfx_draw_glyph_font(gfx_ctx_t *ctx, int32_t x, int32_t y, uint32_t cp, uint32_t color,
+                          const ui_font_t *font, int bold) {
+    if (cp >= 128) {
+        draw_box(ctx, x, y, color, font);
+        return;
+    }
+    uint8_t code = (uint8_t)cp;
     const uint16_t *rows = (bold && font->rows_bold) ? font->rows_bold : font->rows;
     const uint16_t *glyph = rows + (int32_t)code * font->height;
     /* The bold weight is a one-column dilation (tools/gen-font.c), so it
@@ -167,17 +290,25 @@ void gfx_draw_char_font(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t c
     }
 }
 
+void gfx_draw_char_font(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color,
+                         const ui_font_t *font, int bold) {
+    gfx_draw_glyph_font(ctx, x, y, (uint8_t)c, color, font, bold);
+}
+
 void gfx_draw_text_font(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t color,
                          const ui_font_t *font, int bold) {
     int32_t cx = x;
-    for (const char *p = s; *p; p++) {
+    for (const char *p = s; *p;) {
         if (*p == '\n') {
             cx = x;
             y += font->height;
+            p++;
             continue;
         }
-        gfx_draw_char_font(ctx, cx, y, *p, color, font, bold);
-        cx += gfx_char_advance(font, *p);
+        uint32_t cp;
+        p += utf8_step(p, &cp);
+        gfx_draw_glyph_font(ctx, cx, y, cp, color, font, bold);
+        cx += gfx_glyph_advance(font, cp);
     }
 }
 
@@ -189,12 +320,26 @@ void gfx_draw_text(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t
     gfx_draw_text_font(ctx, x, y, s, color, ui_font_current, 0);
 }
 
-void gfx_draw_char_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color) {
-    uint8_t code = (uint8_t)c;
-    if (code >= 128) {
+/* The mono font's box. One cell wide, so a terminal's grid survives -
+ * which is the whole reason the mono path is separate from the
+ * proportional one. */
+static void draw_box_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, uint32_t color) {
+    for (int32_t col = 1; col < FONT_WIDTH - 1; col++) {
+        gfx_put_pixel(ctx, x + col, y + 2, color);
+        gfx_put_pixel(ctx, x + col, y + FONT_HEIGHT - 3, color);
+    }
+    for (int32_t row = 3; row < FONT_HEIGHT - 3; row++) {
+        gfx_put_pixel(ctx, x + 1, y + row, color);
+        gfx_put_pixel(ctx, x + FONT_WIDTH - 2, y + row, color);
+    }
+}
+
+void gfx_draw_glyph_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, uint32_t cp, uint32_t color) {
+    if (cp >= 128) {
+        draw_box_mono(ctx, x, y, color);
         return;
     }
-    const uint8_t *glyph = font8x16[code];
+    const uint8_t *glyph = font8x16[cp];
     for (int32_t row = 0; row < FONT_HEIGHT; row++) {
         uint8_t bits = glyph[row];
         for (int32_t col = 0; col < FONT_WIDTH; col++) {
@@ -205,15 +350,22 @@ void gfx_draw_char_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t c
     }
 }
 
+void gfx_draw_char_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, char c, uint32_t color) {
+    gfx_draw_glyph_mono(ctx, x, y, (uint8_t)c, color);
+}
+
 void gfx_draw_text_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, const char *s, uint32_t color) {
     int32_t cx = x;
-    for (const char *p = s; *p; p++) {
+    for (const char *p = s; *p;) {
         if (*p == '\n') {
             cx = x;
             y += FONT_HEIGHT;
+            p++;
             continue;
         }
-        gfx_draw_char_mono(ctx, cx, y, *p, color);
+        uint32_t cp;
+        p += utf8_step(p, &cp);
+        gfx_draw_glyph_mono(ctx, cx, y, cp, color);
         cx += FONT_WIDTH;
     }
 }

@@ -152,7 +152,8 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
                 $(UOBJ)/libc_signal.o \
                 $(UOBJ)/libc_dirent.o $(UOBJ)/libc_stat.o $(UOBJ)/libc_mman.o \
                 $(UOBJ)/libc_pthread.o $(UOBJ)/libc_errno.o $(UOBJ)/libc_wchar.o $(UOBJ)/libc_locale.o \
-                $(UOBJ)/libc_poll.o \
+                $(UOBJ)/libc_poll.o $(UOBJ)/libc_resource.o \
+                $(UOBJ)/libc_statvfs.o $(UOBJ)/libc_utime.o $(UOBJ)/libc_pwd.o \
                 $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
@@ -611,7 +612,8 @@ TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
 # these are two different codebases with two different build flags, and a
 # list that stopped saying so would be the first step to compiling kernel
 # code with user flags.
-TEST_USER_SRCS := user_space/lib/symtab.c
+TEST_USER_SRCS := user_space/lib/symtab.c \
+                  user_space/libc/src/wchar.c user_space/libc/src/errno.c
 
 TEST_SRCS := tests/runner.c $(wildcard tests/test_*.c) $(TEST_FAKES) \
              $(TEST_KERNEL_SRCS) $(TEST_USER_SRCS)

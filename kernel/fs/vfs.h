@@ -54,6 +54,27 @@ int vfs_symlink(const char *path, const char *target);
 /* M93: a second name for a file, and how many names it has. Refused for
  * anything under a synthetic mount - see the implementation. */
 int vfs_link(const char *old_path, const char *new_path);
+/* M88: what statvfs() reports, in the filesystem's own units.
+ *
+ * Deliberately not system_api's os_statvfs_t, for the same reason
+ * leanfs_stat_t is not os_stat_t: one is what a filesystem knows and the
+ * other is an ABI, and the day there is a second filesystem here they
+ * stop being the same shape. syscall.c converts field by field. */
+typedef struct {
+    uint32_t block_size;
+    uint32_t total_blocks;
+    uint32_t free_blocks;
+    uint32_t total_inodes;
+    uint32_t free_inodes;
+    uint32_t name_max;
+} vfs_statvfs_t;
+
+int vfs_statvfs(const char *path, vfs_statvfs_t *out);
+
+/* M88: set a file's mtime. See leanfs_utime for why a filesystem that
+ * stamps rtc_now() on every write needs one call that does not. */
+int vfs_utime(const char *path, uint32_t mtime);
+
 uint32_t vfs_nlink(const char *path);
 int64_t vfs_readlink(const char *path, char *buf, size_t maxlen);
 int vfs_lstat(const char *path, leanfs_stat_t *out);

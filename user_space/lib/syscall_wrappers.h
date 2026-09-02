@@ -129,6 +129,13 @@ long sys_symlink(const char *target, const char *path);
 long sys_readlink(const char *path, char *buf, size_t len);
 long sys_lstat(const char *path, void *out);
 
+/* M88: where this process's CPU time went (os_rusage_t, proc.h), how
+ * full the filesystem behind a path is (os_statvfs_t, os_fs.h), and a
+ * modification time set to something other than now. */
+long sys_rusage(int who, void *out);
+long sys_statvfs(const char *path, void *out);
+long sys_utime(const char *path, unsigned int mtime);
+
 /* M53: creates one directory whose parent already exists. */
 long sys_mkdir(const char *path);
 

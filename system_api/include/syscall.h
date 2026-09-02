@@ -458,4 +458,19 @@ typedef struct {
  * than the task list that bit already guards. */
 #define SYS_profile    98
 
-#define SYSCALL_COUNT 99
+/* ---- M88 (second attempt): the three calls a build probes for --------
+ *
+ * `configure` runs all three within its first hundred tests, and until
+ * this milestone this machine could not answer any of them: it had no
+ * per-process CPU time, no way to say how big its own disk was, and no
+ * way to set a modification time to anything but now. Each is one
+ * question the kernel already knew the answer to and had never been
+ * asked. */
+
+#define SYS_rusage 99 /* (int who, os_rusage_t *out) -> 0 or -1. OS_RUSAGE_SELF or OS_RUSAGE_CHILDREN (system_api/include/proc.h). Where a process's CPU time went, in PIT ticks, split by the privilege level the timer interrupted - which is what both times() and getrusage() are made of, so this is one call rather than two nearly identical ones. Ticks, not microseconds: a tick is what this machine actually observes (sched_account_tick is called from the timer interrupt), and a finer unit would be arithmetic on a number nothing measured. _SC_CLK_TCK reports the same 100 Hz, which is what lets the receiving side turn one into the other. The CHILDREN form reports what has been REAPED and nothing else - an unreaped child's time is still accruing, and POSIX specifies the same. A THREAD is not a child: a joined thread's ticks are added to the process's own totals rather than to its children's, because a thread's CPU time is time this process spent. That makes SELF mean the calling thread plus every thread of this process already joined - a running sibling's time is not in it, which is stated here rather than left to be discovered. Needs no capability: a process asking where its own CPU time went is asking about itself. */
+
+#define SYS_statvfs 100 /* (const char *path, os_statvfs_t *out) -> 0 or -1. How big the filesystem behind `path` is and how much of it is left, in blocks and in inodes. Both matter here and the second one is the interesting half: LEANFS_MAX_INODES is fixed at format time, so a tree of small files exhausts inodes long before blocks, and a caller watching only free space would watch the wrong ceiling. Refused for a path under a synthetic mount rather than answered with zeros - "how full is /proc" is a question that does not apply, and the zeros a Unix box conventionally returns for it are a number a program will divide by. Refused too for a path that does not exist, so a typo cannot look like a success. */
+
+#define SYS_utime 101 /* (const char *path, uint32_t mtime) -> 0 or -1. Sets a file's modification time to something other than now, which is the one thing every other write path in this filesystem cannot do: they all stamp rtc_now(), correctly, and a build system needs the exception. `make` decides what to rebuild by comparing mtimes, and an unpack or an `install -p` that restamped every file it restored would make the next build rebuild the world. Follows symbolic links (the link's own times are lutimes()' business and nothing has asked); refused under a synthetic mount, where there is no stored time to set. Needs CAP_FS_WRITE: it changes what is on the disk, which is the line that bit draws. */
+
+#define SYSCALL_COUNT 102

@@ -21,21 +21,28 @@ static struct lconv c_lconv = {
     UNSPECIFIED, UNSPECIFIED,
 };
 
-static int name_is_c(const char *s) {
-    if (!s || s[0] == '\0') {
-        return 1; /* "" means "ask the environment", which says nothing here */
-    }
-    if (s[0] == 'C' && s[1] == '\0') {
-        return 1;
-    }
-    const char *p = "POSIX";
+static int name_eq(const char *s, const char *want) {
     int i = 0;
-    for (; p[i]; i++) {
-        if (s[i] != p[i]) {
+    for (; want[i]; i++) {
+        if (s[i] != want[i]) {
             return 0;
         }
     }
     return s[i] == '\0';
+}
+
+static int name_is_c(const char *s) {
+    if (!s || s[0] == '\0') {
+        return 1; /* "" means "ask the environment", which says nothing here */
+    }
+    /* M88: "C.UTF-8" joins the list, and it is the one addition this
+     * machine can honestly accept. It names exactly what is true here -
+     * the C locale's collation and formatting, with a UTF-8 codeset -
+     * and every configure script that wants a UTF-8 locale asks for it
+     * by that name first. "en_US.UTF-8" is still refused, because the
+     * part of it that is not the codeset is a claim about collation and
+     * month names that this libc does not implement. */
+    return name_eq(s, "C") || name_eq(s, "POSIX") || name_eq(s, "C.UTF-8");
 }
 
 char *setlocale(int category, const char *locale) {
@@ -56,13 +63,13 @@ struct lconv *localeconv(void) {
 /* ---- <langinfo.h> ------------------------------------------------------
  *
  * The C locale's answers, and CODESET is the one that matters - see
- * <langinfo.h> for why it says ASCII rather than UTF-8.
+ * <langinfo.h> for why M88 changed it from ASCII to UTF-8.
  */
 #include <langinfo.h>
 
 char *nl_langinfo(nl_item item) {
     switch (item) {
-    case CODESET:   return (char *)"ANSI_X3.4-1968";
+    case CODESET:   return (char *)"UTF-8"; /* M88 - see <langinfo.h> for why this changed */
     case D_T_FMT:   return (char *)"%a %b %e %H:%M:%S %Y";
     case D_FMT:     return (char *)"%m/%d/%y";
     case T_FMT:     return (char *)"%H:%M:%S";

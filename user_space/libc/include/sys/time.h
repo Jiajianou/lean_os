@@ -25,3 +25,8 @@ struct timezone {
 /* `tz` is accepted and ignored - it has been meaningless on every system
  * since 4.3BSD, and this one has no timezone database at all. */
 int gettimeofday(struct timeval *tv, void *tz);
+
+/* M88: BSD's spelling of utime(), carrying microseconds this filesystem
+ * does not store. tv[0] is the access time, which leanfs does not keep
+ * either; tv[1] is the modification time and is the one that lands. */
+int utimes(const char *path, const struct timeval tv[2]);

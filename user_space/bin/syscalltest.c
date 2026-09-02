@@ -252,6 +252,22 @@ static const entry_t table[] = {
     {SYS_fcntl,         CLASS_PLAIN, 0, NULL},
     {SYS_ftruncate,     CLASS_PLAIN, 0, NULL},
     {SYS_fsync,         CLASS_PLAIN, 0, NULL},
+
+    /* M88 (second attempt). Two of the three take a path, so they are
+     * classified where every other path-taking call is; SYS_rusage's
+     * pointer is its second argument, like SYS_fstat's.
+     *
+     * SYS_utime is the one worth a note. It is gated on CAP_FS_WRITE,
+     * which this program HAS, so unlike SYS_profile above these calls
+     * really do reach their argument checks rather than stopping at a
+     * capability gate - which means the pointer refusals below are
+     * graded for a reason that has to do with pointer validation. The
+     * sweep hands it wild path pointers and every one is rejected by
+     * copy_path_from_user before any file is looked at, let alone
+     * stamped. */
+    {SYS_rusage,        CLASS_PTR, 2, NULL},
+    {SYS_statvfs,       CLASS_PTR, 1, NULL},
+    {SYS_utime,         CLASS_PTR, 1, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 

@@ -66,6 +66,11 @@ extern int errno;
 #define ENOSYS  38
 #define ENOTEMPTY 39
 #define ELOOP   40
+/* M88: a byte sequence that is not valid in this locale's encoding.
+ * Unlike the socket codes below, this one is set: every conversion in
+ * <wchar.h> reports a malformed or overlong UTF-8 sequence with it, and
+ * a program that reads a file of unknown bytes will see it. */
+#define EILSEQ  84
 /* The socket and blocking-operation codes. Present because a program
  * that compares errno against them has to compile; nothing on this
  * machine sets them yet, for the reason at the top of this file. */

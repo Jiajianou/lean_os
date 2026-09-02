@@ -437,6 +437,54 @@ int vfs_link(const char *old_path, const char *new_path) {
     return r;
 }
 
+/* M88: a modification time a caller chose. Refused on a synthetic
+ * filesystem exactly as vfs_symlink is, and for a sharper version of the
+ * same reason: /proc/uptime's mtime is not stored anywhere, so there is
+ * nothing to set and a 0 here would be a claim that something changed. */
+int vfs_utime(const char *path, uint32_t mtime) {
+    const char *rel;
+    if (vfs_resolve_mount(path, &rel) >= 0) {
+        return -1;
+    }
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    int r = leanfs_utime(path, mtime);
+    spin_unlock_irqrestore(&fs_lock, f);
+    return r;
+}
+
+/* M88: how big the filesystem behind `path` is and how much of it is
+ * left.
+ *
+ * A synthetic mount is refused rather than described with zeros. `df
+ * /proc` on a Unix box reports a filesystem of size zero and that is a
+ * convention this kernel has no reason to inherit: a program that gets
+ * numbers back believes it asked a filesystem that has blocks, and the
+ * honest answer to "how full is /proc" is that the question does not
+ * apply. Same argument SYS_fstat makes for refusing to describe a pipe.
+ *
+ * Takes the path rather than a mount id because there is no mount id in
+ * this ABI and inventing one for a call with one real answer would be
+ * the speculative generality vfsops.h declined. */
+int vfs_statvfs(const char *path, vfs_statvfs_t *out) {
+    const char *rel;
+    if (!out || vfs_resolve_mount(path, &rel) >= 0) {
+        return -1;
+    }
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    /* The path still has to exist: statvfs("/nonexistent") is an error
+     * everywhere, and answering it with the filesystem's totals would
+     * make a typo look like a success. */
+    int ok = leanfs_exists(path);
+    out->block_size = LEANFS_BLOCK_SIZE;
+    out->total_blocks = leanfs_total_blocks();
+    out->free_blocks = leanfs_free_blocks();
+    out->total_inodes = leanfs_total_inodes();
+    out->free_inodes = leanfs_free_inodes();
+    out->name_max = LEANFS_MAX_NAME;
+    spin_unlock_irqrestore(&fs_lock, f);
+    return ok ? 0 : -1;
+}
+
 uint32_t vfs_nlink(const char *path) {
     const char *rel;
     if (vfs_resolve_mount(path, &rel) >= 0) {

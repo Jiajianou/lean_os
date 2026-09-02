@@ -41,6 +41,20 @@ int clearenv(void);
 int abs(int v);
 long labs(long v);
 
+/* M88: the encoding is UTF-8, so the longest character is four bytes.
+ * A constant rather than a call into the locale, because there is one
+ * locale and it does not change - and a program sizing a buffer with
+ * this deserves a compile-time answer. The conversions themselves are in
+ * <wchar.h>; these three are declared here too because that is where the
+ * C standard puts them and where a ported program will look. */
+#define MB_CUR_MAX 4
+
+int mblen(const char *s, size_t n);
+int mbtowc(wchar_t *dst, const char *src, size_t n);
+int wctomb(char *dst, wchar_t c);
+size_t mbstowcs(wchar_t *dst, const char *src, size_t n);
+size_t wcstombs(char *dst, const wchar_t *src, size_t n);
+
 #define RAND_MAX 32767
 int rand(void);
 void srand(unsigned int seed);

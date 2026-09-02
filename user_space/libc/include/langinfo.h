@@ -1,14 +1,21 @@
-/* user_space/libc/include/langinfo.h - M80 groundwork
+/* user_space/libc/include/langinfo.h - M80 groundwork, M88 correction
  *
  * `nl_langinfo`, which on a system with one locale has one interesting
- * answer: CODESET is "ANSI_X3.4-1968" - ASCII - because that is what
- * this machine's font, its filesystem and its terminal actually handle
- * (M39/M57 give one glyph per byte).
+ * answer: CODESET.
  *
- * Saying ASCII rather than UTF-8 is the whole point of the file. A
- * program told UTF-8 would encode above U+007F and produce bytes nothing
- * here can draw; told ASCII, it either stays in range or reports that it
- * cannot represent something, which is the truth.
+ * **It said ASCII until M88, on purpose, and now says UTF-8 - also on
+ * purpose.** The old note argued the case exactly right for the system
+ * that existed then: "a program told UTF-8 would encode above U+007F and
+ * produce bytes nothing here can draw; told ASCII, it either stays in
+ * range or reports that it cannot represent something, which is the
+ * truth." What changed underneath it is that the conversions in
+ * <wchar.h> are now real UTF-8 and the whole system is byte-transparent,
+ * so a program that encodes above U+007F now produces bytes that
+ * round-trip through this filesystem, this terminal and this clipboard
+ * unharmed. They still DRAW as a replacement box above U+00FF, which is
+ * a fact about the font rather than about the encoding - and telling a
+ * program the codeset is ASCII to warn it about a font is answering a
+ * question it did not ask.
  */
 #pragma once
 

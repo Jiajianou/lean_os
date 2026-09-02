@@ -84,3 +84,31 @@ typedef struct {
     int32_t shm_segments; /* live shm segments this task created and still owns */
     char name[TASK_INFO_NAME_MAX];
 } task_info_t;
+
+/* ---- M88: SYS_rusage ---------------------------------------------------
+ *
+ * `who`. Two values, because times() reports both halves and getrusage()
+ * names them RUSAGE_SELF and RUSAGE_CHILDREN. There is no RUSAGE_THREAD:
+ * a thread here is a task with its own counters, so SELF asked from one
+ * already answers about that thread plus every thread of this process
+ * that has already been joined - see SYS_rusage's note on why a joined
+ * thread's time lands in the process's own totals and not its
+ * children's. A third constant would name a subset of that, and the
+ * subset is what SELF already gives a thread that has joined nothing. */
+#define OS_RUSAGE_SELF     0
+#define OS_RUSAGE_CHILDREN 1
+
+/* Two numbers, in PIT ticks at _SC_CLK_TCK (100 Hz).
+ *
+ * Deliberately not a `struct rusage`-shaped record with fourteen fields
+ * this machine does not measure. A page-fault count, a maximum resident
+ * set and a voluntary-context-switch count are all things nothing here
+ * counts, and a struct full of zeros is a struct a program will divide
+ * by. libc's getrusage() zeroes the fields it cannot fill - which POSIX
+ * explicitly allows - but it does so at the boundary where "not
+ * measured" is documented, rather than in the ABI where it would look
+ * like data. */
+typedef struct {
+    uint64_t user_ticks;
+    uint64_t sys_ticks;
+} os_rusage_t;

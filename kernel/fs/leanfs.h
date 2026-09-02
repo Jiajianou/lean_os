@@ -358,6 +358,24 @@ int leanfs_mkdir(const char *path);
  * PIO writes are the most expensive thing this OS does. */
 uint32_t leanfs_free_blocks(void);
 
+/* M88: the rest of what `statvfs` reports. free_blocks alone answers
+ * "how much room is left" and not "out of how much", and this filesystem
+ * has a second thing that runs out - LEANFS_MAX_INODES is fixed at
+ * format time, so a tree of small files exhausts inodes long before
+ * blocks. A df that could not see that would be measuring the wrong
+ * ceiling. */
+uint32_t leanfs_total_blocks(void);
+uint32_t leanfs_total_inodes(void);
+uint32_t leanfs_free_inodes(void);
+
+/* M88: stamp a file with a modification time that is not now.
+ *
+ * The one write path here that does not call rtc_now(), and it exists
+ * for `make`: a build compares mtimes, and an unpack or an `install -p`
+ * that silently restamped every file it restored would make the next
+ * build rebuild the world. Follows symbolic links, as utime() does. */
+int leanfs_utime(const char *path, uint32_t mtime);
+
 /* M56: removes one regular file. Frees its blocks and its inode and
  * drops its record from the parent directory, in that order, so nothing
  * can be reached through a name after its blocks are gone.

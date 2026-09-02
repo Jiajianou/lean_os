@@ -1,23 +1,33 @@
-/* user_space/libc/include/wchar.h - M80 groundwork
+/* user_space/libc/include/wchar.h - M80 groundwork, M88 rewrite
  *
- * Wide characters, to the extent this system has any.
+ * Wide characters, and - since M88 - a real multibyte encoding under
+ * them.
  *
- * It has none, and that is worth saying at the top rather than burying:
- * every string this OS handles - filenames, the console, the terminal,
- * every label the compositor draws - is bytes, and the font (M39/M57) has
- * one glyph per byte. There is no locale, no multibyte encoding and no
- * `mbstate_t` that means anything.
+ * **What changed, and why the old note is worth keeping in mind.** Until
+ * M88 this header opened by saying this system had no multibyte encoding
+ * at all, and that the conversions below treated a byte string as
+ * Latin-1: "it is wrong for anything above U+00FF, deliberately, and
+ * this comment is where that is written down." That was the honest thing
+ * to say while the whole system was one byte per character. It stopped
+ * being the right trade the moment a source tree written by somebody
+ * else had to reach this disk - every one of them has non-ASCII bytes in
+ * it, and a Latin-1 round trip turns a UTF-8 file into a different file.
  *
- * What is here therefore has a narrow and honest purpose: `wchar_t` is a
- * 32-bit code point, the functions that are pure arithmetic over arrays
- * of them are real, and the conversions between wide and multibyte
- * treat the byte string as Latin-1 - which is not an encoding this
- * system chose so much as the only one under which "one byte is one
- * character" is true, and it is true here.
+ * So: `wchar_t` is a 32-bit code point and the byte encoding is UTF-8.
+ * The conversions decode and encode it properly - rejecting overlong
+ * forms, surrogates and anything above U+10FFFF with EILSEQ rather than
+ * accepting them - and `mbstate_t` genuinely carries a partial sequence
+ * across calls, which is what makes converting a stream in fixed-size
+ * chunks work at all.
  *
- * A program that needs real UTF-8 conversion will find this wrong rather
- * than missing, so: it is wrong for anything above U+00FF, deliberately,
- * and this comment is where that is written down.
+ * **What did not change: the glyphs.** The font is one byte per glyph
+ * (M39/M57), and a font covering more than Latin-1 is a font project
+ * rather than a libc one. The split is exact and worth stating: the
+ * *encoding* is correct end to end and text round-trips through this
+ * system unmangled, while text above U+00FF draws as a replacement box.
+ * That is a rendering limitation a program can be told about, which is
+ * categorically better than an encoding limitation that corrupts its
+ * data.
  */
 #pragma once
 
@@ -31,10 +41,24 @@ typedef int wint_t;
  * the target's actual wchar_t signedness. Redefining them here would be
  * this file guessing at something GCC already knows. */
 
-/* An opaque conversion state that has nothing to hold, because Latin-1
- * is stateless. Present because the standard's signatures take one. */
+/* M88: a conversion state that genuinely holds something.
+ *
+ * UTF-8 is stateless between characters and stateful *within* one, which
+ * is the case that matters: a program reading a file in 4 KiB chunks
+ * will eventually cut a three-byte character across a boundary, and the
+ * whole reason `mbrtowc` takes an `mbstate_t` is so the next call can
+ * finish it. The Latin-1 version of this struct held an `int dummy`;
+ * this one holds the partial code point, how many continuation bytes are
+ * still owed, and how many the sequence had in total - the last one
+ * because an overlong encoding can only be detected once the value is
+ * complete and its length is known.
+ *
+ * A zeroed mbstate_t is the initial state, which is what the standard
+ * requires and what a static one gets for free. */
 typedef struct {
-    int dummy;
+    unsigned int wc;     /* the code point accumulated so far */
+    unsigned char owed;  /* continuation bytes still expected */
+    unsigned char total; /* continuation bytes this sequence has in all */
 } mbstate_t;
 
 size_t wcslen(const wchar_t *s);
@@ -58,11 +82,33 @@ unsigned long wcstoul(const wchar_t *s, wchar_t **end, int base);
 wchar_t *wcstok(wchar_t *s, const wchar_t *delim, wchar_t **saveptr);
 wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n);
 
-/* Latin-1 both ways - see the header note. `ps` is accepted and ignored,
- * because there is no state to carry. */
+/* UTF-8 both ways - see the header note.
+ *
+ * Every one of these reports a malformed sequence rather than
+ * substituting something for it: (size_t)-1 or -1, with errno set to
+ * EILSEQ. A conversion that silently replaced bad bytes with U+FFFD
+ * would make a corrupt file indistinguishable from a valid one, and
+ * this is a libc rather than a text editor - the program on top gets to
+ * decide what to do about it.
+ *
+ * The restartable forms take an `mbstate_t` and use it; a NULL `ps`
+ * means "use the library's own", which is what the standard specifies
+ * and which is only safe from one thread at a time. */
 size_t mbstowcs(wchar_t *dst, const char *src, size_t n);
 size_t wcstombs(char *dst, const wchar_t *src, size_t n);
 int    mbtowc(wchar_t *dst, const char *src, size_t n);
 int    wctomb(char *dst, wchar_t c);
 size_t mbrtowc(wchar_t *dst, const char *src, size_t n, mbstate_t *ps);
 size_t wcrtomb(char *dst, wchar_t c, mbstate_t *ps);
+
+/* M88: the restartable string forms, which is what a program converting
+ * a stream actually calls - `*src` is advanced to the first byte not
+ * consumed, so a partial character at the end of a buffer is left for
+ * the next call rather than being an error. */
+size_t mbsrtowcs(wchar_t *dst, const char **src, size_t n, mbstate_t *ps);
+size_t wcsrtombs(char *dst, const wchar_t **src, size_t n, mbstate_t *ps);
+
+/* How many bytes the next character occupies, or -1 for a malformed or
+ * incomplete one. The oldest of these calls and the one a configure
+ * script probes for by name. */
+int mblen(const char *s, size_t n);

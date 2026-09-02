@@ -71,4 +71,17 @@ int open(const char *path, int flags, ...);
 #define F_SETFL  4
 #define FD_CLOEXEC 1
 
+/* M88: the "relative to the current directory" dirfd, defined because
+ * utimensat takes one and a program has to be able to name that case.
+ *
+ * The rest of the *at() family - openat, fstatat, unlinkat - does not
+ * exist here; it is M89's, where toybox asks for it by name. So this
+ * constant is the only dirfd anything accepts, and every call that takes
+ * one refuses the others rather than resolving against the wrong
+ * directory, which is a silent wrong answer where a refusal is a
+ * loud one. -100 is the value Linux uses and the one a ported program
+ * will have baked into an object file. */
+#define AT_FDCWD (-100)
+#define AT_SYMLINK_NOFOLLOW 0x100
+
 int fcntl(int fd, int cmd, ...);

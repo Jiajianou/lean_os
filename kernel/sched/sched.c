@@ -300,6 +300,29 @@ uint64_t sched_total_ticks(int cpu) {
     return (cpu >= 0 && cpu < MAX_CPUS) ? total_ticks[cpu] : 0;
 }
 
+/* M88: see sched.h. No lock: this runs on every timer tick on every core,
+ * and the only writer of a given task's counters is the core that is
+ * running it, so the race a lock would close cannot happen. A reader on
+ * another core can see a count one tick stale, which is a distinction
+ * nothing reporting centiseconds can act on.
+ *
+ * The idle identities are charged too, deliberately. They are tasks; a
+ * `times()` asked about one would otherwise report a process that has
+ * been alive for an hour and used no CPU. M68's idle_ticks answers "was
+ * this machine busy" and this answers "where did this task's time go" -
+ * two questions, two counters, rather than one counter asked to be both. */
+void sched_account_tick(int user) {
+    task_t *t = current_task[smp_current_cpu()];
+    if (!t) {
+        return;
+    }
+    if (user) {
+        t->user_ticks++;
+    } else {
+        t->sys_ticks++;
+    }
+}
+
 /* M45: bounded copy into a task_t's own fixed name buffer. NULL and an
  * over-long name are both ordinary inputs here, not errors - see
  * TASK_NAME_MAX's own comment in sched.h. */
@@ -704,6 +727,16 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->pending_signal = 0;
     t->reaped = 0;
     t->exit_signal = 0; /* M84: not killed until something kills it */
+    /* M88: a slot may be a reaped task's, and CPU time belongs to the
+     * occupant rather than to the slot. Zeroed inside the same critical
+     * section that publishes this task as READY, for the reason this
+     * function's own M40 note gives: it is schedulable the instant the
+     * lock drops, so the first tick to land on it would otherwise be
+     * added to the previous occupant's total. */
+    t->user_ticks = 0;
+    t->sys_ticks = 0;
+    t->child_user_ticks = 0;
+    t->child_sys_ticks = 0;
     /* M75: the working directory is inherited exactly the way the fd
      * table above is, and for the same reason - a child is launched *in*
      * a place, and a launcher that had to pass one as an argument would
@@ -1387,6 +1420,54 @@ void sched_reap_slot(task_t *t) {
      * never nested in the other order anywhere in this kernel, and
      * kfree-ing inside this critical section would be the one place that
      * broke it. */
+    /* M88: the child's CPU time moves to the parent before the slot is
+     * cleared, which is what `times()`' tms_cutime and tms_cstime are.
+     *
+     * Here rather than in the two wait paths in syscall.c because this is
+     * the single point every reap goes through - sys_wait reaps in two
+     * places and sys_waitpid in two more, and a fifth would have been
+     * added silently the next time somebody wrote one. A child's own
+     * accumulated child-time comes along with it: a grandchild's ticks
+     * are reported once, at the generation that waited for them, exactly
+     * as POSIX specifies.
+     *
+     * sched_task_by_id takes no lock, so calling it while holding
+     * sched_lock is safe - it is a bounds check and a generation compare
+     * over a table this critical section already owns. */
+    task_t *parent = sched_task_by_id(t->parent_id);
+    if (parent) {
+        if (t->is_thread && t->tgid == parent->tgid) {
+            /* A THREAD of the same process, not a child of it - and the
+             * distinction is the whole of `times()`' contract. A thread's
+             * CPU time is time this process spent; a child's is not.
+             *
+             * The first version of this did not make the distinction,
+             * because a thread is a task with a parent_id like any other,
+             * and libctest's own assertion - "a process with no children
+             * has no reaped child time" - failed on the machine within a
+             * minute of being written. It has M79's threads above it in
+             * the same program, and every one that had been joined was
+             * being reported as a child.
+             *
+             * So a joined thread's ticks land in the process's OWN
+             * counters. What that makes RUSAGE_SELF is worth stating
+             * plainly: the calling thread's time plus every thread of
+             * this process that has already been joined. A running
+             * sibling's time is not in it and cannot be without walking
+             * the task table on every call, which is a cost this has no
+             * measurement to justify - and POSIX's own wording for
+             * RUSAGE_SELF ("the calling process") is satisfied by the
+             * sum of what the process has actually finished doing. */
+            parent->user_ticks += t->user_ticks;
+            parent->sys_ticks += t->sys_ticks;
+            parent->child_user_ticks += t->child_user_ticks;
+            parent->child_sys_ticks += t->child_sys_ticks;
+        } else {
+            parent->child_user_ticks += t->user_ticks + t->child_user_ticks;
+            parent->child_sys_ticks += t->sys_ticks + t->child_sys_ticks;
+        }
+    }
+
     uint8_t *stack = t->stack_base;
     t->stack_base = NULL;
     t->kernel_stack_top = 0;
@@ -1394,6 +1475,14 @@ void sched_reap_slot(task_t *t) {
     t->state = TASK_FREE;
     t->pending_signal = 0;
     t->reaped = 0;
+    /* M88: and the CPU time goes with the occupant, not the slot. Zeroed
+     * both here and at spawn on purpose: this is the release path, and a
+     * free slot holding a dead task's totals is the same class of thing
+     * as the caps field two lines down holding its authority. */
+    t->user_ticks = 0;
+    t->sys_ticks = 0;
+    t->child_user_ticks = 0;
+    t->child_sys_ticks = 0;
     t->exit_signal = 0; /* M84: not killed until something kills it */
     t->parent_id = -1;
     t->caps = 0; /* M65: a free slot holds no authority, so a stale pointer to one cannot lend any */
@@ -1859,6 +1948,16 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->pending_signal = 0;
     t->reaped = 0;
     t->exit_signal = 0; /* M84: not killed until something kills it */
+    /* M88: a fork inherits the parent's descriptors and its address
+     * space, and inherits none of its CPU time. The child has not run.
+     * This is the one field where "copy the parent" would be actively
+     * wrong rather than merely generous - `times()` in a child that
+     * reported its parent's accumulated ticks is how a build system
+     * concludes it has been running for a week. */
+    t->user_ticks = 0;
+    t->sys_ticks = 0;
+    t->child_user_ticks = 0;
+    t->child_sys_ticks = 0;
 
     for (int i = 0; i < PATH_MAX_LEN; i++) {
         t->cwd[i] = parent->cwd[i];

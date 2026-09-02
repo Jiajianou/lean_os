@@ -71,6 +71,16 @@ int32_t gfx_text_width(const ui_font_t *font, const char *s);
  * substring (a cursor position inside an edit field, say). */
 int32_t gfx_text_width_n(const ui_font_t *font, const char *s, int32_t n);
 int32_t gfx_char_advance(const ui_font_t *font, char c);
+
+/* M88: the same question asked about a decoded code point rather than a
+ * byte. Anything this font has no glyph for - which is everything above
+ * U+007F - is the width of a replacement box, so a string's measured
+ * width matches what gets drawn. See gfx.c's note on why the byte form
+ * could not keep answering 0. */
+int32_t gfx_glyph_advance(const ui_font_t *font, uint32_t cp);
+void gfx_draw_glyph_font(gfx_ctx_t *ctx, int32_t x, int32_t y, uint32_t cp, uint32_t color,
+                          const ui_font_t *font, int bold);
+void gfx_draw_glyph_mono(gfx_ctx_t *ctx, int32_t x, int32_t y, uint32_t cp, uint32_t color);
 /* How many leading characters of `s` fit in `max_w` pixels - what every
  * "truncate this to the space I have" site needs now that it cannot
  * divide by a constant. */

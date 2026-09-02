@@ -29,6 +29,11 @@ static void pit_irq(isr_regs_t *regs) {
      * before the tick can be diverted. Costs a load and a branch when no
      * profile is running. */
     profile_sample(regs);
+    /* M88: and the same tick charged to whoever it interrupted, for the
+     * same reason and at the same point - the interrupted frame is the
+     * only place the privilege level is available, and a tick that ends
+     * in a context switch never returns here. */
+    sched_account_tick((regs->cs & 3) != 0);
     /* M62: the speaker's own deadline. One comparison per tick, and the
      * reason a tone does not block whoever asked for it - see pcspk.h.
      * Ahead of the scheduler hook deliberately: a tick that ends in a

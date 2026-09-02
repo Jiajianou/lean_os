@@ -78,10 +78,11 @@ struct stat {
 
 int stat(const char *path, struct stat *out);
 int fstat(int fd, struct stat *out);
-/* No symbolic links exist on this filesystem, so lstat and stat cannot
- * differ. Provided because a program that walks a tree calls it, and
- * aliasing it to stat is the truthful implementation rather than a
- * stub - there is nothing for it to do differently. */
+/* M87: a real lstat over SYS_lstat - it does not follow a final symbolic
+ * link, and reports S_IFLNK for one. The comment that stood here until
+ * M88 said no symbolic links existed on this filesystem and that the two
+ * calls therefore could not differ. That was true when it was written
+ * and stopped being true one milestone later; see stat.c. */
 int lstat(const char *path, struct stat *out);
 
 /* `mode` is accepted and ignored, for the reason the header note gives.
@@ -89,3 +90,12 @@ int lstat(const char *path, struct stat *out);
  * that passes 0755 compiles and behaves identically, and one that reads
  * the mode back gets the honest 0. */
 int mkdir(const char *path, mode_t mode);
+
+/* M88: the two nanosecond sentinels utimensat takes, and the call
+ * itself. leanfs stores whole seconds, so a real tv_nsec is truncated -
+ * see utime.c. UTIME_OMIT asks this call to leave the one field it can
+ * set alone, which is a success that does nothing. */
+#define UTIME_NOW  ((1L << 30) - 1L)
+#define UTIME_OMIT ((1L << 30) - 2L)
+
+int utimensat(int dirfd, const char *path, const struct timespec ts[2], int flags);

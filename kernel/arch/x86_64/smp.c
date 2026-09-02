@@ -262,6 +262,11 @@ void smp_init(void) {
 void lapic_vector_handler(isr_regs_t *regs) {
     lapic_send_eoi();
     if (regs->vector == IPI_SCHEDULE_VECTOR) {
+        /* M88: this core's share of the tick, charged before the hook
+         * that may switch away from the task it belongs to. The BSP's
+         * copy of this is in pit.c, next to profile_sample and for the
+         * same reason. */
+        sched_account_tick((regs->cs & 3) != 0);
         scheduler_tick_cpu(smp_current_cpu());
     }
 }

@@ -1,5 +1,7 @@
 #include <time.h>
+#include <unistd.h> /* M88: sysconf(_SC_CLK_TCK), the rate clock() scales from */
 
+#include "proc.h" /* system_api/include/proc.h - os_rusage_t, M88 */
 #include "syscall_wrappers.h"
 
 time_t time(time_t *out) {
@@ -11,11 +13,28 @@ time_t time(time_t *out) {
 }
 
 clock_t clock(void) {
-    /* Milliseconds since boot, which is what CLOCKS_PER_SEC above says
-     * this returns. Not CPU time: this OS does not account per-task CPU
-     * time at all, and reporting wall time as if it were would be a
-     * quieter lie than reporting wall time and saying so. */
-    return (clock_t)sys_uptime_ms();
+    /* M88: processor time, which is what clock() actually means.
+     *
+     * Until this milestone this returned uptime with a comment saying so
+     * - "this OS does not account per-task CPU time at all, and reporting
+     * wall time as if it were would be a quieter lie than reporting wall
+     * time and saying so." That was the right call while it was true. It
+     * stopped being true when SYS_rusage landed, so this is the real
+     * thing now: user plus system ticks, scaled to CLOCKS_PER_SEC.
+     *
+     * The scaling is exact rather than approximate - the tick is 10 ms
+     * and CLOCKS_PER_SEC is 1000, so one tick is 10 clocks and no
+     * rounding is involved. If the two ever stop dividing evenly, this
+     * expression still holds; it just stops being exact. */
+    os_rusage_t r;
+    if (sys_rusage(OS_RUSAGE_SELF, &r) != 0) {
+        return (clock_t)-1;
+    }
+    long hz = sysconf(_SC_CLK_TCK);
+    if (hz <= 0) {
+        return (clock_t)-1;
+    }
+    return (clock_t)((r.user_ticks + r.sys_ticks) * (unsigned long)CLOCKS_PER_SEC / (unsigned long)hz);
 }
 
 /* M80 groundwork - see <sys/time.h> for what the microseconds field can

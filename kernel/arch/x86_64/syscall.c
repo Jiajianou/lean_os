@@ -24,6 +24,7 @@
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "power/power.h" /* M47 - power_shutdown, and power_mode.h's POWER_OFF/POWER_REBOOT through it */
+#include "os_fs.h"   /* system_api/include/os_fs.h - os_statvfs_t, M88 */
 #include "proc.h"      /* system_api/include/proc.h - task_info_t, M45. Resolves to the system_api one, not kernel/proc/proc.h below: a quoted include searches the *including* file's own directory first (kernel/arch/x86_64/, which has no proc.h), then -Ikernel (no kernel/proc.h either), then -Isystem_api/include. */
 #include "proc/proc.h"
 #include "proc/elf.h"   /* M48 - elf_validate, to tell "not a program" apart from "no such file" */
@@ -1566,6 +1567,83 @@ static long sys_fsync(uint64_t fd, uint64_t a2, uint64_t a3,
     }
     vfs_sync();
     return 0;
+}
+
+/* ---- M88 (second attempt) ---------------------------------------------
+ *
+ * See the ABI notes at SYS_rusage, SYS_statvfs and SYS_utime for what
+ * each one promises. The three are here together because they are one
+ * milestone and because each is short: every number they report was
+ * already known to some part of this kernel and had simply never been
+ * asked for from outside it.
+ */
+static long sys_rusage(uint64_t who, uint64_t out_ptr, uint64_t a3,
+                       uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!user_range_ok(out_ptr, sizeof(os_rusage_t), 1)) {
+        return -1;
+    }
+    task_t *self = sched_current();
+    os_rusage_t r;
+    if (who == OS_RUSAGE_SELF) {
+        r.user_ticks = self->user_ticks;
+        r.sys_ticks = self->sys_ticks;
+    } else if (who == OS_RUSAGE_CHILDREN) {
+        r.user_ticks = self->child_user_ticks;
+        r.sys_ticks = self->child_sys_ticks;
+    } else {
+        return -1; /* a third value would be a fourth meaning nothing here has */
+    }
+    *(os_rusage_t *)out_ptr = r;
+    return 0;
+}
+
+static long sys_statvfs(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3,
+                        uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    char path[LEANFS_MAX_PATH];
+    if (copy_path_from_user(path, path_ptr) != 0 ||
+        !user_range_ok(out_ptr, sizeof(os_statvfs_t), 1)) {
+        return -1;
+    }
+    vfs_statvfs_t st;
+    if (vfs_statvfs(path, &st) != 0) {
+        return -1;
+    }
+    /* Converted field by field rather than copied whole, exactly as
+     * SYS_stat does it: vfs_statvfs_t is what a filesystem knows and
+     * os_statvfs_t is an ABI. They happen to have the same shape today
+     * and a memcpy would make that a requirement nobody wrote down. */
+    os_statvfs_t *out = (os_statvfs_t *)out_ptr;
+    out->block_size = st.block_size;
+    out->total_blocks = st.total_blocks;
+    out->free_blocks = st.free_blocks;
+    out->total_inodes = st.total_inodes;
+    out->free_inodes = st.free_inodes;
+    out->name_max = st.name_max;
+    return 0;
+}
+
+static long sys_utime(uint64_t path_ptr, uint64_t mtime, uint64_t a3,
+                      uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1;
+    }
+    char path[LEANFS_MAX_PATH];
+    if (copy_path_from_user(path, path_ptr) != 0) {
+        return -1;
+    }
+    return vfs_utime(path, (uint32_t)mtime);
 }
 
 static long sys_readlink(uint64_t path_ptr, uint64_t buf, uint64_t len,
@@ -4435,6 +4513,9 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_profile] = sys_profile,
     [SYS_readlink] = sys_readlink,
     [SYS_lstat] = sys_lstat,
+    [SYS_rusage] = sys_rusage,
+    [SYS_statvfs] = sys_statvfs,
+    [SYS_utime] = sys_utime,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

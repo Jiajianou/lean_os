@@ -1568,6 +1568,52 @@ uint32_t leanfs_free_blocks(void) {
     return free_count;
 }
 
+/* M88: the three numbers `statvfs` needs that free_blocks alone cannot
+ * give - how big the filesystem is, and how many files it can still
+ * hold. An inode table this filesystem fills before it fills its data
+ * blocks is a real failure mode (LEANFS_MAX_INODES is fixed at format
+ * time), so f_files/f_ffree are not decoration here: they are the number
+ * that runs out first on a source tree of small files. */
+uint32_t leanfs_total_blocks(void) {
+    return sb.data_blocks;
+}
+
+uint32_t leanfs_total_inodes(void) {
+    return (uint32_t)LEANFS_MAX_INODES;
+}
+
+uint32_t leanfs_free_inodes(void) {
+    uint32_t free_count = 0;
+    for (int i = 0; i < (int)LEANFS_MAX_INODES; i++) {
+        if (inodes[i].type == LEANFS_TYPE_FREE) {
+            free_count++;
+        }
+    }
+    return free_count;
+}
+
+/* M88: set a file's modification time to something other than "now".
+ *
+ * Every other write path here calls rtc_now() and that is the right
+ * default; this is the one call that exists because a build system says
+ * otherwise. `make` compares mtimes, `install -p` and every tar-like
+ * unpack preserve them, and a filesystem that silently stamps the
+ * current time on a restored file makes every subsequent build rebuild
+ * everything.
+ *
+ * Follows a symbolic link, which is what utime() specifies - the times
+ * of the link itself are lutimes()' business and nothing has asked. */
+int leanfs_utime(const char *path, uint32_t mtime) {
+    int idx = resolve(path);
+    if (idx < 0) {
+        return -1;
+    }
+    inodes[idx].mtime = mtime;
+    mark_inode(idx);
+    save_meta();
+    return 0;
+}
+
 int leanfs_unlink(const char *path) {
     int parent;
     char leaf[LEANFS_MAX_NAME + 1];

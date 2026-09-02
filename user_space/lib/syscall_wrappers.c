@@ -229,6 +229,20 @@ long sys_lstat(const char *path, void *out) {
     return do_syscall(SYS_lstat, (long)path, (long)out, 0);
 }
 
+/* M88: the three a build probes for. See the ABI notes in
+ * system_api/include/syscall.h. */
+long sys_rusage(int who, void *out) {
+    return do_syscall(SYS_rusage, who, (long)out, 0);
+}
+
+long sys_statvfs(const char *path, void *out) {
+    return do_syscall(SYS_statvfs, (long)path, (long)out, 0);
+}
+
+long sys_utime(const char *path, unsigned int mtime) {
+    return do_syscall(SYS_utime, (long)path, (long)mtime, 0);
+}
+
 long sys_mkdir(const char *path) {
     return do_syscall(SYS_mkdir, (long)path, 0, 0);
 }

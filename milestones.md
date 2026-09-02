@@ -7695,7 +7695,7 @@ bad, which is exactly when it is being asked. It extrapolates from the
 TSC now, which counts cycles the CPU actually executed and which nothing
 coalesces.
 
-### M88 — Everything else a ported program calls [~] poll and the identity/limits calls; the rest is open
+### M88 — Everything else a ported program calls [~] UTF-8, poll, the identity/limits/time calls and statvfs shipped; `O_NONBLOCK` and `AF_UNIX` are M100's
 
 *Reopened third of the five before M94 — see "Before M94" below. The
 second attempt is UTF-8 and the `getrlimit`/`getrusage`/`times`/
@@ -7830,6 +7830,219 @@ own terms - but neither was ever *verified*, because a quiet run passed
 before them too, and "the symptom did not reproduce" was treated as "the
 cause is gone" for a symptom already known to be load-dependent. The
 check is the first user of the `poll(NULL, 0, ms)` sleep above.
+
+#### Second attempt — UTF-8, and the calls a build probes for ✅
+
+*Taken as the head of the queue the "next ten" section at the bottom of
+this file sets. The scope is the one that section names and no more:
+UTF-8 in the C library, and the `getrlimit`/`getrusage`/`times`/
+`statvfs`/`utime` group. `O_NONBLOCK` and `AF_UNIX` stay absorbed into
+M100.*
+
+- [x] UTF-8 in the C library: `mbrtowc`, `wcrtomb`, `mbtowc`, `wctomb`,
+      `mbstowcs`, `wcstombs`, `mbsrtowcs`, `wcsrtombs` and `mblen`, over
+      one decoder and one encoder. `mbstate_t` genuinely carries a
+      partial sequence now - it held an `int dummy` before, because
+      Latin-1 had nothing to carry
+- [x] `nl_langinfo(CODESET)` says `UTF-8`, and `setlocale` accepts
+      `C.UTF-8` as a third spelling of the one locale here. `en_US.UTF-8`
+      is still refused, because the half of that name which is not the
+      codeset is a claim about collation this libc does not implement
+- [x] `getrlimit`/`setrlimit`, `getrusage`, `times`, `statvfs`, `utime`/
+      `utimes`/`utimensat` - and `clock()`, which was uptime with a
+      comment saying so and is now processor time
+- [x] Three syscalls: `SYS_rusage` (99), `SYS_statvfs` (100),
+      `SYS_utime` (101), and the per-task CPU accounting underneath the
+      first of them, which this kernel has never had
+- [x] `<pwd.h>` and `getpwuid`/`getpwnam`/`getpwent`, which the bullet
+      above named and the first attempt did not ship. One row, because
+      there is one principal - see the header for why that is not the
+      fiction M65 refused
+- [x] Deliberately **not** the glyphs - and the replacement box that
+      makes that split honest rather than silent. See below
+
+**The kernel had no idea where its own CPU time went.** That is the part
+of this milestone that was not a header. `times()` and `getrusage()` are
+made of one number - how long has this process been running - and
+nothing in this kernel counted it. The task manager's percentages come
+from M68's *per-CPU* idle counter, which answers "was this machine busy"
+and cannot answer "was it busy on account of this process". So
+`sched_account_tick(int user)` is charged from the timer interrupt on
+every core, split by the privilege level the timer interrupted, and it
+sits in `pit.c` and `smp.c` next to `profile_sample` for exactly the
+reason M101 put that call there: **the interrupted frame is the only
+place the privilege level exists, and a tick that ends in a context
+switch never comes back to be accounted afterwards.**
+
+The child half is `tms_cutime`/`tms_cstime`, and it went into
+`sched_reap_slot` rather than into the wait paths. `sys_wait` reaps in
+two places and `sys_waitpid` in two more; four call sites is four places
+to forget, and the fifth would have been added silently by whoever wrote
+the next wait. A reaped child's own child-time comes along with it, so a
+grandchild is reported once, at the generation that waited for it.
+
+**The second bug its own test found, and this one was a design error
+rather than a slip.** `libctest` asserts that a process with no children
+reports no reaped child time. It failed on the machine: *"times()
+reported child time in a process with no children"*. The cause is that a
+**thread is a task with a `parent_id` like any other**, so every one of
+M79's threads that libctest had joined a few hundred lines earlier was
+being reported to it as a dead child.
+
+That is wrong in the way that matters for what this call is for: a
+thread's CPU time is time *this process* spent, and a child's is not.
+`make` reading `tms_cutime` wants the second and would have been handed
+the first. The fix is four lines - a joined thread's ticks go into the
+process's own counters, keyed on `is_thread && tgid == parent->tgid` -
+and it settles what `RUSAGE_SELF` means here, which is now written into
+the ABI note rather than left to be discovered: **the calling thread plus
+every thread of this process already joined.** A running sibling's time
+is not in it and cannot be without walking the task table on every call,
+which is a cost nothing has measured a need for.
+
+Worth noting where the assertion came from. It was not written to catch
+this - it was written because "a counter that reports somebody else's
+work" is one of the three ways a CPU-time counter can be wrong, and it
+was the cheapest of the three to state. The bug it found was a different
+one than the one it was aimed at.
+
+**The bug the milestone's own test found, and what it was really
+about.** `mblen("", 1)` returned 1 and must return 0. The cause is that
+`mbtowc` decoded straight through the caller's pointer and then tested
+`*dst == 0` to spot the terminator - which cannot work when `dst` is
+NULL, and `mblen` is precisely the caller that passes NULL. It is a
+one-line fix. What is worth recording is that **every round-trip test
+passed with it in place**: the encoder and decoder agreed with each
+other perfectly, and the defect was in the one function whose contract
+is about a case neither of them has. A property test over a range is a
+strong instrument and it is blind to a function that is not in the
+property.
+
+**What the exhaustive tests are for, and why they are host tests.** The
+interesting half of a UTF-8 decoder is the set of sequences it
+*refuses*, and **a booted machine cannot reach any of them** - nothing on
+this disk contains an overlong encoding or a lone surrogate, because
+nothing that produced those files would emit one. `tests/test_utf8.c`
+writes the bytes down: `0xC0 0xAF` is `/` written the long way,
+`0xC0 0x80` is a NUL that hides from a C string, `0xED 0xA0 0x80` is a
+surrogate half, `0xF4 0x90 0x80 0x80` is one past the last code point.
+Every real UTF-8 security bug of the last thirty years is in that family,
+and the only difference between a decoder that has the rule and one that
+does not is a test that supplies the bytes. Twenty-two tests - fifteen written against
+the design and seven the mutation harness asked for, see below - and the
+round trip is graded over the whole range rather than against a table
+this file wrote down.
+
+**Two headers are redirected rather than one include path added, and the
+reason is blast radius.** The code under test is `libc/src/wchar.c`,
+which says `#include <wchar.h>`; compiled for the host that finds the
+host's, whose `mbstate_t` is a different struct, and the file does not
+build. Putting `user_space/libc/include` on the test tier's include path
+would have fixed it and also shadowed the host's `<string.h>` and
+`<stdio.h>` for every other test in the binary. So `tests/fakes/wchar.h`
+and `tests/fakes/errno.h` redirect two headers by name, using the
+mechanism the Makefile already documents for `spinlock.h`, and nothing
+else changes. The code under test is still the code that ships, which is
+the property the whole tier is built to keep.
+
+**The replacement box, which was not in the plan and makes the plan's
+claim true.** The bullet says "deliberately not the glyphs... text above
+U+00FF still draws as a replacement box. That is a rendering limitation
+a program can be told about, which is categorically better than an
+encoding limitation that corrupts its data." Checking what the renderer
+actually did with a high byte turned up something worse than either: it
+drew **nothing, and advanced nothing**. So a filename with an accent in
+it did not render as wrong text - it rendered as *shorter* text, and two
+names differing only above U+007F were pixel-identical. That is the
+silent-corruption failure the bullet was written to avoid, sitting one
+layer below where it was looking.
+
+`gfx.c` now decodes UTF-8 in the three text walkers - draw, measure and
+truncate - and draws a hollow box for anything the font has no glyph
+for, which above U+007F is everything (the font is 128 glyphs, not 256;
+the plan's "U+00FF" was one boundary out about this project's own font).
+A malformed byte gets the same box and advances exactly one byte, so bad
+input cannot walk a decoder off the end of a string. `gfx_text_fit`
+returns a byte count that never lands inside a character, because every
+caller uses it to truncate and a cut through the middle of a sequence
+produces bytes that are not text.
+
+**A comment corrected in passing.** `<sys/stat.h>` still said "no
+symbolic links exist on this filesystem, so lstat and stat cannot
+differ". That was true when it was written and M87 made it false one
+milestone later. Fixed where it stood, with what it used to say kept -
+which is this file's own rule applied to a header.
+
+**The mutation harness found the tests wanting, twice, and the second
+time was the more instructive.** `make mutate FILE=user_space/libc/src/
+wchar.c MUTANTS=60` broke the file sixty ways. The fifteen tests above
+noticed eighteen of them: **30.0%**, with the survivors split exactly in
+half - 21 in the M80 wide-string functions and **21 in the UTF-8 code
+this milestone wrote**.
+
+What the twenty-one had in common is the finding: **every one was an
+error return or a NULL-destination form.** The tests graded what the
+conversions produce and nothing graded what they report when they cannot
+produce anything. A mutant returning `(size_t)-2` instead of
+`(size_t)-1` from `mbstowcs` passed all fifteen. `wcsrtombs` had no
+caller at all. And **line coverage was already total** - `wcstombs`'
+error path executes inside the round-trip test the moment a surrogate
+reaches it - which is precisely the thing Q8's own note says a coverage
+number cannot see.
+
+Five tests later: **46.7%**, survivors 21 / 11. The eleven were the same
+lesson one layer in - three were terminator writes that the new tests
+*executed* without *inspecting*. `wcstombs`' end-of-string guard had
+never decided anything, because every test of it returned early from
+inside the loop when a character did not fit, so the case where a string
+fits exactly and the NUL does not was untouched.
+
+Three more tests: **53.3%**. Then the same no-room question asked of
+`wcsrtombs`, which is where it closes: **55.0%, and no killable survivor
+left in the UTF-8 code at all.** The three that remain there are
+**equivalent mutants** - `char scratch[4]` grown to `[5]`, and two
+initializers overwritten before they are read - which no test can kill
+because they change nothing. Twenty tests, four measurements, and the
+number stopped moving because there was nothing left to move it.
+
+**And a finding this milestone is recording rather than fixing.** The
+other 24 survivors are in `wcslen`, `wcscpy`, `wcsncpy`, `wcscat`,
+`wcscmp`, `wcschr`, `wmemmove`, `wcstol` and `wcstok` - M80 groundwork
+that **nothing in this tree has ever tested**, and which became visible
+only because this milestone put `wchar.c` into the host tier for the
+first time. That is not this milestone's scope and inventing it here
+would be the drift the "next ten" section exists to prevent. The
+condition for collecting it is concrete: **the first program that calls
+one of them.** Today nothing does - they were written for a CPython port
+that never linked (M80), and M99 is where a real caller arrives. The
+number is written down here so that whoever gets there is starting from
+a measurement rather than from a suspicion.
+
+**The boot battery refused this milestone once, and it was right to.**
+`syscalltest` panicked the machine: *"syscall 99 is not classified in
+this file's table"*, and 100 and 101 behind it. That file keeps a census
+of every syscall number and fails the boot when one is missing, on the
+stated grounds that **an unclassified syscall is one nothing tests, and
+that would be invisible**. Three new numbers arrived with a kernel
+implementation, an ABI note, a libc wrapper and a host test, and the one
+thing they did not arrive with was a line saying which of them takes a
+pointer. The census found it in one boot.
+
+Worth recording because the check cost nothing to write and has now paid
+for itself twice: it is the same shape as M93's "the kernel's own headers
+are prerequisites too" - a test that grades whether the tests still cover
+the thing, rather than grading the thing. `SYS_utime` is the interesting
+entry of the three, and its note says why: unlike `SYS_profile`, this
+program *holds* `CAP_FS_WRITE`, so the sweep's hostile arguments really
+do reach the argument checks instead of stopping at a capability gate -
+which is the difference between a pointer refusal that is graded and one
+that passes vacuously.
+
+**What this cost.** Three syscalls, four task fields, one decoder, one
+encoder, five libc source files, twenty-two host tests and a renderer
+that now knows what a character is. No number moved in `tests/budgets.tsv`:
+the tick accounting is two increments inside an interrupt that was
+already running, and the text path decodes bytes it was already reading.
 
 ### M89 — Somebody else's userland
 
@@ -11193,3 +11406,65 @@ this one had never even arrived.
 The `git remote` still points at GitHub. That is where the repository is
 stored, not something the build or the tests touch, and removing it is
 the user's call rather than this entry's.
+
+## The next ten, and where they actually start
+
+*Written after M101 and M102 landed, from re-reading the queue against
+the tree rather than against any one arc's plan.* The ask was ten new
+milestones. **Nothing new is written here, because the tree already has
+fifteen unbuilt ones and the next ten of them are listed below.** An arc
+that collects a second plan while the first is unbuilt is precisely the
+drift "Deliberately not next" exists to catch, and the loop in
+`CLAUDE.md` says one milestone at a time in the order this file sets.
+What was actually missing was not scope. It was an **order**: the head
+of the queue is written in three different places — the "Before M94"
+table, the M94–M100 arc, and two entries reopened under their own
+numbers — and no single line in this file said which one comes next.
+This section is that line.
+
+| order | milestone | state | what it closes | what it blocks |
+|---|---|---|---|---|
+| 1 | **M88 (2nd)** | `[~]` poll and the identity calls shipped | UTF-8 in the C library, and `getrlimit`/`getrusage`/`times`/`statvfs`/`utime` | every source tree in the arc has non-ASCII bytes in it, and a configure script probes all five |
+| 2 | **M89** | not started | toybox: somebody else's userland | a configure run shells out to `sed`, `grep`, `install`; `/bin` has six programs |
+| 3 | **M91 (2nd)** | `[~]` six of seven | `MAP_SHARED` and file-backed `mmap` | M91's own words: *"there is no version of M95 that does not need this first"* |
+| 4 | **M94** | not started | `x86_64-lean_os` as a triple, and a sysroot | everything after it: nothing cross-compiles without a target |
+| 5 | **M95** | not started | the loader, and `dlopen` | M97's exceptions across an object boundary, M99's extension modules |
+| 6 | **M96** | not started | TLS, a futex, real pthread primitives | libstdc++ does not build without `__thread` |
+| 7 | **M97** | not started | C++, and the unwinder inside it | GCC is a C++ program |
+| 8 | **M98** | not started | a compiler that runs here | M99, M109, and two boxes left half-open below |
+| 9 | **M99** | not started | Python, built here | — |
+| 10 | **M100** | not started | the browser gap, measured | the arc after this one |
+
+**A correction, recorded rather than quietly fixed.** The M101–M110
+arc's opening sentence says *"the M94–M100 arc is planned and unbuilt,
+and nothing below starts before it finishes."* Two things below it
+started anyway: M101 and M102 are both ✅ and both landed ahead of every
+milestone in the table above. That was not a decision anybody wrote
+down, so it gets written down now, and the cost is already visible in
+those two entries rather than hypothetical — **each of them shipped with
+a box it could not close.** M101's attribution over a bootstrap
+(*"not taken, because M98 does not exist"*) and M102's swap decision
+(*"not decided, because the number that decides it does not exist"*)
+are both waiting on the same milestone. **M98 therefore now carries
+three deliverables rather than one:** its own three-stage bootstrap, the
+profile that closes M101, and the peak-RSS number that decides M102.
+Building a measurement's instrument before the thing it measures is not
+free; it costs an entry that reads as done and is not.
+
+**The one ordering question this raises, taken here rather than
+halfway.** M103's interrupts and M104's writeback cache are the obvious
+candidates to pull ahead of M98: a GCC bootstrap against a driver that
+polls, one request deep, is the slowest thing this machine will ever
+do, and it is tempting to make the disk fast before spending hours
+waiting on it. **They stay where they are.** M104's own first bullet
+says M92 deferred writeback *for want of a measurement* and names M98's
+build as that measurement. Building the cache first to make M98 pleasant
+would be optimizing a path nobody has profiled, which is M69's rule and
+the one this project decides by. The slow bootstrap is the measurement;
+if the wall-clock says the disk owns it, M104 is specified by a number
+instead of by an expectation.
+
+**What this section does not do.** It promotes nothing from the deferred
+list, invents no milestone number, and changes no scope: every row above
+already had its bullets and its grading test written. M103–M110 remain
+the arc after this one, in the order they are already in.

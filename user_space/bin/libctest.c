@@ -30,6 +30,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <pwd.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/times.h>
+#include <utime.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -403,8 +409,15 @@ int main(void) {
         same("strftime %F %T", buf, "2001-09-09 01:46:40");
     }
 
-    /* The wide-character subset, including the Latin-1 conversion this
-     * system is honest about being. */
+    /* The wide-character subset, and the UTF-8 conversion under it.
+     * M88 changed what this section asserts: the encoding used to be
+     * Latin-1 and the test below used to require a code point above
+     * U+00FF to be REFUSED. It is now encoded, which is the point of
+     * that milestone. The exhaustive grading of the encoding lives in
+     * tests/test_utf8.c, where the malformed sequences a booted machine
+     * cannot produce can be written down as bytes; what is checked here
+     * is that the same code behaves the same way in ring 3, on this
+     * machine, against this libc's own <wchar.h>. */
     {
         wchar_t w[16];
         if (mbstowcs(w, "wide", 16) != 4 || wcslen(w) != 4 || w[0] != L'w') {
@@ -423,12 +436,23 @@ int main(void) {
         if (wcstol(nums, &wend, 0) != 42 || *wend != L' ') {
             fail("wcstol");
         }
-        /* Above U+00FF is deliberately not representable - checked so
-         * that the limit <wchar.h> documents is a limit rather than a
-         * silent truncation. */
+        /* M88: four bytes out, and the same character back. The old
+         * assertion here was that this returned -1. */
         wchar_t big[2] = {0x1F600, 0};
-        if (wcstombs(back, big, 16) != (size_t)-1) {
-            fail("wcstombs accepted a code point it cannot represent");
+        if (wcstombs(back, big, 16) != 4) {
+            fail("wcstombs did not encode a four-byte character");
+        }
+        wchar_t round[4];
+        if (mbstowcs(round, back, 4) != 1 || round[0] != (wchar_t)0x1F600) {
+            fail("a four-byte character did not round-trip");
+        }
+        /* And a sequence that is not valid UTF-8 is still refused, which
+         * is the half of this that did not change. */
+        if (mbstowcs(round, "\xC0\xAF", 4) != (size_t)-1) {
+            fail("mbstowcs accepted an overlong encoding");
+        }
+        if (MB_CUR_MAX != 4) {
+            fail("MB_CUR_MAX is not 4");
         }
     }
 
@@ -443,8 +467,13 @@ int main(void) {
         if (strcmp(localeconv()->decimal_point, ".") != 0) {
             fail("localeconv");
         }
-        if (strcmp(nl_langinfo(CODESET), "ANSI_X3.4-1968") != 0) {
-            fail("nl_langinfo(CODESET) is not ASCII");
+        /* M88: UTF-8, because the conversions are now real - see
+         * <langinfo.h> for the argument this reverses. */
+        if (strcmp(nl_langinfo(CODESET), "UTF-8") != 0) {
+            fail("nl_langinfo(CODESET) is not UTF-8");
+        }
+        if (strcmp(setlocale(LC_ALL, "C.UTF-8"), "C") != 0) {
+            fail("setlocale(\"C.UTF-8\")");
         }
     }
 
@@ -741,6 +770,26 @@ int main(void) {
         if (sysconf(-12345) != -1) {
             fail("sysconf accepted a name it does not know");
         }
+        /* M88 (second attempt): the password database, which has one row
+         * because this machine has one principal. What is checked is
+         * that it says so both ways and refuses everything else - a
+         * database that answered about uid 1000 would be inventing a
+         * second principal, which is the thing M65 refused. */
+        struct passwd *pw = getpwuid(getuid());
+        if (!pw || strcmp(pw->pw_name, "root") != 0 || pw->pw_uid != 0) {
+            fail("getpwuid did not describe this machine's one principal");
+        }
+        if (getpwnam("root") != pw || getpwnam("nobody") != (struct passwd *)0) {
+            fail("getpwnam disagrees with getpwuid");
+        }
+        if (getpwuid(1000) != (struct passwd *)0) {
+            fail("getpwuid invented a user this machine does not have");
+        }
+        setpwent();
+        if (getpwent() != pw || getpwent() != (struct passwd *)0) {
+            fail("getpwent does not walk a database of exactly one");
+        }
+        endpwent();
     }
 
     /* sigaction, which is M76 reached by its POSIX name. Installing and
@@ -764,6 +813,141 @@ int main(void) {
         sigaddset(&set, SIGUSR2);
         if (!sigismember(&set, SIGUSR2) || sigismember(&set, SIGUSR1)) {
             fail("sigaddset/sigismember");
+        }
+    }
+
+    /* M88 (second attempt): the three calls a build probes for, asked on
+     * the machine rather than on the host - because every one of them
+     * reports something only a running kernel knows.
+     *
+     * The assertions are about relationships rather than values. What
+     * makes a CPU-time counter wrong is not a number this test could
+     * predict; it is that the number does not move when the process
+     * burns a slice, or that it moves when the process sleeps, or that
+     * it counts somebody else's work. Those are all checkable without
+     * knowing what the right answer is. */
+    {
+        struct tms t0, t1;
+        clock_t r0 = times(&t0);
+        if (r0 == (clock_t)-1) {
+            fail("times() failed");
+        }
+        /* Long enough to cross several 10 ms ticks - the counter has a
+         * tick's granularity, so a shorter loop can honestly report
+         * zero and this would be a flaky test rather than a wrong one. */
+        volatile unsigned long spin = 0;
+        for (unsigned long i = 0; i < 40000000UL; i++) {
+            spin += i;
+        }
+        (void)spin; /* the work is the point; the sum is not */
+        clock_t r1 = times(&t1);
+        if (t1.tms_utime <= t0.tms_utime) {
+            printf("[libctest] utime %ld -> %ld\n", (long)t0.tms_utime, (long)t1.tms_utime);
+            fail("times() did not charge a busy loop to user time");
+        }
+        if (r1 < r0) {
+            fail("times() elapsed clock went backwards");
+        }
+        /* A process with no children has no reaped child time, and this
+         * one has spawned nothing. A counter that reported some would be
+         * reading the wrong task. */
+        if (t1.tms_cutime != 0 || t1.tms_cstime != 0) {
+            fail("times() reported child time in a process with no children");
+        }
+
+        struct rusage ru;
+        if (getrusage(RUSAGE_SELF, &ru) != 0) {
+            fail("getrusage(RUSAGE_SELF)");
+        }
+        /* The same time, in the other unit. tms_utime is in ticks and
+         * ru_utime is in seconds and microseconds; they must describe
+         * the same quantity, which is the check that catches a scaling
+         * error in either direction. */
+        long from_ticks = (long)t1.tms_utime * (1000000L / sysconf(_SC_CLK_TCK));
+        long from_rusage = (long)ru.ru_utime.tv_sec * 1000000L + ru.ru_utime.tv_usec;
+        long diff = from_ticks - from_rusage;
+        if (diff < 0) {
+            diff = -diff;
+        }
+        if (diff > 2000000L / sysconf(_SC_CLK_TCK)) {
+            fail("times() and getrusage() disagree about this process's user time");
+        }
+        if (getrusage(12345, &ru) != -1) {
+            fail("getrusage accepted a `who` it does not have");
+        }
+        /* clock() is the third spelling of the same number, and M88 made
+         * it real - it returned uptime before, with a comment saying so. */
+        if (clock() == (clock_t)-1) {
+            fail("clock() failed");
+        }
+
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur != (rlim_t)sysconf(_SC_OPEN_MAX)) {
+            fail("getrlimit(RLIMIT_NOFILE) does not agree with sysconf");
+        }
+        /* Setting a limit to what it already is changes nothing and is
+         * granted; anything else is refused rather than accepted and
+         * ignored - see <sys/resource.h>. */
+        if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+            fail("setrlimit refused a request to change nothing");
+        }
+        rl.rlim_cur = 8;
+        if (setrlimit(RLIMIT_NOFILE, &rl) != -1 || errno != EPERM) {
+            fail("setrlimit agreed to enforce a limit nothing here enforces");
+        }
+    }
+
+    /* statvfs and utime, which need a real filesystem underneath. */
+    {
+        struct statvfs vfs;
+        if (statvfs("/", &vfs) != 0) {
+            fail("statvfs(\"/\")");
+        }
+        if (vfs.f_bsize == 0 || vfs.f_blocks == 0 || vfs.f_bfree > vfs.f_blocks) {
+            fail("statvfs reported an impossible filesystem");
+        }
+        if (vfs.f_files == 0 || vfs.f_ffree > vfs.f_files) {
+            fail("statvfs reported an impossible inode count");
+        }
+        if (vfs.f_namemax == 0) {
+            fail("statvfs did not report a name limit");
+        }
+        if (statvfs("/no/such/path", &vfs) != -1) {
+            fail("statvfs answered about a path that does not exist");
+        }
+        /* /proc has no blocks, and saying zero would be a number a
+         * caller divides by - see the ABI note at SYS_statvfs. */
+        if (statvfs("/proc", &vfs) != -1) {
+            fail("statvfs described a synthetic filesystem with numbers");
+        }
+
+        const char *path = "/tmp_utime_test";
+        FILE *f = fopen(path, "w");
+        if (!f) {
+            fail("could not create a file to stamp");
+        } else {
+            fputs("x", f);
+            fclose(f);
+            struct utimbuf ut;
+            ut.actime = 0;
+            ut.modtime = 1000000000; /* 2001-09-09, the same instant strftime is checked against */
+            if (utime(path, &ut) != 0) {
+                fail("utime failed");
+            }
+            struct stat st;
+            if (stat(path, &st) != 0 || st.st_mtime != 1000000000) {
+                printf("[libctest] mtime is %ld\n", (long)st.st_mtime);
+                fail("utime did not set the modification time");
+            }
+            /* The whole reason this call exists: a stamped file must not
+             * be re-stamped by the next thing that looks at it, because
+             * `make` decides what to rebuild by comparing these. */
+            if (stat(path, &st) != 0 || st.st_mtime != 1000000000) {
+                fail("a stat re-stamped the file it looked at");
+            }
+            if (unlink(path) != 0) {
+                fail("could not remove the stamped file");
+            }
         }
     }
 
