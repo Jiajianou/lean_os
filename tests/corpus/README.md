@@ -14,7 +14,8 @@ Two kinds of thing live here and they are worth telling apart:
   starts generating anything, so a reintroduced bug fails immediately.
 
 The two files in `leanfs/` beginning `crash-` are the second kind, with a
-caveat that belongs on the record: they crashed the *harness*, not the
+caveat that belongs on the record - and it is also why untracking them
+costs little in this particular case: they crashed the *harness*, not the
 kernel. `tests/fuzz/fuzz_leanfs.c` was calling `fake_pmm_reset()` per
 input, which freed the 16 MiB inode table `leanfs_init` had begun caching
 - a use-after-free in the test scaffolding. They are kept because they are
@@ -24,24 +25,28 @@ written down rather than quietly deleted.
 
 ## What is in git and what is not
 
-The split is in `.gitignore` and it is deliberate:
+**Nothing in this directory is tracked.** The rule is the simple one:
+nothing a test *produces* is in git, only what a test *is*. `tests/*.c`,
+`tests/sh/`, `tests/fakes/`, `tests/budgets.tsv` and
+`tests/coverage-floor.tsv` are sources and stay tracked; everything under
+`tests/corpus/` is output and does not.
 
-- **The corpus is ignored.** Every run adds files, so committing them
-  would mean `make fuzz-run` dirties the tree with dozens of new entries
-  each time - exactly the noise that makes people stop reading
-  `git status`. The cost is that a campaign starts cold, which is a few
-  seconds of a thirty-minute nightly run.
-- **Reproducers are not.** `crash-*`, `leak-*`, `timeout-*` and `oom-*`
-  are checked in. `make fuzz-run` passes `-artifact_prefix` so libFuzzer
-  writes them straight into this directory rather than into the repo
-  root, which means a fuzzer that finds something produces exactly one
-  new file in `git status`, in the right place, and it is the one worth
-  keeping.
+**This reverses what this file used to say, and the reversal has a cost
+that is worth stating rather than quietly dropping.** Reproducers -
+`crash-*`, `leak-*`, `timeout-*`, `oom-*` - used to be un-ignored, on the
+argument that an ignored file is one nobody is prompted to commit: it
+sits in a working tree until the tree is thrown away, and the bug it
+reproduces gets found again the hard way. That argument is still true.
+What has changed is the decision, not the reasoning.
 
-That last part is the whole point of not ignoring them: an ignored file
-is one nobody is prompted to commit. It sits in a working tree until the
-tree is thrown away, and the bug it reproduces gets found again the hard
-way.
+What is unchanged is that `make fuzz-run` replays every file in this
+directory before it generates anything, so a reproducer still works as a
+regression test **on the machine that found it** - which is the same
+machine every tier of this project is run on (see "Testing is local" in
+`milestones.md`). What is lost is a finding surviving a fresh clone. If
+that matters for a particular input, the way to keep it is to turn it
+into a test: a byte array in `tests/test_leanfs_format.c` is tracked,
+readable, and says what it is for, which a hash-named blob never did.
 
 If a committed corpus ever becomes worth it - to seed a longer campaign,
 say - the way

@@ -90,8 +90,9 @@ dkms.conf
 # interactive suite writes its failure screendumps to /tmp entirely
 # (LEANOS_INPUT_ARTIFACTS overrides it).
 #
-# What is left is the fuzz corpus, and it needs splitting rather than
-# ignoring wholesale, because two different kinds of file live there.
+# What is left is the fuzz corpus, and it is now ignored wholesale. It
+# used to be split - corpus ignored, reproducers kept - and the note
+# below records why that split was dropped.
 
 # The corpus proper: inputs libFuzzer found interesting, named by content
 # hash. Machine-generated, and *every* run adds more - a committed corpus
@@ -99,24 +100,28 @@ dkms.conf
 # time, which is exactly the noise this section exists to remove. The
 # cost of ignoring them is that a campaign starts cold; that is thirty
 # seconds of a thirty-minute nightly run.
-/tests/corpus/*/*
 
-# ...but NOT the reproducers. A file libFuzzer names crash-, leak-,
-# timeout- or oom- is an input that once broke something, and checking one
-# in is what turns a finding into a permanent regression test rather than
-# an afternoon. `make fuzz-run` writes them straight here
-# (-artifact_prefix), so a fuzzer that finds something produces exactly
-# one new file in `git status` and it is the one worth keeping.
+# ...and the reproducers with them, which reverses what this file said
+# until now and is a decision rather than a drift.
 #
-# Deliberately un-ignored, and the reason is visibility rather than
-# safety from `git clean` - which would remove an uncommitted reproducer
-# either way. The point is that an ignored file is one nobody is prompted
-# to commit: it sits in a working tree until the tree is thrown away, and
-# the bug it reproduces is found again the hard way.
-!/tests/corpus/*/crash-*
-!/tests/corpus/*/leak-*
-!/tests/corpus/*/timeout-*
-!/tests/corpus/*/oom-*
+# `crash-`, `leak-`, `timeout-` and `oom-` files used to be un-ignored on
+# the argument that an ignored file is one nobody is prompted to commit,
+# so a reproducer would sit in a working tree until the tree was thrown
+# away and the bug would be found again the hard way. That argument is
+# still true and it is the cost being accepted here: **a fuzz finding is
+# now a local file, and a fresh clone starts without it.**
+#
+# What is unchanged is that `make fuzz-run` replays every file in this
+# directory before it generates anything, so a reproducer keeps working
+# as a regression test on the machine that found it - which is the same
+# machine every tier of this project is run on (see "Testing is local" in
+# milestones.md). What is lost is the same finding surviving a re-clone.
+#
+# The rule this file now applies is the simple one: nothing a test
+# *produces* is tracked, only what a test *is*. tests/*.c, tests/sh/,
+# tests/fakes/, tests/budgets.tsv and tests/coverage-floor.tsv are
+# sources and stay tracked; everything under tests/corpus/ is output.
+/tests/corpus/*/*
 
 # Coverage instrumentation, for the case where it is ever run outside
 # /build/ - llvm-cov and gcov both drop these beside the object files.
