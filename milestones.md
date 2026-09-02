@@ -10169,30 +10169,233 @@ independent across a `dlopen`ed object, which is the case the
 general-dynamic model exists for and the one a local-exec-only
 implementation silently gets wrong.
 
-### M97 — C++ [ ]
+### M97 — C++ [x]
 
-- [ ] libstdc++ (GCC's own) built for the target: `operator new`/`delete`,
-      static initialization and `__cxa_atexit`, `std::string`,
-      the containers, iostreams, `<atomic>`, and `std::thread` over M96
-- [ ] **Exceptions**, which is the milestone inside the milestone:
-      `.eh_frame`, `_Unwind_RaiseException` and the rest of the unwinder
-      ABI, the personality routine, and unwinding *through* a shared
-      object boundary. This is the single largest new mechanism in the
-      arc and there is no version of GCC or Chrome that runs without it
-- [ ] RTTI and `dynamic_cast`, which need type identity to be stable
-      across shared objects — the same problem exceptions have, with the
-      same answer, and both get it wrong in the same way if `COPY`
-      relocations and symbol interposition are not right in M95
-- [ ] `libsupc++`/`libstdc++` as both an archive and a shared object
-- [ ] Deliberately **not** `libc++`. One C++ runtime, and it is the one
-      GCC ships with, because M98's whole test is GCC compiling itself
+**Status:** done, all four bullets, verified on the machine. The largest
+single milestone in this arc by a distance, and most of it was not C++ at
+all - it was this project's libc being told the truth about itself by a
+standard library that will not compile against a lie.
 
-**How we'll know.** A `throw` in one shared object caught by type in
-another, with destructors running for every frame in between — verified
-by counting the destructor calls, because a catch that fires while
-skipping a destructor is the bug this gets wrong and it looks like
-success. And a C++ program nobody here wrote, with templates,
-containers and iostreams, run unmodified.
+- [x] libstdc++ (GCC's own) built for the target - `operator
+      new`/`delete`, static initialization and `__cxa_atexit`,
+      `std::string`, the containers, iostreams, `<atomic>` and
+      `std::thread` over M96
+- [x] **Exceptions**: `.eh_frame`, the unwinder ABI, the personality
+      routine, and unwinding **through a shared object boundary**
+- [x] RTTI and `dynamic_cast`, with type identity holding across a
+      shared object
+- [x] `libsupc++`/`libstdc++` as both an archive and a shared object -
+      `libstdc++.so.6.0.33` and `libgcc_s.so.1` are both on the disk
+- [x] Deliberately **not** `libc++`
+
+#### The four things that are true now, each proved separately
+
+They are separate self-tests because they fail for entirely different
+reasons, and one fixture reporting "C++ is broken" when what is broken is
+a missing declaration in `<cstdio>` would be a worse instrument than
+four.
+
+**1. A throw unwinds.** Three frames deep, caught by type in `main`, with
+a destructor run for every frame in between - **counted and ordered**,
+not asserted to have happened. M97's own bullet says why: *"a catch that
+fires while skipping a destructor is the bug this gets wrong and it looks
+like success."* Plus a derived object caught by its base, a rethrow that
+keeps the object, `catch(...)` over a builtin, and a namespace-scope
+object constructed before `main` by `.init_array` and destroyed after it
+by `__cxa_atexit`.
+
+**2. The standard library on top of it.** A sorted vector, a `std::map`
+iterated in key order **out of libstdc++'s own compiled tree code** (so
+it proves `libstdc++.a`, not just the headers), a string across the
+small-string boundary, iostreams round-tripped through a stringstream,
+`dynamic_cast` and `typeid` agreeing, **three exceptions raised inside
+libstdc++** and caught here by type, and a `std::thread` joined over
+M79's tasks and M96's futex.
+
+**3. An exception across a shared object** - this milestone's headline.
+A library the program `dlopen`s and never named on its link line throws;
+the executable catches it by exact type and again by its base; both of
+the library's own frame destructors run on the way out; and a throw from
+the executable is caught by a clause compiled into the library. Three
+different things have to be right at once and a single-object test passes
+with all three broken.
+
+**4. C++ nobody here wrote.** Eight of GCC's own libstdc++ regression
+tests, one from each area this port touches, compiled with **no edits of
+any kind** and every one exiting 0. `23_containers/map/pthread6.cc` is
+the one worth naming: its author put a `std::map` behind threads to test
+libstdc++, and on this machine that exercises M79's tasks, M96's futex
+and the C++ threading model at once - which is a better test than
+anything written here, because it was not written knowing what this OS
+can do.
+
+#### What the C++ compiler found in this project's libc
+
+None of this was C++ work. All of it was already wrong.
+
+- **No `extern "C"` guards. Anywhere.** All 82 headers. Every declaration
+  became a C++ function when a C++ program included it, so `malloc` in a
+  header and `malloc` in `libc.a` were different symbols. It cost a
+  complete libstdc++ build to find, and the error names the caller rather
+  than the header: **"undefined reference to `malloc(unsigned long)`"** -
+  with the argument list, which is the tell.
+- **`int mkstemp(char *template)`.** POSIX spells the parameter
+  `template`; it is a keyword. A syntax error inside a system header,
+  four lines from anything the program wrote.
+- **Twenty-one missing `errno` codes**, which `<system_error>` builds a
+  table of and `<mutex>` throws (`EDEADLK` from `once_flag`). And
+  `ENETUNREACH` defined twice, thirty lines apart, both as 101.
+- **`strtok`, `strtok_r`, `strcoll`, `strxfrm`, `difftime`, `div`,
+  `ldiv`, `lldiv`, `system`, `fgetpos`, `fsetpos`, `freopen`, `tmpfile`,
+  `sig_atomic_t`, `fpos_t`** - every one named unconditionally by a
+  `<cxxx>` header, so absence is a compile error rather than a missing
+  feature.
+- **`<pthread.h>` did not include `<sched.h>`**, which is where every
+  other pthreads implementation puts it and where GCC's `gthr-posix.h`
+  reaches for `sched_yield`.
+
+Two of those additions are refusals rather than features, on M65's rule.
+`system()` is declared and returns -1 for every command: a `system()`
+nothing calls is a `system()` nothing checks, and the version that would
+get written without a caller would be wrong in some way nobody would
+find. `pthread_cancel` returns `ENOSYS`: cancellation is cancellation
+points, cleanup handlers and a deferred/asynchronous distinction, and one
+that returned 0 while leaving the thread running would be the worst
+possible answer.
+
+#### The port, and the five things it did not know
+
+`tools/toolchain-port/apply.py` grew from nine edits to fourteen, and
+`lean_os.h` gained three specs. Each was a thing the target could not
+express, not a thing that was merely missing:
+
+1. **`default_use_cxa_atexit` was `no`,** correctly for C. GCC's fallback
+   registers one destructor per translation unit with plain `atexit`,
+   which has nowhere to record *which shared object* a static belongs to.
+   `dlclose` then destroys nothing or destroys somebody else's.
+2. **libstdc++'s configure calls `GCC_NO_EXECUTABLES`** for any cross
+   target it does not name, after which a link test is a fatal error -
+   and libtool's `dlopen` probe is a link test that does not know that.
+   A `lean_os*)` case leaving `lt_cv_dlopen` at `no` is the fix and is a
+   true statement: the C++ runtime does not load pieces of itself here.
+3. **`crossconfig.m4` ends in `AC_MSG_ERROR`,** so an unlisted target
+   gets a stopped configure rather than a default.
+4. **libtool did not know what a shared library looks like here.**
+   `checking dynamic linker characteristics... no`, after which
+   `--enable-shared` is *accepted and quietly does nothing* - the worst
+   shape a configuration failure can take. And the case appears **twice**
+   in a generated configure, once per libtool tag; editing the first left
+   the C++ half still answering no.
+5. **`STARTFILE_SPEC` had one answer for three cases.** A shared object
+   was getting `crt1.o`, whose call to `main` is a PC-relative reference
+   to a symbol that does not exist - reported as *"relocation
+   R_X86_64_PC32 against symbol `__lean_start' can not be used when
+   making a shared object"*, a message about PIC from a file that should
+   not have been on the line.
+
+#### The bug this milestone is really about: one unwinder, not two
+
+The cross-object throw failed for a long time with **exit 134** - abort,
+which is `std::terminate` - from a build where every single-object
+exception test passed. libgcc's exception machinery keeps a **static
+registry** of the `.eh_frame` tables it has been told about. Link
+`libgcc.a` into the executable and into the shared object and there are
+two registries: the library registers its frames in its copy at load
+time, the executable throws through its own, the throw finds no handler
+and the program dies with no message.
+
+That is the entire reason `libgcc_s.so` exists, and it took
+`t-slibgcc t-slibgcc-gld t-slibgcc-elf-ver` in `libgcc/config.host` plus
+a `LIBGCC_SPEC` that routes anything dynamic to `-lgcc_s`. Not
+`t-eh-dw2-dip`, which is the other way to find an FDE - `dl_iterate_phdr`
+over the loaded objects - because that needs `<elf.h>` and a
+`dl_iterate_phdr`, and this system has neither. The registry is the older
+mechanism and the right one here: `crtbeginS`'s `frame_dummy` runs from a
+shared object's own `.init_array`, which M95's loader already walks for
+every object it maps.
+
+**And asking for a shared libgcc split the archive**, which broke the
+static case a step later and in a way that hid: the exception machinery
+moves out of `libgcc.a` into `libgcc_eh.a`, so a static link stops
+getting the unwinder - but only a program that reaches a part of
+libstdc++ which can throw pulls in the object that needs it. Every
+fixture in this milestone still linked; one of GCC's own tests did not.
+The static case takes `-lgcc -lgcc_eh` now.
+
+#### Two things that had to be built here first
+
+**`.eh_frame` and `.gcc_except_table` had no rule in
+`user_space/lib/user.ld`,** and an orphan section is not a no-op - ld
+places it wherever it likes. What the unwinder needs is that the whole of
+`.eh_frame` is *contiguous and in link order*: `crtbegin.o`'s
+`__EH_FRAME_BEGIN__` is a label at offset 0 of its empty one and
+`crtend.o`'s `__FRAME_END__` is a four-byte zero terminator, so a gap
+between them is a walk off the end of the table. `KEEP` on both, because
+`--gc-sections` has no way to know that a table nothing references by
+name is the only thing between a throw and `std::terminate`.
+
+**The sysroot gained `libc.so` and `Scrt1.o`.** `libstdc++.so` has to
+link against a shared libc; without one it links `libc.a` and stops at
+the first non-PIC object (*"relocation R_X86_64_TPOFF32 against
+`lean_errno`"*). It is built by `make sysroot` with the same
+`x86_64-elf-gcc` that builds `libc.a`, because `build-dynamic.sh` cannot
+supply it - that script needs the toolchain that needs `libc.so`. One
+pass instead of two. It is linked with `x86_64-elf-ld` **directly**, for
+the reason `CLAUDE.md` already gives for the kernel: this is a
+bare-metal driver with no notion of a shared object, and it drops
+`-shared` and links an executable, which announces itself as *"undefined
+reference to `main`"* from a library that has no `main`.
+
+#### What is not done
+
+**`-static` is still the target's default and there is still no
+dynamically-linked non-PIE.** The three cases the specs know are static
+executable, PIE and shared object; a plain dynamic `ET_EXEC` - which is
+what most Unix programs actually are - has no spelling. Nothing here
+needs one, and the condition for adding it is a program that does: it
+becomes worth doing when something ported here wants a dynamic
+executable that is not position-independent, which is a decision about
+that program rather than about this compiler.
+
+**`TARGET_LIBC_HAS_FUNCTION` is still `no_c99_libc_has_function`** -
+deliberately. Widening it would let the compiler synthesise calls into a
+libc this project is still filling in, which is a link error in somebody
+else's build at the end of a long compile. It becomes worth revisiting
+when a measurement shows the missing transformations cost something.
+
+#### Two bugs this milestone exposed that had nothing to do with C++
+
+**The launcher had been silently listing a subset of `/bin`.**
+`LAUNCHER_MAX_ENTRIES` was 48 and `/bin` held 58 programs, so the last
+ten were simply not there - no message, no ellipsis, nothing. It had been
+that way since whenever `/bin` passed 48. Eleven C++ fixtures pushed
+`reboot` off the end and `settings_persist_across_a_reboot` in the
+interactive suite failed, which is a lucky failure: the only reason
+anything noticed is that one test types a program name into that
+launcher. It is 128 now - a number set by the failure - and a truncation
+**says so** rather than losing a program quietly.
+
+**And the fixtures do not belong in `/bin`.** Eight of somebody else's
+regression tests are not applications, and putting them there put them in
+the launcher, in the file manager's default view and in every `ls /bin`,
+which is a lie about what is installed. They are in `/tests` now. The
+overflow is what made that obvious, and it would have been the right
+answer regardless.
+
+**The mount scan is twenty times slower, and that is a real finding
+rather than a cost.** Eighty megabytes of libstdc++, libgcc_s and test
+binaries took `mount_scan_us` from 6 ms to 128 ms, and the budget row
+failed on the first boot after this landed - which is exactly what M105
+put it there for. What it says is that M105's conclusion was one word too
+broad: the scan does not get slower when files are *added*, it gets
+slower when *bytes* are, because it walks every allocated inode's block
+tree and the indirect blocks come off the disk. M105's entry and the
+deferred-journal condition are both amended in place.
+
+**Nine toolchain rebuilds**, at about twelve minutes each, were the real
+cost of this milestone. Every one of them was a configuration answer this
+target did not have, and every one of them is now written down in
+`apply.py` next to what goes wrong without it.
 
 ### M98 — A compiler that runs here [ ]
 
@@ -11058,6 +11261,18 @@ full scan, cold cache, boot filesystem              6041 us
 the same scan after four writers' trees             4832 us
 ```
 
+> **Amended by M97, and the amendment matters more than the original
+> finding.** These numbers are 6 ms on the filesystem M105 measured and
+> **128 ms** on the one M97 left behind - eighty megabytes of libstdc++,
+> libgcc_s and C++ test binaries. The claim below is still true as
+> stated: the scan does not get more expensive when files are *added*.
+> It gets more expensive when *bytes* are, because the scan walks every
+> allocated inode's block tree and the indirect blocks come off the
+> disk. M105 measured the right pair and drew a conclusion one word too
+> broad. The budget rows caught it on the first boot after M97 landed,
+> which is what they are for; the ceiling is 400 ms now and set from a
+> measurement rather than from an opinion.
+
 **5–7 ms, and it does not move with the file count.** M93 measured 30 ms
 at a hundred thousand files and this filesystem holds far fewer, so a
 smaller number is not news. What is news is the *pair*: the tree grew by
@@ -11092,9 +11307,17 @@ no. It is now:
 
 > **A journal becomes worth building when a metadata sequence stops being
 > atomic against another writer** — when `fs_lock` is split finer for
-> throughput, or when the inode table stops being resident and the scan
-> becomes disk-bound. Either one alone is enough; today neither is true,
-> and the second was already M93's condition.
+> throughput, or when the scan becomes a wait. Either one alone is
+> enough.
+>
+> *(M97 amendment: this said "when the inode table stops being resident
+> and the scan becomes disk-bound". The inode table is still resident
+> and the scan is already disk-bound - it walks indirect blocks - so
+> that clause named a mechanism rather than a threshold. What matters is
+> the number: 128 ms on an eighty-megabyte filesystem against a 400 ms
+> ceiling. A scan that costs a person a noticeable pause after a power
+> cut is the condition, and it is measured on every graded boot rather
+> than argued about.)*
 
 The first half is the new one, and it is a condition on *this project's
 own future work*: M106 wants per-CPU run queues and M109 wants a

@@ -122,10 +122,11 @@ cd "$SRC/build-gcc"
 if [ ! -f Makefile ]; then
   "../gcc-$GCC_VER/configure" \
     --target="$TARGET" --prefix="$PREFIX" --with-sysroot="$SYSROOT" \
-    --enable-languages=c --disable-nls --disable-werror \
-    --disable-shared --disable-libssp --disable-libquadmath \
+    --enable-languages=c,c++ --disable-nls --disable-werror \
+    --enable-shared --disable-libssp --disable-libquadmath \
     --disable-libgomp --disable-libatomic --disable-multilib \
     --enable-initfini-array \
+    --disable-libstdcxx-verbose --enable-threads=posix \
     --with-gmp="$GMP" --with-mpfr="$MPFR" --with-mpc="$MPC" \
     --with-system-zlib \
     > configure.log 2>&1 || { tail -40 configure.log >&2; exit 1; }
@@ -135,6 +136,34 @@ make -j"$JOBS" MAKEINFO=true all-gcc > build-gcc.log 2>&1 || { tail -40 build-gc
 make -j"$JOBS" MAKEINFO=true all-target-libgcc > build-libgcc.log 2>&1 || { tail -40 build-libgcc.log >&2; exit 1; }
 make MAKEINFO=true install-gcc > install-gcc.log 2>&1 || { tail -20 install-gcc.log >&2; exit 1; }
 make MAKEINFO=true install-target-libgcc > install-libgcc.log 2>&1 || { tail -20 install-libgcc.log >&2; exit 1; }
+
+# ---- M97: the C++ runtime -----------------------------------------------
+#
+# `--disable-hosted-libstdcxx` builds libstdc++-v3 in FREESTANDING mode,
+# which produces libsupc++.a and nothing else. That is not a reduced
+# ambition, it is the correct decomposition: libsupc++ is the C++ ABI
+# runtime - operator new/delete, __cxa_throw, the personality routine,
+# type_info and dynamic_cast - and it is the half that has to exist
+# before any C++ program links at all. The containers and iostreams sit
+# on top of a libc and are a separate question with a separate set of
+# things that can be missing.
+#
+# It is built as a third stage rather than folded into the second because
+# it needs a working target libgcc to configure against, and libgcc is
+# what stage two produces. `all-target-libstdc++-v3` after
+# `install-target-libgcc` is that ordering stated in the makefile's own
+# terms.
+#
+# --disable-libstdcxx-verbose: the verbose terminate handler formats a
+# diagnostic through the full stdio machinery on the way to aborting.
+# What it buys is a message; what it costs is a dependency on that
+# machinery from the one code path that runs when the program has already
+# lost control of itself.
+echo "build-toolchain: building the C++ runtime (libsupc++)"
+make -j"$JOBS" MAKEINFO=true all-target-libstdc++-v3 > build-cxx.log 2>&1 \
+  || { tail -40 build-cxx.log >&2; exit 1; }
+make MAKEINFO=true install-target-libstdc++-v3 > install-cxx.log 2>&1 \
+  || { tail -20 install-cxx.log >&2; exit 1; }
 
 echo "build-toolchain: done"
 "$PREFIX/bin/$TARGET-gcc" --version | head -1

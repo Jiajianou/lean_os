@@ -22,6 +22,18 @@
 
 #include <sys/types.h> /* M89: pid_t and uid_t, for siginfo_t below */
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef void (*sighandler_t)(int);
 
 #define SIG_DFL ((sighandler_t)SIG_DFL_ADDR)
@@ -62,6 +74,13 @@ int raise(int sig);
  * all.
  */
 typedef unsigned int sigset_t;
+
+/* M97: <csignal> does `using ::sig_atomic_t;`. An int, which is what it
+ * is everywhere: the type an object can have when it is written by a
+ * signal handler and read by the interrupted code without tearing. On
+ * x86-64 an aligned int load or store is a single instruction, which is
+ * the whole of the guarantee. */
+typedef int sig_atomic_t;
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *old);
 
@@ -159,3 +178,7 @@ int sigismember(const sigset_t *set, int sig);
  * over signals spells it. SIG_MAX is the highest; NSIG is the bound. */
 #define NSIG (SIG_MAX + 1)
 
+
+#ifdef __cplusplus
+}
+#endif

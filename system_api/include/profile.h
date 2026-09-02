@@ -36,6 +36,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* One entry of the flat profile: an address, how many ticks were
  * sampled at it, and whose address it is. */
 typedef struct {
@@ -80,3 +92,7 @@ typedef struct {
 #define PROFILE_OP_SYSCALLS  5 /* (prof_syscount_t *out, max) -> entries written, indexed by syscall number */
 #define PROFILE_OP_SYSRESET  6 /* () -> 0 */
 #define PROFILE_OP_TIMING    7 /* (on) -> the previous setting */
+
+#ifdef __cplusplus
+}
+#endif

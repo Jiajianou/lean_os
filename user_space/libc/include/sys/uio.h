@@ -14,6 +14,18 @@
 
 #include <sys/types.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct iovec {
     void  *iov_base;
     size_t iov_len;
@@ -21,3 +33,7 @@ struct iovec {
 
 ssize_t readv(int fd, const struct iovec *iov, int count);
 ssize_t writev(int fd, const struct iovec *iov, int count);
+
+#ifdef __cplusplus
+}
+#endif

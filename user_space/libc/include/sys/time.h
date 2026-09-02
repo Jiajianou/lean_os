@@ -12,6 +12,18 @@
 
 #include <time.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct timeval {
     time_t tv_sec;
     long   tv_usec;
@@ -46,3 +58,7 @@ int settimeofday(const struct timeval *tv, const void *tz);
  * does not store. tv[0] is the access time, which leanfs does not keep
  * either; tv[1] is the modification time and is the one that lands. */
 int utimes(const char *path, const struct timeval tv[2]);
+
+#ifdef __cplusplus
+}
+#endif

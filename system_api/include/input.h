@@ -10,6 +10,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     int32_t dx; /* relative movement since the last event, screen
                  * coordinates (x: right-positive, y: down-positive -
@@ -78,3 +90,7 @@ typedef struct {
 #define KBD_KEY_F1  14
 #define KBD_KEY_F12 25
 #define KBD_KEY_FN(n) (KBD_KEY_F1 + (n) - 1) /* n is 1..12 */
+
+#ifdef __cplusplus
+}
+#endif

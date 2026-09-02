@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <errno.h>  /* M97: pthread_cancel reports ENOSYS - see the header */
 
 #include "syscall_wrappers.h"
 
@@ -861,4 +862,11 @@ int pthread_condattr_init(pthread_condattr_t *attr) {
 int pthread_condattr_destroy(pthread_condattr_t *attr) {
     (void)attr;
     return 0;
+}
+
+/* M97: see <pthread.h> for why this exists and why it refuses. */
+int pthread_cancel(pthread_t thread) {
+    (void)thread;
+    errno = ENOSYS;
+    return ENOSYS;
 }

@@ -19,6 +19,18 @@
 
 #include "input.h" /* KBD_MOD_*, KBD_KEY_* - the chords are expressed in exactly what the keyboard driver delivers */
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     SHORTCUT_NONE = 0,
     SHORTCUT_CYCLE_FORWARD,   /* Alt+Tab */
@@ -96,3 +108,7 @@ static inline int shortcut_lookup(char ch, int mods) {
     }
     return SHORTCUT_NONE;
 }
+
+#ifdef __cplusplus
+}
+#endif

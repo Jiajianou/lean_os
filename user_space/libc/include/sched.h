@@ -15,6 +15,18 @@
 
 #include <sys/types.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SCHED_OTHER 0
 #define SCHED_FIFO  1
 #define SCHED_RR    2
@@ -30,3 +42,7 @@ int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param);
 int sched_getscheduler(pid_t pid);
 int sched_get_priority_min(int policy);
 int sched_get_priority_max(int policy);
+
+#ifdef __cplusplus
+}
+#endif

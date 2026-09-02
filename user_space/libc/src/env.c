@@ -89,15 +89,112 @@ extern void (*__fini_array_end[])(void) __attribute__((weak));
  * a flush and is told it succeeded will not flush.
  */
 #define ATEXIT_MAX 32
-static void (*atexit_fns[ATEXIT_MAX])(void);
+
+/* ---- M97: one list, two shapes of entry -------------------------------
+ *
+ * atexit takes `void (*)(void)`. The C++ ABI's __cxa_atexit takes
+ * `void (*)(void *)` plus an argument and the handle of the shared object
+ * the destructor belongs to, and that third field is the whole reason it
+ * exists: a static object inside a shared library must be destroyed when
+ * that library is unloaded, not when the program exits, or dlclose leaves
+ * destructors pointing at unmapped code.
+ *
+ * One list rather than two, because the ORDER between them matters and
+ * two lists cannot express it: `static Foo f;` and `atexit(g)` in the
+ * same translation unit must unwind in reverse registration order
+ * regardless of which mechanism registered which. Two lists would run all
+ * of one and then all of the other, which is the wrong answer in a way
+ * nothing would notice until a destructor read something g had freed.
+ */
+typedef struct {
+    void (*fn)(void *);
+    void *arg;
+    void *dso;
+    /* Which of the two shapes this is. A plain atexit handler is stored
+     * with a NULL arg and called through a cast; keeping the distinction
+     * explicit means the call site never has to guess from the arg. */
+    int takes_arg;
+} exit_entry_t;
+
+static exit_entry_t atexit_fns[ATEXIT_MAX];
 static int atexit_count;
 
-int atexit(void (*fn)(void)) {
+/* The main executable's handle. GCC's crtbegin.o defines this on targets
+ * whose crtstuff was configured to; ours does not (see
+ * tools/toolchain-port/apply.py on which parts of crtstuff this target
+ * builds), so libc supplies it. Its ADDRESS is the identity - the value
+ * is never read - which is why it can be a single byte.
+ *
+ * The dynamic linker gives each shared object its own; a destructor
+ * registered against this one belongs to the program and runs at exit. */
+/* `__dso_handle` is NOT defined here, and where it comes from moved
+ * during this milestone, which is worth recording because the first
+ * version of this file did define it.
+ *
+ * GCC's crtstuff.c defines it - but only on a target configured with
+ * `DEFAULT_USE_CXA_ATEXIT`, which is what M97 turned on. So under M94's
+ * configuration there was nobody to define it and libc had to; under
+ * M97's, crtbegin.o does, and libc defining it too is a duplicate symbol
+ * at every C++ link. It is declared in <stdlib.h> and defined by the
+ * startup files, which is where the rest of the world puts it. */
+
+static int register_exit(void (*fn)(void *), void *arg, void *dso, int takes_arg) {
     if (!fn || atexit_count >= ATEXIT_MAX) {
         return -1;
     }
-    atexit_fns[atexit_count++] = fn;
+    atexit_fns[atexit_count].fn = fn;
+    atexit_fns[atexit_count].arg = arg;
+    atexit_fns[atexit_count].dso = dso;
+    atexit_fns[atexit_count].takes_arg = takes_arg;
+    atexit_count++;
     return 0;
+}
+
+int atexit(void (*fn)(void)) {
+    return register_exit((void (*)(void *))(void *)fn, (void *)0, (void *)0, 0);
+}
+
+/* M97: the C++ ABI entry point. GCC emits a call to this for every
+ * function-local static and every namespace-scope object with a
+ * non-trivial destructor, once the target is configured with
+ * `default_use_cxa_atexit=yes` - which this one now is, because the
+ * alternative it falls back to (a per-translation-unit destructor
+ * registered with plain atexit) cannot express "unload this library"
+ * at all. */
+int __cxa_atexit(void (*fn)(void *), void *arg, void *dso) {
+    return register_exit(fn, arg, dso, 1);
+}
+
+/* M97: run and remove every destructor belonging to one shared object,
+ * or all of them when `dso` is NULL - which is what exit() means.
+ *
+ * Reverse order, and the removal has to happen before the call for the
+ * same reason __lean_run_exit_handlers' does: a destructor that triggers
+ * another dlclose, or calls exit, must not find itself still on the
+ * list. Compaction rather than a tombstone because the list is 32 entries
+ * and walked backwards; a hole would have to be skipped by every later
+ * pass and that is more state than this saves. */
+void __cxa_finalize(void *dso) {
+    for (int i = atexit_count - 1; i >= 0; i--) {
+        if (i >= atexit_count) {
+            /* A destructor ran and shortened the list under us. */
+            i = atexit_count;
+            continue;
+        }
+        if (dso && atexit_fns[i].dso != dso) {
+            continue;
+        }
+        exit_entry_t e = atexit_fns[i];
+        for (int k = i; k < atexit_count - 1; k++) {
+            atexit_fns[k] = atexit_fns[k + 1];
+        }
+        atexit_count--;
+        if (e.takes_arg) {
+            e.fn(e.arg);
+        } else {
+            ((void (*)(void))(void *)e.fn)();
+        }
+    }
 }
 
 /* Called by exit(), in reverse order of registration - which is what the
@@ -105,12 +202,10 @@ int atexit(void (*fn)(void)) {
  * another handler's setup runs before it. The destructor array and
  * _fini run after, in the order the ELF ABI specifies. */
 void __lean_run_exit_handlers(void) {
-    while (atexit_count > 0) {
-        void (*fn)(void) = atexit_fns[--atexit_count];
-        /* The count is decremented BEFORE the call, so a handler that
-         * calls exit() again does not run itself forever. */
-        fn();
-    }
+    /* M97: everything, whichever way it was registered - see
+     * __cxa_finalize, which is the same walk with a filter this call does
+     * not want. */
+    __cxa_finalize((void *)0);
     if (__fini_array_start && __fini_array_end) {
         for (void (**p)(void) = __fini_array_end; p > __fini_array_start;) {
             (*--p)();

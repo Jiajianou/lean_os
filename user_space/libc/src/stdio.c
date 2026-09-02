@@ -778,3 +778,116 @@ size_t __fpending(FILE *f) {
     (void)f;
     return 0; /* there is no buffer - see <stdio.h> */
 }
+
+/* ---- M97: position as an opaque token, and two ways to open ----------
+ *
+ * fgetpos/fsetpos are ftell/fseek with the position wrapped in a type a
+ * program cannot do arithmetic on. On this OS that is all they are,
+ * because a position here IS a byte offset; the wrapper exists so that a
+ * program written against the standard's opacity keeps working on a
+ * system where it is not.
+ */
+int fgetpos(FILE *f, fpos_t *pos) {
+    if (!f || !pos) {
+        return -1;
+    }
+    long where = ftell(f);
+    if (where < 0) {
+        return -1;
+    }
+    pos->__pos = where;
+    return 0;
+}
+
+int fsetpos(FILE *f, const fpos_t *pos) {
+    if (!f || !pos) {
+        return -1;
+    }
+    return fseek(f, pos->__pos, SEEK_SET);
+}
+
+/* freopen: close whatever this stream was and reopen it on a new path,
+ * KEEPING THE SAME FILE OBJECT. That last part is the whole point of the
+ * call and the reason it cannot be written as fclose-then-fopen by the
+ * caller: the standard streams are the usual target
+ * (`freopen("out", "w", stdout)`), and every pointer to stdout in the
+ * program - including ones inside a library it did not write - has to
+ * keep working afterwards.
+ *
+ * A NULL path means "reopen the same file with a new mode", which this
+ * OS cannot do: there is no way to ask a descriptor what path it came
+ * from. Refused rather than silently ignored - a program that asked to
+ * change a stream from read to write and was told it succeeded would
+ * then write nothing, somewhere else.
+ */
+FILE *freopen(const char *path, const char *mode, FILE *f) {
+    if (!f || !path) {
+        return (FILE *)0;
+    }
+    uint32_t flags = 0;
+    for (const char *m = mode; m && *m; m++) {
+        if (*m == 'r') flags |= OPEN_READ;
+        if (*m == 'w') flags |= OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE;
+        if (*m == 'a') flags |= OPEN_WRITE | OPEN_CREATE | OPEN_APPEND;
+        if (*m == '+') flags |= OPEN_READ | OPEN_WRITE;
+    }
+    if (!flags) {
+        return (FILE *)0;
+    }
+    long fd = sys_open(path, flags);
+    if (fd < 0) {
+        return (FILE *)0;
+    }
+    /* The old descriptor goes only once the new one is in hand. A
+     * freopen that fails must leave the stream exactly as it was, and
+     * closing first would leave it closed. */
+    if (f->fd >= 0) {
+        sys_close(f->fd);
+    }
+    f->fd = (int)fd;
+    f->eof = 0;
+    f->err = 0;
+    f->used = 1;
+    return f;
+}
+
+/* tmpfile: a stream on a file with no name a program can use.
+ *
+ * Made in /tmp with a name derived from the pid and a counter, opened,
+ * and then UNLINKED while the descriptor is still open - so the file has
+ * no directory entry from the moment this returns and its blocks come
+ * back when the last descriptor closes. That is what makes it a
+ * temporary file rather than a file in a temporary place, and it is the
+ * one part of this a caller cannot arrange for itself.
+ */
+FILE *tmpfile(void) {
+    static int counter;
+    char name[64];
+    long pid = sys_getpid();
+    int n = 0;
+    const char *dir = "/tmp/tmpf";
+    while (dir[n] && n < 32) {
+        name[n] = dir[n];
+        n++;
+    }
+    long v = pid * 1000 + (++counter);
+    char digits[16];
+    int d = 0;
+    do {
+        digits[d++] = (char)('0' + (int)(v % 10));
+        v /= 10;
+    } while (v && d < 16);
+    while (d > 0) {
+        name[n++] = digits[--d];
+    }
+    name[n] = '\0';
+    FILE *f = fopen(name, "w+");
+    if (!f) {
+        return (FILE *)0;
+    }
+    /* Unlinked while open. If this fails the stream still works and the
+     * file is merely visible, which is worse than a temporary file and
+     * better than no file - so it is not a reason to fail the call. */
+    sys_unlink(name);
+    return f;
+}

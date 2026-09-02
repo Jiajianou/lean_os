@@ -34,6 +34,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef int wint_t;
 
 #define WEOF ((wint_t)-1)
@@ -149,3 +161,7 @@ int fputws(const wchar_t *ws, FILE *f);
  * it. The definitions are in wctype.c and are unchanged. */
 int wcwidth(wchar_t c);
 int wcswidth(const wchar_t *s, size_t n);
+
+#ifdef __cplusplus
+}
+#endif

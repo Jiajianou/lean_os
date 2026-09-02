@@ -27,6 +27,18 @@
  * system_api/include/mman.h, which is the file that owns these flags. */
 #include <mman.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
 int munmap(void *addr, size_t length);
 
@@ -44,3 +56,7 @@ int msync(void *addr, size_t length, int flags);
 int mprotect(void *addr, size_t length, int prot);
 int madvise(void *addr, size_t length, int advice);
 int posix_madvise(void *addr, size_t length, int advice);
+
+#ifdef __cplusplus
+}
+#endif

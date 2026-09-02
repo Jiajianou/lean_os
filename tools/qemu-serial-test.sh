@@ -383,6 +383,16 @@ REQUIRED_MARKERS=(
   "[m79] two threads, one address space:"
   # M96: the two things that make M79's threads usable by a C runtime.
   "[m96] a thread with its own variables, and a wait that costs nothing:"
+  # M97: C++, in four parts that fail for four different reasons - the
+  # ABI runtime, the standard library on top of it, an exception across a
+  # shared-object boundary, and GCC's own tests compiled unmodified. All
+  # four are required for the same reason M94's and M95's are: the
+  # toolchain is optional to BUILD and the image either has these
+  # programs or it does not, and run-tests.sh is what puts them there.
+  "[m97] C++ that throws:"
+  "[m97] and the standard library on top of it:"
+  "[m97] and across a shared object:"
+  "[m97] and C++ nobody here wrote:"
   # M106: the cores. Required on every boot, one core or four - on one
   # it is the serial baseline the four-core number is a ratio against,
   # and it is the only place MAX_TASKS' and MAX_FDS' high-water marks are

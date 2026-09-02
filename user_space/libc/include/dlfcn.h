@@ -19,6 +19,18 @@
  */
 #pragma once
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* RTLD_LAZY is accepted and behaves as RTLD_NOW: binding is eager
  * throughout this linker (see its header for why lazy binding is a
  * refusal rather than an omission), and a lazy binding that happens
@@ -37,3 +49,7 @@ int   dlclose(void *handle);
 /* The last error, cleared by reading it. NULL when there has been none
  * since the last call. */
 char *dlerror(void);
+
+#ifdef __cplusplus
+}
+#endif

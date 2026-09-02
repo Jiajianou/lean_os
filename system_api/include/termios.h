@@ -17,6 +17,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned int tcflag_t;
 typedef unsigned char cc_t;
 
@@ -153,3 +165,7 @@ struct winsize {
  * a terminal no other session owns - both rules are POSIX's and both
  * exist so that one session cannot steal another's terminal. */
 #define TIOCSCTTY  0x540E
+
+#ifdef __cplusplus
+}
+#endif

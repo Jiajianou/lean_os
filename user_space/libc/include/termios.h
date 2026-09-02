@@ -34,6 +34,18 @@
 #include_next <termios.h>
 #include <sys/types.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* tcsetattr's `optional_actions`. All three are accepted and behave
  * identically, because this line discipline has no output queue to
  * drain and no input queue worth flushing separately - a setting takes
@@ -93,3 +105,7 @@ int     cfsetspeed(struct termios *t, speed_t speed);
  * hand the result to tcsetattr. That is POSIX's shape and it is the
  * reason the function can be pure. */
 void    cfmakeraw(struct termios *t);
+
+#ifdef __cplusplus
+}
+#endif

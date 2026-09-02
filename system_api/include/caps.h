@@ -54,6 +54,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Draw straight to the screen (SYS_fb_info, SYS_fb_map). The compositor
  * has it; nothing the compositor launches does. */
 #define CAP_FRAMEBUFFER   (1u << 0)
@@ -310,3 +322,7 @@ static inline uint32_t caps_for_program(const char *path) {
     }
     return CAP_APP_DEFAULT;
 }
+
+#ifdef __cplusplus
+}
+#endif

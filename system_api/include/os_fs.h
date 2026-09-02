@@ -12,6 +12,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Blocks and inodes, both, because this filesystem has two ceilings and
  * a caller watching only the first would watch the wrong one:
  * LEANFS_MAX_INODES is fixed at format time, so a source tree of small
@@ -29,3 +41,7 @@ typedef struct {
     uint32_t free_inodes;
     uint32_t name_max;     /* longest single path component, not counting the NUL */
 } os_statvfs_t;
+
+#ifdef __cplusplus
+}
+#endif

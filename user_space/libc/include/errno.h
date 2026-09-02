@@ -28,6 +28,18 @@
  */
 #pragma once
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ---- M97: errno is a MACRO, and that is not cosmetic -----------------
  *
  * It was `extern __thread int errno;` from M96, which is a per-thread
@@ -131,5 +143,46 @@ int *__errno_location(void);
 #define ENETDOWN        100
 #define ENOTSUP EOPNOTSUPP
 #define EHOSTUNREACH 113
-#define ENETUNREACH 101
+/* M97: ENETUNREACH was defined twice, here and thirty lines up, both as
+ * 101. Harmless and still wrong - the second one is deleted rather than
+ * left, because the next person to change one of them would have changed
+ * the wrong one. */
+
+/* ---- M97: the codes a C++ standard library names ---------------------
+ *
+ * <system_error> builds a table of every errno constant the standard
+ * lists, and <mutex> throws EDEADLK from once_flag when a call to
+ * call_once re-enters itself. Neither is optional: an absent macro is a
+ * compile error inside a system header, not a feature this OS declines.
+ *
+ * The values are Linux's, which is what every other number in this file
+ * already is - not because Linux is the standard but because a program
+ * ported here that hard-codes one (and they do) should find the number
+ * it expects. Nothing here returns most of them; they exist so that code
+ * that names them compiles, and a code this OS never produces is a code
+ * no program will see. */
+#define EDEADLK      35
+#define ENOLCK       37
+#define EADDRNOTAVAIL 99
+#define ENOMSG       42
+#define EIDRM        43
+#define ENOLINK      67
+#define EPROTO       71
+#define EMULTIHOP    72
+#define EBADMSG      74
+#define EOVERFLOW    75
+#define ENOTUNIQ     76
+#define EPROTOTYPE   91
+#define ENETRESET    102
+#define ENOBUFS      105
+#define EISCONN      106
+#define ETOOMANYREFS 109
+#define ESTALE       116
+#define ECANCELED    125
+#define EOWNERDEAD   130
+#define ENOTRECOVERABLE 131
 #define EWOULDBLOCK EAGAIN
+
+#ifdef __cplusplus
+}
+#endif

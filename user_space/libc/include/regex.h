@@ -62,6 +62,18 @@
 
 #include <stddef.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* regcomp() cflags */
 #define REG_EXTENDED 0x01 /* ERE rather than BRE - see the note in regex.c on how much they differ */
 #define REG_ICASE    0x02
@@ -111,3 +123,7 @@ int    regexec(const regex_t *preg, const char *string, size_t nmatch,
                regmatch_t pmatch[], int eflags);
 size_t regerror(int errcode, const regex_t *preg, char *errbuf, size_t errbuf_size);
 void   regfree(regex_t *preg);
+
+#ifdef __cplusplus
+}
+#endif

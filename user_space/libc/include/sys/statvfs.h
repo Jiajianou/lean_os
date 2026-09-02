@@ -17,6 +17,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef uint64_t fsblkcnt_t;
 typedef uint64_t fsfilcnt_t;
 
@@ -40,3 +52,7 @@ int statvfs(const char *path, struct statvfs *buf);
  * which this libc does not remember - so this is refused rather than
  * guessed. See the note in statvfs.c. */
 int fstatvfs(int fd, struct statvfs *buf);
+
+#ifdef __cplusplus
+}
+#endif

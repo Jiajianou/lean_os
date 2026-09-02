@@ -653,3 +653,14 @@ int settimeofday(const struct timeval *tv, const void *tz) {
     }
     return 0;
 }
+
+/* M97: seconds between two times, as a double.
+ *
+ * A time_t here is a signed count of seconds, so this is a subtraction -
+ * but the signature is the portable one because a program that calls it
+ * was written against the portable one, where time_t need not be
+ * arithmetic at all. The cast is done on the difference rather than on
+ * each operand so that the exact integer result is what gets converted. */
+double difftime(time_t end, time_t start) {
+    return (double)(end - start);
+}

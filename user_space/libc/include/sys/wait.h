@@ -26,6 +26,18 @@
 
 #include <sys/types.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Return immediately with 0 if no child has exited, rather than waiting.
  * The difference between a shell that can report a background job and one
  * that stops to wait for it. */
@@ -67,3 +79,7 @@ pid_t wait3(int *status, int options, struct rusage *usage);
 
 /* waitpid(-1, status, 0), which is all `wait` has ever been. */
 pid_t wait(int *status);
+
+#ifdef __cplusplus
+}
+#endif

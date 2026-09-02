@@ -18,6 +18,18 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* leanfs's own superblock magic (kernel/fs/leanfs_format.h). Not one of
  * Linux's magic numbers, deliberately: claiming to be ext2 would make a
  * program take ext2's path. */
@@ -44,3 +56,7 @@ struct statfs {
 
 int statfs(const char *path, struct statfs *buf);
 int fstatfs(int fd, struct statfs *buf);
+
+#ifdef __cplusplus
+}
+#endif

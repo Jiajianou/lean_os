@@ -2,6 +2,18 @@
  * these is a comparison and a call would be more code than the work. */
 #pragma once
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 static inline int isspace(int c) { return c == ' ' || (c >= '\t' && c <= '\r'); }
 static inline int isdigit(int c) { return c >= '0' && c <= '9'; }
 static inline int isxdigit(int c) { return isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
@@ -21,3 +33,7 @@ static inline int isgraph(int c) { return isprint(c) && c != ' '; }
 static inline int isblank(int c) { return c == ' ' || c == '\t'; }
 static inline int toupper(int c) { return islower(c) ? c - 'a' + 'A' : c; }
 static inline int tolower(int c) { return isupper(c) ? c - 'A' + 'a' : c; }
+
+#ifdef __cplusplus
+}
+#endif

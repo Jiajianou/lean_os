@@ -12,6 +12,18 @@
 #include <netinet/in.h>
 #include <byteswap.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* This target is little-endian (see <endian.h>), so host-to-network is a
  * swap in both directions. */
 #define htons(x) ((uint16_t)bswap_16((uint16_t)(x)))
@@ -28,3 +40,7 @@ int       inet_aton(const char *s, struct in_addr *out);
 char     *inet_ntoa(struct in_addr addr);
 const char *inet_ntop(int af, const void *src, char *dst, socklen_t size);
 int         inet_pton(int af, const char *src, void *dst);
+
+#ifdef __cplusplus
+}
+#endif

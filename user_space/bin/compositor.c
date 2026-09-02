@@ -225,8 +225,33 @@
 #define LAUNCHER_ROW_H    20
 #define LAUNCHER_LIST_Y   (LAUNCHER_PAD + LAUNCHER_INPUT_H + 10)
 #define LAUNCHER_ROWS     10 /* M47: 12 -> 10, to leave the bottom of the overlay for the Power controls. LAUNCHER_LIST_Y + 10*20 still clears POWER_BTN_Y with room to spare */
-#define LAUNCHER_MAX_ENTRIES 48   /* file_manager.c's own MAX_FILES, for the same flat namespace */
+/* M97: 48 -> 128, and the number comes from a failure rather than from
+ * rounding up.
+ *
+ * /bin held 58 programs before this milestone and the launcher listed
+ * the first 48 of them in directory order. It has silently listed a
+ * subset since whenever /bin passed 48 - there is no message, no
+ * ellipsis, nothing: a program is simply not there, and the only way to
+ * notice is to look for one and fail to find it.
+ *
+ * M97 put eleven C++ fixtures on the image and `reboot` fell off the
+ * end, which broke settings_persist_across_a_reboot in the interactive
+ * suite - a test that types "reboot" into this launcher. That is the
+ * first time anything has failed because of it, and it is a lucky
+ * failure: the same truncation had been quietly hiding programs for
+ * several milestones.
+ *
+ * 128 is LEANFS's own directory-entry headroom rather than a guess, and
+ * the truncation is now REPORTED (see launcher_load_entries) so that the
+ * next time this cap is reached it says so instead of losing a program.
+ * 128 * 32 bytes is 4 KiB, which the compositor already spends on a
+ * single window's title bar. */
+#define LAUNCHER_MAX_ENTRIES 128
 #define LAUNCHER_NAME_MAX 32      /* leanfs's real cap is 27 + NUL (kernel/fs/leanfs.h, not visible to user_space builds) - same constant file_manager.c keeps for the same reason */
+/* M97: turns the cap above into text for the truncation message, so the
+ * number in the message and the number in the code cannot drift. */
+#define STRINGIFY_(x) #x
+#define STRINGIFY(x) STRINGIFY_(x)
 #define LAUNCHER_QUERY_MAX 24
 #define LAUNCHER_LIST_BUF 2048
 
@@ -3041,7 +3066,15 @@ static void launcher_reload(void) {
         n = (long)sizeof(buf);
     }
     int col = 0;
-    for (long i = 0; i < n && launcher_entry_count < LAUNCHER_MAX_ENTRIES; i++) {
+    int truncated = 0;
+    for (long i = 0; i < n; i++) {
+        if (launcher_entry_count >= LAUNCHER_MAX_ENTRIES) {
+            /* M97: said out loud. A launcher that lists a subset of the
+             * programs on the machine and does not mention it is a
+             * launcher that lies about what is installed. */
+            truncated = 1;
+            break;
+        }
         if (buf[i] == '\n') {
             if (col > 0 && launcher_entries[launcher_entry_count][col - 1] == '/') {
                 col = 0;
@@ -3053,6 +3086,13 @@ static void launcher_reload(void) {
         } else if (col < LAUNCHER_NAME_MAX - 1) {
             launcher_entries[launcher_entry_count][col++] = buf[i];
         }
+    }
+    if (truncated) {
+        static const char msg[] =
+            "[launcher] more than " STRINGIFY(LAUNCHER_MAX_ENTRIES)
+            " programs in /bin - the rest are not listed. Raise "
+            "LAUNCHER_MAX_ENTRIES in compositor.c.\n";
+        sys_write(1, msg, sizeof(msg) - 1);
     }
 }
 

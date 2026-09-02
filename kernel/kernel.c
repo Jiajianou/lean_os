@@ -2916,6 +2916,325 @@ static void boot_selftests_system(void) {
         klog_puts("[smp] self-test passed.\n\n");
     }
 
+    /* ---- M97 self-test: a throw that unwinds ------------------------
+     *
+     * M97's own "how we'll know" is specific about the failure this is
+     * most likely to have and about why an obvious test misses it:
+     *
+     *   "a throw ... caught by type ... with destructors running for
+     *    every frame in between - verified by COUNTING the destructor
+     *    calls, because a catch that fires while skipping a destructor
+     *    is the bug this gets wrong and it looks like success."
+     *
+     * So the fixture counts and orders rather than asserting that
+     * control reached a handler, and every one of its failure modes has
+     * its own exit code (tests/cxx/exceptions.cpp lists them). This side
+     * reads the code and the line it printed.
+     *
+     * The three things being proved are not "C++ works". They are:
+     *   1. `.eh_frame` and `.gcc_except_table` are laid out where the
+     *      unwinder can walk them, which is a linker-script question
+     *      (user_space/lib/user.ld) and was unanswered until M97.
+     *   2. `__cxa_atexit` carries the object AND the shared object it
+     *      belongs to, which is what M94's `default_use_cxa_atexit=no`
+     *      could not express.
+     *   3. A destructor runs on the way out of a frame nobody returns
+     *      through - which is the only thing in this system that
+     *      executes code during a non-local jump.
+     *
+     * Skipped when /bin/cxxtest is absent, on the same terms as M94's:
+     * the toolchain is not part of `make`, and a battery that panicked
+     * without it would make the default build depend on an optional
+     * half-hour step.
+     */
+    {
+        os_stat_t ct;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/cxxtest", (uint64_t)&ct, 0) != 0) {
+            klog_puts("[m97] /bin/cxxtest is not on this image - skipped. "
+                       "tools/build-toolchain.sh builds the C++ runtime and "
+                       "tools/cxx-test.sh installs what it produces.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m97.sh";
+            const char *result = PATH_TMP_DIR "m97.out";
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "/bin/cxxtest > " PATH_TMP_DIR "m97.out\n"
+                "echo code $? >> " PATH_TMP_DIR "m97.out\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M97 self-test: could not write the script fixture");
+            }
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m97] the C++ program could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+
+            static char produced[512];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m97] the C++ program produced no output at all - a throw "
+                           "with no unwind tables reaches std::terminate before main "
+                           "can print anything\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                /* The exit code first, because it is the only thing that
+                 * distinguishes the failures from each other - and its
+                 * absence means the program died rather than returned. */
+                if (!selftest_contains(produced, "code 0")) {
+                    klog_puts("[m97] the fixture did not exit 0 - see "
+                               "tests/cxx/exceptions.cpp for what each code means\n");
+                    all_ok = 0;
+                }
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"4 destructors",     "one destructor per live frame the throw passed through"},
+                    {"in order 3 2 1",    "innermost frame first - the order, not just the count"},
+                    {"matched by type",   "the catch clause selected by type rather than by position"},
+                    {"rethrow preserved", "a rethrow carrying the same object out again"},
+                    {"static ctor ran",   "__cxa_atexit and .init_array, which M94 could not do"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m97] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+
+            if (!all_ok) {
+                klog_puts("[m97] what the C++ program actually wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m97] ---- end\n");
+                panic("M97 self-test: an exception does not unwind on this machine");
+            }
+
+            /* ---- and the standard library ---------------------
+             *
+             * A separate program because it fails for entirely
+             * different reasons: the fixture above needs libsupc++ and
+             * a linker script, this one needs most of this project's
+             * libc reached through libstdc++. Skipped independently,
+             * so an image with one and not the other reports which.
+             */
+            os_stat_t lt;
+            if (do_syscall(SYS_stat, (uint64_t)"/bin/cxxlib", (uint64_t)&lt, 0) == 0) {
+                int lib_ok = 1;
+                const char *lscript = PATH_TMP_DIR "m97lib.sh";
+                const char *lresult = PATH_TMP_DIR "m97lib.out";
+                static const char LSCRIPT[] =
+                    "#!/bin/sh\n"
+                    "/bin/cxxlib > " PATH_TMP_DIR "m97lib.out\n"
+                    "echo code $? >> " PATH_TMP_DIR "m97lib.out\n";
+                if (do_syscall(SYS_writefile, (uint64_t)lscript, (uint64_t)LSCRIPT,
+                                sizeof(LSCRIPT) - 1) != 0) {
+                    panic("M97 self-test: could not write the library script fixture");
+                }
+                long lpid = do_syscall(SYS_spawn, (uint64_t)lscript, 0, 0);
+                if (lpid < 0) {
+                    klog_puts("[m97] the libstdc++ program could not be spawned\n");
+                    lib_ok = 0;
+                } else {
+                    do_syscall(SYS_wait, (uint64_t)lpid, 0, 0);
+                }
+                static char lproduced[512];
+                k_memset(lproduced, 0, sizeof(lproduced));
+                int64_t ln = vfs_read(lresult, lproduced, sizeof(lproduced) - 1);
+                if (ln <= 0) {
+                    klog_puts("[m97] the libstdc++ program produced no output\n");
+                    lib_ok = 0;
+                } else {
+                    lproduced[ln] = '\0';
+                    if (!selftest_contains(lproduced, "code 0")) {
+                        klog_puts("[m97] the library fixture did not exit 0 - see "
+                                   "tests/cxx/library.cpp for what each code means\n");
+                        lib_ok = 0;
+                    }
+                    static const char *const LEXPECT[] = {
+                        "vector sorted",
+                        "map ordered",
+                        "across the SSO boundary",
+                        "iostreams round-tripped",
+                        "dynamic_cast and typeid agreed",
+                        "caught by type",
+                        "std::thread joined",
+                    };
+                    for (unsigned i = 0; i < sizeof(LEXPECT) / sizeof(LEXPECT[0]); i++) {
+                        if (!selftest_contains(lproduced, LEXPECT[i])) {
+                            klog_puts("[m97] the library fixture did not report: ");
+                            klog_puts(LEXPECT[i]);
+                            klog_putc('\n');
+                            lib_ok = 0;
+                        }
+                    }
+                }
+                do_syscall(SYS_unlink, (uint64_t)lscript, 0, 0);
+                do_syscall(SYS_unlink, (uint64_t)lresult, 0, 0);
+                if (!lib_ok) {
+                    klog_puts("[m97] what the libstdc++ program actually wrote:\n");
+                    klog_puts(lproduced);
+                    klog_puts("[m97] ---- end\n");
+                    panic("M97 self-test: the C++ standard library does not work here");
+                }
+                klog_puts("[m97] and the standard library on top of it: a sorted vector, "
+                           "a map iterated in key order out of libstdc++'s own compiled "
+                           "tree code, a string across the small-string boundary, "
+                           "iostreams round-tripped through a stringstream, dynamic_cast "
+                           "and typeid agreeing about a type, three exceptions raised "
+                           "INSIDE libstdc++ caught here by type, and a std::thread over "
+                           "M79's tasks joined - self-test passed.\n");
+            } else {
+                klog_puts("[m97] /bin/cxxlib is not on this image - the standard-library "
+                           "half is skipped.\n");
+            }
+
+            /* ---- and the boundary M97 is really about ----------
+             *
+             * "a throw in one shared object caught by type in another,
+             * with destructors running for every frame in between" is
+             * this milestone's own headline, and it is the case that
+             * needs three separate things to be right at once: the
+             * loader has to have registered the mapped object's
+             * .eh_frame with the unwinder (it runs its .init_array, and
+             * crtbeginS is what is in it), the object's own
+             * .gcc_except_table has to be readable for a catch INSIDE
+             * it, and the type_info the object throws has to be the
+             * same object as the one the executable's catch names -
+             * which is symbol interposition, not luck.
+             *
+             * A single-object test passes with all three broken.
+             */
+            os_stat_t bt;
+            if (do_syscall(SYS_stat, (uint64_t)"/bin/throwmain", (uint64_t)&bt, 0) == 0) {
+                int b_ok = 1;
+                const char *bscript = PATH_TMP_DIR "m97b.sh";
+                const char *bresult = PATH_TMP_DIR "m97b.out";
+                static const char BSCRIPT[] =
+                    "#!/bin/sh\n"
+                    "/bin/throwmain > " PATH_TMP_DIR "m97b.out\n"
+                    "echo code $? >> " PATH_TMP_DIR "m97b.out\n";
+                if (do_syscall(SYS_writefile, (uint64_t)bscript, (uint64_t)BSCRIPT,
+                                sizeof(BSCRIPT) - 1) != 0) {
+                    panic("M97 self-test: could not write the boundary script fixture");
+                }
+                long bpid = do_syscall(SYS_spawn, (uint64_t)bscript, 0, 0);
+                if (bpid < 0) {
+                    klog_puts("[m97] the cross-object program could not be spawned\n");
+                    b_ok = 0;
+                } else {
+                    do_syscall(SYS_wait, (uint64_t)bpid, 0, 0);
+                }
+                static char bproduced[512];
+                k_memset(bproduced, 0, sizeof(bproduced));
+                int64_t bn = vfs_read(bresult, bproduced, sizeof(bproduced) - 1);
+                if (bn <= 0) {
+                    klog_puts("[m97] the cross-object program produced no output\n");
+                    b_ok = 0;
+                } else {
+                    bproduced[bn] = '\0';
+                    if (!selftest_contains(bproduced, "code 0")) {
+                        klog_puts("[m97] the cross-object fixture did not exit 0 - see "
+                                   "tests/cxx/throwmain.cpp for what each code means\n");
+                        b_ok = 0;
+                    }
+                    if (!selftest_contains(bproduced, "caught by exact type and by base")) {
+                        klog_puts("[m97] the cross-object fixture did not report a "
+                                   "successful boundary crossing\n");
+                        b_ok = 0;
+                    }
+                }
+                do_syscall(SYS_unlink, (uint64_t)bscript, 0, 0);
+                do_syscall(SYS_unlink, (uint64_t)bresult, 0, 0);
+                if (!b_ok) {
+                    klog_puts("[m97] what the cross-object program actually wrote:\n");
+                    klog_puts(bproduced);
+                    klog_puts("[m97] ---- end\n");
+                    panic("M97 self-test: an exception does not cross a shared-object "
+                          "boundary on this machine");
+                }
+                klog_puts("[m97] and across a shared object: an exception thrown inside "
+                           "a library this program dlopen'd - one it never named on its "
+                           "link line - caught in the executable by its exact type and "
+                           "again by its base, with both of the library's own frame "
+                           "destructors run on the way out, and one thrown here caught "
+                           "inside the library - self-test passed.\n");
+            } else {
+                klog_puts("[m97] /bin/throwmain is not on this image - the "
+                           "shared-object half is skipped.\n");
+            }
+
+            /* ---- and C++ nobody here wrote --------------------
+             *
+             * Eight of GCC's own libstdc++ regression tests, compiled
+             * unmodified (tools/cxx-test.sh names them and says why
+             * these). Each exits 0 or it does not; nothing here reads
+             * their output, because what they assert is asserted by
+             * their own VERIFY macros and an exit code is the only
+             * thing a program written by somebody else reliably
+             * promises. */
+            {
+                int theirs_ran = 0, theirs_failed = 0;
+                for (int i = 0; i < 8; i++) {
+                    char prog[32];
+                    k_strlcpy(prog, "/tests/gnucxx0", sizeof(prog));
+                    prog[13] = (char)('0' + i);
+                    os_stat_t gt2;
+                    if (do_syscall(SYS_stat, (uint64_t)prog, (uint64_t)&gt2, 0) != 0) {
+                        continue;
+                    }
+                    theirs_ran++;
+                    long gp = do_syscall(SYS_spawn, (uint64_t)prog, 0, 0);
+                    if (gp < 0) {
+                        klog_puts("[m97] could not spawn ");
+                        klog_puts(prog);
+                        klog_putc('\n');
+                        theirs_failed++;
+                        continue;
+                    }
+                    long code = do_syscall(SYS_wait, (uint64_t)gp, 0, 0);
+                    if (code != 0) {
+                        klog_puts("[m97] ");
+                        klog_puts(prog);
+                        klog_puts(" (one of GCC's own libstdc++ tests) exited ");
+                        klog_put_dec((uint32_t)code);
+                        klog_putc('\n');
+                        theirs_failed++;
+                    }
+                }
+                if (theirs_failed) {
+                    panic("M97 self-test: a libstdc++ regression test written by "
+                          "somebody else does not pass here");
+                }
+                if (theirs_ran) {
+                    klog_puts("[m97] and C++ nobody here wrote: ");
+                    klog_put_dec((uint32_t)theirs_ran);
+                    klog_puts(" of GCC's own libstdc++ regression tests - vectors, a "
+                               "map behind threads, sets, strings, algorithms, "
+                               "stringstreams, tuples and complex arithmetic - "
+                               "compiled with no edits of any kind and every one of "
+                               "them exiting 0 on this machine.\n");
+                }
+            }
+
+            klog_puts("[m97] C++ that throws: a throw three frames deep caught by type "
+                       "in main with a destructor run for every frame in between, "
+                       "counted and ordered rather than assumed; a derived object "
+                       "caught by its base; a rethrow that kept the object it was "
+                       "given; catch(...) over a builtin; and a namespace-scope "
+                       "object constructed before main by .init_array and destroyed "
+                       "after it by __cxa_atexit - self-test passed.\n\n");
+        }
+    }
+
     /* ---- M106 self-test: does a second core do a second core's work?
      *
      * This milestone was written as a list of scheduler optimisations -

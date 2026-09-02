@@ -7,6 +7,18 @@
 
 #include <stddef.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void *malloc(size_t size);
 void free(void *ptr);
 void *calloc(size_t count, size_t size);
@@ -17,7 +29,48 @@ void *realloc(void *ptr, size_t size);
  * rather than dropping the registration, because a program told its
  * flush was registered will not flush. Note _exit() deliberately runs
  * none of these - see <unistd.h>. */
+/* ---- M97: div/ldiv, and system ---------------------------------------
+ *
+ * <cstdlib> does `using ::div;` and `using ::ldiv_t;` unconditionally.
+ *
+ * div exists at all because C89 did not say which way `/` rounds a
+ * negative quotient and div did - it truncates toward zero, always. It
+ * has been redundant since C99 made `/` do the same, and it is here
+ * because a standard header names it, not because anything should call
+ * it. The pairing with the remainder in one return is the other half:
+ * the two are one instruction on x86-64 and returning them together lets
+ * the compiler keep it that way. */
+typedef struct { int quot; int rem; } div_t;
+typedef struct { long quot; long rem; } ldiv_t;
+typedef struct { long long quot; long long rem; } lldiv_t;
+div_t div(int num, int den);
+ldiv_t ldiv(long num, long den);
+lldiv_t lldiv(long long num, long long den);
+
+/* M97: `system` is declared and always fails.
+ *
+ * This is M65's rule applied to a libc function rather than to a
+ * syscall: "don't build a thing that pretends to enforce something", and
+ * its mirror image - do not build a thing that pretends to DO
+ * something. There is a shell here and a spawn, so a real system() is
+ * writable; what there is not is a reason, because nothing ported here
+ * has needed one and the version that would get written without a caller
+ * to check it against would be wrong in some way nobody would find.
+ *
+ * It returns 0 for the `system(NULL)` probe - which asks "is there a
+ * command processor", and the honest answer for a function that will
+ * refuse every command is no - and -1 for everything else. A program
+ * that checks gets told; a program that does not check gets a failure
+ * rather than silence. */
+int system(const char *command);
+
 int atexit(void (*fn)(void));
+/* M97: the C++ ABI's registration, which carries the shared object a
+ * destructor belongs to so that dlclose can run its statics without
+ * running anybody else's. See env.c. */
+int __cxa_atexit(void (*fn)(void *), void *arg, void *dso);
+void __cxa_finalize(void *dso);
+extern void *__dso_handle;
 
 /* ---- M94: what this program is called ---------------------------------
  *
@@ -90,8 +143,14 @@ void srandom(unsigned int seed);
 char *initstate(unsigned int seed, char *state, size_t n);
 char *setstate(char *state);
 
-int mkstemp(char *template);
-char *mkdtemp(char *template);
+/* M97: `tmpl`, not `template`. POSIX spells this parameter `template`
+ * and so did this header, which is fine until a C++ program includes it
+ * - and then it is a syntax error inside a system header, four lines
+ * from anything the program wrote. A parameter name in a prototype means
+ * nothing to the compiler and everything to the reader, and this reader
+ * includes g++. Found by the first C++ program built against this libc. */
+int mkstemp(char *tmpl);
+char *mkdtemp(char *tmpl);
 
 /* M75: the environment. `getenv` returns a pointer into the environment
  * itself, not a copy - the standard contract, and the reason a caller
@@ -123,3 +182,7 @@ size_t wcstombs(char *dst, const wchar_t *src, size_t n);
 #define RAND_MAX 32767
 int rand(void);
 void srand(unsigned int seed);
+
+#ifdef __cplusplus
+}
+#endif

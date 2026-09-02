@@ -67,6 +67,42 @@ SECTIONS
         *(.rodata*)
     } :text
 
+    /* ---- M97: the tables an exception unwinds through ----------------
+     *
+     * `.eh_frame` is the DWARF call-frame information the unwinder reads
+     * to walk one frame back to its caller, and `.gcc_except_table` is
+     * the per-function LSDA that says which catch clauses and which
+     * destructors apply to which range of instructions. Neither is code
+     * and neither is data the program reads: they exist so that a throw
+     * can find its way out.
+     *
+     * There was no rule for either, and an orphan section is not a
+     * no-op - ld places it wherever it likes, which for these two means
+     * the unwinder's own scan runs over whatever landed next to it. What
+     * the unwinder needs is that the whole of `.eh_frame` is CONTIGUOUS
+     * and in link order: crtbegin.o's `__EH_FRAME_BEGIN__` is a label at
+     * offset 0 of its (empty) .eh_frame, and crtend.o's `__FRAME_END__`
+     * is a four-byte zero terminator, so the registry walks from the
+     * first to the terminator and a gap between them is a walk off the
+     * end of the table.
+     *
+     * KEEP on both, because --gc-sections has no way to know that a
+     * table nothing references by name is the only thing standing
+     * between a throw and std::terminate.
+     *
+     * Read-only and in the text segment: they are looked at by the
+     * unwinder and never written, and putting them in a writable segment
+     * would be handing an attacker the map a throw follows. */
+    .eh_frame : {
+        KEEP(*(.eh_frame))
+        KEEP(*(.eh_frame.*))
+    } :text
+
+    .gcc_except_table : {
+        KEEP(*(.gcc_except_table))
+        KEEP(*(.gcc_except_table.*))
+    } :text
+
     . = ALIGN(0x1000);
 
     /* M94: the constructor and destructor arrays, with symbols around

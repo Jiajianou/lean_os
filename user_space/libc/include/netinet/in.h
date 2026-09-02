@@ -15,6 +15,18 @@
 #include <sys/socket.h>
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef uint16_t in_port_t;
 typedef uint32_t in_addr_t;
 
@@ -89,3 +101,7 @@ extern const struct in6_addr in6addr_loopback;
 
 #define IPPROTO_IPV6 41
 #define IPV6_V6ONLY  26
+
+#ifdef __cplusplus
+}
+#endif

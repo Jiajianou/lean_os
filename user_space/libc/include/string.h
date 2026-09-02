@@ -19,6 +19,18 @@
 
 #include <stddef.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void *memcpy(void *dst, const void *src, size_t n);
 void *memmove(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
@@ -45,6 +57,19 @@ size_t strspn(const char *s, const char *accept);
 size_t strcspn(const char *s, const char *reject);
 /* M80 groundwork. */
 char *strpbrk(const char *s, const char *accept);
+
+/* ---- M97: the three <cstring> names a C++ library insists on ---------
+ *
+ * <cstring> does `using ::strtok;` and friends unconditionally, so an
+ * absent declaration is a compile error inside a standard header rather
+ * than a missing feature. strcoll and strxfrm are the locale-aware
+ * comparison pair; on a machine with one locale they are strcmp and a
+ * copy, which is what the C standard says they must be in "C" and is the
+ * whole of what this OS has to say about collation. */
+char *strtok(char *s, const char *delim);
+char *strtok_r(char *s, const char *delim, char **saveptr);
+int strcoll(const char *a, const char *b);
+size_t strxfrm(char *dst, const char *src, size_t n);
 char *strdup(const char *s);
 /* M89: at most `n` bytes, always NUL-terminated. Unlike strdup this
  * cannot be expressed with strlen plus malloc without reading past the
@@ -69,3 +94,7 @@ void *memccpy(void *dst, const void *src, int c, size_t n);
  * a tar header's name is the case it exists for, and reading past it
  * with strlen is the bug it prevents. */
 size_t strnlen(const char *s, size_t n);
+
+#ifdef __cplusplus
+}
+#endif

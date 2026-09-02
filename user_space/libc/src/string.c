@@ -305,3 +305,72 @@ size_t strnlen(const char *s, size_t n) {
     }
     return i;
 }
+
+/* ---- M97: strtok, and the two locale functions that are not ----------
+ *
+ * strtok holds its position between calls in a static, which is exactly
+ * the design C89 chose and exactly why it cannot be used from two
+ * threads. strtok_r is the same walk with the caller holding the state,
+ * and strtok is written in terms of it so there is one tokeniser here
+ * rather than two that could disagree about a run of delimiters.
+ */
+char *strtok_r(char *s, const char *delim, char **saveptr) {
+    if (!s) {
+        s = *saveptr;
+    }
+    if (!s) {
+        return (char *)0;
+    }
+    /* Skip leading delimiters. A run of them is ONE separator, which is
+     * the behaviour that distinguishes strtok from a field splitter and
+     * the thing a hand-written version usually gets wrong. */
+    while (*s && strchr(delim, *s)) {
+        s++;
+    }
+    if (!*s) {
+        *saveptr = (char *)0;
+        return (char *)0;
+    }
+    char *token = s;
+    while (*s && !strchr(delim, *s)) {
+        s++;
+    }
+    if (*s) {
+        *s = '\0';
+        *saveptr = s + 1;
+    } else {
+        *saveptr = (char *)0;
+    }
+    return token;
+}
+
+char *strtok(char *s, const char *delim) {
+    static char *saved;
+    return strtok_r(s, delim, &saved);
+}
+
+/* This machine has one locale, and in the "C" locale the standard says
+ * strcoll IS strcmp and strxfrm IS a copy. So these are not stubs and
+ * not approximations - they are the specified behaviour for the only
+ * locale that exists here, which is the same argument M65 made about
+ * chmod: a machine with one principal reports one principal.
+ *
+ * strxfrm returns the length it WOULD have written, and copies only if
+ * there is room. Getting that backwards is the classic bug: a caller
+ * sizes a buffer from the return value of a first call with n == 0, and
+ * a version that returned the copied length would tell it zero. */
+int strcoll(const char *a, const char *b) {
+    return strcmp(a, b);
+}
+
+size_t strxfrm(char *dst, const char *src, size_t n) {
+    size_t len = strlen(src);
+    if (n > 0) {
+        size_t copy = len < n - 1 ? len : n - 1;
+        for (size_t i = 0; i < copy; i++) {
+            dst[i] = src[i];
+        }
+        dst[copy] = '\0';
+    }
+    return len;
+}

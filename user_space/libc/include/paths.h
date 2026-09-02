@@ -18,6 +18,18 @@
  * as <signal.h> and <termios.h> in this directory. */
 #include_next <paths.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define _PATH_BSHELL  "/bin/sh"
 #define _PATH_DEVNULL "/dev/null"   /* M87's devfs */
 #define _PATH_TTY     "/dev/tty"    /* M85's terminal device */
@@ -25,3 +37,7 @@
 #define _PATH_TMP     "/tmp/"
 #define _PATH_STDPATH "/bin"        /* there is one directory of programs here */
 #define _PATH_DEFPATH "/bin"
+
+#ifdef __cplusplus
+}
+#endif

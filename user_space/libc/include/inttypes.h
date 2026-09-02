@@ -16,6 +16,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* On this target: int is 32-bit, long and long long are both 64-bit, and
  * a pointer is 64-bit. So the 64-bit and pointer-sized macros are "l" and
  * the 32-bit ones are "". Stated here rather than derived, because there
@@ -49,3 +61,7 @@ typedef unsigned long uintmax_t;
 
 intmax_t  strtoimax(const char *s, char **end, int base);
 uintmax_t strtoumax(const char *s, char **end, int base);
+
+#ifdef __cplusplus
+}
+#endif

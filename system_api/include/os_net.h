@@ -15,6 +15,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t ip;
     uint16_t port;
@@ -88,3 +100,7 @@ static inline int os_ip_from_string(const char *s, uint32_t *out) {
     *out = ip;
     return 1;
 }
+
+#ifdef __cplusplus
+}
+#endif

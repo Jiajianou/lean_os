@@ -21,6 +21,18 @@
 
 #include <stddef.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef long time_t;
 
 /* M80 groundwork: `struct timespec`, which is what every deadline API
@@ -157,3 +169,14 @@ typedef long clock_t;
 
 time_t time(time_t *out);
 clock_t clock(void);
+
+/* M97: <ctime> does `using ::difftime;`. Seconds between two time_t
+ * values as a double, which is what C specifies - on this machine a
+ * time_t is a count of seconds and the subtraction is exact, but the
+ * signature is the portable one because a program that includes <ctime>
+ * is a program written for the portable one. */
+double difftime(time_t end, time_t start);
+
+#ifdef __cplusplus
+}
+#endif

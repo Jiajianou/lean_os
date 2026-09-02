@@ -29,6 +29,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SIGHUP   1
 #define SIGINT   2
 #define SIGQUIT  3
@@ -200,3 +212,7 @@ typedef struct {
     uint32_t saved_blocked; /* the mask to put back - the handler's own signal was added to it */
     uint32_t signo;         /* which signal this frame is for; informational, and a sanity check */
 } sig_frame_t;
+
+#ifdef __cplusplus
+}
+#endif

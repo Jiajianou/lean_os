@@ -15,6 +15,18 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* The environment, as every program that has ever walked one expects to
  * find it: a NULL-terminated array of "NAME=value". Points into the
  * kernel's argument region until something calls setenv/putenv, at which
@@ -479,3 +491,7 @@ int execvp(const char *file, char *const argv[]);
  * this stops being the only way to start a program with arguments. */
 long spawnv(const char *path, char *const argv[]);
 long spawnve(const char *path, char *const argv[], char *const envp[]);
+
+#ifdef __cplusplus
+}
+#endif

@@ -28,6 +28,18 @@
 
 #include <stddef.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define POLLIN   0x001 /* there is something to read */
 #define POLLOUT  0x004 /* writable - see the header note on why this is always set */
 #define POLLERR  0x008 /* only ever set in revents */
@@ -51,3 +63,7 @@ struct pollfd {
  * reason a program should use this rather than a loop of non-blocking
  * reads. */
 int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+
+#ifdef __cplusplus
+}
+#endif

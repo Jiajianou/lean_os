@@ -23,6 +23,18 @@
 #include <stdint.h>
 #include <sys/time.h> /* struct timeval */
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define RUSAGE_SELF     0
 #define RUSAGE_CHILDREN (-1) /* the values getrusage() is specified with; SYS_rusage's own are in proc.h */
 
@@ -108,3 +120,7 @@ struct rusage {
 int getrusage(int who, struct rusage *usage);
 int getrlimit(int resource, struct rlimit *rlim);
 int setrlimit(int resource, const struct rlimit *rlim);
+
+#ifdef __cplusplus
+}
+#endif

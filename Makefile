@@ -649,17 +649,90 @@ $(LIBC_A): $(LIBC_A_OBJS)
 	@rm -f $@
 	$(AR) rcs $@ $(LIBC_A_OBJS)
 
-sysroot: $(LIBC_A) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
+# ---- M97: the same library, as a shared object -----------------------
+#
+# M95 built one of these, inside tools/build-dynamic.sh, with the
+# x86_64-lean_os compiler. This one is built with the same
+# `x86_64-elf-gcc` that builds libc.a, and lives in the sysroot - and the
+# difference is an ordering, not a preference.
+#
+# libstdc++.so has to link against a shared libc. If it does not find
+# one it links the STATIC libc.a instead, and the first non-PIC object
+# in it stops the link with "relocation R_X86_64_TPOFF32 against
+# `lean_errno' can not be used when making a shared object". So the
+# sysroot needs libc.so BEFORE the toolchain is built - and
+# build-dynamic.sh cannot supply it, because it needs the toolchain that
+# needs libc.so. One pass instead of two, by using the compiler that is
+# already here.
+#
+# -fPIC and -mcmodel=small rather than the tree's usual -fno-pic and
+# -mcmodel=large: a shared object is mapped wherever there is room and
+# reaches itself RIP-relative. -ftls-model=initial-exec because a
+# `__thread` variable in a library loaded at startup can use the fixed
+# offset, and the general-dynamic model would need __tls_get_addr, which
+# this system does not have.
+LIBC_SO := $(BUILD)/libc.so
+LIBC_SO_SRCS := $(wildcard user_space/libc/src/*.c) \
+                user_space/lib/syscall_wrappers.c user_space/lib/str.c \
+                user_space/lib/malloc.c user_space/lib/dns.c
+
+# Linked with `x86_64-elf-ld` directly rather than through the driver,
+# and for the reason CLAUDE.md already gives for the kernel: this is a
+# bare-metal toolchain, and its driver has no notion of a shared object -
+# it drops `-shared` on the floor and links an executable, which
+# announces itself as "undefined reference to `main`" from a library that
+# has no main and was never supposed to. ld itself is perfectly capable;
+# it is the specs in front of it that are not.
+$(LIBC_SO): $(LIBC_SO_SRCS) $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
+	@mkdir -p $(UOBJ)/pic
+	@for src in $(LIBC_SO_SRCS); do \
+	  obj=$(UOBJ)/pic/$$(echo $$src | tr / _ | sed 's/\.c$$/.o/'); \
+	  $(CC) -std=c11 -O2 -ffreestanding -fno-stack-protector -fPIC \
+	    -mcmodel=small -mno-red-zone -ftls-model=initial-exec \
+	    -Iuser_space/lib -Iuser_space/libc/include -Isystem_api/include \
+	    -c $$src -o $$obj || exit 1; \
+	done
+	$(LD) -shared -soname libc.so -o $@ $(UOBJ)/pic/*.o \
+	  $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
+
+sysroot: $(LIBC_A) $(LIBC_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
 	@rm -rf $(SYSROOT)
 	@mkdir -p $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include $(SYSROOT)/usr/lib
 	@cp -R user_space/libc/include/. $(SYSROOT)/usr/local/include/
 	@cp -R system_api/include/. $(SYSROOT)/usr/include/
 	@cp user_space/lib/syscall_wrappers.h $(SYSROOT)/usr/include/
 	@cp $(LIBC_A) $(SYSROOT)/usr/lib/libc.a
+	@cp $(LIBC_SO) $(SYSROOT)/usr/lib/libc.so
 	@cp $(UOBJ)/crt0.o $(SYSROOT)/usr/lib/crt1.o
+	@# M97: and the PIE startup under the name the driver looks for.
+	@# crt0-pie.asm is crt0.asm with its two calls routed through the
+	@# PLT; every toolchain calls that file Scrt1.o, so this one does
+	@# too. It was built by tools/build-dynamic.sh into its own output
+	@# directory before, which meant the compiler could not find it -
+	@# a `-pie` link had to name it by path. It is a startup file, so
+	@# it belongs in the sysroot beside the other three.
+	@nasm -f elf64 -o $(UOBJ)/crt0-pie.o user_space/lib/crt0-pie.asm
+	@cp $(UOBJ)/crt0-pie.o $(SYSROOT)/usr/lib/Scrt1.o
 	@cp $(UOBJ)/crti.o $(SYSROOT)/usr/lib/crti.o
 	@cp $(UOBJ)/crtn.o $(SYSROOT)/usr/lib/crtn.o
 	@cp user_space/lib/user.ld $(SYSROOT)/usr/lib/lean_os.ld
+	@# M97: libm.a, and it is empty on purpose.
+	@#
+	@# g++'s link spec ends in `-lm` on essentially every target, so a
+	@# C++ program does not link at all without a file by that name -
+	@# not because it uses libm, but because the driver names it. The
+	@# math this libc has lives in libc.a (user_space/libc/src/math.c)
+	@# and putting a second copy here would be two definitions of
+	@# every symbol the moment a program named both.
+	@#
+	@# An empty archive is the truthful shape: "there is nothing in
+	@# libm that is not already in libc". It is what several small
+	@# systems ship for exactly this reason, and the alternative -
+	@# teaching the target's LINK_SPEC to drop -lm - would make this
+	@# toolchain differ from every other one in a way somebody would
+	@# have to rediscover.
+	@rm -f $(SYSROOT)/usr/lib/libm.a
+	@$(AR) rcs $(SYSROOT)/usr/lib/libm.a 2>/dev/null || true
 	@echo "sysroot: $(SYSROOT) - $$(ls $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include | grep -c . ) header entries, libc.a $$(du -h $(LIBC_A) | cut -f1)"
 
 # M93 (second attempt): the same list, for a script that preseeds an image

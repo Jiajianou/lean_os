@@ -17,6 +17,18 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct addrinfo {
     int              ai_flags;
     int              ai_family;
@@ -89,3 +101,7 @@ int  getnameinfo(const struct sockaddr *addr, socklen_t addrlen,
                  char *serv, socklen_t servlen, int flags);
 
 struct hostent *gethostbyname(const char *name);
+
+#ifdef __cplusplus
+}
+#endif

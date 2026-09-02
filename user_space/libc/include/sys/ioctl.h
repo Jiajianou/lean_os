@@ -16,4 +16,20 @@
 
 #include "termios.h" /* system_api's - TCGETS, TCSETS, TIOCGWINSZ, TIOCGPGRP, TIOCSPGRP, struct winsize */
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int ioctl(int fd, unsigned long request, ...);
+
+#ifdef __cplusplus
+}
+#endif

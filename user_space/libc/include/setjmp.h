@@ -5,6 +5,18 @@
  */
 #pragma once
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* rbx, rbp, r12-r15, rsp, rip. Eight words, and the layout is shared
  * with the assembly by nothing but this comment and that file's own -
  * the one place in this project where two halves of a contract are not
@@ -54,3 +66,7 @@ void __sigjmp_save(__sigjmp_state *env, int savemask);
     (__sigjmp_save((env), (savemask)), setjmp((env)->jb))
 
 void siglongjmp(sigjmp_buf env, int value) __attribute__((noreturn));
+
+#ifdef __cplusplus
+}
+#endif

@@ -29,7 +29,26 @@
  */
 #pragma once
 
+/* M97: <sched.h>, because GCC's gthr-posix.h - the layer std::thread and
+ * std::mutex are built on - reaches for sched_yield through <pthread.h>
+ * alone. Every other pthreads implementation includes it here, and the
+ * failure without it is "sched_yield undeclared" inside a GCC header
+ * during a libstdc++ build, which names neither file. */
+#include <sched.h>
+
 #include <stddef.h>
+
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef int pthread_t;
 
@@ -190,6 +209,23 @@ int pthread_barrier_wait(pthread_barrier_t *b);
 #define PTHREAD_MUTEX_RECURSIVE  1
 #define PTHREAD_MUTEX_ERRORCHECK 2
 
+/* ---- M97: cancellation, which this OS does not have -------------------
+ *
+ * Declared because gthr-posix.h takes a weak reference to it and a weak
+ * reference still needs a declaration; defined because a weak reference
+ * that resolves to nothing is a call through a null pointer the first
+ * time somebody takes the path that uses it.
+ *
+ * It refuses, and that is M65's rule rather than a shortcut: "don't
+ * build a thing that pretends to enforce something". Cancellation is
+ * cancellation points, cleanup handlers and a deferred/asynchronous
+ * distinction - a real feature, and one nothing here has asked for. A
+ * pthread_cancel that returned 0 and left the thread running would be
+ * the worst possible answer: the caller would believe the thread was
+ * gone and then read what it was still writing. ENOSYS says no.
+ */
+int pthread_cancel(pthread_t thread);
+
 int pthread_kill(pthread_t thread, int sig);
 
 int pthread_attr_destroy(pthread_attr_t *attr);
@@ -279,3 +315,7 @@ int pthread_key_create(pthread_key_t *key, void (*destructor)(void *));
 int pthread_key_delete(pthread_key_t key);
 void *pthread_getspecific(pthread_key_t key);
 int pthread_setspecific(pthread_key_t key, const void *value);
+
+#ifdef __cplusplus
+}
+#endif

@@ -16,6 +16,18 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct FILE FILE;
 
 extern FILE *stdin;
@@ -40,6 +52,28 @@ size_t fread(void *buf, size_t size, size_t count, FILE *f);
 size_t fwrite(const void *buf, size_t size, size_t count, FILE *f);
 int fseek(FILE *f, long offset, int whence);
 long ftell(FILE *f);
+
+/* ---- M97: the five <cstdio> names a C++ library insists on -----------
+ *
+ * <cstdio> does `using ::fgetpos;` and the rest unconditionally, so an
+ * absent declaration stops the standard library compiling rather than
+ * costing a program a feature.
+ *
+ * fpos_t is an OPAQUE type by specification - the standard says a
+ * program may only obtain one from fgetpos and hand it back to fsetpos,
+ * never do arithmetic on it - which is why it is a struct here rather
+ * than a typedef for long. A program that tries to add to one gets a
+ * compile error, which is the standard's intent and is friendlier than
+ * silently working on this OS and failing on a system where a position
+ * carries a multibyte conversion state as well as an offset. */
+typedef struct {
+    long __pos;
+} fpos_t;
+
+int fgetpos(FILE *f, fpos_t *pos);
+int fsetpos(FILE *f, const fpos_t *pos);
+FILE *freopen(const char *path, const char *mode, FILE *f);
+FILE *tmpfile(void);
 int fflush(FILE *f);
 int feof(FILE *f);
 /* M80 groundwork - see the implementations for what each one can and
@@ -139,3 +173,7 @@ int sscanf(const char *str, const char *fmt, ...);
 int vsscanf(const char *str, const char *fmt, va_list ap);
 int fscanf(FILE *f, const char *fmt, ...);
 int scanf(const char *fmt, ...);
+
+#ifdef __cplusplus
+}
+#endif

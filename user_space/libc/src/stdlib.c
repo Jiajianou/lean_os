@@ -458,3 +458,37 @@ long long atoll(const char *s) {
 long long llabs(long long v) {
     return v < 0 ? -v : v;
 }
+
+/* M97: see <stdlib.h> for why these three exist at all. Written as one
+ * division each so the compiler emits the single idiv that computes both
+ * halves, which is the only argument these functions ever had. */
+div_t div(int num, int den) {
+    div_t r;
+    r.quot = num / den;
+    r.rem = num % den;
+    return r;
+}
+
+ldiv_t ldiv(long num, long den) {
+    ldiv_t r;
+    r.quot = num / den;
+    r.rem = num % den;
+    return r;
+}
+
+lldiv_t lldiv(long long num, long long den) {
+    lldiv_t r;
+    r.quot = num / den;
+    r.rem = num % den;
+    return r;
+}
+
+/* M97: declared, and it refuses. See <stdlib.h> for the argument - the
+ * short version is that a system() nothing calls is a system() nothing
+ * checks, and this project has refused to ship those since M65. */
+int system(const char *command) {
+    if (!command) {
+        return 0; /* "is there a command processor" - no, not through this */
+    }
+    return -1;
+}

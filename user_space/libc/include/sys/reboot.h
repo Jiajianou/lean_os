@@ -24,6 +24,18 @@
  */
 #pragma once
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define RB_AUTOBOOT     0x01234567
 #define RB_HALT_SYSTEM  0xcdef0123
 #define RB_ENABLE_CAD   0x89abcdef
@@ -33,3 +45,7 @@
 #define RB_KEXEC        0x45584543
 
 int reboot(int cmd);
+
+#ifdef __cplusplus
+}
+#endif

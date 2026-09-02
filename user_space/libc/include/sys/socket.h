@@ -21,6 +21,18 @@
 #include <sys/types.h>
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned int socklen_t;
 typedef unsigned short sa_family_t;
 
@@ -116,3 +128,7 @@ int getsockname(int fd, struct sockaddr *addr, socklen_t *len);
 int getpeername(int fd, struct sockaddr *addr, socklen_t *len);
 int setsockopt(int fd, int level, int option, const void *value, socklen_t len);
 int getsockopt(int fd, int level, int option, void *value, socklen_t *len);
+
+#ifdef __cplusplus
+}
+#endif

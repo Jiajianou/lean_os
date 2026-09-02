@@ -27,6 +27,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Mirrors kernel/sched/sched.h's TASK_NAME_MAX. Duplicated rather than
  * included for the same reason file_manager.c keeps its own MAX_NAME_LEN
  * (leanfs's LEANFS_MAX_NAME): that header is kernel-only and is not on a
@@ -217,3 +229,7 @@ typedef struct {
  * for something that is not here - which is a refusal rather than a
  * substitution. */
 #define USER_INTERP_PATH "/lib/ld-lean.so"
+
+#ifdef __cplusplus
+}
+#endif

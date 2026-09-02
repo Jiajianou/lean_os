@@ -21,6 +21,18 @@
  */
 #pragma once
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SYS_write      0
 #define SYS_exit       1 /* (code) -> never returns. M79: ends every task in the caller's thread group, not just this one - which is what POSIX exit() means and what `return` from main has always meant. SYS_thread_exit is the one that ends a single thread. */
 #define SYS_getpid     2 /* () -> the caller's thread GROUP id. Identical to the task's own id for anything that is not a thread, which is every process this OS ran before M79 - so nothing that used this before means anything different now. SYS_gettid is the per-thread answer. */
@@ -610,3 +622,7 @@ typedef struct {
 #define SYS_futex 109
 
 #define SYSCALL_COUNT 110
+
+#ifdef __cplusplus
+}
+#endif

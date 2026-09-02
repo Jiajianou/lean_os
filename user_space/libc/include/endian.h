@@ -17,6 +17,18 @@
 
 #include <byteswap.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define __LITTLE_ENDIAN __ORDER_LITTLE_ENDIAN__
 #define __BIG_ENDIAN    __ORDER_BIG_ENDIAN__
 #define __PDP_ENDIAN    __ORDER_PDP_ENDIAN__
@@ -54,3 +66,7 @@
 #define le16toh(x) htole16(x)
 #define le32toh(x) htole32(x)
 #define le64toh(x) htole64(x)
+
+#ifdef __cplusplus
+}
+#endif

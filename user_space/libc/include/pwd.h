@@ -26,6 +26,18 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct passwd {
     char  *pw_name;
     char  *pw_passwd;
@@ -58,3 +70,7 @@ int getpwuid_r(uid_t uid, struct passwd *out, char *buf, size_t buflen,
                struct passwd **result);
 int getpwnam_r(const char *name, struct passwd *out, char *buf, size_t buflen,
                struct passwd **result);
+
+#ifdef __cplusplus
+}
+#endif

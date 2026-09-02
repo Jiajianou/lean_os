@@ -11,6 +11,18 @@
  */
 #pragma once
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define FNM_NOMATCH 1
 
 #define FNM_NOESCAPE 0x01 /* a backslash is an ordinary character */
@@ -20,3 +32,7 @@
 #define FNM_CASEFOLD 0x10
 
 int fnmatch(const char *pattern, const char *string, int flags);
+
+#ifdef __cplusplus
+}
+#endif

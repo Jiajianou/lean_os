@@ -115,6 +115,13 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
   # shape and the same reason as the stage above - it needs the compiler
   # M94 built, and skips with a message when that is not there.
   run_stage "the dynamic loader and a program that needs it" ./tools/build-dynamic.sh
+
+  # M97: after build-dynamic.sh, and the order is not arbitrary - the
+  # cross-object C++ fixtures need ld-lean.so and libc.so on the image
+  # before an executable whose PT_INTERP names the loader can start at
+  # all, and a program that cannot start reports "command not found",
+  # which is a message about the shell.
+  run_stage "C++, and an exception that crosses a library" ./tools/cxx-test.sh
   if [ "$OVERALL" -ne 0 ]; then
     echo "the dynamic linker or something it loads would not build" >&2
     exit 1

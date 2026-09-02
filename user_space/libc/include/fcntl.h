@@ -16,6 +16,18 @@
 #include <sys/types.h>
 #include "syscall.h" /* system_api/include/syscall.h - the OPEN_* flags, and M84's F_*_CMD/FD_CLOEXEC_BIT */
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define O_RDONLY   OPEN_READ
 #define O_WRONLY   OPEN_WRITE
 #define O_RDWR     (OPEN_READ | OPEN_WRITE)
@@ -190,3 +202,7 @@ int symlinkat(const char *target, int dirfd, const char *path);
 int linkat(int oldfd, const char *oldpath, int newfd, const char *newpath, int flags);
 long readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz);
 int faccessat(int dirfd, const char *path, int mode, int flags);
+
+#ifdef __cplusplus
+}
+#endif

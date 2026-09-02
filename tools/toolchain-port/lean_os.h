@@ -78,11 +78,39 @@
  *
  * crt1.o is user_space/lib/crt0.asm under the name the driver looks for
  * - see the Makefile's `sysroot` target, where the two are reconciled. */
+/* ---- M97: and the three cases these have, matching LINK_SPEC's -------
+ *
+ * M94 wrote one answer here and it was right for the one kind of thing
+ * this target could produce. There are three now, and the differences
+ * are not cosmetic:
+ *
+ *   an executable   crt1.o, which is this project's crt0 - the entry
+ *                   point, the argv unpacking, the call to main.
+ *   a PIE           Scrt1.o, the same startup with its two calls routed
+ *                   through the PLT (user_space/lib/crt0-pie.asm), and
+ *                   crtbeginS/crtendS, which are the -fPIC crtstuff.
+ *   a shared object NO crt1 of any kind. A library has no entry point
+ *                   and no main, and linking one in is not a harmless
+ *                   extra: crt0's call to `main` is a PC-relative
+ *                   reference to a symbol that does not exist, which
+ *                   stops the link with "relocation R_X86_64_PC32
+ *                   against symbol `__lean_start' can not be used when
+ *                   making a shared object" - a message about PIC, from
+ *                   a file that should not have been on the line.
+ *
+ * crti/crtn bracket _init and _fini in all three, for the reason
+ * user_space/lib/crti.asm gives: they are built out of fragments, so
+ * crti.o opens what crtbegin contributes to and crtn.o closes it. */
 #undef STARTFILE_SPEC
-#define STARTFILE_SPEC "crt1.o%s crti.o%s crtbegin.o%s"
+#define STARTFILE_SPEC                                                  \
+  "%{shared:crti.o%s crtbeginS.o%s} "                                   \
+  "%{!shared:%{pie:Scrt1.o%s crti.o%s crtbeginS.o%s}"                   \
+  "%{!pie:crt1.o%s crti.o%s crtbegin.o%s}}"
 
 #undef ENDFILE_SPEC
-#define ENDFILE_SPEC "crtend.o%s crtn.o%s"
+#define ENDFILE_SPEC                                                    \
+  "%{shared|pie:crtendS.o%s crtn.o%s} "                                 \
+  "%{!shared:%{!pie:crtend.o%s crtn.o%s}}"
 
 /* The library. -lc is enough because this libc is one archive; -lgcc is
  * added by the driver itself. Written with the group so that a program
@@ -90,6 +118,40 @@
  * without the caller having to order them. */
 #undef LIB_SPEC
 #define LIB_SPEC "-lc"
+
+/* ---- M97: which libgcc, and it is not always the archive -------------
+ *
+ * A static program gets libgcc.a, which is what M94 assumed and what the
+ * default spec says. Anything dynamic has to get libgcc_s.so instead,
+ * and the reason is not size:
+ *
+ * libgcc's exception machinery keeps a STATIC REGISTRY of the .eh_frame
+ * tables it has been told about. Link the archive into an executable and
+ * into a shared object and there are two registries. The library
+ * registers its frames in its own copy at load time; the executable
+ * throws through its own; the throw finds no handler, calls
+ * std::terminate, and the program aborts with no message - from a build
+ * whose single-object exception tests all pass. One unwinder is the
+ * whole point of libgcc_s existing, and this is the line that asks for
+ * it.
+ *
+ * `-lgcc` still follows it: libgcc_s exports the unwinder and the
+ * runtime, and the compiler-internal helpers (__udivti3 and friends)
+ * live only in the archive.
+ *
+ * And the static case gained `-lgcc_eh`, which is the other half of the
+ * same change and was found the hard way. Asking for a shared libgcc
+ * SPLITS the archive: the exception machinery moves out of libgcc.a and
+ * into libgcc_eh.a, so a static link that used to get the unwinder for
+ * free stops getting it. It does not fail at once, either - only a
+ * program that reaches a part of libstdc++ which can throw pulls in the
+ * object that needs it, so the first failure was one testsuite file out
+ * of three with "undefined reference to `_Unwind_Resume`" while every
+ * fixture in this milestone still linked. */
+#undef LIBGCC_SPEC
+#define LIBGCC_SPEC                                                     \
+  "%{shared|pie:-lgcc_s -lgcc} "                                        \
+  "%{!shared:%{!pie:-lgcc -lgcc_eh}}"
 
 /* ---- the link, and the three cases it now has ------------------------
  *
@@ -124,15 +186,29 @@
 #undef STANDARD_STARTFILE_PREFIX
 #define STANDARD_STARTFILE_PREFIX "/usr/lib/"
 
-/* No shared libraries yet, so no position-independent default and no
- * .init_array indirection through a loader. M95 is the milestone that
- * turns both of these over. */
+/* Which libc functions the compiler may assume exist when it optimises
+ * one call into another - `printf("x\n")` into `puts`, a `sin`/`cos` pair
+ * into `sincos`. M94 said "none of the C99 ones", which was conservative
+ * and cost nothing.
+ *
+ * M97 leaves it alone, and that is deliberate rather than an oversight:
+ * libstdc++'s configure probes for what it needs directly and does not
+ * consult this, and widening it would let the compiler synthesise calls
+ * into a libc this project is still filling in - which is a link error
+ * in somebody else's build, at the end of a long compile. It becomes
+ * worth revisiting when a measurement shows the missing transformations
+ * cost something. */
 #undef TARGET_LIBC_HAS_FUNCTION
 #define TARGET_LIBC_HAS_FUNCTION no_c99_libc_has_function
 
-/* This libc has __cxa_atexit? No - it has atexit (M94). Saying so is
- * what makes g++ emit a destructor registration this runtime can
- * actually service rather than a call to a symbol that does not exist;
- * M97 is where the answer changes. */
+/* This libc has __cxa_atexit? Since M97, yes - user_space/libc/src/env.c.
+ *
+ * M94 answered no, which was true and was the right answer for C: GCC
+ * falls back to one destructor per translation unit registered with
+ * plain atexit, and that services `static struct S s;` perfectly well.
+ * It cannot service C++ with shared objects, because the fallback has
+ * nowhere to record which object a static belongs to - so dlclose either
+ * destroys nothing or destroys somebody else's. The three-argument form
+ * carries the handle, which is the only reason it has three arguments. */
 #undef DEFAULT_USE_CXA_ATEXIT
-#define DEFAULT_USE_CXA_ATEXIT 0
+#define DEFAULT_USE_CXA_ATEXIT 1

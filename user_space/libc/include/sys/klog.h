@@ -37,6 +37,18 @@
 
 #include <stddef.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SYSLOG_ACTION_CLOSE        0
 #define SYSLOG_ACTION_OPEN         1
 #define SYSLOG_ACTION_READ         2
@@ -50,3 +62,7 @@
 #define SYSLOG_ACTION_SIZE_BUFFER  10
 
 int klogctl(int type, char *buf, int len);
+
+#ifdef __cplusplus
+}
+#endif

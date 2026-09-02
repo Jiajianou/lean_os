@@ -127,11 +127,79 @@ echo "build-dynamic: libdyn.so"
       -O2 -Wall -o "$OUT/libdyn.so" tests/dynamic/libdyn.c \
       -Wl,-soname,libdyn.so "$OUT/libc.so" || exit 1
 
+# ---- M97: the same boundary, in C++ -----------------------------------
+#
+# A shared object that throws and an executable that dlopens it and
+# catches. Built here rather than in tools/cxx-test.sh because it needs
+# libc.so, ld-lean.so and Scrt1.o - the three things this script makes -
+# and because the ORDER things reach the image matters: an executable
+# whose PT_INTERP names a loader that is not on the disk is refused by
+# the kernel with "not on this disk", which is a message about the image
+# rather than about the program, and cost one run to read properly.
+#
+# -nostdlib and the startup files by hand, exactly as the C programs
+# above are: the driver's own spec would pull in the static libc and the
+# static crt1. What is added on top is libsupc++.a and libgcc.a for the
+# C++ ABI runtime and the unwinder, and crtbeginS.o/crtendS.o for the
+# shared object - which is the piece that registers ITS OWN .eh_frame
+# with the unwinder from its .init_array, and without which an exception
+# raised inside it has no frame information to unwind by.
+#
+# --export-dynamic on the executable, and it is load-bearing: the C++
+# runtime is linked statically INTO the executable, so the shared
+# object's calls to __cxa_throw and its references to the typeinfo for
+# a shared type have to resolve to the executable's copies. Without it
+# they are not in the dynamic symbol table, the loader cannot find them,
+# and the two sides end up with two type_info objects for one type -
+# which is exactly the failure M97's bullet describes.
+CXX="$PREFIX/bin/x86_64-lean_os-g++"
+if [ -x "$CXX" ] && [ -f "$PREFIX/x86_64-lean_os/lib/libstdc++.so" ]; then
+  echo "build-dynamic: libthrow.so"
+  "$CXX" -shared -fPIC -O1 -Wall -Itests/cxx \
+        -o "$OUT/libthrow.so" tests/cxx/throwlib.cpp \
+        -Wl,-soname,libthrow.so || exit 1
+
+  # ld-lean.so on the line because dlopen/dlsym/dlclose live in the
+  # loader itself - there is no libdl here and there is nothing for one
+  # to contain. --export-dynamic is not for that, though: the C++ ABI
+  # runtime and the typeinfo for the shared types have to be in this
+  # program's DYNAMIC symbol table, or the library it opens resolves
+  # them to its own copies and the two sides end up with two type_info
+  # objects for one type. That is the failure M97's bullet describes,
+  # and it looks like a catch clause that simply does not match.
+  echo "build-dynamic: throwmain"
+  "$CXX" -pie -fPIE -O1 -Wall -Itests/cxx \
+        -Wl,--export-dynamic -Wl,-rpath,/lib \
+        -o "$OUT/throwmain" tests/cxx/throwmain.cpp \
+        "$OUT/ld-lean.so" || exit 1
+else
+  echo "build-dynamic: no shared C++ runtime yet - the cross-object throw is skipped."
+fi
+
 if [ -f "$IMAGE" ]; then
   build/leanfs-put "$IMAGE" "$OUT/ld-lean.so" /lib/ld-lean.so >/dev/null || exit 1
   build/leanfs-put "$IMAGE" "$OUT/libc.so"    /lib/libc.so    >/dev/null || exit 1
   build/leanfs-put "$IMAGE" "$OUT/libdyn.so"  /lib/libdyn.so  >/dev/null || exit 1
   build/leanfs-put "$IMAGE" "$OUT/dyntest"    /bin/dyntest    >/dev/null || exit 1
+  if [ -f "$OUT/throwmain" ]; then
+    # libstdc++.so.6 by its SONAME, which is the name the loader will
+    # look for - the .so.6.0.33 file and the bare .so symlink are a
+    # build-time convenience and mean nothing at runtime.
+    # libgcc_s.so.1 as well, and it is the load-bearing one: it holds the
+    # unwinder, and the whole point of it being shared is that the
+    # executable and every library it opens use the SAME registry of
+    # .eh_frame tables. Two static copies is two registries, and a throw
+    # that crosses between them finds no handler and aborts.
+    build/leanfs-put "$IMAGE" \
+      "$PREFIX/x86_64-lean_os/lib/libgcc_s.so.1" /lib/libgcc_s.so.1 \
+      >/dev/null || exit 1
+    build/leanfs-put "$IMAGE" \
+      "$PREFIX/x86_64-lean_os/lib/libstdc++.so.6.0.33" /lib/libstdc++.so.6 \
+      >/dev/null || exit 1
+    build/leanfs-put "$IMAGE" "$OUT/libthrow.so" /lib/libthrow.so >/dev/null || exit 1
+    build/leanfs-put "$IMAGE" "$OUT/throwmain"   /bin/throwmain   >/dev/null || exit 1
+    echo "build-dynamic: installed /lib/libstdc++.so.6, /lib/libthrow.so, /bin/throwmain"
+  fi
   echo "build-dynamic: installed /lib/ld-lean.so, /lib/libc.so, /lib/libdyn.so, /bin/dyntest"
 fi
 

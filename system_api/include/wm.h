@@ -16,6 +16,18 @@
 
 #include <stdint.h>
 
+/* M97: C++ linkage.
+ *
+ * Without this every declaration below is a C++ function when a C++
+ * program includes it, so `malloc` in a header and `malloc` in libc.a
+ * are different symbols and nothing links. It cost a whole libstdc++
+ * build to find, and the error names the caller rather than the header:
+ * "undefined reference to `malloc(unsigned long)`" - with the argument
+ * list, which is the tell. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* SYS_fb_info fills one of these - read-only geometry, not the pixels
  * themselves (SYS_fb_map is the separate call that actually maps the
  * framebuffer in). */
@@ -441,3 +453,7 @@ typedef struct {
     uint32_t accent_color; /* M38: the focused-window titlebar color - compositor.c's second global setting, previously TITLEBAR_FOCUS_COLOR, a compile-time constant. settings.c is still the only client that ever sends this request, so (unlike wm_create_request_t's confirm_close) there's no back-compat concern about adding a field here - the one writer and the one reader change together. */
     uint32_t wallpaper;    /* M44: which wallpaper style (user_space/lib/wallpaper.h's WALLPAPER_*) the desktop paints. The compositor stores and relays it and nothing more - it never draws a wallpaper and has no idea what any style looks like, the same relay-only role it had for the menu protocol in M41. */
 } wm_settings_request_t;
+
+#ifdef __cplusplus
+}
+#endif
