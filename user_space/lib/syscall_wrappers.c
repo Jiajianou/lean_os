@@ -261,6 +261,10 @@ long sys_alarm(unsigned int seconds) {
     return do_syscall(SYS_alarm, (long)seconds, 0, 0);
 }
 
+long sys_msync(void *addr, unsigned long len, int flags) {
+    return do_syscall(SYS_msync, (long)addr, (long)len, flags);
+}
+
 long sys_utime(const char *path, unsigned int mtime) {
     return do_syscall(SYS_utime, (long)path, (long)mtime, 0);
 }

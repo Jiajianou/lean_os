@@ -22,6 +22,8 @@
 #include "proc/proc.h" /* M54 - process_destroy_address_space, called from task_exit_with_code */
 #include "lib/libk.h" /* M82: k_memset, zeroing a demand-filled page */
 #include "mman.h"  /* system_api/include/mman.h - PROT_WRITE, read by sched_fault_fill */
+#include "fs/vfs.h"     /* M91 (second attempt): a private file mapping reads the file */
+#include "mm/filemap.h" /* M91 (second attempt): a shared one shares a frame */
 #include "signal.h" /* system_api/include/signal.h - SIGKILL/SIGTERM */
 
 /* M81: 8 KiB -> 32 KiB, and the reason is a number in another file.
@@ -1374,6 +1376,15 @@ void task_exit_with_code(int code) {
         spin_unlock(&sched_lock);
         irq_restore(eflags);
 
+        /* M91 (second attempt): shared file pages go back to filemap
+         * before the address space is torn down, and only when this is
+         * the last thread in it - a sibling still running is still
+         * reading them. Done before the CR3 switch below, because
+         * vmm_user_range_ok and vmm_unmap_page_in work on a pml4 by
+         * address and `dead` is still this task's. */
+        if (!others) {
+            sched_release_shared_range(t, USER_MMAP_BASE, USER_MMAP_LIMIT);
+        }
         t->pml4_phys = vmm_kernel_pml4_phys();
         vmm_switch_address_space(t->pml4_phys);
         loaded_pml4_phys[cpu] = t->pml4_phys;
@@ -1728,6 +1739,74 @@ static uint64_t fill_policy(task_t *self, uint64_t page, int for_write, int for_
     return flags;
 }
 
+/* M91 (second attempt): the region a fault landed in, or NULL.
+ *
+ * fill_policy already finds this and returns only the flags, which was
+ * everything a fault needed while every mapping was anonymous. A
+ * file-backed one needs the region itself - which file, which page of
+ * it, and whether the frame is shared - so the lookup is factored out
+ * rather than done twice. */
+static const mmap_region_t *mmap_region_for(task_t *self, uint64_t page) {
+    if (page < USER_MMAP_BASE || page >= USER_MMAP_LIMIT) {
+        return 0;
+    }
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (self->mmaps[i].pages == 0) {
+            break;
+        }
+        uint64_t start = self->mmaps[i].base;
+        uint64_t end = start + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+        if (page >= start && page < end) {
+            return &self->mmaps[i];
+        }
+    }
+    return 0;
+}
+
+/* ---- M91 (second attempt): giving shared file pages back --------------
+ *
+ * A shared mapping's frames belong to kernel/mm/filemap.c, not to this
+ * address space, so every path that stops using them has to say so
+ * rather than freeing them: unmap, fork (which drops both sides' entries
+ * so each re-faults and takes its own reference) and exit.
+ *
+ * **Only pages that are actually mapped.** A reference is taken by the
+ * fault that maps a page and by nothing else, so a region's untouched
+ * pages hold none - and putting one back would underflow the count and
+ * free a frame another process is reading. The page table is the record
+ * of which pages were faulted, which is why this asks it rather than
+ * assuming a region is fully backed.
+ *
+ * Returns how many references were dropped, which is what the self-test
+ * counts.
+ */
+int sched_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
+    int dropped = 0;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (t->mmaps[i].pages == 0) {
+            break;
+        }
+        if (!t->mmaps[i].shared || t->mmaps[i].handle < 0) {
+            continue;
+        }
+        uint64_t rstart = t->mmaps[i].base;
+        uint64_t rend = rstart + (uint64_t)t->mmaps[i].pages * PAGE_SIZE;
+        uint64_t from = start > rstart ? start : rstart;
+        uint64_t to = end < rend ? end : rend;
+        for (uint64_t p = from; p < to; p += PAGE_SIZE) {
+            if (!vmm_user_range_ok(t->pml4_phys, p, 1, 0)) {
+                continue; /* never faulted in - holds no reference */
+            }
+            vmm_unmap_page_in(t->pml4_phys, p);
+            filemap_put(t->mmaps[i].handle,
+                        t->mmaps[i].file_page +
+                            (uint32_t)((p - rstart) / PAGE_SIZE));
+            dropped++;
+        }
+    }
+    return dropped;
+}
+
 static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_exec) {
 
     /* Never build a page that already exists.
@@ -1753,6 +1832,44 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
         return 0;
     }
 
+    /* ---- M91 (second attempt): where the bytes come from --------------
+     *
+     * Three cases, and the difference between them is the whole of
+     * file-backed and shared mapping:
+     *
+     *   anonymous          - a fresh zeroed frame, which is what every
+     *                        mapping was until now.
+     *   file, MAP_PRIVATE  - a fresh frame with the file's page read
+     *                        into it. Writes stay here: nothing else
+     *                        points at this frame, so "private" is true
+     *                        by construction rather than by a
+     *                        copy-on-write that would have to happen
+     *                        later.
+     *   file, MAP_SHARED   - the ONE frame kernel/mm/filemap.c holds for
+     *                        that (file, page). Every mapper gets the
+     *                        same one, which is what makes a shared
+     *                        mapping shared.
+     */
+    const mmap_region_t *region = mmap_region_for(self, page);
+    if (region && region->handle >= 0 && region->shared) {
+        uint32_t index = region->file_page +
+                         (uint32_t)((page - region->base) / PAGE_SIZE);
+        uint64_t sphys = filemap_get(region->handle, index,
+                                     (region->prot & PROT_WRITE) != 0);
+        if (sphys == 0) {
+            /* No frame, no slot, or the file would not read. All three
+             * are "the machine could not do it" rather than "this
+             * address is not yours", which is the distinction
+             * FILL_NO_MEMORY exists to draw. */
+            return FILL_NO_MEMORY;
+        }
+        if (vmm_try_map_page_in(self->pml4_phys, page, sphys, flags) != 0) {
+            filemap_put(region->handle, index);
+            return FILL_NO_MEMORY;
+        }
+        return 1;
+    }
+
     uint64_t phys = pmm_try_alloc_frame();
     if (phys == 0) {
         /* M102: FILL_NO_MEMORY, not 0. The difference matters at the
@@ -1766,6 +1883,20 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
      * anonymous memory that handed a process the previous owner's bytes
      * would leak one program's data into another's. */
     k_memset((void *)phys, 0, PAGE_SIZE);
+    /* M91 (second attempt): a private file mapping reads the file over
+     * the zeros. Zeroed first and then read into, rather than read into
+     * directly, because a mapping may run past the end of the file - and
+     * POSIX says the tail of the last page reads as zeros, which is the
+     * one thing a bare read would leave holding the previous owner's
+     * bytes. A read that fails leaves the page zeroed rather than
+     * failing the fault: the mapping is valid and the file is short or
+     * unreadable, which is a page of zeros everywhere else too. */
+    if (region && region->handle >= 0) {
+        uint32_t index = region->file_page +
+                         (uint32_t)((page - region->base) / PAGE_SIZE);
+        (void)vfs_handle_read(region->handle, (void *)phys, PAGE_SIZE,
+                              index * PAGE_SIZE);
+    }
     /* M102: the page table this needs is a frame too, and on a full
      * machine it is the one that is missing. Returning 0 sends the fault
      * handler down the same path as "no frame for the page itself",

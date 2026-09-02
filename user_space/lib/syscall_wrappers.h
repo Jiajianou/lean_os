@@ -140,6 +140,7 @@ long sys_getppid(void);
 long sys_sync(void);
 long sys_meminfo(void *out);
 long sys_alarm(unsigned int seconds);
+long sys_msync(void *addr, unsigned long len, int flags);
 
 /* M53: creates one directory whose parent already exists. */
 long sys_mkdir(const char *path);

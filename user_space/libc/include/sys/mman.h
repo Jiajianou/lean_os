@@ -30,6 +30,13 @@
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
 int munmap(void *addr, size_t length);
 
+/* M91 (second attempt): write a shared file mapping's pages back to the
+ * file. A private or anonymous mapping is a success that does nothing -
+ * there is no file for its contents to reach. See SYS_msync for why
+ * MS_ASYNC and MS_SYNC do the same thing here and why MS_INVALIDATE is
+ * refused rather than accepted. */
+int msync(void *addr, size_t length, int flags);
+
 /* M91. mprotect's range must lie entirely inside mappings the caller
  * holds - a partially-covered range is -1 rather than half applied.
  * madvise honours MADV_DONTNEED (drop the pages, keep the mapping) and

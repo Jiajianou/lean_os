@@ -153,6 +153,24 @@ typedef struct {
      * has to live with the mapping rather than in a page table entry that
      * does not exist yet. */
     uint32_t prot;
+    /* ---- M91 (second attempt): what backs this mapping ----------------
+     *
+     * `handle` is the vfs handle of the file behind it, or -1 for
+     * anonymous memory - which is every mapping this kernel could make
+     * until now. `file_page` is which page of that file the region's
+     * first page is; the fault handler adds the offset within the region
+     * to it.
+     *
+     * `shared` says whether the frames are this address space's own or
+     * everybody's. It changes three things and each is somewhere else:
+     * the fault fills from kernel/mm/filemap.c rather than from a fresh
+     * zeroed frame; fork gives the child the same frame rather than a
+     * copy-on-write one; and unmap gives the frame back to filemap
+     * rather than to the pmm, because somebody else may still be
+     * holding it. */
+    int handle;
+    uint32_t file_page;
+    uint8_t shared;
 } mmap_region_t;
 
 /* M45: how long a per-task name may be, NUL included. A process was a
@@ -900,6 +918,11 @@ void sched_release_env(task_t *t);
  * one, rounded up. See fire_expired_alarms in sched.c for the
  * resolution and for why there is exactly one per task. */
 unsigned int sched_set_alarm(task_t *t, unsigned int seconds);
+
+/* M91 (second attempt): drop this task's references to the shared file
+ * pages in [start, end), unmapping each as it goes. See the
+ * implementation for why only mapped pages count. Returns how many. */
+int sched_release_shared_range(task_t *t, uint64_t start, uint64_t end);
 
 void sched_raise_signal(task_t *t, int sig);
 

@@ -8935,10 +8935,12 @@ was written as the real test and it stayed the real test:
 `tools/qemu-input-test.sh` passes unchanged — it grades pixels, and
 nothing in this milestone was supposed to reach them.
 
-### M91 — An address space that is a set of mappings [~]
+### M91 — An address space that is a set of mappings [x]
 
-**Status:** six of seven. `MAP_SHARED`, file-backed mappings and `mremap`
-are the three left.
+**Status:** done on the second attempt. File-backed mappings and
+`MAP_SHARED` landed; `mremap` is deferred with a condition rather than
+left open, and the first bullet's second half is a stopping point with a
+reason rather than a shortfall. See the second-attempt notes below.
 
 *Reopened fifth and last of the five before M94 — see "Before M94"
 below. The second attempt is `MAP_SHARED` and file-backed mappings,
@@ -8956,15 +8958,19 @@ backlog. The NX bit in the third bullet shipped.*
       kernel names rather than list entries** — see the notes for why
       that turned out to be the right stopping point rather than a
       shortfall
-- [~] `mmap` with a hint and `MAP_FIXED` — **shipped**; `MAP_SHARED` and
-      file-backed mappings — **not**. `SYS_mmap` refuses all three today,
+- [x] `mmap` with a hint and `MAP_FIXED` — **shipped**; `MAP_SHARED` and
+      file-backed mappings — **shipped in the second attempt**.
+      `SYS_mmap` refused all three,
       in its own words, *"rather than quietly given private anonymous
       memory"* — that refusal was right and this is the milestone that
       earns the yes for the first one. A dynamic loader maps a file at an
       address it chose; there is no version of M95 that does not need
       this first
 - [~] `mprotect` and `madvise(MADV_DONTNEED)` — **shipped**; `mremap` —
-      **not**. And a real NX bit, so `PROT_EXEC` is a fact rather than a
+      **deferred with a condition**: a program that grows a mapping and
+      cannot afford to copy it. `realloc` here copies, and nothing else
+      has asked. **`msync` arrived instead**, because a shared file
+      mapping without one is a write with no way to know it landed. And a real NX bit, so `PROT_EXEC` is a fact rather than a
       shrug and `PROT_NONE` is a mapping rather than a refusal —
       **shipped, and it reached further than expected**: see the notes on
       what had to change in the linker script before the bit meant
@@ -8976,6 +8982,93 @@ backlog. The NX bit in the third bullet shipped.*
       argument for why that boundary is what makes a kernel pointer an
       error rather than a read is untouched by any of this, and should
       be
+
+#### Second attempt — a file behind a mapping, and one frame behind two [x]
+
+**What landed.** `SYS_mmap` takes a descriptor and an offset. A
+`MAP_PRIVATE` file mapping reads the file's pages in on the fault that
+touches them, and writes stay in the process that made them. A
+`MAP_SHARED` one hands every mapper **the same frame** — which is the
+only thing MAP_SHARED means and the one thing a per-process copy cannot
+fake — and `msync` writes the dirty ones back. `sysconf(_SC_MAPPED_FILES)`
+answered -1 for one milestone and answers 200809L now, which is the line
+M89 predicted would move.
+
+**The new piece is `kernel/mm/filemap.c`, and what it is not is the
+interesting part.** It is a table of the frames a file's pages occupy
+*while somebody has them mapped*, keyed on (handle, page index), with a
+refcount. It is **not a page cache**: nothing enters it because a file
+was read, only because a file was mapped, and a page leaves the moment
+the last mapping does. M92 measured what a cache buys here and put one in
+front of the block device, which is where the measurement said it
+belonged; nothing has measured a second one at the file layer, so this is
+a *sharing* table that happens to have to read and write a file. 512
+pages, which is 2 MiB of shared mapping across the machine, and a mapping
+that cannot get a slot fails at the fault rather than silently getting a
+private page.
+
+**Three places had to learn that a frame might not be theirs**, and
+finding all three is most of the work:
+
+- **munmap** drops a filemap reference instead of freeing the frame,
+  because somebody else may still be reading it.
+- **fork** cannot clone a shared mapping copy-on-write — COW's whole
+  promise is that a write separates the two copies, which is the opposite
+  of what MAP_SHARED means. The parent's entries are dropped first,
+  references and all, and both sides fault them back in afterwards. The
+  cost is a re-fault per page in the parent; the alternative is a fork
+  that silently turns one shared mapping into two private ones.
+- **exit** releases them before the address space is destroyed, and only
+  when the last thread in it goes.
+
+**And a rule that had to be written down because it is not obvious:
+only pages that were actually faulted hold a reference.** A reference is
+taken by the fault that maps a page and by nothing else, so a region's
+untouched pages hold none — and putting one back would underflow the
+count and hand a frame another process is reading to the pmm. The page
+table is the record of which pages were faulted, which is why the release
+path asks it rather than assuming a region is fully backed.
+
+**Dirtiness is coarse, on purpose, and the trade is stated.** A frame
+handed out for a writable shared mapping is marked dirty when it is
+*mapped*, not when it is written. The exact answer is the page table's
+dirty bit, and collecting it would mean walking every mapper's tables at
+unmap time. The cost of coarse is one wasted block write per page that
+was mapped writable and never written; the cost of exact is a data
+structure. "Dirty" here means "could have been written", which is a
+weaker statement than it looks and so is said out loud.
+
+**What the self-test checks, and why each check is the one that matters.**
+`vmtest` grew six: that a private mapping reads back the file's **own
+bytes** (a mapping that succeeded and returned zeros passes every check
+about addresses and none about content — which is exactly the failure the
+old refusal existed to prevent); that it reads **zeros past the end of
+the file**, which a frame handed over without clearing would not; that a
+write through it never reaches the file; that **two shared mappings of
+one page are the same memory**, which is not observable from a single
+mapping; that the write reaches the disk through `msync` and an ordinary
+`read`; and that `filemap_in_use()` is back to zero afterwards — a leak
+the existing free-frame assertion structurally cannot see, because the
+frame *is* allocated and simply belongs to nobody.
+
+**Two smaller decisions worth their line.** A descriptor passed with
+`MAP_ANONYMOUS` is refused rather than ignored: POSIX says ignore it,
+this kernel already refused it, and a caller who passed one meant to map
+a file — handing them zeros is the thing every refusal in `<sys/mman.h>`
+exists to avoid. And `MAP_SHARED|MAP_ANONYMOUS` is still refused, with
+its own condition: it is memory shared with a child, `shm` is what does
+that here, and nothing has asked for the second spelling.
+
+**And a harness bug this milestone tripped over twice, half an hour each
+time.** `tools/qemu-serial-test.sh` decides the boot is over by grepping
+its log for a panic or the desktop handoff. Given a *named* log file
+(`LEANOS_SERIAL_LOG`, which is how a person reads what the machine
+actually said), it saw the **previous** run's ending one second in,
+killed QEMU, and reported all ninety markers missing — which reads
+exactly like a catastrophic regression. The log is emptied before QEMU
+starts now. The lesson is small and general: a test harness that decides
+"done" by looking at a file has to own that file's beginning as well as
+its end.
 
 **How we'll know.** A program reserves 4 GiB at an address it names,
 `mprotect`s one page read-only and dies on the write, then makes a
@@ -9679,7 +9772,7 @@ the precedent for a milestone reopened under the number it was given.
 | 2 | M86 `[x]` | the shell | M94's grading test *is* a shell script |
 | 3 | M88 (2nd) `[x]` | UTF-8, and the calls a build probes for | every source tree in this arc has non-ASCII bytes in it |
 | 4 | M89 `[x]` | toybox | a configure run shells out to `sed`, `grep`, `install`; `/bin` has six programs |
-| 5 | M91 (2nd) | `MAP_SHARED` and file-backed `mmap` | M91's own words: *"there is no version of M95 that does not need this first"* |
+| 5 | M91 (2nd) `[x]` | `MAP_SHARED` and file-backed `mmap` | M91's own words: *"there is no version of M95 that does not need this first"* |
 
 **What this ordering assumes, written down so it can be wrong.** That
 M89 belongs before M91: toybox is static and needs no loader, and

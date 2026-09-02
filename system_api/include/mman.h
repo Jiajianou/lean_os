@@ -25,13 +25,25 @@
 
 #define MAP_PRIVATE   0x02
 #define MAP_ANONYMOUS 0x20
-/* Named so that a caller passing it is refused by name rather than
- * silently handed private memory. There are no shared mappings here:
- * kernel/ipc/shm.h is what two processes share memory through, and it
- * has its own lifetime rules that a MAP_SHARED would have to duplicate
- * badly. */
+/* M91 (second attempt): real, for a file.
+ *
+ * This said "there are no shared mappings here: kernel/ipc/shm.h is what
+ * two processes share memory through, and it has its own lifetime rules
+ * that a MAP_SHARED would have to duplicate badly." Half of that is
+ * still true and is the half that matters: MAP_SHARED **with a file** is
+ * implemented (kernel/mm/filemap.c holds the one frame every mapper of a
+ * page shares, and writes reach the file), and MAP_SHARED|MAP_ANONYMOUS
+ * is still refused - it is memory shared with a child, which is shm's
+ * job here, and nothing has asked for the second spelling. */
 #define MAP_SHARED    0x01
 #define MAP_FIXED     0x10
+
+/* M91 (second attempt): msync's flags. MS_ASYNC and MS_SYNC do the same
+ * thing here and the ABI note on SYS_msync says why; MS_INVALIDATE is
+ * refused rather than accepted, for the reason given there. */
+#define MS_ASYNC      0x1
+#define MS_INVALIDATE 0x2
+#define MS_SYNC       0x4
 
 #define MAP_FAILED ((void *)-1)
 

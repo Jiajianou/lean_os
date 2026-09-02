@@ -35,6 +35,7 @@
 #include "lib/libk.h"
 #include "mm/e820.h"
 #include "mm/heap.h"
+#include "mm/filemap.h" /* M91 (second attempt): filemap_in_use */
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "net/icmp.h"
@@ -10010,6 +10011,20 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("M91 self-test: the address space is not a set of mappings this program can arrange");
         }
+        /* M91 (second attempt): the frames a shared mapping borrowed have
+         * to be back too, and that is a different count from the pmm's -
+         * a filemap slot still holding a frame after every mapper has
+         * gone is a leak the free-frame check above cannot see, because
+         * the frame IS allocated and simply belongs to nobody. */
+        int shared_left = filemap_in_use();
+        if (all_ok && shared_left != 0) {
+            klog_puts("[m91] 0x");
+            klog_put_hex32((uint32_t)shared_left);
+            klog_puts(" shared file page(s) still held after every mapping was "
+                       "dropped - see kernel/mm/filemap.c\n");
+            all_ok = 0;
+        }
+
         klog_puts("[m91] an address space that is a set of mappings: an address hint "
                    "honoured and MAP_FIXED landing exactly where it was told and "
                    "replacing what was there, mprotect taking write away and giving it "
@@ -10018,6 +10033,10 @@ static void boot_selftests_system(void) {
                    "returning the frames and keeping the mapping, a 4 GiB reservation "
                    "touched at both ends on a machine whose whole user region used to be "
                    "under a gigabyte, a stack grown sixteen times past what it was given, "
+                   "a file mapped MAP_PRIVATE reading back as its own bytes and as zeros "
+                   "past its end with a write that never reached it, the same file mapped "
+                   "MAP_SHARED twice as one piece of memory with a write that reached the "
+                   "disk through msync, "
                    "NX ");
         klog_puts(vmm_nx_enabled() ? "enforced" : "unavailable on this CPU");
         klog_puts(", and all four faults that must stay fatal - executing a "

@@ -34,13 +34,26 @@
  *   9   the stack would not grow deeper than its initial mapping
  *   10  mprotect accepted a range no mapping covers
  *   11  a PROT_NONE mapping was refused outright rather than reserved
+ *   12-18  a file mapped MAP_PRIVATE: could not be created, did not read
+ *          back as the file's own bytes, did not read as zeros past the
+ *          end of the file, or a write through it reached the file -
+ *          which would mean it was never private
+ *   19-24  a file mapped MAP_SHARED: refused, did not read back as the
+ *          file, two mappings of one page turned out not to be the same
+ *          memory, or a write reached neither the other mapping nor the
+ *          file after msync
  */
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 #define PAGE 4096UL
+
+/* M91 (second attempt): the file checks 9 and 10 map. Under /tmp because
+ * that is where every other fixture in this tree writes. */
+#define VM_FILE "/tmp/vmtest.map"
 
 /* mov eax, 42 ; ret - the smallest thing that proves a page is being
  * executed rather than merely mapped. Written as bytes because a program
@@ -253,8 +266,89 @@ static int ordinary(void) {
         return 9;
     }
 
-    printf("vmtest: fixed, hinted, protected, executed, dropped, reserved "
-           "and grown - all checks passed\n");
+    /* ---- 9. A file, mapped private ------------------------------------
+     *
+     * The case M91's second attempt exists for and the one M95's loader
+     * needs: a program maps a file at an address it chose and reads the
+     * file's bytes there. What is checked is that the BYTES ARE THE
+     * FILE'S - a mapping that succeeded and handed back zeros would pass
+     * every check about addresses and none about content, which is
+     * exactly the failure the old refusal was written to avoid.
+     *
+     * And that a write to a private mapping does NOT reach the file,
+     * which is the half of "private" that a test made only of reads
+     * cannot see. */
+    static const char BODY[] = "m91-file-backed-mapping";
+    int fd = open(VM_FILE, O_RDWR | O_CREAT | O_TRUNC);
+    if (fd < 0) {
+        return 12;
+    }
+    if (write(fd, BODY, sizeof(BODY)) != (long)sizeof(BODY)) {
+        return 13;
+    }
+    char *priv = (char *)mmap(0, PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    if (priv == (char *)MAP_FAILED) {
+        return 14;
+    }
+    if (memcmp(priv, BODY, sizeof(BODY)) != 0) {
+        return 15;
+    }
+    /* Past the end of a 24-byte file, inside the mapped page: POSIX says
+     * zeros, and a frame handed over without being cleared would say
+     * whatever the last owner wrote. */
+    for (unsigned long i = sizeof(BODY); i < PAGE; i++) {
+        if (priv[i] != 0) {
+            return 16;
+        }
+    }
+    priv[0] = 'X';
+    munmap(priv, PAGE);
+
+    char back[8];
+    if (lseek(fd, 0, SEEK_SET) != 0 || read(fd, back, 4) != 4) {
+        return 17;
+    }
+    if (back[0] != 'm') {
+        return 18; /* a private write reached the file - it is not private */
+    }
+
+    /* ---- 10. A file, mapped shared -------------------------------------
+     *
+     * Two mappings of the same page of the same file, which must be the
+     * same memory - so a write through one is visible through the other
+     * without anything being flushed. That is the entire meaning of
+     * MAP_SHARED and it is not observable from a single mapping.
+     *
+     * Then msync, and the file read back through an ordinary read(): the
+     * write has to reach the disk, not just the other mapping. */
+    char *sh1 = (char *)mmap(0, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    char *sh2 = (char *)mmap(0, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (sh1 == (char *)MAP_FAILED || sh2 == (char *)MAP_FAILED || sh1 == sh2) {
+        return 19;
+    }
+    if (memcmp(sh1, BODY, sizeof(BODY)) != 0) {
+        return 20;
+    }
+    sh1[0] = 'Z';
+    if (sh2[0] != 'Z') {
+        return 21; /* two mappings, two frames - not shared at all */
+    }
+    if (msync(sh1, PAGE, MS_SYNC) != 0) {
+        return 22;
+    }
+    if (lseek(fd, 0, SEEK_SET) != 0 || read(fd, back, 4) != 4) {
+        return 23;
+    }
+    if (back[0] != 'Z') {
+        return 24; /* the shared write did not reach the file */
+    }
+    munmap(sh1, PAGE);
+    munmap(sh2, PAGE);
+    close(fd);
+    unlink(VM_FILE);
+
+    printf("vmtest: fixed, hinted, protected, executed, dropped, reserved, "
+           "grown, and a file mapped both ways - all checks passed\n");
     return 0;
 }
 

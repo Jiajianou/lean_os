@@ -548,9 +548,14 @@ int main(void) {
             }
             munmap(hinted, 4096);
         }
-        /* fd is still refused rather than ignored - there are no
-         * file-backed mappings here, and anonymous zeroes are not a
-         * file. */
+        /* M91 (second attempt): a descriptor WITH MAP_ANONYMOUS is still
+         * refused, and now for a sharper reason than "there are no
+         * file-backed mappings here". There are; POSIX says the
+         * descriptor is ignored for an anonymous mapping, and this
+         * kernel refuses it instead - a caller who passed one is a
+         * caller who meant to map a file, and silently handing them
+         * zeroes is the thing every refusal in this file exists to
+         * avoid. */
         if (mmap(0, 4096, PROT_READ | PROT_WRITE,
                   MAP_ANONYMOUS | MAP_PRIVATE, 3, 0) != MAP_FAILED) {
             fail("mmap accepted a file descriptor it cannot honour");

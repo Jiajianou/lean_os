@@ -147,6 +147,12 @@ OVMF_CODE="build/ovmf/OVMF_CODE.fd"
 OVMF_VARS_TEMPLATE="build/ovmf/OVMF_VARS.fd"
 OVMF_VARS_RUNTIME="$(mktemp -t qemu-serial-ovmf-vars-XXXXXX.fd)"
 LOG="${LEANOS_SERIAL_LOG:-$(mktemp -t qemu-serial-XXXXXX.log)}"
+# Emptied before QEMU is started, and this is not tidiness. The wait loop
+# below decides the boot is over by grepping this file for a panic or for
+# the desktop handoff - so a named log left over from a previous run
+# makes the harness see the PREVIOUS boot's ending one second in, kill
+# QEMU, and report every marker as missing. Cost: half an hour, twice.
+: > "$LOG"
 
 if [ ! -f "$IMAGE" ]; then
   echo "No image at $IMAGE yet - run 'make' first." >&2
@@ -332,6 +338,12 @@ REQUIRED_MARKERS=(
   "[m87] files with a type and a place:"
   "[m90] more than a gigabyte:"
   "[m91] an address space that is a set of mappings:"
+  # M91 (second attempt): the marker is one line, so what proves the file
+  # half landed is a second entry naming it rather than a longer first
+  # one - a marker list that matched a prefix would keep passing if the
+  # sentence lost its tail.
+  "a file mapped MAP_PRIVATE reading back as its own bytes"
+  "the same file mapped MAP_SHARED twice as one piece of memory"
   "[m92] a disk worth reading:"
   "[m93] a filesystem that can hold a source tree:"
   # M101: five markers rather than one, because they fail independently.

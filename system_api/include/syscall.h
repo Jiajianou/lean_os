@@ -548,4 +548,23 @@ typedef struct {
  * itself, and SIGALRM goes to the caller and to nobody else. */
 #define SYS_alarm 106
 
-#define SYSCALL_COUNT 107
+/* M91 (second attempt): (addr, len, flags) -> 0 or -1.
+ *
+ * Write a shared file mapping's dirty pages back to the file. Every
+ * mapping in the range that is shared and file-backed is flushed; a
+ * private or anonymous one is a success that does nothing, because there
+ * is no file for its contents to reach and saying so with an error would
+ * make a program that msyncs everything fail.
+ *
+ * MS_ASYNC and MS_SYNC behave identically and both write: this
+ * filesystem's writes are synchronous down to the block cache and that
+ * cache is write-through (M92), so there is no later for MS_ASYNC to
+ * defer to. MS_INVALIDATE is refused - it asks for other mappings of the
+ * same file to be dropped so they re-read, and every mapper here is
+ * already looking at the same frame, so there is nothing to invalidate
+ * and a success would be claiming an operation happened.
+ *
+ * Needs CAP_FS_WRITE: it puts bytes on the disk. */
+#define SYS_msync 107
+
+#define SYSCALL_COUNT 108

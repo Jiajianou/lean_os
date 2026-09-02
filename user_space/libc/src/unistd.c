@@ -557,6 +557,8 @@ long sysconf(int name) {
     case _SC_2_C_BIND:
     case _SC_2_VERSION:
         return 200809L;
+    case _SC_MAPPED_FILES:          /* M91 (second attempt) */
+        return 200809L;
     case _SC_JOB_CONTROL:           /* M85 */
     case _SC_REGEXP:                /* M89's engine, graded against the host's */
     case _SC_SHELL:                 /* M72/M86 */
@@ -573,16 +575,15 @@ long sysconf(int name) {
      * barriers/rwlocks/spinlocks/semaphores in <pthread.h> - which are
      * M96's, over a futex that does not exist yet.
      *
-     * _SC_MAPPED_FILES is the one to watch: file-backed mmap is M91's
-     * unfinished half, and this line is what turns into 200809L on the
-     * day it lands. */
+     * _SC_MAPPED_FILES moved out of this list when M91's second attempt
+     * landed file-backed mmap, which is the line above rather than a
+     * note here - and is what this paragraph asked to happen. */
     case _SC_ADVISORY_INFO:
     case _SC_BARRIERS:
     case _SC_ASYNCHRONOUS_IO:
     case _SC_CLOCK_SELECTION:
     case _SC_CPUTIME:
     case _SC_IPV6:
-    case _SC_MAPPED_FILES:
     case _SC_MEMLOCK:
     case _SC_MEMLOCK_RANGE:
     case _SC_MESSAGE_PASSING:

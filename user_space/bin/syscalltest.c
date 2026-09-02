@@ -277,6 +277,11 @@ static const entry_t table[] = {
     {SYS_sync,          CLASS_PLAIN, 0, NULL},
     {SYS_meminfo,       CLASS_PTR, 1, NULL},
     {SYS_alarm,         CLASS_PLAIN, 0, NULL},
+    /* M91 (second attempt). msync takes an address rather than a pointer
+     * the kernel dereferences - it names a mapping, and a range outside
+     * the caller's arena is refused by the range check rather than by a
+     * copy - so it is PLAIN like mmap and madvise beside it. */
+    {SYS_msync,         CLASS_PLAIN, 0, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 

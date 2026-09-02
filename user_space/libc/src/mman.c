@@ -1,5 +1,6 @@
 /* user_space/libc/src/mman.c - M78, M91 */
 #include <sys/mman.h>
+#include <errno.h>
 
 #include "syscall_wrappers.h"
 
@@ -13,16 +14,19 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
      * it can be and reported honestly when it cannot, because the address
      * actually mapped is the return value.
      *
-     * `fd`/`offset` stay refused, and for the unchanged reason: a
-     * file-backed mapping is not something this kernel can do, and
-     * handing back anonymous zeroes for one would be found out much later
-     * and somewhere else. */
-    if (fd != -1 || offset != 0) {
-        return MAP_FAILED;
-    }
+     * M91 (second attempt): `fd` and `offset` are passed through too.
+     * The paragraph here said "a file-backed mapping is not something
+     * this kernel can do, and handing back anonymous zeroes for one
+     * would be found out much later and somewhere else" - the second
+     * half is why it was a refusal rather than a fiction, and the first
+     * half stopped being true. The kernel does the checking now: a
+     * descriptor that is not an open file, a sub-page offset, or a
+     * shared writable mapping of a read-only descriptor are all refused
+     * there, where the fd table is. */
     long r = sys_mmap(addr, (unsigned long)length, prot, flags, fd,
                       (unsigned long)offset);
     if (r < 0) {
+        errno = (fd >= 0) ? EACCES : ENOMEM;
         return MAP_FAILED;
     }
     return (void *)(unsigned long)r;
@@ -44,4 +48,12 @@ int madvise(void *addr, size_t length, int advice) {
  * meaning; a program written against either finds it here. */
 int posix_madvise(void *addr, size_t length, int advice) {
     return madvise(addr, length, advice);
+}
+
+int msync(void *addr, size_t length, int flags) {
+    if (sys_msync(addr, length, flags) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
 }

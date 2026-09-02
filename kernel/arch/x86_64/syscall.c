@@ -20,6 +20,7 @@
 #include "ipc/clipboard.h"
 #include "ipc/pipe.h"
 #include "ipc/shm.h"
+#include "mm/filemap.h" /* M91 (second attempt): shared file pages */
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
@@ -2929,7 +2930,8 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
  * which is exactly the table below plus a decision this project has not
  * had to make.
  */
-static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32_t prot) {
+static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32_t prot,
+                                int handle, uint32_t file_page, int shared) {
     /* Inserts, keeping the array sorted by base with free slots (pages
      * == 0) pushed to the end. Returns 0, or -1 if the table is full. */
     int free_slot = -1;
@@ -2958,6 +2960,11 @@ static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32
     t->mmaps[at].base = base;
     t->mmaps[at].pages = pages;
     t->mmaps[at].prot = prot; /* M82 - the page fault that fills this region reads it */
+    /* M91 (second attempt) - see mmap_region_t for what each of these
+     * changes and where. */
+    t->mmaps[at].handle = handle;
+    t->mmaps[at].file_page = file_page;
+    t->mmaps[at].shared = (uint8_t)(shared != 0);
     return 0;
 }
 
@@ -2968,6 +2975,9 @@ static void mmap_slot_remove(task_t *t, int index) {
     t->mmaps[MAX_MMAP_REGIONS - 1].base = 0;
     t->mmaps[MAX_MMAP_REGIONS - 1].pages = 0;
     t->mmaps[MAX_MMAP_REGIONS - 1].prot = 0;
+    t->mmaps[MAX_MMAP_REGIONS - 1].handle = -1;
+    t->mmaps[MAX_MMAP_REGIONS - 1].file_page = 0;
+    t->mmaps[MAX_MMAP_REGIONS - 1].shared = 0;
 }
 
 /* The first gap in the arena that `pages` will fit into, or 0. THE
@@ -3031,19 +3041,79 @@ static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     if (len == 0) {
         return -1;
     }
-    /* Still anonymous and private, and still refused by name otherwise -
-     * a MAP_SHARED that quietly handed back private memory would be the
-     * kind of lie this project keeps declining to tell. MAP_FIXED is the
-     * one that stopped being on this list. */
-    if ((flags & MAP_ANONYMOUS) == 0 || (flags & MAP_PRIVATE) == 0 ||
-        (flags & MAP_SHARED) != 0) {
-        return -1;
+    /* ---- M91 (second attempt): what may be mapped ---------------------
+     *
+     * The paragraph that stood here said this call was "still anonymous
+     * and private, and still refused by name otherwise". Both halves are
+     * gone, and this is the milestone that earns them: a file may back a
+     * mapping, and a mapping may be shared.
+     *
+     * Exactly one of MAP_PRIVATE and MAP_SHARED, which is what POSIX
+     * requires and what makes "neither was passed" an error rather than
+     * a default somebody has to guess at.
+     */
+    int shared = (flags & MAP_SHARED) != 0;
+    int private_ = (flags & MAP_PRIVATE) != 0;
+    if (shared == private_) {
+        return -1; /* both, or neither */
     }
-    /* A file-backed mapping is refused rather than silently given
-     * anonymous zeroes, for the reason MAP_SHARED is: a caller that asked
-     * for a file and got zeros finds out much later and somewhere else. */
-    if ((long)fd >= 0 || offset != 0) {
-        return -1;
+    int anon = (flags & MAP_ANONYMOUS) != 0;
+
+    int handle = -1;
+    uint32_t file_page = 0;
+    if (!anon) {
+        /* A file-backed mapping. The descriptor has to be a file this
+         * caller has open - not a pipe, not a socket, not a directory -
+         * and the offset has to be a whole number of pages, because a
+         * mapping's first byte is a page boundary and there is nowhere
+         * for a sub-page offset to go. */
+        if ((long)fd < 0 || (uint64_t)fd >= MAX_FDS) {
+            return -1;
+        }
+        if ((offset & (PAGE_SIZE - 1)) != 0) {
+            return -1;
+        }
+        task_t *cur = sched_current();
+        if (cur->fds[fd].type != FD_FILE || !cur->fds[fd].file) {
+            return -1;
+        }
+        /* A shared writable mapping needs the descriptor to be writable,
+         * for the reason a write(2) does: this is a write to the file,
+         * arriving later and through a different door. */
+        if (shared && (prot & PROT_WRITE) && !cur->fds[fd].file->writable) {
+            return -1;
+        }
+        if (shared && (prot & PROT_WRITE) && !has_cap(CAP_FS_WRITE)) {
+            return -1; /* M65: this ends up as bytes on the disk */
+        }
+        handle = cur->fds[fd].file->handle;
+        file_page = (uint32_t)(offset / PAGE_SIZE);
+    } else {
+        /* Anonymous. Both the descriptor and the offset are meaningless,
+         * and a caller who passed either is a caller who thinks they are
+         * mapping a file. POSIX says the descriptor is ignored; refusing
+         * is louder and is what this kernel did before file mappings
+         * existed, so a program that got an error yesterday gets the
+         * same one today rather than silently different memory. */
+        if (offset != 0 || (long)fd >= 0) {
+            return -1;
+        }
+        /* MAP_SHARED|MAP_ANONYMOUS is memory shared with children, and
+         * it is refused here rather than half-built: making it work is
+         * fork's job (a child gets the same frame instead of a
+         * copy-on-write one) and there is nothing for a process with no
+         * children to observe. It is refused rather than quietly given
+         * private memory, which is the rule this whole paragraph used to
+         * be about - see kernel/ipc/shm.h, which is what two unrelated
+         * processes share memory through and has lifetime rules a
+         * MAP_SHARED would have to duplicate badly.
+         *
+         * The condition for building it: something that needs memory
+         * shared across a fork and cannot use shm - which is a program,
+         * not an argument. */
+        if (shared) {
+            return -1;
+        }
     }
     /* M91: PROT_NONE is now a mapping. M78 refused it because "there is
      * no way to express 'mapped but inaccessible' in a page table entry
@@ -3104,7 +3174,8 @@ static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     if (base == 0) {
         return -1;
     }
-    if (mmap_slot_cmp_insert(self, base, (uint32_t)pages, (uint32_t)prot) != 0) {
+    if (mmap_slot_cmp_insert(self, base, (uint32_t)pages, (uint32_t)prot,
+                             handle, file_page, shared) != 0) {
         return -1; /* the table is full - see MAX_MMAP_REGIONS */
     }
 
@@ -3165,11 +3236,25 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
          * mapping was fully backed - and became thirty-six thousand
          * four-level walks to free two frames the moment mappings became
          * sparse. */
-        vmm_unmap_range_free(self->pml4_phys, cut_start, cut_end);
+        /* M91 (second attempt): a shared mapping's frames are not this
+         * address space's to free. They belong to kernel/mm/filemap.c,
+         * which holds the one copy every mapper of that file page shares
+         * - so the reference is dropped and the frame goes back only if
+         * this was the last holder. Unmapping without freeing is the
+         * distinction; vmm_unmap_range_free would have handed a frame
+         * somebody else is still reading straight back to the pmm. */
+        if (self->mmaps[i].shared) {
+            sched_release_shared_range(self, cut_start, cut_end);
+        } else {
+            vmm_unmap_range_free(self->pml4_phys, cut_start, cut_end);
+        }
         if (cut_start == rstart && cut_end == rend) {
             mmap_slot_remove(self, i);
             i--; /* the tail shifted down into this index */
         } else if (cut_start == rstart) {
+            /* The head went. The file offset moves with the base, or the
+             * tail would read the wrong part of the file. */
+            self->mmaps[i].file_page += (uint32_t)((cut_end - rstart) / PAGE_SIZE);
             self->mmaps[i].base = cut_end;
             self->mmaps[i].pages = (uint32_t)((rend - cut_end) / PAGE_SIZE);
         } else if (cut_end == rend) {
@@ -3184,7 +3269,10 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
             self->mmaps[i].pages = (uint32_t)((cut_start - rstart) / PAGE_SIZE);
             if (mmap_slot_cmp_insert(self, cut_end,
                                       (uint32_t)((rend - cut_end) / PAGE_SIZE),
-                                      self->mmaps[i].prot) != 0) {
+                                      self->mmaps[i].prot, self->mmaps[i].handle,
+                                      self->mmaps[i].file_page +
+                                          (uint32_t)((cut_end - rstart) / PAGE_SIZE),
+                                      self->mmaps[i].shared) != 0) {
                 return -1;
             }
             i = -1; /* the array was re-sorted underneath; rescan from the start */
@@ -3193,6 +3281,51 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
     /* A range that overlapped nothing is a success: the caller asked for
      * those pages not to be mapped, and they are not. Every Unix answers
      * this the same way and for the same reason. */
+    return 0;
+}
+
+/* M91 (second attempt): msync - see SYS_msync for what each flag does
+ * and which one is refused. */
+static long sys_msync(uint64_t addr, uint64_t len, uint64_t flags, uint64_t a4,
+                      uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if ((addr & (PAGE_SIZE - 1)) != 0 || len == 0) {
+        return -1;
+    }
+    if (flags & MS_INVALIDATE) {
+        return -1;
+    }
+    if (flags & ~(uint64_t)(MS_ASYNC | MS_SYNC | MS_INVALIDATE)) {
+        return -1;
+    }
+    if (!has_cap(CAP_FS_WRITE)) {
+        return -1; /* M65: this ends up as bytes on the disk */
+    }
+    uint64_t end = addr + ((len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+    if (end <= addr || addr < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
+        return -1;
+    }
+    task_t *self = sched_vm_owner(sched_current());
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (self->mmaps[i].pages == 0) {
+            break;
+        }
+        uint64_t rstart = self->mmaps[i].base;
+        uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+        if (end <= rstart || addr >= rend) {
+            continue;
+        }
+        if (self->mmaps[i].shared && self->mmaps[i].handle >= 0) {
+            /* Every dirty page of the file, not only the ones in the
+             * range: filemap tracks dirtiness per file page and not per
+             * mapping, so a finer flush would be a claim this kernel
+             * cannot make. Flushing more than was asked is always
+             * correct for msync; flushing less is not. */
+            filemap_sync(self->mmaps[i].handle);
+        }
+    }
     return 0;
 }
 
@@ -3232,8 +3365,12 @@ static int mmap_split_for(task_t *t, uint64_t addr, uint64_t end) {
             continue;
         }
         uint32_t prot = t->mmaps[i].prot;
+        int handle = t->mmaps[i].handle;
+        uint32_t fp = t->mmaps[i].file_page + (uint32_t)((cut - rstart) / PAGE_SIZE);
+        int shared = t->mmaps[i].shared;
         t->mmaps[i].pages = (uint32_t)((cut - rstart) / PAGE_SIZE);
-        if (mmap_slot_cmp_insert(t, cut, (uint32_t)((rend - cut) / PAGE_SIZE), prot) != 0) {
+        if (mmap_slot_cmp_insert(t, cut, (uint32_t)((rend - cut) / PAGE_SIZE), prot,
+                                 handle, fp, shared) != 0) {
             /* Put it back rather than leaving a region shorter than the
              * memory it describes - a mapping the caller can still touch
              * with nothing saying what it may become is worse than a
@@ -4211,6 +4348,18 @@ static long sys_fork(isr_regs_t *regs) {
         return -1;
     }
 
+    /* M91 (second attempt): a shared file mapping must not be cloned
+     * copy-on-write.
+     *
+     * COW's whole promise is that a write separates the two copies,
+     * which is the opposite of what MAP_SHARED means. So the parent's
+     * entries for those pages are dropped first - references and all -
+     * and both sides fault them back in through filemap afterwards, each
+     * taking its own reference to the one frame they now share. The cost
+     * is a re-fault per page in the parent; the alternative is a fork
+     * that silently turns a shared mapping into two private ones. */
+    sched_release_shared_range(parent, USER_MMAP_BASE, USER_MMAP_LIMIT);
+
     uint64_t child_pml4 = process_fork_address_space(parent->pml4_phys);
     if (child_pml4 == 0) {
         return -1;
@@ -4695,6 +4844,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_sync] = sys_sync,
     [SYS_meminfo] = sys_meminfo,
     [SYS_alarm] = sys_alarm,
+    [SYS_msync] = sys_msync,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than
