@@ -121,7 +121,8 @@
     X(profile)                     \
     X(proftest)                    \
     X(oomtest)                                                                \
-    X(futextest)
+    X(futextest)                   \
+    X(fswriter)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -9776,6 +9777,208 @@ static void boot_selftests_system(void) {
                    "place, a broadcast that woke every waiter, eight threads through "
                    "four barrier rounds, and a writer that never overlapped a reader - "
                    "self-test passed.\n\n");
+    }
+
+    /* ---- M105 self-test: the journal's two conditions, taken together
+     *      and taken for real ------------------------------------------
+     *
+     * M71 deferred a journal on two conditions: **multiple writers**,
+     * and **a full scan getting slow**. Every re-measurement since has
+     * taken the second one and left the first as an assumption. M81 said
+     * thousands of files makes the second "nearly" true; M93 measured it
+     * at 30 ms per hundred thousand files and refused again. Nobody had
+     * ever run the first, because until M79 gave this machine threads
+     * and M86 gave it a shell that can background a job, there was no
+     * way to have two writers at once.
+     *
+     * So both, in one place:
+     *
+     *   1. **The scan, on every graded boot, in microseconds.** M93's
+     *      number was reported and not graded, and its own note said why
+     *      - the tree size varies with whatever the image builder wrote.
+     *      This one runs over the ordinary boot filesystem, which is the
+     *      same tree every time, so it can be a budget row. That turns
+     *      the fourth re-measurement from an investigation somebody has
+     *      to remember to do into a test that fails.
+     *
+     *   2. **Four writers at once, and then the scan.** Four processes
+     *      each create, write, grow past the direct blocks, fsync,
+     *      rename and delete in their own subtree, all running at the
+     *      same time on however many cores this machine has. Then the
+     *      full scan runs and has to find NOTHING - no orphaned block,
+     *      no block two inodes both point at. Then the trees are removed
+     *      and the free-block count has to come back to exactly where it
+     *      started, which is the assertion a leak fails and a check that
+     *      only counts orphans would pass.
+     *
+     * What this is really testing is an argument rather than a feature,
+     * and the argument is M67's: leanfs is entered only through vfs.c,
+     * every entry point takes one coarse `fs_lock` for the whole call,
+     * and a whole metadata sequence - allocate, write data, barrier,
+     * write the inode, write the directory entry - happens inside one
+     * call. So two writers cannot interleave two sequences, and the disk
+     * sees exactly what it saw when there was one writer: sequences, one
+     * at a time, in order. If that argument is wrong, this test is where
+     * it breaks.
+     */
+    {
+        const int WRITERS = 4;
+
+        /* The scan alone, first, on a quiet filesystem. This is the
+         * budgeted number: same tree every boot, so a change in it is a
+         * change in the scan rather than in the workload. */
+        /* Cold, and that is not conservatism - it is the only state this
+         * measurement is ever taken in for real. A mount scan runs
+         * because the machine was not shut down cleanly, which means it
+         * has just booted and the block cache is empty. Measured warm the
+         * number swung 4747 us to 25476 us across two boots of the same
+         * image, because what varies is whether the indirect blocks
+         * happened to still be cached from something else - a property of
+         * the run before it, not of the scan. */
+        blk_cache_drop();
+        uint64_t s0 = tsc_read();
+        int quiet_problems = vfs_check();
+        uint64_t s1 = tsc_read();
+        uint64_t quiet_scan_us = tsc_to_us(s1 - s0);
+        if (quiet_problems != 0) {
+            klog_puts("[m105] the scan found ");
+            klog_put_dec((uint32_t)quiet_problems);
+            klog_puts(" problem(s) on a filesystem nothing had written to yet\n");
+            panic("M105 self-test: the boot filesystem does not check out clean");
+        }
+
+        uint32_t free_before = vfs_free_blocks();
+
+        size_t image_bytes = 0;
+        uint8_t *image = read_program(PATH_BIN_DIR "fswriter", &image_bytes);
+        if (!image) {
+            panic("m105: /bin/fswriter is not on the disk");
+        }
+        int ids[8];
+        for (int w = 0; w < WRITERS; w++) {
+            char arg[8];
+            arg[0] = (char)('0' + w);
+            arg[1] = '\0';
+            /* Spawned in a loop and waited for afterwards, deliberately:
+             * spawn-then-wait one at a time would run them in sequence
+             * and measure nothing this milestone is about. */
+            task_t *t = process_spawn("fswriter", image, image_bytes, arg);
+            if (!t) {
+                panic("M105 self-test: could not spawn a writer");
+            }
+            ids[w] = t->id;
+        }
+        kfree(image);
+
+        uint64_t w0 = tsc_read();
+        /* Generous: four processes each writing half a megabyte through
+         * a filesystem behind one coarse lock, with an fsync per file.
+         * A ceiling rather than a guess - see selftest_wait_until. */
+        uint64_t deadline = pit_get_ticks() + 12000;
+        for (int w = 0; w < WRITERS; w++) {
+            while (sched_task_by_id(ids[w]) &&
+                   sched_task_by_id(ids[w])->state != TASK_TERMINATED) {
+                if (pit_get_ticks() > deadline) {
+                    panic("M105 self-test: a writer never finished - four writers on one "
+                          "coarse filesystem lock have deadlocked or starved");
+                }
+                pit_sleep_ms(10);
+            }
+        }
+        uint64_t w1 = tsc_read();
+        uint64_t writers_us = tsc_to_us(w1 - w0);
+
+        for (int w = 0; w < WRITERS; w++) {
+            task_t *done = sched_task_by_id(ids[w]);
+            int code = done ? done->exit_code : -1;
+            selftest_reap(done);
+            if (code != 0) {
+                klog_puts("[m105] writer ");
+                klog_put_dec((uint32_t)w);
+                klog_puts(" exited ");
+                klog_put_dec((uint32_t)code);
+                klog_puts(" - see user_space/bin/fswriter.c for what each code means\n");
+                panic("M105 self-test: a writer could not verify its own bytes with "
+                      "three others writing beside it");
+            }
+        }
+
+        /* The check that answers the milestone's question. A block handed
+         * to two writers, or one neither of them freed, is here or
+         * nowhere. */
+        blk_cache_drop(); /* cold, for the reason above */
+        uint64_t s2 = tsc_read();
+        int busy_problems = vfs_check();
+        uint64_t s3 = tsc_read();
+        uint64_t busy_scan_us = tsc_to_us(s3 - s2);
+        if (busy_problems != 0) {
+            klog_puts("[m105] the scan found ");
+            klog_put_dec((uint32_t)busy_problems);
+            klog_puts(" problem(s) after four concurrent writers\n");
+            panic("M105 self-test: concurrent writers corrupted the block bitmap - "
+                  "write ordering plus a mount check is no longer enough");
+        }
+
+        /* And nothing leaked. The scan reclaims orphans by rebuilding the
+         * bitmap, so it would have hidden a leak from itself; the
+         * free-block count taken before and after does not. */
+        for (int w = 0; w < WRITERS; w++) {
+            char dir[64], path[96];
+            k_strlcpy(dir, PATH_TMP "/w", sizeof(dir));
+            size_t dn = k_strlen(dir);
+            dir[dn] = (char)('0' + w);
+            dir[dn + 1] = '\0';
+            /* Both prefixes and a range comfortably past what the fixture
+             * makes: a temp file left behind by a writer that died mid
+             * rename is exactly the leak this is looking for, so the
+             * cleanup has to be able to see one. */
+            for (int f = 0; f < 32; f++) {
+                for (int which = 0; which < 2; which++) {
+                    k_strlcpy(path, dir, sizeof(path));
+                    size_t q = k_strlen(path);
+                    path[q++] = '/';
+                    path[q++] = which ? 't' : 'f';
+                    if (f >= 10) {
+                        path[q++] = (char)('0' + f / 10);
+                    }
+                    path[q++] = (char)('0' + f % 10);
+                    path[q] = '\0';
+                    if (vfs_exists(path)) {
+                        vfs_unlink(path);
+                    }
+                }
+            }
+            vfs_rmdir(dir);
+        }
+        uint32_t free_after = vfs_free_blocks();
+        if (free_after != free_before) {
+            klog_puts("[m105] ");
+            klog_put_dec(free_before);
+            klog_puts(" data blocks free before the writers ran and ");
+            klog_put_dec(free_after);
+            klog_puts(" after removing everything they made\n");
+            panic("M105 self-test: concurrent writers leaked blocks - the free count did "
+                  "not come back");
+        }
+
+        klog_perf("mount_scan_us", quiet_scan_us, "us");
+        klog_perf("mount_scan_busy_us", busy_scan_us, "us");
+        klog_perf("four_writers_us", writers_us, "us");
+
+        klog_puts("[m105] the journal's two conditions, measured together: the full scan "
+                   "an unclean mount runs costs ");
+        klog_put_dec((uint32_t)quiet_scan_us);
+        klog_puts(" us on this filesystem and ");
+        klog_put_dec((uint32_t)busy_scan_us);
+        klog_puts(" us with four writers' trees on it; four processes wrote, fsynced, "
+                   "renamed and deleted concurrently for ");
+        klog_put_dec((uint32_t)writers_us);
+        klog_puts(" us, every one of them read back exactly the bytes it wrote, the scan "
+                   "found no orphaned or doubly-allocated block, and all ");
+        klog_put_dec(free_before);
+        klog_puts(" free blocks came back - M71's first condition is met and costs "
+                   "nothing, because one coarse lock makes a metadata sequence atomic "
+                   "against another writer. Journal still refused - self-test passed.\n\n");
     }
 
     /* M81 self-test: a filesystem that can hold somebody else's program.

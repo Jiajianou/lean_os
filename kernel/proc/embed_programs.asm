@@ -368,3 +368,9 @@ global futextest_elf_end
 futextest_elf_start:
     incbin "build/futextest.elf"
 futextest_elf_end:
+
+global fswriter_elf_start
+global fswriter_elf_end
+fswriter_elf_start:
+    incbin "build/fswriter.elf"
+fswriter_elf_end:

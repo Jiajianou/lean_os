@@ -580,7 +580,7 @@ uint32_t leanfs_meta_writes(void);
  * nothing points at. Called automatically on mount when the superblock
  * says the filesystem was never unmounted; exposed so a self-test can
  * drive it directly. See leanfs.c for what it does and does not check. */
-void leanfs_check(void);
+uint32_t leanfs_check(void); /* M105: returns orphans + double-allocations found */
 
 /* M71: mark this filesystem cleanly unmounted. Everything leanfs writes
  * is already write-through, so this flushes nothing - what it does is

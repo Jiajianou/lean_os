@@ -359,6 +359,11 @@ REQUIRED_MARKERS=(
   "[m79] two threads, one address space:"
   # M96: the two things that make M79's threads usable by a C runtime.
   "[m96] a thread with its own variables, and a wait that costs nothing:"
+  # M105: the journal's two conditions. The marker is required rather
+  # than the numbers alone because the numbers pass a boot where the
+  # writers never ran - the sentence only prints when four of them did,
+  # the scan found nothing, and every free block came back.
+  "[m105] the journal's two conditions, measured together:"
   "[m81] a filesystem that can hold somebody else's program:"
   "[m82] a page that arrives when it is asked for:"
   "[m83] two processes from one:"

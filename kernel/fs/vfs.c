@@ -401,11 +401,15 @@ int vfs_rename_replace(const char *old_path, const char *new_path) {
     return r;
 }
 
+/* M105: the number of problems the scan found, rather than always 0.
+ * The old signature returned a success/failure code that could not fail,
+ * which made it impossible to write a test whose subject is what the
+ * scan found. */
 int vfs_check(void) {
     uint64_t f = spin_lock_irqsave(&fs_lock);
-    leanfs_check();
+    uint32_t problems = leanfs_check();
     spin_unlock_irqrestore(&fs_lock, f);
-    return 0;
+    return (int)problems;
 }
 
 int vfs_rmdir(const char *path) {

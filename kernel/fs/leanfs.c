@@ -656,7 +656,7 @@ static void check_mark(uint32_t block) {
     }
 }
 
-void leanfs_check(void) {
+uint32_t leanfs_check(void) {
     k_memset(check_bitmap, 0, sizeof(check_bitmap));
     /* Block 0 is the never-allocated sentinel and the bitmap has always
      * held it - see alloc_block. Marking it here keeps it from being
@@ -713,6 +713,12 @@ void leanfs_check(void) {
     klog_put_dec(missing);
     klog_puts(" block(s) were in use but marked free");
     klog_puts(orphans || missing ? " - bitmap rebuilt from the inodes\n" : " - nothing to fix\n");
+
+    /* M105: the count is returned as well as logged, so a test can
+     * assert "the scan found nothing" rather than assert that a line
+     * exists. M105's whole question is whether concurrent writers leave
+     * this number non-zero; a check that only prints cannot answer it. */
+    return orphans + missing;
 }
 
 static void free_inode_blocks(int idx) {

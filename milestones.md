@@ -10336,7 +10336,7 @@ doing something else:
 | a GCC bootstrap's peak RSS and build-tree size (M98) | **swap** | M82 deferred it for want of a measurement, M90 again "for a better reason", and M94–M100's closing note already says *"if that number is larger than what M90 makes available, swap gets a milestone and the measurement is its specification"* |
 | a bootstrap's wall-clock, attributable (M98) | **`syscall`/`sysret`** | the deferred list: *"M98 is the first thing likely to ask... If `int 0x80`'s cost shows up in that attribution, this stops being a deferral and becomes a number"* |
 | `make -j` against `MAX_TASKS 128` (M98) | **one scheduler lock** | `sched.c:126` is a single `sched_lock`; `sched.c:499` broadcasts one PIT tick to every core by IPI. Nothing has ever run more than one CPU-bound process on purpose |
-| thousands of small writes from a parallel build (M98, M99) | **a journal** | M71's two conditions were *"multiple writers"* and *"a full scan gets slow"*. M93 measured the second at 30 ms per hundred thousand files and refused it again. A parallel make is the first multiple writer this machine has ever had |
+| thousands of small writes from a parallel build (M98, M99) | **a journal** | M71's two conditions were *"multiple writers"* and *"a full scan gets slow"*. M105 took both, together, and both said no: four concurrent writers left the scan finding nothing and every free block back, because one coarse `fs_lock` makes a metadata sequence atomic against another writer, and the cold scan is 5-7 ms and does not move with the file count. **The condition is now the third one M105 wrote down: a journal becomes worth building when a metadata sequence stops being atomic against another writer** - when `fs_lock` is split finer for throughput, or when the inode table stops being resident |
 | a page fetched over TLS by an engine nobody here wrote (M100) | **window scaling, SACK, Nagle** | same deferred list, same rule: they come back when a measurement asks |
 
 The second kind is larger and older, and it is not a deferral because
@@ -10985,33 +10985,153 @@ now", and the host's fake disk is holding nothing by construction. A
 fake that counted flushes would be a fake with an opinion about the real
 one's internals.
 
-### M105 — The journal, or the measurement that refuses it a third time [ ]
+### M105 — The journal, or the measurement that refuses it a third time [x]
 
-- [ ] Re-measure M71's two conditions with M104's cache in place and a
-      parallel build running. The first condition — *"multiple
-      writers"* — is met for the first time by `make -j`; the second was
-      measured by M93 at 30 ms per hundred thousand files and refused.
-      Both get taken again, together, because M104 changes what an
-      unclean mount has to reconstruct
-- [ ] **If the numbers say no, this milestone is that paragraph and
-      nothing else,** and the deferred entry gets its third condition
-      written down rather than its second restated. That is a complete
-      outcome and it is the likelier one
-- [ ] If they say yes: a metadata journal in leanfs — a circular log, a
-      transaction around every multi-block metadata update, replay at
-      mount, and a checksum that decides whether a transaction was
-      complete. Metadata only, and deliberately: data journalling is a
-      second decision needing a second measurement
-- [ ] Either way, the mount-time number that decides it goes into
-      `tests/budgets.tsv` as a row, so the third re-measurement is a
-      regression rather than an investigation
+**Status:** done, and it is the refusal. The milestone's own second
+bullet said that was the likelier outcome and a complete one; what
+changed is that the refusal now rests on a measurement of the condition
+that had never been measured, rather than on a restatement of the one
+that had.
 
-**How we'll know.** A number, and a decision attached to it. If a
-journal is built: `tools/crash-test.sh` with cuts placed inside a
-transaction rather than around one, and a mount that replays rather than
-scans — proven by the replay being *faster* than the scan it replaces on
-a filesystem with a build tree in it, because a journal that costs more
-than the scan is a journal that failed.
+- [x] Re-measure M71's two conditions with M104's cache in place. **Both
+      taken, and taken together**
+- [x] **The numbers said no**, and this milestone is that paragraph plus
+      three budget rows and a self-test — the deferred entry gets a third
+      condition written down rather than its second restated
+- [ ] A metadata journal in leanfs — **not built**, and the two sections
+      below are why
+- [x] The deciding numbers are in `tests/budgets.tsv`, so the fourth
+      re-measurement is a regression rather than an investigation
+
+#### The first condition, met for the first time, and it cost nothing
+
+M71 named **multiple writers** as the first condition, and every
+re-measurement since — M81's, M93's — took the *second* one and left
+this as an assumption. That was reasonable while it was unfalsifiable:
+until M79 gave this machine threads and M86 gave it a shell that can
+background a job, there had never been two programs writing to this
+filesystem at once. Nobody had refused to test it; there had been
+nothing to test.
+
+There is now. `user_space/bin/fswriter.c` is one writer, and four of them
+run at once — each creating, writing past the direct blocks into an
+indirect one, `fsync`ing, renaming over the top of a previous file, and
+deleting every other one, in its own subtree, with content keyed on the
+writer id so a block handed to two files reads back as somebody else's
+pattern rather than as plausible garbage. Then the full scan runs and has
+to find nothing, and every block has to come back:
+
+```
+four writers, concurrent                 282885 us
+each read back exactly the bytes it wrote
+orphaned or doubly-allocated blocks           0
+free blocks before / after                523873 / 523873
+```
+
+**The condition is met and it changes nothing**, and the reason is M67's
+rather than luck. leanfs is reachable only through `vfs.c`; every entry
+point there takes one coarse `fs_lock` for the whole call; and a whole
+metadata sequence — allocate the blocks, write the data, barrier, write
+the inode, write the directory entry — happens inside one such call. So
+two writers cannot interleave two sequences. The disk sees what it saw
+when there was one writer: sequences, one at a time, in order, which is
+the entire premise M71's ordering rests on.
+
+That is worth stating precisely, because it is the part that would have
+been wrong. "Multiple writers" is not the dangerous thing; **interleaved
+metadata sequences** are, and a journal is one way to make sequences
+atomic with respect to each other. A coarse lock is another, and this
+machine already had it — for a reason M67 wrote down that had nothing to
+do with crash consistency. The condition M71 named turned out to be a
+proxy for a property that was already true.
+
+The honest cost of that answer is in the third budget row: one coarse
+lock means four writers *serialise*, so the concurrency buys correctness
+and no throughput. That is a scheduling complaint rather than a
+filesystem one, it is M106's and M109's to feel, and the row exists so
+that the day it becomes the bottleneck the number says so.
+
+#### The second condition, re-measured cold, and a variance worth more than the number
+
+```
+full scan, cold cache, boot filesystem              6041 us
+the same scan after four writers' trees             4832 us
+```
+
+**5–7 ms, and it does not move with the file count.** M93 measured 30 ms
+at a hundred thousand files and this filesystem holds far fewer, so a
+smaller number is not news. What is news is the *pair*: the tree grew by
+several hundred files and blocks between the two measurements and the
+scan got no more expensive, because its cost is a pass over the resident
+inode table rather than a walk of the tree. That is the structural reason
+M93 gave for the deferral, stated as a prediction; this is the
+measurement that confirms it.
+
+**And the variance taught more than the value.** Measured warm, the same
+scan came out at 4747 us on one boot and 25476 us on the next — a 5x
+swing in a number that decides a milestone. Nothing about the scan
+changed; what varied was whether the indirect blocks happened to still be
+in M104's cache from whatever ran before, which is a measurement of the
+previous test rather than of this one. So the scan is now measured with
+`blk_cache_drop()` first, and **cold is not conservatism, it is the only
+state this measurement is ever taken in for real**: a mount scan runs
+because the machine was *not* shut down cleanly, which means it has just
+booted and the cache is empty by construction. The warm number was
+answering a question nobody asks.
+
+This is the second time in two milestones that M104's cache made a
+benchmark measure the run before it — the other was the readahead
+comparison. A cache under a measurement is a hidden input, and every
+disk-shaped number in this tree now says which state it was taken in.
+
+#### The third condition, which is the deliverable
+
+The deferred entry's condition is no longer "when there are multiple
+writers or the scan gets slow". Both halves have been taken and both said
+no. It is now:
+
+> **A journal becomes worth building when a metadata sequence stops being
+> atomic against another writer** — when `fs_lock` is split finer for
+> throughput, or when the inode table stops being resident and the scan
+> becomes disk-bound. Either one alone is enough; today neither is true,
+> and the second was already M93's condition.
+
+The first half is the new one, and it is a condition on *this project's
+own future work*: M106 wants per-CPU run queues and M109 wants a
+self-hosted build, and the first person to make the filesystem lock
+finer-grained for either is the person who has to build a journal. That
+is written into the deferred list rather than left as something to
+rediscover.
+
+#### What graded it
+
+A `[m105]` boot marker that is required, not just reported — the numbers
+alone pass a boot where the writers never ran, so the marker is the
+sentence that only prints when four of them did, the scan found nothing,
+and the free count came back. Three budget rows: `mount_scan_us` and
+`mount_scan_busy_us` at a 100 ms ceiling, which is an **opinion rather
+than headroom** — 100 ms is where a mount stops being instant and becomes
+a wait, so the row fails exactly when M71's second condition becomes
+true. And `four_writers_us`, wide on purpose, guarding liveness rather
+than speed: a change that makes two writers deadlock shows up there as a
+run that never finishes.
+
+`leanfs_check` returns what it found instead of nothing. The old
+signature was `void`, and `vfs_check` returned a success code that could
+not fail — so the scan could only be observed by grepping its own log
+line, and no test could have "what did the scan find" as its subject.
+M105's whole question is whether that number is ever non-zero, which is
+not askable of a function that does not answer.
+
+**One cut deliberately not made.** `tools/crash-test.sh` cuts the power
+during the first boot's program seeding, which is the heaviest metadata
+run this machine does. Cutting it *during* the four writers instead would
+be a stronger test, and it is not done: the writers only run with the
+self-test battery enabled, which turns each of sixteen boots from fifteen
+seconds into four minutes — an hour per run, for a window whose metadata
+traffic is the same shape as the one already covered. It becomes worth it
+the day the sequences stop being serialised, which is the same condition
+as the journal's.
 
 ### M106 — Cores a build can use [ ]
 
@@ -12445,7 +12565,22 @@ Everything else below is unchanged or changed only in place.
   parallel build put M71's *first* condition under pressure for the
   first time. M105 is written so that refusing it a third time is a
   complete outcome; a deferral that can only ever be collected is not a
-  deferral.
+  deferral. **Refused a third time, and this time the condition changed
+  rather than the number.** M105 took both of M71's clauses together and
+  both said no: four concurrent writers left the scan finding no orphan
+  and no double-allocation and every free block back, and the cold scan
+  is 5-7 ms and does not move with the file count. The reason the first
+  clause cost nothing is that "multiple writers" was never the dangerous
+  thing — **interleaved metadata sequences** are, and M67's one coarse
+  `fs_lock` already makes a sequence atomic against another writer, for
+  a reason that had nothing to do with crashes. So the condition is
+  restated, and it is now a condition on this project's own future work:
+  **a journal becomes worth building when a metadata sequence stops
+  being atomic against another writer** — when `fs_lock` is split finer
+  for throughput (M106, M109), or when the inode table stops being
+  resident and the scan becomes disk-bound (M93's condition, unchanged).
+  Either alone is enough. The first person to make this filesystem's
+  locking finer-grained is the person who has to build the journal.
 - **Self-hosting (a compiler on the machine).** The romantic end state,
   and genuinely out of reach — but M72 moves the line: after it, some of
   what needed a cross-compiler needs a script instead. **Reversed. This
