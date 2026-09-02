@@ -77,6 +77,61 @@
 #define SIGTTIN  21 /* default: stop. A background process tried to read the terminal */
 #define SIGTTOU  22 /* default: stop. A background process tried to write it */
 
+/* M89: the terminal changed size.
+ *
+ * Linux's number, like every other number in this file. Nothing on this
+ * machine raises it yet - the console is a fixed 80x25 and the framebuffer
+ * terminal is a program rather than a driver - so the only thing that can
+ * send one today is `kill`. It is here because a program that draws to a
+ * terminal installs a handler for it unconditionally, and a system that
+ * cannot even name the signal makes that program fail to compile rather
+ * than fail to resize. Its default action is to be ignored, which is the
+ * one place a signal nobody sends still has to behave correctly: a
+ * process that is sent one must not die. */
+#define SIGWINCH 28
+
+/* ---- M89: the rest of POSIX's numbers -------------------------------
+ *
+ * Nine signals nothing on this machine raises, given their Linux numbers
+ * because a program that prints a signal name from a number must not
+ * print the wrong one - and toybox's `kill -l` builds a table indexed by
+ * every one of these.
+ *
+ * They are not stubs and they are not fictions: a number is a name, and
+ * naming SIGXFSZ does not claim that anything enforces a file-size
+ * limit. What each one would mean here, so the list is a fact rather
+ * than a copy:
+ *
+ *   SIGTRAP  - a debugger's breakpoint. There is no debugger.
+ *   SIGBUS   - an unaligned or unbacked access. This kernel reports
+ *              every ring-3 fault as SIGSEGV (M52), deliberately, and
+ *              nothing distinguishes the two.
+ *   SIGURG   - out-of-band TCP data. M66's TCP does not implement the
+ *              urgent pointer.
+ *   SIGXCPU  - a CPU-time limit. M88's getrlimit reports limits and
+ *              nothing enforces one.
+ *   SIGXFSZ  - a file-size limit. Same.
+ *   SIGVTALRM/SIGPROF - interval timers. There is no setitimer here.
+ *   SIGIO    - a descriptor became ready. That is what SYS_waitfds is
+ *              for, and it is a wait rather than a signal.
+ *   SIGSYS   - a bad system call. This kernel returns -1 instead, which
+ *              is what every syscall here does for everything.
+ *
+ * A process CAN be sent any of them with kill(2), and the default action
+ * for all nine is to terminate - which is the POSIX default and means a
+ * `kill -TRAP` does what a person typing it expects. */
+#define SIGTRAP  5
+#define SIGURG   23
+#define SIGXCPU  24
+#define SIGXFSZ  25
+#define SIGVTALRM 26
+#define SIGPROF  27
+#define SIGIO    29
+#define SIGSYS   31
+/* SIGBUS is 7 on Linux and 10 on the BSDs; 7 is the number a program
+ * compiled for the same ABI as everything else in this file expects. */
+#define SIGBUS   7
+
 /* The highest signal number this kernel will carry. A task's pending and
  * blocked sets are single 32-bit words, so this is 31 and the arithmetic
  * that depends on it is in one place. */
@@ -104,7 +159,7 @@
 #define SIG_DFL_CONTINUE  3
 
 #define SIG_DEFAULT_ACTION(sig)                                              \
-    ((sig) == SIGCHLD ? SIG_DFL_IGNORE                                       \
+    (((sig) == SIGCHLD || (sig) == SIGWINCH) ? SIG_DFL_IGNORE                \
      : ((sig) == SIGCONT ? SIG_DFL_CONTINUE                                  \
         : (((sig) == SIGSTOP || (sig) == SIGTSTP || (sig) == SIGTTIN ||      \
             (sig) == SIGTTOU)                                                \

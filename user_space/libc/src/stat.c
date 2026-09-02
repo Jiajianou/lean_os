@@ -5,6 +5,7 @@
  * field is and, more importantly, which of them are zero on purpose.
  */
 #include <sys/stat.h>
+#include <errno.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -19,6 +20,17 @@ static void fill(struct stat *out, const os_stat_t *st) {
     out->st_mtime = (time_t)st->mtime;
     out->st_atime = out->st_mtime; /* leanfs stores one timestamp, not three */
     out->st_ctime = out->st_mtime;
+    /* M89: the nanosecond halves, zeroed explicitly. leanfs has whole
+     * seconds and nothing finer, so this is the value rather than a
+     * missing initialization - see <sys/stat.h>. */
+    out->st_mtim.tv_nsec = 0;
+    out->st_atim.tv_nsec = 0;
+    out->st_ctim.tv_nsec = 0;
+    out->st_rdev = 0;
+    /* M89: a real inode number, which is what makes two paths
+     * distinguishable as files. See <sys/stat.h> and os_stat_t for what
+     * changed and for the bug that found it. */
+    out->st_ino = (ino_t)st->inode;
     out->st_nlink = 1;             /* no hard links exist here, so this is a fact rather than a default */
     out->st_blksize = 4096;        /* leanfs's own block size (LEANFS_BLOCK_SIZE) - M93: was 512 */
     out->st_blocks = (blkcnt_t)((st->size + 511u) / 512u);
@@ -63,5 +75,87 @@ int fstat(int fd, struct stat *out) {
 
 int mkdir(const char *path, mode_t mode) {
     (void)mode; /* accepted and ignored - see <sys/stat.h> */
-    return (int)sys_mkdir(path);
+    if (sys_mkdir(path) != 0) {
+        /* M89: EEXIST when it is already there, which is what makes
+         * `mkdir -p` work - see __lean_path_errno's own note for why
+         * this is inferred rather than reported. */
+        errno = __lean_path_errno(path, 1);
+        return -1;
+    }
+    return 0;
+}
+
+/* ---- M89: the setters, and the one of them that is real -------------
+ *
+ * See <sys/stat.h> for the argument. The short version: leanfs stores no
+ * mode and no owner, so a setter that returned 0 would be lying about
+ * the only thing it exists to do.
+ */
+int chmod(const char *path, mode_t mode) {
+    (void)path;
+    (void)mode;
+    errno = EPERM;
+    return -1;
+}
+
+int fchmod(int fd, mode_t mode) {
+    (void)fd;
+    (void)mode;
+    errno = EPERM;
+    return -1;
+}
+
+int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
+    (void)dirfd;
+    (void)path;
+    (void)mode;
+    (void)flags;
+    errno = EPERM;
+    return -1;
+}
+
+int mkfifo(const char *path, mode_t mode) {
+    (void)path;
+    (void)mode;
+    /* A named pipe is a filesystem object leanfs has no type for. M59's
+     * pipes are anonymous and live in the kernel; SYS_pipe_open's named
+     * pipes are a lean_os interface with its own namespace and are not
+     * this. EOPNOTSUPP rather than EPERM: the operation is not permitted
+     * nowhere, it is unsupported here. */
+    errno = EOPNOTSUPP;
+    return -1;
+}
+
+int mknod(const char *path, mode_t mode, dev_t dev) {
+    (void)path;
+    (void)mode;
+    (void)dev;
+    /* /dev is devfs (M87) and its contents are fixed by the kernel. A
+     * program cannot add a node to it, which is what this call is for. */
+    errno = EOPNOTSUPP;
+    return -1;
+}
+
+/* The file-creation mask: a real number this library keeps, over a
+ * filesystem with no modes for it to mask. See <sys/stat.h>.
+ *
+ * 022 is the value every Unix starts a login shell with, and starting
+ * anywhere else would make a program that reads it without setting it
+ * behave differently here for no reason anybody could name. */
+static mode_t umask_value = 022;
+
+mode_t umask(mode_t mask) {
+    mode_t old = umask_value;
+    umask_value = mask & 07777;
+    return old;
+}
+
+int mknodat(int dirfd, const char *path, mode_t mode, dev_t dev) {
+    (void)dirfd;
+    return mknod(path, mode, dev); /* refused either way - see mknod */
+}
+
+int mkfifoat(int dirfd, const char *path, mode_t mode) {
+    (void)dirfd;
+    return mkfifo(path, mode);
 }

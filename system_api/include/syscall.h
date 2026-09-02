@@ -30,7 +30,18 @@
  * report, and half an argument names something else. Sixteen is the
  * width of every command line this OS's terminal can produce and then
  * some; the real ceiling is the single page the vector is copied into. */
-#define SPAWN_MAX_ARGS 16
+/* M89: 256, from 16.
+ *
+ * Sixteen was chosen when the longest command line on this machine was
+ * `cp src dst`. `xargs` builds the longest one it can out of whatever it
+ * is fed, a `make` invokes a linker with a hundred object files, and
+ * both are the point of the M89-M100 arc. 256 arguments and 128 KiB of
+ * strings (USER_ARG_BYTES) is what a spawn carries now; the vector is
+ * still truncated at the last whole argument rather than refused, for
+ * the reason below. The number is bounded by kernel stack: the array of
+ * pointers is a local in sys_spawn, and 256 of them is 2 KiB out of a
+ * 32 KiB stack. */
+#define SPAWN_MAX_ARGS 256
 
 #define SYS_spawn      3 /* (path, argv, envp) -> pid or -1 (a SPAWN_ERR_* code, M48). Combines fork+exec into one call - a fork/exec "equivalent" (M13), not literal fork(): no address-space duplication, just a fresh process loaded straight from a named file. M60: `argv` is a NULL-terminated array of char* holding the arguments *after* the program name - the kernel puts `path` in argv[0] itself, because that is the one element it knows for certain and the one a program is entitled to assume is there. NULL is a program launched with no arguments. Truncated at SPAWN_MAX_ARGS, or at whatever fits in the argument region the vector is copied into; the one-string form every caller in this project used until now is user_space/lib's sys_spawn(), which builds a two-element vector. M75: `envp` is a NULL-terminated array of "NAME=value" strings, or NULL to give the child a copy of the *caller's own* environment - which is what makes an environment a thing that survives a spawn rather than a thing each program invents. user_space/lib's sys_spawnv() passes `environ`, so a setenv() before a spawn is visible to the child; the NULL form is what a kernel thread and every pre-M75 caller get, and it means "whatever I was started with". M75: the child also inherits the caller's working directory (SYS_chdir), which is the other half of "a place to stand" - the pair is what lets a launcher say where a program should run without inventing an argument for it. */
 #define SYS_wait       4 /* (pid) -> exit code. M68: a real blocking wait - a parent waiting on one child parks on that child and is woken by it. (This said "polls + cooperatively yields rather than a real blocking wait queue - M14 is where more complete wait semantics is scoped to land" for fifty-four milestones after M68 made it false. M84 is what had reason to read it.) Returns an exit code, which cannot distinguish exit(139) from a death by SIGSEGV - SYS_waitpid is the call that can. */
@@ -113,6 +124,11 @@
  * twenty-eight milestones with a note that a program relying on it
  * "gets no protection". It does now. */
 #define OPEN_EXCL     0x40
+/* M89: refuse to open a final component that is a symbolic link. M87
+ * named this bullet and did not land it; a ported program passes it to
+ * avoid being redirected by a link it did not expect. See sys_open for
+ * why it is a check rather than a guarantee. */
+#define OPEN_NOFOLLOW 0x80
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
@@ -429,6 +445,11 @@
 #define OS_DT_UNKNOWN 0
 #define OS_DT_DIR     4      /* the same values <dirent.h> uses, so libc's readdir copies rather than translates */
 #define OS_DT_REG     8
+/* M89: leanfs has carried a link type in the directory record since M87
+ * and SYS_getdents reported OS_DT_REG for one. A walker that follows
+ * links decides from this field, so reporting a link as a regular file
+ * made that decision silently wrong. */
+#define OS_DT_LNK     10
 
 typedef struct {
     unsigned int   ino;      /* the inode number, which since M81 is a real one */
@@ -473,4 +494,58 @@ typedef struct {
 
 #define SYS_utime 101 /* (const char *path, uint32_t mtime) -> 0 or -1. Sets a file's modification time to something other than now, which is the one thing every other write path in this filesystem cannot do: they all stamp rtc_now(), correctly, and a build system needs the exception. `make` decides what to rebuild by comparing mtimes, and an unpack or an `install -p` that restamped every file it restored would make the next build rebuild the world. Follows symbolic links (the link's own times are lutimes()' business and nothing has asked); refused under a synthetic mount, where there is no stored time to set. Needs CAP_FS_WRITE: it changes what is on the disk, which is the line that bit draws. */
 
-#define SYSCALL_COUNT 102
+/* M89: (fd, char *buf, size_t len) -> the byte count written (excluding
+ * the NUL), or -1.
+ *
+ * The absolute path an open descriptor was opened with. It exists for
+ * exactly one reason: the *at() family resolves a relative name against
+ * a directory named by a descriptor, and a descriptor here points at an
+ * inode handle, which has no name. Rather than five new kernel calls
+ * that each take a dirfd, this is one call that hands the name back and
+ * lets libc do the joining - which is the smaller kernel surface and
+ * puts the string arithmetic where the rest of it already lives.
+ *
+ * -1 for anything that is not an open file (a pipe, a socket, stdin) and
+ * for a path too long to have been recorded - see OPENFILE_PATH_MAX, and
+ * <fcntl.h> for what this is and is not a guarantee of. */
+#define SYS_fdpath 102
+
+/* M89: () -> the pid of whatever spawned this process, or -1 for task 0.
+ *
+ * `parent_id` has been in every task since M14 and there has never been
+ * a way to read it. SYS_taskinfo reports it, but that is the whole-table
+ * snapshot and it needs CAP_PROC_LIST - which is the right gate for
+ * "list every process" and the wrong one for "who is my parent", a
+ * question a process is always entitled to ask about itself. */
+#define SYS_getppid 103
+
+/* M89: () -> 0. Flush every dirty block this machine is holding.
+ *
+ * SYS_fsync (97) takes a descriptor and pushes what that file dirtied,
+ * which is the call a program makes about its own data. `sync(2)` is the
+ * one an operator makes about the machine, and it is a different
+ * question with a different answer: a shutdown script and a `sync` at a
+ * shell prompt both mean "everything", including metadata no descriptor
+ * names.
+ *
+ * Not gated on a capability. Flushing what is already committed to be
+ * written reveals nothing and destroys nothing - it only makes the disk
+ * agree with memory sooner, which is what M92's write-through cache is
+ * mostly already doing. */
+#define SYS_sync 104
+
+#define SYS_meminfo 105 /* (os_meminfo_t *out) -> 0 or -1. M89: how much physical memory there is and how much is free, in frames. See system_api/include/proc.h for the struct and for why sysconf could not answer _SC_PHYS_PAGES until this existed. */
+
+/* M89: (unsigned seconds) -> whole seconds left on the previous alarm.
+ *
+ * The first timer on this machine that interrupts a *running* task
+ * rather than ending a sleep. 0 cancels. One per process, replaced by
+ * each call, which is what alarm(2) is - see fire_expired_alarms in
+ * kernel/sched/sched.c for the resolution (a tick) and for why there is
+ * no setitimer beside it.
+ *
+ * Not gated: a process asking to be interrupted later is asking about
+ * itself, and SIGALRM goes to the caller and to nobody else. */
+#define SYS_alarm 106
+
+#define SYSCALL_COUNT 107

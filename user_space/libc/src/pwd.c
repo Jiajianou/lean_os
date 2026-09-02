@@ -3,6 +3,7 @@
  * is not the thing M65 refused to write. */
 #include <pwd.h>
 
+#include <errno.h>
 #include <string.h>
 
 /* Not `const`, because `struct passwd`'s members are `char *` - which is
@@ -48,4 +49,64 @@ struct passwd *getpwent(void) {
 
 void endpwent(void) {
     enumerated = 0;
+}
+
+/* ---- M89: the reentrant forms ---------------------------------------
+ *
+ * They copy the strings into the caller's buffer rather than returning
+ * pointers into this file's storage, which is the whole reason they
+ * exist - and toybox calls them for exactly that reason: it caches
+ * entries and would otherwise be holding pointers that the next lookup
+ * overwrites.
+ *
+ * The contract that surprises people, so it is written twice (here and
+ * in <pwd.h>): "no such user" is a return of 0 with *result set to NULL.
+ * A non-zero return is an errno value, not -1, and the only one this can
+ * produce is ERANGE for a buffer too small.
+ */
+static int copy_pw(struct passwd *out, char *buf, size_t buflen,
+                   struct passwd **result) {
+    static const char *const fields[] = {name_root, no_password, gecos, home,
+                                         shell};
+    char **dst[] = {&out->pw_name, &out->pw_passwd, &out->pw_gecos,
+                    &out->pw_dir, &out->pw_shell};
+    size_t used = 0;
+    for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        size_t n = strlen(fields[i]) + 1;
+        if (used + n > buflen) {
+            *result = (struct passwd *)0;
+            return ERANGE;
+        }
+        memcpy(buf + used, fields[i], n);
+        *dst[i] = buf + used;
+        used += n;
+    }
+    out->pw_uid = 0;
+    out->pw_gid = 0;
+    *result = out;
+    return 0;
+}
+
+int getpwuid_r(uid_t uid, struct passwd *out, char *buf, size_t buflen,
+               struct passwd **result) {
+    if (!out || !buf || !result) {
+        return EINVAL;
+    }
+    if (uid != 0) {
+        *result = (struct passwd *)0;
+        return 0; /* no such user - not an error */
+    }
+    return copy_pw(out, buf, buflen, result);
+}
+
+int getpwnam_r(const char *name, struct passwd *out, char *buf, size_t buflen,
+               struct passwd **result) {
+    if (!out || !buf || !result) {
+        return EINVAL;
+    }
+    if (!name || strcmp(name, name_root) != 0) {
+        *result = (struct passwd *)0;
+        return 0;
+    }
+    return copy_pw(out, buf, buflen, result);
 }

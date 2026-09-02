@@ -90,6 +90,19 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
     echo "build failed - nothing below would mean anything" >&2
     exit 1
   fi
+  # M89: and the ported userland, onto that image.
+  #
+  # `make toybox` is not part of `all` - see the Makefile for the inode
+  # ordering that keeps it out - but the graded boot below has a marker
+  # for it, and a tier that skipped the port would be grading an image
+  # that is missing the thing the milestone added. So it is a stage of
+  # its own here: visible in the summary, timed like every other, and
+  # failing loudly rather than turning the boot's M89 check into a skip.
+  run_stage "the ported userland, onto the image" make toybox
+  if [ "$OVERALL" -ne 0 ]; then
+    echo "the toybox port failed to build or install - see tools/build-toybox.sh" >&2
+    exit 1
+  fi
 fi
 
 # ---- Stage 1: the host tier ------------------------------------------
@@ -121,6 +134,10 @@ run_stage "the shell, against $(basename "${REFERENCE_SH:-/bin/sh}")" ./tools/sh
 # should be. In every tier for the same reason as the shell: about a
 # second, and it grades something a boot marker cannot.
 run_stage "the regex engine, against the host's" ./tools/regex-test.sh
+# M89: the third differential test, for the same reason as the other two -
+# see tools/scanf-test.sh. In the fast tier, next to them, because it is
+# a second and costs nothing.
+run_stage "scanf, against the host's" ./tools/scanf-test.sh
 
 # ---- Q11/Q12: the instruments that grade the tests themselves --------
 #

@@ -87,6 +87,26 @@ static void vfs_mount(const char *prefix, const vfs_ops_t *ops) {
     mount_count++;
 }
 
+/* M89: the mount table, for /proc/mounts - see vfs.h.
+ *
+ * The type name is derived from the prefix rather than stored, and that
+ * is honest rather than lazy: there are exactly three mounts, they are
+ * registered in one place below, and a `type` field would be a second
+ * copy of a fact the prefix already carries. The day a filesystem can be
+ * mounted twice at two points, this becomes a field. */
+int vfs_mount_info(int i, const char **prefix, const char **type) {
+    if (i < 0 || i >= mount_count) {
+        return 0;
+    }
+    const char *p = mounts[i].prefix;
+    if (!p || !p[0]) {
+        p = "/";
+    }
+    *prefix = p;
+    *type = mounts[i].ops ? (p[1] == 'd' ? "devfs" : "procfs") : "leanfs";
+    return 1;
+}
+
 /* Which mount owns `path`, and what the path looks like from inside it.
  *
  * `*rel` points into `path` for a mounted filesystem - so "/dev/null"
@@ -278,6 +298,7 @@ int vfs_readdir(const char *path, uint32_t *cookie, leanfs_dir_entry_t *out) {
     }
     out->inode = 0; /* a mount point is not an inode of the filesystem it sits in */
     out->is_dir = 1;
+    out->is_link = 0; /* M89 */
     k_strlcpy(out->name, mounts[i].prefix + 1, sizeof(out->name)); /* past the leading '/' */
     *cookie = VFS_SYNTH_COOKIE + i + 1;
     return 1;

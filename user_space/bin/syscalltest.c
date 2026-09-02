@@ -268,6 +268,15 @@ static const entry_t table[] = {
     {SYS_rusage,        CLASS_PTR, 2, NULL},
     {SYS_statvfs,       CLASS_PTR, 1, NULL},
     {SYS_utime,         CLASS_PTR, 1, NULL},
+    /* M89. SYS_fdpath and SYS_meminfo write through a caller-supplied
+     * pointer and are checked as such; the other three take no pointer
+     * at all - SYS_getppid and SYS_sync take nothing, and SYS_alarm
+     * takes a count of seconds, which is a number and not an address. */
+    {SYS_fdpath,        CLASS_PTR, 2, NULL},
+    {SYS_getppid,       CLASS_PLAIN, 0, NULL},
+    {SYS_sync,          CLASS_PLAIN, 0, NULL},
+    {SYS_meminfo,       CLASS_PTR, 1, NULL},
+    {SYS_alarm,         CLASS_PLAIN, 0, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 

@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h> /* UTIME_NOW, UTIME_OMIT - POSIX puts them here */
+#include <limits.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -58,9 +59,31 @@ int utimes(const char *path, const struct timeval tv[2]) {
  * which is a success that does nothing. */
 int utimensat(int dirfd, const char *path, const struct timespec ts[2], int flags) {
     (void)flags; /* AT_SYMLINK_NOFOLLOW: leanfs stores no time on a link */
-    if (dirfd != AT_FDCWD) {
-        errno = ENOSYS;
-        return -1;
+    /* M89: a dirfd is resolvable now. This returned ENOSYS for anything
+     * but AT_FDCWD because there was no way to ask what directory a
+     * descriptor named; SYS_fdpath is that way, and <fcntl.h> documents
+     * what the resolution does and does not guarantee. */
+    char full[PATH_MAX];
+    if (dirfd != AT_FDCWD && path && path[0] != '/') {
+        long n = sys_fdpath(dirfd, full, sizeof(full));
+        if (n < 0) {
+            errno = EBADF;
+            return -1;
+        }
+        size_t at = (size_t)n;
+        if (at > 0 && full[at - 1] != '/') {
+            full[at++] = '/';
+        }
+        size_t i = 0;
+        while (path[i] && at + 1 < sizeof(full)) {
+            full[at++] = path[i++];
+        }
+        if (path[i]) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        full[at] = '\0';
+        path = full;
     }
     if (!ts) {
         return set_mtime(path, time((time_t *)0));
@@ -72,4 +95,16 @@ int utimensat(int dirfd, const char *path, const struct timespec ts[2], int flag
         return set_mtime(path, time((time_t *)0));
     }
     return set_mtime(path, ts[1].tv_sec);
+}
+
+/* M89: the descriptor form. Goes through SYS_fdpath rather than through
+ * a second syscall taking an fd, which is the same decision fcntl.c's
+ * *at() family made and for the same reason - see that file's header. */
+int futimens(int fd, const struct timespec ts[2]) {
+    char path[PATH_MAX];
+    if (sys_fdpath(fd, path, sizeof(path)) < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    return utimensat(AT_FDCWD, path, ts, 0);
 }

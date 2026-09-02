@@ -4364,14 +4364,28 @@ static void boot_selftests_system(void) {
                 listed++;
             }
         }
-        if (listed != (int)EMBEDDED_PROGRAM_COUNT) {
+        /* M89: at LEAST every embedded program, rather than exactly them.
+         *
+         * This asserted equality for thirty-six milestones, on the sound
+         * argument that "something that is not a program is in it" was a
+         * bug worth catching - /bin was seeded by the kernel and by
+         * nothing else, so any extra entry was a mistake.
+         *
+         * `make toybox` makes that false on purpose: a hundred and fifty
+         * command names, every one of them a symbolic link to the ported
+         * multi-call binary, are in /bin because M89 put them there. The
+         * check that survives is the one that was always the point - the
+         * loop above, which requires every embedded program to be present
+         * by name. An entry that is not a program can no longer be
+         * distinguished from one that is by counting, so counting stops. */
+        if (listed < (int)EMBEDDED_PROGRAM_COUNT) {
             klog_puts("[m53] ");
             klog_puts(PATH_BIN);
             klog_puts(" lists 0x");
             klog_put_hex32((uint32_t)listed);
-            klog_puts(" entries but this build ships 0x");
+            klog_puts(" entries, fewer than the 0x");
             klog_put_hex32((uint32_t)EMBEDDED_PROGRAM_COUNT);
-            klog_puts(" programs - something that is not a program is in it\n");
+            klog_puts(" programs this build ships - the listing and the seeding disagree\n");
             all_ok = 0;
         }
 
@@ -8023,6 +8037,122 @@ static void boot_selftests_system(void) {
                    "subshell whose assignment does not escape it, a here-document written by a "
                    "second process, ${x:-default}, and an exported variable reaching a child's "
                    "environment while an unexported one does not - self-test passed.\n\n");
+    }
+
+    /* ---- M89 self-test: somebody else's userland ------------------------
+     *
+     * M89's own "how we'll know" is one command line:
+     *
+     *   find . -type f | xargs grep -l something | sort | uniq -c | sort -rn
+     *
+     * and its argument for choosing it is that **every stage is a program
+     * nobody here wrote**, connected by M86's pipes, forked by M83 and
+     * exec'd by M84, over a tree that could not have existed before M81.
+     * One line that is false if any milestone in the arc is incomplete.
+     * So that is what this runs, against a tree it makes for the purpose.
+     *
+     * **It skips rather than fails when /bin/toybox is absent, and that
+     * is deliberate.** The port is installed by `make toybox`, which is
+     * not part of `all` for the same reason `preseed` is not (see the
+     * Makefile): writing into a fresh image claims inodes that M22's
+     * launcher self-test has opinions about. An image that has never had
+     * `make toybox` run on it is a valid image, and a battery that
+     * panicked on one would make the default build depend on an optional
+     * step. The skip is logged with the reason, so "it passed" and "it
+     * was not there" are never the same line in the log.
+     */
+    {
+        os_stat_t tb;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/toybox", (uint64_t)&tb, 0) != 0) {
+            klog_puts("[m89] /bin/toybox is not on this image - skipped. "
+                       "`make toybox` installs it; see milestones.md M89.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m89.sh";
+            const char *result = PATH_TMP_DIR "m89.out";
+
+            /* Two files hold the word and one does not, in two different
+             * directories - so `find` has to recurse, `grep -l` has to
+             * reject one, and the counting stages have something with
+             * more than one line in it to work on. */
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "d=" PATH_TMP_DIR "m89tree\n"
+                /* -f, because a first boot has no tree to remove and an
+                 * `rm` that complained would put a line in the serial
+                 * log that looks like a failure and is not. */
+                "rm -rf $d 2>/dev/null\n"
+                "mkdir -p $d/a $d/b\n"
+                "echo something > $d/a/one\n"
+                "echo nothing > $d/a/two\n"
+                "echo something > $d/b/three\n"
+                "cd $d\n"
+                "find . -type f | xargs grep -l something | sort | uniq -c | sort -rn "
+                    "> " PATH_TMP_DIR "m89.out\n"
+                /* And one line that proves the multi-call dispatch is
+                 * reading argv[0] rather than always being the same
+                 * program: `wc` and `sort` are the same 438 KB binary. */
+                "find . -type f | wc -l >> " PATH_TMP_DIR "m89.out\n";
+
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M89 self-test: could not write the script fixture");
+            }
+
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m89] the pipeline script could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+
+            static char produced[1024];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m89] the five-stage pipeline produced no output at all\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"./a/one",   "find recursed and grep -l kept a matching file"},
+                    {"./b/three", "and kept the one in the other directory"},
+                    {"3",         "wc -l counted every file find reported"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m89] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+                /* The file WITHOUT the word must not be there. A grep
+                 * that matched everything would satisfy every check
+                 * above, which is exactly the failure a test made only
+                 * of positives cannot see. */
+                if (selftest_contains(produced, "./a/two")) {
+                    klog_puts("[m89] grep -l reported a file that does not contain the word\n");
+                    all_ok = 0;
+                }
+            }
+
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+
+            if (!all_ok) {
+                klog_puts("[m89] what the pipeline actually wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m89] ---- end\n");
+                panic("M89 self-test: somebody else's userland does not run here");
+            }
+
+            klog_puts("[m89] somebody else's userland: find, xargs, grep, sort and uniq - "
+                       "five programs nobody here wrote, one multi-call binary reached through "
+                       "five symbolic links, connected by four pipes across five forked and "
+                       "exec'd processes, over a tree made by mkdir - self-test passed.\n\n");
+        }
     }
 
     /* ---- M73 self-test: names, and the first inbound byte ---------------

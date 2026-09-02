@@ -4,7 +4,7 @@ A desktop operating system for x86-64, written from scratch: bootloader,
 kernel, drivers, filesystem, window system and applications. No GRUB, no
 libc, no third-party code anywhere in the OS itself.
 
-![93 milestones](https://img.shields.io/badge/milestones-93-informational)
+![94 milestones](https://img.shields.io/badge/milestones-94-informational)
 
 ```
 UEFI firmware
@@ -67,6 +67,14 @@ UEFI firmware
 - **Somebody else's program.** The 1972 Whetstone benchmark, ported
   unmodified, running on an SSE-enabled kernel against a libc written
   here. See [docs/third-party-programs.md](docs/third-party-programs.md).
+- **Somebody else's *userland*.** Toybox, built for this machine from
+  the published tarball with no edit to its source, installed as one
+  static binary and 143 command names in `/bin`: `find`, `grep`, `sed`,
+  `sort`, `xargs`, `tar`, `ps`, `du`, `wc` and the rest. `find . -type f
+  | xargs grep -l something | sort | uniq -c | sort -rn` is a boot
+  self-test — five programs nobody here wrote, four pipes, five forked
+  and exec'd processes. See M89 in [milestones.md](milestones.md) for
+  the eight bugs running it found.
 
 ## Build and run
 
@@ -122,13 +130,15 @@ Four instruments, and none of them subsumes another:
   is the only instrument here that grades the *tests* rather than the
   machine, and the first thing it found was a file at 100% line coverage
   whose mutation score was zero.
-- **A shell differential test** (`tools/sh-test.sh`) compiles
-  `/bin/sh` from the same source the machine runs, for the machine you
-  are sitting at, and requires every fixture in `tests/sh/` to produce
-  byte-identical output to the host's own `/bin/sh`. Nothing in those
-  fixtures says what the right answer is - a shell nobody here wrote
-  decides, which is the only useful standard for a program whose whole
-  job is to agree with every other shell about what a script means.
+- **Three differential tests** (`tools/sh-test.sh`,
+  `tools/regex-test.sh`, `tools/scanf-test.sh`) compile this project's
+  own shell, regular-expression engine and `sscanf` from the same source
+  the machine runs, for the machine you are sitting at, and require
+  every fixture to produce byte-identical output to the host's own.
+  Nothing in those fixtures says what the right answer is - a program
+  nobody here wrote decides, which is the only useful standard for code
+  whose whole job is to agree with every other implementation of itself.
+  Each of the three found real bugs on its first run.
 - **An image-tree test** (`tools/image-tree-test.sh`) has a host tool
   write a directory tree into a leanfs image, compares the image with an
   independent reader against the tree it came from, then boots it and has

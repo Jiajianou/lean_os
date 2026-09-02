@@ -49,6 +49,30 @@ int clock_gettime(clockid_t clk, struct timespec *ts);
  * asking whether it can measure microseconds here; the answer is no, and
  * this is where it says so. */
 int clock_getres(clockid_t clk, struct timespec *res);
+
+/* ---- M89: sleeping, in the three spellings a program uses ------------
+ *
+ * All three are one mechanism: SYS_waitfds with nothing to wait for and
+ * a deadline, which is the wait this system already has - see poll.c,
+ * which found the same thing one milestone earlier and said so.
+ *
+ * The resolution is a millisecond, because that is what SYS_waitfds
+ * takes and what clock_getres above already reports. A nanosleep of 100
+ * microseconds therefore sleeps for zero and returns 0 rather than
+ * sleeping a whole millisecond: rounding *up* would make a program that
+ * polls in a tight loop 10x slower than it asked for, and rounding down
+ * to zero is what a machine with a millisecond clock can honestly do.
+ * Sub-millisecond remainders round up to 1 ms only when the whole
+ * request is below 1 ms and non-zero, so `nanosleep(1ns)` still yields.
+ *
+ * `rem` is written with zeros on a completed sleep. This machine's wait
+ * is not interrupted by a signal handler returning - see M76 - so a
+ * short sleep is not a case that arises, and reporting a remainder of
+ * zero is the truth rather than a simplification.
+ */
+int nanosleep(const struct timespec *req, struct timespec *rem);
+unsigned int sleep(unsigned int seconds);
+int usleep(unsigned int usec);
 /* M80 groundwork. The fields are C's, in C's order. `tm_isdst` is always
  * 0 and `tm_gmtoff` always 0 - see the header note: this machine keeps
  * UTC and knows of no other zone, so those are facts rather than
@@ -76,6 +100,30 @@ struct tm *localtime_r(const time_t *t, struct tm *out);
 struct tm *gmtime(const time_t *t);
 struct tm *localtime(const time_t *t);
 
+/* M89: the timezone globals and the call that sets them.
+ *
+ * This machine keeps UTC and knows of no other zone - the header note
+ * above says so and `localtime` is `gmtime` for that reason. So tzset is
+ * a call that sets `tzname` to {"UTC", "UTC"}, `timezone` to 0 and
+ * `daylight` to 0, every time, and a program that calls it and then
+ * reads those gets consistent answers rather than uninitialized ones.
+ * TZ in the environment is deliberately ignored: honouring it would need
+ * a zone database, and pretending to honour it would put a program an
+ * hour off with no way to tell. */
+extern char *tzname[2];
+extern long timezone;
+extern int daylight;
+void tzset(void);
+
+/* M89: strftime's inverse. Supports the conversions a program actually
+ * parses - %Y %y %m %d %e %H %I %M %S %j %b %B %a %A %p %T %D %F %R %n
+ * %t %% and %s - and returns a pointer to the first character it did not
+ * consume, or NULL if the format did not match. An unsupported
+ * conversion returns NULL rather than being skipped, for the reason
+ * scanf.c gives about the same choice. */
+char *strptime(const char *s, const char *format, struct tm *tm);
+
+
 /* The inverse. `tm_isdst` and the weekday/yearday fields are ignored on
  * input and recomputed, which is what mktime is specified to do. */
 time_t mktime(struct tm *tm);
@@ -86,6 +134,20 @@ time_t timegm(struct tm *tm);
  * rather than silently dropped, so an unsupported specifier shows up in
  * the output where somebody will see it. */
 size_t strftime(char *out, size_t max, const char *fmt, const struct tm *tm);
+
+/* M89: the 1970s spelling - "Www Mmm dd hh:mm:ss yyyy\n", 26 bytes
+ * including the newline and the NUL, always. It is here because a
+ * program that prints a timestamp without formatting one calls it, and
+ * because `dmesg -T` does.
+ *
+ * `ctime` and `asctime` return a pointer into one static buffer, which
+ * is the ancient interface; the _r forms take the caller's 26 bytes and
+ * are the ones to use. All four produce the same string - there is one
+ * timezone here, so ctime and a UTC asctime cannot differ. */
+char *asctime(const struct tm *tm);
+char *asctime_r(const struct tm *tm, char *buf);
+char *ctime(const time_t *t);
+char *ctime_r(const time_t *t, char *buf);
 
 typedef long clock_t;
 

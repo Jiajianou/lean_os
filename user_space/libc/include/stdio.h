@@ -80,3 +80,48 @@ int sprintf(char *out, const char *fmt, ...) __attribute__((format(printf, 2, 3)
 int snprintf(char *out, size_t n, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 int vsnprintf(char *out, size_t n, const char *fmt, va_list ap);
 int vfprintf(FILE *f, const char *fmt, va_list ap);
+int vprintf(const char *fmt, va_list ap);
+int vsprintf(char *out, const char *fmt, va_list ap);
+
+/* ---- M89: printf to a descriptor, without a FILE ---------------------
+ *
+ * `dprintf` is what a program uses when it has a file descriptor and
+ * does not want a stream over it - reading a password from /dev/tty is
+ * the canonical case and the one toybox uses it for. It is not
+ * "debug printf" despite the name every reader expects. */
+int dprintf(int fd, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+int vdprintf(int fd, const char *fmt, va_list ap);
+
+/* ---- M89: a line, however long it turns out to be --------------------
+ *
+ * The difference from fgets, and the reason a ported program uses these
+ * instead: fgets needs the caller to guess a size and silently splits a
+ * line that does not fit, so a program reading somebody else's file has
+ * no correct buffer size to pick. getdelim grows the buffer.
+ *
+ * `*lineptr` may be NULL with `*n` 0 on the first call, which is the
+ * usual way to start; after that the buffer is reused and only grows.
+ * The caller frees it. Returns the byte count INCLUDING the delimiter,
+ * or -1 at end of file - and a returned length is the right way to
+ * handle a line with an embedded NUL, which strlen on the buffer is not.
+ */
+long getdelim(char **lineptr, size_t *n, int delim, FILE *f);
+long getline(char **lineptr, size_t *n, FILE *f);
+
+/* ---- M89: scanf, on strings and streams ------------------------------
+ *
+ * The conversions this supports are the ones a program actually writes:
+ * %d %i %u %o %x %c %s %n %% and %f/%g/%e, with a field width, the `*`
+ * suppression flag, and the h/hh/l/ll/z length modifiers. A `%[...]`
+ * scanset is supported too, because `sscanf(s, "%[^,]", ...)` is how
+ * half the string splitting in the world is written.
+ *
+ * What is NOT here: %p, %a, and the `m` allocation modifier. Each would
+ * be a few more lines and none of them has been asked for by a program,
+ * which is M63's rule - and an unsupported conversion stops the scan and
+ * returns what it matched so far, rather than being skipped silently.
+ */
+int sscanf(const char *str, const char *fmt, ...);
+int vsscanf(const char *str, const char *fmt, va_list ap);
+int fscanf(FILE *f, const char *fmt, ...);
+int scanf(const char *fmt, ...);

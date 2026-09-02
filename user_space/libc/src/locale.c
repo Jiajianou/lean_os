@@ -1,5 +1,6 @@
 /* user_space/libc/src/locale.c - M80 groundwork. See <locale.h>. */
 #include <locale.h>
+#include <string.h> /* M89: newlocale compares the locale name */
 
 static char c_locale[] = "C";
 static char empty[] = "";
@@ -81,4 +82,55 @@ char *nl_langinfo(nl_item item) {
     case NOEXPR:    return (char *)"^[nN]";
     default:        return (char *)"";
     }
+}
+
+/* ---- M89: locale_t - see <locale.h> for why none of this allocates --- */
+
+/* The one locale object. Its contents are never read: everything in this
+ * library that would consult a locale consults the C one unconditionally,
+ * so what matters about this pointer is only that it is not NULL and is
+ * stable across calls. */
+static struct __locale {
+    int mask;
+} the_c_locale = {LC_ALL_MASK};
+
+/* What this thread has adopted. Not thread-local, because this libc has
+ * no thread-local storage yet (M96's) - which is honest rather than a
+ * bug here: there is one locale, so a per-thread copy of a value that
+ * can only ever be one thing would differ from a shared one in no
+ * observable way. The day there are two locales this needs M96. */
+static locale_t current_locale;
+
+locale_t newlocale(int category_mask, const char *locale, locale_t base) {
+    (void)base; /* nothing to inherit from: there is one locale */
+    if (category_mask & ~LC_ALL_MASK) {
+        return (locale_t)0;
+    }
+    if (!locale) {
+        return (locale_t)0;
+    }
+    if (locale[0] == '\0' || strcmp(locale, "C") == 0 ||
+        strcmp(locale, "POSIX") == 0 || strcmp(locale, "C.UTF-8") == 0) {
+        return &the_c_locale;
+    }
+    return (locale_t)0; /* the same refusal setlocale gives, in the same place */
+}
+
+locale_t uselocale(locale_t loc) {
+    locale_t prev = current_locale ? current_locale : LC_GLOBAL_LOCALE;
+    if (loc) {
+        current_locale = (loc == LC_GLOBAL_LOCALE) ? (locale_t)0 : loc;
+    }
+    return prev; /* a NULL argument is a query, which is POSIX's rule */
+}
+
+locale_t duplocale(locale_t loc) {
+    /* One object, so a duplicate is the same object. Correct rather than
+     * lazy: freelocale is a no-op, so two callers holding one pointer
+     * cannot free it out from under each other. */
+    return (loc == LC_GLOBAL_LOCALE || !loc) ? &the_c_locale : loc;
+}
+
+void freelocale(locale_t loc) {
+    (void)loc; /* nothing was allocated - see the note above */
 }

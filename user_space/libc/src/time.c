@@ -1,4 +1,6 @@
 #include <time.h>
+#include <errno.h>
+#include <stdint.h>   /* M89: nanosleep refuses an out-of-range timespec */
 #include <unistd.h> /* M88: sysconf(_SC_CLK_TCK), the rate clock() scales from */
 
 #include "proc.h" /* system_api/include/proc.h - os_rusage_t, M88 */
@@ -258,4 +260,396 @@ size_t strftime(char *out, size_t max, const char *fmt, const struct tm *tm) {
     }
     out[at] = '\0';
     return at;
+}
+
+/* ---- M89: sleeping - see <time.h> for the resolution argument ------- */
+
+static void sleep_ms(long ms) {
+    if (ms <= 0) {
+        return;
+    }
+    int dummy = -1;
+    (void)sys_waitfds(&dummy, 0, (int)ms);
+}
+
+int nanosleep(const struct timespec *req, struct timespec *rem) {
+    if (!req || req->tv_nsec < 0 || req->tv_nsec >= 1000000000L ||
+        req->tv_sec < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    long ms = req->tv_sec * 1000L + req->tv_nsec / 1000000L;
+    if (ms == 0 && (req->tv_sec != 0 || req->tv_nsec != 0)) {
+        ms = 1; /* a non-zero request never becomes a no-op */
+    }
+    sleep_ms(ms);
+    if (rem) {
+        rem->tv_sec = 0;
+        rem->tv_nsec = 0;
+    }
+    return 0;
+}
+
+unsigned int sleep(unsigned int seconds) {
+    sleep_ms((long)seconds * 1000L);
+    return 0; /* nothing cuts a sleep short here - see <time.h> */
+}
+
+int usleep(unsigned int usec) {
+    long ms = (long)(usec / 1000u);
+    if (ms == 0 && usec != 0) {
+        ms = 1;
+    }
+    sleep_ms(ms);
+    return 0;
+}
+
+/* ---- M89: the timezone globals - see <time.h> ------------------------ */
+
+static char tz_utc[] = "UTC";
+char *tzname[2] = {tz_utc, tz_utc};
+long timezone = 0;
+int daylight = 0;
+
+void tzset(void) {
+    /* Already what they are, and set again anyway so that a program
+     * which zeroes them and calls this gets them back. TZ is ignored -
+     * see <time.h> for why honouring it halfway would be worse than not
+     * at all. */
+    tzname[0] = tz_utc;
+    tzname[1] = tz_utc;
+    timezone = 0;
+    daylight = 0;
+}
+
+/* ---- M89: strptime ---------------------------------------------------
+ *
+ * The mirror of strftime, sharing its month and day name tables so the
+ * two cannot disagree about spelling - which is the bug a second table
+ * would eventually produce.
+ */
+static const char *const MON_FULL[12] = {
+    "January", "February", "March",     "April",   "May",      "June",
+    "July",    "August",   "September", "October", "November", "December"};
+static const char *const DAY_FULL[7] = {"Sunday",   "Monday", "Tuesday",
+                                        "Wednesday", "Thursday", "Friday",
+                                        "Saturday"};
+
+static int ci_prefix(const char *s, const char *word, int abbrev_len) {
+    /* Matches `word` case-insensitively, either in full or at exactly
+     * `abbrev_len` characters. Returns how many characters matched, or
+     * 0. Full first, so that "June" is not read as "Jun" plus a stray
+     * 'e'. */
+    int i = 0;
+    while (word[i]) {
+        char a = s[i];
+        char b = word[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (char)(a - 'A' + 'a');
+        }
+        if (b >= 'A' && b <= 'Z') {
+            b = (char)(b - 'A' + 'a');
+        }
+        if (a != b) {
+            break;
+        }
+        i++;
+    }
+    if (!word[i]) {
+        return i;
+    }
+    return i >= abbrev_len ? abbrev_len : 0;
+}
+
+static const char *scan_num(const char *s, int width, int *out) {
+    int v = 0;
+    int n = 0;
+    while (*s == ' ') {
+        s++; /* %e and a space-padded %d */
+    }
+    while (n < width && *s >= '0' && *s <= '9') {
+        v = v * 10 + (*s - '0');
+        s++;
+        n++;
+    }
+    if (n == 0) {
+        return 0;
+    }
+    *out = v;
+    return s;
+}
+
+char *strptime(const char *s, const char *format, struct tm *tm) {
+    if (!s || !format || !tm) {
+        return (char *)0;
+    }
+    int pm_seen = 0;
+    int twelve_hour = 0;
+
+    for (const char *f = format; *f; f++) {
+        if (*f == ' ' || *f == '\t' || *f == '\n') {
+            while (*s == ' ' || *s == '\t' || *s == '\n') {
+                s++;
+            }
+            continue;
+        }
+        if (*f != '%') {
+            if (*s != *f) {
+                return (char *)0;
+            }
+            s++;
+            continue;
+        }
+        f++;
+        int v = 0;
+        switch (*f) {
+        case '%':
+            if (*s++ != '%') {
+                return (char *)0;
+            }
+            break;
+        case 'n':
+        case 't':
+            while (*s == ' ' || *s == '\t' || *s == '\n') {
+                s++;
+            }
+            break;
+        case 'Y':
+            if (!(s = scan_num(s, 4, &v))) {
+                return (char *)0;
+            }
+            tm->tm_year = v - 1900;
+            break;
+        case 'y':
+            if (!(s = scan_num(s, 2, &v))) {
+                return (char *)0;
+            }
+            /* POSIX's window: 69-99 is 1900s, 00-68 is 2000s. */
+            tm->tm_year = v >= 69 ? v : v + 100;
+            break;
+        case 'm':
+            if (!(s = scan_num(s, 2, &v)) || v < 1 || v > 12) {
+                return (char *)0;
+            }
+            tm->tm_mon = v - 1;
+            break;
+        case 'd':
+        case 'e':
+            if (!(s = scan_num(s, 2, &v)) || v < 1 || v > 31) {
+                return (char *)0;
+            }
+            tm->tm_mday = v;
+            break;
+        case 'H':
+            if (!(s = scan_num(s, 2, &v)) || v > 23) {
+                return (char *)0;
+            }
+            tm->tm_hour = v;
+            break;
+        case 'I':
+            if (!(s = scan_num(s, 2, &v)) || v < 1 || v > 12) {
+                return (char *)0;
+            }
+            tm->tm_hour = v % 12;
+            twelve_hour = 1;
+            break;
+        case 'M':
+            if (!(s = scan_num(s, 2, &v)) || v > 59) {
+                return (char *)0;
+            }
+            tm->tm_min = v;
+            break;
+        case 'S':
+            if (!(s = scan_num(s, 2, &v)) || v > 60) {
+                return (char *)0;
+            }
+            tm->tm_sec = v;
+            break;
+        case 'j':
+            if (!(s = scan_num(s, 3, &v)) || v < 1 || v > 366) {
+                return (char *)0;
+            }
+            tm->tm_yday = v - 1;
+            break;
+        case 'b':
+        case 'B':
+        case 'h': {
+            int i;
+            for (i = 0; i < 12; i++) {
+                int n = ci_prefix(s, MON_FULL[i], 3);
+                if (n) {
+                    s += n;
+                    tm->tm_mon = i;
+                    break;
+                }
+            }
+            if (i == 12) {
+                return (char *)0;
+            }
+            break;
+        }
+        case 'a':
+        case 'A': {
+            int i;
+            for (i = 0; i < 7; i++) {
+                int n = ci_prefix(s, DAY_FULL[i], 3);
+                if (n) {
+                    s += n;
+                    tm->tm_wday = i;
+                    break;
+                }
+            }
+            if (i == 7) {
+                return (char *)0;
+            }
+            break;
+        }
+        case 'p': {
+            int n = ci_prefix(s, "PM", 2);
+            if (n) {
+                pm_seen = 1;
+                s += n;
+            } else if ((n = ci_prefix(s, "AM", 2)) != 0) {
+                s += n;
+            } else {
+                return (char *)0;
+            }
+            break;
+        }
+        case 's': {
+            /* Seconds since the epoch, which is not a field of struct tm
+             * but a whole time - so it fills every field. */
+            long secs = 0;
+            int n = 0;
+            int neg = 0;
+            if (*s == '-') {
+                neg = 1;
+                s++;
+            }
+            while (*s >= '0' && *s <= '9') {
+                secs = secs * 10 + (*s - '0');
+                s++;
+                n++;
+            }
+            if (n == 0) {
+                return (char *)0;
+            }
+            time_t t = neg ? -secs : secs;
+            gmtime_r(&t, tm);
+            break;
+        }
+        /* The composite conversions, expanded rather than duplicated:
+         * each one is its own expansion parsed by this same loop. */
+        case 'T':
+        case 'D':
+        case 'F':
+        case 'R': {
+            const char *sub = (*f == 'T')   ? "%H:%M:%S"
+                              : (*f == 'D') ? "%m/%d/%y"
+                              : (*f == 'F') ? "%Y-%m-%d"
+                                            : "%H:%M";
+            char *end = strptime(s, sub, tm);
+            if (!end) {
+                return (char *)0;
+            }
+            s = end;
+            break;
+        }
+        default:
+            return (char *)0; /* unsupported - see <time.h> */
+        }
+    }
+    if (twelve_hour && pm_seen) {
+        tm->tm_hour += 12;
+    }
+    return (char *)s;
+}
+
+/* ---- M89: asctime/ctime - see <time.h> ------------------------------
+ *
+ * The format is fixed and so is the length: exactly 26 bytes with the
+ * newline and the NUL, which is what makes the _r forms' "give me a
+ * 26-byte buffer" contract safe. Written with explicit padding rather
+ * than through snprintf so that a year outside 1000-9999 cannot silently
+ * change the field widths, which is the one way this string stops being
+ * 26 bytes.
+ */
+static const char *const WDAY_ABBR[7] = {"Sun", "Mon", "Tue", "Wed",
+                                         "Thu", "Fri", "Sat"};
+static const char *const MON_ABBR[12] = {"Jan", "Feb", "Mar", "Apr",
+                                         "May", "Jun", "Jul", "Aug",
+                                         "Sep", "Oct", "Nov", "Dec"};
+
+static void two(char *out, int v, char pad) {
+    out[0] = (v / 10) ? (char)('0' + (v / 10) % 10) : pad;
+    out[1] = (char)('0' + v % 10);
+}
+
+char *asctime_r(const struct tm *tm, char *buf) {
+    if (!tm || !buf) {
+        return (char *)0;
+    }
+    int wday = (tm->tm_wday >= 0 && tm->tm_wday < 7) ? tm->tm_wday : 0;
+    int mon = (tm->tm_mon >= 0 && tm->tm_mon < 12) ? tm->tm_mon : 0;
+    int year = tm->tm_year + 1900;
+    if (year < 0) {
+        year = 0;
+    }
+    for (int i = 0; i < 3; i++) {
+        buf[i] = WDAY_ABBR[wday][i];
+        buf[4 + i] = MON_ABBR[mon][i];
+    }
+    buf[3] = ' ';
+    buf[7] = ' ';
+    two(buf + 8, tm->tm_mday, ' ');
+    buf[10] = ' ';
+    two(buf + 11, tm->tm_hour, '0');
+    buf[13] = ':';
+    two(buf + 14, tm->tm_min, '0');
+    buf[16] = ':';
+    two(buf + 17, tm->tm_sec, '0');
+    buf[19] = ' ';
+    buf[20] = (char)('0' + (year / 1000) % 10);
+    buf[21] = (char)('0' + (year / 100) % 10);
+    buf[22] = (char)('0' + (year / 10) % 10);
+    buf[23] = (char)('0' + year % 10);
+    buf[24] = '\n';
+    buf[25] = '\0';
+    return buf;
+}
+
+static char asctime_buf[26];
+
+char *asctime(const struct tm *tm) {
+    return asctime_r(tm, asctime_buf);
+}
+
+char *ctime_r(const time_t *t, char *buf) {
+    struct tm tm;
+    if (!t || !gmtime_r(t, &tm)) {
+        return (char *)0;
+    }
+    return asctime_r(&tm, buf);
+}
+
+char *ctime(const time_t *t) {
+    return ctime_r(t, asctime_buf);
+}
+
+int settimeofday(const struct timeval *tv, const void *tz) {
+    (void)tz; /* POSIX says to ignore it, and there is one zone anyway */
+    if (!tv) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (tv->tv_sec < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (sys_settime((uint32_t)tv->tv_sec) != 0) {
+        /* The syscall refuses an implausible time - see SYS_settime. */
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
 }

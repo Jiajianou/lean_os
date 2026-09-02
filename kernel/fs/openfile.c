@@ -40,7 +40,7 @@ static void ensure_init(void) {
     initialized = 1;
 }
 
-openfile_t *openfile_alloc(int handle, int writable) {
+openfile_t *openfile_alloc(int handle, int writable, const char *path) {
     uint64_t flags = spin_lock_irqsave(&openfile_lock);
     ensure_init();
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -49,6 +49,19 @@ openfile_t *openfile_alloc(int handle, int writable) {
             table[i].offset = 0;
             table[i].writable = (uint8_t)(writable != 0);
             table[i].refcount = 1;
+            /* M89: all of it or none of it - see OPENFILE_PATH_MAX. */
+            table[i].path[0] = 0;
+            if (path) {
+                int n = 0;
+                while (path[n] && n < OPENFILE_PATH_MAX - 1) {
+                    n++;
+                }
+                if (!path[n]) {
+                    for (int j = 0; j <= n; j++) {
+                        table[i].path[j] = path[j];
+                    }
+                }
+            }
             spin_unlock_irqrestore(&openfile_lock, flags);
             return &table[i];
         }

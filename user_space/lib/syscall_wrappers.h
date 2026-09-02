@@ -135,6 +135,11 @@ long sys_lstat(const char *path, void *out);
 long sys_rusage(int who, void *out);
 long sys_statvfs(const char *path, void *out);
 long sys_utime(const char *path, unsigned int mtime);
+long sys_fdpath(int fd, char *out, unsigned long out_len);
+long sys_getppid(void);
+long sys_sync(void);
+long sys_meminfo(void *out);
+long sys_alarm(unsigned int seconds);
 
 /* M53: creates one directory whose parent already exists. */
 long sys_mkdir(const char *path);

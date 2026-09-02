@@ -27,6 +27,43 @@ void qsort(void *base, size_t count, size_t size, int (*cmp)(const void *, const
 void *bsearch(const void *key, const void *base, size_t count, size_t size,
                int (*cmp)(const void *, const void *));
 double strtod(const char *s, char **end);
+/* M89: `long double` is the same 64-bit double on this toolchain's ABI
+ * for every purpose this library has - nothing here uses x87's 80-bit
+ * format - so this is strtod with a wider return type and not a second
+ * parser. Said here rather than left for someone to find out by losing
+ * precision they thought they had. */
+long double strtold(const char *s, char **end);
+float strtof(const char *s, char **end);
+long long atoll(const char *s);
+long long llabs(long long v);
+
+/* ---- M89: temporary files -------------------------------------------
+ *
+ * `template` ends in exactly six X's, which are replaced in place. Both
+ * return with the template rewritten to the name that was actually
+ * created, which is what makes them safe to use and the reason neither
+ * has a "generate a name and hope" variant here: `tmpnam` is a race by
+ * construction and is deliberately absent.
+ *
+ * The exclusion is real. mkstemp opens with O_CREAT|O_EXCL, and M87 made
+ * that atomic inside leanfs's own lock - so of two processes that pick
+ * the same name, exactly one creates it and the other tries again.
+ * mkdtemp has no equivalent: SYS_mkdir fails if the directory exists,
+ * which is the same guarantee arrived at from the other direction.
+ */
+/* M89: BSD's random(), which is the same generator this libc's rand()
+ * already is - see stdlib.c. Provided because a program that wants a
+ * better generator than rand() asks for this one by name, and getting a
+ * link error for it is worse than getting the generator that is here
+ * under a second name. `initstate`/`setstate` are the state-array
+ * interface and are honest about having a fixed-size state. */
+long random(void);
+void srandom(unsigned int seed);
+char *initstate(unsigned int seed, char *state, size_t n);
+char *setstate(char *state);
+
+int mkstemp(char *template);
+char *mkdtemp(char *template);
 
 /* M75: the environment. `getenv` returns a pointer into the environment
  * itself, not a copy - the standard contract, and the reason a caller

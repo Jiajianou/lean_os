@@ -5,6 +5,7 @@
  * has a natural neighbour.
  */
 #include <sched.h>
+#include <sys/sysinfo.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
 
@@ -12,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "proc.h" /* system_api/include/proc.h - os_meminfo_t and task_info_t, M89 */
 #include "syscall_wrappers.h"
 
 /* Copies a NUL-terminated string into a fixed field. */
@@ -209,4 +211,36 @@ long syscall(long number, ...) {
     (void)number;
     errno = ENOSYS;
     return -1;
+}
+
+/* ---- M89: sysinfo - see <sys/sysinfo.h> for what each 0 means ------- */
+
+int sysinfo(struct sysinfo *info) {
+    if (!info) {
+        errno = EFAULT;
+        return -1;
+    }
+    memset(info, 0, sizeof(*info));
+
+    info->uptime = (long)(sys_uptime_ms() / 1000);
+
+    os_meminfo_t mi;
+    if (sys_meminfo(&mi) == 0) {
+        info->mem_unit = (unsigned int)mi.page_size;
+        info->totalram = (unsigned long)mi.total_frames;
+        info->freeram = (unsigned long)mi.free_frames;
+    } else {
+        info->mem_unit = 4096;
+    }
+
+    /* The process count needs CAP_PROC_LIST, which an ordinary program
+     * does not have - so this is 0 for most callers rather than -1 for
+     * the whole call. A refusal to report one field is not a reason to
+     * refuse the other eleven, and `procs` is the one a program reading
+     * this is least likely to be asking for. */
+    long n = sys_taskinfo((task_info_t *)0, 0);
+    if (n > 0) {
+        info->procs = (unsigned short)n;
+    }
+    return 0;
 }

@@ -87,6 +87,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h> /* M89: a symlink made from a string needs a timestamp from somewhere */
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -475,6 +476,34 @@ static int alloc_inode(uint32_t type) {
     fprintf(stderr, "leanfs-put: no free inode (this filesystem holds at most %d)\n",
             LEANFS_MAX_INODES);
     exit(1);
+}
+
+/* M89: repoints an existing name at a different inode, and updates the
+ * record's cached type with it.
+ *
+ * Needed because the multi-call binary's command names collide with this
+ * project's own programs - /bin/ls is a lean_os ELF before it is a link
+ * to /bin/toybox - and M89's third bullet decided which one wins. The
+ * record carries the type as well as the inode number (see
+ * leanfs_dirent_t), so changing one without the other would leave a
+ * directory that lists a link as a regular file.
+ *
+ * Returns 0 if the name was not there. */
+static int dir_repoint(leanfs_inode_t *dir, const char *name, int inode_idx) {
+    uint32_t name_len = (uint32_t)strlen(name);
+    uint32_t blocks = dir_nblocks(dir);
+    for (uint32_t b = 0; b < blocks; b++) {
+        dir_block_read(dir, b);
+        int32_t off = dir_block_find(name, name_len);
+        if (off >= 0) {
+            leanfs_dirent_t *r = dir_rec((uint32_t)off);
+            r->inode = (uint32_t)inode_idx;
+            r->type = (uint8_t)inodes[inode_idx].type;
+            write_block(map_block(dir, b), dir_block);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* Adds a record, reusing a hole before growing the directory - the same
@@ -1052,10 +1081,16 @@ static int resolve_dir(const char *path) {
 
 static void usage(const char *argv0) {
     fprintf(stderr, "usage: %s <disk-image> <local-file> <leanfs-path>\n", argv0);
-    fprintf(stderr, "       %s -r <disk-image> <local-dir> <leanfs-dir>\n\n", argv0);
+    fprintf(stderr, "       %s -r <disk-image> <local-dir> <leanfs-dir>\n", argv0);
+    fprintf(stderr, "       %s -s <disk-image> <target> <leanfs-path>\n\n", argv0);
     fprintf(stderr, "  Writes into disk-image's leanfs filesystem without booting anything.\n");
     fprintf(stderr, "  leanfs paths are absolute (\"/bin/yourprog\"); missing parent\n");
     fprintf(stderr, "  directories are created.\n\n");
+    fprintf(stderr, "  -s makes leanfs-path a symbolic link to target. `target` is a\n");
+    fprintf(stderr, "  string stored verbatim and is NOT resolved on the host - the link\n");
+    fprintf(stderr, "  is being made for a filesystem this host cannot see. M89 added it\n");
+    fprintf(stderr, "  for the multi-call binary, which needs one link per command name\n");
+    fprintf(stderr, "  and has no host-side tree to copy them out of.\n\n");
     fprintf(stderr, "  -r copies a whole host directory tree, preserving symbolic links,\n");
     fprintf(stderr, "  hard links and modification times, and writes /.image-manifest\n");
     fprintf(stderr, "  describing what it put there.\n\n");
@@ -1075,14 +1110,16 @@ int main(int argc, char **argv) {
     }
 
     int recursive = (argc >= 2 && strcmp(argv[1], "-r") == 0);
-    if ((recursive && argc != 5) || (!recursive && argc != 4)) {
+    int symlink_mode = (argc >= 2 && strcmp(argv[1], "-s") == 0);
+    int flagged = recursive || symlink_mode;
+    if ((flagged && argc != 5) || (!flagged && argc != 4)) {
         usage(argv[0]);
         return 1;
     }
 
-    const char *image_path  = argv[recursive ? 2 : 1];
-    const char *local_path  = argv[recursive ? 3 : 2];
-    const char *leanfs_path = argv[recursive ? 4 : 3];
+    const char *image_path  = argv[flagged ? 2 : 1];
+    const char *local_path  = argv[flagged ? 3 : 2];
+    const char *leanfs_path = argv[flagged ? 4 : 3];
 
     if (recursive) {
         struct stat st;
@@ -1116,6 +1153,48 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    /* M89: a symbolic link whose target is a string rather than a path on
+     * this host. The recursive mode above copies links it finds; this
+     * makes one that has no host-side original - which is what a
+     * multi-call binary needs, since its hundred and fifty names exist
+     * only on the machine being built. */
+    if (symlink_mode) {
+        size_t tlen = strlen(local_path);
+        if (tlen == 0 || tlen >= LEANFS_MAX_PATH) {
+            die("the link target is empty or longer than a path");
+        }
+        image_open(image_path);
+        char leaf[LEANFS_MAX_NAME + 1];
+        int parent = resolve_parent(leanfs_path, leaf);
+        int idx = dir_lookup(&inodes[parent], leaf);
+        if (idx >= 0 && inodes[idx].type == LEANFS_TYPE_LINK) {
+            free_inode_blocks(&inodes[idx]); /* re-pointing an existing link */
+        } else if (idx >= 0) {
+            if (inodes[idx].type == LEANFS_TYPE_DIR) {
+                die("that path already names a directory");
+            }
+            /* A regular file being replaced by a link. This is the
+             * multi-call install overwriting one of this project's own
+             * programs, which M89 decided in favour of the ported name -
+             * see the Makefile's `toybox` target. The old inode's blocks
+             * are released and the directory record is repointed, so the
+             * name never stops resolving. */
+            free_inode_blocks(&inodes[idx]);
+            memset(&inodes[idx], 0, sizeof(inodes[idx]));
+            idx = alloc_inode(LEANFS_TYPE_LINK);
+            dir_repoint(&inodes[parent], leaf, idx);
+        } else {
+            idx = alloc_inode(LEANFS_TYPE_LINK);
+            dir_add(&inodes[parent], leaf, idx);
+        }
+        inode_write_all(&inodes[idx], (const uint8_t *)local_path, tlen,
+                        (uint32_t)time(NULL));
+        save_all();
+        fclose(img);
+        printf("leanfs-put: %s -> %s (symlink)\n", leanfs_path, local_path);
+        return 0;
+    }
+
     struct stat st;
     if (lstat(local_path, &st) != 0 || !S_ISREG(st.st_mode)) {
         die("local-file is not a regular file this tool can read");
@@ -1134,7 +1213,18 @@ int main(int argc, char **argv) {
     int parent = resolve_parent(leanfs_path, leaf);
 
     int idx = dir_lookup(&inodes[parent], leaf);
-    if (idx >= 0) {
+    if (idx >= 0 && inodes[idx].type == LEANFS_TYPE_LINK) {
+        /* M89: a symbolic link being replaced by a file. The mirror of
+         * the -s path's file-to-link case, and needed for the same
+         * reason: `make preseed` after `make toybox` writes a program
+         * over a name a previous install had turned into a link, and a
+         * tool that could only go one way would leave an image nothing
+         * could put back. */
+        free_inode_blocks(&inodes[idx]);
+        memset(&inodes[idx], 0, sizeof(inodes[idx]));
+        idx = alloc_inode(LEANFS_TYPE_FILE);
+        dir_repoint(&inodes[parent], leaf, idx);
+    } else if (idx >= 0) {
         if (inodes[idx].type != LEANFS_TYPE_FILE) {
             die("that path already names a directory");
         }

@@ -512,6 +512,15 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
      * open-file entry rather than in this slot, so two fds made by
      * SYS_dup2 advance one position between them. */
     if (slot->type == FD_FILE) {
+        /* M89: a directory can be open (see leanfs_open) and cannot be
+         * read. Its bytes are leanfs's own records, and handing those to
+         * a program would be exporting the on-disk format through a
+         * call that promises file contents. SYS_getdents is the call
+         * that reads a directory, and it takes a path. */
+        leanfs_stat_t st;
+        if (vfs_handle_stat(slot->file->handle, &st) == 0 && st.is_dir) {
+            return -1;
+        }
         int64_t n = vfs_handle_read(slot->file->handle, dst, (size_t)len, slot->file->offset);
         if (n < 0) {
             return -1;
@@ -791,7 +800,11 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
      * refused: half an argument names something else, and a program
      * seeing fewer arguments than it was given is a failure it can
      * report itself. */
-    char *arg = (char *)kmalloc(PAGE_SIZE);
+    /* M89: the staging buffer is the argument region's size, not one
+     * page. It was a page when SPAWN_MAX_ARGS was 16; both moved for the
+     * same reason - see SPAWN_MAX_ARGS and USER_ARG_PAGES. Heap rather
+     * than stack: 128 KiB does not fit in a 32 KiB kernel stack. */
+    char *arg = (char *)kmalloc(USER_ARG_BYTES);
     if (!arg) {
         return SPAWN_ERR_NO_MEMORY;
     }
@@ -818,7 +831,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
                 break;
             }
             char *dst = arg + used;
-            size_t room = PAGE_SIZE - used;
+            size_t room = USER_ARG_BYTES - used;
             if (room < 2 || copy_str_from_user(dst, slot, room) != 0) {
                 break;
             }
@@ -1291,7 +1304,7 @@ static long sys_getdents(uint64_t path_ptr, uint64_t cookie_ptr, uint64_t buf,
         os_dirent_t rec;
         rec.ino = e.inode;
         rec.reclen = (unsigned short)need;
-        rec.type = e.is_dir ? OS_DT_DIR : OS_DT_REG;
+        rec.type = e.is_link ? OS_DT_LNK : (e.is_dir ? OS_DT_DIR : OS_DT_REG);
         rec.name_len = (unsigned char)name_len;
         if (copy_to_user(buf + written, &rec, sizeof(rec)) != 0 ||
             copy_to_user(buf + written + sizeof(rec), e.name, name_len + 1) != 0) {
@@ -1569,6 +1582,103 @@ static long sys_fsync(uint64_t fd, uint64_t a2, uint64_t a3,
     return 0;
 }
 
+/* M89: alarm(2) - see SYS_alarm and sched_set_alarm. */
+static long sys_alarm(uint64_t seconds, uint64_t a2, uint64_t a3,
+                      uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    /* Clamped rather than refused: a caller asking for more than 68
+     * years of delay has made an arithmetic mistake, and the honest
+     * outcome is the longest alarm this can express rather than an error
+     * it will not check. */
+    if (seconds > 0xffffffffu) {
+        seconds = 0xffffffffu;
+    }
+    return (long)sched_set_alarm(sched_current(), (unsigned int)seconds);
+}
+
+/* M89: how much memory there is - see SYS_meminfo. */
+static long sys_meminfo(uint64_t out_ptr, uint64_t a2, uint64_t a3,
+                        uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    os_meminfo_t info;
+    info.total_frames = pmm_total_frame_count();
+    info.free_frames = pmm_free_frame_count();
+    info.page_size = PAGE_SIZE;
+    if (copy_to_user(out_ptr, &info, sizeof(info)) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* M89: flush everything - see SYS_sync, and sys_fsync above for why the
+ * two calls exist rather than one taking a sentinel descriptor. */
+static long sys_sync(uint64_t a1, uint64_t a2, uint64_t a3,
+                     uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    vfs_sync();
+    return 0;
+}
+
+/* M89: who spawned this - see SYS_getppid. */
+static long sys_getppid(uint64_t a1, uint64_t a2, uint64_t a3,
+                        uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    return sched_current()->parent_id;
+}
+
+/* M89: the name behind a descriptor - see SYS_fdpath.
+ *
+ * A read of a string this kernel already holds, so the only interesting
+ * part is what it refuses: a descriptor that is not an open file has no
+ * path at all, and one whose path did not fit in the open-file entry has
+ * a truncated one, which is worse than none. Both are -1. */
+static long sys_fdpath(uint64_t fd, uint64_t out_ptr, uint64_t out_len,
+                       uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (fd >= MAX_FDS) {
+        return -1;
+    }
+    task_t *self = sched_current();
+    if (self->fds[fd].type != FD_FILE || !self->fds[fd].file) {
+        return -1;
+    }
+    const char *p = self->fds[fd].file->path;
+    if (p[0] != '/') {
+        return -1; /* recorded as "" because it did not fit */
+    }
+    uint64_t n = 0;
+    while (p[n]) {
+        n++;
+    }
+    if (out_len < n + 1) {
+        return -1;
+    }
+    if (copy_to_user(out_ptr, p, n + 1) != 0) {
+        return -1;
+    }
+    return (long)n;
+}
+
 /* ---- M88 (second attempt) ---------------------------------------------
  *
  * See the ABI notes at SYS_rusage, SYS_statvfs and SYS_utime for what
@@ -1684,6 +1794,7 @@ static long sys_lstat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3,
     out.mtime = st.mtime;
     out.is_dir = st.is_dir;
     out.is_link = st.is_link;
+    out.inode = st.inode; /* M89 */
     return copy_to_user(out_ptr, &out, sizeof(out));
 }
 
@@ -1793,6 +1904,41 @@ static long sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
         t->fg_pgid = pgid;
         return 0;
     }
+    /* M89: give up the controlling terminal.
+     *
+     * Only the session that owns this terminal may release it, and only
+     * a caller that actually has one - a process with no controlling
+     * terminal calling this is a program that thinks it detached and did
+     * not, which is worth an error rather than a silent success.
+     *
+     * Releasing it leaves fg_pgid at 0 as well as sid: a terminal with
+     * no session must not keep pointing at a foreground group, because
+     * the next session to claim it would inherit somebody else's job as
+     * its own foreground. */
+    /* M89: claim this terminal. The two rules are POSIX's, and each one
+     * stops a real mistake: only a session leader may claim (so a child
+     * cannot re-point its parent's session at a different terminal), and
+     * only an unowned terminal may be claimed (so one session cannot
+     * take another's). `arg` is the "steal it anyway" flag on Linux and
+     * is ignored here - stealing needs a privilege model this machine
+     * does not have, and silently honouring it would be the fake check
+     * M65 refused. */
+    case TIOCSCTTY:
+        if (self->sid != self->id) {
+            return -1; /* not a session leader */
+        }
+        if (t->sid != 0 && t->sid != self->sid) {
+            return -1; /* somebody else's terminal */
+        }
+        t->sid = self->sid;
+        return 0;
+    case TIOCNOTTY:
+        if (t->sid == 0 || t->sid != self->sid) {
+            return -1;
+        }
+        t->sid = 0;
+        t->fg_pgid = 0;
+        return 0;
     default:
         return -1;
     }
@@ -2652,8 +2798,34 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
     if ((flags & OPEN_EXCL) && !(flags & OPEN_CREATE)) {
         return -1; /* O_EXCL without O_CREAT is undefined; refusing is the honest reading */
     }
+    /* M89: O_NOFOLLOW, which M87 named and did not land.
+     *
+     * Asked before the open rather than during it, which makes it a
+     * check and not a guarantee: a symlink created between the lstat and
+     * the open is followed. That is the same non-atomicity <fcntl.h>
+     * documents for the *at() family, for the same reason - one
+     * principal, no adversary - and it is written here rather than left
+     * to be inferred from the absence of a lock. */
+    if (flags & OPEN_NOFOLLOW) {
+        leanfs_stat_t st;
+        if (vfs_lstat(path, &st) == 0 && st.is_link) {
+            return -1;
+        }
+    }
     int handle = vfs_open(path, create_flags);
     if (handle < 0) {
+        return -1;
+    }
+    /* M89: a directory opens read-only and for nothing else.
+     *
+     * leanfs_open will now hand back a directory handle (see its note on
+     * why the *at() family needs one). Everything that would modify it
+     * is refused here rather than there, because "may I write to this"
+     * is a question about the caller's flags and leanfs_open does not
+     * see them. A write to a directory that succeeded would be writing
+     * over its records. */
+    if (vfs_is_dir(path) &&
+        (flags & (OPEN_WRITE | OPEN_TRUNCATE | OPEN_APPEND | OPEN_CREATE))) {
         return -1;
     }
     if ((flags & OPEN_TRUNCATE) && writable && vfs_handle_truncate(handle) != 0) {
@@ -2664,7 +2836,7 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
     if (fd < 0) {
         return -1;
     }
-    openfile_t *of = openfile_alloc(handle, writable);
+    openfile_t *of = openfile_alloc(handle, writable, path);
     if (!of) {
         return -1;
     }
@@ -2728,6 +2900,7 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
      * links, so whatever it landed on is by definition not one.
      * SYS_lstat is the call that can say otherwise. */
     out.is_link = 0;
+    out.inode = st.inode; /* M89 - see os_stat_t */
     return copy_to_user(out_ptr, &out, sizeof(out));
 }
 
@@ -3212,6 +3385,7 @@ static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
      * what this handle refers to is whatever the link pointed at - which
      * is why fstat has no lstat counterpart anywhere. */
     out.is_link = 0;
+    out.inode = st.inode; /* M89 */
     return copy_to_user(out_ptr, &out, sizeof(out)) == 0 ? 0 : -1;
 }
 
@@ -4516,6 +4690,11 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_rusage] = sys_rusage,
     [SYS_statvfs] = sys_statvfs,
     [SYS_utime] = sys_utime,
+    [SYS_fdpath] = sys_fdpath,
+    [SYS_getppid] = sys_getppid,
+    [SYS_sync] = sys_sync,
+    [SYS_meminfo] = sys_meminfo,
+    [SYS_alarm] = sys_alarm,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

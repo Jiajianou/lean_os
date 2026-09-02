@@ -22,6 +22,8 @@
  */
 #pragma once
 
+#include <sys/resource.h> /* M89: struct rusage, which wait4 reports into */
+
 #include <sys/types.h>
 
 /* Return immediately with 0 if no child has exited, rather than waiting.
@@ -45,6 +47,23 @@
  * form - is refused rather than quietly treated as -1, because process
  * groups do not mean anything here yet. */
 pid_t waitpid(pid_t pid, int *status, int options);
+
+/* M89: waitpid with the child's resource usage.
+ *
+ * `wait4` is BSD's and `wait3` is the same call without the pid. The
+ * usage it reports is what SYS_rusage(OS_RUSAGE_CHILDREN) knows -
+ * reaped children's CPU time, in the two fields this machine actually
+ * measures - and every other field of `struct rusage` is 0, which
+ * <sys/resource.h> already documents for getrusage.
+ *
+ * The one thing worth stating: the usage is the *cumulative* total for
+ * every reaped child, not this one child's. This kernel accounts
+ * children's time into one pair of counters at reap (see SYS_rusage),
+ * and there is nowhere for a per-child figure to come from. A caller
+ * that wants one child's cost takes the difference across the call,
+ * which is what `time` does anyway. */
+pid_t wait4(pid_t pid, int *status, int options, struct rusage *usage);
+pid_t wait3(int *status, int options, struct rusage *usage);
 
 /* waitpid(-1, status, 0), which is all `wait` has ever been. */
 pid_t wait(int *status);

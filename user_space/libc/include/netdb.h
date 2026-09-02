@@ -42,6 +42,16 @@ struct hostent {
 #define AI_CANONNAME   0x02
 #define AI_NUMERICHOST 0x04
 #define AI_NUMERICSERV 0x400
+/* M89: accepted and ignored, and the reason is that there is nothing for
+ * it to select. AI_ADDRCONFIG asks getaddrinfo to return only families
+ * this machine has an address in; there is exactly one family here
+ * (AF_INET - see <netinet/in.h> on IPv6), so the filtered answer and the
+ * unfiltered one are the same list. AI_ALL and AI_V4MAPPED are the same
+ * argument from the other side: both describe how to present v6
+ * addresses, and there are none. */
+#define AI_ADDRCONFIG  0x20
+#define AI_ALL         0x10
+#define AI_V4MAPPED    0x08
 
 #define EAI_BADFLAGS  -1
 #define EAI_NONAME    -2
@@ -64,6 +74,11 @@ struct hostent {
 #define NO_DATA        4
 
 extern int h_errno;
+
+/* M89: the message for an h_errno value. Four codes, four strings, and
+ * an unknown one says so rather than returning NULL - which is what a
+ * caller printing it would then dereference. */
+const char *hstrerror(int err);
 
 int  getaddrinfo(const char *node, const char *service,
                  const struct addrinfo *hints, struct addrinfo **res);

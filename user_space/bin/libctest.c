@@ -764,8 +764,30 @@ int main(void) {
         if (sysconf(_SC_OPEN_MAX) <= 0 || sysconf(_SC_CLK_TCK) <= 0) {
             fail("sysconf could not state a limit this machine does have");
         }
-        if (sysconf(_SC_PHYS_PAGES) != -1) {
-            fail("sysconf answered a question this machine cannot answer");
+        /* M89: this asserted -1 for one milestone, on the grounds that
+         * the kernel knew and no syscall reported it. SYS_meminfo does
+         * now, so the assertion inverts - and what is checked is the
+         * *relationship* rather than a number, because the number is a
+         * fact about the guest QEMU was given rather than about this
+         * code: there must be memory, and the free part of it cannot be
+         * more than all of it. A bug that swapped the two fields, or one
+         * that reported bytes where frames were meant, fails this. */
+        long phys = sysconf(_SC_PHYS_PAGES);
+        long avail = sysconf(_SC_AVPHYS_PAGES);
+        if (phys <= 0 || avail < 0 || avail > phys) {
+            fail("sysconf's memory answers are not a machine's memory");
+        }
+        /* M89: the POSIX options, which are the useful half of sysconf.
+         * Two that must be positive because this machine genuinely has
+         * them, and two that must be -1 because it genuinely does not -
+         * the second pair being the half a stub gets wrong, since a
+         * sysconf that answered 200809L for everything would satisfy
+         * every positive check ever written. */
+        if (sysconf(_SC_THREADS) <= 0 || sysconf(_SC_JOB_CONTROL) <= 0) {
+            fail("sysconf denies an option this machine implements");
+        }
+        if (sysconf(_SC_MESSAGE_PASSING) != -1 || sysconf(_SC_TIMERS) != -1) {
+            fail("sysconf claims an option this machine does not have");
         }
         if (sysconf(-12345) != -1) {
             fail("sysconf accepted a name it does not know");

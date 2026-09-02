@@ -8292,31 +8292,34 @@ that now knows what a character is. No number moved in `tests/budgets.tsv`:
 the tick accounting is two increments inside an interrupt that was
 already running, and the text path decodes bytes it was already reading.
 
-### M89 — Somebody else's userland [~]
+### M89 — Somebody else's userland [x]
 
-**Status:** the libc surface toybox asks for has landed; the wall behind it
-has not. See the progress note below.
+**Status:** done on the third attempt. Toybox builds, installs and runs:
+`/bin` holds 143 command names nobody here wrote, and the five-stage
+pipeline this milestone chose as its own test passes as a boot marker.
+The first two attempts are recorded below — the header pass, and then
+the wall that was not a surface.
 
 *Scheduled fourth of the five before M94 — see "Before M94" below, which
 also hands this milestone M87's unlanded `*at()` family. This is where
 that surface gets asked for by a program instead of by a checklist.*
 
-- [ ] Port **toybox** (or busybox) — M63's rule at the largest scale it
+- [x] Port **toybox** (or busybox) — M63's rule at the largest scale it
       goes: its build's own errors are the specification, and no patch
       to its source. One static binary, multi-call, a hundred and fifty
       or so utilities
-- [ ] `/bin` stops being six programs. Today it is `ls`, `cat`, `cp`,
+- [x] `/bin` stops being six programs. Today it is `ls`, `cat`, `cp`,
       `echo`, `env` and `sh`; there is no `rm`, no `mv`, no `mkdir`, no
       `ps`, no `grep`, no `sed`, no `find`, no `sort`, no `wc`, no
       `test`, no `tar`, no `xargs` — and every one of those is a program
       a script someone else wrote assumes without thinking about it
-- [ ] The lean_os programs that overlap stay, and this is a real
+- [~] The lean_os programs that overlap stay, and this is a real
       decision rather than sentiment: `ls` here knows about leanfs's own
       shape and `caps` has no toybox equivalent. Where toybox and this
       tree both provide a name, the one in `/bin` is the ported one and
       the lean_os one keeps its own name, because a script does not care
       and a person might
-- [ ] This milestone is also the arc's own test. Toybox is the densest
+- [x] This milestone is also the arc's own test. Toybox is the densest
       single consumer of the POSIX surface that exists in one build:
       whatever M81–M88 got wrong, its build breaks on, and it breaks
       with a compiler error naming the thing rather than with a desktop
@@ -8329,11 +8332,12 @@ over a tree that could not have existed before M81, interruptible with
 `^C` by M85. One command line that is false if any milestone in the arc
 is incomplete.
 
-#### Progress — the libc surface, and the wall that is not a surface [~]
+#### First and second attempts — the libc surface, and the wall that is not a surface [x]
 
-*In progress. Toybox does not build yet, and this entry is written at
-the point where what remains stopped being a category and became a
-list.*
+*Written when toybox did not build yet, at the point where what remained
+stopped being a category and became a list. Kept as it was: the third
+attempt below is what finished it, and what this entry got right about
+the shape of the work is more useful than a rewrite would be.*
 
 **The method worked exactly as the bullet said it would.** *"Its build's
 own errors are the specification"* - so the loop was: run toybox's own
@@ -8456,6 +8460,158 @@ collapsed to an empty range before the component scan could see it, and
 not. Every case in `tests/test_fnmatch.c` is one POSIX tabulates, which
 is how it was caught: the table has four inputs a first implementation
 gets wrong and this was one of them.
+
+#### Third attempt — the build, the boot, and eight bugs it found [x]
+
+**It runs.** `tools/build-toybox.sh` produces a 438 KiB static ELF64 for
+this machine, `make toybox` writes it to `/bin/toybox` and makes 143
+command names point at it, and the boot self-test battery runs M89's own
+command line and grades what comes out:
+
+```
+[m89] somebody else's userland: find, xargs, grep, sort and uniq -
+five programs nobody here wrote, one multi-call binary reached through
+five symbolic links, connected by four pipes across five forked and
+exec'd processes, over a tree made by mkdir - self-test passed.
+```
+
+**The list at the end of the second attempt was the specification and it
+was accurate.** `openat`, `fstatat`, `mkdirat`, `readlinkat`, `getline`,
+`getdelim`, `sscanf`, `dprintf`, `umask`, `fchmod`, `fchmodat`,
+`fchown`, `fdopendir`, `nanosleep`, `cfmakeraw`, `cfsetspeed`, the `_r`
+forms, `sigjmp_buf`, `<mntent.h>` and `sockaddr_in6` all landed, plus
+what the next round of errors named: `getopt`/`getopt_long`, `strptime`,
+`ctime`, `mkstemp`, `mkdtemp`, `strndup`, `stpcpy`, `memmem`, `memccpy`,
+`strnlen`, `random`, `pathconf`, `confstr`, `ttyname`, `klogctl`,
+`sysinfo`, `settimeofday`, `wait4`, `alarm`, `dup`, `setsid`, `fchdir`,
+`ioctl`, `sync`, `locale_t`, and the whole `_SC_*` set.
+
+**Six things the kernel had to grow, and every one of them was found by a
+program rather than by a checklist:**
+
+- **`SYS_fdpath`** — the *at() family resolves a relative name against a
+  directory named by a descriptor, and a descriptor here pointed at an
+  inode handle, which has no name. One call that hands the path back,
+  rather than a second copy of eight path syscalls each taking a dirfd.
+- **A directory can be opened.** `leanfs_open` refused one for
+  thirty-six milestones and nothing minded, because every directory
+  operation took a path. `ls`, `find` and `du` all walk a tree by holding
+  the directory open, and an open that refuses is where every one of them
+  stops.
+- **`st_ino` is a real number.** `<sys/stat.h>` documented it as "always
+  0" and the cost turned out to be larger than it looked: **every file on
+  this machine had the same identity**, so every program that compares
+  `(st_dev, st_ino)` to ask "are these the same file" got yes. toybox's
+  `cp` asks exactly that before copying and refused to copy anything at
+  all. This is the best bug of the milestone: it was found on the first
+  day a ported program ran, by a check written to protect a user from
+  themselves.
+- **`SPAWN_MAX_ARGS` 16 → 256 and the argument region 8 KiB → 128 KiB.**
+  `xargs` sizes its batches from `sysconf(_SC_ARG_MAX)` and prints
+  "command too long" rather than running when the limit is smaller than
+  one command plus the environment. Sixteen arguments was chosen when the
+  longest command line on this machine was `cp src dst`. The region is
+  128 KiB of *address space* and only the pages a vector fills are
+  mapped, so the common case is now one page where it used to be two.
+- **`SYS_meminfo`, `SYS_sync`, `SYS_getppid`, `SYS_alarm`.** Four numbers
+  and one timer the kernel already had and had never been asked for.
+  `alarm` is the only new mechanism among them: the first timer here that
+  interrupts a *running* task rather than ending a sleep.
+- **`TIOCSCTTY`/`TIOCNOTTY`**, `SIGWINCH` and nine more signal numbers,
+  and eleven termios flags — all carried and ignored, each said so
+  individually rather than in a summary.
+
+**And a bug in a rule this project wrote, exposed by a hundred and fifty
+symbolic links.** M60 decided that a trailing slash on a file must be
+refused, because `/bin/ls/` "is saying something untrue about `ls`". The
+resolver lost the slash whenever it followed a final symbolic link, so
+`/bin/ls/` resolved happily — and nothing noticed for two milestones
+because nothing had ever put a symbolic link in `/bin`. The self-test
+that caught it had been checking `/bin/ls/` the whole time; what changed
+is that `/bin/ls` became a link.
+
+**Three things this libc was quietly getting wrong, found by the two new
+differential tests and by a ported program:**
+
+- **`sscanf` returned 0 for an empty input where POSIX says EOF.** A
+  program looping `while (sscanf(...) != EOF)` never terminates. Found by
+  `tools/scanf-test.sh` on its first run — the third differential test in
+  this tree, after the shell's and the regex engine's, and it earned its
+  place in the same way both of those did.
+- **`mkdir` set no errno**, so `mkdir -p` failed on a directory that
+  already existed: the whole construct is "create it and tolerate
+  EEXIST". Every path syscall here reports failure as -1 and nothing
+  else, which was survivable while every caller was in this tree. Libc
+  now infers an errno from questions it can still ask — see
+  `__lean_path_errno`, which is honest about being an inference.
+- **`execvp` with no PATH searched the current directory.** The note
+  there said that was "what the standard says and not what most people
+  expect", which was a misreading: POSIX says an unset PATH uses an
+  implementation-defined default that finds the standard utilities, which
+  is `confstr(_CS_PATH)` and is `/bin`. `xargs` exec's `grep` by name and
+  every process the kernel starts has an empty environment.
+
+**The third bullet is corrected rather than ticked, and the graded boot
+is what corrected it.** That bullet says the ported name wins a
+collision. Installed that way, three self-tests fail: M73 fetches from
+lean_os's `httpd` over loopback and got toybox's, which is a different
+program; M60 spawns `/bin/cp`; and `/bin/sh` is the shell every fixture
+runs in. So the rule is the reverse — **a name this project already ships
+keeps its program, and toybox's version of that name is `toybox <name>`**
+— which is what a multi-call binary is for. Seven names are kept that
+way and 143 are links. The bullet's own reasoning survives the reversal:
+it argued the overlap should stay *because* the lean_os programs know
+things toybox's do not. The sentence after it was a guess about which
+name should point where, made before the collision set was known.
+
+**Two host requirements, and one of them is a shim rather than a
+package.** Toybox's code generation needs GNU sed, which
+`docs/toolchain.md` already recorded. It also pipes `gzip` output through
+`od -Anone -vtx1` into a `sed` that turns each space into `,0x` — and BSD
+`od`, which is what macOS has, indents its lines and pads them out, so
+the same `sed` produces `,0x,0x,0x1f` and the compiler stops at "invalid
+suffix 'x' on integer constant". Requiring coreutils for one command in
+one build step was the wrong trade against three substitutions, so
+`tools/build-toybox.sh` puts a shim on PATH for the duration of the
+build. `third_party/` and the patch series both stay out of it: what is
+wrong is an assumption about the machine doing the building, not anything
+about lean_os.
+
+**What is deliberately not built, and why that is configuration rather
+than a gap.** Forty-odd commands are switched off in
+`tools/build-toybox.sh`, listed **by source file** and with the reason
+next to each — `mount` because there is no `mount(2)`, `swapon` because
+there is no swap, `su` because there is one principal, `dmesg` kept
+because `klogctl` is real here over M70's kernel log. Listing by file
+rather than by config symbol is a detail that cost an hour: one `.c` file
+often declares several commands (`taskset.c` declares `nproc` too), and
+turning off one of them still compiles the file.
+
+**Two more patch hunks, and the rule they were checked against.** The
+patch series grew a `__lean_os__` branch for toybox's file-change
+notification (there is none here, of any kind, so the three functions
+name the reason and stop) and one line adding lean_os to the `#if` that
+includes `<sys/xattr.h>`. Both are the "add an OS to a portability layer"
+kind that M94 already distinguishes from patching somebody's passes.
+`third_party/toybox` is still byte-identical to the published tarball.
+
+**What it cost.** The libc grew about 2,600 lines across sixteen files
+and eleven new headers; the kernel grew four syscalls, an alarm, and
+about 200 lines. Two new test instruments: `tools/scanf-test.sh` (64
+cases against the host's own sscanf) and `tests/test_getopt.c` (11 tests,
+and the one place in this tree where a differential test is *refused* on
+purpose — GNU's getopt permutes and BSD's does not, so "the host's
+answer" would depend on which machine ran the suite, and there is no
+oracle to defer to). The host tier went from 123 tests to 181.
+
+**The lesson, and it is the one M63 wrote down and this milestone paid
+for.** *"Its build's own errors are the specification"* is true and
+incomplete: its build's errors got a binary that linked, and then its
+**runtime** errors found six kernel gaps and three libc bugs that no
+amount of reading headers would have. Every one of them had been there
+for milestones. A surface that compiles is not a surface that works, and
+the only thing that tells the two apart is a program nobody here wrote,
+running.
 
 #### Where this leaves M80, and the deferral M89 is likely to collect
 
@@ -9521,8 +9677,8 @@ the precedent for a milestone reopened under the number it was given.
 |---|---|---|---|
 | 1 | M93 (2nd) `[x]` | the host-side image builder, and the journal measurement | nothing else in the arc can begin until a tarball can reach the disk |
 | 2 | M86 `[x]` | the shell | M94's grading test *is* a shell script |
-| 3 | M88 (2nd) | UTF-8, and the calls a build probes for | every source tree in this arc has non-ASCII bytes in it |
-| 4 | M89 | toybox | a configure run shells out to `sed`, `grep`, `install`; `/bin` has six programs |
+| 3 | M88 (2nd) `[x]` | UTF-8, and the calls a build probes for | every source tree in this arc has non-ASCII bytes in it |
+| 4 | M89 `[x]` | toybox | a configure run shells out to `sed`, `grep`, `install`; `/bin` has six programs |
 | 5 | M91 (2nd) | `MAP_SHARED` and file-backed `mmap` | M91's own words: *"there is no version of M95 that does not need this first"* |
 
 **What this ordering assumes, written down so it can be wrong.** That

@@ -28,6 +28,22 @@ It ends up in the image no more than `nasm` or `qemu` does. Porting
 somebody else's software means accepting their build's requirements, and
 that is the first one.
 
+**The second one is not a package, deliberately.** The same build pipes
+`gzip` output through `od -Anone -vtx1` into a `sed` that turns each
+space into `,0x`. GNU `od` emits exactly one space before each byte; BSD
+`od`, which is what macOS has, indents the line and pads it out with
+trailing spaces — so the same `sed` produces `,0x,0x,0x1f` and the
+compiler stops at "invalid suffix 'x' on integer constant".
+
+That could have been a second `brew install` (`coreutils`, for its
+`god`). It is not, because the normalization is three substitutions and
+requiring a whole package for one command in one build step is the wrong
+trade. `tools/build-toybox.sh` writes a shim and puts it first on PATH
+for the duration of that build. The distinction worth keeping: `gsed` is
+a *requirement of somebody else's build* and is listed above as one; the
+`od` difference is a fact about the machine doing the building, and
+belongs in the script that does the building.
+
 ## M24: the UEFI toolchain is a separate, parallel one
 
 Everything above builds the OS itself (ELF64 kernel/user binaries, the

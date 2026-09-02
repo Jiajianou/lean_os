@@ -1314,6 +1314,28 @@ static int resolve_ex(const char *path, int follow_final) {
                 k_memcpy(walk_next + n, p, rest);
                 n += (uint32_t)rest;
             }
+            /* M89: keep the trailing slash across the rewrite.
+             *
+             * next_component consumes a component's separator, so for
+             * "/bin/ls/" the walk reaches the link with `*p == '\0'` and
+             * the slash is gone by the time the rewritten path is built.
+             * The result was that "/bin/ls/" resolved to whatever `ls`
+             * pointed at, and the check below - which exists to refuse
+             * exactly that claim - never saw a trailing slash to refuse.
+             *
+             * Nothing had a symbolic link in /bin until the toybox port
+             * put a hundred and fifty of them there, which is why a rule
+             * M60 wrote and M87 left intact was wrong for two milestones
+             * without anything noticing. The self-test that caught it
+             * was checking "/bin/ls/" the whole time; what changed is
+             * that /bin/ls became a link. */
+            if (*p == '\0') {
+                size_t was = k_strlen(walk_path);
+                if (was > 1 && walk_path[was - 1] == '/' &&
+                    n + 1 < sizeof(walk_next) && walk_next[n - 1] != '/') {
+                    walk_next[n++] = '/';
+                }
+            }
             walk_next[n] = '\0';
             k_strlcpy(walk_path, walk_next, sizeof(walk_path));
             rewritten = 1;
@@ -1968,6 +1990,7 @@ int leanfs_lstat(const char *path, leanfs_stat_t *out) {
     out->mtime = inodes[idx].mtime;
     out->is_dir = (inodes[idx].type == LEANFS_TYPE_DIR) ? 1 : 0;
     out->is_link = (inodes[idx].type == LEANFS_TYPE_LINK) ? 1 : 0;
+    out->inode = (uint32_t)idx; /* M89 - see leanfs_stat_t */
     return 0;
 }
 
@@ -1983,6 +2006,7 @@ int leanfs_stat(const char *path, leanfs_stat_t *out) {
      * omission - this resolve FOLLOWS links, so whatever it lands on is
      * by definition not one. leanfs_lstat is the call that can say yes. */
     out->is_link = 0;
+    out->inode = (uint32_t)idx; /* M89 */
     return 0;
 }
 
@@ -1993,6 +2017,8 @@ int leanfs_handle_stat(int handle, leanfs_stat_t *out) {
     out->size = inodes[handle].size;
     out->mtime = inodes[handle].mtime;
     out->is_dir = inodes[handle].type == LEANFS_TYPE_DIR;
+    out->is_link = 0; /* a handle names what a link points at, never the link */
+    out->inode = (uint32_t)handle; /* M89: a handle IS the inode index */
     return 0;
 }
 
@@ -2016,7 +2042,28 @@ int leanfs_open(const char *path, int create) {
         if (create & LEANFS_OPEN_EXCL) {
             return -1;
         }
-        return inodes[idx].type == LEANFS_TYPE_FILE ? idx : -1;
+        /* M89: a directory can be opened, read-only.
+         *
+         * This refused one for thirty-six milestones and nothing minded,
+         * because every directory operation here took a path. The *at()
+         * family does not: a program walks a tree by holding the
+         * directory open and naming children relative to that descriptor
+         * (see <fcntl.h> and SYS_fdpath), and toybox's `ls`, `find` and
+         * `du` are all written that way. An open that refuses is where
+         * every one of them stops.
+         *
+         * What an open directory can be used for is deliberately narrow:
+         * it names a place. SYS_read on one is refused (EISDIR, in
+         * sys_read), because the bytes of a directory are leanfs's
+         * records and handing those to a program would be exporting the
+         * on-disk format; SYS_getdents is the call that reads a
+         * directory and it takes a path. Writing, truncating and
+         * appending are refused by sys_open before it gets here. */
+        if (inodes[idx].type == LEANFS_TYPE_FILE ||
+            inodes[idx].type == LEANFS_TYPE_DIR) {
+            return idx;
+        }
+        return -1;
     }
     if (!create) {
         return -1;
@@ -2200,6 +2247,7 @@ static int dir_next(int idx, uint32_t *cookie, leanfs_dir_entry_t *out) {
                 }
                 out->inode = r->inode;
                 out->is_dir = (uint8_t)(r->type == LEANFS_TYPE_DIR);
+                out->is_link = (uint8_t)(r->type == LEANFS_TYPE_LINK);
                 k_memcpy(out->name, dir_block + off + LEANFS_DIRENT_HDR, n);
                 out->name[n] = '\0';
                 *cookie = b * LEANFS_BLOCK_SIZE + off + r->rec_len;

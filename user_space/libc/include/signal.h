@@ -20,6 +20,8 @@
  * would hardcode this file's own location into it. */
 #include_next <signal.h>
 
+#include <sys/types.h> /* M89: pid_t and uid_t, for siginfo_t below */
+
 typedef void (*sighandler_t)(int);
 
 #define SIG_DFL ((sighandler_t)SIG_DFL_ADDR)
@@ -41,10 +43,27 @@ int kill(int pid, int sig);
 /* Sends `sig` to this process. Returns 0, or -1. */
 int raise(int sig);
 
-/* Block/unblock/replace this process's blocked set. `mask` is a plain
- * 32-bit word with bit N meaning signal N, not POSIX's opaque sigset_t -
- * see system_api/include/signal.h for why. `old` may be NULL. */
-int sigprocmask(int how, unsigned int mask, unsigned int *old);
+/* ---- M89: sigprocmask takes pointers, because POSIX says so ----------
+ *
+ * This was `sigprocmask(int how, unsigned int mask, unsigned int *old)`
+ * from M76 to M89, on the argument that the kernel's mask is a plain
+ * word and a pointer to one would be ceremony. That was a reasonable
+ * design for a system whose only callers were in this tree, and it is
+ * the wrong one the moment a program written elsewhere calls it: toybox
+ * passes `&sigset` and gets a diagnostic about making an integer from a
+ * pointer, which is the compiler catching a real ABI difference rather
+ * than a spelling one.
+ *
+ * So the POSIX signature wins. `sigset_t` is still a plain 32-bit word
+ * (see below for why an opaque struct would be a wrapper around a
+ * number), so the change is entirely in how it is passed. `set` may be
+ * NULL to read the mask without changing it, which is the form a program
+ * uses to save it - and which the old signature could not express at
+ * all.
+ */
+typedef unsigned int sigset_t;
+
+int sigprocmask(int how, const sigset_t *set, sigset_t *old);
 
 /* ---- the POSIX spelling -----------------------------------------------
  *
@@ -67,8 +86,6 @@ int sigprocmask(int how, unsigned int mask, unsigned int *old);
  * is broken here; one that loops - which is what every program that
  * handles EINTR correctly already does - works either way.
  */
-typedef unsigned int sigset_t;
-
 struct sigaction {
     sighandler_t sa_handler;
     sigset_t     sa_mask;   /* accepted; the handler's own signal is blocked regardless */
@@ -81,6 +98,54 @@ struct sigaction {
 #define SA_SIGINFO   0x00000004
 #define SA_ONSTACK   0x08000000
 #define SA_RESETHAND 0x80000000
+/* M89: accepted and ignored, and each for a reason worth one line.
+ * SA_NOCLDSTOP asks not to be sent SIGCHLD when a child *stops* - this
+ * kernel only sends SIGCHLD on exit (see sched_raise_signal), so the
+ * flag describes a delivery that never happens. SA_NOCLDWAIT asks that
+ * children be reaped automatically; SYS_wait's bookkeeping is what makes
+ * a child reapable exactly once, and skipping it would leak task slots.
+ */
+#define SA_NOCLDSTOP 0x00000001
+#define SA_NOCLDWAIT 0x00000002
+
+/* M89: `siginfo_t`, declared so that a program which writes a
+ * three-argument handler compiles.
+ *
+ * **Nothing ever fills one in.** SA_SIGINFO is not supported - see
+ * `sa_sigaction` above, which says the same thing - because delivering
+ * one would mean the kernel building a second, larger frame on the
+ * process's own stack for information (a faulting address, a sending
+ * uid) that this machine either does not have or has already reported
+ * another way. A handler installed with SA_SIGINFO is called through
+ * sa_handler with the signal number, which is the one argument that is
+ * always right; the pointer arguments are never passed.
+ *
+ * The fields are the POSIX-required ones, so that the day this kernel
+ * does fill one in it is not a second struct to reconcile. */
+typedef struct {
+    int si_signo;
+    int si_code;
+    int si_errno;
+    pid_t si_pid;
+    uid_t si_uid;
+    void *si_addr;
+    int si_status;
+    long si_band;
+    union {
+        int sival_int;
+        void *sival_ptr;
+    } si_value;
+} siginfo_t;
+
+/* si_code values a program tests for. All of them are 0 here, because
+ * nothing fills a siginfo_t in. */
+#define SI_USER    0
+#define SI_KERNEL  0x80
+#define CLD_EXITED 1
+#define CLD_KILLED 2
+#define CLD_DUMPED 3
+#define CLD_STOPPED 5
+#define CLD_CONTINUED 6
 
 int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
 
@@ -89,3 +154,8 @@ int sigfillset(sigset_t *set);
 int sigaddset(sigset_t *set, int sig);
 int sigdelset(sigset_t *set, int sig);
 int sigismember(const sigset_t *set, int sig);
+
+/* One past the highest signal number, the way every program that loops
+ * over signals spells it. SIG_MAX is the highest; NSIG is the bound. */
+#define NSIG (SIG_MAX + 1)
+

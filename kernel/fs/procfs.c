@@ -17,6 +17,7 @@
  * file behave like a file.
  */
 #include "vfsops.h"
+#include "vfs.h" /* M89: vfs_mount_info, for /proc/mounts */
 
 #include "drivers/pit.h"
 #include "lib/libk.h"
@@ -96,11 +97,15 @@ static uint32_t put_dec(char *dst, uint32_t at, uint32_t cap, uint64_t v) {
  *
  * Parsed rather than tabulated, because half of these paths contain a
  * process id and a table cannot hold those. */
+/* M89: see devfs.c's DEVFS_INO_BASE - one number space, partitioned. */
+#define PROCFS_INO_BASE 0x50000000u
+
 enum {
     P_NONE = 0,
     P_ROOT,       /* /proc */
     P_UPTIME,     /* /proc/uptime */
     P_MEMINFO,    /* /proc/meminfo */
+    P_MOUNTS,     /* /proc/mounts - M89 */
     P_PIDDIR,     /* /proc/N or /proc/self */
     P_STATUS,     /* /proc/N/status */
     P_CMDLINE,    /* /proc/N/cmdline */
@@ -133,6 +138,13 @@ static int classify(const char *rel, int *out_pid) {
     }
     if (k_strcmp(p, "meminfo") == 0) {
         return P_MEMINFO;
+    }
+    /* M89. Every ported program that wants to know what is mounted reads
+     * this file - toybox's df and mount both do, through <mntent.h> -
+     * and the mount table it reports has been real since M87 with no way
+     * to see it from outside the kernel. */
+    if (k_strcmp(p, "mounts") == 0) {
+        return P_MOUNTS;
     }
     /* M101. Readable by anyone who can open the file, unlike SYS_profile
      * which is gated on CAP_PROCESS_LIST - and that difference is
@@ -221,6 +233,26 @@ static void generate(proc_file_t *f, int kind, int pid) {
         at = put_str(f->buf, at, cap, "MemFree:        ");
         at = put_dec(f->buf, at, cap, free_kb);
         at = put_str(f->buf, at, cap, " kB\n");
+        break;
+    }
+    case P_MOUNTS: {
+        /* fstab's five fields after the device, in fstab's order,
+         * because that is what a program parsing this file splits on.
+         * The device column is the filesystem's own name rather than a
+         * block-device path: there is no /dev/sda here, and inventing
+         * one would be a lie a program could act on. The last two are 0
+         * and 0, which is what "not dumped, not fsck'd at boot" means
+         * and is true of every one of these. */
+        const char *prefix;
+        const char *type;
+        for (int i = 0; vfs_mount_info(i, &prefix, &type); i++) {
+            at = put_str(f->buf, at, cap, type);
+            at = put_str(f->buf, at, cap, " ");
+            at = put_str(f->buf, at, cap, prefix);
+            at = put_str(f->buf, at, cap, " ");
+            at = put_str(f->buf, at, cap, type);
+            at = put_str(f->buf, at, cap, " rw 0 0\n");
+        }
         break;
     }
     case P_STATUS: {
@@ -341,6 +373,12 @@ static int proc_stat(const char *rel, leanfs_stat_t *out) {
     }
     out->mtime = 0;
     out->is_dir = (k == P_ROOT || k == P_PIDDIR) ? 1 : 0;
+    out->is_link = 0;
+    /* M89: a number no leanfs inode and no devfs entry can collide with -
+     * see devfs.c's DEVFS_INO_BASE for the whole argument. The kind and
+     * the pid together are what make two /proc files distinguishable,
+     * which is what a program comparing st_ino is asking. */
+    out->inode = PROCFS_INO_BASE + ((uint32_t)pid << 8) + (uint32_t)k;
     if (out->is_dir) {
         out->size = 0;
         return 0;
@@ -438,6 +476,12 @@ static int proc_handle_stat(int handle, leanfs_stat_t *out) {
     out->size = proc_files[handle].len;
     out->mtime = 0;
     out->is_dir = 0;
+    out->is_link = 0;
+    /* M89: distinct per open file rather than per path, which is the
+     * honest number here - two opens of /proc/self/status are two
+     * snapshots with different contents, so calling them the same file
+     * would be a stronger claim than this filesystem can make. */
+    out->inode = PROCFS_INO_BASE + 0x00800000u + (uint32_t)handle;
     return 0;
 }
 
@@ -445,7 +489,8 @@ static int proc_handle_stat(int handle, leanfs_stat_t *out) {
  * task; a pid directory lists its three files. The cookie is an index
  * into whichever of those two lists applies. */
 static const char *const PID_FILES[] = {"status", "cmdline", "exe"};
-static const char *const ROOT_FILES[] = {"uptime", "meminfo", "profile", "syscalls"};
+static const char *const ROOT_FILES[] = {"uptime", "meminfo", "mounts", "profile",
+                                         "syscalls"};
 #define ROOT_FILE_COUNT ((uint32_t)(sizeof(ROOT_FILES) / sizeof(ROOT_FILES[0])))
 
 static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *out) {
@@ -459,6 +504,7 @@ static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *o
         }
         out->inode = 0;
         out->is_dir = 0;
+        out->is_link = 0; /* M89 */
         k_strlcpy(out->name, PID_FILES[i], sizeof(out->name));
         *cookie = i + 1;
         return 1;
@@ -469,6 +515,7 @@ static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *o
     if (i < ROOT_FILE_COUNT) {
         out->inode = 0;
         out->is_dir = 0;
+        out->is_link = 0; /* M89 */
         k_strlcpy(out->name, ROOT_FILES[i], sizeof(out->name));
         *cookie = i + 1;
         return 1;
@@ -485,6 +532,7 @@ static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *o
         if (t && t->state != TASK_TERMINATED) {
             out->inode = (uint32_t)t->id;
             out->is_dir = 1;
+            out->is_link = 0; /* M89 */
             char name[16];
             uint32_t at = put_dec(name, 0, sizeof(name), (uint64_t)t->id);
             name[at] = '\0';

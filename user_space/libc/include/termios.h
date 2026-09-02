@@ -76,3 +76,20 @@ speed_t cfgetispeed(const struct termios *t);
 speed_t cfgetospeed(const struct termios *t);
 int     cfsetispeed(struct termios *t, speed_t speed);
 int     cfsetospeed(struct termios *t, speed_t speed);
+/* Sets both, and therefore fails for both. POSIX's convenience spelling,
+ * and toybox's `stty`-shaped code calls it rather than the pair. */
+int     cfsetspeed(struct termios *t, speed_t speed);
+
+/* ---- M89: cfmakeraw, which is the one of these that does something ----
+ *
+ * It is not a baud rate: it is the exact set of flag clears every
+ * program that wants bytes-as-typed performs by hand, and every one of
+ * the flags it touches that this discipline implements is honoured. So
+ * unlike the four calls above this is a real operation with a real
+ * effect - a terminal it has been applied to delivers ^C as a byte and
+ * echoes nothing, which is what an editor asks for.
+ *
+ * It edits `t` and does not talk to the driver; a caller still has to
+ * hand the result to tcsetattr. That is POSIX's shape and it is the
+ * reason the function can be pure. */
+void    cfmakeraw(struct termios *t);

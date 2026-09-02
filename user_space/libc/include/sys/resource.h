@@ -34,7 +34,39 @@
 #define RLIMIT_NOFILE  5
 #define RLIMIT_AS      6
 #define RLIMIT_NPROC   7
-#define RLIM_NLIMITS   8
+/* M89: the rest of the set, so that a program looping over every limit
+ * has a number for each. All of them report RLIM_INFINITY for the same
+ * reason the eight above do - nothing here enforces a limit; see the
+ * header note. Each names something this machine does not have at all,
+ * which is a second reason and a stronger one: there is no nice value
+ * (M69), no swap to lock against, no signal queue, no message queues,
+ * no realtime priority, no file locks in the kernel and no pending-
+ * signal count beyond one bit per signal. */
+#define RLIMIT_MEMLOCK 8
+#define RLIMIT_RSS     9
+#define RLIMIT_NICE    10
+#define RLIMIT_RTPRIO  11
+#define RLIMIT_SIGPENDING 12
+#define RLIMIT_MSGQUEUE 13
+#define RLIMIT_LOCKS   14
+/* 15, and guarded, because toybox's portability layer defines this one
+ * itself for any system that does not - and a second definition with a
+ * different number would be two names for two different limits that a
+ * program thinks are one. Taking its value is the cheaper half of
+ * agreeing. */
+#ifndef RLIMIT_RTTIME
+#define RLIMIT_RTTIME  15
+#endif
+#define RLIM_NLIMITS   16
+
+/* M89: getpriority/setpriority's `which`. Defined so that a program
+ * naming one compiles; there is no scheduling priority a process can
+ * set here (M69 decided that from a measurement), so both calls are
+ * absent rather than present-and-lying - a program that needs them gets
+ * a link error, which is the loudest possible answer. */
+#define PRIO_PROCESS 0
+#define PRIO_PGRP    1
+#define PRIO_USER    2
 
 typedef uint64_t rlim_t;
 

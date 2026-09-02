@@ -40,3 +40,52 @@ struct sockaddr_in {
 #define IPPROTO_UDP  17
 
 #define INET_ADDRSTRLEN 16
+#define INET6_ADDRSTRLEN 46
+
+/* ---- M89: IPv6, declared and not implemented -------------------------
+ *
+ * There is no IPv6 in this stack. M27 built Ethernet/ARP/IPv4 and M66
+ * built TCP over it; nothing here has ever parsed a 40-byte header or
+ * done neighbour discovery, and this milestone does not add one.
+ *
+ * These declarations exist because a program that has been written for
+ * both families puts a `sockaddr_in6` inside a union next to a
+ * `sockaddr_in` and cannot compile without the type - toybox's
+ * `lib/lib.h` does exactly that, and its `sizeof` decides how big the
+ * union is. A type with no stack behind it is a strictly different thing
+ * from a call that pretends to work: nothing here returns a success for
+ * an AF_INET6 socket. `socket(AF_INET6, ...)` fails with
+ * EAFNOSUPPORT, which is precisely the error a machine with no IPv6 is
+ * supposed to give and the one every dual-stack program already handles
+ * by falling back.
+ *
+ * The layout is the standard one, byte for byte, so that the day a v6
+ * stack exists this is not a second representation to reconcile.
+ */
+struct in6_addr {
+    union {
+        uint8_t  __u6_addr8[16];
+        uint16_t __u6_addr16[8];
+        uint32_t __u6_addr32[4];
+    } __in6_u;
+};
+#define s6_addr   __in6_u.__u6_addr8
+#define s6_addr16 __in6_u.__u6_addr16
+#define s6_addr32 __in6_u.__u6_addr32
+
+struct sockaddr_in6 {
+    sa_family_t     sin6_family;
+    in_port_t       sin6_port;     /* network byte order */
+    uint32_t        sin6_flowinfo;
+    struct in6_addr sin6_addr;
+    uint32_t        sin6_scope_id;
+};
+
+extern const struct in6_addr in6addr_any;
+extern const struct in6_addr in6addr_loopback;
+
+#define IN6ADDR_ANY_INIT      {{{0}}}
+#define IN6ADDR_LOOPBACK_INIT {{{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1}}}
+
+#define IPPROTO_IPV6 41
+#define IPV6_V6ONLY  26

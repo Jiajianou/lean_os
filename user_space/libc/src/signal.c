@@ -1,5 +1,6 @@
 /* user_space/libc/src/signal.c - M76 */
 #include <signal.h>
+#include <setjmp.h>
 
 #include "syscall_wrappers.h"
 
@@ -30,7 +31,16 @@ int raise(int sig) {
     return (int)sys_kill(sys_getpid(), sig);
 }
 
-int sigprocmask(int how, unsigned int mask, unsigned int *old) {
+/* M89: the POSIX signature. `set` may be NULL, which asks to read the
+ * mask without changing it - and the kernel has no such command, so this
+ * expresses it the only way it can: block nothing. SIG_BLOCK with an
+ * empty set is a no-op on any mask, so the old value comes back
+ * unchanged and nothing was modified on the way. */
+int sigprocmask(int how, const sigset_t *set, sigset_t *old) {
+    unsigned int mask = set ? *set : 0u;
+    if (!set) {
+        how = SIG_BLOCK;
+    }
     return (int)sys_sigprocmask(how, mask, old);
 }
 
@@ -109,4 +119,28 @@ int sigismember(const sigset_t *set, int sig) {
         return -1;
     }
     return (*set & (1u << sig)) ? 1 : 0;
+}
+
+/* ---- M89: the mask half of sigsetjmp/siglongjmp ----------------------
+ *
+ * See <setjmp.h> for why this is split between a macro and these two
+ * functions rather than being a pair of ordinary calls.
+ */
+void __sigjmp_save(__sigjmp_state *env, int savemask) {
+    if (!env) {
+        return;
+    }
+    env->savemask = savemask;
+    env->mask = 0;
+    if (savemask) {
+        /* NULL `set` reads without changing - see sigprocmask above. */
+        sigprocmask(SIG_BLOCK, 0, &env->mask);
+    }
+}
+
+void siglongjmp(sigjmp_buf env, int value) {
+    if (env->savemask) {
+        sigprocmask(SIG_SETMASK, &env->mask, 0);
+    }
+    longjmp(env->jb, value);
 }

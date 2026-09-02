@@ -44,6 +44,7 @@ extern int errno;
 #define ENOMEM  12
 #define EACCES  13
 #define EFAULT  14
+#define ENOTBLK 15 /* M89: "not a block device" - nothing here is one, so this is only ever the answer, never the question */
 #define EBUSY   16
 #define EEXIST  17
 #define EXDEV   18
@@ -66,6 +67,15 @@ extern int errno;
 #define ENOSYS  38
 #define ENOTEMPTY 39
 #define ELOOP   40
+/* M89: "no medium found" - what a removable drive with nothing in it
+ * reports. Nothing here can produce it; it is defined so that a program
+ * which tests for it compiles, and it will never be the answer. */
+#define ENOMEDIUM 123
+/* M89: "no data available" - what a read of an extended attribute that
+ * does not exist reports. Nothing here produces it either; see
+ * <sys/xattr.h>, which refuses with ENOTSUP one level before this could
+ * be reached. */
+#define ENODATA 61
 /* M88: a byte sequence that is not valid in this locale's encoding.
  * Unlike the socket codes below, this one is set: every conversion in
  * <wchar.h> reports a malformed or overlong UTF-8 sequence with it, and

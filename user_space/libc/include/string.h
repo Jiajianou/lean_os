@@ -46,3 +46,26 @@ size_t strcspn(const char *s, const char *reject);
 /* M80 groundwork. */
 char *strpbrk(const char *s, const char *accept);
 char *strdup(const char *s);
+/* M89: at most `n` bytes, always NUL-terminated. Unlike strdup this
+ * cannot be expressed with strlen plus malloc without reading past the
+ * end of a string that is not terminated within n, which is exactly the
+ * case it exists for. */
+char *strndup(const char *s, size_t n);
+/* M89: strcpy that returns a pointer to the NUL it wrote rather than to
+ * the start. The whole point is concatenating without rescanning, which
+ * is what makes a loop of them linear instead of quadratic. */
+char *stpcpy(char *dst, const char *src);
+char *stpncpy(char *dst, const char *src, size_t n);
+/* M89: strstr for bytes rather than for strings - the needle and the
+ * haystack may both contain NULs, which is why it cannot be written with
+ * strstr and why a program scanning a downloaded buffer uses it. */
+void *memmem(const void *haystack, size_t hlen, const void *needle, size_t nlen);
+/* M89: copy until `c` is copied or `n` bytes are, and return the byte
+ * after the copied `c` - or NULL if it was not found. The return is the
+ * whole point: it is how a caller tells "I found the terminator" from "I
+ * ran out of room", which memcpy plus memchr cannot do in one pass. */
+void *memccpy(void *dst, const void *src, int c, size_t n);
+/* M89: strlen bounded by `n`, for a field that may not be terminated -
+ * a tar header's name is the case it exists for, and reading past it
+ * with strlen is the bug it prevents. */
+size_t strnlen(const char *s, size_t n);

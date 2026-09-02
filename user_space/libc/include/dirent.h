@@ -32,6 +32,16 @@
 #define DT_UNKNOWN 0
 #define DT_DIR     4
 #define DT_REG     8
+/* M87 gave leanfs symbolic links and SYS_getdents reports them, so this
+ * is a value a real entry can hold rather than one defined for
+ * completeness. The three below are not: leanfs has no device nodes,
+ * FIFOs or sockets, and nothing will ever set them. They are here so a
+ * program that switches on d_type compiles. */
+#define DT_LNK     10
+#define DT_CHR     2
+#define DT_BLK     6
+#define DT_FIFO    1
+#define DT_SOCK    12
 
 struct dirent {
     /* M81: a real inode number.
@@ -64,3 +74,13 @@ struct dirent *readdir(DIR *d);
 
 void rewinddir(DIR *d);
 int closedir(DIR *d);
+
+/* M89: a stream over an already-open directory descriptor, which the
+ * *at() family's users want so that one open serves both the walk and
+ * the path resolution. The DIR takes ownership: closedir closes `fd`.
+ *
+ * `dirfd` reports that descriptor, and reports -1 for a stream opendir
+ * made - which holds a path rather than a descriptor here. See
+ * dirent.c. */
+DIR *fdopendir(int fd);
+int dirfd(DIR *d);

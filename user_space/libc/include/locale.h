@@ -52,3 +52,39 @@ struct lconv {
  * name, and NULL for anything else. */
 char *setlocale(int category, const char *locale);
 struct lconv *localeconv(void);
+
+/* ---- M89: the per-thread locale interface ----------------------------
+ *
+ * POSIX.1-2008's `locale_t`: a locale object a thread can adopt without
+ * changing the process's. There is one locale on this machine, so the
+ * only object these can ever produce is the C locale and there is
+ * nothing for two threads to disagree about.
+ *
+ * `newlocale` accepts the same names `setlocale` does - "C", "POSIX",
+ * "C.UTF-8" and the empty string - and returns NULL for anything else,
+ * which is the same refusal in the same place and is what a program
+ * probing for a locale it wants is asking. It does NOT allocate: there
+ * is one locale object and it is static, so `freelocale` is a no-op and
+ * a program that leaks one loses nothing.
+ *
+ * The masks are a bitfield rather than the category numbers above,
+ * because that is what newlocale takes. LC_GLOBAL_LOCALE is the sentinel
+ * `uselocale` returns for a thread that has not adopted one.
+ */
+typedef struct __locale *locale_t;
+
+#define LC_COLLATE_MASK  (1 << LC_COLLATE)
+#define LC_CTYPE_MASK    (1 << LC_CTYPE)
+#define LC_MONETARY_MASK (1 << LC_MONETARY)
+#define LC_NUMERIC_MASK  (1 << LC_NUMERIC)
+#define LC_TIME_MASK     (1 << LC_TIME)
+#define LC_MESSAGES_MASK (1 << LC_MESSAGES)
+#define LC_ALL_MASK      (LC_COLLATE_MASK | LC_CTYPE_MASK | LC_MONETARY_MASK | \
+                          LC_NUMERIC_MASK | LC_TIME_MASK | LC_MESSAGES_MASK)
+
+#define LC_GLOBAL_LOCALE ((locale_t)-1)
+
+locale_t newlocale(int category_mask, const char *locale, locale_t base);
+locale_t uselocale(locale_t loc);
+locale_t duplocale(locale_t loc);
+void     freelocale(locale_t loc);

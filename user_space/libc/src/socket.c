@@ -282,3 +282,10 @@ int getsockopt(int fd, int level, int option, void *value, socklen_t *len) {
     errno = ENOPROTOOPT;
     return -1;
 }
+
+/* M89: the two well-known v6 addresses, defined so that a program that
+ * references them links. Nothing in this stack will ever hand one to the
+ * kernel - see <netinet/in.h> for why declaring the family without
+ * implementing it is a different thing from pretending it works. */
+const struct in6_addr in6addr_any = IN6ADDR_ANY_INIT;
+const struct in6_addr in6addr_loopback = IN6ADDR_LOOPBACK_INIT;

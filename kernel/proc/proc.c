@@ -178,31 +178,16 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
      * scratch buffer is where "virtually contiguous" is made true before
      * anything depends on it.
      */
+    /* M89: the region is 32 pages of window and only the used ones are
+     * backed - see USER_ARG_PAGES. So the block is built first, the
+     * bytes it actually took are counted, and the frames are allocated
+     * afterwards against that count. `arg_used` is set inside the block
+     * below and is at least one page, because argv[0] always exists. */
     uint64_t arg_frames[USER_ARG_PAGES];
-    for (int i = 0; i < USER_ARG_PAGES; i++) {
-        /* M102: pmm_try_alloc_frame, which is what makes the check below
-         * reachable. It was written against pmm_alloc_frame, which panics
-         * rather than returning 0 - so this careful unwind has been dead
-         * code since it was written, and the machine halted three lines
-         * earlier instead. */
-        arg_frames[i] = pmm_try_alloc_frame();
-        if (arg_frames[i] == 0) {
-            /* Out of frames partway through. Give back whatever was
-             * taken and fail the spawn - the address space goes with it
-             * below, and a process with half an argument region is a
-             * process whose argv[0] may not exist. */
-            for (int j = 0; j < i; j++) {
-                pmm_free_frame(arg_frames[j]);
-            }
-            process_destroy_address_space(pml4_phys);
-            return 0;
-        }
-    }
+    int arg_pages = 0;
+    size_t arg_used = 0;
     char *block = (char *)kmalloc(USER_ARG_BYTES);
     if (!block) {
-        for (int i = 0; i < USER_ARG_PAGES; i++) {
-            pmm_free_frame(arg_frames[i]);
-        }
         process_destroy_address_space(pml4_phys);
         return 0;
     }
@@ -275,8 +260,33 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
             env_stored++;
         }
         header[env_base + (size_t)env_stored] = 0;
+        arg_used = at;
     }
-    for (int i = 0; i < USER_ARG_PAGES; i++) {
+    arg_pages = (int)((arg_used + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (arg_pages < 1) {
+        arg_pages = 1;
+    }
+    for (int i = 0; i < arg_pages; i++) {
+        /* M102: pmm_try_alloc_frame, which is what makes the check below
+         * reachable. It was written against pmm_alloc_frame, which panics
+         * rather than returning 0 - so this careful unwind has been dead
+         * code since it was written, and the machine halted three lines
+         * earlier instead. */
+        arg_frames[i] = pmm_try_alloc_frame();
+        if (arg_frames[i] == 0) {
+            /* Out of frames partway through. Give back whatever was
+             * taken and fail the spawn - the address space goes with it
+             * below, and a process with half an argument region is a
+             * process whose argv[0] may not exist. */
+            for (int j = 0; j < i; j++) {
+                pmm_free_frame(arg_frames[j]);
+            }
+            kfree(block);
+            process_destroy_address_space(pml4_phys);
+            return 0;
+        }
+    }
+    for (int i = 0; i < arg_pages; i++) {
         k_memcpy((void *)arg_frames[i], block + (size_t)i * PAGE_SIZE, PAGE_SIZE);
         /* M102: the last mapping on this path that could halt the
          * machine. A page table is a frame like any other, and the
@@ -288,7 +298,7 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
             /* Frames not yet mapped are not reachable from the address
              * space, so they go back by hand; the ones already mapped go
              * with it. */
-            for (int j = i; j < USER_ARG_PAGES; j++) {
+            for (int j = i; j < arg_pages; j++) {
                 pmm_free_frame(arg_frames[j]);
             }
             kfree(block);

@@ -146,7 +146,7 @@ IMAGE="${LEANOS_IMAGE:-build/os-image.bin}"
 OVMF_CODE="build/ovmf/OVMF_CODE.fd"
 OVMF_VARS_TEMPLATE="build/ovmf/OVMF_VARS.fd"
 OVMF_VARS_RUNTIME="$(mktemp -t qemu-serial-ovmf-vars-XXXXXX.fd)"
-LOG="$(mktemp -t qemu-serial-XXXXXX.log)"
+LOG="${LEANOS_SERIAL_LOG:-$(mktemp -t qemu-serial-XXXXXX.log)}"
 
 if [ ! -f "$IMAGE" ]; then
   echo "No image at $IMAGE yet - run 'make' first." >&2
@@ -310,6 +310,11 @@ REQUIRED_MARKERS=(
   "[m71] files worth trusting:"
   "[m72] a script is a program:"
   "[m86] a shell that is a shell: a function called with a quoted argument,"
+  # M89. Required rather than optional, because run-tests.sh installs the
+  # port before this runs - so an image reaching here without /bin/toybox
+  # is a broken build step rather than a legitimate configuration, and
+  # the "skipped" line the kernel prints in that case is not this marker.
+  "[m89] somebody else's userland: find, xargs, grep, sort and uniq"
   "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m73] names, not numbers:"
   "[m74] the session remembers:"
@@ -451,7 +456,12 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
   "$elapsed" \
   "${boot_secs:-}" >> build/test-history.tsv
 
-rm -f "$LOG" "$OVMF_VARS_RUNTIME"
+# The log is kept when the caller named it: LEANOS_SERIAL_LOG is how a
+# person debugging a failed marker gets to see what the machine actually
+# said, and deleting the file they asked for would be the one thing that
+# makes this harness hard to use.
+[ -n "${LEANOS_SERIAL_LOG:-}" ] || rm -f "$LOG"
+rm -f "$OVMF_VARS_RUNTIME"
 
 if [ "$pass" -eq 1 ]; then
   echo "PASS: ${#REQUIRED_MARKERS[@]}/${#REQUIRED_MARKERS[@]} required boot markers found, no kernel panic."

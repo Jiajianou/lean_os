@@ -96,7 +96,8 @@ int main(void) {
     }
 
     /* ---- a blocked signal waits ------------------------------------- */
-    sigprocmask(SIG_BLOCK, 1u << SIGUSR2, 0);
+    sigset_t usr2 = 1u << SIGUSR2;
+    sigprocmask(SIG_BLOCK, &usr2, 0);
     raise(SIGUSR2);
     /* A syscall, so that delivery would have happened by now if the mask
      * were not holding it. */
@@ -104,7 +105,7 @@ int main(void) {
     if (usr2_count != 0) {
         return 7;
     }
-    sigprocmask(SIG_UNBLOCK, 1u << SIGUSR2, 0);
+    sigprocmask(SIG_UNBLOCK, &usr2, 0);
     sys_uptime_ms();
     if (usr2_count != 1) {
         return 7;

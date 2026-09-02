@@ -645,3 +645,90 @@ FILE *fdopen(int fd, const char *mode) {
     }
     return (FILE *)0;
 }
+
+/* ---- M89: printf to a bare descriptor -------------------------------
+ *
+ * The same one-buffer-one-write shape as vfprintf above and for the same
+ * reason. It does not go through a FILE because its whole point is that
+ * the caller has a descriptor and no stream - see <stdio.h>.
+ */
+int vdprintf(int fd, const char *fmt, va_list ap) {
+    static char line[1024];
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    int len = n < (int)sizeof(line) - 1 ? n : (int)sizeof(line) - 1;
+    if (len > 0) {
+        sys_write(fd, line, (size_t)len);
+    }
+    return n;
+}
+
+int dprintf(int fd, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vdprintf(fd, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+int vsprintf(char *out, const char *fmt, va_list ap) {
+    return vsnprintf(out, (size_t)-1, fmt, ap);
+}
+
+/* ---- M89: getdelim/getline ------------------------------------------
+ *
+ * See <stdio.h> for why a ported program uses these rather than fgets.
+ *
+ * The growth policy is doubling from 128, which matters more here than
+ * it would elsewhere: this stdio is unbuffered, so every byte is a
+ * syscall, and a realloc per byte on top of that would make reading a
+ * file quadratic in a way a person would notice. The buffer is always
+ * NUL-terminated even though the return value is the length, because
+ * every caller in the world treats it as a string as well.
+ */
+long getdelim(char **lineptr, size_t *n, int delim, FILE *f) {
+    if (!lineptr || !n || !f) {
+        return -1;
+    }
+    if (!*lineptr || *n == 0) {
+        size_t want = 128;
+        char *p = (char *)malloc(want);
+        if (!p) {
+            return -1;
+        }
+        *lineptr = p;
+        *n = want;
+    }
+    size_t len = 0;
+    for (;;) {
+        int c = fgetc(f);
+        if (c == EOF) {
+            if (len == 0) {
+                return -1; /* nothing read at all - end of file */
+            }
+            break;
+        }
+        if (len + 2 > *n) {
+            size_t want = *n * 2;
+            char *p = (char *)realloc(*lineptr, want);
+            if (!p) {
+                return -1;
+            }
+            *lineptr = p;
+            *n = want;
+        }
+        (*lineptr)[len++] = (char)c;
+        if (c == delim) {
+            break;
+        }
+    }
+    (*lineptr)[len] = '\0';
+    return (long)len;
+}
+
+long getline(char **lineptr, size_t *n, FILE *f) {
+    return getdelim(lineptr, n, '\n', f);
+}
+
+int vprintf(const char *fmt, va_list ap) {
+    return vfprintf(stdout, fmt, ap);
+}

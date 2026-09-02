@@ -280,6 +280,13 @@ typedef struct __attribute__((packed)) {
 typedef struct {
     uint32_t inode;
     uint8_t  is_dir;
+    /* M89: the record already carries LEANFS_TYPE_LINK - see the type
+     * field's own note about why it is in the record and not fetched
+     * from the inode - and nothing had ever read it back out. A tree
+     * walker that has to stat every entry to find out whether it is a
+     * link is doing one block read per file to learn something the
+     * directory block it just read already said. */
+    uint8_t  is_link;
     char     name[LEANFS_MAX_NAME + 1];
 } leanfs_dir_entry_t;
 
@@ -434,6 +441,17 @@ typedef struct {
      * to know whether a name IS a link rather than what it points at has
      * to ask the question that does not follow. */
     uint8_t is_link;
+    /* M89: which inode this is.
+     *
+     * leanfs has had inode numbers since it existed and stat never
+     * reported one, so <sys/stat.h> documented st_ino as "always 0". The
+     * cost of that turned out to be larger than it looked: **every file
+     * on this machine had the same identity**, so every program that
+     * asks "are these two paths the same file" got yes. toybox's `cp`
+     * asks exactly that before copying, refused to copy anything onto
+     * anything, and that is how this was found - by a program nobody
+     * here wrote, on the first day one ran. */
+    uint32_t inode;
 } leanfs_stat_t;
 
 int leanfs_stat(const char *path, leanfs_stat_t *out);

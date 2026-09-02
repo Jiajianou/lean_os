@@ -412,6 +412,11 @@ typedef struct task {
      * daemon calls it. */
     int sid;
     int pending_signal; /* 0 = none, else SIGKILL/SIGTERM (system_api/include/signal.h) - checked at the next syscall entry or scheduler tick, see syscall.c/sched.c */
+    /* M89: when this task's alarm(2) expires, in ms since boot; 0 for no
+     * alarm. Separate from wake_deadline_ms, which is a sleep: a sleep
+     * ends by making a blocked task runnable, an alarm interrupts a
+     * running one with a signal, and a task can have both. */
+    uint64_t alarm_deadline_ms;
     int reaped; /* SYS_wait(-1) sets this once it's returned this task's id, so a later wait(-1) call doesn't hand back the same dead child twice */
     /* M19: per-process virtual memory bookkeeping (proc.h's USER_HEAP_
      * and USER_SHM_BASE constants) - meaningless (left zeroed) for a plain
@@ -890,6 +895,12 @@ void sched_release_env(task_t *t);
  *
  * Safe to call from a task other than `t`, and from task_exit_with_code
  * (SIGCHLD). Not safe from an interrupt handler: it takes sched_lock. */
+/* M89: alarm(2). Sets this task's one alarm to `seconds` from now (0
+ * cancels) and returns how many whole seconds were left on the previous
+ * one, rounded up. See fire_expired_alarms in sched.c for the
+ * resolution and for why there is exactly one per task. */
+unsigned int sched_set_alarm(task_t *t, unsigned int seconds);
+
 void sched_raise_signal(task_t *t, int sig);
 
 /* 1 if the *current* task has a caught signal waiting that is not

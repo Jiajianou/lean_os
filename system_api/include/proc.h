@@ -112,3 +112,28 @@ typedef struct {
     uint64_t user_ticks;
     uint64_t sys_ticks;
 } os_rusage_t;
+
+/* ---- M89: SYS_meminfo --------------------------------------------------
+ *
+ * How much physical memory there is and how much of it is free, in
+ * frames. Both numbers have been in the kernel since M18 (pmm.h's
+ * pmm_total_frame_count and pmm_free_frame_count) and the only way to
+ * see either from user space was to read /proc/meminfo, which reports
+ * one of them.
+ *
+ * The reason it arrived: <unistd.h>'s sysconf said of _SC_PHYS_PAGES and
+ * _SC_AVPHYS_PAGES that "the kernel knows... but there is no syscall
+ * that answers it... -1 is the honest answer until something asks."
+ * Something asked - `free`, and `dmesg`'s uptime banner through
+ * sysinfo(). Frames rather than bytes because a frame is what the PMM
+ * counts, and the page size is reported alongside so the conversion is
+ * the caller's and is exact.
+ *
+ * Not gated: how much memory the machine has is a fact about the
+ * hardware, which is the line caps.h draws for SYS_fb_info.
+ */
+typedef struct {
+    uint64_t total_frames;
+    uint64_t free_frames;
+    uint64_t page_size;
+} os_meminfo_t;

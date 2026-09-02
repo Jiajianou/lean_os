@@ -218,3 +218,90 @@ char *strdup(const char *s) {
     memcpy(out, s, n);
     return out;
 }
+
+/* ---- M89 - see <string.h> for what each of these buys ---------------- */
+
+char *strndup(const char *s, size_t n) {
+    if (!s) {
+        return (char *)0;
+    }
+    size_t len = 0;
+    while (len < n && s[len]) {
+        len++;
+    }
+    char *p = (char *)malloc(len + 1);
+    if (!p) {
+        return (char *)0;
+    }
+    memcpy(p, s, len);
+    p[len] = '\0';
+    return p;
+}
+
+char *stpcpy(char *dst, const char *src) {
+    while ((*dst = *src) != '\0') {
+        dst++;
+        src++;
+    }
+    return dst; /* the NUL, not the start - that is the whole point */
+}
+
+char *stpncpy(char *dst, const char *src, size_t n) {
+    size_t i = 0;
+    while (i < n && src[i]) {
+        dst[i] = src[i];
+        i++;
+    }
+    char *end = dst + i;
+    /* strncpy's zero-fill, which stpncpy inherits: the remainder is
+     * padded, and the return is the first NUL written rather than the
+     * end of the padding. */
+    while (i < n) {
+        dst[i++] = '\0';
+    }
+    return end;
+}
+
+void *memmem(const void *haystack, size_t hlen, const void *needle,
+             size_t nlen) {
+    const unsigned char *h = (const unsigned char *)haystack;
+    const unsigned char *n = (const unsigned char *)needle;
+    if (nlen == 0) {
+        return (void *)h; /* the empty needle is at the start - POSIX's rule */
+    }
+    if (nlen > hlen) {
+        return (void *)0;
+    }
+    /* The naive scan. A source tree's worth of `wget` output is a few
+     * hundred kilobytes against a needle of a dozen bytes, so the O(hn)
+     * worst case is not reachable by anything this machine does - and a
+     * Boyer-Moore table would be more code than the thing it speeds up.
+     * Said here so the next reader knows it was a choice. */
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        if (h[i] == n[0] && memcmp(h + i, n, nlen) == 0) {
+            return (void *)(h + i);
+        }
+    }
+    return (void *)0;
+}
+
+void *memccpy(void *dst, const void *src, int c, size_t n) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    unsigned char stop = (unsigned char)c;
+    for (size_t i = 0; i < n; i++) {
+        d[i] = s[i];
+        if (s[i] == stop) {
+            return d + i + 1;
+        }
+    }
+    return (void *)0;
+}
+
+size_t strnlen(const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n && s[i]) {
+        i++;
+    }
+    return i;
+}

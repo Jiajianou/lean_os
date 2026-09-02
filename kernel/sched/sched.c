@@ -142,6 +142,7 @@ static int blocked_count;
 
 static task_t *pick_next(task_t *from);
 static void wake_expired(uint64_t now_ms);
+static void fire_expired_alarms(uint64_t now_ms); /* M89 */
 static void unblock_self(task_t *self);
 
 /* M68: the well-known wait channels. Their *addresses* are the identity;
@@ -483,6 +484,8 @@ void scheduler_tick_cpu(int cpu) {
     /* Deadlines, before the signal check below: a task whose sleep just
      * expired should be runnable on this tick rather than the next one. */
     wake_expired(pit_get_ticks() * (1000 / PIT_HZ));
+    /* M89: and the alarms, after the wakes - see fire_expired_alarms. */
+    fire_expired_alarms(pit_get_ticks() * (1000 / PIT_HZ));
 
     /* M76: any nonzero pending_signal at all, not just the two that used
      * to be the only ones SYS_kill would accept. sched_raise_signal is
@@ -922,6 +925,79 @@ static task_t *pick_next(task_t *from) {
  * it runs with interrupts already off and with sched_lock NOT held - it
  * takes it itself. A deadline of 0 means "no deadline" and is the common
  * case, so the test is one compare for almost every slot. */
+/* ---- M89: alarm(2) ---------------------------------------------------
+ *
+ * A per-task deadline that raises SIGALRM when it passes. This is the
+ * first timer in this kernel that is not a *sleep* - a sleep blocks the
+ * task that asked and ends by making it runnable, and an alarm leaves it
+ * running and interrupts it later.
+ *
+ * Checked once per tick, from the same place `wake_expired` is called
+ * and immediately after it, so the two share one pass over the task
+ * table and one lock acquisition. That ordering is deliberate: a task
+ * whose sleep and whose alarm expire on the same tick should wake and
+ * then see the signal, not be signalled while still blocked.
+ *
+ * The resolution is a tick - 10 ms at PIT_HZ 100 - which is stated in
+ * <unistd.h> rather than rounded up to make a nicer number. `alarm(1)`
+ * fires between 1.00 and 1.01 seconds from now, and a program that needs
+ * better than that is asking this machine for something it does not
+ * measure.
+ *
+ * There is exactly one alarm per task, which is what alarm(2) is: a
+ * second call replaces the first and returns what was left of it. No
+ * setitimer, no timer_create, no per-thread alarms - each of those is a
+ * real feature and none of them is what a program calling alarm() for a
+ * timeout wants.
+ */
+static void fire_expired_alarms(uint64_t now_ms) {
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    int to_signal[MAX_TASKS];
+    int n = 0;
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state != TASK_FREE && tasks[i].state != TASK_TERMINATED &&
+            tasks[i].alarm_deadline_ms != 0 &&
+            now_ms >= tasks[i].alarm_deadline_ms) {
+            tasks[i].alarm_deadline_ms = 0;
+            to_signal[n++] = tasks[i].id;
+        }
+    }
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+    /* Raised with sched_lock DROPPED: sched_raise_signal takes it, and a
+     * kernel with two lock orders is a kernel with a deadlock in it (see
+     * openfile_unref for the same move and the same reason). The gap is
+     * unobservable - the deadline is already cleared, so no second pass
+     * can raise the same alarm twice. */
+    for (int i = 0; i < n; i++) {
+        task_t *t = sched_task_by_id(to_signal[i]);
+        if (t) {
+            sched_raise_signal(t, SIGALRM);
+        }
+    }
+}
+
+unsigned int sched_set_alarm(task_t *t, unsigned int seconds) {
+    if (!t) {
+        return 0;
+    }
+    uint64_t now_ms = pit_get_ticks() * (1000 / PIT_HZ);
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    unsigned int remaining = 0;
+    if (t->alarm_deadline_ms > now_ms) {
+        /* POSIX rounds the remainder UP: a caller told "0 seconds left"
+         * on an alarm that has not fired would cancel a timer it thinks
+         * is already done. */
+        remaining = (unsigned int)((t->alarm_deadline_ms - now_ms + 999) / 1000);
+    }
+    t->alarm_deadline_ms = seconds ? now_ms + (uint64_t)seconds * 1000 : 0;
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+    return remaining;
+}
+
 static void wake_expired(uint64_t now_ms) {
     uint64_t flags = irq_save_disable();
     spin_lock(&sched_lock);

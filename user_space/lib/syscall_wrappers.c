@@ -239,6 +239,28 @@ long sys_statvfs(const char *path, void *out) {
     return do_syscall(SYS_statvfs, (long)path, (long)out, 0);
 }
 
+/* M89: the absolute path an open descriptor was opened with, for the
+ * *at() family - see SYS_fdpath. */
+long sys_fdpath(int fd, char *out, unsigned long out_len) {
+    return do_syscall(SYS_fdpath, fd, (long)out, (long)out_len);
+}
+
+long sys_getppid(void) {
+    return do_syscall(SYS_getppid, 0, 0, 0);
+}
+
+long sys_sync(void) {
+    return do_syscall(SYS_sync, 0, 0, 0);
+}
+
+long sys_meminfo(void *out) {
+    return do_syscall(SYS_meminfo, (long)out, 0, 0);
+}
+
+long sys_alarm(unsigned int seconds) {
+    return do_syscall(SYS_alarm, (long)seconds, 0, 0);
+}
+
 long sys_utime(const char *path, unsigned int mtime) {
     return do_syscall(SYS_utime, (long)path, (long)mtime, 0);
 }

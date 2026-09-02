@@ -81,7 +81,23 @@
  * that envp is argv's NULL terminator plus one, so crt0 finds it with an
  * lea rather than with a second address it would have to be told. One
  * page held both only until an environment of any size existed. */
-#define USER_ARG_PAGES   2
+/* ---- M89: thirty-two pages of window, and only the used ones backed ---
+ *
+ * Two pages was enough for every program this project wrote and is not
+ * enough for a program somebody else wrote. `xargs` sizes its batches
+ * from sysconf(_SC_ARG_MAX) and refuses to run at all - "command too
+ * long" - when the limit is smaller than one command plus the
+ * environment, which at 8 KiB it was. That is how this was found: by the
+ * middle stage of M89's own five-program pipeline.
+ *
+ * The window is 128 KiB of *address space*, which costs nothing. What
+ * would cost something is 32 frames per spawn, so process_spawnve maps
+ * only the pages the vector actually fills - which for every program on
+ * this machine is one, making the common case cheaper than the two pages
+ * it replaces rather than sixteen times more expensive. See the
+ * allocation loop in proc.c, where the count is computed rather than
+ * constant. */
+#define USER_ARG_PAGES   32
 #define USER_ARG_BYTES   (USER_ARG_PAGES * PAGE_SIZE)
 
 /* M75: the ceiling on an environment. Both numbers are about the region

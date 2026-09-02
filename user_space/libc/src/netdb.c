@@ -308,3 +308,14 @@ char *if_indextoname(unsigned int index, char *name) {
     snprintf(name, IFNAMSIZ, "eth0");
     return name;
 }
+
+const char *hstrerror(int err) {
+    switch (err) {
+    case 0:              return "Resolver Error 0 (no error)";
+    case HOST_NOT_FOUND: return "Unknown host";
+    case TRY_AGAIN:      return "Host name lookup failure";
+    case NO_RECOVERY:    return "Unknown server error";
+    case NO_DATA:        return "No address associated with name";
+    default:             return "Unknown resolver error";
+    }
+}

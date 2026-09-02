@@ -18,8 +18,10 @@
  * has to answer to walk one - which is the whole point.
  */
 #include <dirent.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "paths.h"   /* system_api/include/paths.h  - PATH_MAX_LEN */
 #include "syscall.h" /* system_api/include/syscall.h - os_dirent_t, OS_DIRENT_MAX */
@@ -35,6 +37,9 @@ _Static_assert(DIR_BUF >= OS_DIRENT_MAX, "a fetch buffer must hold the longest s
 
 struct DIR {
     unsigned int cookie; /* the kernel's position; 0 is the start */
+    /* M89: -1 for opendir, and the caller's descriptor for fdopendir -
+     * which owns it and closes it in closedir. See fdopendir below. */
+    int fd;
     long len;            /* bytes of valid records in buf */
     long pos;            /* how far through buf readdir has walked */
     int at_end;          /* the kernel has reported end-of-directory */
@@ -57,6 +62,7 @@ DIR *opendir(const char *path) {
         return 0;
     }
     memcpy(d->path, path, plen + 1);
+    d->fd = -1;
     d->cookie = 0;
     d->len = 0;
     d->pos = 0;
@@ -140,6 +146,57 @@ int closedir(DIR *d) {
     if (!d) {
         return -1;
     }
+    /* fdopendir hands its descriptor to the DIR, and POSIX is explicit
+     * that closedir closes it. A caller that keeps using the fd after
+     * closedir is the bug this is on the right side of. */
+    if (d->fd >= 0) {
+        close(d->fd);
+    }
     free(d);
     return 0;
+}
+
+/* ---- M89: a directory stream over a descriptor ----------------------
+ *
+ * toybox's tree walker opens each directory once and then wants to both
+ * read it and use the descriptor as an *at() base, which is what this
+ * call exists for.
+ *
+ * SYS_getdents takes a path rather than a descriptor - see the file
+ * header for why the stream is built the way it is - so this asks the
+ * kernel what path the descriptor names (SYS_fdpath) and opens a stream
+ * on it. The result is a DIR that reads the right directory and a
+ * descriptor that stays open and owned, which is the whole observable
+ * contract. What it is not is a stream immune to the directory being
+ * renamed underneath it; <fcntl.h> covers that, in the same terms and
+ * for the same reason.
+ */
+DIR *fdopendir(int fd) {
+    char path[PATH_MAX_LEN];
+    if (fd < 0 || sys_fdpath(fd, path, sizeof(path)) < 0) {
+        errno = EBADF;
+        return 0;
+    }
+    DIR *d = opendir(path);
+    if (!d) {
+        return 0;
+    }
+    d->fd = fd;
+    return d;
+}
+
+int dirfd(DIR *d) {
+    if (!d) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (d->fd < 0) {
+        /* opendir here does not hold a descriptor at all - the stream is
+         * a path and a cookie. Reporting -1 is the truthful answer and
+         * the one a caller can act on; inventing an open() to satisfy
+         * the call would leak a descriptor nobody asked for. */
+        errno = ENOTSUP;
+        return -1;
+    }
+    return d->fd;
 }

@@ -11,14 +11,17 @@
 # header for the argument.
 --- third_party/toybox/lib/portability.h	2025-01-18 13:20:33
 +++ build/toybox/lib/portability.h	2026-09-01 22:24:41
-@@ -164,6 +164,11 @@
+@@ -164,6 +164,14 @@
  
  // Linux headers not listed by POSIX or LSB
  #include <sys/mount.h>
 +#ifdef __lean_os__
-+// lean_os provides statfs over the same syscall as statvfs; it has no
-+// swap and no sysinfo(), so those two headers are not included here.
++// lean_os provides statfs over the same syscall as statvfs, and a real
++// sysinfo() over its own physical-memory accounting (M89). It has no
++// swap - see milestones.md, where the deferral has a condition - so
++// <sys/swap.h> is the one of the three that is not included here.
 +#include <sys/statfs.h>
++#include <sys/sysinfo.h>
 +#endif
  #ifdef __linux__
  #include <sys/statfs.h>
@@ -78,3 +81,49 @@
    // macOS has an `f_type` field, but assigns values dynamically as filesystems
    // are registered. They do give you the name directly though, so use that.
    return statfs->f_fstypename;
+--- third_party/toybox/lib/portability.c	2025-01-18 13:20:33
++++ build/toybox/lib/portability.c	2026-09-01 22:24:41
+@@ -216,6 +216,30 @@
+   }
+ }
+ 
++#elif defined(__lean_os__)
++
++// lean_os has no file-change notification of any kind: no inotify, no
++// kqueue, and nothing shaped like either. The two callers of this are
++// `tail -f` and `inotifyd`, and both are better served by a refusal that
++// names the reason than by a poll loop pretending to be a subscription.
++
++struct xnotify *xnotify_init(int max)
++{
++  error_exit("no file-change notification on lean_os");
++  return (void *)(long)max;
++}
++
++int xnotify_add(struct xnotify *not, int fd, char *path)
++{
++  error_exit("no file-change notification on lean_os");
++  return fd + (int)(long)not + (int)(long)path;
++}
++
++int xnotify_wait(struct xnotify *not, char **path)
++{
++  error_exit("no file-change notification on lean_os");
++  return (int)(long)not + (int)(long)path;
++}
+ #else
+ 
+ #include <sys/inotify.h>
+--- third_party/toybox/lib/portability.h	2025-01-18 13:20:33
++++ build/toybox/lib/portability.h	2026-09-01 22:24:41
+@@ -189,6 +189,9 @@
+ #endif
+ 
+-#if defined(__APPLE__) || defined(__linux__)
++// lean_os ships a <sys/xattr.h> whose calls all refuse - leanfs has
++// nowhere to store an extended attribute. Same spelling as Linux's, so
++// the Linux branch below is the right one.
++#if defined(__APPLE__) || defined(__linux__) || defined(__lean_os__)
+ // Linux and macOS has both have getxattr and friends in <sys/xattr.h>, but
+ // they aren't compatible.
+ #include <sys/xattr.h>

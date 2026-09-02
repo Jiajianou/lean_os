@@ -1,0 +1,87 @@
+# tests/scanf/cases.tsv - M89
+#
+# One case per line: a format, a TAB, and the input to scan. Nothing here
+# says what the right answer is - the host's own sscanf decides, and this
+# project's has to agree with it on the return value and on every value
+# it wrote. See tools/scanf-test.sh for why that is the only useful
+# standard for a function of this kind.
+#
+# "\n" and "\t" in the input column are the real characters; the file has
+# to be one case per line.
+#
+# ---- the plain integer conversions ----
+%d	42
+%d	-42
+%d	  42
+%d	+7
+%d	x
+%d	
+%d %d	3 4
+%d %d %d	1 2 3
+%i	42
+%i	0x2a
+%i	0755
+%i	-0x10
+%u	4294967295
+%o	755
+%x	deadbeef
+%x	0xDEADBEEF
+%X	FF
+# A width stops the conversion mid-number, which is the case a
+# hand-written parser gets wrong by scanning to the end.
+%2d	1234
+%1d%1d	1234
+%3x	0xff
+# Suppression consumes input and no argument, so the return value is the
+# thing under test here.
+%*d %d	11 22
+%*d	11
+# ---- the length modifiers ----
+%ld	2147483648
+%lld	9223372036854775807
+%hd	70000
+%hhd	300
+%zu	12345
+# ---- strings and scansets ----
+%s	hello
+%s	  hello world
+%s %s	hello world
+%4s	abcdefgh
+%[abc]	aabbccxyz
+%[^,]	before,after
+%[^,]	,nothing
+%[a-z]	abcXYZ
+%[]a]	]]aa!
+%[^]]	abc]def
+%20[^\n]	a whole line of text
+# ---- characters ----
+%c	x
+%c	 x
+%3c	abcdef
+%c%c	ab
+# ---- floating point ----
+%f	3.5
+%f	-0.125
+%f	1e3
+%f	1.5e-2
+%f	.5
+%f	5.
+%lf	3.14159
+%f	abc
+%5f	3.14159
+# ---- literals in the format, and whitespace rules ----
+a%d	a42
+a%d	b42
+%d,%d	3,4
+%d , %d	3 , 4
+%d%%	5%
+ %d	   9
+%d	 	9
+# ---- %n, which counts and does not convert ----
+%d%n	1234
+%d %d%n	11 22
+# ---- mixtures, which is what a real caller writes ----
+%d-%d-%d	2026-09-02
+%s %d	name 42
+%d%c	42x
+%[^=]=%s	KEY=value

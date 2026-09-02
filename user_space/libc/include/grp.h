@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include <stddef.h>
 #include <sys/types.h>
 
 struct group {
@@ -30,3 +31,20 @@ void          endgrent(void);
  * size in *count, which is the contract every implementation uses. */
 int getgrouplist(const char *user, gid_t group, gid_t *groups, int *count);
 int getgroups(int size, gid_t *list);
+
+/* M89: set the supplementary list from a user's group memberships.
+ * Succeeds for `root`/gid 0, which is already the process's list, and
+ * fails for anything else - the same shape setuid takes and for the same
+ * reason. */
+int initgroups(const char *user, gid_t group);
+int setgroups(size_t size, const gid_t *list);
+
+/* M89: the reentrant forms, which toybox calls rather than the plain
+ * ones because it caches the results in its own buffer. `buf`/`buflen`
+ * hold the strings; `*result` is `out` on success and NULL for "no such
+ * group", which is the one part of this interface everybody gets wrong -
+ * a NULL result with a 0 return is not an error. */
+int getgrgid_r(gid_t gid, struct group *out, char *buf, size_t buflen,
+               struct group **result);
+int getgrnam_r(const char *name, struct group *out, char *buf, size_t buflen,
+               struct group **result);

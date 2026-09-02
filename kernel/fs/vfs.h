@@ -71,6 +71,14 @@ typedef struct {
 
 int vfs_statvfs(const char *path, vfs_statvfs_t *out);
 
+/* M89: the mount table, read out one row at a time, for /proc/mounts.
+ *
+ * The table has existed since M87 and nothing outside this file could
+ * see it - which is why `mount` and `df` had nothing to read. `i` is
+ * 0-based; returns 0 past the end. `*prefix` is "/" for the root and the
+ * mount point otherwise, `*type` the filesystem's name. */
+int vfs_mount_info(int i, const char **prefix, const char **type);
+
 /* M88: set a file's mtime. See leanfs_utime for why a filesystem that
  * stamps rtc_now() on every write needs one call that does not. */
 int vfs_utime(const char *path, uint32_t mtime);

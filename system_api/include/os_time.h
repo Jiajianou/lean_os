@@ -40,6 +40,19 @@ typedef struct {
      * Only ever set by SYS_lstat: every other path call follows a link,
      * so by the time they answer there is nothing left to report. */
     uint8_t is_link;
+    /* M89: the inode number, and the first thing on this machine that
+     * makes two paths distinguishable as files.
+     *
+     * A program that compares (st_dev, st_ino) to decide "same file" -
+     * which is every cp, mv, ln and find in the world - was getting a
+     * yes for every pair, because both halves were 0. This is the half
+     * that can be answered: leanfs knows which inode a path resolved to.
+     * st_dev stays 0 and is the half that cannot, because there is one
+     * filesystem here (see /proc/mounts); the synthetic mounts avoid
+     * colliding with leanfs by numbering from a disjoint base rather
+     * than by having a device number, which is written down in devfs.c
+     * and procfs.c where the numbers are chosen. */
+    uint32_t inode;
 } os_stat_t;
 
 typedef struct {

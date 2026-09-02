@@ -23,6 +23,7 @@
  */
 #pragma once
 
+#include <stddef.h>
 #include <sys/types.h>
 
 struct passwd {
@@ -49,3 +50,11 @@ struct passwd *getpwnam(const char *name);
 void           setpwent(void);
 struct passwd *getpwent(void);
 void           endpwent(void);
+
+/* M89: the reentrant forms - see <grp.h> for the one thing about this
+ * interface worth stating, which is that a 0 return with *result NULL
+ * means "no such user" and is not a failure. */
+int getpwuid_r(uid_t uid, struct passwd *out, char *buf, size_t buflen,
+               struct passwd **result);
+int getpwnam_r(const char *name, struct passwd *out, char *buf, size_t buflen,
+               struct passwd **result);

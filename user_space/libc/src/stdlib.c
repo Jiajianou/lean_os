@@ -1,5 +1,8 @@
 #include <stdlib.h>
+#include <errno.h>     /* M89: mkstemp/mkdtemp report why they gave up */
+#include <fcntl.h>     /* M89: O_CREAT|O_EXCL, which is what makes mkstemp safe */
 #include <string.h>
+#include <sys/stat.h>  /* M89: mkdir, for mkdtemp */
 
 #include "malloc.h"           /* user_space/lib - malloc/free, M19 */
 #include "syscall_wrappers.h" /* sys_exit */
@@ -314,4 +317,134 @@ void *bsearch(const void *key, const void *base, size_t count, size_t size,
         }
     }
     return (void *)0;
+}
+
+/* ---- M89: mkstemp/mkdtemp - see <stdlib.h> for the exclusion argument */
+
+/* The candidate name is built from three things that differ between two
+ * processes racing here: the pid, the uptime in milliseconds, and a
+ * counter that advances on every attempt. None of them is a random
+ * number, and this is not a security boundary - O_EXCL is what makes the
+ * result correct, and these only decide how many attempts it takes. */
+static int fill_template(char *template, unsigned int salt) {
+    size_t n = 0;
+    while (template[n]) {
+        n++;
+    }
+    if (n < 6) {
+        return -1;
+    }
+    for (size_t i = n - 6; i < n; i++) {
+        if (template[i] != 'X') {
+            return -1;
+        }
+    }
+    static const char alphabet[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for (size_t i = n - 6; i < n; i++) {
+        template[i] = alphabet[salt % (sizeof(alphabet) - 1)];
+        salt /= (sizeof(alphabet) - 1);
+        salt += 7919; /* so the six characters do not all collapse to one */
+    }
+    return 0;
+}
+
+int mkstemp(char *template) {
+    if (!template) {
+        errno = EINVAL;
+        return -1;
+    }
+    unsigned int salt =
+        (unsigned int)sys_getpid() * 2654435761u + (unsigned int)sys_uptime_ms();
+    for (int attempt = 0; attempt < 128; attempt++) {
+        if (fill_template(template, salt + (unsigned int)attempt * 104729u) != 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        int fd = open(template, O_RDWR | O_CREAT | O_EXCL);
+        if (fd >= 0) {
+            return fd;
+        }
+    }
+    errno = EEXIST;
+    return -1;
+}
+
+char *mkdtemp(char *template) {
+    if (!template) {
+        errno = EINVAL;
+        return (char *)0;
+    }
+    unsigned int salt =
+        (unsigned int)sys_getpid() * 2654435761u + (unsigned int)sys_uptime_ms();
+    for (int attempt = 0; attempt < 128; attempt++) {
+        if (fill_template(template, salt + (unsigned int)attempt * 104729u) != 0) {
+            errno = EINVAL;
+            return (char *)0;
+        }
+        if (mkdir(template, 0700) == 0) {
+            return template;
+        }
+    }
+    errno = EEXIST;
+    return (char *)0;
+}
+
+/* ---- M89: random()/srandom() ----------------------------------------
+ *
+ * The same linear congruential generator rand() uses, widened to
+ * random()'s 31-bit range. BSD's random() is historically a trinomial
+ * additive-feedback generator with a much longer period, and this is not
+ * that - which is worth stating rather than implying, because the whole
+ * reason a program calls random() instead of rand() is that it wants the
+ * better one.
+ *
+ * What it is NOT is a source of unpredictability, and neither is BSD's:
+ * both are deterministic from the seed. Nothing on this machine should
+ * be using either for anything that needs to be unguessable, and nothing
+ * does - `shuf` is what asked for it.
+ */
+static unsigned int random_state = 1;
+
+long random(void) {
+    random_state = random_state * 1103515245u + 12345u;
+    return (long)(random_state >> 1); /* 31 bits, which is random()'s range */
+}
+
+void srandom(unsigned int seed) {
+    random_state = seed;
+}
+
+char *initstate(unsigned int seed, char *state, size_t n) {
+    /* The state array is not used: this generator's whole state is one
+     * 32-bit word (see above), so there is nothing to spread across the
+     * caller's buffer. Accepting the array and ignoring it is right -
+     * the caller's contract is that it owns the storage, not that the
+     * library must use all of it - and returning it back is what
+     * setstate() would be handed. */
+    (void)n;
+    random_state = seed;
+    return state;
+}
+
+char *setstate(char *state) {
+    return state; /* see initstate: there is one state and it is not here */
+}
+
+/* ---- M89 - see <stdlib.h> and <string.h> for what each of these is -- */
+
+long double strtold(const char *s, char **end) {
+    return (long double)strtod(s, end);
+}
+
+float strtof(const char *s, char **end) {
+    return (float)strtod(s, end);
+}
+
+long long atoll(const char *s) {
+    return strtoll(s, (char **)0, 10);
+}
+
+long long llabs(long long v) {
+    return v < 0 ? -v : v;
 }

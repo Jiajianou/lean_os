@@ -7,6 +7,7 @@
 #include <termios.h>
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <stdarg.h>
 
 #include "syscall_wrappers.h"
 
@@ -131,4 +132,66 @@ int cfsetospeed(struct termios *t, speed_t speed) {
     (void)speed;
     errno = EINVAL;
     return -1;
+}
+
+int cfsetspeed(struct termios *t, speed_t speed) {
+    (void)t;
+    (void)speed;
+    errno = EINVAL;
+    return -1;
+}
+
+/* ---- and the one that is not a refusal -------------------------------
+ *
+ * cfmakeraw is the flag arithmetic every program that wants bytes as
+ * typed writes by hand, and every flag it clears that this discipline
+ * implements is genuinely honoured afterwards: ICANON, ECHO, ECHOE, ISIG
+ * and ICRNL are the five kernel/dev/tty.c reads, and clearing them is
+ * exactly what makes ^C arrive as byte 3.
+ *
+ * The rest of what it touches is carried and ignored, which changes
+ * nothing about the result - a discipline that never stripped a parity
+ * bit does not start behaving differently when ISTRIP is cleared.
+ */
+void cfmakeraw(struct termios *t) {
+    if (!t) {
+        return;
+    }
+    t->c_iflag &= ~(unsigned)(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR |
+                              IGNCR | ICRNL | IXON);
+    t->c_oflag &= ~(unsigned)OPOST;
+    t->c_lflag &= ~(unsigned)(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    t->c_cflag &= ~(unsigned)(CSIZE | PARENB);
+    t->c_cflag |= CS8;
+    t->c_cc[VMIN] = 1;
+    t->c_cc[VTIME] = 0;
+}
+
+/* ---- M89: ioctl itself ----------------------------------------------
+ *
+ * <sys/ioctl.h> has declared this since M89's header pass and nothing
+ * implemented it - every caller in this tree went through sys_ioctl or
+ * through tcgetattr above. A program written elsewhere calls `ioctl`.
+ *
+ * It lives in this file rather than in one of its own because every
+ * request this kernel implements is a terminal request (see
+ * system_api/include/termios.h), so this is where the reader who wants
+ * to know what an ioctl can do here is already looking.
+ *
+ * The variadic third argument is always taken as a pointer, which is
+ * what all six commands take. An ioctl the kernel does not know returns
+ * -1 with ENOTTY - the error that means "this descriptor does not
+ * support that request", which is exactly the situation and is what a
+ * caller probing for a capability tests for.
+ */
+int ioctl(int fd, unsigned long request, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, request);
+    void *arg = __builtin_va_arg(ap, void *);
+    __builtin_va_end(ap);
+    if (sys_ioctl(fd, (unsigned int)request, arg) != 0) {
+        errno = ENOTTY;
+        return -1;
+    }
+    return 0;
 }

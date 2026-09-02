@@ -101,6 +101,23 @@ static int dev_is_dir(const char *rel) {
     return lookup(rel) == DEV_DIR;
 }
 
+/* ---- M89: inode numbers, and why these start where they do ------------
+ *
+ * A program deciding whether two paths are the same file compares
+ * (st_dev, st_ino). st_dev is 0 everywhere here - there is one device
+ * namespace and nothing to number it with - so st_ino has to carry the
+ * whole answer, which means /dev/null and leanfs inode 1 must not share
+ * a number.
+ *
+ * leanfs's inodes run from 0 to LEANFS_MAX_INODES (131072), so the two
+ * synthetic filesystems number from bases well above that and well apart
+ * from each other. It is a partition of one number space rather than a
+ * device field, which is the cheaper of the two and is honest as long as
+ * it is written down - so it is written down here, in procfs.c, and in
+ * os_stat_t's own note.
+ */
+#define DEVFS_INO_BASE 0x40000000u
+
 static int dev_stat(const char *rel, leanfs_stat_t *out) {
     int d = lookup(rel);
     if (d < 0) {
@@ -109,6 +126,8 @@ static int dev_stat(const char *rel, leanfs_stat_t *out) {
     out->size = 0; /* a device has no length - see dev_size */
     out->mtime = 0;
     out->is_dir = (d == DEV_DIR) ? 1 : 0;
+    out->is_link = 0;
+    out->inode = DEVFS_INO_BASE + (uint32_t)d; /* M89 - see DEVFS_INO_BASE */
     return 0;
 }
 
@@ -138,6 +157,8 @@ static int dev_handle_stat(int handle, leanfs_stat_t *out) {
     out->size = 0;
     out->mtime = 0;
     out->is_dir = 0;
+    out->is_link = 0;
+    out->inode = DEVFS_INO_BASE + (uint32_t)handle; /* M89 */
     return 0;
 }
 
@@ -222,6 +243,7 @@ static int dev_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *ou
     }
     out->inode = i;
     out->is_dir = 0;
+    out->is_link = 0; /* M89: no links under /dev - see leanfs_dir_entry_t */
     k_strlcpy(out->name, DEV_NAMES[i], sizeof(out->name));
     *cookie = i + 1;
     return 1;
