@@ -1,6 +1,7 @@
 #include "openfile.h"
 
 #include "lib/spinlock.h"
+#include "vfs.h" /* M101 - vfs_handle_close, at the last unref */
 
 static openfile_t table[MAX_OPEN_FILES];
 static int initialized;
@@ -70,10 +71,27 @@ void openfile_unref(openfile_t *f) {
         return;
     }
     uint64_t flags = spin_lock_irqsave(&openfile_lock);
+    int closing = -1;
     if (f->refcount > 0 && --f->refcount == 0) {
+        closing = f->handle;
         f->handle = -1;
     }
     spin_unlock_irqrestore(&openfile_lock, flags);
+
+    /* M101: tell the filesystem, and do it with openfile_lock DROPPED.
+     *
+     * vfs_handle_close takes fs_lock. Calling it from inside this one
+     * would establish openfile_lock -> fs_lock as a lock order, and
+     * every other path in this kernel that touches both takes fs_lock
+     * first (SYS_open: resolve the path, then claim a table entry). Two
+     * orders is a deadlock waiting for the second CPU that M67 made
+     * possible, so the entry is released first and the filesystem is
+     * told second. Nothing observes the gap: the slot is already free
+     * and `closing` is a handle no other descriptor names, which is
+     * precisely what a refcount reaching zero means. */
+    if (closing >= 0) {
+        vfs_handle_close(closing);
+    }
 }
 
 int openfile_in_use(void) {

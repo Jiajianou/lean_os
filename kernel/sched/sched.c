@@ -211,8 +211,30 @@ void sched_sleep_until(uint64_t deadline_ms) {
 
 void sched_idle_enter(void) {
     uint64_t flags = irq_save_disable();
-    idle_depth[smp_current_cpu()]++;
+    /* One smp_current_cpu() for both, not two. It reads the Local APIC's
+     * ID register over MMIO and then scans the CPU table, which is not
+     * the sort of thing to do twice in a row on a path this kernel takes
+     * hundreds of times a boot - and M101's own profile is what made
+     * that cost visible. */
+    int cpu = smp_current_cpu();
+    idle_depth[cpu]++;
+    /* M101: the same bracket, recorded on the task as well as on the
+     * CPU. The per-CPU counter is M68's and answers "is this CPU
+     * halted"; a task can be scheduled away from inside the bracket, so
+     * only the per-task one answers "is THIS task waiting". Both are
+     * kept because they are different questions - see task_t's field. */
+    task_t *self = current_task[cpu];
+    if (self && self->idle_wait_depth < 255) {
+        self->idle_wait_depth++;
+    }
     irq_restore(flags);
+}
+
+/* M101. Read without a lock: the only caller is the timer interrupt,
+ * looking at the task it just interrupted on its own CPU, and that task
+ * cannot be running anywhere else to change the value. */
+int sched_task_is_idle_waiting(const task_t *t) {
+    return t && t->idle_wait_depth > 0;
 }
 
 void sched_idle_exit(void) {
@@ -220,6 +242,10 @@ void sched_idle_exit(void) {
     int cpu = smp_current_cpu();
     if (idle_depth[cpu] > 0) {
         idle_depth[cpu]--;
+    }
+    task_t *self = current_task[cpu];
+    if (self && self->idle_wait_depth > 0) {
+        self->idle_wait_depth--;
     }
     irq_restore(flags);
 }

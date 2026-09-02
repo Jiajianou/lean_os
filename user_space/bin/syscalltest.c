@@ -191,6 +191,20 @@ static const entry_t table[] = {
     {SYS_link,          CLASS_PTR, 1, NULL},
     {SYS_audio_play,    CLASS_PTR, 1, NULL},
     {SYS_ioctl,         CLASS_PTR, 3, NULL},
+    /* M101. The pointer is argument 2 for the three operations that
+     * return anything (STATS, SAMPLES, SYSCALLS).
+     *
+     * Worth stating what this entry does NOT grade: syscalltest holds no
+     * capabilities, and SYS_profile is gated on CAP_PROCESS_LIST, so
+     * every call below is refused at the gate before an argument is
+     * looked at. Both the sweep and the pointer check therefore pass for
+     * a reason that has nothing to do with pointer validation - which is
+     * the definition of a vacuous pass, so the real check lives in
+     * kernel.c's selftest_profile, where the caller has the capability
+     * and a refused kernel address means something. Classified here
+     * anyway because this table is a census: an unclassified number is
+     * a syscall nobody thought about. */
+    {SYS_profile,       CLASS_PTR, 2, NULL},
 
     /* ---- can wait: swept with an fd that cannot exist ---------------- */
     {SYS_wait,          CLASS_BLOCK, 0, NULL},

@@ -153,7 +153,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
                 $(UOBJ)/libc_dirent.o $(UOBJ)/libc_stat.o $(UOBJ)/libc_mman.o \
                 $(UOBJ)/libc_pthread.o $(UOBJ)/libc_errno.o $(UOBJ)/libc_wchar.o $(UOBJ)/libc_locale.o \
                 $(UOBJ)/libc_poll.o \
-                $(UOBJ)/setjmp.o
+                $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
 # init and shell in their own directories. Each becomes build/NAME.elf,
@@ -169,7 +169,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/
 # alongside its own" is only true if there is no special path for them.
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
@@ -183,7 +183,7 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run leanfs-put preseed print-user-programs font font-check clean distclean
+.PHONY: all run leanfs-put preseed print-user-programs syms font font-check clean distclean
 
 all: $(IMAGE)
 
@@ -258,6 +258,22 @@ $(UOBJ)/%.o: user_space/shell/%.c | $(UOBJ)
 # it - an explicit extra prerequisite on top of the normal *.asm pattern
 # rule below, the same "side effect a generic rule wouldn't know to
 # guarantee" situation $(UEFI_BOOT_OBJ)'s kernel.sectors dependency below is.
+# M101: crt0.o and setjmp.o are built by pattern rules and named only as
+# prerequisites, which makes them *intermediate* files - so make deletes
+# them after the first program links, and with -j8 the next link races
+# the deletion. The failure is intermittent, and its shape is worse than
+# its frequency: `make -j8 | grep error` reports nothing useful, the
+# .elf silently keeps its previous contents, and the image boots the
+# program you edited five minutes ago. That cost a three-minute QEMU run
+# and a wrong conclusion about a test failure during this milestone.
+#
+# .SECONDARY with no prerequisites marks every target in this Makefile as
+# secondary, which is the documented way to say "never auto-delete an
+# intermediate". Naming just these two would work today and would go
+# stale the next time something is added to USER_LIBOBJS by a pattern
+# rule.
+.SECONDARY:
+
 $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(USER_LD)
 	$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/$*.o
 
@@ -514,6 +530,30 @@ preseed: $(IMAGE) $(LEANFS_PUT)
 print-user-programs:
 	@echo $(USER_PROGRAMS)
 
+# ---- M101: the kernel's symbol table, as a file on the disk ----------
+#
+# /bin/profile resolves sampled addresses against this. It is a file
+# rather than a table inside the kernel because a table inside the kernel
+# changes the addresses it describes - see tools/gen-kernel-syms.sh and
+# kernel/profile/sampler.h for the full argument.
+#
+# Not part of `all`, for one reason and it is not laziness: writing a
+# file into a *fresh* image claims the first free inode, and kernel.c's
+# M22 self-test asserts that launcher slot 0 is `hello` - the first file
+# ever seeded. That is the same trap the `preseed` target above documents
+# at length. Depending on $(IMAGE) here means the image exists; running
+# this after a boot, or after `make preseed`, means every program's inode
+# is already spoken for. `make syms` is a thing you do when you want to
+# profile, which is exactly when you will also have booted.
+KERNEL_SYMS := $(BUILD)/kernel.syms
+
+$(KERNEL_SYMS): $(KERNEL_ELF) tools/gen-kernel-syms.sh
+	@./tools/gen-kernel-syms.sh $(KERNEL_ELF) $@
+
+syms: $(IMAGE) $(KERNEL_SYMS) $(LEANFS_PUT)
+	@$(LEANFS_PUT) $(IMAGE) $(KERNEL_SYMS) /etc/kernel.syms
+	@echo "kernel.syms -> /etc/kernel.syms in $(IMAGE)"
+
 
 # ---- Q2: the host test tier -----------------------------------------
 #
@@ -561,8 +601,20 @@ TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
                     kernel/net/udp.c kernel/net/ethernet.c kernel/net/tcp.c \
                     kernel/dev/fwcfg.c
 
+# M101: the first user-space source in this tier, and it earns its place
+# by the same argument the kernel units do. user_space/lib/symtab.c is a
+# pure function over a buffer whose failure mode is a *plausible wrong
+# answer* - a profile report attributing every sample to the function
+# before the right one - which is exactly the class of bug a booted
+# machine cannot see, because there is nothing in there to compare
+# against. Kept separate from TEST_KERNEL_SRCS rather than folded in:
+# these are two different codebases with two different build flags, and a
+# list that stopped saying so would be the first step to compiling kernel
+# code with user flags.
+TEST_USER_SRCS := user_space/lib/symtab.c
+
 TEST_SRCS := tests/runner.c $(wildcard tests/test_*.c) $(TEST_FAKES) \
-             $(TEST_KERNEL_SRCS)
+             $(TEST_KERNEL_SRCS) $(TEST_USER_SRCS)
 
 TEST_BIN := $(TEST_BUILD)/leanos-tests
 
@@ -656,9 +708,9 @@ coverage: | $(COV_BUILD)
 	 if [ ! -x "$$PROFDATA" ]; then PROFDATA=llvm-profdata; COV=llvm-cov; fi; \
 	 $$PROFDATA merge -sparse $(COV_BUILD)/tests.profraw -o $(COV_BUILD)/tests.profdata && \
 	 $$COV report $(COV_BUILD)/tests -instr-profile=$(COV_BUILD)/tests.profdata \
-	   $(TEST_KERNEL_SRCS) | tee $(COV_BUILD)/report.txt && \
+	   $(TEST_KERNEL_SRCS) $(TEST_USER_SRCS) | tee $(COV_BUILD)/report.txt && \
 	 $$COV show $(COV_BUILD)/tests -instr-profile=$(COV_BUILD)/tests.profdata \
-	   $(TEST_KERNEL_SRCS) -format=html -o $(COV_BUILD)/html >/dev/null && \
+	   $(TEST_KERNEL_SRCS) $(TEST_USER_SRCS) -format=html -o $(COV_BUILD)/html >/dev/null && \
 	 echo "" && echo "line-by-line report: $(COV_BUILD)/html/index.html"
 
 # ---- Q12: mutation testing -------------------------------------------

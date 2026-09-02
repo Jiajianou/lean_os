@@ -16,14 +16,25 @@
 # nothing asserted what any of them did. Read this file next to
 # `make mutate`, never instead of it.
 #
+# M101: the names here are repo-relative paths, and they used to be
+# relative to kernel/ instead. llvm-cov prints each file with the longest
+# common prefix of everything on its command line removed, so adding the
+# first user-space source to the report shortened nothing and lengthened
+# every kernel name. Every floor in this file stopped matching, and the
+# ratchet reported ten "new" files and "nothing fell" - which is a
+# ratchet that has quietly stopped ratcheting. tools/coverage-ratchet.py
+# now fails when a name in this file is absent from the report, so the
+# next time that happens it is an error rather than a silence.
+#
 # file<TAB>line_coverage_floor<TAB>commit<TAB>note
-lib/libk.c	100.00	b7bb520	Every line. Mutation score 73.8%, which is the more interesting number.
-mm/heap.c	100.00	b7bb520	Mutation score 89.4% after Q12's split and coalescing tests.
-fs/leanfs.c	55.00	b7bb520	The error paths are covered; the indirect and double-indirect block chains largely are not.
-net/arp.c	83.00	b7bb520	Mutation score 76.6%.
-net/ip.c	62.00	b7bb520	The send path was entirely unexercised until Q12.
-net/icmp.c	74.00	b7bb520	Mutation score 59.4%; the unreachable part is the error-message paths.
-net/udp.c	96.00	b7bb520	Was 28% before Q12's checksum tests. Mutation score 80.5%.
-net/ethernet.c	100.00	b7bb520	Was 90% lines at a 0% mutation score - the file that proved why this table is not enough on its own.
-net/tcp.c	62.00	b7bb520	Was 3.74% and the largest hole in the suite from Q8 until Q11. tests/test_tcp_states.c drives the eleven-state machine one segment at a time and found two remotely-triggerable defects on its first run.
-dev/fwcfg.c	97.00	b7bb520	Added with tests, which is why it starts high.
+kernel/lib/libk.c	100.00	b7bb520	Every line. Mutation score 73.8%, which is the more interesting number.
+kernel/mm/heap.c	100.00	b7bb520	Mutation score 89.4% after Q12's split and coalescing tests.
+kernel/fs/leanfs.c	55.00	b7bb520	The error paths are covered; the indirect and double-indirect block chains largely are not.
+kernel/net/arp.c	83.00	b7bb520	Mutation score 76.6%.
+kernel/net/ip.c	62.00	b7bb520	The send path was entirely unexercised until Q12.
+kernel/net/icmp.c	74.00	b7bb520	Mutation score 59.4%; the unreachable part is the error-message paths.
+kernel/net/udp.c	96.00	b7bb520	Was 28% before Q12's checksum tests. Mutation score 80.5%.
+kernel/net/ethernet.c	100.00	b7bb520	Was 90% lines at a 0% mutation score - the file that proved why this table is not enough on its own.
+kernel/net/tcp.c	62.00	b7bb520	Was 3.74% and the largest hole in the suite from Q8 until Q11. tests/test_tcp_states.c drives the eleven-state machine one segment at a time and found two remotely-triggerable defects on its first run.
+kernel/dev/fwcfg.c	97.00	b7bb520	Added with tests, which is why it starts high.
+user_space/lib/symtab.c	97.00	HEAD	M101: the profile report's symbol resolver, and the first user-space file in this tier. 97.87% measured - the two uncovered lines are the guards for a symbol file that is not ascending, which the parser cannot produce and only a hand-written one can. Four hand-run mutations against its tests were all caught, which is the number that matters more than this one.

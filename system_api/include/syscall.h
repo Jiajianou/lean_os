@@ -451,4 +451,11 @@ typedef struct {
 
 #define SYS_madvise    95 /* (addr, len, advice) -> 0 or -1. M91: MADV_DONTNEED drops every frame in the range and leaves the mapping - the address stays reserved, keeps its permissions, and reads as zero again on the next touch. Every other advice value is accepted as a no-op success rather than refused: this kernel has no page cache for MADV_WILLNEED to warm, and a program that fails because it asked politely is a worse outcome than one whose hint went nowhere. */
 
-#define SYSCALL_COUNT 98
+/* M101: the profiler's control and readout - see system_api/include/profile.h
+ * for the operations, the structs and why this is a syscall rather than a
+ * writable /proc file. Gated on CAP_PROCESS_LIST: a flat profile is a
+ * description of what every process is executing, which is strictly more
+ * than the task list that bit already guards. */
+#define SYS_profile    98
+
+#define SYSCALL_COUNT 99

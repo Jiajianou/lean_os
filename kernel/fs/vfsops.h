@@ -51,6 +51,23 @@ typedef struct vfs_ops {
 
     /* One entry at a time, same cookie contract as leanfs_readdir. */
     int (*readdir)(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *out);
+
+    /* M101: the last descriptor naming this handle has gone.
+     *
+     * Optional - NULL means the filesystem has nothing to give back, and
+     * leanfs is genuinely in that position: its handle IS an inode index,
+     * so there is no per-open state to release and there never was. That
+     * is exactly why this hook did not exist, and exactly why its absence
+     * was a bug the moment a synthetic filesystem with a fixed table of
+     * open files was mounted. procfs allocates a slot in proc_open and,
+     * until this, released it nowhere - so the seventeenth open of any
+     * /proc file on a given boot failed, permanently, and nothing in this
+     * tree noticed for six milestones. See M101's notes.
+     *
+     * Called by vfs_handle_close, which openfile_unref calls at
+     * refcount 0 - so a file held open by two dup2'd descriptors is
+     * closed once, when the second one goes. */
+    void (*close)(int handle);
 } vfs_ops_t;
 
 /* ---- handles ----------------------------------------------------------

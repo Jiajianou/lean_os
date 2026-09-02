@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "arch/x86_64/cpu.h" /* MAX_CPUS - M68 */
+#include "arch/x86_64/tsc.h" /* M101 - the syscall accounting bracket's clock */
 #include "drivers/ac97.h"
 #include "drivers/dispi.h"
 #include "drivers/pcspk.h"
@@ -26,6 +27,8 @@
 #include "proc.h"      /* system_api/include/proc.h - task_info_t, M45. Resolves to the system_api one, not kernel/proc/proc.h below: a quoted include searches the *including* file's own directory first (kernel/arch/x86_64/, which has no proc.h), then -Ikernel (no kernel/proc.h either), then -Isystem_api/include. */
 #include "proc/proc.h"
 #include "proc/elf.h"   /* M48 - elf_validate, to tell "not a program" apart from "no such file" */
+#include "profile/sampler.h" /* M101 - SYS_profile's control and readout */
+#include "profile/syscount.h" /* M101 - the per-syscall accounting bracket below */
 #include "sched/sched.h"
 #include "signal.h"  /* system_api/include/signal.h - SIGKILL/SIGTERM */
 #include "spawn_error.h" /* system_api/include/spawn_error.h - M48's distinct SYS_spawn failure codes */
@@ -2239,6 +2242,83 @@ static long sys_close(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64
     return 0;
 }
 
+/* M101: the profiler's whole control and readout surface.
+ *
+ * One syscall with an operation selector rather than eight syscall
+ * numbers, which is a departure from how every other call in this table
+ * is shaped and is worth defending. The eight operations are one
+ * instrument: they share a capability, a lifetime and a set of structs,
+ * and nothing will ever call PROFILE_OP_STOP that could not also call
+ * PROFILE_OP_START. Eight numbers would spend eight entries of a table
+ * whose size this arc is already trying to justify, to express a thing
+ * that is genuinely one interface. `ioctl` is the precedent already in
+ * this file.
+ *
+ * Every op is gated once, at the top. There is no read-only subset here
+ * that deserves a weaker gate: the sample list is the part that reveals
+ * what other processes are doing, and it is the part a reader wants. */
+static long sys_profile(uint64_t op, uint64_t arg1, uint64_t arg2, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (!has_cap(CAP_PROCESS_LIST)) {
+        return -1; /* M65 */
+    }
+
+    switch (op) {
+    case PROFILE_OP_START:
+        profile_start();
+        return 0;
+    case PROFILE_OP_STOP:
+        profile_stop();
+        return 0;
+    case PROFILE_OP_RESET:
+        profile_reset();
+        return 0;
+    case PROFILE_OP_STATS: {
+        prof_stats_t st;
+        profile_get_stats(&st);
+        return copy_to_user(arg1, &st, sizeof(st)) == 0 ? 0 : -1;
+    }
+    case PROFILE_OP_SAMPLES: {
+        if (arg2 == 0 || arg2 > PROF_BUCKETS ||
+            !user_range_ok(arg1, arg2 * sizeof(prof_sample_t), 1)) {
+            return -1;
+        }
+        /* Straight into the caller's buffer. The alternative - snapshot
+         * into a kernel array and then copy - would need PROF_BUCKETS *
+         * sizeof(prof_sample_t) of stack or heap for no gain: the range
+         * is validated above, and profile_snapshot holds its lock for
+         * the walk either way. */
+        return profile_snapshot((prof_sample_t *)arg1, (int)arg2);
+    }
+    case PROFILE_OP_SYSCALLS: {
+        if (arg2 == 0 || arg2 > SYSCALL_COUNT ||
+            !user_range_ok(arg1, arg2 * sizeof(prof_syscount_t), 1)) {
+            return -1;
+        }
+        /* Indexed by syscall number, holes included. A caller that
+         * wanted a dense list would have to be told which number each
+         * row was, which is the same information in a worse shape. */
+        prof_syscount_t *out = (prof_syscount_t *)arg1;
+        for (uint64_t i = 0; i < arg2; i++) {
+            syscount_entry_t e;
+            syscount_get((int)i, &e);
+            out[i].calls = e.calls;
+            out[i].cycles = e.cycles;
+        }
+        return (long)arg2;
+    }
+    case PROFILE_OP_SYSRESET:
+        syscount_reset();
+        return 0;
+    case PROFILE_OP_TIMING:
+        return syscount_set_timing(arg1 ? 1 : 0);
+    default:
+        return -1;
+    }
+}
+
 static long sys_wait_nb(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -4352,6 +4432,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_symlink] = sys_symlink,
     [SYS_link] = sys_link,
     [SYS_fsync] = sys_fsync,
+    [SYS_profile] = sys_profile,
     [SYS_readlink] = sys_readlink,
     [SYS_lstat] = sys_lstat,
 };
@@ -4554,7 +4635,34 @@ static int signal_return(isr_regs_t *regs) {
     return 0;
 }
 
+/* M101: the accounting bracket, and the reason dispatch became an inner
+ * function rather than growing a counter at each of its five exits.
+ *
+ * There are five places below that return, and one of them (SYS_execve on
+ * success) has already rewritten `regs` by the time it does. A counter
+ * added at each exit is five chances to add it in four of them, which is
+ * the shape of bug this project keeps finding in code that grew a special
+ * case at a time. One bracket has no such choice to get wrong.
+ *
+ * What this deliberately does NOT record is a syscall that never comes
+ * back: SYS_exit, a fatal signal delivered at entry, and an `execve` that
+ * replaced the program all leave through task_exit_with_code or the new
+ * image's entry point, and nothing here runs afterwards. A count of
+ * "calls that returned" is the honest name for what this measures, and it
+ * differs from "calls made" by at most one per process. */
+static void syscall_dispatch(isr_regs_t *regs);
+
 void syscall_handler(isr_regs_t *regs) {
+    uint64_t num = regs->rax;
+    int timing = syscount_timing_enabled();
+    uint64_t started = timing ? tsc_read() : 0;
+
+    syscall_dispatch(regs);
+
+    syscount_record((int)num, timing ? (tsc_read() - started) : 0);
+}
+
+static void syscall_dispatch(isr_regs_t *regs) {
     /* Deliver a pending fatal signal before servicing the syscall the
      * caller actually asked for - this is the "next syscall entry"
      * checkpoint sys_kill's doc comment promises. A task that never

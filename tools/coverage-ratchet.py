@@ -77,6 +77,21 @@ def main():
         print("coverage-ratchet: could not parse %s - no rows found" % report)
         return 2
 
+    # M101: a floor with no row in the report is an error, not a silence.
+    #
+    # The names in the floor file are whatever llvm-cov printed, and
+    # llvm-cov strips the longest common prefix of the sources it was
+    # given - so adding one source from a different top-level directory
+    # renames every other file in the report. When that happened, every
+    # floor stopped matching, all ten files were reported as "new", and
+    # the ratchet printed "nothing fell". It had stopped enforcing
+    # anything and said so in a way that reads like success.
+    #
+    # This is the same failure Q11 built the ratchet against, one level
+    # up: an instrument that cannot fail. A floor that names a file the
+    # report does not have is either a drifted name or a deleted test,
+    # and both are things a person has to decide about.
+    missing = sorted(set(floor) - set(got))
     fell = []
     rose = []
     new = []
@@ -97,6 +112,18 @@ def main():
     for name, pct, was in fell:
         print("  FELL    %-28s %6.2f%%  (floor %.2f%%, set at %s)"
               % (name, pct, was, commit()))
+
+    if missing:
+        for name in missing:
+            print("  MISSING %-28s (a floor row with no line in the report)"
+                  % name)
+        print("\ncoverage-ratchet: %d floor row(s) name a file the report does "
+              "not contain. Either the test tier stopped building it, or the "
+              "names drifted - llvm-cov strips the longest common prefix of "
+              "the sources it is given, so adding one changes the rest. Fix "
+              "the names in %s rather than deleting the rows."
+              % (len(missing), floor_path))
+        return 1
 
     if fell:
         print("\ncoverage-ratchet: %d file(s) below their floor. If this is "

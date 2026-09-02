@@ -183,6 +183,15 @@ static const cap_grant_t CAP_GRANTS[] = {
     /* Shows every process and ends the one you pick. Both halves are
      * capabilities and it is the only shipped program that has either. */
     {"task_manager",  CAP_APP_DEFAULT | CAP_PROCESS_LIST | CAP_KILL_ANY},
+    /* M101: a profile describes what every process on the machine is
+     * executing, which is strictly more than the task list - so
+     * SYS_profile is gated on the same bit rather than on a new one.
+     * These two hold it and nothing else does. `profile` is the tool a
+     * person runs; `proftest` is the self-test that proves the gate
+     * admits a holder, which is the direction /bin/captest's denial
+     * cases cannot show. */
+    {"profile",       CAP_APP_DEFAULT | CAP_PROCESS_LIST},
+    {"proftest",      CAP_APP_DEFAULT | CAP_PROCESS_LIST},
     /* Changes the resolution, which reconfigures the display hardware
      * under every other program's feet. */
     {"settings",      CAP_APP_DEFAULT | CAP_DISPLAY_MODE | CAP_CLIPBOARD},

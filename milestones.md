@@ -9160,10 +9160,15 @@ will hand it a number rather than an opinion:
   again for a better reason. M98 measures a GCC bootstrap's peak
   footprint; if that number is larger than what M90 makes available,
   swap gets a milestone and the measurement is its specification.
+  **That milestone is M102,** written so that a bootstrap which fits is
+  a complete outcome rather than a milestone with nothing in it.
 - **A journal.** M71 and M81 both deferred it. M93 takes the scan-time
   measurement at hundreds of thousands of files, which is the second of
   M71's two conditions, and M92's writeback cache puts real pressure on
-  the first.
+  the first. **M93 took it and refused again at 30 ms per hundred
+  thousand files. The first condition is M105's**, once M98's parallel
+  build is the writer and M104's cache is the thing an unclean mount has
+  to recover.
 - **A third-party libc.** Named above: the trigger is symbol versioning,
   not volume, and it is not expected before M100. If M100's gap analysis
   says a browser needs a glibc ABI rather than a glibc-shaped surface,
@@ -9178,6 +9183,627 @@ them. That is more true here, not less: M91, M95, M97 and M98 are each
 larger than anything in that arc, and M97 and M98 are each plausibly
 larger than the whole of M75–M79. Eleven headings is the shape of the
 work, not its cost.
+
+## And the arc after that: the other half of the goal sentence
+
+*Written after M93 and M86 landed, against the tree rather than against
+a wish list — the M94–M100 arc is planned and unbuilt, and nothing below
+starts before it finishes.* The goal in `CLAUDE.md` is one sentence with
+two halves:
+
+> A Unix-interface-compatible OS that is **stable enough and complete
+> enough to build and run somebody else's software against**, on a
+> **machine that manages its own CPU, memory and disk honestly**.
+
+M94–M100 is entirely the first half. Every milestone in it is about a
+surface a program names or a size a program needs, and its closing test
+is somebody else's build system succeeding. None of it touches the
+second half, and the second half is where this project has been quietly
+carrying two different kinds of debt.
+
+The first kind is **deferrals waiting on a number that M98 and M100
+produce by construction.** Every one of them was deferred correctly, by
+M69's rule, and every one of them named the measurement that would end
+the deferral. That arc takes those measurements as a side effect of
+doing something else:
+
+| what M94–M100 produces | the deferral it finally prices | where the deferral is written |
+|---|---|---|
+| a GCC bootstrap's peak RSS and build-tree size (M98) | **swap** | M82 deferred it for want of a measurement, M90 again "for a better reason", and M94–M100's closing note already says *"if that number is larger than what M90 makes available, swap gets a milestone and the measurement is its specification"* |
+| a bootstrap's wall-clock, attributable (M98) | **`syscall`/`sysret`** | the deferred list: *"M98 is the first thing likely to ask... If `int 0x80`'s cost shows up in that attribution, this stops being a deferral and becomes a number"* |
+| `make -j` against `MAX_TASKS 128` (M98) | **one scheduler lock** | `sched.c:126` is a single `sched_lock`; `sched.c:499` broadcasts one PIT tick to every core by IPI. Nothing has ever run more than one CPU-bound process on purpose |
+| thousands of small writes from a parallel build (M98, M99) | **a journal** | M71's two conditions were *"multiple writers"* and *"a full scan gets slow"*. M93 measured the second at 30 ms per hundred thousand files and refused it again. A parallel make is the first multiple writer this machine has ever had |
+| a page fetched over TLS by an engine nobody here wrote (M100) | **window scaling, SACK, Nagle** | same deferred list, same rule: they come back when a measurement asks |
+
+The second kind is larger and older, and it is not a deferral because
+nobody ever wrote it down as one. **Every number in this file is a number
+about QEMU.** `tests/budgets.tsv`'s header is the only place that says so
+out loud — *"measured on QEMU under macOS on Apple Silicon... a claim
+about this machine"* — and the M57+ path note said the rest: *"none of
+this has run on metal. That is now the single largest claim in the
+project."* Fifty-three milestones later it still is, and the audit is
+short enough to fit in a table:
+
+| what the machine assumes | where it is written | what a real machine does instead |
+|---|---|---|
+| interrupts arrive through the legacy 8259 PIC | `kernel/arch/x86_64/pic.c`; there is no `ioapic.c` in this tree | routes them through an I/O APIC, with the MADT's interrupt source overrides deciding which line is which |
+| PCI devices raise a pin | `kernel/drivers/pci.h:8` — *"there's no capability list, MSI, or..."* | every PCIe device built since about 2010 raises an MSI or MSI-X, and several of them cannot raise anything else |
+| the block device is virtio or ATA PIO | `virtio_blk.c`, `ata.c` | AHCI or NVMe. M92 declined AHCI in exactly these words: *"it is what a real machine needs and it is a second full driver"* |
+| the block driver polls | `virtio_blk.c:203-207` — *"This driver polls, and nothing in this kernel is registered on the PCI interrupt this device would raise"* | one completion interrupt per request, which is the only way a parallel build's disk queue is ever more than one deep |
+| input arrives on port 0x60 | `keyboard.c:12`, and the mouse beside it | a laptop built this decade has no PS/2 controller at all. The keys come off an xHCI controller through USB HID |
+| the network is an RTL8139 | `kernel/drivers/rtl8139.c`, 218 lines | an Intel or Realtek PCIe part with MSI-X and a descriptor ring, and a link that drops |
+| a physical machine has never booted this | M28's fourth box, open since M28 | nothing. It needs hands, and it has needed them for eighty-two milestones |
+
+M101–M110 is those two lists, in dependency order.
+
+### Three decisions taken here rather than discovered halfway
+
+**Three of these ten may end in a refusal, and a refusal is a result.**
+M102's swap, M105's journal and M101's `syscall`/`sysret` are each
+scheduled as *a measurement with a decision attached*, not as work.
+If the number says the thing is not needed, the milestone's deliverable
+is the number and the entry closes as refused. M65 is the precedent —
+it is one of the more useful entries in this file and it built nothing —
+and M93's second attempt is the more recent one: it re-measured the
+journal at a hundred thousand files and declined it again, which is why
+M105 below is allowed to exist without prejudging its own outcome.
+Writing three milestones that might not build anything is the honest way
+to schedule a measurement; writing them as "add swap" and discovering
+halfway that nothing wanted it is how a plan drifts.
+
+**A driver for a standard is not a driver per vendor, and the GPU
+refusal is untouched.** AHCI, NVMe, xHCI and MSI-X are published
+specifications with one implementation each: the same code drives every
+part that implements them, which is the whole reason they exist. A GPU
+is the opposite — a driver per vendor per generation, with a
+reverse-engineered command stream — and that is the distinction the
+"Deliberately not next" refusal has always rested on, stated here
+because M107 is the first milestone that could be mistaken for eroding
+it. Software rasterization into this compositor's framebuffer remains
+the answer, and it remains a slow answer rather than a missing one.
+
+**Metal is the point of this arc and it is scheduled last anyway.**
+M110 is the only milestone in this file whose blocker is a physical
+object, and pretending otherwise by putting it first would block nine
+milestones behind a thing this environment has not had since M28. So it
+goes last, its two real prerequisites (M107's devices, M108's NIC) go
+where they belong, and **its position is a scheduling artifact rather
+than a dependency**: the day there is a machine and a USB stick, M110
+jumps the queue. That sentence is here so that running it early is
+recorded as the plan working rather than as the plan being abandoned.
+
+### What this ordering assumes, written down so it can be wrong
+
+M101 is first because it is the instrument the four milestones after it
+are graded by, and M69's rule — *"performance work on an unmeasured path
+doesn't get done"* — applies to this arc's own contents before it
+applies to anything else. M103 is third rather than seventh because
+interrupts are a prerequisite of both halves of the arc at once: M104's
+writeback cache needs completion interrupts to have a queue depth worth
+measuring, and every device in M107 and M108 raises an MSI-X or nothing.
+
+The assumption most likely to be wrong is that **M104 and M105 are two
+milestones.** A writeback cache and a journal are the same ordering
+problem seen from two sides, and if M104's crash test turns out to need
+journal-shaped machinery to be correct at all, they merge — under M104's
+number, per M68 and M74's precedent for a milestone reopened rather than
+renumbered. The second most likely is that **M106 is bigger than M101
+makes it look**: per-CPU run queues touch `sched.c`'s 2,157 lines, which
+Q13 has already priced as *"larger than the whole of Q1–Q10's host
+tier"* and never started.
+
+---
+
+### M101 — Where the time actually goes ✅
+
+- [x] A sampling profiler in the kernel (`kernel/profile/sampler.c`): the
+      PIT interrupt records the interrupted RIP into a hash table keyed
+      by (rip, pid). Sampling is off until something asks for it, so a
+      stopped profiler costs one load and one branch per tick
+- [x] Per-syscall accounting (`kernel/profile/syscount.c`): calls always,
+      cycles only when asked. There are 97 live entries in
+      `syscall_table` and, before this, no idea which of them anything
+      actually calls
+- [x] `SYS_profile` (98), gated on `CAP_PROCESS_LIST`, plus
+      `/proc/profile` and `/proc/syscalls` for a person with a terminal
+- [x] `/bin/profile`: `start`, `stop`, `reset`, `report [n]`,
+      `syscalls [n]`, `timing on|off`, and `run <secs> <cmd>` which
+      brackets one workload rather than sampling whatever the machine
+      happened to be doing
+- [x] Symbol resolution, in user space, against `/etc/kernel.syms` —
+      generated by `tools/gen-kernel-syms.sh` from the linked ELF and put
+      on the disk by `make syms`
+- [~] **The attribution over an M98 bootstrap: not taken, because M98
+      does not exist.** This milestone was built ahead of the arc it
+      belongs to. What is measured instead is stated below rather than
+      implied, and the box stays half-open until there is a compiler here
+      to point this at
+- [x] **`syscall`/`sysret`: measured, and still deferred.** The number is
+      `syscall_null_cycles`, now a row in `tests/budgets.tsv`
+
+**The two decisions that were taken against the plan.**
+
+**No frame-pointer chain, so a flat profile rather than a call graph.**
+Walking one needs `-fno-omit-frame-pointer` on every kernel translation
+unit, which changes the code generation of every path this project has a
+budget for — all eleven rows of `tests/budgets.tsv`. Buying caller
+attribution by perturbing every existing measurement, before any
+measurement has asked for caller attribution, is the trade M69 exists to
+refuse. The flat profile answers this arc's
+question; the day something needs to know *who called*, that is a
+milestone with a number behind it.
+
+**Symbols in a file, not in the kernel.** A symbol table compiled into
+the kernel changes the addresses it describes — Linux solves that with
+two link passes and a fixed-point iteration, and nothing here needs to.
+The kernel stores raw addresses and `/bin/profile` resolves them, which
+also puts the string handling where a bug is a wrong line of output
+rather than a fault in an interrupt handler.
+
+**The measurement.** `int 0x80` costs **1020–1300 cycles** round trip on
+this machine, measured with `SYS_getpid` — a call that does almost
+nothing, so what is left is the trap, the dispatch and the return. It
+varied by 25% across three boots of the same image, which is what a
+cycle count on a virtualised TSC looks like.
+
+**The decision that number drives, and it is not the one that was
+expected.** The deferred list says `syscall`/`sysret` comes back when a
+measurement asks. This measurement does not ask, and it cannot: a
+thousand cycles is only meaningful against a workload's total, and the
+workload that was supposed to supply the total is M98's bootstrap.
+`sysret` would save perhaps 700 of those cycles. Whether that matters
+depends entirely on how many syscalls a compiler makes per second, which
+is exactly the number this project still does not have. **So the
+deferral stands, and for the first time it stands on an arithmetic
+statement rather than a principle:** at 1,200 cycles a call, the trap
+path costs 1% of a 3 GHz machine at 25,000 syscalls a second. If M98's
+build makes fewer than that, `sysret` is not worth a milestone. That
+sentence is falsifiable, which the old entry was not.
+
+**What the profiler found on its first run, which is the most useful
+thing here.** Pointed at its own self-test, the first report said half
+of "kernel time" was `pit_sleep_ms+0x50`. That is the `hlt`. A CPU
+halted waiting for the clock is in ring 0, at a real address, in a
+function — so a sampler that classifies by CS alone reports a sleeping
+machine as a busy one, which is precisely the failure
+`kernel/profile/sampler.c`'s own comment warned about one paragraph
+before it happened.
+
+The fix took two attempts and the second one is the interesting part.
+The obvious signal is the per-CPU `idle_depth` M68 already keeps — and
+it is wrong for this. `pit_sleep_ms` brackets a `hlt` loop that the
+timer can schedule *away* from, so the next task to run on that CPU
+finds the counter still raised and looks idle while it is working. Using
+it classified an entire kernel busy loop as idle time, and this
+milestone's own self-test caught it within one boot. The counter that
+answers "is this task waiting" has to live on the task, so `task_t`
+grew `idle_wait_depth` beside the per-CPU one. **Two counters that look
+redundant and answer different questions: "is this CPU halted" and "is
+this task waiting".**
+
+After the fix the same workload reports 50% kernel, 50% idle, and
+`proftest`'s ring-3 busy loop reports 50 user, 0 kernel, 50 idle. The
+missing 50% in both cases was always a halted CPU.
+
+**Two bugs found on the way, neither of them M101's.**
+
+**The VFS had no close path at all, and procfs leaked every handle.**
+`proc_open` set `used = 1` and nothing ever cleared it, so the
+seventeenth open of any `/proc` file on a given boot failed — and every
+one after it. It shipped in M87 and survived every milestone since,
+because nothing had ever opened one of these files in a loop and
+`/bin/profile` is the first thing that does. The fix
+is a `close` hook in `vfs_ops_t`, `vfs_handle_close`, and
+`openfile_unref` calling it at refcount zero — with the openfile lock
+*dropped* first, because `vfs_handle_close` takes `fs_lock` and every
+other path in this kernel takes `fs_lock` first. leanfs supplies no hook
+and needs none: its handle is an inode index, which is exactly why the
+gap existed. Graded by a self-test that opens `/proc/self/status`
+twenty-four times, deliberately more than the sixteen-entry table, so
+that a "fix" which merely enlarged the table would fail it.
+
+**`make -j8` could silently link a stale program.** `crt0.o` and
+`setjmp.o` are built by pattern rules and named only as prerequisites,
+which makes them intermediate files that make deletes after the first
+link — and with `-j8` the next link races the deletion. The failure is
+intermittent and its shape is worse than its frequency: the `.elf`
+silently keeps its previous contents and the image boots the program you
+edited five minutes ago. It cost a three-minute QEMU run and a wrong
+conclusion about a test failure during this milestone. One `.SECONDARY:`
+line. **The compounding mistake was mine and is worth recording
+separately: `make -j8 2>&1 | grep error:` reports the exit status of
+`grep`, so the build looked clean while it had failed.**
+
+**A third bug, found by the fix for the second one.** Putting
+`user_space/lib/symtab.c` into the host tier meant putting it into the
+coverage report, and `llvm-cov` prints each file with the longest common
+prefix of everything on its command line removed. One source from a
+second top-level directory therefore *renamed every other file in the
+report* — `net/ip.c` became `kernel/net/ip.c`. Every row in
+`tests/coverage-floor.tsv` stopped matching, all ten files were reported
+as "new", and the ratchet printed **"nothing fell"**. It had stopped
+enforcing anything and said so in words that read like success. That is
+Q11's own failure mode one level up: an instrument that cannot fail.
+`tools/coverage-ratchet.py` now exits 1 when a floor row names a file the
+report does not contain — checked by drifting a name on purpose and
+confirming the exit code, because a check added in response to a silent
+failure should not be taken on trust.
+
+**The one red result, and why it is not this milestone's.** `--full`
+fails one of fifty interactive tests with a boot timeout, and it is a
+different test each run: `start_button_opens_launcher` once,
+`overlap_click_reaches_the_front_window` the next. Both pass in
+isolation in 14 s. `/tmp/leanos-input-failures` holds seven such logs
+from before this milestone existed, stalling in the same region of the
+boot. And the decisive run: **`--jobs 2` passes 50/50**, in 678 s rather
+than 843 s. Four guests at once oversubscribes this machine, which makes
+the suite both flakier and slower — a finding for the test arc rather
+than for M101, and recorded here rather than re-run until green. The
+commit tier, which is what gates a commit, passes.
+
+**What it cost.** 1,545 new lines across eleven new files, plus about
+820 lines of edits to nineteen existing ones:
+`sampler.c`/`syscount.c` and their headers,
+`system_api/include/profile.h`, `user_space/lib/symtab.c`,
+`/bin/profile`, `/bin/proftest`, `tools/gen-kernel-syms.sh`, and edits to
+the timer IRQ, the syscall dispatch, procfs, the VFS, openfile and the
+scheduler. **48 KiB of kernel BSS** for the histogram (2048 buckets at 24
+bytes) and **1.5 KiB** for the syscall table — both read out of the
+linked ELF rather than estimated. No budget moved: boot to desktop 186 s
+against 192 s at `b7bb520`, and every input-to-photon row is inside its
+ceiling.
+
+**How it is graded.** Six boot markers, eleven host tests, one budget
+and one coverage floor.
+
+- `tests/test_symtab.c` — the first user-space code in the host tier, and
+  it earns the place: the resolver's failure mode is a *plausible wrong
+  answer*, a report attributing every sample to the function before the
+  right one. Booting the machine cannot catch that, because there is
+  nothing in there to compare against. Eleven tests, mostly boundaries.
+  Four mutations were run against them by hand — the `<=` in the binary
+  search, the end-of-text guard, the below-first-symbol guard and the
+  capacity ceiling — and all four were caught.
+- `kernel.c`'s `selftest_profile` — samples land, every kernel one is
+  inside `.text`, the classes add up, stopping stops it, a hundred
+  `getpid` calls move that counter by a hundred and nobody else's, timing
+  is off by default and real when on, `/proc` survives twenty-four
+  open/close cycles, and `/bin/profile` produces a report into the boot
+  log.
+- `/bin/proftest` — the half that only ring 3 can prove. It exists
+  because `user_range_ok` short-circuits for a caller on the kernel's own
+  PML4, with a comment above it saying a garbage-argument matrix run from
+  `kernel_main` "would prove nothing". The first version of this
+  milestone's pointer checks ignored that comment and panicked a machine
+  that was behaving correctly.
+
+**And one instrument that graded itself.** Q5's negative syscall suite
+failed the first boot after `SYS_profile` was added — not on behaviour,
+but because its table did not classify syscall 98. A census that fails
+when a syscall is added is the design working. Its entry now also
+records what it does *not* prove: `syscalltest` holds no capabilities, so
+every `SYS_profile` call in that sweep is refused at the gate before an
+argument is examined, which is a vacuous pass. That is why `proftest`
+exists.
+
+**One finding handed forward rather than acted on.** `sched_current()`
+is `current_task[smp_current_cpu()]`, and `smp_current_cpu()` reads the
+Local APIC's ID register over MMIO and then scans the CPU table. Nearly
+every syscall calls it, several of them more than once, and nothing has
+ever measured what that costs — it is why M101's syscall accounting uses
+a `lock xadd` on a shared table rather than the obvious per-CPU one,
+because finding out which CPU you are on is more expensive here than the
+atomic it would save. The fix is a per-CPU data pointer in a segment
+base, which is scheduler work and belongs to **M106**, not to the
+milestone that noticed. Two of these reads were merged into one in
+`sched_idle_enter` on the way past, because they were adjacent.
+
+**What is still open.** The attribution this milestone was written to
+produce needs a workload worth attributing, and this machine does not
+have one yet. 100 Hz is the sampling rate because the PIT is the
+machine's timebase; M103's per-CPU LAPIC timer is the honest place for a
+faster one. There is no symbol file for user programs, so a ring-3
+sample is reported as a pid and an address — resolving those needs the
+same generator pointed at each `.elf`, which is small work waiting for a
+reason.
+
+### M102 — Memory that runs out honestly
+
+- [ ] `pmm_alloc_frame` stops halting the machine. `pmm.c:297` is
+      `panic("pmm_alloc_frame: out of physical memory")` and it is
+      reachable by any process that allocates in a loop — the test
+      arc's own audit called it *"on a desktop that is a bug; on
+      anything called production it is the whole question"*
+- [ ] A failure path that goes all the way up: the frame allocator, the
+      heap, the address space, `mmap`, `fork`'s copy, and the syscall
+      that started it, each returning rather than panicking, and each
+      with a host test that reaches it. This is where the rest of the
+      production `panic()` count from that audit — about forty, once
+      `kernel.c`'s self-test assertions are excluded — gets audited
+      rather than counted
+- [ ] An OOM policy that names a victim and says why: the process that
+      asked, not a heuristic invented here, and a log line that records
+      the decision. The compositor and PID 1 are not candidates, and
+      the machine stays up
+- [ ] **Swap, or the number that refuses it.** M98's peak RSS against
+      what M90 makes available. If a bootstrap fits, this milestone
+      ships the failure paths and records the margin; if it does not,
+      swap to a leanfs file is specified by exactly that measurement —
+      a clock hand over the page tables' accessed bits, an eviction path,
+      and a `PTE` that faults a page back in
+- [ ] This collects **Q9**, which has sat unstarted since it was written
+
+**How we'll know.** A process that allocates until it cannot, run in a
+loop, with the desktop still responding to a click at the end of it and
+the boot markers still green on the reboot after. And the swap decision
+stated as a number with the two sides of it named — what a bootstrap
+peaks at, and what this machine has.
+
+### M103 — Interrupts a real machine delivers
+
+- [ ] An I/O APIC: parse the MADT's I/O APIC and Interrupt Source
+      Override entries — `acpi.c` already walks that table for the
+      LAPIC base and the APIC ids, so this is one more entry type — and
+      route the legacy lines through it instead of `pic.c`, with the PIC
+      masked rather than deleted. The overrides are the part that is not
+      optional: the timer is routinely not on the line the machine
+      thinks it is
+- [ ] MSI and MSI-X: the PCI capability list `pci.h:8` says out loud
+      does not exist, vector allocation, and per-device masking. A
+      modern NIC or NVMe controller has no other way to interrupt
+- [ ] A per-CPU LAPIC timer as the tick source, replacing the single PIT
+      tick that `sched.c:499` broadcasts by IPI. One core's timer
+      interrupt driving every other core's scheduling decision is a
+      thing that works and is not what a real machine does
+- [ ] `virtio_blk` registered on its own interrupt, and the polling loop
+      at `virtio_blk.c:277-284` retired — the driver's own comment says
+      the `NO_INTERRUPT` flag is *"the flag a polling driver owes the
+      device"*, which is the comment that gets deleted here
+- [ ] Interrupt statistics per vector per CPU, in `/proc`, because an
+      interrupt that stops arriving is otherwise indistinguishable from
+      a device that has nothing to say
+
+**How we'll know.** The whole self-test battery green with the PIC
+masked and every line arriving through the I/O APIC, and again on
+`QEMU_DISK=ide`, which routes a different set of lines. A `/proc`
+counter proving the disk's completions are arriving as interrupts on
+more than one CPU rather than being polled by whoever asked. And the
+input-to-photon budgets re-measured, because moving the tick source is
+exactly the kind of change M69's numbers exist to catch.
+
+### M104 — Writeback, and a disk that keeps up with a build
+
+- [ ] The writeback cache M92 deferred, over M103's completion
+      interrupts: dirty tracking, a flush deadline, and a real queue
+      depth rather than one request at a time. M92's own note deferred
+      this *for want of a measurement*, and M98's build is the
+      measurement — a bootstrap writes hundreds of thousands of small
+      files and waits for every one of them today
+- [ ] Ordering that survives the cache: the write-ordering guarantees
+      M71 bought at the filesystem layer have to be re-established
+      against a cache that reorders by design, or M71's atomic replace
+      quietly stops being atomic
+- [ ] `fsync`/`fdatasync` that mean something, and the `O_SYNC` path a
+      build's temporary files should *not* be taking
+- [ ] Readahead, sized by measurement rather than by taste: a compiler
+      reading a header tree is the most sequential workload this machine
+      has ever had
+- [ ] `tools/crash-test.sh` extended to cut the power with a dirty cache
+      rather than with a synchronous write in flight — which is a
+      strictly harder test than the sixteen cuts M71 and Q17 survived,
+      and the reason this milestone is not just a performance one
+
+**How we'll know.** The build wall-clock from M101's attribution, before
+and after, with the disk's share of it named in both. And the extended
+crash test: sixteen more cuts, at the point of maximum dirty data, each
+one followed by an independent reader that finds a consistent
+filesystem. A cache that makes the build faster and the crash test
+flaky has failed this milestone, not passed it with a caveat.
+
+### M105 — The journal, or the measurement that refuses it a third time
+
+- [ ] Re-measure M71's two conditions with M104's cache in place and a
+      parallel build running. The first condition — *"multiple
+      writers"* — is met for the first time by `make -j`; the second was
+      measured by M93 at 30 ms per hundred thousand files and refused.
+      Both get taken again, together, because M104 changes what an
+      unclean mount has to reconstruct
+- [ ] **If the numbers say no, this milestone is that paragraph and
+      nothing else,** and the deferred entry gets its third condition
+      written down rather than its second restated. That is a complete
+      outcome and it is the likelier one
+- [ ] If they say yes: a metadata journal in leanfs — a circular log, a
+      transaction around every multi-block metadata update, replay at
+      mount, and a checksum that decides whether a transaction was
+      complete. Metadata only, and deliberately: data journalling is a
+      second decision needing a second measurement
+- [ ] Either way, the mount-time number that decides it goes into
+      `tests/budgets.tsv` as a row, so the third re-measurement is a
+      regression rather than an investigation
+
+**How we'll know.** A number, and a decision attached to it. If a
+journal is built: `tools/crash-test.sh` with cuts placed inside a
+transaction rather than around one, and a mount that replays rather than
+scans — proven by the replay being *faster* than the scan it replaces on
+a filesystem with a build tree in it, because a journal that costs more
+than the scan is a journal that failed.
+
+### M106 — Cores a build can use
+
+- [ ] Per-CPU run queues, replacing the single `sched_lock` at
+      `sched.c:126` that every scheduling decision on every core
+      currently serializes behind
+- [ ] Work stealing or a balancer — whichever M101's profile says the
+      contention actually wants — and the measurement that chose it
+      recorded here rather than the reasoning that predicted it
+- [ ] `MAX_TASKS 128` and `MAX_FDS 128` (`sched.h:213`, `sched.h:120`)
+      raised to whatever `make -j` and a linker actually ask for. The
+      M94–M100 arc's own table lists both as numbers that want more; the
+      new numbers are set by the failure, not by rounding up
+- [ ] CPU affinity, at least enough that the compositor is not migrated
+      off a warm cache mid-frame, and `sched_setaffinity`-shaped access
+      to it for anything that asks
+- [ ] Per-CPU idle accounting that is real, so the task manager stops
+      reporting a number derived from one core's view of the world
+
+**How we'll know.** `make -j N` for N from 1 to the core count, with the
+speedup curve recorded. A curve that flattens is a finding, not a
+failure — but it has to be *attributed*, by M101's profiler, to a named
+lock or a named serialization rather than shrugged at. Plus the input
+budgets under a full parallel build, which is the first time this
+machine has had a genuinely CPU-saturated background load and the
+honest test of whether the desktop survives one.
+
+### M107 — The devices a real machine has
+
+- [ ] **AHCI**, the driver M92 named and declined: port command lists,
+      a command FIS, NCQ deep enough to matter, and hotplug ignored on
+      purpose. Under `blk.c`'s existing abstraction, beside virtio and
+      ATA rather than instead of them
+- [ ] **NVMe**, which is the disk a machine built in the last five years
+      actually has: admin and I/O queue pairs, MSI-X completions from
+      M103, and a namespace enumerated rather than assumed
+- [ ] **xHCI plus USB HID**: enumeration, control and interrupt
+      transfers, a boot-protocol keyboard and a boot-protocol mouse.
+      `keyboard.c:12`'s port 0x60 has no counterpart on a modern laptop,
+      and an OS that cannot be typed at on the machine in front of you
+      is a demo whatever else is true of it
+- [ ] Every one of them graded **under QEMU first** — `-device ahci`,
+      `-device nvme`, `-device qemu-xhci` — so the drivers are debugged
+      here and only their assumptions are debugged on metal. This is
+      what makes M110 a boot rather than a bring-up
+- [ ] `QEMU_DISK=ahci` and `QEMU_DISK=nvme` join `ide` and `virtio` as
+      configurations the harnesses are expected to pass, on the same
+      terms `CLAUDE.md` already sets: supported paths, not fallbacks,
+      with a byte-identical image
+
+**How we'll know.** The full self-test battery green four times over,
+once per storage backend, with the disk budgets recorded separately for
+each — four numbers, not one, because the point of this milestone is
+that they differ. And the input suite passing with the PS/2 devices
+absent from the QEMU command line entirely, which is the only way to
+prove the USB path is carrying the keys rather than sitting beside a
+PS/2 driver that still works.
+
+### M108 — A real NIC, and the TCP deferrals it prices
+
+- [ ] A driver for a NIC that exists in physical machines — Intel
+      `e1000e`/`igb` or Realtek `r8169` — with descriptor rings, MSI-X
+      from M103, and multiple queues if the part has them. `rtl8139.c`
+      is 218 lines and QEMU is the only place that chip is common
+- [ ] Link state that changes: carrier up and down, a cable pulled, DHCP
+      renewal against a real router rather than QEMU's user-mode stub,
+      and an address that expires
+- [ ] **Window scaling, SACK and Nagle if and only if M100's TLS fetch
+      asks for them.** The deferral's condition is a measurement, and a
+      browser pulling a real page over a real link at real latency is
+      the first one this stack has ever had. A 64 KiB window on a link
+      with 30 ms of round trip is a number, and the number decides
+- [ ] Whatever the real link breaks that QEMU never did: MTU discovery,
+      a middlebox, retransmission against a loss rate that is not zero.
+      The list is a prediction; the capture is the specification
+
+**How we'll know.** A page fetched over TLS from a host nobody here
+controls, over a physical link, laid out and drawn by M100's engine.
+Then the throughput number on that link, with and without whichever of
+the three deferrals the measurement selected — and if the measurement
+selects none of them, that sentence, with the number that says so.
+
+### M109 — lean_os built on lean_os
+
+- [ ] The kernel compiled by the compiler M98 put on this machine:
+      `kernel/`, `system_api/`, `user_space/`, `tools/`, the linker
+      scripts, the NASM sources, the whole tree, with `make` running
+      here rather than on a Mac
+- [ ] The EFI application too, which is the awkward one —
+      `kernel/boot/uefi/boot.c` is built with `clang`+`lld` into a PE32+
+      object today, and a self-hosted tree needs binutils' own PE
+      support or an equivalent. This is the box most likely to be the
+      one that fails
+- [ ] The image assembled here: `tools/leanfs-put`, the host-side image
+      builder M93 added, and `mtools`' job done by something on this
+      machine — written for the target rather than shelled out to
+      somebody's package
+- [ ] Written to a second disk and booted from it, which is a thing
+      QEMU can be handed two of, and the self-test battery run on the
+      result
+- [ ] **The generational test**, which is the one that makes this
+      falsifiable rather than sentimental: the self-built machine builds
+      a third image, and images two and three are **byte-identical**.
+      Same argument as M98's three-stage bootstrap and for the same
+      reason — a machine that can build a working copy of itself but not
+      a *stable* one has a miscompilation or a nondeterminism in it, and
+      nothing weaker than bit-for-bit equality finds either
+
+**How we'll know.** `sha256` of image two equals `sha256` of image
+three, and image three boots to a desktop and passes every marker and
+every budget. If the two differ, the diff is the milestone's real
+output — this project has never had a reproducibility instrument, and
+the first thing one finds is usually a timestamp somebody embedded on
+purpose. Failing this test with a named cause is a good outcome; passing
+it is the end of the sentence M72 started when it said some of what
+needed a cross-compiler needs a script instead.
+
+### M110 — The boot that has never happened
+
+- [ ] M28's fourth box, open since M28 and the oldest unfinished line in
+      this file: write `build/os-image.bin` to a USB drive with the
+      `tools/write-usb.sh` that has been waiting for it, and boot a
+      physical x86-64 UEFI machine from it
+- [ ] The self-test battery on that machine, and a **second column in
+      `tests/budgets.tsv`**: every one of its eleven rows measured again
+      on metal. The header already says the numbers are a claim about
+      one machine; this is the milestone that stops that being the only
+      claim available
+- [ ] Everything the firmware does differently, recorded as it is found:
+      the memory map's reserved regions — M29's audit already named the
+      class, *"never an issue on QEMU, routine on real hardware"*, and
+      fixed the one instance of it anybody could find from here — the
+      framebuffer mode the firmware chose, ACPI tables written by
+      somebody who was not QEMU, an `_S5` inside a method that
+      `power.c`'s narrow DSDT reader cannot follow, and whichever of
+      M103's interrupt source overrides turns out to matter
+- [ ] `docs/real-hardware.md` corrected from the boot rather than from
+      the plan — it is a runbook written by someone who has never run it,
+      and the difference between those two documents is the deliverable
+- [ ] A photograph in the repository, which is not evidence and is not
+      pretending to be. The serial log is the evidence
+
+**How we'll know.** The machine in front of you boots to its own
+desktop, the self-tests run to completion over the serial cable, and
+eleven budgets have a metal column. Anything short of that is written
+down as what it was — this is the one milestone in this file where a
+partial result is genuinely worth more than a delay, because a boot that
+gets to the framebuffer and hangs on the disk is a bug report, and
+eighty-two milestones of *not knowing* is not.
+
+### What this arc does not answer
+
+- **Multi-user is still not next, and nothing here changes that.**
+  M65's condition — two people sharing a machine — is not met by a
+  machine that compiles its own kernel, and inventing a second principal
+  because the machine got more capable would be exactly the lie M65
+  refused. Recorded here because an arc that puts a compiler and a
+  browser on a box is where the temptation shows up.
+- **A GPU is still not next**, for the reason stated above rather than
+  a restated one: these are drivers for standards, and that is a
+  different category from a driver per vendor per generation.
+- **A third-party libc is still not next.** M100's gap analysis is where
+  that decision gets handed over, and this arc does not front-run it.
+- **Nothing here schedules a second architecture.** `x86_64-lean_os` is
+  a triple with one machine behind it, and it stays that way until
+  something asks — which is the same discipline as everything else in
+  this section, applied to the one place where a self-hosting compiler
+  makes the work look cheap.
+
+**On the size of all this.** Six of these ten are measurements with a
+decision attached, and three of those may build nothing — which makes
+this arc cheaper than M94–M100 and much harder to predict. The two that
+are certainly large are M106 and M107: per-CPU scheduling touches the
+file Q13 has been avoiding for two arcs, and M107 is three device
+drivers where this project has previously done one per milestone. M110
+is the smallest of the ten and the only one that cannot be started at
+this desk.
 
 ## The arc alongside all of it: tests that can fail
 
@@ -10328,6 +10954,18 @@ reversed by writing the arc, which is worth recording, because an arc
 that quietly collected its own deferrals would be the drift
 this section exists to prevent.
 
+*Re-read a third time after the M101–M110 arc.* **Two entries are
+collected outright — the USB boot and the performance quartet — and one
+is re-measured for the third time.** None was promoted because the arc
+wanted it; each is collected under the condition it wrote for itself,
+which is the whole test this section applies. What is worth recording is
+the pattern: the deferrals that survive are the ones whose condition is
+about *the world* (two people sharing a machine, a vendor's GPU), and
+the ones that fall are the ones whose condition was about a
+*measurement this project had not taken yet*. The second kind is not
+really a refusal — it is a scheduled question — and calling it one for
+five arcs was slightly too flattering to the discipline.
+
 *Re-read again after the M90–M100 arc, and this time two entries were
 reversed — which is exactly the event the paragraph above says to watch
 for, so it is recorded here rather than left to be noticed.* **Dynamic
@@ -10351,7 +10989,10 @@ Everything else below is unchanged or changed only in place.
   which is worth saying because a browser is where the pressure for one
   comes from: software rasterization into this compositor's framebuffer
   is the answer here, and it is a slow answer rather than a missing
-  one.
+  one. **Unchanged by M107 as well, and that one is worth stating
+  because it looks closer:** AHCI, NVMe and xHCI are published
+  specifications with one implementation each, which is a category a GPU
+  has never been in. See that arc's second decision.
 - **A browser.** Now a named goal rather than a hypothetical one — see
   the arc above — and the estimate has not moved: HTML, CSS, a layout
   engine, a JS runtime, TLS, GPU compositing, codecs, a sandbox, and a
@@ -10384,7 +11025,9 @@ Everything else below is unchanged or changed only in place.
   telling the truth. What M65 refused was a permission model that
   pretended to enforce something, and M88 adds no enforcement — which
   is also why `chmod` stays a truthful failure rather than a no-op that
-  returns 0.
+  returns 0. **Unchanged by M101–M110 too**, recorded because a machine
+  that compiles its own kernel is exactly where the temptation to invent
+  a second principal turns up.
 - **A journalling filesystem.** M71 buys most of the safety with write
   ordering and a mount check. A journal is worth it when there are
   multiple writers or when a full scan gets slow, and neither is true of
@@ -10395,7 +11038,13 @@ Everything else below is unchanged or changed only in place.
   and the re-measurement moved rather than happened:** M93 takes it at
   hundreds of thousands of files instead of thousands, with M92's cache
   numbers in hand, because both of M71's two conditions are finally
-  under pressure at once.
+  under pressure at once. **Re-measured there and refused again — 30 ms
+  per hundred thousand files — and now scheduled for a third
+  re-measurement as M105,** because M104's writeback cache and M98's
+  parallel build put M71's *first* condition under pressure for the
+  first time. M105 is written so that refusing it a third time is a
+  complete outcome; a deferral that can only ever be collected is not a
+  deferral.
 - **Self-hosting (a compiler on the machine).** The romantic end state,
   and genuinely out of reach — but M72 moves the line: after it, some of
   what needed a cross-compiler needs a script instead. **Reversed. This
@@ -10413,8 +11062,15 @@ Everything else below is unchanged or changed only in place.
   `write` calls and is the first workload on this machine whose
   wall-clock is worth attributing. If `int 0x80`'s cost shows up in that
   attribution, this stops being a deferral and becomes a number.
-- **The USB boot** (M28's one open box). Unchanged and still open — it
-  needs hands. M70's painting panic and M71's mount check both make the
+  **Collected — as measurements rather than as work: `syscall`/`sysret`
+  is M101's last box, and the other three are M108's third.** Both are
+  written as *if and only if the number asks*, which is the form this
+  entry has always implied and never actually been given.
+- **The USB boot** (M28's one open box). **Collected. This is M110** —
+  the oldest unfinished line in this file, and the only milestone
+  anywhere in it whose blocker is a physical object rather than a
+  decision, which is why that arc says its position in the order is a
+  scheduling artifact and it may jump the queue. It still needs hands. M70's painting panic and M71's mount check both make the
   day it happens go better, which is a nice side effect and not a reason
   to reorder anything.
 

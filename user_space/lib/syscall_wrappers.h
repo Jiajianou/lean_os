@@ -408,6 +408,13 @@ long sys_writefile(const char *name, const void *buf, size_t len);
  * contract as sys_listfiles. */
 long sys_taskinfo(task_info_t *buf, long max_entries);
 
+/* M101: the profiler's control and readout. One call with an operation
+ * selector - see system_api/include/profile.h for the operations, the
+ * structs, and why the whole instrument is one syscall rather than
+ * eight. Gated on CAP_PROCESS_LIST, so every one of these returns -1 to
+ * an ordinary application. */
+long sys_profile(long op, void *arg, long count);
+
 /* M47: stops the machine - POWER_OFF or POWER_REBOOT
  * (system_api/include/power_mode.h). Does not return on success; returns
  * -1 for a mode this kernel doesn't recognize. Everything running is

@@ -329,6 +329,17 @@ REQUIRED_MARKERS=(
   "[m91] an address space that is a set of mappings:"
   "[m92] a disk worth reading:"
   "[m93] a filesystem that can hold a source tree:"
+  # M101: five markers rather than one, because they fail independently.
+  # The sampler working says nothing about the syscall counters, and both
+  # can be right while the VFS close path this milestone had to add is
+  # still broken - which is the bug it found rather than the thing it
+  # built, so it gets a marker of its own.
+  "[m101] sampling profiler:"
+  "[m101] per-syscall accounting:"
+  "[m101] /proc survived 24 open/close cycles"
+  "[m101] /proc/profile and /proc/syscalls both answer."
+  "[m101] ring-3 half passed:"
+  "[m101] the report above is /bin/profile's"
   "[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than"
   "[m40] boot-task fd reset self-test passed"
   "[m40] SYS_spawn failure-path self-test passed"

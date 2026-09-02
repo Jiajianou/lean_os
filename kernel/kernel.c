@@ -44,6 +44,9 @@
 #include "paths.h"   /* system_api/include/paths.h - M53's filesystem layout, shared with user space */
 #include "proc.h"      /* system_api/include/proc.h - task_info_t, M45's SYS_taskinfo self-test. Resolves to the system_api header, not kernel/proc/proc.h - see syscall.c's own note on the search order. */
 #include "power/power.h"
+#include "profile/sampler.h"   /* M101 */
+#include "profile.h"              /* system_api - M101's ops */
+#include "profile/syscount.h"  /* M101 */
 #include "proc/proc.h"
 #include "sched/sched.h"
 #include "shortcuts.h" /* system_api/include/shortcuts.h - M49's one table of window-manager chords */
@@ -112,7 +115,9 @@
     X(forktest)                    \
     X(exectest)                    \
     X(jobtest)                       \
-    X(syscalltest)
+    X(syscalltest)                 \
+    X(profile)                     \
+    X(proftest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -2282,6 +2287,346 @@ static void selftest_image_manifest(void) {
               "deferred, reported rather than graded.\n\n");
 }
 
+/* ---- M101: the profiler, graded from inside the machine ---------------
+ *
+ * Four things, and each of them is a thing the host tier cannot reach.
+ * A sampling profiler is a timer interrupt writing down a register that
+ * only exists during an interrupt; syscall accounting is a bracket
+ * around a trap. Neither has a meaning off the machine, which is why the
+ * host tests for this milestone cover the symbol resolver and nothing
+ * else - see tests/test_symtab.c for what that split is.
+ */
+static void selftest_profile(void) {
+    /* ---- 1. Does sampling produce samples, and are they real? --------
+     *
+     * "Real" is the part worth writing a test for. A profiler that
+     * records a constant, or a stale RIP, or the address of its own
+     * handler produces a full table and a confident report - so the
+     * assertion is not "samples exist" but "the addresses are inside
+     * this kernel's text and there is more than one of them". */
+    profile_reset();
+    profile_start();
+
+    /* Something to be sampled *in*. A busy loop in kernel context for
+     * twenty ticks, which at PIT_HZ is 200 ms and about twenty samples
+     * per online CPU - enough to be non-zero by a wide margin and short
+     * enough that the boot budget does not notice. */
+    {
+        uint64_t target = pit_get_ticks() + 20;
+        while (pit_get_ticks() < target) {
+            for (volatile int spin = 0; spin < 5000; spin++) {
+            }
+        }
+    }
+    profile_stop();
+
+    prof_stats_t st;
+    profile_get_stats(&st);
+    if (st.samples == 0) {
+        panic("m101: the profiler ran for 200 ms and recorded nothing");
+    }
+    if (st.distinct == 0) {
+        panic("m101: samples were counted but the histogram is empty");
+    }
+    if (st.overflow != 0) {
+        panic("m101: a 200 ms profile overflowed a 2048-entry table");
+    }
+    if (st.samples != st.kernel + st.user + st.idle) {
+        panic("m101: the sample classes do not add up to the sample count");
+    }
+
+    /* Every kernel-mode address must be inside .text. The loop above
+     * runs in ring 0, so at least one sample is a kernel sample, and a
+     * kernel sample outside the kernel means the frame this reads is not
+     * the frame the CPU pushed. */
+    {
+        static prof_sample_t got[64];
+        int n = profile_snapshot(got, 64);
+        if (n <= 0) {
+            panic("m101: the histogram reports entries but hands back none");
+        }
+        int kernel_seen = 0;
+        extern const uint8_t __bss_start[]; /* kernel/linker.ld - past every byte of .text */
+        uint64_t text_lo = 0x100000u;
+        uint64_t text_hi = (uint64_t)(uintptr_t)__bss_start;
+        for (int i = 0; i < n; i++) {
+            if (got[i].pid != PROF_PID_KERNEL) {
+                continue;
+            }
+            kernel_seen++;
+            if (got[i].rip < text_lo || got[i].rip >= text_hi) {
+                klog_puts("[m101] a kernel sample landed outside the kernel at 0x");
+                klog_put_hex64(got[i].rip);
+                klog_putc('\n');
+                panic("m101: a sampled kernel address is not in this kernel");
+            }
+        }
+        if (kernel_seen == 0) {
+            panic("m101: a kernel-context busy loop produced no kernel samples");
+        }
+    }
+
+    /* ---- 2. Stopped means stopped ------------------------------------
+     *
+     * The cheapest thing for a profiler to get wrong is to keep
+     * sampling, because nothing about the report looks different - it
+     * just describes a longer window than the one asked for. */
+    {
+        prof_stats_t before;
+        profile_get_stats(&before);
+        uint64_t target = pit_get_ticks() + 10;
+        while (pit_get_ticks() < target) {
+        }
+        prof_stats_t after;
+        profile_get_stats(&after);
+        if (after.samples != before.samples) {
+            panic("m101: the profiler kept sampling after being stopped");
+        }
+    }
+
+    klog_puts("[m101] sampling profiler: ");
+    klog_put_dec((uint32_t)st.samples);
+    klog_puts(" samples in 200 ms across ");
+    klog_put_dec((uint32_t)st.distinct);
+    klog_puts(" distinct addresses, every kernel one inside .text.\n");
+    profile_reset();
+
+    /* ---- 3. Per-syscall accounting -----------------------------------
+     *
+     * Graded by *delta*, not by absolute value: this kernel has been
+     * making syscalls since before this test started, and asserting a
+     * count of exactly N would be asserting that nothing else on the
+     * machine calls getpid. A hundred calls must move the counter by a
+     * hundred, and must not move anybody else's. */
+    {
+        syscount_entry_t before_pid, before_uptime, after_pid, after_uptime;
+        syscount_get(SYS_getpid, &before_pid);
+        syscount_get(SYS_uptime_ms, &before_uptime);
+
+        for (int i = 0; i < 100; i++) {
+            do_syscall(SYS_getpid, 0, 0, 0);
+        }
+
+        syscount_get(SYS_getpid, &after_pid);
+        syscount_get(SYS_uptime_ms, &after_uptime);
+
+        uint64_t moved = after_pid.calls - before_pid.calls;
+        if (moved < 100) {
+            klog_puts("[m101] 100 getpid calls moved the counter by ");
+            klog_put_dec((uint32_t)moved);
+            klog_putc('\n');
+            panic("m101: syscall accounting lost calls");
+        }
+        /* Not an equality: another CPU may legitimately have called
+         * getpid during the loop. What must be true is that the count
+         * moved by at least what this task did, and that a *different*
+         * syscall's counter did not move by a hundred - which is what a
+         * bracket recording the wrong number would look like. */
+        if (after_uptime.calls - before_uptime.calls >= 100) {
+            panic("m101: a syscall's calls were recorded against another number");
+        }
+        if (after_pid.cycles != before_pid.cycles) {
+            panic("m101: cycles were recorded while timing was off");
+        }
+    }
+
+    /* ---- 4. Timing is off by default and real when on ----------------
+     *
+     * The default matters: two serialised TSC reads per syscall is a tax
+     * on every program on the machine, and a profiler that silently
+     * levies it would be changing the numbers every other milestone in
+     * this arc is about to take. */
+    {
+        if (syscount_timing_enabled()) {
+            panic("m101: syscall timing is on by default");
+        }
+        int was = syscount_set_timing(1);
+        if (was != 0) {
+            panic("m101: syscount_set_timing did not report the previous setting");
+        }
+        syscount_entry_t before, after;
+        syscount_get(SYS_getpid, &before);
+        for (int i = 0; i < 100; i++) {
+            do_syscall(SYS_getpid, 0, 0, 0);
+        }
+        syscount_get(SYS_getpid, &after);
+        syscount_set_timing(0);
+
+        if (after.cycles <= before.cycles) {
+            panic("m101: timing was on and no cycles were recorded");
+        }
+        uint64_t per = (after.cycles - before.cycles) / (after.calls - before.calls);
+        klog_puts("[m101] per-syscall accounting: getpid costs ");
+        klog_put_dec((uint32_t)per);
+        klog_puts(" cycles through int 0x80, timed only when asked.\n");
+
+        /* ---- The measurement this milestone exists to take -----------
+         *
+         * What a trap costs, as a number, so that the `syscall`/`sysret`
+         * deferral has something behind it other than an argument. The
+         * deferred list has said since M69 that this comes back "when a
+         * measurement asks"; this is the measurement, and the entry in
+         * milestones.md is where the decision it drives is recorded.
+         *
+         * getpid is the right call to measure because it does almost
+         * nothing: what is left is the trap, the dispatch and the
+         * return, which is exactly the cost `sysret` would change. */
+        klog_perf("syscall_null_cycles", per, "cycles");
+    }
+
+    /* ---- 4b. The two refusals a kernel-context caller CAN prove ------
+     *
+     * Only two, and the reason is written at length above user_range_ok:
+     * a task on the kernel's own PML4 takes an early return out of every
+     * pointer check, because a kernel thread passing kernel pointers is
+     * doing what it is for. So a garbage-pointer matrix run from here
+     * would pass whatever the kernel did, which is the definition of a
+     * test that proves nothing - the same trap M52 hit and answered with
+     * user_space/bin/badptr.c.
+     *
+     * Null is refused from any ring (see user_range_ok's first branch),
+     * and an operation that does not exist never reaches a pointer at
+     * all. Those two are real here. Everything else about SYS_profile's
+     * argument handling is graded from ring 3, by /bin/proftest, which
+     * holds the capability an ordinary program does not.
+     *
+     * Getting this wrong once is what produced this comment: the first
+     * version asserted that a kernel address was refused, and panicked
+     * the machine on a kernel that was behaving correctly. */
+    {
+        if (do_syscall(SYS_profile, PROFILE_OP_STATS, 0, 0) != -1) {
+            panic("m101: SYS_profile accepted a null pointer");
+        }
+        if (do_syscall(SYS_profile, 999, 0, 0) != -1) {
+            panic("m101: SYS_profile accepted an operation that does not exist");
+        }
+    }
+
+    /* ---- 5. /proc files can be opened more than sixteen times --------
+     *
+     * A regression test for the bug this milestone found rather than a
+     * test of anything M101 built. procfs claimed a slot in proc_open
+     * and released it nowhere, so the seventeenth open of any /proc file
+     * on a boot failed and every one after it did too. Nothing noticed
+     * for six milestones because nothing opened one in a loop.
+     *
+     * Twenty-four is deliberately more than PROC_MAX_OPEN's sixteen: a
+     * fix that made the table bigger rather than giving slots back would
+     * pass a test that stopped at seventeen. */
+    {
+        for (int i = 0; i < 24; i++) {
+            int fd = (int)do_syscall(SYS_open, (uint64_t)"/proc/self/status", 0, 0);
+            if (fd < 0) {
+                klog_puts("[m101] /proc/self/status could not be opened on attempt ");
+                klog_put_dec((uint32_t)(i + 1));
+                klog_putc('\n');
+                panic("m101: procfs runs out of handles - the close path is broken");
+            }
+            char buf[64];
+            if (do_syscall(SYS_read, (uint64_t)fd, (uint64_t)buf, sizeof(buf)) <= 0) {
+                panic("m101: a /proc file opened but read nothing");
+            }
+            do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+        }
+        klog_puts("[m101] /proc survived 24 open/close cycles through a 16-entry "
+                  "table - the close path M101 added to the VFS works.\n");
+    }
+
+    /* ---- 6. The two new /proc files say something -------------------- */
+    {
+        char buf[512];
+        long n = do_syscall(SYS_readfile, (uint64_t)"/proc/syscalls", (uint64_t)buf, sizeof(buf));
+        if (n <= 0) {
+            panic("m101: /proc/syscalls is empty on a machine that has made syscalls");
+        }
+        n = do_syscall(SYS_readfile, (uint64_t)"/proc/profile", (uint64_t)buf, sizeof(buf));
+        if (n <= 0) {
+            panic("m101: /proc/profile reported nothing");
+        }
+        klog_puts("[m101] /proc/profile and /proc/syscalls both answer.\n");
+    }
+
+    /* ---- 7. And the half that only ring 3 can prove ------------------
+     *
+     * /bin/proftest, spawned and graded by exit code exactly as M52 does
+     * with badptr and for exactly the same reason: the checks it makes
+     * are meaningless from here. See its header for the three of them.
+     * It exits with the number of failed checks. */
+    {
+        size_t image_bytes = 0;
+        uint8_t *image = read_program("/bin/proftest", &image_bytes);
+        if (!image) {
+            panic("m101: /bin/proftest is not on the disk");
+        }
+        task_t *t = process_spawn("proftest", image, image_bytes, "");
+        kfree(image);
+        if (!t) {
+            panic("m101: /bin/proftest would not spawn");
+        }
+        long code = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+        if (code != 0) {
+            klog_puts("[m101] proftest reported 0x");
+            klog_put_hex32((uint32_t)code);
+            klog_puts(" failed check(s) - see the proftest lines above\n");
+            panic("m101: the profiler's ring-3 behaviour is wrong");
+        }
+        klog_puts("[m101] ring-3 half passed: the capability gate admits a holder, "
+                  "every bad pointer is refused, a user busy loop is sampled as user "
+                  "time against its own pid.\n\n");
+    }
+
+    /* ---- 8. The deliverable, run --------------------------------------
+     *
+     * Everything above grades the instrument. This grades the *report*,
+     * which is the thing a person actually gets, and it is a separate
+     * question: the kernel can be sampling perfectly while /bin/profile
+     * divides by zero on an empty histogram or walks off the end of the
+     * sample array. The report goes to this log, so the boot record
+     * contains a real one.
+     *
+     * Symbols are resolved only if /etc/kernel.syms is on the disk, which
+     * `make syms` puts there and a default image does not have - see that
+     * target's comment for why it is not part of `all`. The tool says so
+     * in one line and prints addresses instead, which is the degradation
+     * being checked here as much as the report is. */
+    {
+        profile_reset();
+        profile_start();
+        {
+            uint64_t target = pit_get_ticks() + 20;
+            while (pit_get_ticks() < target) {
+                for (volatile int spin = 0; spin < 5000; spin++) {
+                }
+            }
+        }
+        profile_stop();
+
+        size_t image_bytes = 0;
+        uint8_t *image = read_program("/bin/profile", &image_bytes);
+        if (!image) {
+            panic("m101: /bin/profile is not on the disk");
+        }
+        /* An explicit argv rather than process_spawn's single-string
+         * form: that one hands the child ONE argument, so "report 5"
+         * arrives as a single argv[1] containing a space and the tool
+         * correctly prints its usage. Two arguments have to be passed as
+         * two. */
+        static const char *const profile_argv[] = {"profile", "report", "5", (const char *)0};
+        task_t *t = process_spawnv("profile", image, image_bytes, profile_argv);
+        kfree(image);
+        if (!t) {
+            panic("m101: /bin/profile would not spawn");
+        }
+        long code = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+        if (code != 0) {
+            panic("m101: /bin/profile could not produce a report");
+        }
+        klog_puts("[m101] the report above is /bin/profile's, produced on this "
+                  "machine from the histogram this boot filled.\n\n");
+        profile_reset();
+    }
+}
+
 static void boot_selftests_system(void) {
     /* Self-test: spawn several genuinely CPU-bound tasks and confirm more
      * than one *physical* CPU actually ran them, not just that the
@@ -2329,6 +2674,11 @@ static void boot_selftests_system(void) {
         }
         klog_puts("[smp] self-test passed.\n\n");
     }
+
+    /* M101, and first in this function after the SMP probe on purpose:
+     * the profiler is the instrument the rest of this arc is graded by,
+     * so it is graded before anything it might later be pointed at. */
+    selftest_profile();
 
     /* Stretch goal: networking. net_init() (rtl8139_init underneath)
      * returns 0 rather than panicking if no RTL8139 NIC is attached -

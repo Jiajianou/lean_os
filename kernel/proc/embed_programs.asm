@@ -344,3 +344,15 @@ global syscalltest_elf_end
 syscalltest_elf_start:
     incbin "build/syscalltest.elf"
 syscalltest_elf_end:
+
+global profile_elf_start
+global profile_elf_end
+profile_elf_start:
+    incbin "build/profile.elf"
+profile_elf_end:
+
+global proftest_elf_start
+global proftest_elf_end
+proftest_elf_start:
+    incbin "build/proftest.elf"
+proftest_elf_end:

@@ -554,3 +554,18 @@ int vfs_handle_truncate(int handle) {
     spin_unlock_irqrestore(&fs_lock, f);
     return r;
 }
+
+/* M101: see vfs.h. Deliberately silent about a handle it does not
+ * recognise - this is called from a teardown path (the last close, and
+ * the task-exit walk that closes a dead process's whole table), and a
+ * teardown that can fail is a teardown whose failure nobody will act
+ * on. */
+void vfs_handle_close(int handle) {
+    uint32_t m = VFS_HANDLE_MOUNT(handle);
+    if (m > 0 && m <= (uint32_t)mount_count && mounts[m - 1].ops->close) {
+        mounts[m - 1].ops->close(VFS_HANDLE_LOCAL(handle));
+    }
+    /* leanfs handles fall through to nothing, which is the correct
+     * amount of work: the handle is the inode index, and the inode is
+     * not going anywhere because a file was closed. */
+}

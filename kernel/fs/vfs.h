@@ -64,6 +64,13 @@ uint32_t vfs_handle_size(int handle);
 int vfs_handle_stat(int handle, leanfs_stat_t *out); /* M77 - see leanfs.h */
 int vfs_handle_truncate(int handle);
 
+/* M101: the last fd naming this handle has gone - see vfs_ops_t.close.
+ * A no-op for leanfs handles, which hold no per-open state; the reason
+ * it exists is procfs, whose open() claims a slot out of a fixed table.
+ * Called from openfile_unref rather than from SYS_close, because a
+ * descriptor is not the last one until the refcount says so. */
+void vfs_handle_close(int handle);
+
 /* M87: truncate to any length - see leanfs_handle_truncate_to. */
 int vfs_handle_truncate_to(int handle, uint32_t len);
 

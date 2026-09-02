@@ -459,6 +459,18 @@ typedef struct task {
      * thread (kernel/net/net.c's tcp-timer is already one). Used only to
      * decide whether a tick counts as idle time. */
     uint8_t is_idle;
+    /* M101: how deep this TASK is inside a sched_idle_enter/exit bracket
+     * - a task halted waiting for the clock, which pit_sleep_ms does.
+     *
+     * There is already a per-CPU idle_depth doing M68's accounting, and
+     * the profiler tried to use it first. It cannot: the bracket in
+     * pit_sleep_ms wraps a `hlt` loop that the timer interrupt can
+     * schedule *away* from, so the next task to run on that CPU finds
+     * the counter still raised and looks idle while it is working. That
+     * mistake classified an entire kernel busy loop as idle time and was
+     * caught by this milestone's own self-test. The counter that answers
+     * "is this task waiting" has to live on the task. */
+    uint8_t idle_wait_depth;
     /* ---- M75: a place to stand, and something to stand there with -----
      *
      * `cwd` is this task's working directory - always absolute, always
@@ -700,6 +712,22 @@ void sched_sleep_until(uint64_t deadline_ms);
 
 void sched_idle_enter(void);
 void sched_idle_exit(void);
+
+/* M101: is `t` inside a sched_idle_enter/exit bracket right now - that
+ * is, halted waiting for the clock rather than doing work?
+ *
+ * The profiler needs it and nothing else does yet. A task halted in
+ * pit_sleep_ms is in ring 0 at an address inside pit_sleep_ms, so a
+ * sampler that only looks at CS records it as kernel time in a hot
+ * function. The first profile this machine ever produced said exactly
+ * that: half of "kernel time" was `pit_sleep_ms+0x50`, which is the
+ * `hlt` instruction.
+ *
+ * That is the failure kernel/profile/sampler.c's own comment warns about
+ * one paragraph before it happened - "a profile that learns to lie about
+ * an idle machine". The task's `is_idle` flag does not catch it either:
+ * that marks the idle *task*, and this is an ordinary task waiting. */
+int sched_task_is_idle_waiting(const task_t *t);
 
 /* M68 debugging aid: every task, its state, and what it is parked on.
  * A blocked machine says nothing on its own - this is what turns "the

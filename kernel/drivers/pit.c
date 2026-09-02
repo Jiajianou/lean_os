@@ -6,6 +6,7 @@
 #include "arch/x86_64/isr.h"
 #include "arch/x86_64/pic.h"
 #include "pcspk.h"
+#include "profile/sampler.h"
 
 #define PIT_CHANNEL0_DATA 0x40
 #define PIT_COMMAND       0x43
@@ -20,8 +21,14 @@ static volatile uint64_t ticks;
 static void (*tick_hook)(void);
 
 static void pit_irq(isr_regs_t *regs) {
-    (void)regs;
     ticks++;
+    /* M101: the sampling point. Ahead of everything else here for the
+     * same reason pcspk_tick is ahead of the scheduler hook - a tick that
+     * ends in a context switch never comes back to this function, so
+     * anything that must see *this* tick's interrupted RIP has to read it
+     * before the tick can be diverted. Costs a load and a branch when no
+     * profile is running. */
+    profile_sample(regs);
     /* M62: the speaker's own deadline. One comparison per tick, and the
      * reason a tone does not block whoever asked for it - see pcspk.h.
      * Ahead of the scheduler hook deliberately: a tick that ends in a
