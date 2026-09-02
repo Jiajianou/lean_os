@@ -429,6 +429,23 @@ typedef struct task {
      * with no terminal at all. That last part is the whole reason a
      * daemon calls it. */
     int sid;
+    /* ---- M96: the thread pointer -------------------------------------
+     *
+     * What IA32_FS_BASE holds while this task runs, so that `%fs:0` -
+     * which is what every access to a `__thread` variable goes through -
+     * points at this thread's own block and not at somebody else's.
+     *
+     * Per TASK rather than per address space, which is the whole point:
+     * two threads share every page and must not share this. It is
+     * restored on every context switch beside the FPU state and for the
+     * same reason - a task that resumed with the previous task's thread
+     * pointer would read the previous task's errno.
+     *
+     * 0 means "never set", and a task with 0 gets 0 written to the MSR
+     * rather than being skipped: skipping would leave whatever the
+     * outgoing task had, which is the exact bug this field exists to
+     * prevent. */
+    uint64_t fs_base;
     int pending_signal; /* 0 = none, else SIGKILL/SIGTERM (system_api/include/signal.h) - checked at the next syscall entry or scheduler tick, see syscall.c/sched.c */
     /* M89: when this task's alarm(2) expires, in ms since boot; 0 for no
      * alarm. Separate from wake_deadline_ms, which is a sleep: a sleep
@@ -656,6 +673,12 @@ void sched_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, ui
  * task table, under sched_lock, and never blocks. Waking a channel nobody
  * is on is free and is the common case. */
 void sched_wake_all(const void *chan);
+
+/* M96: the same, bounded. Returns how many were woken - which is what
+ * FUTEX_WAKE reports and what makes "wake one" mean one rather than
+ * everybody. See the implementation for why sched_wake_all was not
+ * rewritten in terms of it. */
+int sched_wake_n(const void *chan, int max);
 
 /* ---- M68: the sequence counter, and the race it closes ------------------
  *

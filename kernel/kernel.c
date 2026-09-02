@@ -8156,6 +8156,106 @@ static void boot_selftests_system(void) {
         }
     }
 
+    /* ---- M94 self-test: a target this compiler knows by name ------------
+     *
+     * The compile is graded on the host (tools/gcc-test.sh, which is
+     * where the compile line is written and is `$CC hello.c -o gcctest`
+     * with nothing else on it). This is the other half, and it is the
+     * half that cannot be faked: the program **runs here**.
+     *
+     * What it proves that the compile does not: that the startup files
+     * were linked in the right order and a constructor ran; that
+     * atexit's handler ran on the way out; that malloc reached this
+     * project's own allocator through libc.a out of the sysroot; that a
+     * struct returned by value and a varargs call agree with the ABI
+     * this kernel's crt0 assumes; and that libgcc, built for this target
+     * by the port, is there. See tests/gcc/hello.c for why each of those
+     * is a line rather than a printf.
+     *
+     * Skipped when /bin/gcctest is absent, for the same reason M89 skips
+     * without /bin/toybox: the toolchain takes half an hour to build and
+     * is not part of `make`, so an image without it is a valid image and
+     * a battery that panicked on one would make the default build depend
+     * on an optional step.
+     */
+    {
+        os_stat_t gt;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/gcctest", (uint64_t)&gt, 0) != 0) {
+            klog_puts("[m94] /bin/gcctest is not on this image - skipped. "
+                       "tools/build-toolchain.sh builds the compiler and "
+                       "tools/gcc-test.sh installs what it produces.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m94.sh";
+            const char *result = PATH_TMP_DIR "m94.out";
+            /* Run through the shell so its output can be redirected to a
+             * file this test can read - the same shape M86 and M89 use,
+             * and the reason all three write a fixture rather than
+             * capturing a pipe. */
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "/bin/gcctest > " PATH_TMP_DIR "m94.out\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M94 self-test: could not write the script fixture");
+            }
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m94] the compiled program could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+
+            static char produced[512];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m94] the compiled program produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"constructor ran",  "crti/crtbegin/crtend/crtn linked in order, .init_array walked"},
+                    {"malloc and string round trip", "libc.a out of the sysroot"},
+                    {"struct return and varargs", "the ABI this kernel's crt0 assumes"},
+                    {"floating point",   "libgcc and SSE state"},
+                    {"every check passed", "every check in the fixture"},
+                    {"atexit ran",       "the exit handlers, which run after main returns"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m94] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+                if (selftest_contains(produced, "FAIL")) {
+                    klog_puts("[m94] the program reported a failure of its own\n");
+                    all_ok = 0;
+                }
+            }
+
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+
+            if (!all_ok) {
+                klog_puts("[m94] what the compiled program actually wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m94] ---- end\n");
+                panic("M94 self-test: a program this compiler produced does not run here");
+            }
+
+            klog_puts("[m94] a target this compiler knows by name: a program compiled by "
+                       "x86_64-lean_os-gcc with no flag supplied by hand - constructor and "
+                       "atexit handler both run, malloc through libc.a out of the sysroot, "
+                       "a struct returned by value and a varargs call agreeing with this "
+                       "kernel's ABI, and floating point through a libgcc built for this "
+                       "target - self-test passed.\n\n");
+        }
+    }
+
     /* ---- M73 self-test: names, and the first inbound byte ---------------
      *
      * Two halves, and neither of them depends on the machine running QEMU

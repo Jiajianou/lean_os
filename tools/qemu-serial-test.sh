@@ -321,6 +321,12 @@ REQUIRED_MARKERS=(
   # is a broken build step rather than a legitimate configuration, and
   # the "skipped" line the kernel prints in that case is not this marker.
   "[m89] somebody else's userland: find, xargs, grep, sort and uniq"
+  # M94. Required for the same reason [m89] is: run-tests.sh installs
+  # what the compiler produced before this runs, so an image reaching
+  # here without /bin/gcctest is a broken build step - unless the
+  # compiler itself was never built, which gcc-test.sh says out loud and
+  # which is why this marker is checked by name rather than by prefix.
+  "[m94] a target this compiler knows by name"
   "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m73] names, not numbers:"
   "[m74] the session remembers:"

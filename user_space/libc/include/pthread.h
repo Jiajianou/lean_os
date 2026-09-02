@@ -42,14 +42,32 @@ typedef struct {
  * is modest and why pthread_attr_setstacksize exists at all. */
 #define PTHREAD_STACK_DEFAULT (64u * 1024u)
 
-/* A mutex is one word and a spin-then-yield loop. There are no futexes
- * here: a blocking mutex would need a kernel-side wait channel keyed on
- * a user address, which is a real piece of work and is not what "two
- * threads, one address space" needs to be true. What this does have is
- * the property that matters - it is a real mutual exclusion built on an
- * atomic exchange, so an increment inside it cannot interleave. */
+/* ---- M96: a mutex over a futex ----------------------------------------
+ *
+ * M79 wrote here: "A mutex is one word and a spin-then-yield loop. There
+ * are no futexes here: a blocking mutex would need a kernel-side wait
+ * channel keyed on a user address, which is a real piece of work." There
+ * is one now (SYS_futex), and this is that word turned into a real lock.
+ *
+ * Three states rather than two, and the third is the whole design:
+ *
+ *   0  free
+ *   1  held, and nobody is waiting
+ *   2  held, and somebody MAY be waiting
+ *
+ * The uncontended paths - lock a free mutex, unlock one nobody wants -
+ * are a single atomic instruction each and never enter the kernel. Only
+ * a thread that actually has to wait writes 2 and calls futex(WAIT), and
+ * only an unlock that finds 2 calls futex(WAKE). That is the entire
+ * reason a futex is worth having: the syscall is on the contended path,
+ * where a syscall is cheap next to the wait it replaces.
+ *
+ * The 2 is sticky - an unlock that sees it wakes somebody even if that
+ * somebody has since given up - and that is deliberate. Clearing it
+ * accurately needs a count of waiters, and an unnecessary wake costs one
+ * syscall while a missed one costs a hang. */
 typedef struct {
-    volatile int locked;
+    volatile unsigned int state;
 } pthread_mutex_t;
 
 #define PTHREAD_MUTEX_INITIALIZER {0}
@@ -97,6 +115,51 @@ typedef struct { int unused; } pthread_condattr_t;
 typedef struct { int unused; } pthread_mutexattr_t;
 
 #define PTHREAD_ONCE_INIT {0, PTHREAD_MUTEX_INITIALIZER}
+
+/* ---- M96: the rest of <pthread.h>, over the same futex ----------------
+ *
+ * M79's "deliberately absent" list said rwlocks, barriers and semaphores
+ * would arrive "until something concrete fails to link without them".
+ * They arrive here for a different and better reason: every one of them
+ * is a wait, all four of the waits in this header were spin loops, and
+ * the futex is what makes a wait cost nothing. Writing them now, over
+ * one primitive, is cheaper than writing them later over four.
+ *
+ * A reader-writer lock is one word: the count of readers, with a
+ * sentinel for "a writer holds it". A barrier is a count and a
+ * generation - the generation is what stops a thread that reaches the
+ * barrier twice quickly from being counted into the wrong round, which
+ * is the bug every naive barrier has. A semaphore is a count.
+ */
+typedef struct {
+    volatile unsigned int state; /* 0 free, ~0u writer, else reader count */
+} pthread_rwlock_t;
+
+#define PTHREAD_RWLOCK_INITIALIZER {0}
+
+typedef struct {
+    volatile unsigned int count;      /* how many have arrived this round */
+    volatile unsigned int generation; /* which round - see above */
+    unsigned int threshold;
+} pthread_barrier_t;
+
+typedef struct { int unused; } pthread_rwlockattr_t;
+typedef struct { int unused; } pthread_barrierattr_t;
+
+#define PTHREAD_BARRIER_SERIAL_THREAD (-1)
+
+int pthread_rwlock_init(pthread_rwlock_t *rw, const void *attr);
+int pthread_rwlock_destroy(pthread_rwlock_t *rw);
+int pthread_rwlock_rdlock(pthread_rwlock_t *rw);
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *rw);
+int pthread_rwlock_wrlock(pthread_rwlock_t *rw);
+int pthread_rwlock_trywrlock(pthread_rwlock_t *rw);
+int pthread_rwlock_unlock(pthread_rwlock_t *rw);
+
+int pthread_barrier_init(pthread_barrier_t *b, const void *attr,
+                         unsigned int count);
+int pthread_barrier_destroy(pthread_barrier_t *b);
+int pthread_barrier_wait(pthread_barrier_t *b);
 
 int pthread_attr_init(pthread_attr_t *attr);
 int pthread_attr_setstacksize(pthread_attr_t *attr, size_t size);

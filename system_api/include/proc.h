@@ -137,3 +137,31 @@ typedef struct {
     uint64_t free_frames;
     uint64_t page_size;
 } os_meminfo_t;
+
+/* ---- M96: the thread pointer, and a wait that costs nothing -----------
+ *
+ * SYS_arch_prctl's subfunctions. The numbers are Linux's, like every
+ * other number in system_api where there is a convention to match: a
+ * program compiled against a real Unix's <asm/prctl.h> means here what
+ * it meant there.
+ *
+ * Only the FS pair. ARCH_SET_GS/ARCH_GET_GS are deliberately absent -
+ * %gs is what a kernel uses for its own per-CPU data through `swapgs`,
+ * and handing user space the ability to set it would be handing it the
+ * register this kernel would want if it ever did. Refused by number
+ * rather than accepted and ignored.
+ */
+#define ARCH_SET_FS 0x1002
+#define ARCH_GET_FS 0x1003
+
+/* ---- SYS_futex's operations -------------------------------------------
+ *
+ * Two, and the argument for having only two is the same one <pthread.h>
+ * makes for having no barriers: a futex is a *wait* and a *wake*, and
+ * everything else built on one - a mutex, a condition variable, a
+ * semaphore - is user-space arithmetic around those two. FUTEX_REQUEUE
+ * and FUTEX_WAKE_OP are optimisations for a thundering herd that nothing
+ * on this machine has measured.
+ */
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1

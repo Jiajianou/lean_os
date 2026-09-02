@@ -103,6 +103,14 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
     echo "the toybox port failed to build or install - see tools/build-toybox.sh" >&2
     exit 1
   fi
+  # M94: and the program this project's own compiler produces, if that
+  # compiler has been built. Skips with a message otherwise - see
+  # tools/gcc-test.sh, which is also where the compile line lives.
+  run_stage "a program from x86_64-lean_os-gcc" ./tools/gcc-test.sh
+  if [ "$OVERALL" -ne 0 ]; then
+    echo "the target port produced something that will not link or run" >&2
+    exit 1
+  fi
 fi
 
 # ---- Stage 1: the host tier ------------------------------------------

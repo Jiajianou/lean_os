@@ -46,13 +46,23 @@ void *realloc(void *ptr, size_t size) {
     return p;
 }
 
+/* M94: exit runs what was registered; _exit does not. See
+ * __lean_run_exit_handlers in env.c, and <unistd.h>'s note on _exit,
+ * which predicted this distinction becoming real. */
+extern void __lean_run_exit_handlers(void);
+
 void exit(int status) {
+    __lean_run_exit_handlers();
     sys_exit(status);
     for (;;) {
     }
 }
 
 void abort(void) {
+    /* Deliberately does NOT run the exit handlers. abort() means the
+     * program has decided its own state is not trustworthy, and running
+     * a flush over a corrupt buffer is how a crash turns into a
+     * corrupted file. C says the same thing in more words. */
     /* Nonzero and distinctive: a process that aborted did not finish, and
      * a task manager row showing 134 (128 + SIGABRT, the convention
      * everywhere) says which kind of not-finishing it was. */

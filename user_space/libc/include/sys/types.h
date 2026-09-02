@@ -7,6 +7,17 @@
  */
 #pragma once
 
+/* M94: <stdint.h>, which is the compiler's own and links nothing.
+ *
+ * Not decoration: every real <sys/types.h> makes `intptr_t` visible, and
+ * code written against a Unix relies on it - GCC's own libgcov.h casts
+ * through `intptr_t` having included only <sys/types.h>, and libgcc
+ * therefore would not compile for this target until this line existed.
+ * That is the kind of expectation a header list cannot predict and a
+ * real build finds in one line, which is M63's rule arriving at the
+ * compiler itself. */
+#include <stdint.h>
+
 #include <stddef.h>
 
 typedef long          ssize_t;

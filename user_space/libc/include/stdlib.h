@@ -12,6 +12,13 @@ void free(void *ptr);
 void *calloc(size_t count, size_t size);
 void *realloc(void *ptr, size_t size);
 
+/* M94: a function to run at exit(), in reverse order of registration.
+ * At most 32, which is POSIX's own minimum; past that this returns -1
+ * rather than dropping the registration, because a program told its
+ * flush was registered will not flush. Note _exit() deliberately runs
+ * none of these - see <unistd.h>. */
+int atexit(void (*fn)(void));
+
 void exit(int status) __attribute__((noreturn));
 void abort(void) __attribute__((noreturn));
 

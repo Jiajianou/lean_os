@@ -567,4 +567,46 @@ typedef struct {
  * Needs CAP_FS_WRITE: it puts bytes on the disk. */
 #define SYS_msync 107
 
-#define SYSCALL_COUNT 108
+/* M96: (code, addr) -> 0, the value, or -1.
+ *
+ * ARCH_SET_FS writes this task's thread pointer; ARCH_GET_FS stores it
+ * through `addr`. See system_api/include/proc.h for why only the FS
+ * pair, and kernel/sched/sched.h's fs_base for why it is per task rather
+ * than per address space.
+ *
+ * The address is not checked for being anything in particular: a thread
+ * pointer is a number the C runtime chose, and this kernel never
+ * dereferences it. What it must be is inside the caller's own address
+ * space, which is checked, because a task resumed with a kernel address
+ * in FS would let a user-space instruction read kernel memory through a
+ * segment override. */
+#define SYS_arch_prctl 108
+
+/* M96: (uint32_t *addr, op, val, timeout_ms) -> 0, a count, or -1.
+ *
+ * FUTEX_WAIT: sleep until somebody wakes this address, but ONLY if
+ * *addr still equals `val` at the moment the kernel checks - which is
+ * the whole mechanism. A mutex's fast path never enters the kernel; its
+ * slow path writes "contended" and calls this, and the value check is
+ * what makes the window between those two steps safe. Returns 0 for a
+ * wake, -2 for a timeout, and -1 if the value had already changed
+ * (which is a success from the caller's point of view: the thing it was
+ * waiting for happened before it slept).
+ *
+ * FUTEX_WAKE: wake at most `val` waiters on that address, and return how
+ * many were woken. A `val` of INT_MAX is "all of them", which is what a
+ * condition variable's broadcast passes.
+ *
+ * The address is a USER address and is the identity - two processes that
+ * map the same page share a futex, which is what makes one work across a
+ * MAP_SHARED mapping (M91). The kernel keys on the address as the
+ * calling address space sees it, so two *different* address spaces at
+ * the same virtual address are two different futexes; a shared futex
+ * between processes needs the physical page, and nothing has asked. Said
+ * here rather than discovered.
+ *
+ * Not gated: a process sleeping on its own memory is asking about
+ * itself. */
+#define SYS_futex 109
+
+#define SYSCALL_COUNT 110

@@ -48,9 +48,83 @@ extern int main(int argc, char **argv, char **envp);
  * main simply never reads - so `int main(int argc, char **argv, char
  * **envp)` works here too, which is what a program written for a real
  * Unix expects. */
+/* M94: the constructor and destructor arrays, and _init/_fini.
+ *
+ * Both mechanisms exist and both are walked, because a program is
+ * compiled by whatever compiler the person had: an object built by a
+ * modern GCC puts a pointer in .init_array, and one built by an older
+ * toolchain (or with -fno-use-cxa-atexit) contributes a fragment to
+ * .init instead. Walking one and not the other is a constructor that
+ * silently does not run, which is the failure this is hardest to notice.
+ *
+ * The symbols come from user_space/lib/user.ld, and are PROVIDE_HIDDEN
+ * there so that a program with no constructors links with the two
+ * bounds equal rather than undefined. */
+extern void _init(void);
+extern void _fini(void);
+extern void (*__init_array_start[])(int, char **, char **);
+extern void (*__init_array_end[])(int, char **, char **);
+extern void (*__fini_array_start[])(void);
+extern void (*__fini_array_end[])(void);
+
+/* ---- M94: atexit ------------------------------------------------------
+ *
+ * <unistd.h>'s note on _exit said "nothing here registers anything yet -
+ * `exit` is a syscall and no more... The distinction becomes real the
+ * day this libc grows atexit". This is that day, and the distinction is
+ * now observable: exit() runs these and _exit() does not, which is
+ * exactly what a forked child that decides not to exec depends on.
+ *
+ * 32 slots is what POSIX requires at minimum (_POSIX_ATEXIT_MAX is 32)
+ * and more than anything here registers. A registration past that is
+ * refused with -1 rather than dropped, because a program that registers
+ * a flush and is told it succeeded will not flush.
+ */
+#define ATEXIT_MAX 32
+static void (*atexit_fns[ATEXIT_MAX])(void);
+static int atexit_count;
+
+int atexit(void (*fn)(void)) {
+    if (!fn || atexit_count >= ATEXIT_MAX) {
+        return -1;
+    }
+    atexit_fns[atexit_count++] = fn;
+    return 0;
+}
+
+/* Called by exit(), in reverse order of registration - which is what the
+ * standard requires and what makes nesting work: a handler registered by
+ * another handler's setup runs before it. The destructor array and
+ * _fini run after, in the order the ELF ABI specifies. */
+void __lean_run_exit_handlers(void) {
+    while (atexit_count > 0) {
+        void (*fn)(void) = atexit_fns[--atexit_count];
+        /* The count is decremented BEFORE the call, so a handler that
+         * calls exit() again does not run itself forever. */
+        fn();
+    }
+    for (void (**p)(void) = __fini_array_end; p > __fini_array_start;) {
+        (*--p)();
+    }
+    _fini();
+}
+
 int __lean_start(int argc, char **argv, char **envp) {
     environ = envp;
-    return main(argc, argv, envp);
+    /* _init first, then the array: that is the order every ELF runtime
+     * uses, and it matters for an object that contributes to both. */
+    _init();
+    for (void (**p)(int, char **, char **) = __init_array_start;
+         p < __init_array_end; p++) {
+        (*p)(argc, argv, envp);
+    }
+    int rc = main(argc, argv, envp);
+    /* Falling off the end of main is a call to exit(), not to _exit() -
+     * C says so, and it is why a program that returns from main still
+     * gets its atexit handlers run. crt0 calls sys_exit with what this
+     * returns, so the handlers have to run here. */
+    __lean_run_exit_handlers();
+    return rc;
 }
 
 static int env_count(void) {

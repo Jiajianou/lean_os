@@ -55,12 +55,47 @@ static inline int atomic_xchg(volatile int *p, int v) {
     return v;
 }
 
+/* M96: the two the futex-backed primitives need beside the exchange.
+ *
+ * A compare-and-swap is what makes "take it only if it is still free" a
+ * single step, which is the whole of a three-state mutex and of a
+ * reader-writer lock's reader count. `lock cmpxchg` is the instruction
+ * and there is no intrinsic to borrow in this freestanding build - the
+ * same argument atomic_xchg's own note makes. */
+static inline unsigned int atomic_cas(volatile unsigned int *p,
+                                      unsigned int expected,
+                                      unsigned int desired) {
+    __asm__ volatile("lock cmpxchgl %2, %1"
+                     : "+a"(expected), "+m"(*p)
+                     : "r"(desired)
+                     : "memory");
+    return expected; /* what was there - equal to `expected` on success */
+}
+
+static inline unsigned int atomic_xchg_u(volatile unsigned int *p,
+                                         unsigned int v) {
+    __asm__ volatile("lock xchgl %0, %1" : "+r"(v), "+m"(*p) : : "memory");
+    return v;
+}
+
+/* Wait until `*p` stops being `val`, and wake whoever is waiting. Thin
+ * enough to be worth naming rather than writing the syscall out four
+ * times, and the names are what the rest of this file reads as. */
+static void futex_wait(volatile unsigned int *p, unsigned int val,
+                       unsigned int timeout_ms) {
+    sys_futex(p, FUTEX_WAIT, val, timeout_ms);
+}
+
+static void futex_wake(volatile unsigned int *p, int count) {
+    sys_futex(p, FUTEX_WAKE, (unsigned int)count, 0);
+}
+
 int pthread_mutex_init(pthread_mutex_t *m, const void *attr) {
     (void)attr;
     if (!m) {
         return 22;
     }
-    m->locked = 0;
+    m->state = 0;
     return 0;
 }
 
@@ -73,42 +108,65 @@ int pthread_mutex_lock(pthread_mutex_t *m) {
     if (!m) {
         return 22;
     }
-    /* Spin briefly, then yield. The spin is what makes an uncontended or
-     * briefly-contended lock cost nothing but one instruction; the yield
-     * is what stops a waiter from burning its whole time slice against a
-     * holder that is not currently running - which, on a machine with
-     * fewer cores than threads, is most of the time.
+    /* ---- M96: the three-state lock - see <pthread.h> for the states ---
      *
-     * 200 is not tuned, and saying so is more useful than pretending: it
-     * is long enough to cover a critical section of a few instructions
-     * (the case this library's own users have) and short enough that a
-     * genuinely blocked waiter reaches the yield in microseconds. */
-    for (;;) {
-        for (int spin = 0; spin < 200; spin++) {
-            if (atomic_xchg(&m->locked, 1) == 0) {
-                return 0;
-            }
-            __asm__ volatile("pause" ::: "memory");
-        }
-        sys_yield();
+     * The uncontended acquire is the CAS below and nothing else: one
+     * instruction, no syscall. Everything after it is the contended
+     * path.
+     *
+     * A short spin before sleeping, because the common contended case on
+     * this machine is a critical section of a few instructions held by a
+     * thread that is currently RUNNING on another core - and a syscall
+     * to sleep through that costs more than the wait. 200 is the number
+     * the spin-then-yield version used and is still not tuned; what
+     * changed is what happens after it, which used to be a yield that
+     * came back and is now a sleep that does not. */
+    if (atomic_cas(&m->state, 0, 1) == 0) {
+        return 0;
     }
+    for (int spin = 0; spin < 200; spin++) {
+        if (atomic_cas(&m->state, 0, 1) == 0) {
+            return 0;
+        }
+        __asm__ volatile("pause" ::: "memory");
+    }
+    /* Give up spinning. From here the lock is marked 2 - "somebody may
+     * be waiting" - and stays that way until it is free again, which is
+     * what tells the unlocker to make a syscall. The exchange rather
+     * than a CAS is deliberate: it both takes the lock if it was free
+     * AND marks it contended if it was not, in one instruction, which is
+     * the standard three-state futex lock and the only version of it
+     * without a race between the two. */
+    while (atomic_xchg_u(&m->state, 2) != 0) {
+        futex_wait(&m->state, 2, 0);
+    }
+    return 0;
 }
 
 int pthread_mutex_trylock(pthread_mutex_t *m) {
     if (!m) {
         return 22;
     }
-    return atomic_xchg(&m->locked, 1) == 0 ? 0 : 16 /* EBUSY */;
+    return atomic_cas(&m->state, 0, 1) == 0 ? 0 : 16 /* EBUSY */;
 }
 
 int pthread_mutex_unlock(pthread_mutex_t *m) {
     if (!m) {
         return 22;
     }
-    /* An exchange rather than a plain store, so that unlocking is a
+    /* M96: an exchange rather than a plain store, so that unlocking is a
      * barrier too - every write the critical section made is visible
-     * before the lock reads as free. */
-    atomic_xchg(&m->locked, 0);
+     * before the lock reads as free - and so that this reads the old
+     * state in the same instruction that clears it.
+     *
+     * The old state is what decides whether a syscall happens: 1 means
+     * nobody ever had to wait, and this unlock costs one instruction; 2
+     * means somebody may be asleep on it, and exactly one of them is
+     * woken. See <pthread.h> for why the 2 is sticky and why an
+     * unnecessary wake is the cheap side of that trade. */
+    if (atomic_xchg_u(&m->state, 0) == 2) {
+        futex_wake(&m->state, 1);
+    }
     return 0;
 }
 
@@ -144,19 +202,35 @@ int pthread_cond_destroy(pthread_cond_t *c) {
     return 0; /* nothing was allocated */
 }
 
+/* ---- M96: the condition variables, over the futex ---------------------
+ *
+ * The counter and the sampling are unchanged from M79 - the correctness
+ * argument is the same and is still the interesting part: `seq` is read
+ * BEFORE the mutex is dropped, so a signal arriving in the window
+ * between the unlock and the wait still moves the counter past the value
+ * sampled, and cannot be missed. Sampling after the unlock is the
+ * classic lost wakeup.
+ *
+ * What changed is the wait. This was `while (c->seq == observed)
+ * sys_yield();` - a loop that burned a time slice per iteration for as
+ * long as the wait lasted. The futex's value check IS the same test, so
+ * the loop becomes a syscall that returns when the counter moves: the
+ * waiting thread is TASK_BLOCKED and consumes no CPU at all, which is
+ * the measurement this milestone exists for.
+ *
+ * The loop around the futex stays, because a futex wake is permitted to
+ * be spurious and because two waiters woken by one broadcast both have
+ * to re-test. POSIX allows spurious wakeups precisely so that a correct
+ * program loops on its predicate; this one loops on the counter.
+ */
 int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
     if (!c || !m) {
         return 22;
     }
-    /* Sampled BEFORE the mutex is dropped, which is the whole
-     * correctness argument: a signal that arrives in the window between
-     * the unlock and the first read of the counter still moves it past
-     * the value sampled here, so it cannot be missed. Sampling after the
-     * unlock is the classic lost-wakeup bug. */
     unsigned observed = c->seq;
     pthread_mutex_unlock(m);
     while (c->seq == observed) {
-        sys_yield();
+        sys_futex(&c->seq, FUTEX_WAIT, observed, 0);
     }
     pthread_mutex_lock(m);
     return 0;
@@ -181,30 +255,213 @@ int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
     unsigned observed = c->seq;
     pthread_mutex_unlock(m);
     while (c->seq == observed) {
-        if (sys_uptime_ms() >= deadline) {
+        long left = deadline - sys_uptime_ms();
+        if (left <= 0) {
             pthread_mutex_lock(m);
             return 110; /* ETIMEDOUT */
         }
-        sys_yield();
+        /* The kernel's own timeout, so a wait that ends by expiring
+         * costs one syscall rather than one per millisecond. The loop
+         * is still here for the spurious-wake case and for a counter
+         * that moved and moved back. */
+        sys_futex(&c->seq, FUTEX_WAIT, observed, (unsigned int)left);
     }
     pthread_mutex_lock(m);
     return 0;
 }
 
-int pthread_cond_signal(pthread_cond_t *c) {
+/* M96: signal wakes ONE and broadcast wakes all, which they could not
+ * before.
+ *
+ * M79's note said signal "wakes every waiter, not one - which is a legal
+ * implementation, not a corner cut", and it was right about the legality
+ * and honest about the cost: N waiters woken for one handoff is N-1
+ * context switches wasted, every time. The futex takes a count, so the
+ * two calls are finally two different operations.
+ *
+ * The counter bump is still an atomic exchange rather than an increment,
+ * so that the write is a barrier: everything the signalling thread did
+ * before this is visible to a waiter that sees the new value. */
+static int cond_wake(pthread_cond_t *c, int count) {
     if (!c) {
         return 22;
     }
-    /* Wakes every waiter, not one - see <pthread.h>. An atomic exchange
-     * rather than an increment so that the write is also a barrier:
-     * everything the signalling thread did before this is visible to a
-     * waiter that sees the new value. */
-    atomic_xchg((volatile int *)&c->seq, (int)(c->seq + 1u));
+    atomic_xchg_u(&c->seq, c->seq + 1u);
+    futex_wake(&c->seq, count);
     return 0;
 }
 
+int pthread_cond_signal(pthread_cond_t *c) {
+    return cond_wake(c, 1);
+}
+
 int pthread_cond_broadcast(pthread_cond_t *c) {
-    return pthread_cond_signal(c); /* identical here, and honestly so */
+    /* MAX_THREADS is this library's own ceiling on how many waiters
+     * there can be, so it is "all of them" said in a number this
+     * machine can mean. */
+    return cond_wake(c, MAX_THREADS);
+}
+
+/* ---- M96: reader-writer locks and barriers ---------------------------
+ *
+ * Both are new, and both are the futex used the way <pthread.h> says: a
+ * word that changes, a wait on the old value, a wake on the change.
+ *
+ * The rwlock's word is the reader count, with ~0u meaning a writer holds
+ * it. That encoding is what makes both acquires a single compare-and-
+ * swap: a reader adds one to anything that is not ~0u, a writer swaps
+ * ~0u in for 0 and nothing else.
+ *
+ * **Writers can starve here, and that is stated rather than fixed.** A
+ * stream of readers that never lets the count reach zero keeps a writer
+ * out forever. Fixing it needs a "writer waiting" flag that readers
+ * respect, which is a second word and a second set of wakes; nothing on
+ * this machine has a reader stream dense enough for it to matter, and
+ * M69's rule is that the measurement is what would change this.
+ */
+int pthread_rwlock_init(pthread_rwlock_t *rw, const void *attr) {
+    (void)attr;
+    if (!rw) {
+        return 22;
+    }
+    rw->state = 0;
+    return 0;
+}
+
+int pthread_rwlock_destroy(pthread_rwlock_t *rw) {
+    (void)rw;
+    return 0; /* nothing was allocated - the same answer the mutex gives */
+}
+
+int pthread_rwlock_rdlock(pthread_rwlock_t *rw) {
+    if (!rw) {
+        return 22;
+    }
+    for (;;) {
+        unsigned int seen = rw->state;
+        if (seen != ~0u) {
+            if (atomic_cas(&rw->state, seen, seen + 1u) == seen) {
+                return 0;
+            }
+            continue; /* somebody else changed it first - look again */
+        }
+        futex_wait(&rw->state, ~0u, 0);
+    }
+}
+
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *rw) {
+    if (!rw) {
+        return 22;
+    }
+    unsigned int seen = rw->state;
+    if (seen == ~0u) {
+        return 16; /* EBUSY */
+    }
+    return atomic_cas(&rw->state, seen, seen + 1u) == seen ? 0 : 16;
+}
+
+int pthread_rwlock_wrlock(pthread_rwlock_t *rw) {
+    if (!rw) {
+        return 22;
+    }
+    for (;;) {
+        if (atomic_cas(&rw->state, 0, ~0u) == 0) {
+            return 0;
+        }
+        unsigned int seen = rw->state;
+        if (seen == 0) {
+            continue; /* it went free between the CAS and the read */
+        }
+        futex_wait(&rw->state, seen, 0);
+    }
+}
+
+int pthread_rwlock_trywrlock(pthread_rwlock_t *rw) {
+    if (!rw) {
+        return 22;
+    }
+    return atomic_cas(&rw->state, 0, ~0u) == 0 ? 0 : 16;
+}
+
+int pthread_rwlock_unlock(pthread_rwlock_t *rw) {
+    if (!rw) {
+        return 22;
+    }
+    unsigned int seen = rw->state;
+    if (seen == ~0u) {
+        atomic_xchg_u(&rw->state, 0);
+        /* A writer let go: every reader waiting may proceed, and one
+         * writer may. Waking everybody is right here rather than
+         * wasteful - the readers genuinely can all run. */
+        futex_wake(&rw->state, MAX_THREADS);
+        return 0;
+    }
+    for (;;) {
+        seen = rw->state;
+        if (seen == 0 || seen == ~0u) {
+            return 22; /* unlocking a lock this thread does not hold */
+        }
+        if (atomic_cas(&rw->state, seen, seen - 1u) == seen) {
+            if (seen == 1) {
+                /* The last reader. Only now can a writer take it, so
+                 * this is the only reader-unlock that has to wake
+                 * anybody. */
+                futex_wake(&rw->state, 1);
+            }
+            return 0;
+        }
+    }
+}
+
+int pthread_barrier_init(pthread_barrier_t *b, const void *attr,
+                         unsigned int count) {
+    (void)attr;
+    if (!b || count == 0) {
+        return 22;
+    }
+    b->count = 0;
+    b->generation = 0;
+    b->threshold = count;
+    return 0;
+}
+
+int pthread_barrier_destroy(pthread_barrier_t *b) {
+    (void)b;
+    return 0;
+}
+
+int pthread_barrier_wait(pthread_barrier_t *b) {
+    if (!b || b->threshold == 0) {
+        return 22;
+    }
+    /* The generation is read BEFORE this thread is counted in, and is
+     * what the wait is keyed on. Without it, a thread that reaches the
+     * barrier, is released, loops, and reaches it again before a slower
+     * sibling has woken would be counted into the next round while the
+     * previous one is still finishing - which is the bug every barrier
+     * written without a generation has, and it presents as an occasional
+     * hang rather than as anything a test would name. */
+    unsigned int gen = b->generation;
+    unsigned int arrived;
+    for (;;) {
+        arrived = b->count;
+        if (atomic_cas(&b->count, arrived, arrived + 1u) == arrived) {
+            break;
+        }
+    }
+    if (arrived + 1u == b->threshold) {
+        /* The last to arrive resets the round and releases everybody.
+         * The count goes first: a thread released here may loop back
+         * and start the next round before this function returns. */
+        atomic_xchg_u(&b->count, 0);
+        atomic_xchg_u(&b->generation, gen + 1u);
+        futex_wake(&b->generation, MAX_THREADS);
+        return PTHREAD_BARRIER_SERIAL_THREAD;
+    }
+    while (b->generation == gen) {
+        futex_wait(&b->generation, gen, 0);
+    }
+    return 0;
 }
 
 int pthread_attr_init(pthread_attr_t *attr) {

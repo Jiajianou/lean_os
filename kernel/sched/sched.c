@@ -1036,6 +1036,44 @@ uint64_t sched_event_seq(void) {
     return v;
 }
 
+/* M96: wake at most `max` waiters on `chan`, and say how many.
+ *
+ * FUTEX_WAKE(1) is what a mutex unlock passes, and waking every waiter
+ * for it is the thundering herd a futex exists to avoid: N threads wake,
+ * N-1 find the lock taken and sleep again, and the cost is N context
+ * switches per handoff rather than one.
+ *
+ * sched_wake_all is left exactly as it was rather than being expressed
+ * in terms of this: its callers - a pipe, a socket, the keyboard - all
+ * genuinely mean everybody, and reading `sched_wake_n(chan, INT_MAX)` at
+ * those sites would be a worse way to say so. */
+int sched_wake_n(const void *chan, int max) {
+    if (!chan || max <= 0) {
+        return 0;
+    }
+    uint64_t flags = irq_save_disable();
+    spin_lock(&sched_lock);
+    event_seq++; /* the same reason sched_wake_all bumps it - see below */
+    int woken = 0;
+    for (int i = 0; i < task_count && woken < max; i++) {
+        if (tasks[i].state == TASK_BLOCKED && tasks[i].wait_chan == chan) {
+            blocked_count--;
+            tasks[i].state = TASK_READY;
+            tasks[i].prio = PRIO_INTERACTIVE; /* M69 - see sched_wake_all */
+            tasks[i].full_slices = 0;
+            tasks[i].wait_chan = (const void *)0;
+            tasks[i].wake_deadline_ms = 0;
+            woken++;
+        }
+    }
+    if (woken > 0) {
+        need_resched[smp_current_cpu()] = 1;
+    }
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+    return woken;
+}
+
 void sched_wake_all(const void *chan) {
     if (!chan) {
         return;
@@ -1253,6 +1291,15 @@ void schedule(void) {
      * means every task starts from a state somebody chose. */
     fpu_save(prev->fpu_state);
     fpu_restore(next->fpu_state);
+
+    /* M96: and the thread pointer, in the same place and for the same
+     * reason. `%fs:0` is where every access to a `__thread` variable
+     * goes; a task resumed with the previous task's FS base reads the
+     * previous task's copy. Written unconditionally rather than only
+     * when it differs - a compare is a memory read and a wrmsr is about
+     * as cheap, and "only when it differs" is how a stale value survives
+     * a path somebody adds later. */
+    cpu_write_msr(MSR_FS_BASE, next->fs_base);
 
     /* sched_lock is still held here on purpose - see its own header
      * comment for why, and for exactly where/how it gets released once

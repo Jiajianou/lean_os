@@ -265,6 +265,17 @@ long sys_msync(void *addr, unsigned long len, int flags) {
     return do_syscall(SYS_msync, (long)addr, (long)len, flags);
 }
 
+/* M96: the thread pointer and the futex - see SYS_arch_prctl and
+ * SYS_futex for what each argument means and what the returns are. */
+long sys_arch_prctl(int code, unsigned long addr) {
+    return do_syscall(SYS_arch_prctl, code, (long)addr, 0);
+}
+
+long sys_futex(volatile unsigned int *addr, int op, unsigned int val,
+               unsigned int timeout_ms) {
+    return do_syscall6(SYS_futex, (long)addr, op, (long)val, (long)timeout_ms, 0, 0);
+}
+
 long sys_utime(const char *path, unsigned int mtime) {
     return do_syscall(SYS_utime, (long)path, (long)mtime, 0);
 }

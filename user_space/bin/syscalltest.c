@@ -282,6 +282,16 @@ static const entry_t table[] = {
      * the caller's arena is refused by the range check rather than by a
      * copy - so it is PLAIN like mmap and madvise beside it. */
     {SYS_msync,         CLASS_PLAIN, 0, NULL},
+    /* M96. arch_prctl's second argument is a pointer only for
+     * ARCH_GET_FS, and the sweep passes garbage `code` values that fall
+     * through to the refusal - so it is PLAIN and the pointer path is
+     * covered by the [m96] self-test instead. The futex takes a user
+     * address it never dereferences beyond one aligned 32-bit read,
+     * which the range check covers; PTR would have the sweep pass an
+     * unaligned kernel address and expect a copy_from_user refusal,
+     * which is not the shape of the check this call makes. */
+    {SYS_arch_prctl,    CLASS_PLAIN, 0, NULL},
+    {SYS_futex,         CLASS_PLAIN, 0, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 

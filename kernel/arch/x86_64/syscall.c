@@ -1633,6 +1633,121 @@ static long sys_sync(uint64_t a1, uint64_t a2, uint64_t a3,
     return 0;
 }
 
+/* ---- M96: the thread pointer and the futex ----------------------------
+ *
+ * Two calls that between them turn "there are threads" into "there are
+ * threads a C runtime can be written against". Before them, `__thread`
+ * had nowhere to live and every wait in <pthread.h> was a spin-then-
+ * yield loop that burned a whole core while it waited.
+ */
+static long sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a3,
+                           uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *self = sched_current();
+    switch (code) {
+    case ARCH_SET_FS:
+        /* Checked for being a user address, and for nothing else. A
+         * thread pointer is a number the runtime chose and this kernel
+         * never dereferences it - but a task resumed with a KERNEL
+         * address in FS would let one `mov %fs:0, %rax` in ring 3 read
+         * kernel memory through a segment override, which is the whole
+         * reason this is checked at all.
+         *
+         * One byte, not eight: what matters is which half of the address
+         * space it is in, and a thread pointer legitimately points at
+         * the END of a TLS block, where the byte after it may be
+         * unmapped. */
+        if (addr != 0 && !user_range_ok(addr, 1, 0)) {
+            return -1;
+        }
+        self->fs_base = addr;
+        /* Written now as well as at the next switch, because the caller
+         * expects `%fs:0` to work on the instruction after this call and
+         * may not be switched away from before then. */
+        cpu_write_msr(MSR_FS_BASE, addr);
+        return 0;
+    case ARCH_GET_FS:
+        if (!user_range_ok(addr, sizeof(uint64_t), 1)) {
+            return -1;
+        }
+        return copy_to_user(addr, &self->fs_base, sizeof(self->fs_base));
+    default:
+        /* ARCH_SET_GS and ARCH_GET_GS land here. Refused by number
+         * rather than accepted and ignored - see system_api/proc.h. */
+        return -1;
+    }
+}
+
+/* ---- the futex ---------------------------------------------------------
+ *
+ * One lock for every futex on the machine, and that is a decision rather
+ * than a simplification. sched_block_on's contract is that the caller
+ * holds the lock guarding its condition, so that a waker cannot run
+ * between "the value is still what I expected" and "I am asleep" - the
+ * two states a lost wakeup slips between. A per-address lock would be a
+ * hash table of locks protecting a check that costs four instructions;
+ * one lock makes the contract obviously satisfied and costs a contended
+ * acquire per futex operation on a machine with eight cores and no
+ * measured futex traffic. M69's rule: the measurement is what would
+ * change this.
+ */
+static spinlock_t futex_lock;
+
+static long sys_futex(uint64_t addr, uint64_t op, uint64_t val,
+                      uint64_t timeout_ms, uint64_t a5, uint64_t a6) {
+    (void)a5;
+    (void)a6;
+    if ((addr & 3u) != 0) {
+        return -1; /* a futex word is a naturally aligned uint32_t */
+    }
+    if (!user_range_ok(addr, sizeof(uint32_t), 0)) {
+        return -1;
+    }
+    if (op == FUTEX_WAKE) {
+        /* `val` is a count; INT_MAX is what a broadcast passes. Capped
+         * at MAX_TASKS because there cannot be more waiters than tasks
+         * and an unbounded number would be a number this kernel cannot
+         * mean. */
+        int max = (val > (uint64_t)(unsigned)MAX_TASKS) ? MAX_TASKS : (int)val;
+        return sched_wake_n((const void *)addr, max);
+    }
+    if (op != FUTEX_WAIT) {
+        return -1;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&futex_lock);
+    uint32_t seen = *(const volatile uint32_t *)addr;
+    if (seen != (uint32_t)val) {
+        /* The value already changed. Not an error: what the caller was
+         * waiting for happened between its own check and this call,
+         * which is exactly the window the value check exists to cover.
+         * -1 rather than 0 so the caller can tell "you were woken" from
+         * "you never slept" - a condition variable needs that
+         * difference. */
+        spin_unlock_irqrestore(&futex_lock, flags);
+        return -1;
+    }
+    uint64_t deadline = 0;
+    if (timeout_ms > 0) {
+        deadline = pit_get_ticks() * (1000 / PIT_HZ) + timeout_ms;
+    }
+    sched_block_on((const void *)addr, deadline, &futex_lock, &flags);
+    spin_unlock_irqrestore(&futex_lock, flags);
+    /* Woken, or the deadline passed. Told apart by the clock rather than
+     * by a return value from sched_block_on, which has none: a waiter
+     * that was woken one millisecond before its deadline and reports a
+     * timeout has told a caller to re-check a condition it would re-check
+     * anyway, so the failure mode of getting this wrong is a spurious
+     * loop rather than a missed wake. */
+    if (deadline != 0 && pit_get_ticks() * (1000 / PIT_HZ) >= deadline) {
+        return -2;
+    }
+    return 0;
+}
+
 /* M89: who spawned this - see SYS_getppid. */
 static long sys_getppid(uint64_t a1, uint64_t a2, uint64_t a3,
                         uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -4845,6 +4960,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_meminfo] = sys_meminfo,
     [SYS_alarm] = sys_alarm,
     [SYS_msync] = sys_msync,
+    [SYS_arch_prctl] = sys_arch_prctl,
+    [SYS_futex] = sys_futex,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than
