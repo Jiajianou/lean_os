@@ -12,6 +12,14 @@
  * says so at link time - which is the specification, exactly as M63's
  * own "pick the program first" bullet says. */
 #pragma once
+/* M98: the traditional guard macro as well, and it is interface rather
+ * than redundancy: ported code asks "has <stdio.h> been included" by
+ * testing for a known guard - gmp.h checks thirteen spellings from
+ * thirteen libcs and only declares its FILE* functions if one is
+ * defined. `#pragma once` defines nothing, so to that test this stdio.h
+ * did not exist and gmp-impl.h's own prototypes went implicit. The
+ * glibc spelling, because it is the one everything tests first. */
+#define _STDIO_H 1
 
 #include <stdarg.h>
 #include <stddef.h>

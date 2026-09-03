@@ -168,7 +168,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_wctype.o \
                 $(UOBJ)/libc_fcntl.o $(UOBJ)/libc_scanf.o $(UOBJ)/libc_mntent.o \
                 $(UOBJ)/libc_xattr.o $(UOBJ)/libc_klog.o $(UOBJ)/libc_getopt.o $(UOBJ)/libc_reboot.o $(UOBJ)/libc_tls.o \
-                $(UOBJ)/libc_pty.o $(UOBJ)/libc_select.o \
+                $(UOBJ)/libc_pty.o $(UOBJ)/libc_select.o $(UOBJ)/libc_realpath.o \
                 $(UOBJ)/setjmp.o $(UOBJ)/symtab.o $(UOBJ)/crtn.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus

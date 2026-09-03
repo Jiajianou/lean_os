@@ -802,10 +802,31 @@ static void put_tree(const char *host_dir, int parent, const char *at, uint32_t 
         }
         uint32_t mtime = (uint32_t)st.st_mtime;
 
+        /* M98: -r is an INSTALLER now, not only a seeder. M93 wrote this
+         * walk for a freshly formatted image, where a blind dir_add is
+         * correct by construction; the toolchain install re-runs it over
+         * an image that already has last run's tree, and a blind add
+         * then DUPLICATES every name - found by the [m93] manifest
+         * self-test reporting exactly 2x the names, bytes and dirs the
+         * host wrote. Every entry is looked up first: a directory is
+         * reused, a file or link is rewritten in place through the same
+         * record, and the shapes this walk cannot re-put honestly - a
+         * type that changed, a hard-link topology that moved - die with
+         * the reason rather than guessing. */
+        int prior = dir_lookup(&inodes[parent], name);
+
         if (S_ISDIR(st.st_mode)) {
-            int idx = alloc_inode(LEANFS_TYPE_DIR);
-            inodes[idx].mtime = mtime;
-            dir_add(&inodes[parent], name, idx);
+            int idx = prior;
+            if (idx >= 0) {
+                if (inodes[idx].type != LEANFS_TYPE_DIR) {
+                    die("re-putting a tree where a file became a directory");
+                }
+                inodes[idx].mtime = mtime;
+            } else {
+                idx = alloc_inode(LEANFS_TYPE_DIR);
+                inodes[idx].mtime = mtime;
+                dir_add(&inodes[parent], name, idx);
+            }
             tally.dirs++;
             put_tree(host_path, idx, leanfs_path, depth + 1);
         } else if (S_ISLNK(st.st_mode)) {
@@ -816,8 +837,16 @@ static void put_tree(const char *host_dir, int parent, const char *at, uint32_t 
                         host_path, strerror(errno));
                 exit(1);
             }
-            int idx = alloc_inode(LEANFS_TYPE_LINK);
-            dir_add(&inodes[parent], name, idx);
+            int idx = prior;
+            if (idx >= 0) {
+                if (inodes[idx].type != LEANFS_TYPE_LINK) {
+                    die("re-putting a tree where a file became a symlink");
+                }
+                free_inode_blocks(&inodes[idx]);
+            } else {
+                idx = alloc_inode(LEANFS_TYPE_LINK);
+                dir_add(&inodes[parent], name, idx);
+            }
             /* A link's target lives in its data blocks exactly as a file's
              * contents do, with `size` the target's length - see
              * LEANFS_TYPE_LINK in the format header. */
@@ -831,11 +860,24 @@ static void put_tree(const char *host_dir, int parent, const char *at, uint32_t 
                 existing = hl_lookup((uint64_t)st.st_dev, (uint64_t)st.st_ino);
             }
             if (existing >= 0) {
-                if (inodes[existing].nlink == 0xFFFFFFFFu) {
-                    die("a file has more names than leanfs can count");
+                /* Re-put: the record may already point at this run's
+                 * inode (the file was replaced in place under its first
+                 * name), in which case there is nothing to add and the
+                 * link count is already right. A record pointing anywhere
+                 * else means the tree's hard-link topology changed
+                 * between runs, which this walk cannot re-put without
+                 * inventing an unlink - so it says so. */
+                if (prior == existing) {
+                    /* already this pair - fall through to the tally */
+                } else if (prior >= 0) {
+                    die("re-putting a tree whose hard links moved - rebuild the image");
+                } else {
+                    if (inodes[existing].nlink == 0xFFFFFFFFu) {
+                        die("a file has more names than leanfs can count");
+                    }
+                    inodes[existing].nlink++;
+                    dir_add(&inodes[parent], name, existing);
                 }
-                inodes[existing].nlink++;
-                dir_add(&inodes[parent], name, existing);
                 tally.hardlinks++;
                 tally.names++;
                 tally.bytes += (uint64_t)st.st_size;
@@ -867,8 +909,19 @@ static void put_tree(const char *host_dir, int parent, const char *at, uint32_t 
                             host_path, strerror(errno));
                     exit(1);
                 }
-                int idx = alloc_inode(LEANFS_TYPE_FILE);
-                dir_add(&inodes[parent], name, idx);
+                int idx = prior;
+                if (idx >= 0) {
+                    if (inodes[idx].type != LEANFS_TYPE_FILE) {
+                        die("re-putting a tree where a directory or link became a file");
+                    }
+                    /* Rewritten through the same record, exactly as the
+                     * single-file mode does: the name never stops
+                     * resolving. */
+                    free_inode_blocks(&inodes[idx]);
+                } else {
+                    idx = alloc_inode(LEANFS_TYPE_FILE);
+                    dir_add(&inodes[parent], name, idx);
+                }
                 /* Zero-length is a file, not an error. The single-file mode
                  * refused one for eight milestones ("local-file is empty,
                  * unreadable") and a tree full of empty __init__.py is

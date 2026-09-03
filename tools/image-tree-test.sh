@@ -147,6 +147,21 @@ if ! cmp -s "$IMG" "$IMG2"; then
 fi
 echo "the same tree built twice is the same image, byte for byte"
 
+# M98: and the same tree put twice into ONE image is still that tree.
+# -r became an installer when the native toolchain started re-running it
+# over yesterday's image, and the seeder it used to be blind-added every
+# name: the [m93] on-machine manifest check found exactly 2x the names,
+# bytes and directories the host wrote. Replace-in-place is what -r does
+# now, and this is the check that keeps it doing it - the compare-tree
+# below fails on a single duplicated name.
+echo "== putting the same tree into the same image a second time"
+build/leanfs-put -r "$IMG" "$TREE" "$AT" > /dev/null
+python3 tools/leanfs-fsck.py --quiet "$IMG" --compare-tree "$TREE" --at "$AT" || {
+  echo "FAIL: re-putting a tree into the same image did not leave the same tree" >&2
+  exit 1
+}
+echo "a re-put tree is the same tree - the installer case holds"
+
 if [ "$BOOT" -eq 0 ]; then
   echo
   echo "PASS (host checks only; --no-boot was given, so nothing has read this image from inside)"

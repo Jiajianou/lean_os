@@ -22,6 +22,22 @@
  * true to honour, and the ALIGN is not cosmetic: the two segments must
  * not share a page, or the page they share has to be given the union of
  * both sets of rights. */
+/* M98: where -lc lives, stated here because stating it anywhere else
+ * does not survive this script's own -T. A sysrooted gcc deliberately
+ * emits no -L/usr/lib - it delegates that to the SEARCH_DIR baked into
+ * ld's default linker script - and -T replaces that script, this one
+ * included. So the first native link on the machine found crt1.o (full
+ * paths from the driver's own %s search) and then could not find libc
+ * two arguments later. A script that supplants the default owes the
+ * default's library path. The "=" prefix means "under the sysroot",
+ * which makes this one line correct from both seats: the cross ld
+ * (--sysroot=build/sysroot) resolves it to the Mac-side staging tree,
+ * the native ld (--sysroot=/) to the machine's own /usr/lib - and
+ * without it the cross ld would quietly search the build Mac's
+ * /usr/lib, which is exactly the kind of leak the sysroot exists to
+ * prevent. */
+SEARCH_DIR("=/usr/lib");
+
 PHDRS
 {
     text PT_LOAD FLAGS(5); /* PF_R | PF_X */

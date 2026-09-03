@@ -3237,104 +3237,6 @@ static void boot_selftests_system(void) {
         }
     }
 
-    /* ---- M98 self-test: the toolchain runs HERE -------------------------
-     *
-     * [m94] proved a program this compiler produced runs on this
-     * machine. This is the next sentence: the tools that produce
-     * programs run on this machine, on their own output. The fixture
-     * (tests/binutils/hello.s, installed by
-     * tools/install-native-toolchain.sh) is assembled by /bin/as, read
-     * back by /bin/nm, archived and listed by /bin/ar, linked by
-     * /bin/ld with NO script and NO flags - which is what grades the
-     * lean_os ld emulation M98 added, because with the generic one this
-     * program lands at Linux's 0x400000 and the loader truthfully
-     * refuses it - stripped by /bin/strip, disassembled by
-     * /bin/objdump, and then RUN.
-     *
-     * Skipped when /bin/as is absent, on [m94]'s exact reasoning: the
-     * native toolchain takes minutes to build and is not part of
-     * `make`, so an image without it is a valid image.
-     */
-    {
-        os_stat_t bt;
-        if (do_syscall(SYS_stat, (uint64_t)"/bin/as", (uint64_t)&bt, 0) != 0) {
-            klog_puts("[m98] /bin/as is not on this image - skipped. "
-                       "tools/build-native-toolchain.sh builds binutils for this "
-                       "machine and tools/install-native-toolchain.sh installs it.\n\n");
-        } else {
-            int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m98.sh";
-            const char *result = PATH_TMP_DIR "m98.out";
-            static const char SCRIPT[] =
-                "#!/bin/sh\n"
-                "cd " PATH_TMP_DIR "\n"
-                "as /tests/binutils-hello.s -o m98.o\n"
-                "nm m98.o > " PATH_TMP_DIR "m98.out\n"
-                "ar rcs m98.a m98.o\n"
-                "ar t m98.a >> " PATH_TMP_DIR "m98.out\n"
-                "ld m98.o -o m98\n"
-                "strip m98\n"
-                "objdump -d m98 >> " PATH_TMP_DIR "m98.out\n"
-                "./m98 >> " PATH_TMP_DIR "m98.out\n";
-            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
-                            sizeof(SCRIPT) - 1) != 0) {
-                panic("M98 self-test: could not write the script fixture");
-            }
-            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
-            if (pid < 0) {
-                klog_puts("[m98] the toolchain script could not be spawned\n");
-                all_ok = 0;
-            } else {
-                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
-            }
-
-            static char produced[2048];
-            k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
-            if (n <= 0) {
-                klog_puts("[m98] the toolchain produced no output\n");
-                all_ok = 0;
-            } else {
-                produced[n] = '\0';
-                static const struct { const char *needle; const char *what; } EXPECT[] = {
-                    {"T _start", "nm reading the symbol table as wrote"},
-                    {"m98.o",    "ar listing the member it archived"},
-                    {"Disassembly of section .text",
-                                 "objdump reading the program ld linked and strip stripped"},
-                    {"as and ld made this program on this machine",
-                                 "the program itself, loaded from ld's no-flags default "
-                                 "address and run"},
-                };
-                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
-                    if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m98] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
-                        all_ok = 0;
-                    }
-                }
-            }
-
-            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
-            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
-            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98.o"), 0, 0);
-            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98.a"), 0, 0);
-            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98"), 0, 0);
-
-            if (!all_ok) {
-                klog_puts("[m98] what the toolchain actually wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m98] ---- end\n");
-                panic("M98 self-test: this machine's own binutils do not work here");
-            }
-
-            klog_puts("[m98] binutils runs here: as assembled it, nm read it, ar "
-                       "archived it, ld linked it at this OS's own default address "
-                       "with no flags and no script, strip stripped it, objdump "
-                       "disassembled it, and the result ran - self-test passed.\n\n");
-        }
-    }
-
     /* ---- M106 self-test: does a second core do a second core's work?
      *
      * This milestone was written as a list of scheduler optimisations -
@@ -8927,8 +8829,17 @@ static void boot_selftests_system(void) {
                     "done\n"
                     "cp $d/in $d/keep\n"
                     "/bin/bzip2 -z $d/in\n"
+                    /* M98: the vacuity guard. A -z that fails leaves
+                     * $d/in exactly as it was, and `cmp in keep` then
+                     * passes without any compression having happened -
+                     * which is precisely how this fixture stayed green
+                     * for four milestones while every bzip2 -z on the
+                     * machine was dying at its final fchmod. A
+                     * successful -z CONSUMES the input, so the input
+                     * still existing is proof of failure. */
+                    "test -f $d/in || echo bzip2:consumed > " PATH_TMP_DIR "m94b.out\n"
                     "/bin/bzip2 -d $d/in.bz2\n"
-                    "cmp $d/in $d/keep && echo bzip2:roundtrip > " PATH_TMP_DIR "m94b.out\n"
+                    "cmp $d/in $d/keep && echo bzip2:roundtrip >> " PATH_TMP_DIR "m94b.out\n"
                     "/bin/gnuhello >> " PATH_TMP_DIR "m94b.out\n";
                 if (do_syscall(SYS_writefile, (uint64_t)tscript, (uint64_t)TSCRIPT,
                                 sizeof(TSCRIPT) - 1) != 0) {
@@ -8949,6 +8860,11 @@ static void boot_selftests_system(void) {
                     third_ok = 0;
                 } else {
                     tout[tn] = '\0';
+                    if (!selftest_contains(tout, "bzip2:consumed")) {
+                        klog_puts("[m94] bzip2 -z did not consume its input - "
+                                   "the compression never happened\n");
+                        third_ok = 0;
+                    }
                     if (!selftest_contains(tout, "bzip2:roundtrip")) {
                         klog_puts("[m94] bzip2 did not compress and decompress back to "
                                    "the same bytes\n");
@@ -8986,6 +8902,149 @@ static void boot_selftests_system(void) {
                        "target - self-test passed.\n\n");
         }
     }
+
+    /* Moved here from between M97 and M106 the day it was written:
+     * a gcc compile is the heaviest thing this battery runs, and with
+     * it sitting immediately before M106's parallel-cost measurement,
+     * that measurement was timing the compile's wake rather than the
+     * scheduler. It lives with its family now - [m94] proves the
+     * cross toolchain's output runs here, and this proves the native
+     * toolchain itself does. */
+    /* ---- M98 self-test: the toolchain runs HERE -------------------------
+     *
+     * [m94] proved a program this compiler produced runs on this
+     * machine. This is the next sentence: the tools that produce
+     * programs run on this machine, on their own output. The fixture
+     * (tests/binutils/hello.s, installed by
+     * tools/install-native-toolchain.sh) is assembled by /bin/as, read
+     * back by /bin/nm, archived and listed by /bin/ar, linked by
+     * /bin/ld with NO script and NO flags - which is what grades the
+     * lean_os ld emulation M98 added, because with the generic one this
+     * program lands at Linux's 0x400000 and the loader truthfully
+     * refuses it - stripped by /bin/strip, disassembled by
+     * /bin/objdump, and then RUN.
+     *
+     * Skipped when /bin/as is absent, on [m94]'s exact reasoning: the
+     * native toolchain takes minutes to build and is not part of
+     * `make`, so an image without it is a valid image.
+     */
+    {
+        os_stat_t bt;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/as", (uint64_t)&bt, 0) != 0) {
+            klog_puts("[m98] /bin/as is not on this image - skipped. "
+                       "tools/build-native-toolchain.sh builds binutils for this "
+                       "machine and tools/install-native-toolchain.sh installs it.\n\n");
+        } else {
+            int all_ok = 1;
+            int gcc_here = 0;
+            const char *script = PATH_TMP_DIR "m98.sh";
+            const char *result = PATH_TMP_DIR "m98.out";
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "cd " PATH_TMP_DIR "\n"
+                "as /tests/binutils-hello.s -o m98.o\n"
+                "nm m98.o > " PATH_TMP_DIR "m98.out\n"
+                "ar rcs m98.a m98.o\n"
+                "ar t m98.a >> " PATH_TMP_DIR "m98.out\n"
+                "ld m98.o -o m98\n"
+                "strip m98\n"
+                "objdump -d m98 >> " PATH_TMP_DIR "m98.out\n"
+                "./m98 >> " PATH_TMP_DIR "m98.out\n"
+                /* M98's second half: the compiler, driving the six of
+                 * them. `gcc file.c -o out` with no flags is the M94
+                 * bar moved onto the machine itself - driver, cpp, cc1,
+                 * as, collect2, ld, headers, crt files and libc.a all
+                 * read from this disk by processes of this kernel. Runs
+                 * only when /usr/bin/gcc is installed; the marker's
+                 * grading below skips the compile needles when it is
+                 * not, and says so. */
+                "gcc /tests/m98c.c -o m98c\n"
+                "./m98c >> " PATH_TMP_DIR "m98.out\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M98 self-test: could not write the script fixture");
+            }
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m98] the toolchain script could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+
+            static char produced[2048];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m98] the toolchain produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"T _start", "nm reading the symbol table as wrote"},
+                    {"m98.o",    "ar listing the member it archived"},
+                    {"Disassembly of section .text",
+                                 "objdump reading the program ld linked and strip stripped"},
+                    {"as and ld made this program on this machine",
+                                 "the program itself, loaded from ld's no-flags default "
+                                 "address and run"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m98] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+                /* The compile half, graded only when the compiler is
+                 * installed - the same conditional shape as the whole
+                 * test's /bin/as gate, one layer in. */
+                os_stat_t gc;
+                if (do_syscall(SYS_stat, (uint64_t)"/usr/bin/gcc",
+                               (uint64_t)&gc, 0) == 0) {
+                    gcc_here = 1;
+                    if (!selftest_contains(produced,
+                            "gcc built this program on this machine")) {
+                        klog_puts("[m98] missing: the program gcc compiled, "
+                                   "linked and ran, entirely from this disk\n");
+                        all_ok = 0;
+                    }
+                } else {
+                    klog_puts("[m98] /usr/bin/gcc is not on this image - the "
+                               "compile half is skipped. "
+                               "tools/build-native-toolchain.sh builds it.\n");
+                }
+            }
+
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98.o"), 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98.a"), 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98"), 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98c"), 0, 0);
+
+            if (!all_ok) {
+                klog_puts("[m98] what the toolchain actually wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m98] ---- end\n");
+                panic("M98 self-test: this machine's own toolchain does not work here");
+            }
+
+            klog_puts("[m98] binutils runs here: as assembled it, nm read it, ar "
+                       "archived it, ld linked it at this OS's own default address "
+                       "with no flags and no script, strip stripped it, objdump "
+                       "disassembled it, and the result ran");
+            if (gcc_here) {
+                klog_puts("; then gcc compiled a C program with no flags - "
+                           "driver, cc1, as, collect2, ld, headers, startup "
+                           "files and libc all from this disk - and that ran "
+                           "too");
+            }
+            klog_puts(" - self-test passed.\n\n");
+        }
+    }
+
 
     /* ---- M103 self-test: interrupts a real machine delivers -------------
      *

@@ -764,6 +764,104 @@ TEST(sched, switching_away_from_a_stack_this_cpu_is_not_on_is_a_panic) {
     q13_kill(b);
 }
 
+/* ---- M98: the wake-while-still-current window -------------------------- */
+
+TEST(sched, a_woken_task_still_current_on_another_cpu_is_not_picked) {
+    q13_boot();
+    task_t *w = q13_spawn("w");
+    task_t *f = q13_spawn("f");
+    REQUIRE(w != NULL);
+    REQUIRE(f != NULL);
+
+    /* Bring cpu1's idle identity up the way smp.c's ap_main does - this
+     * harness had never ticked a second CPU before this test, and a
+     * tick on a CPU with no current task is not a case the machine has. */
+    static int cpu1_up;
+    if (!cpu1_up) {
+        cpu1_up = 1;
+        fake_arch_set_cpu(1);
+        sched_init_ap(1);
+    }
+
+    /* Put `w` on cpu1. */
+    int placed = 0;
+    for (int i = 0; i < 200 * Q13_QUANTUM && !placed; i++) {
+        q13_tick(1);
+        fake_arch_set_cpu(1);
+        placed = (sched_current() == w);
+    }
+    REQUIRE(placed);
+
+    /* The window this test exists for: `w` marks itself BLOCKED on the
+     * way into a wait but cpu1 has not reached schedule() - it is still
+     * current there, still on its own kernel stack - and a wake from
+     * another core makes it READY again. On the machine this is
+     * futex_wait racing futex_wake; [m97]'s std::thread fixture hit it
+     * on four cores and two CPUs ended up on one stack. */
+    w->state = TASK_BLOCKED;
+    sched_wake_task(w);
+    CHECK_EQ(w->state, TASK_READY);
+
+    /* cpu0 must refuse it for as long as cpu1 stands on it. */
+    int stolen = 0;
+    for (int i = 0; i < 40 * Q13_QUANTUM; i++) {
+        q13_tick(0);
+        fake_arch_set_cpu(0);
+        if (sched_current() == w) {
+            stolen = 1;
+        }
+    }
+    CHECK_EQ(stolen, 0);
+
+    /* cpu1 reaches its schedule() and switches away; only then is `w`
+     * anybody else's to run. Ticked to a quantum boundary, not once - a
+     * single tick mid-quantum returns without switching. */
+    w->state = TASK_BLOCKED;
+    for (int i = 0; i < 4 * Q13_QUANTUM; i++) {
+        q13_tick(1);
+        fake_arch_set_cpu(1);
+        if (sched_current() != w) {
+            break;
+        }
+    }
+    fake_arch_set_cpu(1);
+    REQUIRE(sched_current() != w);
+    sched_wake_task(w);
+    int picked = 0;
+    for (int i = 0; i < 200 * Q13_QUANTUM && !picked; i++) {
+        q13_tick(0);
+        fake_arch_set_cpu(0);
+        picked = (sched_current() == w);
+    }
+    CHECK_EQ(picked, 1);
+
+    /* Walk cpu0 off `w` before reaping - M106's rule, as q13_kill's own
+     * comment explains. */
+    for (int i = 0; i < 200 * Q13_QUANTUM; i++) {
+        fake_arch_set_cpu(0);
+        if (sched_current() != w) {
+            break;
+        }
+        w->state = TASK_READY;
+        q13_tick(0);
+    }
+    /* And walk cpu1 off whatever it picked up (it has `f` by now) -
+     * q13_kill only walks cpu0, and a reap refuses a task any CPU still
+     * stands on, which is M106's rule doing its job in the harness. */
+    for (int i = 0; i < 4 * Q13_QUANTUM; i++) {
+        fake_arch_set_cpu(1);
+        task_t *cur = sched_current();
+        if (!cur || cur->is_idle) {
+            break;
+        }
+        cur->state = TASK_BLOCKED;
+        q13_tick(1);
+    }
+    q13_kill(w);
+    f->state = TASK_READY; /* unblock what the walk-off blocked */
+    q13_kill(f);
+}
+
 /* ---- the thread pointer, loaded on the way in -------------------------- */
 
 TEST(sched, a_switch_loads_the_incoming_tasks_thread_pointer) {

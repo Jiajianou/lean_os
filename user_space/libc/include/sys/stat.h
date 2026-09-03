@@ -169,12 +169,17 @@ int utimensat(int dirfd, const char *path, const struct timespec ts[2], int flag
  * selects lstat over stat, which is the only flag it has. */
 int fstatat(int dirfd, const char *path, struct stat *out, int flags);
 
-/* ---- M89: the mode and ownership setters, which all refuse ------------
+/* ---- M89: the mode and ownership setters, which refuse ---------------
  *
  * `chmod` has been described as "a truthful failure" in three headers
  * since M65 without ever existing as a symbol. Toybox calls fchmod,
  * fchmodat and fchown by name, so they arrive - and they arrive as the
  * refusal those notes describe rather than as a no-op returning 0.
+ *
+ * M98 adds the one truthful success: setting the permission bits to
+ * the zero stat reports succeeds, because it asks for what is already
+ * the case. bzip2 hands stat's own st_mode straight back to fchmod and
+ * dies if that fails - see stat.c for what that cost to find.
  *
  * Why a refusal and not a success: leanfs stores no mode and no owner,
  * so a call that returned 0 would be telling a program that a file is

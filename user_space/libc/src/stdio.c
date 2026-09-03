@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -221,17 +222,26 @@ int ungetc(int c, FILE *f) {
     return (unsigned char)c;
 }
 
-/* Writes `s`, a colon, and this system's one honest description of what
- * went wrong. There is no errno string table here because there is
- * barely an errno (see <errno.h>): a syscall that failed said -1 and
- * nothing else, so inventing "No such file or directory" for it would be
- * a guess printed as a fact. */
+/* Writes `s`, a colon, and what errno actually says. This printed a
+ * bare "failed" for eleven milestones, on the honest ground that errno
+ * was barely ever set - but M98 gave stat a real error code and libc
+ * has always set the handful it genuinely knows (EEXIST, ERANGE, the
+ * wrapper checks), so naming them is reporting rather than guessing.
+ * strerror already tells the truth about the rest: a code with no
+ * entry is "error", and errno 0 at a failure is its own information -
+ * the operation that failed set nothing, which "failed" still says
+ * best. */
 void perror(const char *s) {
     if (s && s[0]) {
         fputs(s, stderr);
         fputs(": ", stderr);
     }
-    fputs("failed\n", stderr);
+    if (errno != 0) {
+        fputs(strerror(errno), stderr);
+        fputs("\n", stderr);
+    } else {
+        fputs("failed\n", stderr);
+    }
 }
 
 int remove(const char *path) {

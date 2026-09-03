@@ -620,7 +620,16 @@ int vfs_handle_truncate_to(int handle, uint32_t len) {
 
 int vfs_handle_truncate(int handle) {
     if (VFS_HANDLE_MOUNT(handle) > 0) {
-        return -1; /* nothing synthetic has a length to drop */
+        /* M98: succeed, and it is the truth rather than a stub - a
+         * synthetic file's length is already zero (dev_stat says so),
+         * so truncating it to zero asks for what is already the case.
+         * The -1 that stood here made `> /dev/null` fail from every
+         * shell this machine has ever had: the shell's `>` is
+         * O_WRONLY|O_CREAT|O_TRUNC, dev_open shrugs at the CREAT
+         * ("asking is not an error"), and then the truncate refused.
+         * Every `2>/dev/null` in every fixture had been silently
+         * skipping its redirect. */
+        return 0;
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
     int r = leanfs_handle_truncate(handle);

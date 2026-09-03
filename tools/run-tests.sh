@@ -176,6 +176,11 @@ run_stage "printf, against the host's" ./tools/printf-test.sh
 # instead. That failure cost a five-minute graded boot to see; this
 # reproduces it in milliseconds. See tools/stdio-test.sh.
 run_stage "the FILE layer, off the machine" ./tools/stdio-test.sh
+# M98: the fifth differential test. realpath is pure logic over
+# lstat/readlink/getcwd, so the host's own filesystem and the host's
+# own realpath grade all of it - see tools/realpath-test.sh for the
+# undefined behaviour its absence fed the gcc driver.
+run_stage "realpath, against the host's" ./tools/realpath-test.sh
 
 # ---- Q11/Q12: the instruments that grade the tests themselves --------
 #

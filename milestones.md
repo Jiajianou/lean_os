@@ -10800,6 +10800,144 @@ remaining three boxes (GCC itself plus GMP/MPFR/MPC and make; the
 kernel gaps the build names; the measurements) are untouched, and GCC
 is the bulk of the milestone.
 
+#### Third increment: GCC and make built, and what porting them named
+
+GMP, MPFR, MPC, GCC's own `all-gcc` (cc1, cc1plus, the driver,
+collect2) and GNU make all compile for `--host=x86_64-lean_os` now —
+`build-native-toolchain.sh` carries the whole recipe — and
+`install-native-toolchain.sh` puts the compiler, its headers, the
+target runtime objects, libstdc++, GNU make and the full sysroot onto
+the image under `/usr`, with `[m98]` growing a second half: `gcc
+/tests/m98c.c -o m98c` and running the result, every byte of compiler,
+assembler, linker, header and library read from this disk. What the
+ports named, in order:
+
+- **GMP could not see `<stdio.h>`.** gmp.h declares its FILE*
+  functions only if it can tell stdio was included — by testing
+  thirteen libcs' include-guard macros, and `#pragma once` defines
+  none. `<stdio.h>` now defines `_STDIO_H` beside the pragma: a guard
+  macro is interface, not redundancy. Then `isascii`/`toascii`
+  (`<ctype.h>`), asked for by GMP's printf.
+- **GNU make declared its own `getcwd` because nothing said this was
+  POSIX.** Its pre-ANSI declarations are guarded by
+  `!defined(_POSIX_VERSION)` — the macro every Unix's `<unistd.h>`
+  defines and this one never had. Defined now (M77's "POSIX names for
+  what is already here" includes the name that says so), along with
+  `<alloca.h>` (the builtin wearing a header), `<ar.h>` (make's
+  `lib(member)` support reads archives itself), and `getlogin` (the
+  same one principal getpwuid(0) names). make's dlopen-based `load`
+  feature is configured off — the same refusal as binutils' plugins.
+- **The driver refused every `-o` compile with "input file is the same
+  as output file", and the trail ended at undefined behaviour this
+  libc was feeding libiberty.** Three diagnostic boots narrowed it: the
+  parse was perfect (a probe build printed one infile, the right
+  output), so the same-file *check* itself was lying —
+  `canonical_filename_eq` calls `lrealpath`, and lrealpath, on a
+  system with none of its five canonicalization strategies, **falls
+  off the end of a non-void function**. Two garbage pointers compared
+  equal, every input file became its own output file, and the fatal's
+  `%qs` printed unrelated memory. The fix is not a workaround in the
+  port: this libc now has a real `realpath()` — links followed as they
+  are met, dot-dot by walking, POSIX's strict everything-must-exist
+  form — and `tools/realpath-test.sh` is the **fifth differential
+  test**: realpath.c compiled for the host over a fixture tree of real
+  directories and real symlinks, byte-identical with the host's own
+  answers, 17 cases including a loop, a dangling link, and dot-dot
+  through a symlink.
+- **And the lesson that cost three extra boots: configure answers are
+  frozen at configure time.** `HAVE_REALPATH` was `#undef` in every
+  already-configured tree, so adding the function changed nothing
+  until the trees were reconfigured from scratch. When the libc grows
+  mid-port, the build directories are stale in a way no `make` can
+  see. Recorded as a warning in build-native-toolchain.sh.
+- Two smaller settlements: the default PATH became `/bin:/usr/bin`,
+  defined ONCE (`PATH_DEFAULT` in paths.h) because libc's execvp and
+  the shell's own fallback had already answered it differently; and
+  the mutation harness learned that `make test-fast` is the unit
+  binary only — INSTRUMENTS in mutate.py maps each
+  differential-tested source to its own graders, after stdio.c's
+  first score (0.0%) turned out to be the harness truthfully
+  measuring that it was pointed at the wrong instrument.
+
+*And what running the compiler ON the machine found, which is a longer
+list than building it, exactly as M63's method predicts:*
+
+- **The driver could not find cc1 with no PATH in the environment.**
+  gcc locates its own libexec by finding itself through
+  `getenv("PATH")`, and with none it degrades to prefixes relative to
+  the literal string "gcc" — `../libexec/...` from whatever the cwd
+  was. On every other Unix, login infrastructure exports PATH before
+  anything runs; here the shell IS the login infrastructure, so sh now
+  exports PATH_DEFAULT when it arrives with none. The shell's own
+  lookup and execvp's fallback were always fine — a default a child
+  cannot *read* was the half that was missing.
+- **The link found crt1.o and lost -lc two arguments later.** A
+  sysrooted gcc deliberately emits no -L/usr/lib — it delegates that
+  to the SEARCH_DIR baked into ld's default script — and this
+  target's `-T lean_os.ld` replaces that script. The script that
+  supplants the default owes the default's library path:
+  `SEARCH_DIR("=/usr/lib")`, sysrooted so the cross ld resolves it to
+  the staging tree and the native ld to the machine's own.
+- **`> /dev/null` had never worked, from any shell this machine ever
+  had.** The shell's `>` is O_WRONLY|O_CREAT|O_TRUNC; dev_open shrugs
+  at the CREAT ("asking is not an error") and vfs_handle_truncate then
+  refused every synthetic handle. Truncating a zero-length stream to
+  zero asks for what is already the case; it succeeds now. Every
+  `2>/dev/null` in every fixture had been silently skipping its
+  redirect — and the shell's complaint prints strerror(errno) now,
+  because "cannot open /dev/null" with no why cost a boot of guessing.
+- **`bzip2 -z` had been dying at its final fchmod since M89 — and the
+  [m94] fixture never noticed, because its pass was vacuous.** bzip2
+  hands stat's own st_mode straight back to fchmod and treats failure
+  as fatal; M89's blanket EPERM made every compression on this machine
+  fail at the finish line. A failed -z leaves the input untouched, so
+  the fixture's `cmp in keep` compared a file with itself and printed
+  "roundtrip" for four milestones. fchmod succeeds now for exactly one
+  request — the zero permission bits stat reports, which is asking for
+  what is already true — and the fixture requires `-z` to have
+  CONSUMED its input before any roundtrip claim counts.
+- **`leanfs-put -r` doubled a tree when run twice, and the [m93]
+  manifest self-test caught it with exactly 2x every count.** M93
+  wrote the walk for a freshly formatted image; the toolchain install
+  made it an installer that re-runs over yesterday's image. It looks
+  every entry up first now — directories reused, files and links
+  rewritten through the same record — and dies with the reason on the
+  shapes it cannot re-put (a type that changed, hard links that
+  moved). tools/image-tree-test.sh grew the case: the same tree put
+  twice into the same image is still that tree.
+- **The mount-scan budget moved again, for the row's own recorded
+  reason**: ~160 MB of toolchain is more allocated blocks, and the
+  scan is linear in bytes — 128 ms to 711 ms, ceiling re-set from the
+  measurement. M105's journal condition checked on the way and still
+  not fired: the scan is CPU over cached blocks, not disk-bound.
+- **And a real SMP race, flushed out by [m97]'s std::thread fixture
+  once the compile storm ran on four cores**: a task that has marked
+  itself BLOCKED on the way into a wait but not yet reached schedule()
+  is still current on its CPU, still on its own kernel stack, and
+  already wakeable — and pick_next, looking only at state, handed the
+  SAME kernel stack to a second CPU. M106's switch-away guard caught
+  cpu0 standing on the stack of the thread cpu1 was running, and the
+  crash was two interleaved panics deep before the guard's line made
+  it legible. pick_next now refuses a READY task that is current on
+  any other CPU (the exact question M106's reap fix already asks,
+  asked one place earlier), with the race reproduced as a host test in
+  tests/test_sched.c — the first test in that file to tick two CPUs,
+  which is itself how ASan found sched_init_ap indexing past a full
+  task table, unchecked since M106. The [m98] fixture also moved from
+  between M97 and M106 to after [m94] where it belongs: sitting ahead
+  of M106's parallel-cost measurement, the compile storm was what that
+  measurement was measuring (348-392% of one task where a quiet run
+  is ~100-220%).
+
+**Where M98 stands after this increment**: binutils, GCC (cc1,
+cc1plus, the driver, collect2), GNU make, GMP/MPFR/MPC, the sysroot
+and libstdc++ are all ON the image, and the required `[m98]` marker
+compiles and runs a C program with no flags, every byte from this
+machine's own disk. Remaining: the third box's ceilings as the real
+bootstrap hits them, and the fourth's measurements — peak RSS,
+disk, wall-clock — which need the bootstrap itself, on-machine, which
+is the next increment.
+
 ### M99 — Python, built here [ ]
 
 - [ ] `./configure && make` for CPython **on the machine**, with the

@@ -38,6 +38,12 @@ extern "C" {
 #endif
 
 #define PATH_BIN  "/bin"
+/* M98: the default search path, defined ONCE because two implementations
+ * of it already disagreed: libc's execvp learned "/bin:/usr/bin" when
+ * the toolchain landed in /usr/bin, and the shell's own fallback still
+ * said PATH_BIN - so `gcc` resolved from C programs and not from the
+ * prompt. Anything that defaults a PATH defaults to this. */
+#define PATH_DEFAULT "/bin:/usr/bin"
 #define PATH_HOME "/home"
 #define PATH_ETC  "/etc"
 #define PATH_ICONS "/icons" /* M63 stretch goal: icon blobs, one file each - see system_api/include/icon.h */

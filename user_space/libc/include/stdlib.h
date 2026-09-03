@@ -158,6 +158,15 @@ char *setstate(char *state);
 #define EXIT_FAILURE 1
 
 int mkstemp(char *tmpl);
+
+/* M98: the canonical absolute pathname - symlinks followed, "." and
+ * ".." resolved by walking. NULL with errno when any component does
+ * not exist, which is POSIX's strict form and the one libiberty's
+ * lrealpath depends on for a not-yet-created output file. See
+ * realpath.c for the undefined behaviour its absence fed to the gcc
+ * driver. `resolved` may be NULL, in which case the result is
+ * malloc'd. */
+char *realpath(const char *path, char *resolved);
 char *mkdtemp(char *tmpl);
 /* M98: and the unsafe one, which GNU libiberty's choose-temp.c calls by
  * name - so its absence was a build failure in the first file of the

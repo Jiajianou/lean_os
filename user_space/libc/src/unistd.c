@@ -325,8 +325,13 @@ int execvp(const char *file, char *const argv[]) {
          * It matters rather than being pedantry: `xargs` exec's `grep`
          * by name, and a process spawned with no environment (which is
          * every process the kernel starts) would search "." and not find
-         * it. Found by M89's own pipeline, in its middle stage. */
-        path = "/bin";
+         * it. Found by M89's own pipeline, in its middle stage.
+         *
+         * M98: PATH_DEFAULT ("/bin:/usr/bin"), because the machine has
+         * a /usr/bin now - the toolchain lives there - and defined once
+         * in paths.h because this default and the shell's own fallback
+         * had already disagreed about it. */
+        path = PATH_DEFAULT;
     }
     char attempt[PATH_MAX_LEN];
     const char *p = path;
@@ -446,6 +451,16 @@ gid_t getgid(void) {
 
 gid_t getegid(void) {
     return 0;
+}
+
+/* M98: who is logged in - the same one principal getuid() reports and
+ * getpwuid(0) names, spelled the way <pwd.h> spells it. GNU make asked
+ * (it expands $(USER)); an answer disagreeing with the passwd row would
+ * be two names for one principal, which is one more than the machine
+ * has. */
+char *getlogin(void) {
+    static char name[] = "root";
+    return name;
 }
 
 /* M89: the setters, and the ownership refusals. See <unistd.h> and

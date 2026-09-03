@@ -15,6 +15,18 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+/* M98: the announcement macro, and it is interface the same way
+ * <stdio.h>'s _STDIO_H is: ported code asks "is this a POSIX system"
+ * by testing _POSIX_VERSION, and code older than ANSI then declares
+ * its OWN prototypes for lseek and getcwd when the answer is no - GNU
+ * make's makeint.h does exactly that, and its `char *getcwd(void)`
+ * collides with the real declaration below. The value is the version
+ * whose *names* this header set out to provide (M75/M77's bullet is
+ * literally "POSIX names for what is already here"); what is absent is
+ * absent by link error, which is the same honest failure it was before
+ * this macro existed. */
+#define _POSIX_VERSION 200809L
+
 /* M97: C++ linkage.
  *
  * Without this every declaration below is a C++ function when a C++
@@ -134,6 +146,7 @@ int ftruncate(int fd, off_t length);
  * with borrowed authority", and the honest answer here is no. */
 uid_t getuid(void);
 uid_t geteuid(void);
+char *getlogin(void); /* M98: "root", agreeing with getpwuid(0) - see unistd.c */
 gid_t getgid(void);
 gid_t getegid(void);
 

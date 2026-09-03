@@ -41,7 +41,11 @@ done
 
 WORK="$(mktemp -d -t leanos-smp-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
-LOG="$WORK/serial.log"
+# M98: keep the serial log when the caller names a place for it, exactly
+# as qemu-serial-test.sh does - a panic's own diagnostic lines are in
+# there, and a harness that deletes them on exit reports "it panicked"
+# while discarding the part that says why.
+LOG="${LEANOS_SERIAL_LOG:-$WORK/serial.log}"
 : > "$LOG"
 cp "$OVMF_VARS" "$WORK/vars.fd"
 

@@ -59,6 +59,7 @@
  * have been written this way.
  */
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2282,7 +2283,16 @@ static int apply_redirs(Redir *list, RedirSave *save) {
             }
             target = open(path, flags, 0644);
             if (target < 0) {
-                errmsg("cannot open ", path, 0);
+                /* M98: with the reason, now that open() infers one -
+                 * "cannot open /dev/null" with no why cost a boot of
+                 * guessing. */
+                char why[48];
+                why[0] = '\0';
+                if (errno) {
+                    strcpy(why, ": ");
+                    strncat(why, strerror(errno), sizeof(why) - 3);
+                }
+                errmsg("cannot open ", path, why[0] ? why : 0);
                 free(path);
                 return -1;
             }
@@ -2809,7 +2819,7 @@ static int exec_external(char **argv, Node *n) {
         } else {
             const char *path = var_get("PATH");
             if (!path[0]) {
-                path = PATH_BIN;
+                path = PATH_DEFAULT; /* M98: "/bin:/usr/bin" - see paths.h */
             }
             const char *p = path;
             while (*p) {
@@ -3368,6 +3378,18 @@ static int run_script_file(const char *path) {
 
 int main(int argc, char **argv) {
     shell_pid = getpid();
+
+    /* M98: PATH exists in the environment from here on down, not just
+     * in two fallbacks. execvp and this shell's own lookup both default
+     * to PATH_DEFAULT when PATH is unset, but a default a child cannot
+     * *read* is half a truth: gcc's driver locates cc1 by finding
+     * itself through getenv("PATH"), and with no PATH it degraded to
+     * prefixes relative to the literal string "gcc" - "../libexec/..."
+     * from whatever the working directory was. On every other Unix,
+     * login infrastructure exports PATH before anything runs; on this
+     * machine the shell IS the login infrastructure, so it does. The 0
+     * means an inherited PATH is left exactly as it came. */
+    setenv("PATH", PATH_DEFAULT, 0);
 
     /* A descriptor to complain on.
      *

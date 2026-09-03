@@ -114,16 +114,34 @@ int mkdir(const char *path, mode_t mode) {
  * mode and no owner, so a setter that returned 0 would be lying about
  * the only thing it exists to do.
  */
+/* M98 amends M89's blanket refusal with the one case a modeless
+ * filesystem can grant truthfully: setting the permission bits to the
+ * zero this libc's own stat reports. bzip2's compress path is
+ * fchmod(fd, st.st_mode) - it hands back exactly what stat gave it -
+ * and ERROR_IF_NOT_ZERO around that call meant every `bzip2 -z` on
+ * this machine died at the finish line... and the [m94] boot fixture
+ * never noticed, because a failed -z leaves the input file untouched
+ * and `cmp in keep` then passes vacuously. Asking for what is already
+ * the case succeeds because it is already the case; asking for any
+ * actual permission bits stays the EPERM refusal M89 argued for. */
+static int mode_is_what_stat_reports(mode_t mode) {
+    return (mode & 07777) == 0;
+}
+
 int chmod(const char *path, mode_t mode) {
     (void)path;
-    (void)mode;
+    if (mode_is_what_stat_reports(mode)) {
+        return 0;
+    }
     errno = EPERM;
     return -1;
 }
 
 int fchmod(int fd, mode_t mode) {
     (void)fd;
-    (void)mode;
+    if (mode_is_what_stat_reports(mode)) {
+        return 0;
+    }
     errno = EPERM;
     return -1;
 }
@@ -131,8 +149,10 @@ int fchmod(int fd, mode_t mode) {
 int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
     (void)dirfd;
     (void)path;
-    (void)mode;
     (void)flags;
+    if (mode_is_what_stat_reports(mode)) {
+        return 0;
+    }
     errno = EPERM;
     return -1;
 }

@@ -31,6 +31,12 @@ static inline int iscntrl(int c) { return c < 0x20 || c == 0x7F; }
  * [[:graph:]] and [[:blank:]]. */
 static inline int isgraph(int c) { return isprint(c) && c != ' '; }
 static inline int isblank(int c) { return c == ' ' || c == '\t'; }
+/* M98: XPG's pair, asked for by name by GMP's own printf. isascii is
+ * defined on EVERY int, unlike the classifications above whose argument
+ * must be unsigned-char-or-EOF - that wider domain is its whole reason
+ * to exist, and why it is not isprint with different bounds. */
+static inline int isascii(int c) { return (c & ~0x7F) == 0; }
+static inline int toascii(int c) { return c & 0x7F; }
 static inline int toupper(int c) { return islower(c) ? c - 'a' + 'A' : c; }
 static inline int tolower(int c) { return isupper(c) ? c - 'A' + 'a' : c; }
 

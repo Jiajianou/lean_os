@@ -650,11 +650,34 @@ void sched_init(void) {
 void sched_init_ap(int cpu_id) {
     uint64_t flags = irq_save_disable();
     spin_lock(&sched_lock);
-    int slot = task_count;
+    /* M98: the same scan-then-grow task_spawn does, where a bare
+     * `task_count` stood. On the machine the APs come up before
+     * userland can fill the table and the bare index was never wrong -
+     * but it was never CHECKED either, and the host harness proved it
+     * writes past `tasks[]` the moment the table has been full first.
+     * An AP with no slot to be is a panic rather than a corruption:
+     * there is no machine worth running whose idle identities do not
+     * fit. */
+    int slot = -1;
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_FREE) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (task_count >= MAX_TASKS) {
+            panic("sched_init_ap: no task slot for a CPU's idle identity");
+        }
+        slot = task_count++;
+    }
     task_t *t = &tasks[slot];
     t->state = TASK_RUNNING;
-    t->generation = 0;
-    t->id = PID_MAKE(slot, 0);
+    /* The slot's existing generation, not 0: a reused slot resetting it
+     * would let a stale pid name this idle identity (M98, with the slot
+     * scan above). A never-used slot has generation 0 anyway, which is
+     * what keeps a first boot's ids readable. */
+    t->id = PID_MAKE(slot, t->generation);
     t->stack_base = NULL; /* this is ap_main's own boot stack (smp.c's start_ap kmalloc'd it), not one this table owns or will ever free */
     t->kernel_stack_top = 0; /* like task 0, never consulted - this idle identity never enters ring 3 */
     t->pml4_phys = vmm_kernel_pml4_phys();
@@ -678,7 +701,8 @@ void sched_init_ap(int cpu_id) {
     set_task_name(t, "cpu-idle");
     current_task[cpu_id] = t;
     loaded_pml4_phys[cpu_id] = t->pml4_phys;
-    task_count++;
+    /* task_count moved into the slot scan above (M98) - counting here as
+     * well double-counted a reused slot. */
     spin_unlock(&sched_lock);
     irq_restore(flags);
 }
@@ -976,6 +1000,28 @@ task_t *task_spawn_in(const char *name, uint64_t pml4_phys, void (*entry)(void *
  * TASK_TERMINATED slots are skipped. Caller must hold sched_lock - two
  * CPUs scanning/claiming concurrently without it could both pick the same
  * READY task. */
+/* M98: is this task on some CPU's stack right now? Under sched_lock the
+ * answer is exact for a task that is INSIDE schedule() - M106's reap fix
+ * says why at length - but there is a window it does not cover: a task
+ * that has marked itself TASK_BLOCKED on the way into a wait and has not
+ * yet reached schedule() is still current on its CPU, still standing on
+ * its own kernel stack, and already wakeable. A futex_wake from another
+ * core in that window makes it TASK_READY, and a pick_next that looks
+ * only at state then hands the SAME task - the same kernel stack - to a
+ * second CPU. Found by [m97]'s std::thread fixture on four cores: the
+ * switch-away guard caught cpu0 standing on the stack of the thread
+ * cpu1 was running. The task is not lost by being skipped - the CPU it
+ * is still current on is inside (or one instruction from) schedule(),
+ * and whoever scans next picks it up the moment it stops being current. */
+static int current_on_some_cpu(const task_t *t) {
+    for (int c = 0; c < MAX_CPUS; c++) {
+        if (current_task[c] == t) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static task_t *pick_next(task_t *from) {
     /* M54: from->id is a pid now, not an index - PID_SLOT is where in the
      * table it actually lives. A free slot is skipped for the same reason
@@ -990,6 +1036,13 @@ static task_t *pick_next(task_t *from) {
     for (int offset = 1; offset <= task_count; offset++) {
         int i = (start + offset) % task_count;
         if (tasks[i].state != TASK_READY) {
+            continue;
+        }
+        /* M98: READY is necessary but no longer sufficient - see
+         * current_on_some_cpu above. `from` excludes itself via the
+         * fallback below, which is the one legitimate "still current
+         * here, keep running it" case. */
+        if (&tasks[i] != from && current_on_some_cpu(&tasks[i])) {
             continue;
         }
         /* M69: batch is remembered as a fallback, not returned.

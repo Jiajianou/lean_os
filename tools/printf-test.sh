@@ -157,6 +157,11 @@ long sys_lseek(int fd, long o, int w) { (void)fd; (void)o; (void)w; return -1; }
 long sys_unlink(const char *p) { (void)p; return -1; }
 long sys_rename(const char *a, const char *b) { (void)a; (void)b; return -1; }
 long sys_getpid(void) { return 1; }
+/* M98: perror reads errno through this libc's own accessor and names
+ * it with this libc's strerror; the host build supplies both here. */
+static int fake_errno;
+int *__errno_location(void) { return &fake_errno; }
+char *strerror(int e) { (void)e; return "error"; }
 EOF
 
 OURS="$BUILD/printf-ours"
