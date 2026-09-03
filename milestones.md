@@ -227,6 +227,9 @@ Every milestone, in order, with its status. `[ ]` not started ·
 **[The next ten, and where they actually start](#the-next-ten-and-where-they-actually-start)**
 
 
+**[The next ten, asked a second time](#the-next-ten-asked-a-second-time)**
+
+
 ## Ground rules / assumptions
 
 - **Architecture:** x86_64, UEFI boot only (the original legacy-BIOS boot
@@ -10668,7 +10671,6 @@ function that is subtly wrong, none of which a `hello.c` that prints
 would catch. If a full bootstrap does not fit this machine, the honest
 outcome is the *number* that says by how much, and a stage-1 compiler
 that builds a real program.
-
 ### M99 — Python, built here [ ]
 
 - [ ] `./configure && make` for CPython **on the machine**, with the
@@ -13746,3 +13748,79 @@ instead of by an expectation.
 list, invents no milestone number, and changes no scope: every row above
 already had its bullets and its grading test written. M103–M110 remain
 the arc after this one, in the order they are already in.
+
+## The next ten, asked a second time
+
+*Written after M104, M105, M106 and Q17–Q20 landed, when the ask was
+made again.* The first answer to this question is the section above, and
+that answer has since graded itself: seven of its ten rows are struck
+through, each struck the week it landed, and the head of the queue it
+named — M98 — is where work actually went next. So the same kind of
+answer is given again, for the same reason: the loop says one milestone
+at a time in the order this file sets, and an arc that collects a second
+plan while the first is unbuilt is precisely the drift "Deliberately not
+next" exists to catch. **Nothing below is invented and nothing is
+promoted from the deferred list.**
+
+What has changed is the arithmetic. Twelve lines in the index are still
+not `[x]`, and they fold to exactly ten pieces of work: M28's one open
+box *is* M110's first box, M92's last box collects inside M107 under
+the condition already written for it, and M103's three remaining boxes
+split two ways between M107 and M110 — each split recorded where the
+box was declined, not decided here. **The next ten milestones are the
+ten the file already has, and for the first time they are also the last
+ten it knows how to write.**
+
+| order | milestone | state | why here and not elsewhere |
+|---|---|---|---|
+| **1** | **M98** — a compiler that runs here | started | the probe is in the tree: configure succeeded outright, libiberty and bfd build, and the next stop is `<sys/param.h>` in libctf. Still the unambiguous head, and still carrying three deliverables — its own three-stage bootstrap, the attribution that closes M101, and the peak-RSS number that decides M102 |
+| **2** | **M99** — Python, built here | not started | built *with* row 1's compiler by definition; nothing else about its position is a decision |
+| **3** | **M100** — the browser gap, measured | not started | the last milestone of its arc, and the one that specifies the arc after it. TLS lives here — which is also the fetch M108's three TCP deferrals are conditioned on |
+| **4** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not. Placed before the device arc — see the note below the table |
+| **5** | **Q14** — the compositor, off the machine | not started | the same move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded by tests that run in milliseconds rather than only through a booted screendump |
+| **6** | **M103 (2nd)** — MSI/MSI-X | condition fires at row 7 | its own entry names the condition — *"a driver for a part that has no other way to interrupt"* — and M107's NVMe bullet answers it by name: *"MSI-X completions from M103"*. The LAPIC-timer and interrupt-driven-virtio boxes are **not** collected here; they wait for M110's hardware, exactly as written |
+| **7** | **M107** — AHCI, NVMe, xHCI + USB HID | not started | all three gradeable under QEMU at this desk, which is what makes M110 a boot rather than a bring-up. Collects M92's last open box on the way |
+| **8** | **M108** — a real NIC | the driver half | the `e1000e` driver is QEMU-gradeable and belongs here; the link half — carrier, a real router, a lease that expires — needs hardware and sits in the same table as M110. Window scaling, SACK and Nagle stay *if and only if M100's fetch asks* |
+| **9** | **M109** — lean_os built on lean_os | not started | needs nothing from rows 7–8 and stays after them anyway: the tree it rebuilds should be the whole tree, drivers included, or the generational test grades a subset of the machine it runs on |
+| **10** | **M110** — the boot that has never happened | held — see the hold note below | M28's fourth box, a metal column in `budgets.tsv`, the 8259 default reversed or confirmed with a number, and M103's last two boxes weighed on hardware that exists |
+
+**A hold, added 2026-09-03 by the user's instruction, which outranks
+this table.** Real-hardware work does not start until the user says it
+does — even if a machine and a USB drive turn up. That covers M110 in
+its entirety, M28's last box (the same box), M108's link half (a
+physical NIC, a real router, a lease that expires), and the two M103
+boxes that wait on M110's measurements. Row 10's standing permission to
+jump the queue is suspended: its blocker is now a decision as well as an
+object, and the decision is the user's. Until then, work refines the OS
+through rows 1–9, all of which are gradeable at this desk under QEMU —
+including M108's driver half, which was always the QEMU-gradeable part.
+
+Three notes, so the table cannot be misread:
+
+- **Rows 4 and 5 are the one ordering decision this section makes.**
+  Everything else is dependency or standing arc order. The argument:
+  M107's grading bar is the full self-test battery run four times over,
+  once per storage backend, plus the input suite with the PS/2 devices
+  deleted from the QEMU command line — Q19 made each of those boots
+  cheap, and rows 4–5 are what make each of them *sharp*. An hour spent
+  on the pixel instruments before the device arc is repaid once per
+  backend per run for the rest of the project's life. The counterweight
+  is recorded too: the previous section's correction warns that building
+  an instrument ahead of its subject cost M101 and M102 each a box they
+  could not close. That warning does not apply here — Q7 and Q14 grade
+  code that already exists, not measurements M107 has yet to produce.
+- **The journal stays deferred, and this table checked rather than
+  assumed.** M105's restated condition — a metadata sequence that stops
+  being atomic against another writer — did not fire: M106 measured the
+  coarse locks under four cores and *kept* them. Multi-user, the GPU,
+  the browser itself: unchanged, all still deferred on conditions about
+  the world rather than about this queue.
+- **Where the eleventh milestone comes from — not from this section.**
+  M100 ends with a gap analysis carrying a number on every line, and
+  M110 ends with eleven budgets measured on metal for the first time.
+  Whatever arc follows row 10 is specified by those two documents, or it
+  is speculation with a milestone number attached. The assumption this
+  section records, per the loop's own rule: the ask was for ten
+  milestones, and the reading most consistent with this file is that
+  writing new ones while these ten stand unbuilt would be the second
+  plan the first answer refused to collect.
