@@ -10605,8 +10605,10 @@ target did not have, and every one of them is now written down in
 
 - [x] binutils built *for* lean_os and running *on* it: `as`, `ld`, `ar`,
       `nm`, `objdump`, `strip` — see the second-increment notes below
-- [ ] GCC built for and running on lean_os — `cc1`, `cc1plus`, the
-      driver — plus GNU make (or toybox's, if M89 got there first)
+- [x] GCC built for and running on lean_os — `cc1`, `cc1plus`, the
+      driver — plus GNU make (toybox has no make; GNU make 4.4.1 built
+      with `--disable-load`, the same dlopen refusal as binutils'
+      plugins) — see the third-increment notes
 - [ ] Whatever the build actually asks the kernel for that is still
       missing, in M63's method: process counts past `MAX_TASKS 128`
       under `make -j`, fd counts past `MAX_FDS 128` in a linker, `/tmp`,

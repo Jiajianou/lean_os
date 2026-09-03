@@ -753,7 +753,13 @@ static void put_tree(const char *host_dir, int parent, const char *at, uint32_t 
                 at, TREE_MAX_DEPTH);
         exit(1);
     }
-    if (depth > tally.deepest) {
+    /* Matching the machine's walker exactly (kernel.c's manifest walk):
+     * the ROOT does not count. A flat tree is depth 0 there - deepest
+     * only moves when a subdirectory frame is pushed - and this side
+     * counted its own entry, so the first flat tree ever put (M98's
+     * three-file make fixture) failed the manifest with every other
+     * number equal and depth 1/0. */
+    if (depth >= 2 && depth > tally.deepest) {
         tally.deepest = depth;
     }
 

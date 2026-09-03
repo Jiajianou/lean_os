@@ -136,7 +136,9 @@ if [ -x build/native/make/make ]; then
   strip_put build/native/make/make /usr/bin/make
 fi
 
-# The compile fixture for [m98]'s second half.
+# The compile fixture for [m98]'s second half, and the make project for
+# its third.
 "$PUT" "$IMAGE" tests/binutils/m98c.c /tests/m98c.c >/dev/null || exit 1
+"$PUT" -r "$IMAGE" tests/binutils/m98mk /tests/m98mk >/dev/null || exit 1
 
 echo "install-native-toolchain: gcc, g++, cpp, make, headers and libraries under /usr"

@@ -8959,7 +8959,20 @@ static void boot_selftests_system(void) {
                  * grading below skips the compile needles when it is
                  * not, and says so. */
                 "gcc /tests/m98c.c -o m98c\n"
-                "./m98c >> " PATH_TMP_DIR "m98.out\n";
+                "./m98c >> " PATH_TMP_DIR "m98.out\n"
+                /* M98's third act: a BUILD, not a compile. make reads a
+                 * rule graph, stats leanfs to decide what is out of
+                 * date, runs gcc per rule, links, and then - run again -
+                 * must conclude there is nothing to do, which is the
+                 * mtime half no single compile exercises. */
+                "mkdir -p m98prj\n"
+                "cd m98prj\n"
+                "cp /tests/m98mk/Makefile Makefile\n"
+                "cp /tests/m98mk/main.c main.c\n"
+                "cp /tests/m98mk/lib.c lib.c\n"
+                "make >> " PATH_TMP_DIR "m98.out\n"
+                "./prog >> " PATH_TMP_DIR "m98.out\n"
+                "make >> " PATH_TMP_DIR "m98.out\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M98 self-test: could not write the script fixture");
@@ -9010,6 +9023,20 @@ static void boot_selftests_system(void) {
                                    "linked and ran, entirely from this disk\n");
                         all_ok = 0;
                     }
+                    if (!selftest_contains(produced,
+                            "make built this on this machine: 42")) {
+                        klog_puts("[m98] missing: the program make built - "
+                                   "two rules, two compiles, one link\n");
+                        all_ok = 0;
+                    }
+                    /* The incremental half: a second `make` over the
+                     * same tree must decide, from leanfs's own mtimes,
+                     * that there is nothing to do. */
+                    if (!selftest_contains(produced, "up to date")) {
+                        klog_puts("[m98] missing: make's second run "
+                                   "concluding nothing was out of date\n");
+                        all_ok = 0;
+                    }
                 } else {
                     klog_puts("[m98] /usr/bin/gcc is not on this image - the "
                                "compile half is skipped. "
@@ -9039,7 +9066,10 @@ static void boot_selftests_system(void) {
                 klog_puts("; then gcc compiled a C program with no flags - "
                            "driver, cc1, as, collect2, ld, headers, startup "
                            "files and libc all from this disk - and that ran "
-                           "too");
+                           "too; then make drove a two-rule build of a "
+                           "two-file program, ran it, and on a second pass "
+                           "read leanfs's mtimes and concluded there was "
+                           "nothing to do");
             }
             klog_puts(" - self-test passed.\n\n");
         }
