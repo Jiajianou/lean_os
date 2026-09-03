@@ -21,11 +21,20 @@
 #   tools/qemu-input-test.sh                 # every test
 #   tools/qemu-input-test.sh --quick         # the pre-commit subset
 #   tools/qemu-input-test.sh --jobs 2        # fewer guests at once
+#   tools/qemu-input-test.sh --no-snapshot   # boot every guest cold (Q19's baseline)
+#   tools/qemu-input-test.sh --check-stale   # prove a stale snapshot is refused
 #   tools/qemu-input-test.sh alt_tab_cycles_focus [more...]
 #
-# Each test boots its own guest, which is what makes them independent and
-# also what makes a full run slow. Several guests run at once (a third of
-# the machine's cores, capped at four - see default_jobs).
+# Q19: each test gets its own guest, which is what makes them
+# independent - but that guest is RESTORED from a snapshot of a painted
+# desktop rather than booted. The boot happens once per image. Several
+# guests still run at once (a third of the machine's cores, capped at
+# four - see default_jobs).
+#
+# Four tests still boot cold, because they are about the boot: see
+# COLD_BOOT_TESTS in qemu_input_suite.py. The snapshot is keyed on a hash
+# of the image, so a rebuilt kernel cannot be tested against yesterday's
+# snapshot; `--check-stale` proves that rather than asserting it.
 #
 # Q1: a full run is about eight minutes - 47 tests in 458 s, measured.
 # This comment said "about twenty minutes" for several milestones and was

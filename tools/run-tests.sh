@@ -221,6 +221,11 @@ else
   else
     run_stage "interactive suite (--quick subset)" ./tools/qemu-input-test.sh --quick
   fi
+  # Q19: the snapshot the two stages above now start from is only worth
+  # having if a stale one cannot be used by mistake. Costs no boot - it
+  # manufactures a stale snapshot and requires the harness to refuse it.
+  run_stage "a stale snapshot is refused, not used" \
+    ./tools/qemu-input-test.sh --check-stale
 fi
 
 # ---- Summary ----------------------------------------------------------

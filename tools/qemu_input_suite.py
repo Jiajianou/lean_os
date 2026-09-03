@@ -29,6 +29,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
+import qemu_input
 from qemu_input import BOOT_MARKER, Machine
 
 # Where a failing test drops the screenshot it gave up on. A pixel
@@ -2864,6 +2865,33 @@ def record_run(results, jobs, elapsed):
         pass
 
 
+def record_wall_clock(count, jobs, elapsed, snapshot, snap_secs):
+    """Q19: the before and the after, in the file this project already
+    keeps its harness timings in.
+
+    `harness` says which of the two this row is, so the comparison is a
+    grep rather than a memory: `input-suite-snapshot` against
+    `input-suite-cold`. The snapshot build is reported in its own column
+    rather than folded into the total, because it is paid once for a run
+    of any size and burying it would flatter the result on a short run
+    and be invisible on a long one."""
+    try:
+        os.makedirs("build", exist_ok=True)
+        path = os.path.join("build", "test-history.tsv")
+        new = not os.path.exists(path)
+        with open(path, "a") as f:
+            if new:
+                f.write("when\tcommit\tharness\tverdict\twall_s\tboot_s\n")
+            f.write("%s\t%s\t%s\t%s\t%.0f\t%.0f\n"
+                    % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                       _commit(),
+                       "input-suite-%s-%dtests-%djobs"
+                       % ("snapshot" if snapshot else "cold", count, jobs),
+                       "pass", elapsed, snap_secs))
+    except Exception:
+        pass
+
+
 def known_flaky(names):
     """Tests that have both passed and failed at the same commit.
 
@@ -2887,7 +2915,28 @@ def known_flaky(names):
         return []
 
 
-def run_one(name, fn, boot_timeout):
+# ---- Q19: the tests that genuinely need a cold boot --------------------
+#
+# Everything else starts from a snapshot of a painted desktop. These four
+# cannot, and the reason is the same in each: they are about the BOOT.
+# Two count boot markers in the serial log to prove a reboot happened, a
+# third checks what the machine printed on its way down, and all of them
+# would be handed a log that begins after the boot they are asking about.
+#
+# Marked by name rather than detected, because "does this test depend on
+# the boot" is a question about intent - a test that reads the log for an
+# unrelated reason would be caught by a heuristic and slowed down for
+# nothing, and one that quietly grew a dependency would not be caught at
+# all. A name in a list is checkable by a person.
+COLD_BOOT_TESTS = {
+    "shutdown_powers_off_the_machine",
+    "settings_persist_across_a_reboot",
+    "session_restores_windows_across_a_reboot",
+    "behaviour_settings_persist",
+}
+
+
+def run_one(name, fn, boot_timeout, snapshot=None):
     """One test, in its own guest, with its output collected rather than
     printed - parallel tests interleaving their lines would make the
     result unreadable, so each one's report is emitted whole by the
@@ -2895,7 +2944,8 @@ def run_one(name, fn, boot_timeout):
     _current.name = name
     started = time.time()
     try:
-        with Machine(boot_timeout=boot_timeout) as m:
+        use = None if name in COLD_BOOT_TESTS else snapshot
+        with Machine(boot_timeout=boot_timeout, snapshot=use) as m:
             fn(m)
     except Failure as exc:
         return (name, str(exc), "   FAIL (%.0fs): %s" % (time.time() - started, exc))
@@ -2908,11 +2958,86 @@ def run_one(name, fn, boot_timeout):
     return (name, None, "   pass (%.0fs)" % (time.time() - started))
 
 
+def check_stale_snapshot():
+    """Manufacture a stale snapshot and require it to be refused.
+
+    Two ways a snapshot can be stale and both are checked, because they
+    fail closed by different mechanisms:
+
+      1. the image changed, so the KEY changed - the name asked for does
+         not exist and there is nothing to be stale with;
+      2. a file with the right name whose recorded key is somebody
+         else's - which is what a half-finished build, a copied
+         build/ directory or a `git checkout` between runs produces.
+
+    The second is the dangerous one: the file is there, it loads, and it
+    is yesterday's kernel. Nothing downstream could tell.
+    """
+    key = qemu_input.snapshot_key()
+    qcow, meta = qemu_input.snapshot_paths(key)
+    os.makedirs(qemu_input.SNAPSHOT_DIR, exist_ok=True)
+    failures = []
+
+    # (1) a different image is a different name.
+    other = qemu_input.snapshot_paths("0" * 64)[0]
+    if other == qcow:
+        failures.append("two different images produced the same snapshot name")
+
+    # (2) right name, wrong contents.
+    saved = None
+    if os.path.exists(qcow):
+        saved = qcow + ".held"
+        os.replace(qcow, saved)
+    saved_meta = None
+    if os.path.exists(meta):
+        saved_meta = meta + ".held"
+        os.replace(meta, saved_meta)
+    try:
+        with open(qcow, "w") as f:
+            f.write("not a snapshot")
+        with open(meta, "w") as f:
+            f.write("0" * 64 + "\n")
+        if qemu_input.snapshot_is_valid(key):
+            failures.append("a snapshot whose recorded key does not match the "
+                            "image was accepted as valid")
+        # And the harness's own reaction to that: discard, do not use.
+        qemu_input.discard_snapshot(key)
+        if os.path.exists(qcow) or os.path.exists(meta):
+            failures.append("discard_snapshot left the stale files behind")
+    finally:
+        for tmp in (qcow, meta):
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        if saved:
+            os.replace(saved, qcow)
+        if saved_meta:
+            os.replace(saved_meta, meta)
+
+    # And the honest half: a snapshot that IS current is accepted, or
+    # this check would pass against a harness that refused everything.
+    if os.path.exists(qcow) and os.path.exists(meta):
+        if not qemu_input.snapshot_is_valid(key):
+            failures.append("a current snapshot was refused")
+    else:
+        print("  (no current snapshot on disk to check the accepting half "
+              "against - run the suite once first)")
+
+    if failures:
+        print("FAIL: the stale-snapshot check did not hold:")
+        for f in failures:
+            print("  - %s" % f)
+        return 1
+    print("PASS: a stale snapshot is refused and a current one is accepted.")
+    return 0
+
+
 def usage():
-    print("usage: qemu_input_suite.py [--jobs N] [--quick] [test ...]")
+    print("usage: qemu_input_suite.py [--jobs N] [--quick] [--no-snapshot]\n                            [--check-stale] [test ...]")
     print()
     print("  --jobs N   run N guests at once (default: %d here)" % default_jobs())
     print("  --quick    the pre-commit subset (%d tests)" % len(QUICK_TESTS))
+    print("  --no-snapshot  boot every guest cold (Q19's baseline)")
+    print("  --check-stale  prove a stale snapshot is refused, not used")
     print()
     print("known tests:")
     for n, _ in TESTS:
@@ -2924,6 +3049,7 @@ def main(argv):
     signal.signal(signal.SIGINT, _die_on_signal)
 
     jobs = int(os.environ.get("LEANOS_INPUT_JOBS", "0")) or default_jobs()
+    use_snapshot = os.environ.get("LEANOS_INPUT_SNAPSHOT", "1") != "0"
     wanted = []
     args = argv[1:]
     i = 0
@@ -2937,6 +3063,20 @@ def main(argv):
             i += 1
         elif a == "--quick":
             wanted.extend(QUICK_TESTS)
+            i += 1
+        elif a == "--check-stale":
+            # Q19's other deliverable: "a stale snapshot proven to fail
+            # rather than to pass quietly." Proven by making one and
+            # watching it be refused, because the alternative is a
+            # comment claiming the check exists.
+            return check_stale_snapshot()
+        elif a == "--no-snapshot":
+            # Q19: the cold path, kept and reachable. It is what the
+            # snapshot is measured against, and it is what to reach for
+            # when a failure might be the snapshot's fault - "does this
+            # still fail from a cold boot" is the first question, and a
+            # harness that cannot answer it has made itself unfalsifiable.
+            use_snapshot = False
             i += 1
         elif a in ("-h", "--help"):
             usage()
@@ -2971,19 +3111,43 @@ def main(argv):
     # with what it is timing cannot fail, which makes it not a timeout.
     boot_timeout = 420 + 90 * (jobs - 1)
 
-    print("running %d test(s), %d at a time" % (len(selected), jobs), flush=True)
+    # ---- Q19: the boot, once ------------------------------------------
+    snapshot = None
+    snap_secs = 0.0
+    if use_snapshot and any(n not in COLD_BOOT_TESTS for n, _ in selected):
+        if qemu_input.snapshot_is_valid():
+            snapshot = qemu_input.snapshot_paths()[0]
+            print("snapshot: reusing %s" % os.path.basename(snapshot), flush=True)
+        else:
+            # Not "no snapshot found" - a snapshot whose key does not
+            # match the image on disk is DELETED and rebuilt, which is
+            # the whole of failing closed. See qemu_input.snapshot_key.
+            qemu_input.discard_snapshot()
+            print("snapshot: building one (the image changed, or there was none)",
+                  flush=True)
+            t0 = time.time()
+            snapshot = qemu_input.build_snapshot(desktop_is_painted,
+                                                 boot_timeout=boot_timeout)
+            snap_secs = time.time() - t0
+            print("snapshot: built in %.0fs - %s"
+                  % (snap_secs, os.path.basename(snapshot)), flush=True)
+
+    print("running %d test(s), %d at a time%s"
+          % (len(selected), jobs,
+             "" if snapshot else " (cold boot for every one)"), flush=True)
     started_all = time.time()
     results = []
 
     if jobs == 1:
         for name, fn in selected:
             print("== %s" % name, flush=True)
-            r = run_one(name, fn, boot_timeout)
+            r = run_one(name, fn, boot_timeout, snapshot)
             print(r[2], flush=True)
             results.append(r)
     else:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
-            futures = [(n, pool.submit(run_one, n, f, boot_timeout)) for n, f in selected]
+            futures = [(n, pool.submit(run_one, n, f, boot_timeout, snapshot))
+                       for n, f in selected]
             for name, fut in futures:
                 r = fut.result()
                 print("== %s" % name, flush=True)
@@ -2993,6 +3157,7 @@ def main(argv):
     failures = [(n, d) for n, d, _ in results if d is not None]
     elapsed = time.time() - started_all
     record_run(results, jobs, elapsed)
+    record_wall_clock(len(selected), jobs, elapsed, snapshot, snap_secs)
     print()
     print("%d test(s) in %.0fs" % (len(selected), elapsed))
     flaky = known_flaky([n for n, _ in selected])

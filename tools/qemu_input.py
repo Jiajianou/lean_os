@@ -43,6 +43,7 @@ rather than assumed:
     which are the only two things that actually prove guest behavior.
 """
 
+import hashlib
 import os
 import shutil
 import socket
@@ -182,10 +183,178 @@ class Ppm:
         return n
 
 
+# ---- Q19: boot once, test many ----------------------------------------
+#
+# Every test in this suite boots its own guest, which is what makes them
+# independent and is also two thirds of what a run costs: the boot is
+# about eight seconds of each test's twenty-five.
+#
+# So the boot happens once. A guest is brought to a painted desktop, its
+# whole state - RAM, devices, disk - is written into a qcow2 snapshot,
+# and every test after that starts by restoring it. Restoring is a file
+# clone plus a `-loadvm`, and on APFS the clone is copy-on-write and
+# costs nothing measurable.
+#
+# ---- the failure this must not have -----------------------------------
+#
+# A stale snapshot silently testing yesterday's kernel. It would pass,
+# which is the worst possible way to be wrong, and nothing downstream
+# could notice.
+#
+# It fails closed twice over. The snapshot's *name* contains a hash of
+# the image it was taken from, so a rebuilt image asks for a file that
+# does not exist. And a sidecar records the full hash, which is checked
+# before the snapshot is used at all - so a file that somehow has the
+# right name and the wrong contents is deleted rather than trusted. The
+# key covers everything that changes what a boot IS: the image, the disk
+# backend, the core count and the memory size, because a snapshot taken
+# on one of those cannot be resumed under another.
+SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "build", "snapshot")
+SNAPSHOT_TAG = "desktop"
+
+
+def _qemu_disk_kind():
+    return "ide" if os.environ.get("LEANOS_QEMU_DISK") == "ide" else "virtio"
+
+
+def snapshot_key():
+    """What this snapshot is OF. Any change here is a different file."""
+    h = hashlib.sha256()
+    with open(IMAGE, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    h.update(("|%s|%s|%s" % (_qemu_disk_kind(),
+                             os.environ.get("QEMU_CPUS", "1"),
+                             os.environ.get("LEANOS_QEMU_MEM", "4096"))).encode())
+    return h.hexdigest()
+
+
+def snapshot_paths(key=None):
+    key = key or snapshot_key()
+    base = os.path.join(SNAPSHOT_DIR, "desktop-%s" % key[:16])
+    return base + ".qcow2", base + ".key"
+
+
+def snapshot_is_valid(key=None):
+    """The sidecar half of failing closed - see the note above."""
+    key = key or snapshot_key()
+    qcow, meta = snapshot_paths(key)
+    if not (os.path.exists(qcow) and os.path.exists(meta)):
+        return False
+    try:
+        with open(meta) as f:
+            return f.read().strip() == key
+    except OSError:
+        return False
+
+
+def discard_snapshot(key=None):
+    for path in snapshot_paths(key):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _clone(src, dst):
+    """A copy-on-write clone where the filesystem has one, a copy where it
+    does not. `cp -c` is APFS's and `--reflink` is Linux's; both turn a
+    50 MiB snapshot into a few milliseconds, and the fallback is correct
+    everywhere and merely slower."""
+    for args in (["cp", "-c", src, dst], ["cp", "--reflink=auto", src, dst]):
+        try:
+            if subprocess.call(args, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL) == 0:
+                return
+        except OSError:
+            pass
+    shutil.copyfile(src, dst)
+
+
+def build_snapshot(painted, boot_timeout=300, quiet=False):
+    """Boot one guest to a painted desktop and freeze it.
+
+    `painted(shot)` is the suite's own "is the desktop finished" check,
+    passed in rather than imported: this file knows how to drive a guest
+    and the suite knows what a finished desktop looks like, and the
+    snapshot must not be taken a frame early - every test after it would
+    start from a half-drawn screen.
+
+    The disk is a qcow2 overlay on the image rather than the image
+    itself. Two reasons, and both matter: `savevm` needs a block device
+    that can hold a snapshot and a raw file cannot, and an overlay keeps
+    the real image read-only, so a run holds no write lock on
+    build/os-image.bin - which is the property the cold path already had
+    through `snapshot=on` and must not lose.
+    """
+    key = snapshot_key()
+    qcow, meta = snapshot_paths(key)
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    discard_snapshot(key)
+
+    # Every other snapshot in here is for an image that no longer exists.
+    # Keeping them costs 50 MiB apiece for nothing - the key is a hash,
+    # so an old one can never be asked for again. Swept on the way in
+    # rather than on the way out: a run that is killed halfway through
+    # still leaves a clean directory behind the next one.
+    for name in os.listdir(SNAPSHOT_DIR):
+        if name.startswith("desktop-") and not name.startswith("desktop-%s" % key[:16]):
+            try:
+                os.unlink(os.path.join(SNAPSHOT_DIR, name))
+            except OSError:
+                pass
+
+    subprocess.check_call(
+        ["qemu-img", "create", "-f", "qcow2", "-b", os.path.abspath(IMAGE),
+         "-F", "raw", qcow],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    said = ""
+    m = Machine(quiet=quiet, boot_timeout=boot_timeout,
+                snapshot_build=qcow)
+    try:
+        if not m.wait_for_marker(timeout=boot_timeout):
+            raise RuntimeError("the snapshot guest never reached %r - see %s"
+                               % (BOOT_MARKER, m.save_log("snapshot-boot-timeout")))
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if painted(m.screenshot()):
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("the snapshot guest never finished painting - see %s"
+                               % m.save_log("snapshot-never-painted"))
+        # A moment past "painted" on purpose. Every test starts here, so
+        # a frame of settling bought once is a frame every test does not
+        # have to wait for.
+        time.sleep(2.0)
+        said = m.savevm(SNAPSHOT_TAG, timeout=180)
+    finally:
+        m.kill()
+
+    # Verified against the FILE rather than against what the monitor said.
+    # The monitor echoes every keystroke back and interleaves its own
+    # prompt, so parsing it for success is parsing a terminal; the
+    # question that matters is whether the snapshot is in the qcow2, and
+    # qemu-img answers exactly that.
+    listing = subprocess.run(["qemu-img", "snapshot", "-l", qcow],
+                             capture_output=True, text=True).stdout
+    if SNAPSHOT_TAG not in listing:
+        raise RuntimeError("savevm produced no snapshot in %s.\nqemu-img said: %s\n"
+                           "the monitor said: %r"
+                           % (qcow, listing.strip() or "(nothing)", said[-600:]))
+
+    with open(meta, "w") as f:
+        f.write(key + "\n")
+    return qcow
+
+
 class Machine:
     """One booted guest, driven through its HMP monitor."""
 
-    def __init__(self, extra_args=(), quiet=False, boot_timeout=None):
+    def __init__(self, extra_args=(), quiet=False, boot_timeout=None,
+                 snapshot=None, snapshot_build=None):
         if not os.path.exists(IMAGE):
             raise RuntimeError("no image at %s - run 'make' first" % IMAGE)
         if not os.path.exists(OVMF_CODE):
@@ -205,8 +374,43 @@ class Machine:
         # note on why a boot timeout is the harness giving up rather than
         # a verdict about the desktop.
         self.boot_timeout = boot_timeout
+
+        # Q19: restored, or booted. Everything below that differs between
+        # the two is here, so the rest of this class - and every test -
+        # cannot tell which kind of guest it has.
+        #
+        # The OVMF variable store is READ-ONLY on the restored path, and
+        # that is not a detail: `savevm` refuses to run while any
+        # writable block device cannot hold a snapshot, and a raw pflash
+        # cannot. Read-only costs nothing here because this machine boots
+        # the same way every time and has no boot variables worth
+        # keeping.
+        self.restored = snapshot is not None
         vars_rt = os.path.join(self._dir, "OVMF_VARS.fd")
         shutil.copyfile(OVMF_VARS, vars_rt)
+        if self.restored or snapshot_build:
+            # The build guest writes the snapshot file itself; a test
+            # guest gets its own clone of it. Same devices either way,
+            # which is what makes the restore legal.
+            if snapshot_build:
+                disk = snapshot_build
+            else:
+                disk = os.path.join(self._dir, "state.qcow2")
+                _clone(snapshot, disk)
+            disk_args = ["-drive", "if=none,id=disk0,format=qcow2,file=" + disk,
+                         "-device", "virtio-blk-pci,drive=disk0"]
+            if _qemu_disk_kind() == "ide":
+                disk_args = ["-drive", "format=qcow2,file=" + disk]
+            pflash_vars = ["-drive",
+                           "if=pflash,format=raw,readonly=on,file=" + vars_rt]
+            restore_args = [] if snapshot_build else ["-loadvm", SNAPSHOT_TAG]
+        else:
+            disk_args = (["-drive", "format=raw,snapshot=on,file=" + IMAGE]
+                         if _qemu_disk_kind() == "ide" else
+                         ["-drive", "if=none,id=disk0,format=raw,snapshot=on,file=" + IMAGE,
+                          "-device", "virtio-blk-pci,drive=disk0"])
+            pflash_vars = ["-drive", "if=pflash,format=raw,file=" + vars_rt]
+            restore_args = []
 
         self._proc = subprocess.Popen([
             "qemu-system-x86_64",
@@ -219,7 +423,7 @@ class Machine:
             # there yet.
             "-smp", os.environ.get("QEMU_CPUS", "1"),
             "-drive", "if=pflash,format=raw,readonly=on,file=" + OVMF_CODE,
-            "-drive", "if=pflash,format=raw,file=" + vars_rt,
+            *pflash_vars,
             # snapshot=on: guest writes (leanfs formats the disk on its
             # first boot, so this can't be a read-only device) land in a
             # throwaway overlay and the real image is opened read-only.
@@ -233,10 +437,7 @@ class Machine:
             # tools/run-qemu.sh for why, and LEANOS_QEMU_DISK=ide for the
             # ATA path. snapshot=on still means guest writes land in a
             # throwaway overlay.
-            *(["-drive", "format=raw,snapshot=on,file=" + IMAGE]
-              if os.environ.get("LEANOS_QEMU_DISK") == "ide" else
-              ["-drive", "if=none,id=disk0,format=raw,snapshot=on,file=" + IMAGE,
-               "-device", "virtio-blk-pci,drive=disk0"]),
+            *disk_args,
             "-display", "none",
             # M90: the guest's memory size, stated rather than defaulted -
             # see tools/run-qemu.sh for why 4 GiB specifically. Overridable
@@ -257,7 +458,8 @@ class Machine:
             "-audiodev", "none,id=snd0", "-device", "AC97,audiodev=snd0",
             "-serial", "file:" + self.log_path,
             "-monitor", "unix:" + self._mon_path + ",server,nowait",
-        ] + list(extra_args), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ] + restore_args + list(extra_args),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         self._sock = None
         deadline = time.time() + 15
@@ -307,6 +509,50 @@ class Machine:
         if settle:
             time.sleep(settle)
 
+    def savevm(self, tag, timeout=180):
+        """Q19: freeze this guest into its qcow2, and WAIT for it.
+
+        A fixed sleep would be a guess about how long writing fifty
+        megabytes of guest state takes on a machine that is also running
+        the tests. The monitor prints its `(qemu)` prompt when the
+        command is done, so that is what this waits for - and the
+        artifact is checked afterwards by build_snapshot, because a
+        prompt means "finished", not "succeeded"."""
+        # Drained FIRST, and that is the bug this line exists for: the
+        # monitor echoes every keystroke of every previous command and
+        # prints its prompt after each, so a read that starts on a dirty
+        # buffer finds a `(qemu)` belonging to the last screendump and
+        # concludes savevm is finished before it has begun.
+        self._drain()
+        self._sock.sendall(("savevm %s\n" % tag).encode())
+        deadline = time.time() + timeout
+        seen = ""
+        self._sock.settimeout(0.5)
+        try:
+            while time.time() < deadline:
+                try:
+                    chunk = self._sock.recv(65536)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                seen += chunk.decode(errors="replace")
+                # The command is echoed back first, so the prompt that
+                # ends it is the one AFTER the echoed newline.
+                # The echoed command ends with a newline; the prompt that
+                # follows the OUTPUT is the one that means "done". Both
+                # arrive, so wait for the prompt that comes after the
+                # echoed tag rather than for the first one seen.
+                tail = seen.split(tag, 1)[-1]
+                if "(qemu)" in tail:
+                    return seen
+        finally:
+            self._sock.settimeout(None)
+        raise RuntimeError("savevm did not finish within %ds; monitor said %r"
+                           % (timeout, seen[-400:]))
+
     # ---- boot / logs -------------------------------------------------
 
     def read_log(self):
@@ -330,6 +576,12 @@ class Machine:
         first frame. `settle` is a real budget measured against the
         boot this project actually does, not a magic number - every
         pixel assertion downstream depends on the first frame being up."""
+        if self.restored:
+            # Q19: this guest is already there. The marker it would wait
+            # for was printed before the snapshot was taken and will
+            # never appear in this guest's log, so waiting for it is a
+            # guaranteed timeout rather than a check.
+            return
         if not self.wait_for_marker(timeout=timeout):
             raise RuntimeError("guest never reached %r - see %s"
                                % (BOOT_MARKER, self.save_log("boot-timeout")))
