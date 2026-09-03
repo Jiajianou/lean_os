@@ -10,7 +10,10 @@
  * because those are the ones whose spelling actually differs between
  * platforms and therefore the ones a program cannot hardcode. A program
  * asking for PRId8 gets a compile error rather than a wrong format, which
- * is the right failure.
+ * is the right failure - *until a real program asks*, which is the
+ * amendment M98 makes below: readelf prints ELF half-words with PRId16,
+ * so the 8- and 16-bit rows exist now, spelled with the h modifiers both
+ * of this libc's format engines already parse.
  *
  * M98: and the SCN* family, which was **entirely absent** - this header
  * had the print half of a header whose name is about both. binutils'
@@ -40,6 +43,24 @@ extern "C" {
  * a pointer is 64-bit. So the 64-bit and pointer-sized macros are "l" and
  * the 32-bit ones are "". Stated here rather than derived, because there
  * is exactly one target. */
+/* M98: the 8- and 16-bit rows, added the day readelf asked. For printf
+ * the h/hh is near-decorative (default promotions have already widened
+ * the argument), but it is what C99 says these expand to, and scanf's
+ * table below shares the spelling where it is anything but decorative. */
+#define PRId8  "hhd"
+#define PRIi8  "hhi"
+#define PRIu8  "hhu"
+#define PRIx8  "hhx"
+#define PRIX8  "hhX"
+#define PRIo8  "hho"
+
+#define PRId16 "hd"
+#define PRIi16 "hi"
+#define PRIu16 "hu"
+#define PRIx16 "hx"
+#define PRIX16 "hX"
+#define PRIo16 "ho"
+
 #define PRId32 "d"
 #define PRIi32 "i"
 #define PRIu32 "u"
@@ -73,6 +94,18 @@ extern "C" {
  * comment above says why there is exactly one target - so they are
  * written out separately anyway, because the day there are two the
  * coincidence is where the bug goes. */
+#define SCNd8  "hhd"
+#define SCNi8  "hhi"
+#define SCNu8  "hhu"
+#define SCNx8  "hhx"
+#define SCNo8  "hho"
+
+#define SCNd16 "hd"
+#define SCNi16 "hi"
+#define SCNu16 "hu"
+#define SCNx16 "hx"
+#define SCNo16 "ho"
+
 #define SCNd32 "d"
 #define SCNi32 "i"
 #define SCNu32 "u"

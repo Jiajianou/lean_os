@@ -96,8 +96,10 @@ int open(const char *path, int flags, ...);
  *              spawn is a fork and an exec in one call. This paragraph
  *              said the opposite for seven milestones and the note above
  *              said the header exists to avoid exactly that.
- *   F_GETFL -> 0. O_NONBLOCK is 0 here - see the flags above - so no
- *              status flag is set either.
+ *   F_GETFL -> the descriptor's real access mode, from the kernel, as
+ *              of M98 - because in this encoding 0 is NOT O_RDONLY the
+ *              way it is on Linux, it is "no access", and BFD aborts on
+ *              it. O_NONBLOCK is still never set, which is still true.
  *   F_SETFL -> 0 if the caller is setting nothing, -1 otherwise.
  *              Accepting a flag that will not be honoured is the failure
  *              mode this whole file is written to avoid, and O_NONBLOCK

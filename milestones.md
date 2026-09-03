@@ -175,7 +175,7 @@ Every milestone, in order, with its status. `[ ]` not started ·
 - `[x]` [M95 — Code that is loaded, not linked](#m95--code-that-is-loaded-not-linked-x)
 - `[x]` [M96 — A thread with its own variables, and a wait that costs nothing](#m96--a-thread-with-its-own-variables-and-a-wait-that-costs-nothing-x)
 - `[x]` [M97 — C++](#m97--c-x)
-- `[ ]` [M98 — A compiler that runs here](#m98--a-compiler-that-runs-here--)
+- `[~]` [M98 — A compiler that runs here](#m98--a-compiler-that-runs-here--)
 - `[ ]` [M99 — Python, built here](#m99--python-built-here--)
 - `[ ]` [M100 — What a browser actually needs, measured rather than argued](#m100--what-a-browser-actually-needs-measured-rather-than-argued--)
 
@@ -10601,10 +10601,10 @@ cost of this milestone. Every one of them was a configuration answer this
 target did not have, and every one of them is now written down in
 `apply.py` next to what goes wrong without it.
 
-### M98 — A compiler that runs here [ ]
+### M98 — A compiler that runs here [~]
 
-- [ ] binutils built *for* lean_os and running *on* it: `as`, `ld`, `ar`,
-      `nm`, `objdump`, `strip`
+- [x] binutils built *for* lean_os and running *on* it: `as`, `ld`, `ar`,
+      `nm`, `objdump`, `strip` — see the second-increment notes below
 - [ ] GCC built for and running on lean_os — `cc1`, `cc1plus`, the
       driver — plus GNU make (or toybox's, if M89 got there first)
 - [ ] Whatever the build actually asks the kernel for that is still
@@ -10671,6 +10671,135 @@ function that is subtly wrong, none of which a `hello.c` that prints
 would catch. If a full bootstrap does not fit this machine, the honest
 outcome is the *number* that says by how much, and a stage-1 compiler
 that builds a real program.
+
+#### Second increment: binutils built, and the first box's "running on it" half
+
+*The probe's front held: everything between it and eight working
+binaries was this libc, and none of it was a syscall.* binutils 2.43
+now builds to completion for `--host=x86_64-lean_os` —
+`tools/build-native-toolchain.sh` is the recipe,
+`tools/install-native-toolchain.sh` puts the eight tools in `/bin`
+(11 MB stripped), and a new required boot marker `[m98] binutils runs
+here:` grades the sentence that matters: **on the machine, `as`
+assembles the fixture, `nm` reads what as wrote, `ar` archives and
+lists it, `ld` links it with no flags and no script, `strip` strips
+it, `objdump` disassembles it, and the result runs.** What it cost, in
+the order the build named it:
+
+- **Two more headers and a table row**: `<sys/param.h>` (libctf named
+  it; MAXPATHLEN, MIN/MAX, the classic bit arithmetic), `<memory.h>`
+  (the pre-ANSI alias for `<string.h>`; the testsuite named it), and
+  the 8- and 16-bit `PRI*`/`SCN*` rows (readelf prints ELF half-words
+  with `PRId16`). `<inttypes.h>`'s own doctrine — "PRId8 gets a compile
+  error, which is the right failure" — held exactly until a real
+  program asked, which is what the doctrine said should settle it.
+- **GCC had been shadowing this libc's `<limits.h>` since M94.** GCC
+  ships its own limits.h and decides *at its own build time* whether to
+  chain to the system's, by testing for `$SYSROOT/usr/include/limits.h`
+  — and this sysroot keeps libc headers in `usr/local/include`, so the
+  installed header never chained and **no program this toolchain ever
+  compiled saw PATH_MAX**. Nothing noticed for four milestones because
+  nothing nobody-here-wrote had asked; libiberty's `getpwd.c` asked.
+  Fixed at the cause (`LIMITS_H_TEST=true` on gcc's make line, in
+  `build-toolchain.sh`, with the comment naming this milestone) and in
+  the installed tree by regenerating the header the way that flag would
+  have.
+- **Two configure refusals, recorded as decisions rather than
+  worked around silently**: `--disable-plugins` (bfd's LTO-plugin
+  loader wants `dlopen`, which lives in libc.so and not in the static
+  libc the specs link — and no LTO plugin exists for this machine to
+  load; linking the loader in to load nothing would be capability
+  theater) and `--disable-libctf` (CTF has zero producers and zero
+  consumers here, and wants dlopen too). The day something ships an
+  LTO plugin for this target, the dynamic-linking deferral has already
+  scheduled the argument.
+- **Bare `ld` linked at Linux's address, and the fix is a new ninth
+  edit in the port.** The M94 port put the load address in the gcc
+  driver's LINK_SPEC (`-T lean_os.ld`), so `ld hello.o` with no flags —
+  which is what the [m98] fixture does, on M94's own no-flags doctrine —
+  produced a 0x400000 binary the loader truthfully refused. Caught
+  host-side before the machine ever saw it, by linking the fixture with
+  the cross ld. The port now writes `ld/emulparams/elf_x86_64_lean_os.sh`
+  (TEXT_START_ADDR at 512 GiB, 4 KiB page constants) and gives
+  `x86_64-*-lean_os*` its own configure.tgt case — for bare ld, the
+  target description IS the emulation. `apply.py` grew `write_file` for
+  the one file upstream doesn't have.
+- **printf was wrong five ways, and the fourth differential test now
+  exists because of it.** Adding `PRId16` forced the question of what
+  `%hx` of a negative short prints: this printf consumed the `h` and
+  printed all eight promoted bytes. `tools/printf-test.sh` is
+  scanf-test's argument applied to the format engine's other half — 90
+  fixtures, the host's snprintf as the only oracle — and its first run
+  found: `%h`/`%hh` ignored; `%05d` of -42 as `00-42` (zeros before the
+  sign); `%.0d` of 0 printing `0` (C99: no characters); `%.0f` of 2.5
+  as `3` (the hardware rounds half to even, so every other printf on
+  x86 says 2); and `%g` not being `%g` at all — its own comment had
+  admitted the trailing-zero trim was "the half that changes what a
+  number *is*", and the significant-digits rule was missing too. All
+  five fixed; `format_frac` now reports its carry instead of the caller
+  re-deriving it, which was a sixth latent bug found by reading. *And
+  the half-even fix was itself wrong once, which the M63 boot fixture
+  caught*: `%.4f` of -0.00005 must print `-0.0001`, because that
+  value's double sits just ABOVE the tie — information the digit
+  loop's accumulated roundings had destroyed, so "round the tie to
+  even" rounded a non-tie. The scaling multiply is done once now, with
+  its exact error recovered by Veltkamp splitting, so the comparison
+  against one half decides the way the true value does. The M63
+  fixture's other two expectations were the OLD engine's answers
+  written down as law (`%.0f` of 2.5 as `3`; `F_GETFL` as 0), and both
+  moved to what the host oracle and the kernel's truth respectively
+  say — a fixture asserting what the implementation happens to do is
+  exactly what the differential tests exist to outrank.
+- **The machine's own `as` could not assemble a comment, and the cost
+  of finding that on the machine is why `tools/stdio-test.sh` exists.**
+  gas's first act on every input file is `getc, getc, ungetc('#')` — it
+  pushes back a character it did not just read, which C99 guarantees
+  (one character, any character). This libc's `ungetc` was
+  `lseek(pos-1)`: it handed back whatever byte was on disk. The `'#'`
+  became the space behind it, line one of the fixture became code, and
+  the boot test failed with gas complaining about an operand mismatch
+  for `test` — the word it found mid-comment. The FILE now carries a
+  real one-slot pushback honoured by every reader (`fgetc`, `fread`,
+  `fgets`, `getdelim`) and accounted for by `ftell`/`fseek`. The five-
+  minute graded boot that found it is now a five-millisecond host test
+  that replays gas's exact sequence.
+
+*And three more, found only by the [m98] boot marker — each one a bug
+the host tier could not reach, which is the four-instruments argument
+making itself again:*
+
+- **`ungetc` could not push back a character that was not already
+  there.** Described above with the stdio-test entry; the boot found
+  it (gas parsing the fixture's comment as code, erroring on the word
+  `test` it found mid-sentence), the host test now holds it.
+- **`F_GETFL` returning 0 was an invalid access mode, and BFD aborts
+  on those.** libc answered 0 for honesty about O_NONBLOCK — but 0
+  spells O_RDONLY on Linux and "no access at all" in this ABI, where
+  OPEN_READ is 1. `strip` hit BFD's `default: abort()` on it.
+  F_GETFL now reaches the kernel (F_GETFL_CMD), because only the fd
+  table knows a descriptor's access; O_NONBLOCK stays truthfully
+  unset.
+- **`ar` could not create an archive because stat() carried no
+  errno — so SYS_stat is the first syscall in this ABI with a real
+  error code.** ar's create path is literally "stat the output;
+  proceed only if errno == ENOENT", and this libc's errno doctrine
+  (set it only when the reason is genuinely known) had nothing to set
+  it from. The doctrine's own closing line — "when a syscall here
+  grows a real error code, this is where it surfaces" — came due:
+  leanfs_stat has exactly one failure mode (resolve() found nothing;
+  the inode table is resident, so there is no I/O to fail), so
+  -OS_ERR_NOENT is a fact, not a guess. Bisected on the machine with
+  a step-by-step libbfd reproducer after two wrong theories about the
+  archive writer, both disproved by evidence rather than argued away:
+  the write path was never broken at all.
+
+**What this leaves of the first box**: nothing — the `[m98]` marker is
+in the required list and green: as, nm, ar, ld (no flags, no script),
+strip, objdump, and the program they made, all on the machine. The
+remaining three boxes (GCC itself plus GMP/MPFR/MPC and make; the
+kernel gaps the build names; the measurements) are untouched, and GCC
+is the bulk of the milestone.
+
 ### M99 — Python, built here [ ]
 
 - [ ] `./configure && make` for CPython **on the machine**, with the

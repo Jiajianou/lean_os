@@ -31,6 +31,20 @@ class MissingAnchor(Exception):
     pass
 
 
+def write_file(path, content, why):
+    """Creates a file the upstream tree does not have. Idempotent the
+    same way edit() is: content already in place means already applied,
+    different content in place is replaced (the port owns this file -
+    nothing upstream will ever write it)."""
+    if os.path.exists(path):
+        with open(path) as f:
+            if f.read() == content:
+                return "already applied"
+    with open(path, "w") as f:
+        f.write(content)
+    return "applied"
+
+
 def edit(path, anchor, replacement, why, count=1):
     """Replaces the first `count` occurrences of `anchor` (all of them when
     count is 0). Fails loudly.
@@ -89,11 +103,44 @@ def port_binutils(root):
         "  x86_64-*-lean_os* | x86_64-*-elf* | x86_64-*-rtems* | x86_64-*-fuchsia | x86_64-*-genode*)",
         "the BFD target vector for x86-64 ELF")))
 
+    # The linker emulation - lean_os's OWN, not a name added to the
+    # generic -elf case. M94 shared elf_x86_64 and that held until M98
+    # ran `ld hello.o` with no flags ON the machine: the generic
+    # emulation's TEXT_START_ADDR is Linux's 0x400000, which is outside
+    # the window kernel/proc/elf.c will load, so a bare ld produced
+    # programs the kernel truthfully refused. The driver's -T lean_os.ld
+    # never sees this default; a person or a build system invoking ld
+    # directly gets it. M94's rule decides where the fix goes: the load
+    # address comes from the target description, and for bare ld the
+    # target description IS the emulation.
+    out.append(("ld/emulparams", write_file(
+        os.path.join(root, "ld/emulparams/elf_x86_64_lean_os.sh"),
+        "source_sh ${srcdir}/emulparams/elf_x86_64.sh\n"
+        "# Where a lean_os process image lives: PML4[1], 512 GiB - the\n"
+        "# same address user_space/lib/user.ld sets, kept in step by\n"
+        "# M98's boot self-test linking with no script at all.\n"
+        "TEXT_START_ADDR=0x8000000000\n"
+        "# This machine has 4 KiB pages and no transparent huge ones, so\n"
+        "# aligning segments to the generic 2 MiB would buy nothing and\n"
+        "# cost address-space sprawl in every bare-ld binary.\n"
+        "MAXPAGESIZE=0x1000\n"
+        "COMMONPAGESIZE=0x1000\n",
+        "the lean_os linker emulation")))
     out.append(("ld/configure.tgt", edit(
         os.path.join(root, "ld/configure.tgt"),
         "x86_64-*-elf* | x86_64-*-rtems* | x86_64-*-fuchsia* | x86_64-*-genode*)",
-        "x86_64-*-lean_os* | x86_64-*-elf* | x86_64-*-rtems* | x86_64-*-fuchsia* | x86_64-*-genode*)",
+        "x86_64-*-lean_os*)\ttarg_emul=elf_x86_64_lean_os\n"
+        "\t\t\t;;\n"
+        "x86_64-*-elf* | x86_64-*-rtems* | x86_64-*-fuchsia* | x86_64-*-genode*)",
         "the linker emulation for x86-64 ELF")))
+    # The generated-emulation lists, so make knows eelf_x86_64_lean_os.c
+    # exists to be generated - the e%.c pattern rule does the rest.
+    for mf in ("ld/Makefile.am", "ld/Makefile.in"):
+        out.append((mf, edit(
+            os.path.join(root, mf),
+            "\teelf_x86_64_haiku.c \\\n",
+            "\teelf_x86_64_haiku.c \\\n\teelf_x86_64_lean_os.c \\\n",
+            "the 64-bit emulation source list")))
 
     out.append(("gas/configure.tgt", edit(
         os.path.join(root, "gas/configure.tgt"),

@@ -1929,11 +1929,11 @@ static long sys_lstat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3,
     char path[LEANFS_MAX_PATH];
     if (copy_path_from_user(path, path_ptr) != 0 ||
         !user_range_ok(out_ptr, sizeof(os_stat_t), 1)) {
-        return -1;
+        return -OS_ERR_FAULT;
     }
     leanfs_stat_t st;
     if (vfs_lstat(path, &st) != 0) {
-        return -1;
+        return -OS_ERR_NOENT; /* M98: same fact as SYS_stat's - see there */
     }
     /* Converted field by field rather than copied whole, exactly as
      * SYS_stat does it. leanfs_stat_t is a filesystem's internal record
@@ -3140,11 +3140,14 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
     (void)a6;
     char path[LEANFS_MAX_PATH];
     if (copy_path_from_user(path, path_ptr) != 0) {
-        return -1;
+        return -OS_ERR_FAULT;
     }
     leanfs_stat_t st;
+    /* M98: -OS_ERR_NOENT rather than -1, and it is a fact rather than a
+     * guess - see the constant's note in system_api/include/syscall.h
+     * for why a failed stat here means exactly "no such path". */
     if (vfs_stat(path, &st) != 0) {
-        return -1;
+        return -OS_ERR_NOENT;
     }
     os_stat_t out;
     out.size = st.size;
@@ -4664,6 +4667,24 @@ static long sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     case F_SETFD_CMD:
         self->fds[fd].cloexec = (arg & FD_CLOEXEC_BIT) ? 1 : 0;
         return 0;
+    /* M98: the access mode, which only this table knows. See the note
+     * at F_GETFL_CMD in system_api/include/syscall.h for who asked. A
+     * disk file is always readable here - openfile_t records `writable`
+     * and nothing else because SYS_read has never refused one - so the
+     * answer for FD_FILE says so rather than inventing a distinction
+     * the kernel does not enforce. */
+    case F_GETFL_CMD:
+        switch (self->fds[fd].type) {
+        case FD_STDIN:      return OPEN_READ;
+        case FD_STDOUT:     return OPEN_WRITE;
+        case FD_PIPE_READ:  return OPEN_READ;
+        case FD_PIPE_WRITE: return OPEN_WRITE;
+        case FD_FILE:
+            return OPEN_READ |
+                   (self->fds[fd].file->writable ? OPEN_WRITE : 0);
+        case FD_SOCKET:     return OPEN_READ | OPEN_WRITE;
+        default:            return -1;
+        }
     default:
         return -1;
     }

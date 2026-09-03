@@ -156,8 +156,15 @@ int main(void) {
     same("bases", buf, "ff FF 10 4000000000");
     snprintf(buf, sizeof(buf), "%s|%8s|%-8s|%.3s", "ab", "ab", "ab", "abcdef");
     same("string widths", buf, "ab|      ab|ab      |abc");
+    /* M98: "3 " became "2 ", and the host's own printf is the authority:
+     * 2.5 is exactly representable, ties round to even, and every printf
+     * on x86 says 2. The -0.0001 is the other side of the same coin -
+     * -0.00005's double sits just ABOVE the tie, which is exactly the
+     * distinction tools/printf-test.sh now grades. This line asserted
+     * what the old engine happened to do; the differential test is what
+     * says what it should do. */
     snprintf(buf, sizeof(buf), "%.2f %.0f %.4f", 3.14159, 2.5, -0.00005);
-    same("fixed point", buf, "3.14 3 -0.0001");
+    same("fixed point", buf, "3.14 2 -0.0001");
     snprintf(buf, sizeof(buf), "%e %.2e %12.4e", 1234.5, 0.000271828, 1234.5);
     same("scientific", buf, "1.234500e+03 2.72e-04   1.2345e+03");
     snprintf(buf, sizeof(buf), "%ld %c %%", 1234567890L, 'z');
@@ -632,8 +639,20 @@ int main(void) {
             if (write(fd, "ok", 2) != 2) {
                 fail("write to an fd from open()");
             }
-            if (fcntl(fd, F_GETFD) != 0 || fcntl(fd, F_GETFL) != 0) {
+            if (fcntl(fd, F_GETFD) != 0) {
                 fail("fcntl: a flag that is not set should read as 0");
+            }
+            /* M98: F_GETFL carries the ACCESS MODE now (the kernel's
+             * answer, and the reason is in <fcntl.h>: 0 is not a valid
+             * access mode in this encoding, and BFD aborts on it). This
+             * fd was opened O_WRONLY, and on this kernel a disk file is
+             * always readable too - openfile_t records only `writable`
+             * - so the honest expectation is O_RDWR, exactly. Not
+             * "& O_ACCMODE": O_NONBLOCK is 0 in this encoding, so any
+             * stray bit in the answer would be a bit that means
+             * nothing, and equality is what catches one. */
+            if (fcntl(fd, F_GETFL) != O_RDWR) {
+                fail("fcntl: F_GETFL should report the access mode (M98)");
             }
             if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 ||
                 fcntl(fd, F_GETFD) != FD_CLOEXEC) {

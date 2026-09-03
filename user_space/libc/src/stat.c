@@ -36,9 +36,28 @@ static void fill(struct stat *out, const os_stat_t *st) {
     out->st_blocks = (blkcnt_t)((st->size + 511u) / 512u);
 }
 
+/* M98: SYS_stat is the first syscall in this ABI to carry a reason out
+ * (negated, Linux-style - see OS_ERR_NOENT in system_api's syscall.h),
+ * and this is where it becomes errno. Set only from what the kernel
+ * actually said, which is <errno.h>'s standing rule; the program that
+ * forced the question was `ar`, whose "create the archive" path begins
+ * with a stat that must fail with ENOENT specifically. */
+static long stat_errno(long r) {
+    if (r == -OS_ERR_NOENT) {
+        errno = ENOENT;
+    } else if (r == -OS_ERR_FAULT) {
+        errno = EFAULT;
+    }
+    return r;
+}
+
 int stat(const char *path, struct stat *out) {
     os_stat_t st;
-    if (!out || sys_stat(path, &st) != 0) {
+    if (!out) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (stat_errno(sys_stat(path, &st)) != 0) {
         return -1;
     }
     fill(out, &st);
@@ -57,7 +76,11 @@ int stat(const char *path, struct stat *out) {
  * whatever a link pointed at, including a directory above itself. */
 int lstat(const char *path, struct stat *out) {
     os_stat_t st;
-    if (!out || sys_lstat(path, &st) != 0) {
+    if (!out) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (stat_errno(sys_lstat(path, &st)) != 0) {
         return -1;
     }
     fill(out, &st);

@@ -25,6 +25,12 @@
  * exactly the kind of plausible fiction this project declined to write
  * for uids (M65) and for st_mode (M77). When a syscall here grows a real
  * error code, this is where it surfaces.
+ *
+ * M98: the first one grew. SYS_stat/SYS_lstat return -OS_ERR_NOENT for
+ * a path that does not resolve - a fact, not a guess, because that is
+ * the only way leanfs_stat can fail - and stat()/lstat() turn it into
+ * ENOENT. The program that forced it was `ar`, whose create-an-archive
+ * path is written as "stat, and proceed only if errno == ENOENT".
  */
 #pragma once
 

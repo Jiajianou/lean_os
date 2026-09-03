@@ -1,0 +1,120 @@
+# tests/printf/cases.tsv - M98
+#
+# One case per line: a format, a TAB, an argument kind, a TAB, the
+# argument. Kinds: d signed, u unsigned, f floating, s string, c one
+# character, n no argument, w "width:number" for %*d. Nothing here says
+# what the right answer is - the host's own snprintf decides, and this
+# project's has to agree with it byte for byte. See tools/printf-test.sh.
+#
+# One conversion per case, because the argument's C type comes from the
+# format and the driver types exactly one.
+#
+# ---- plain conversions ----
+%d	d	42
+%d	d	-42
+%d	d	0
+%i	d	-7
+%u	u	42
+%u	u	4294967295
+%x	u	48879
+%X	u	48879
+%o	u	511
+%s	s	hello
+%c	c	A
+%%	n
+plain text no conversion	n
+# ---- the h and hh rows, which are why this file exists (M98: %hx of a
+# ---- negative short printed the whole promotion) ----
+%hd	d	-1
+%hd	d	32767
+%hd	d	-32768
+%hu	d	-1
+%hx	d	-1
+%hx	d	-291
+%hhd	d	-1
+%hhd	d	127
+%hhu	d	-1
+%hhx	d	-1
+%hd	d	65537
+%hhd	d	257
+# ---- the l and ll and z rows ----
+%ld	d	-9223372036854775807
+%ld	d	9223372036854775807
+%lu	u	18446744073709551615
+%lx	u	18446744073709551615
+%lld	d	-42
+%llu	u	42
+%zu	u	4096
+# ---- flags ----
+%+d	d	42
+%+d	d	-42
+% d	d	42
+% d	d	-42
+%05d	d	42
+%05d	d	-42
+%-5d|	d	42
+%5d	d	42
+%5s|	s	ab
+%-5s|	s	ab
+%05x	u	255
+%08lx	u	3735928559
+%+05d	d	42
+%010.2f	f	3.14159
+%+.0d	d	0
+%.0u	u	0
+%.0x	u	0
+# ---- width from the argument list ----
+%*d|	w	6:42
+%*d|	w	-6:42
+# ---- precision ----
+%.3d	d	7
+%.3s	s	hello
+%.0d	d	0
+%8.3d	d	7
+%.5u	u	42
+# ---- floating point ----
+%f	f	0
+%f	f	1.5
+%f	f	-1.5
+%f	f	3.141592653589793
+%f	f	1000000
+%.2f	f	3.14159
+%.0f	f	2.5
+%.0f	f	3.5
+%.0f	f	0.5
+%.0f	f	1.5
+%.4f	f	-0.00005
+%.4f	f	0.00005
+%.1f	f	0.25
+%.1f	f	0.35
+%.2f	f	0.125
+%.2f	f	0.135
+%.3f	f	2.0005
+%10.2f	f	3.14159
+%-10.2f|	f	3.14159
+%e	f	12345.678
+%e	f	0.00012345
+%E	f	-12345.678
+%g	f	1.5
+%g	f	100000
+%g	f	1000000
+%g	f	0.0001
+%g	f	0.00001
+%g	f	123456789
+%g	f	0
+%g	f	-1.5
+%g	f	999999.9
+%g	f	1234.5
+%.3g	f	1234.5
+%.10g	f	1.25
+%G	f	0.0000123
+%g	f	2
+%f	f	-0
+# ---- character and string edges ----
+%c	c
+%s	s
+%10c|	c	Z
+%-3c|	c	Z
+# ---- literal text around a conversion ----
+value=%d end	d	5
+[%s]	s	mid

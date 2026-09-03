@@ -14,20 +14,29 @@ struct FILE {
      * back negative; cleared only by `clearerr`, which is what "sticky"
      * means and what a caller checking it once at the end relies on. */
     int err;
+    /* M98: the one character ungetc pushed back, or -1. It has to be a
+     * real slot rather than the lseek(-1) trick that stood here, because
+     * C lets a caller push back a character DIFFERENT from the one it
+     * read - and gas does, in its very first act on every input file:
+     * it reads '#' then ' ', pushes back '#', and the seek-based version
+     * silently handed it the space instead. The '#' vanished, line one
+     * of every assembly file became code, and the machine's own `as`
+     * could not assemble a comment. Every reader consults this first. */
+    int unget;
 };
 
 /* stdin/stdout/stderr are the three descriptors every process here starts
  * with (or, for stdin in a GUI terminal's child, does not - see
  * gui_terminal.c, which closes fd 0 deliberately). Static rather than
  * allocated so they exist before main does. */
-static FILE std_files[3] = {{0, 0, 1, 0}, {1, 0, 1, 0}, {2, 0, 1, 0}};
+static FILE std_files[3] = {{0, 0, 1, 0, -1}, {1, 0, 1, 0, -1}, {2, 0, 1, 0, -1}};
 FILE *stdin = &std_files[0];
 FILE *stdout = &std_files[1];
 /* fd 2 has never existed in this OS - a process gets stdin and stdout and
  * nothing else (sched.h's fd table). Pointing stderr at fd 1 is the
  * honest mapping: a ported program's diagnostics go where its output
  * goes, which on this desktop is the terminal window that launched it. */
-static FILE stderr_file = {1, 0, 1, 0};
+static FILE stderr_file = {1, 0, 1, 0, -1};
 FILE *stderr = &stderr_file;
 
 #define FOPEN_MAX_FILES 16
@@ -53,6 +62,7 @@ FILE *fopen(const char *path, const char *mode) {
             open_files[i].fd = (int)fd;
             open_files[i].eof = 0;
             open_files[i].err = 0;
+            open_files[i].unget = -1;
             open_files[i].used = 1;
             return &open_files[i];
         }
@@ -73,15 +83,26 @@ int fclose(FILE *f) {
 }
 
 size_t fread(void *buf, size_t size, size_t count, FILE *f) {
-    if (!f || size == 0) {
+    if (!f || size == 0 || count == 0) {
         return 0;
     }
-    long n = sys_read(f->fd, buf, size * count);
-    if (n <= 0) {
-        f->eof = 1;
-        return 0;
+    size_t want = size * count;
+    size_t got = 0;
+    if (f->unget >= 0) {
+        ((char *)buf)[0] = (char)f->unget;
+        f->unget = -1;
+        got = 1;
     }
-    return (size_t)n / size;
+    if (got < want) {
+        long n = sys_read(f->fd, (char *)buf + got, want - got);
+        if (n > 0) {
+            got += (size_t)n;
+        } else if (got == 0) {
+            f->eof = 1;
+            return 0;
+        }
+    }
+    return got / size;
 }
 
 size_t fwrite(const void *buf, size_t size, size_t count, FILE *f) {
@@ -96,11 +117,30 @@ size_t fwrite(const void *buf, size_t size, size_t count, FILE *f) {
 }
 
 int fseek(FILE *f, long offset, int whence) {
-    return f && sys_lseek(f->fd, offset, whence) >= 0 ? 0 : -1;
+    if (!f) {
+        return -1;
+    }
+    /* A pushed-back character the seek discards was still consumed from
+     * the underlying file, so a relative seek has to account for it or
+     * land one byte past where the caller's arithmetic says. */
+    if (f->unget >= 0) {
+        if (whence == SEEK_CUR) {
+            offset -= 1;
+        }
+        f->unget = -1;
+    }
+    return sys_lseek(f->fd, offset, whence) >= 0 ? 0 : -1;
 }
 
 long ftell(FILE *f) {
-    return f ? sys_lseek(f->fd, 0, SEEK_CUR) : -1;
+    if (!f) {
+        return -1;
+    }
+    long pos = sys_lseek(f->fd, 0, SEEK_CUR);
+    if (pos > 0 && f->unget >= 0) {
+        pos -= 1; /* the pushed-back character is logically unread */
+    }
+    return pos;
 }
 
 int fflush(FILE *f) {
@@ -140,6 +180,7 @@ void rewind(FILE *f) {
         sys_lseek(f->fd, 0, SEEK_SET);
         f->eof = 0;
         f->err = 0;
+        f->unget = -1;
     }
 }
 
@@ -172,15 +213,12 @@ int ungetc(int c, FILE *f) {
     if (!f || c == EOF) {
         return EOF;
     }
-    long pos = sys_lseek(f->fd, 0, SEEK_CUR);
-    if (pos <= 0) {
-        return EOF; /* not seekable, or already at the start */
+    if (f->unget >= 0) {
+        return EOF; /* the standard guarantees one character; this is it */
     }
-    if (sys_lseek(f->fd, pos - 1, SEEK_SET) < 0) {
-        return EOF;
-    }
+    f->unget = (unsigned char)c;
     f->eof = 0;
-    return c;
+    return (unsigned char)c;
 }
 
 /* Writes `s`, a colon, and this system's one honest description of what
@@ -205,11 +243,17 @@ int rename(const char *from, const char *to) {
 }
 
 int fgetc(FILE *f) {
+    if (!f) {
+        return EOF;
+    }
+    if (f->unget >= 0) {
+        int c = f->unget;
+        f->unget = -1;
+        return c;
+    }
     char c;
-    if (!f || sys_read(f->fd, &c, 1) != 1) {
-        if (f) {
-            f->eof = 1;
-        }
+    if (sys_read(f->fd, &c, 1) != 1) {
+        f->eof = 1;
         return EOF;
     }
     return (unsigned char)c;
@@ -314,8 +358,78 @@ static int format_uint(unsigned long long v, int base, int upper, char *out) {
 }
 
 /* Rounded decimal digits of |v| < 1, `prec` of them, into `out`. Used by
- * both %f and %e, which is what keeps their rounding identical. */
-static void format_frac(double v, int prec, char *out) {
+ * both %f and %e, which is what keeps their rounding identical. Returns
+ * 1 when the rounding carried out of the top digit, so the caller
+ * increments the integer part instead of re-deriving the carry from the
+ * fraction - the re-derivation is the bug M98's printf test found.
+ *
+ * A leftover of exactly one half rounds to even (the last digit's
+ * parity, or the integer part's when there are no digits), because that
+ * is what the hardware's default rounding does and therefore what every
+ * other printf on x86 prints: %.0f of 2.5 is 2 everywhere else, and a
+ * formatter that says 3 disagrees with the machine it runs on. Exact
+ * halves are the only case this distinguishes - a value that is merely
+ * near a half has already made its choice in binary. */
+/* The exact error of the product p = a*b, by Veltkamp splitting - ten
+ * lines of pure double arithmetic that recover what the one rounding in
+ * `a*b` threw away. Needed because "is this a tie" cannot be answered
+ * from the rounded product alone: -0.00005 scaled by 10^4 lands within
+ * half an ulp of 0.5 and rounds TO it, but its true value is above it,
+ * so the host prints -0.0001 where a naive comparison says tie-to-even
+ * and prints -0.0000. The error term keeps the side. (fma() would be
+ * one line, but the target compiler lowers __builtin_fma to a libm call
+ * this libc would then have to be, correctly, which is a bigger ask.) */
+static double two_prod_err(double a, double b, double p) {
+    const double split = 134217729.0; /* 2^27 + 1 */
+    double ca = split * a;
+    double ah = ca - (ca - a);
+    double al = a - ah;
+    double cb = split * b;
+    double bh = cb - (cb - b);
+    double bl = b - bh;
+    return ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+}
+
+static int format_frac(double v, int prec, char *out, int ipart_odd) {
+    if (prec <= 15) {
+        /* One scaling multiply instead of `prec` of them: 10^prec is
+         * exact and v*pow10 rounds ONCE, so the comparison against the
+         * halfway point - with the multiply's own error recovered
+         * above - decides the way the true value does. The iterative
+         * version accumulated one rounding per digit, and by the last
+         * digit the leftover no longer knew which side of a half it
+         * was on. 15 is where 10^prec stops fitting the 53-bit integer
+         * range this depends on. */
+        double pow10 = 1.0;
+        for (int i = 0; i < prec; i++) {
+            pow10 *= 10.0;
+        }
+        double scaled = v * pow10;
+        double err = two_prod_err(v, pow10, scaled);
+        unsigned long long d = (unsigned long long)scaled;
+        double r = scaled - (double)d;
+        int odd = prec ? (int)(d & 1) : ipart_odd;
+        int up;
+        if (r > 0.5) {
+            up = 1;
+        } else if (r < 0.5) {
+            up = 0;
+        } else {
+            up = err > 0.0 || (err == 0.0 && odd);
+        }
+        if (up) {
+            d++;
+        }
+        for (int i = prec - 1; i >= 0; i--) {
+            out[i] = (char)('0' + (int)(d % 10));
+            d /= 10;
+        }
+        return d != 0; /* what is left after prec digits is the carry out */
+    }
+
+    /* Past 15 digits a double's own fraction is exhausted anyway; the
+     * digit-at-a-time walk with a plain half-up finish is as honest as
+     * the input. */
     for (int i = 0; i < prec; i++) {
         v *= 10.0;
         int d = (int)v;
@@ -324,18 +438,17 @@ static void format_frac(double v, int prec, char *out) {
         out[i] = (char)('0' + d);
         v -= (double)d;
     }
-    /* Round the last digit from what is left over, carrying upward
-     * through the string. A carry out of the top is the caller's
-     * problem - both callers below normalise before calling. */
     if (v >= 0.5) {
         for (int i = prec - 1; i >= 0; i--) {
             if (out[i] != '9') {
                 out[i]++;
-                return;
+                return 0;
             }
             out[i] = '0';
         }
+        return 1;
     }
+    return 0;
 }
 
 static int is_nan(double v) { return v != v; }
@@ -376,26 +489,8 @@ static void emit_double(sink_t *s, double v, int prec, int sci, int upper) {
     char frac[20];
     double ipart_d = (double)(unsigned long long)v;
     double fpart = v - ipart_d;
-    format_frac(fpart, prec, frac);
     unsigned long long ipart = (unsigned long long)v;
-    /* format_frac may have carried out of its top digit, which shows up
-     * as every digit being '0' when the leftover was >= 0.5. */
-    if (prec > 0 && fpart >= 0.5) {
-        int all_zero = 1;
-        for (int i = 0; i < prec; i++) {
-            if (frac[i] != '0') {
-                all_zero = 0;
-                break;
-            }
-        }
-        if (all_zero) {
-            ipart++;
-            if (sci && ipart >= 10) {
-                ipart = 1;
-                exp10++;
-            }
-        }
-    } else if (prec == 0 && fpart >= 0.5) {
+    if (format_frac(fpart, prec, frac, (int)(ipart & 1))) {
         ipart++;
         if (sci && ipart >= 10) {
             ipart = 1;
@@ -421,6 +516,46 @@ static void emit_double(sink_t *s, double v, int prec, int sci, int upper) {
         }
         emit_str(s, ebuf, elen);
     }
+}
+
+/* %g's trailing-zero trim, applied to what emit_double just wrote from
+ * `start` onward: zeros after the decimal point go, then a bare point
+ * goes, and a mantissa's exponent suffix survives in place. Operates on
+ * the sink's buffer directly, which is safe for exactly one caller -
+ * the %g branch formats into `body`, whose cap no single %g can reach. */
+static void trim_g_zeros(sink_t *b, size_t start) {
+    size_t stored = b->len < b->cap ? b->len : b->cap;
+    size_t mant = stored;
+    for (size_t i = start; i < stored; i++) {
+        if (b->buf[i] == 'e' || b->buf[i] == 'E') {
+            mant = i;
+            break;
+        }
+    }
+    int has_dot = 0;
+    for (size_t i = start; i < mant; i++) {
+        if (b->buf[i] == '.') {
+            has_dot = 1;
+            break;
+        }
+    }
+    if (!has_dot) {
+        return;
+    }
+    size_t last = mant;
+    while (last > start && b->buf[last - 1] == '0') {
+        last--;
+    }
+    if (last > start && b->buf[last - 1] == '.') {
+        last--;
+    }
+    if (last == mant) {
+        return;
+    }
+    for (size_t i = mant; i < stored; i++) {
+        b->buf[last + (i - mant)] = b->buf[i];
+    }
+    b->len = stored - (mant - last);
 }
 
 int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
@@ -471,10 +606,17 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
                 }
             }
         }
-        int lng = 0;
+        /* M98: `h` counted rather than skipped. Skipping was almost
+         * right - promotion has already widened the argument - but %hx
+         * of a negative short printed all eight bytes of the promotion
+         * instead of the two the caller asked about. readelf prints ELF
+         * half-words with PRIx16, which is how "almost" got caught. */
+        int lng = 0, sht = 0;
         while (*p == 'l' || *p == 'h' || *p == 'z') {
             if (*p == 'l' || *p == 'z') {
                 lng++;
+            } else {
+                sht++;
             }
             p++;
         }
@@ -488,9 +630,13 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
 
         if (conv == 'd' || conv == 'i') {
             long long v = lng ? va_arg(ap, long) : va_arg(ap, int);
+            if (sht == 1)      v = (short)v;
+            else if (sht >= 2) v = (signed char)v;
             unsigned long long mag = (unsigned long long)(v < 0 ? -v : v);
             char nbuf[24];
-            int nlen = format_uint(mag, 10, 0, nbuf);
+            /* Zero with an explicit zero precision converts to no
+             * characters at all (C99) - the sign, if asked for, stays. */
+            int nlen = (prec == 0 && v == 0) ? 0 : format_uint(mag, 10, 0, nbuf);
             if (v < 0) emit(&b, '-');
             else if (plus) emit(&b, '+');
             else if (space) emit(&b, ' ');
@@ -500,9 +646,11 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
             emit_str(&b, nbuf, nlen);
         } else if (conv == 'u' || conv == 'x' || conv == 'X' || conv == 'o') {
             unsigned long long v = lng ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int);
+            if (sht == 1)      v = (unsigned short)v;
+            else if (sht >= 2) v = (unsigned char)v;
             int base = conv == 'u' ? 10 : (conv == 'o' ? 8 : 16);
             char nbuf[24];
-            int nlen = format_uint(v, base, conv == 'X', nbuf);
+            int nlen = (prec == 0 && v == 0) ? 0 : format_uint(v, base, conv == 'X', nbuf);
             if (prec > nlen) {
                 emit_pad(&b, '0', prec - nlen);
             }
@@ -570,14 +718,42 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
         } else if (conv == 'e' || conv == 'E') {
             emit_double(&b, va_arg(ap, double), prec, 1, conv == 'E');
         } else if (conv == 'g' || conv == 'G') {
-            /* %g's real rule is "whichever of %e and %f is shorter, with
-             * trailing zeros removed". This does the exponent test and
-             * skips the trailing-zero trim, which is the half that
-             * changes what a number *is* rather than how it looks. */
+            /* %g's precision is SIGNIFICANT digits, not decimal places -
+             * the standard's rule is: with exponent X and precision P,
+             * print as %f with P-1-X decimals when -4 <= X < P, as %e
+             * with P-1 decimals otherwise, then remove trailing zeros.
+             * An earlier version did only the exponent test and its own
+             * comment admitted the trim was "the half that changes what
+             * a number *is*"; M98's printf test agreed, five times. */
             double v = va_arg(ap, double);
             double mag = v < 0 ? -v : v;
-            int sci = (mag != 0.0 && (mag < 1e-4 || mag >= 1e6));
-            emit_double(&b, v, prec < 0 ? 6 : prec, sci, conv == 'G');
+            int P = prec < 0 ? 6 : (prec == 0 ? 1 : prec);
+            if (P > 17) {
+                P = 17;
+            }
+            int X = 0;
+            if (mag != 0.0 && !is_nan(mag) && !is_inf(mag)) {
+                double m = mag;
+                while (m >= 10.0) { m /= 10.0; X++; }
+                while (m < 1.0)  { m *= 10.0; X--; }
+                /* Rounding to P digits can carry into the next decade -
+                 * 999999.9 at six digits is 1e+06, not a seven-digit %f.
+                 * Decide the branch from the value rounding will print. */
+                double half = 0.5;
+                for (int hd = 1; hd < P; hd++) {
+                    half /= 10.0;
+                }
+                if (m + half >= 10.0) {
+                    X++;
+                }
+            }
+            size_t start = b.len;
+            if (X >= -4 && X < P) {
+                emit_double(&b, v, P - 1 - X, 0, 0);
+            } else {
+                emit_double(&b, v, P - 1, 1, conv == 'G');
+            }
+            trim_g_zeros(&b, start);
         } else if (conv == '\0') {
             break;
         } else {
@@ -587,12 +763,28 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
 
         int blen = (int)(b.len < sizeof(body) ? b.len : sizeof(body) - 1);
         int pad = width - blen;
+        /* Two rules of the 0 flag, both found by M98's printf test: the
+         * zeros go AFTER the sign (%05d of -42 is -0042, not 00-42),
+         * and a precision turns the flag off for the integer
+         * conversions but never for the floating ones (C99 7.19.6.1). */
+        int isfloat = conv == 'f' || conv == 'F' || conv == 'e' ||
+                      conv == 'E' || conv == 'g' || conv == 'G';
+        int zpad = zero && !left && (prec < 0 || isfloat);
         if (pad > 0 && !left) {
-            emit_pad(&s, zero && prec < 0 ? '0' : ' ', pad);
-        }
-        emit_str(&s, body, blen);
-        if (pad > 0 && left) {
-            emit_pad(&s, ' ', pad);
+            if (zpad && blen > 0 &&
+                (body[0] == '-' || body[0] == '+' || body[0] == ' ')) {
+                emit(&s, body[0]);
+                emit_pad(&s, '0', pad);
+                emit_str(&s, body + 1, blen - 1);
+            } else {
+                emit_pad(&s, zpad ? '0' : ' ', pad);
+                emit_str(&s, body, blen);
+            }
+        } else {
+            emit_str(&s, body, blen);
+            if (pad > 0 && left) {
+                emit_pad(&s, ' ', pad);
+            }
         }
     }
 
@@ -680,6 +872,7 @@ FILE *fdopen(int fd, const char *mode) {
             open_files[i].fd = fd;
             open_files[i].eof = 0;
             open_files[i].err = 0;
+            open_files[i].unget = -1;
             open_files[i].used = 1;
             return &open_files[i];
         }
@@ -847,6 +1040,7 @@ FILE *freopen(const char *path, const char *mode, FILE *f) {
     f->fd = (int)fd;
     f->eof = 0;
     f->err = 0;
+    f->unget = -1;
     f->used = 1;
     return f;
 }

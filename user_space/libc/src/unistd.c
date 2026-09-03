@@ -244,11 +244,16 @@ int fcntl(int fd, int cmd, ...) {
         __builtin_va_end(ap);
         return (int)sys_fcntl(fd, F_SETFD_CMD, arg & FD_CLOEXEC);
     }
-    /* F_GETFL/F_SETFL are unchanged and still honest. They are about
-     * O_NONBLOCK, every descriptor here is blocking, and a silent success
-     * would be a program believing otherwise. M88 is where that changes. */
+    /* M98: F_GETFL asks the kernel, because half of its answer - the
+     * access mode - is something only the fd table knows, and because 0
+     * is not a valid access mode in this ABI's encoding (O_RDONLY is
+     * OPEN_READ, which is not 0). BFD aborts on an impossible access
+     * mode, and the machine's own `strip` proved it will. O_NONBLOCK is
+     * still never set, which is still the truth. F_SETFL is unchanged
+     * and still honest: accepting O_NONBLOCK without honouring it would
+     * be a program believing otherwise. M100 is where that changes. */
     case F_GETFL:
-        return 0;
+        return (int)sys_fcntl(fd, F_GETFL_CMD, 0);
     case F_SETFL: {
         __builtin_va_list ap;
         __builtin_va_start(ap, cmd);

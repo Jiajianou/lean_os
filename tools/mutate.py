@@ -56,6 +56,22 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # limitation and is recorded rather than hidden.
 TEST_CMD = ["make", "--no-print-directory", "test-fast", "TEST_SAN=0"]
 
+# M98: which instrument actually grades a file. `make test-fast` is the
+# host unit binary and nothing else - the differential tests are their
+# own scripts - so a mutant in a file only a differential test compiles
+# is INVISIBLE to TEST_CMD by construction. The first run against
+# stdio.c reported 40 survivors out of 40 at score 0.0%, which was this
+# harness truthfully measuring that it was pointed at the wrong
+# instrument. A file listed here runs its own graders as well; a file
+# not listed and not in the unit binary's sources will still score zero,
+# and that zero is the honest signal to extend this table.
+INSTRUMENTS = {
+    "user_space/libc/src/stdio.c": [["./tools/printf-test.sh"],
+                                    ["./tools/stdio-test.sh"]],
+    "user_space/libc/src/scanf.c": [["./tools/scanf-test.sh"]],
+    "user_space/libc/src/regex.c": [["./tools/regex-test.sh"]],
+}
+
 # A mutant can hang - an inverted loop condition is the classic case - and
 # a hang is a detected fault, not a stuck harness. Generous enough that a
 # slow machine does not manufacture kills.
@@ -282,8 +298,12 @@ def drop_test_binary():
         pass
 
 
-def run_suite():
-    """(verdict, seconds). 'killed' means the suite noticed."""
+def run_suite(extra=()):
+    """(verdict, seconds). 'killed' means the suite noticed. `extra` is
+    the mutated file's own instruments from INSTRUMENTS, run after the
+    unit binary - each one a script whose non-zero exit is a kill and
+    whose compile failure of the mutated source is a non-mutant, same
+    as the unit build's."""
     drop_test_binary()
     started = time.time()
     try:
@@ -301,7 +321,24 @@ def run_suite():
         # either way is wrong.
         if "error:" in err:
             return "build-failed", time.time() - started
-    return ("killed" if p.returncode != 0 else "survived"), time.time() - started
+    if p.returncode != 0:
+        return "killed", time.time() - started
+    for cmd in extra:
+        try:
+            q = subprocess.run(cmd, cwd=ROOT, timeout=TIMEOUT_S,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE)
+        except subprocess.TimeoutExpired:
+            return "killed-timeout", time.time() - started
+        if q.returncode != 0:
+            qerr = q.stderr.decode("utf-8", "replace")
+            # The differential scripts compile the source themselves, so
+            # a mutant the compiler rejects surfaces here rather than in
+            # the make step. Their scripts say which happened.
+            if "could not compile" in qerr:
+                return "build-failed", time.time() - started
+            return "killed", time.time() - started
+    return "survived", time.time() - started
 
 
 def main():
@@ -336,10 +373,16 @@ def main():
         return 0
 
     # A baseline run first. Mutating a tree whose tests already fail
-    # produces a page of meaningless kills.
+    # produces a page of meaningless kills. Runs every instrument the
+    # files under mutation will be graded by, for the same reason.
+    baseline_extra = []
+    for path in args.files:
+        for cmd in INSTRUMENTS.get(path, []):
+            if cmd not in baseline_extra:
+                baseline_extra.append(cmd)
     sys.stdout.write("baseline: ")
     sys.stdout.flush()
-    verdict, secs = run_suite()
+    verdict, secs = run_suite(baseline_extra)
     if verdict != "survived":
         print("the suite does not pass on the unmutated tree (%s). "
               "Fix that first - every mutant below would be reported killed "
@@ -371,7 +414,8 @@ def main():
         for i, mu in enumerate(all_mutants, 1):
             with open(mu.path, "w") as f:
                 f.write(mu.apply(originals[mu.path]))
-            verdict, secs = run_suite()
+            verdict, secs = run_suite(
+                INSTRUMENTS.get(os.path.relpath(mu.path, ROOT), []))
             mu.verdict = verdict
             results.append(mu)
             mark = {"killed": ".", "killed-timeout": "T",

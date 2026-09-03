@@ -126,6 +126,10 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
     echo "the dynamic linker or something it loads would not build" >&2
     exit 1
   fi
+  # M98: the toolchain that runs ON the machine, if it has been built.
+  # Skips with a message otherwise, same as the three stages above; the
+  # [m98] boot marker downstream is what actually grades it.
+  run_stage "the native binutils, onto the image" ./tools/install-native-toolchain.sh
 fi
 
 # ---- Stage 1: the host tier ------------------------------------------
@@ -161,6 +165,17 @@ run_stage "the regex engine, against the host's" ./tools/regex-test.sh
 # see tools/scanf-test.sh. In the fast tier, next to them, because it is
 # a second and costs nothing.
 run_stage "scanf, against the host's" ./tools/scanf-test.sh
+# M98: and the fourth, printf - added when binutils made the format
+# engine load-bearing for programs nobody here wrote, and worth having
+# for the same reason as scanf's: its first run found five bug classes,
+# from %hx printing the whole promotion to %g not being %g at all.
+run_stage "printf, against the host's" ./tools/printf-test.sh
+# M98: the FILE layer's stream machinery, against C99's own guarantees -
+# ungetc above all, because gas pushes back a character it never read
+# and the seek-based ungetc that stood here handed it the disk's byte
+# instead. That failure cost a five-minute graded boot to see; this
+# reproduces it in milliseconds. See tools/stdio-test.sh.
+run_stage "the FILE layer, off the machine" ./tools/stdio-test.sh
 
 # ---- Q11/Q12: the instruments that grade the tests themselves --------
 #

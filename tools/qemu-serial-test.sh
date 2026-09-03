@@ -393,6 +393,12 @@ REQUIRED_MARKERS=(
   "[m97] and the standard library on top of it:"
   "[m97] and across a shared object:"
   "[m97] and C++ nobody here wrote:"
+  # M98: the machine's own binutils, on their own output. Required on
+  # [m94]'s reasoning: run-tests.sh installs the native tools before
+  # this runs, so an image reaching here without /bin/as is a broken
+  # build step - unless the native toolchain was never built, which
+  # install-native-toolchain.sh says out loud.
+  "[m98] binutils runs here:"
   # M106: the cores. Required on every boot, one core or four - on one
   # it is the serial baseline the four-core number is a ratio against,
   # and it is the only place MAX_TASKS' and MAX_FDS' high-water marks are

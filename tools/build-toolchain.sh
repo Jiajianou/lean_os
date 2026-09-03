@@ -132,9 +132,19 @@ if [ ! -f Makefile ]; then
     > configure.log 2>&1 || { tail -40 configure.log >&2; exit 1; }
 fi
 echo "build-toolchain: building gcc (this is the long one)"
-make -j"$JOBS" MAKEINFO=true all-gcc > build-gcc.log 2>&1 || { tail -40 build-gcc.log >&2; exit 1; }
+# LIMITS_H_TEST=true, found by M98 two milestones after it mattered: GCC
+# ships its own <limits.h> and decides *at build time* whether it should
+# chain on to the system's, by testing for $SYSROOT/usr/include/limits.h.
+# This sysroot keeps its headers in usr/local/include, so the test said
+# no, the installed header did not chain, and every program compiled by
+# this toolchain since M94 saw GCC's limits.h and never this libc's -
+# no PATH_MAX, invisibly, until binutils' getpwd.c asked for it. Forcing
+# the test true generates the chaining header (limitx.h + glimits.h +
+# limity.h), which is what a build against a /usr/include sysroot would
+# have produced on its own.
+make -j"$JOBS" MAKEINFO=true LIMITS_H_TEST=true all-gcc > build-gcc.log 2>&1 || { tail -40 build-gcc.log >&2; exit 1; }
 make -j"$JOBS" MAKEINFO=true all-target-libgcc > build-libgcc.log 2>&1 || { tail -40 build-libgcc.log >&2; exit 1; }
-make MAKEINFO=true install-gcc > install-gcc.log 2>&1 || { tail -20 install-gcc.log >&2; exit 1; }
+make MAKEINFO=true LIMITS_H_TEST=true install-gcc > install-gcc.log 2>&1 || { tail -20 install-gcc.log >&2; exit 1; }
 make MAKEINFO=true install-target-libgcc > install-libgcc.log 2>&1 || { tail -20 install-libgcc.log >&2; exit 1; }
 
 # ---- M97: the C++ runtime -----------------------------------------------

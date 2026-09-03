@@ -148,7 +148,28 @@ extern "C" {
 
 #define SYS_open   40 /* (path, flags) -> fd, or -1. Regular files only; a directory is refused rather than opened, because there is nothing a read of one would honestly return that SYS_listdir does not already give. The offset lives in a kernel-side open-file entry shared by every fd SYS_dup2 makes from this one, so two descriptors on the same file advance one position between them. */
 #define SYS_lseek  41 /* (fd, offset, whence) -> the new absolute position, or -1. offset is signed. Seeking past the end is allowed and creates a hole on the next write, which reads back as zeros - the ordinary sparse-file behaviour, and cheaper than refusing. -1 for a pipe: a pipe has no position, and saying so beats pretending. */
-#define SYS_stat   42 /* (path, os_stat_t *out) -> 0 or -1. Size, mtime and whether it is a directory - the three things the file manager's columns are made of, and what every "how big a buffer do I need" caller in this kernel was previously answering with LEANFS_MAX_FILE_SIZE. */
+#define SYS_stat   42 /* (path, os_stat_t *out) -> 0, -OS_ERR_NOENT, or -1. Size, mtime and whether it is a directory - the three things the file manager's columns are made of, and what every "how big a buffer do I need" caller in this kernel was previously answering with LEANFS_MAX_FILE_SIZE. M98: the first syscall to carry a REASON out - see OS_ERR_NOENT below. */
+
+/* ---- M98: the first real error code this ABI has ever carried --------
+ *
+ * <errno.h>'s own doctrine: libc sets errno only where the system
+ * genuinely knows the reason, and "when a syscall here grows a real
+ * error code, this is where it surfaces". This is the first, and the
+ * program that demanded it is `ar`: creating an archive begins with
+ * stat() on the output name, and POSIX-shaped code takes errno==ENOENT
+ * as "fine, I am creating it" and ANYTHING else as fatal. A stat that
+ * says only -1 makes creating an archive impossible.
+ *
+ * It is truthful here because leanfs_stat has exactly one failure:
+ * resolve() did not find the path (kernel/fs/leanfs.c) - the inode
+ * table is resident, so there is no I/O to fail. A failed stat on this
+ * filesystem IS "no such file". OS_ERR_FAULT is the other clause: the
+ * caller's own pointer or an overlong path, which the kernel also
+ * genuinely knows. Returned NEGATED, Linux-style, so 0 stays success
+ * and every existing `!= 0` caller keeps working. The values match
+ * Linux's errno numbers because <errno.h> already made that promise. */
+#define OS_ERR_NOENT 2
+#define OS_ERR_FAULT 14
 #define SYS_rmdir  43 /* (path) -> 0 or -1. M59: the same gap SYS_unlink closed for files in M56, left open there because nothing had asked. Empty directories only - recursive delete is one keystroke away from losing everything under a path, and this OS has no trash to take it back out of. */
 #define SYS_time   44 /* (os_datetime_t *out, may be NULL) -> seconds since 1970, or 0 on a machine with no readable CMOS clock. The first thing in this project that can answer "what time is it" rather than "how long has this been switched on". */
 
@@ -386,11 +407,22 @@ extern "C" {
  * a program to expect - and it is now -1 because the flag does not
  * exist rather than because the whole call was a stub.
  *
- * F_GETFL/F_SETFL stay in libc and stay answering 0: O_NONBLOCK is the
- * flag they are about, every descriptor here is blocking, and M88 is
- * where that changes. */
+ * F_SETFL stays in libc and stays answering 0-or-refuse: O_NONBLOCK is
+ * the flag it is about, every descriptor here is blocking, and M100 is
+ * where that changes (M88 deferred it there).
+ *
+ * F_GETFL reaches the kernel as of M98, and the reason is the half of
+ * its return value that is NOT about O_NONBLOCK: the access mode. libc
+ * answered 0, which on Linux happens to spell O_RDONLY - but this ABI's
+ * OPEN_READ is 1, so 0 spells "no access at all", an encoding no
+ * descriptor can legitimately have. BFD checks, has an abort() for
+ * impossible access modes, and the machine's own `strip` hit it. Only
+ * the kernel knows a descriptor's access, so only the kernel can answer.
+ * The reply is OPEN_READ/OPEN_WRITE bits, which are also this libc's
+ * O_RDONLY/O_WRONLY - one encoding, on purpose (see <fcntl.h>). */
 #define F_GETFD_CMD 1
 #define F_SETFD_CMD 2
+#define F_GETFL_CMD 3
 #define FD_CLOEXEC_BIT 1
 #define SYS_fcntl      85
 
