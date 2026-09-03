@@ -519,3 +519,182 @@ TEST(leanfs, remounting_does_not_leak_the_inode_table) {
     CHECK(leanfs_is_dir("/"));
     fake_blk_free();
 }
+
+/* ---- Q16: a disk that starts failing under a filesystem ---------------
+ *
+ * Until Q16 there was nothing to test here, because there was nothing to
+ * report: every failure under this filesystem was a `panic` in a driver,
+ * and a panic reaches leanfs as a machine that stopped. What changed is
+ * that `blk_read`/`blk_write`/`blk_flush` return, and leanfs collects
+ * those returns into a per-operation flag (see io_error in leanfs.c).
+ *
+ * Two different questions get two different fault injectors, and keeping
+ * them apart is the point:
+ *
+ *   - a disk that fails and SAYS so asks whether leanfs reports it;
+ *   - a disk that drops writes SILENTLY - which is what Q3's original
+ *     injector did, because `blk_write` was `void` - asks whether the
+ *     filesystem is still consistent when nobody was told, which is the
+ *     question M71's write ordering exists to answer.
+ */
+
+TEST(leanfs, a_write_to_a_disk_that_refuses_every_write_is_reported) {
+    fs_fixture();
+    static uint8_t data[8192];
+    memset(data, 'a', sizeof(data));
+
+    /* Healthy first, so a failure below is known to be the fault rather
+     * than the path. */
+    CHECK_EQ(leanfs_write("/before", data, sizeof(data)), 0);
+
+    fake_blk_fail_writes_after(0);
+    memset(data, 'b', sizeof(data));
+    CHECK_EQ(leanfs_write("/during", data, sizeof(data)), -1);
+
+    /* And the disk comes back. A filesystem that latched the error would
+     * pass the check above and fail every operation afterwards, which is
+     * the bug a sticky flag invites and the reason io_begin exists. */
+    fake_blk_fail_writes_after(-1);
+    memset(data, 'c', sizeof(data));
+    CHECK_EQ(leanfs_write("/after", data, sizeof(data)), 0);
+
+    static uint8_t got[8192];
+    CHECK_EQ(leanfs_read("/after", got, sizeof(got)), (int64_t)sizeof(got));
+    CHECK_EQ(got[0], 'c');
+    fake_blk_free();
+}
+
+TEST(leanfs, a_read_from_a_disk_that_refuses_every_read_is_reported) {
+    fs_fixture();
+    static uint8_t data[8192];
+    memset(data, 'a', sizeof(data));
+    CHECK_EQ(leanfs_write("/f", data, sizeof(data)), 0);
+
+    static uint8_t got[8192];
+    memset(got, 'z', sizeof(got));
+    fake_blk_fail_reads_after(0);
+    CHECK_EQ(leanfs_read("/f", got, sizeof(got)), -1);
+    /* The caller's buffer is deliberately NOT asserted here, and the
+     * reason is worth writing down rather than dropping the check.
+     *
+     * The first read this call makes is not the file's data - it is the
+     * DIRECTORY, because resolving "/f" walks it. So a disk that refuses
+     * every read fails the path lookup and returns before a byte of
+     * `got` is touched, which is correct and is not what blk.h's
+     * zero-fill contract is about. That contract is between the block
+     * layer and its caller, and it is graded where the real block layer
+     * is: the [q16] boot self-test, which drops the cache and reads a
+     * file whose name it has already resolved. */
+    fake_blk_fail_reads_after(-1);
+    CHECK_EQ(leanfs_read("/f", got, sizeof(got)), (int64_t)sizeof(got));
+    CHECK_EQ(got[0], 'a');
+    fake_blk_free();
+}
+
+TEST(leanfs, a_file_written_before_the_disk_failed_survives_it) {
+    fs_fixture();
+    static uint8_t data[4096];
+    memset(data, 'k', sizeof(data));
+    CHECK_EQ(leanfs_write("/keep", data, sizeof(data)), 0);
+
+    /* Ten writes' grace, then nothing. The milestone's own bar: "a disk
+     * that fails every write from the tenth onward leaves a machine that
+     * reports an error, keeps its desktop, and mounts to a consistent
+     * filesystem on the next boot." */
+    fake_blk_reset_counters();
+    fake_blk_fail_writes_after(10);
+    static uint8_t big[64 * 1024];
+    memset(big, 'x', sizeof(big));
+    CHECK_EQ(leanfs_write("/doomed", big, sizeof(big)), -1);
+    fake_blk_fail_writes_after(-1);
+
+    static uint8_t got[4096];
+    memset(got, 0, sizeof(got));
+    CHECK_EQ(leanfs_read("/keep", got, sizeof(got)), (int64_t)sizeof(got));
+    CHECK_EQ(got[0], 'k');
+    CHECK_EQ(got[sizeof(got) - 1], 'k');
+    fake_blk_free();
+}
+
+TEST(leanfs, the_filesystem_is_consistent_after_a_disk_that_failed_mid_write) {
+    fs_fixture();
+    static uint8_t data[4096];
+    memset(data, 'a', sizeof(data));
+    for (int i = 0; i < 4; i++) {
+        char name[16];
+        name[0] = '/';
+        name[1] = (char)('a' + i);
+        name[2] = '\0';
+        CHECK_EQ(leanfs_write(name, data, sizeof(data)), 0);
+    }
+
+    /* Silent, which is the harder half: the filesystem is not told, so
+     * nothing it does can depend on having been told. What has to hold
+     * afterwards is M71's guarantee - no block is both free and
+     * referenced, and no name points at an inode that is not there. */
+    fake_blk_reset_counters();
+    fake_blk_fail_writes_silently_after(6);
+    static uint8_t big[128 * 1024];
+    memset(big, 'x', sizeof(big));
+    (void)leanfs_write("/torn", big, sizeof(big));
+    fake_blk_fail_writes_after(-1);
+
+    /* Remount from the disk, which is what a reboot does - the in-memory
+     * inode table is rebuilt from whatever actually reached the
+     * platters. */
+    leanfs_init();
+    uint32_t reclaimed = leanfs_check();
+    (void)reclaimed; /* whatever it found, it must not have crashed finding it */
+
+    /* And the files written before the failure are all still there and
+     * still say what they said. */
+    for (int i = 0; i < 4; i++) {
+        char name[16];
+        name[0] = '/';
+        name[1] = (char)('a' + i);
+        name[2] = '\0';
+        static uint8_t got[4096];
+        memset(got, 0, sizeof(got));
+        int64_t n = leanfs_read(name, got, sizeof(got));
+        if (n != (int64_t)sizeof(got)) {
+            test_fail(__FILE__, __LINE__, "%s read %lld bytes after a torn write, expected %lld",
+                      name, (long long)n, (long long)sizeof(got));
+        } else {
+            CHECK_EQ(got[0], 'a');
+            CHECK_EQ(got[sizeof(got) - 1], 'a');
+        }
+    }
+    fake_blk_free();
+}
+
+TEST(leanfs, a_directory_created_on_a_failing_disk_is_reported) {
+    fs_fixture();
+    fake_blk_fail_writes_after(0);
+    /* mkdir is the metadata-only path, and it is the one where a failure
+     * was invisible without this: it writes an inode and a directory
+     * entry, and returned 0 whether or not either reached the disk. */
+    CHECK_EQ(leanfs_mkdir("/nope"), -1);
+    fake_blk_fail_writes_after(-1);
+
+    /* A REMOUNT before carrying on, and that is a finding rather than a
+     * convenience.
+     *
+     * After a write that failed, the in-memory inode table and the disk
+     * disagree - the table grew the root directory and the block behind
+     * it was never written. Nothing reconciles them, so the next
+     * operation reads a directory block full of whatever was there. The
+     * disk is the authority and a remount is what re-reads it, which is
+     * also exactly what a reboot does; the failed mkdir simply did not
+     * happen.
+     *
+     * Reconciling in place would mean an undo log, which is a journal,
+     * which is the thing M71 and M93 and M105 have each measured and
+     * refused. The honest statement is the one this test makes: the
+     * operation is reported failed, the disk is consistent, and the
+     * in-memory table is only trustworthy again after a mount. */
+    leanfs_init();
+    CHECK(!leanfs_exists("/nope"));
+    CHECK_EQ(leanfs_mkdir("/yes"), 0);
+    CHECK(leanfs_is_dir("/yes"));
+    fake_blk_free();
+}

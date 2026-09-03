@@ -55,12 +55,40 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         return 0;
     }
 
-    long first = sys_waitfds(watch, (int)n, timeout);
-    if (first == -1) {
-        return -1;
+    /* ---- M88 (third attempt): a set that asks only for POLLOUT --------
+     *
+     * POLLOUT is reported ready for any open descriptor here, because
+     * there is no write-readiness anywhere in this kernel (see <poll.h>).
+     * So a set containing one is a set with something ready in it *before
+     * this call blocks*, and blocking on it was a bug with two visible
+     * halves: `poll(fd, POLLOUT, 1000)` waited a second and then returned
+     * 0, and `poll(fd, POLLOUT, 0)` returned 0 immediately - a poll that
+     * says nothing is ready about a descriptor it will call ready one
+     * line later.
+     *
+     * Found by `select`, which is a shim over this function: a
+     * select-for-writable is exactly this shape, and nothing had ever
+     * written one. SYS_waitfds is not wrong here - it answers about
+     * *readability*, which is the only readiness this kernel has - so the
+     * fix is that this function must not ask it a question it has
+     * already answered. */
+    int wants_write = 0;
+    for (unsigned int i = 0; i < n; i++) {
+        if (fds[map[i]].events & POLLOUT) {
+            wants_write = 1;
+            break;
+        }
     }
-    if (first == -2) {
-        return 0; /* the deadline passed with nothing ready */
+
+    long first = -3; /* nothing known ready yet: probe every descriptor below */
+    if (!wants_write) {
+        first = sys_waitfds(watch, (int)n, timeout);
+        if (first == -1) {
+            return -1;
+        }
+        if (first == -2) {
+            return 0; /* the deadline passed with nothing ready */
+        }
     }
 
     /* Now the mask. Each descriptor is asked on its own with a zero

@@ -527,6 +527,32 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
         if (slot->file->is_dir) {
             return -1;
         }
+        /* M85 (second attempt): a path that can be empty and later not.
+         *
+         * Every file this call has ever read was ready by definition -
+         * bytes on a disk do not arrive later. A pty is the first thing
+         * openable by name that is genuinely sometimes empty, and a read
+         * on one has to park exactly as a read on a pipe does, or a
+         * terminal emulator spins a core waiting for its shell to say
+         * something.
+         *
+         * vfs_handle_readable answers 1 for everything else, so this loop
+         * runs zero times for a regular file and costs one predictable
+         * branch - which is why the check is here rather than behind a
+         * second descriptor type. */
+        while (!vfs_handle_readable(slot->file->handle)) {
+            uint64_t seq = sched_event_seq();
+            if (vfs_handle_readable(slot->file->handle)) {
+                break; /* it became ready between the test and the sample */
+            }
+            sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+            if (sched_signal_pending()) {
+                /* Same answer as the keyboard path above: 0, because
+                 * every blocking reader on this machine loops on a short
+                 * read and the handler runs on the way out. */
+                return 0;
+            }
+        }
         int64_t n = vfs_handle_read(slot->file->handle, dst, (size_t)len, slot->file->offset);
         if (n < 0) {
             return -1;
@@ -1958,24 +1984,46 @@ static long sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a3, uint64_t a4
  * everywhere else, and it became that by being open before anything
  * needed it.
  *
- * `fd` must be one of the three descriptors a task starts with. That is
- * the same approximation isatty has made since M77 - there is one
- * terminal and fd 0/1/2 are it - and M87, which gives the terminal a
- * path, is where it stops being one.
+ * M85 (second attempt): `fd` is no longer restricted to 0/1/2.
+ *
+ * It was, and the comment here said so: "there is one terminal and fd
+ * 0/1/2 are it", with M87 named as where that stops being true. M87 gave
+ * the terminal a path and the restriction stayed, because there was
+ * still one terminal. There is not any more - /dev/ptmx makes them - so
+ * the question this call asks is "which terminal is this descriptor",
+ * and a descriptor that is not one is the only refusal.
  */
+static tty_t *tty_for_fd(task_t *self, uint64_t fd, int *pty_number) {
+    *pty_number = -1;
+    if (fd >= MAX_FDS) {
+        return NULL;
+    }
+    fd_slot_t *slot = &self->fds[fd];
+    if (slot->type == FD_STDIN || slot->type == FD_STDOUT) {
+        /* The console, and still an approximation: fd 0 may have been
+         * redirected to a pipe by a shell and would then not be a
+         * terminal at all. It is the approximation isatty has made since
+         * M77 and narrowing it needs the fd table to record what a
+         * descriptor was opened on, which nothing here does. */
+        return tty_console();
+    }
+    if (slot->type == FD_FILE) {
+        return (tty_t *)vfs_handle_tty(slot->file->handle, pty_number);
+    }
+    return NULL;
+}
+
 static long sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
                       uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
     (void)a6;
     task_t *self = sched_current();
-    if (fd > 2) {
-        return -1;
+    int pty_number = -1;
+    tty_t *t = tty_for_fd(self, fd, &pty_number);
+    if (!t) {
+        return -1; /* not a terminal - which is what ENOTTY means */
     }
-    if (self->fds[fd].type != FD_STDIN && self->fds[fd].type != FD_STDOUT) {
-        return -1; /* redirected somewhere that is not a terminal */
-    }
-    tty_t *t = tty_console();
 
     switch (cmd) {
     case TCGETS:
@@ -2002,6 +2050,38 @@ static long sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
         ws.ws_xpixel = 0;
         ws.ws_ypixel = 0;
         if (copy_to_user(arg, &ws, sizeof(ws)) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+    /* M85: the write half of TIOCGWINSZ. Only a pty has one worth
+     * setting - the console's size is a fact about the framebuffer - and
+     * the refusal is the honest answer rather than a silent success that
+     * would leave a program believing it had resized the screen. */
+    case TIOCSWINSZ: {
+        struct winsize ws;
+        if (pty_number < 0) {
+            return -1;
+        }
+        if (copy_from_user(&ws, arg, sizeof(ws)) != 0) {
+            return -1;
+        }
+        t->rows = ws.ws_row;
+        t->cols = ws.ws_col;
+        /* SIGWINCH is what a program is actually waiting for here, and it
+         * is not raised: system_api/include/signal.h has no SIGWINCH, and
+         * inventing one so that this line could exist would be a signal
+         * number nothing delivers. A program that asks the size when it
+         * draws gets the new one; a program that waits to be told does
+         * not. Written down rather than left to be discovered. */
+        return 0;
+    }
+    /* M85: which /dev/pts/<n> is on the other end of this master. */
+    case TIOCGPTN: {
+        if (pty_number < 0) {
+            return -1; /* the console is not a pty and has no number */
+        }
+        if (copy_to_user(arg, &pty_number, sizeof(pty_number)) != 0) {
             return -1;
         }
         return 0;
@@ -2057,6 +2137,26 @@ static long sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
             return -1; /* somebody else's terminal */
         }
         t->sid = self->sid;
+        /* M85 (second attempt): and the session leader's group becomes
+         * the foreground one.
+         *
+         * This line was missing and its absence is invisible until there
+         * is a second terminal. On the console it did not matter -
+         * nothing else was ever going to claim it, and the shell called
+         * tcsetpgrp immediately afterwards. On a pty it is the whole
+         * thing: the process that claims the terminal is the one in it,
+         * and the process on the other end (a terminal emulator, in a
+         * different session) is not allowed to call TIOCSPGRP on a
+         * terminal it does not own - correctly, because that check is
+         * what stops one session stealing another's job control. So
+         * without this, a ^C typed into a pty raised SIGINT on process
+         * group 0, which is nobody.
+         *
+         * Only for a terminal that had no foreground group: re-claiming
+         * one must not steal the job the session is already running. */
+        if (t->fg_pgid == 0) {
+            t->fg_pgid = self->pgid;
+        }
         return 0;
     case TIOCNOTTY:
         if (t->sid == 0 || t->sid != self->sid) {
@@ -4109,8 +4209,12 @@ static int fd_is_ready(task_t *self, int fd) {
     case FD_FILE:
         /* A regular file is always readable - it is never a reason to
          * wait. Saying so beats refusing the whole call because one
-         * descriptor in the set happens to be a file. */
-        return 1;
+         * descriptor in the set happens to be a file.
+         *
+         * M85: and a pty is not a regular file. vfs_handle_readable is
+         * the one place that knows the difference, and it answers 1 for
+         * everything that is - so this stayed a one-liner. */
+        return vfs_handle_readable(slot->file->handle);
     default:
         return 0;
     }
@@ -4569,6 +4673,25 @@ static int wait_status_of(const task_t *t) {
     return (t->exit_code & 0xFF) << 8;
 }
 
+/* M85: the third status a wait can report, and the only one that is not
+ * about a dead process.
+ *
+ * 0x7f in the low byte is the encoding every Unix uses and the reason
+ * WIFSTOPPED reads the way it does: 0 means exited, a signal number
+ * means killed, and 0x7f is the one value that cannot be either. The
+ * layout is what makes the macros a ported program was compiled against
+ * work, which is the argument <sys/wait.h> already makes about the other
+ * two. */
+static int stop_status_of(const task_t *t) {
+    return ((t->stopped_sig & 0xFF) << 8) | 0x7F;
+}
+
+/* Has this child a stop that a WUNTRACED wait should report? Reported at
+ * most once - see task_t.stop_reported for why a shell depends on that. */
+static int stop_to_report(task_t *t, uint64_t options) {
+    return (options & WUNTRACED) && t->state == TASK_STOPPED && !t->stop_reported;
+}
+
 static long sys_waitpid(uint64_t pid_arg, uint64_t status_ptr, uint64_t options,
                         uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
@@ -4605,6 +4728,18 @@ static long sys_waitpid(uint64_t pid_arg, uint64_t status_ptr, uint64_t options,
                 }
                 return pid;
             }
+            /* M85: and a stop. Deliberately NOT reaped - the child is
+             * alive and will be waited for again when it finally exits,
+             * which is the difference between this and every other
+             * return from this call. */
+            if (stop_to_report(t, options)) {
+                int status = stop_status_of(t);
+                t->stop_reported = 1;
+                if (status_ptr) {
+                    (void)copy_to_user(status_ptr, &status, sizeof(status));
+                }
+                return t->id;
+            }
         } else {
             int total = sched_task_count();
             for (int i = 0; i < total; i++) {
@@ -4624,6 +4759,14 @@ static long sys_waitpid(uint64_t pid_arg, uint64_t status_ptr, uint64_t options,
                         (void)copy_to_user(status_ptr, &status, sizeof(status));
                     }
                     return pid;
+                }
+                if (stop_to_report(t, options)) {
+                    int status = stop_status_of(t);
+                    t->stop_reported = 1;
+                    if (status_ptr) {
+                        (void)copy_to_user(status_ptr, &status, sizeof(status));
+                    }
+                    return t->id;
                 }
             }
         }
@@ -5219,6 +5362,31 @@ static void syscall_dispatch(isr_regs_t *regs) {
         self->pending_signal = 0;
         task_exit_with_code(128 + sig); /* noreturn */
     }
+    /* M85 (second attempt): and a pending STOP, at the same checkpoint.
+     *
+     * take_pending_stop's own comment has said since M85 that it is
+     * "called from the same two places a fatal pending signal is - the
+     * scheduler tick and the syscall boundary". It was called from one:
+     * the tick. That is not a missing optimisation, it is why job
+     * control did not work, and the failure is subtle enough to be worth
+     * writing down.
+     *
+     * The tick takes the stop from whichever task is CURRENT when the
+     * timer fires. A program waiting to be stopped is, almost by
+     * definition, a program sitting in a blocking read - it wakes for a
+     * few microseconds, finds nothing, and parks again. The chance that
+     * a 10 ms tick lands inside one of those windows is small, so a ^Z
+     * typed at a terminal reached a task that was READY with
+     * `pending_stop` set and stayed that way indefinitely. It looked
+     * exactly like "the stop machinery does not work", which is what
+     * M85's first attempt concluded.
+     *
+     * Here it is taken on the way *into* the next syscall - and the
+     * blocking read the task is about to make is a syscall. After the
+     * death check, for the reason take_pending_stop already gives: a
+     * task with both pending has been killed, and stopping it first
+     * would suspend it with a SIGKILL it can never take. */
+    sched_take_pending_stop_if_any(self);
 
     uint64_t num = regs->rax;
     if (num >= SYSCALL_COUNT) {

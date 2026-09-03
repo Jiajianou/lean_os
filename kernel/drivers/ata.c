@@ -1,7 +1,6 @@
 #include "ata.h"
 
 #include "arch/x86_64/io.h"
-#include "panic.h"
 
 #define ATA_IO_BASE 0x1F0
 
@@ -25,7 +24,7 @@
 
 #define ATA_DRIVE_MASTER_LBA 0xE0 /* bits 7,5 always 1 (legacy); bit 6 = LBA mode; bit 4 = 0 (master) */
 
-#define ATA_POLL_LIMIT 100000 /* generous bound so a wedged/missing drive panics instead of hanging boot forever */
+#define ATA_POLL_LIMIT 100000 /* generous bound so a wedged/missing drive reports instead of hanging boot forever (Q16: it used to panic) */
 
 static void ata_select(uint32_t lba, uint8_t count) {
     outb(ATA_REG_DRIVE, (uint8_t)(ATA_DRIVE_MASTER_LBA | ((lba >> 24) & 0x0F)));
@@ -35,63 +34,97 @@ static void ata_select(uint32_t lba, uint8_t count) {
     outb(ATA_REG_LBA_HIGH, (uint8_t)((lba >> 16) & 0xFF));
 }
 
-/* Waits for BSY to clear, then checks ERR. Every command (issued or
- * per-sector) needs this before touching the data port or the status
- * register again. */
-static void ata_wait_ready(void) {
+/* Q16: the four halts that used to be here.
+ *
+ * Every one of them was a device failure - an ERR status or a poll that
+ * ran out - and every one stopped the machine. Under QEMU they never
+ * fire, which is exactly why they survived ninety milestones; on the
+ * hardware M28 is still waiting for, they are the likeliest first thing
+ * to happen. They report now, and the report is counted so that a disk
+ * which is failing occasionally is distinguishable from one that is not
+ * failing at all: see ata_error_count and the [q16] self-test.
+ *
+ * Returns 0 ready, -1 failed. */
+static uint32_t errors;
+
+uint32_t ata_error_count(void) {
+    return errors;
+}
+
+static int ata_wait_ready(void) {
     for (uint32_t i = 0; i < ATA_POLL_LIMIT; i++) {
         uint8_t status = inb(ATA_REG_STATUS);
         if (status & ATA_SR_BSY) {
             continue;
         }
         if (status & ATA_SR_ERR) {
-            panic("ata: command reported ERR");
+            errors++;
+            return -1;
         }
-        return;
+        return 0;
     }
-    panic("ata: timed out waiting for BSY to clear");
+    errors++;
+    return -1;
 }
 
-static void ata_wait_drq(void) {
+static int ata_wait_drq(void) {
     for (uint32_t i = 0; i < ATA_POLL_LIMIT; i++) {
         uint8_t status = inb(ATA_REG_STATUS);
         if (status & ATA_SR_ERR) {
-            panic("ata: command reported ERR");
+            errors++;
+            return -1;
         }
         if (status & ATA_SR_DRQ) {
-            return;
+            return 0;
         }
     }
-    panic("ata: timed out waiting for DRQ");
+    errors++;
+    return -1;
 }
 
-void ata_read_sectors(uint32_t lba, uint8_t count, void *buf) {
-    ata_wait_ready();
+int ata_read_sectors(uint32_t lba, uint8_t count, void *buf) {
+    if (ata_wait_ready() != 0) {
+        return -1;
+    }
     ata_select(lba, count);
     outb(ATA_REG_COMMAND, ATA_CMD_READ_SECTORS);
 
     uint16_t *dst = (uint16_t *)buf;
     for (uint8_t s = 0; s < count; s++) {
-        ata_wait_ready();
-        ata_wait_drq();
+        /* Bailing out mid-transfer leaves the drive with sectors it still
+         * wants to hand over, and the next command re-selects and
+         * re-issues - which is what the ata_wait_ready at the top of
+         * every entry point is for. It was there before this change and
+         * it is load-bearing now rather than merely tidy. */
+        if (ata_wait_ready() != 0 || ata_wait_drq() != 0) {
+            return -1;
+        }
         insw(ATA_REG_DATA, dst, ATA_SECTOR_SIZE / 2);
         dst += ATA_SECTOR_SIZE / 2;
     }
+    return 0;
 }
 
-void ata_write_sectors(uint32_t lba, uint8_t count, const void *buf) {
-    ata_wait_ready();
+int ata_write_sectors(uint32_t lba, uint8_t count, const void *buf) {
+    if (ata_wait_ready() != 0) {
+        return -1;
+    }
     ata_select(lba, count);
     outb(ATA_REG_COMMAND, ATA_CMD_WRITE_SECTORS);
 
     const uint16_t *src = (const uint16_t *)buf;
     for (uint8_t s = 0; s < count; s++) {
-        ata_wait_ready();
-        ata_wait_drq();
+        if (ata_wait_ready() != 0 || ata_wait_drq() != 0) {
+            return -1;
+        }
         outsw(ATA_REG_DATA, src, ATA_SECTOR_SIZE / 2);
         src += ATA_SECTOR_SIZE / 2;
     }
 
     outb(ATA_REG_COMMAND, ATA_CMD_CACHE_FLUSH);
-    ata_wait_ready();
+    /* The flush is where a write that the drive accepted and could not
+     * commit finally reports itself, so its answer is the call's answer.
+     * A write that returned success before the flush completed would be
+     * exactly the lie M71's ordering guarantee is built on top of. */
+    return ata_wait_ready();
 }

@@ -1,24 +1,25 @@
-/* user_space/libc/include/pty.h - M89
+/* user_space/libc/include/pty.h - M89, filled in by M85's second attempt
  *
- * `openpty`, `forkpty`, `login_tty` - and there are no pseudo-terminals
- * on this machine, so all three are refusals.
+ * `openpty`, `forkpty`, `login_tty`, and the four `/dev/ptmx` calls
+ * underneath them.
  *
- * That is not an oversight and it has a date. M85 made the terminal a
- * device with a line discipline and deliberately left the *pseudo*
- * terminal out; the arc note in milestones.md puts it in M98, where an
- * hour-long compiler build needs `^C` to reach the thing it is building.
- * Until then a program that wants to allocate a terminal for a child
- * gets -1 and ENOSYS, which is what "this system cannot do that" looks
- * like - as opposed to a stub returning a file descriptor that is not a
- * terminal, which is how a program ends up reporting that its child
- * exited for no reason.
+ * This header shipped as three refusals. M85 made the terminal a device
+ * with a line discipline and left the *pseudo* terminal out, because a
+ * pty needs a path and paths needed M87's vnode layer, two milestones
+ * later. That inversion is recorded in kernel/dev/pty.h; what matters
+ * here is that the refusals are gone and the calls are real, over
+ * kernel/dev/pty.c.
  *
  * The header exists at all because `#ifdef __APPLE__ ... #else #include
  * <pty.h>` is how a ported program decides where these live, and being
- * the `#else` case means having the file.
+ * the `#else` case means having the file. posix_openpt, grantpt,
+ * unlockpt and ptsname are declared here as well as in <stdlib.h>, where
+ * the standard puts them, because a program that includes one of the two
+ * should not have to know which.
  */
 #pragma once
 
+#include <stddef.h>
 #include <sys/types.h>
 #include <termios.h>
 
@@ -33,6 +34,21 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ---- the four underneath ----------------------------------------------
+ *
+ * posix_openpt opens /dev/ptmx, which *creates* a terminal - the one
+ * open() on this machine with a side effect. ptsname is then the only
+ * way to learn the slave's name, because the master descriptor does not
+ * carry it. grantpt and unlockpt have nothing to do on a machine with
+ * one principal and no lock bit, and return 0 having checked that their
+ * argument really is a master; see the implementation for why that is a
+ * true statement rather than a stub. */
+int posix_openpt(int flags);
+int grantpt(int fd);
+int unlockpt(int fd);
+char *ptsname(int fd);
+int ptsname_r(int fd, char *buf, size_t len);
 
 int openpty(int *primary, int *secondary, char *name,
             const struct termios *tio, const struct winsize *ws);

@@ -67,6 +67,12 @@ static inline uint16_t gdt_tss_selector(int cpu_id) {
  *
  * Returns 0 before `ltr` has run on this core, which is the right
  * bootstrap answer: the BSP is cpu 0 and nothing else is running yet. */
+/* Q13: `str` is an x86 instruction and the host test tier compiles this
+ * header on a machine that has no such thing - see the same #if in
+ * cpu.h for the full argument. The host side is a number a test sets,
+ * which is what lets one process drive a multi-core scheduler one CPU at
+ * a time. */
+#if defined(__x86_64__)
 static inline int gdt_current_cpu(void) {
     uint16_t sel;
     __asm__ volatile("str %0" : "=r"(sel));
@@ -75,6 +81,9 @@ static inline int gdt_current_cpu(void) {
     }
     return (int)((sel - GDT_TSS_SEL_BASE) / 16);
 }
+#else
+int gdt_current_cpu(void);
+#endif
 
 /* Updates TSS.RSP0 for the given CPU - the kernel stack the CPU switches
  * to automatically on any ring3->ring0 transition (interrupt, exception,

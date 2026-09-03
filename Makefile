@@ -168,6 +168,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_wctype.o \
                 $(UOBJ)/libc_fcntl.o $(UOBJ)/libc_scanf.o $(UOBJ)/libc_mntent.o \
                 $(UOBJ)/libc_xattr.o $(UOBJ)/libc_klog.o $(UOBJ)/libc_getopt.o $(UOBJ)/libc_reboot.o $(UOBJ)/libc_tls.o \
+                $(UOBJ)/libc_pty.o $(UOBJ)/libc_select.o \
                 $(UOBJ)/setjmp.o $(UOBJ)/symtab.o $(UOBJ)/crtn.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
@@ -184,7 +185,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
 # alongside its own" is only true if there is no special path for them.
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
@@ -806,13 +807,15 @@ TEST_FAKES := tests/fakes/fake_panic.c tests/fakes/fake_klog.c \
               tests/fakes/fake_vmm.c tests/fakes/fake_blk.c \
               tests/fakes/fake_rtc.c tests/fakes/fake_net.c \
               tests/fakes/fake_pit.c tests/fakes/fake_socket.c \
-              tests/fakes/fake_fwcfg.c
+              tests/fakes/fake_fwcfg.c \
+              tests/fakes/fake_arch.c tests/fakes/fake_kernel_objects.c
 
 # The kernel sources under test, compiled unmodified.
 TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
                     kernel/net/arp.c kernel/net/ip.c kernel/net/icmp.c \
                     kernel/net/udp.c kernel/net/ethernet.c kernel/net/tcp.c \
-                    kernel/dev/fwcfg.c
+                    kernel/dev/fwcfg.c kernel/dev/tty.c kernel/dev/pty.c \
+                    kernel/sched/sched.c
 
 # M101: the first user-space source in this tier, and it earns its place
 # by the same argument the kernel units do. user_space/lib/symtab.c is a
@@ -982,7 +985,8 @@ FUZZ_FAKES  := tests/fakes/fake_panic_abort.c tests/fakes/fake_klog.c \
                tests/fakes/fake_vmm.c tests/fakes/fake_blk.c \
                tests/fakes/fake_rtc.c tests/fakes/fake_net.c \
                tests/fakes/fake_pit.c tests/fakes/fake_socket.c \
-              tests/fakes/fake_fwcfg.c
+              tests/fakes/fake_fwcfg.c \
+              tests/fakes/fake_arch.c tests/fakes/fake_kernel_objects.c
 FUZZ_TARGETS := $(FUZZ_BUILD)/fuzz_net $(FUZZ_BUILD)/fuzz_leanfs
 
 $(FUZZ_BUILD):

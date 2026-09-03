@@ -52,7 +52,7 @@ const uint8_t *fake_net_tx_frame(int i, uint32_t *len_out) {
     return tx[i];
 }
 
-void rtl8139_send(const uint8_t *frame, uint16_t len) {
+int rtl8139_send(const uint8_t *frame, uint16_t len) {
     if (tx_count >= MAX_TX) {
         /* Not silently dropped. A parser that answers one bad packet with
          * sixty-four frames is a bug worth stopping on, not one to
@@ -65,9 +65,14 @@ void rtl8139_send(const uint8_t *frame, uint16_t len) {
     memcpy(tx[tx_count], frame, len);
     tx_len[tx_count] = len;
     tx_count++;
+    /* Q16: the driver reports now - see kernel/drivers/rtl8139.h. This
+     * fake never refuses a frame it could hold, because the cases it
+     * refuses are harness bugs and panic above. */
+    return 0;
 }
 
 int rtl8139_init(void) { return 1; }
+uint32_t rtl8139_tx_error_count(void) { return 0; }
 const uint8_t *rtl8139_mac(void) { return local_mac; }
 
 const uint8_t *net_local_mac(void) { return local_mac; }

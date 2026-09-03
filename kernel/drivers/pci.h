@@ -29,6 +29,11 @@ int pci_find_device(uint16_t vendor_id, uint16_t device_id, pci_device_t *out);
  * it encodes. Panics if BAR0 turns out to be memory-mapped (bit 0 clear) -
  * every device this driver looks for today is I/O-mapped; a memory-BAR
  * device needs vmm mapping support this function doesn't attempt. */
+/* Q16: 0 if the BAR is memory-mapped rather than I/O-mapped, which is a
+ * fact about the card rather than a bug in this kernel - and used to
+ * halt the machine. Every driver here speaks port I/O, so 0 means
+ * "decline this card"; port 0 is not a device address on x86, which is
+ * what makes it a safe sentinel rather than a convenient one. */
 uint16_t pci_bar0_io_base(const pci_device_t *dev);
 
 /* M62: the same for BAR1, which is where a device's *second* I/O region

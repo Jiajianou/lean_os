@@ -152,6 +152,19 @@ char *setstate(char *state);
 int mkstemp(char *tmpl);
 char *mkdtemp(char *tmpl);
 
+/* M85 (second attempt): a terminal for a child process.
+ *
+ * The standard puts these four in <stdlib.h>, which is a historical
+ * accident rather than a category - they have nothing to do with the
+ * rest of this header. They are also declared in <pty.h> beside openpty
+ * and forkpty, and a program that includes either one gets all four.
+ * See user_space/libc/src/pty.c. */
+int posix_openpt(int flags);
+int grantpt(int fd);
+int unlockpt(int fd);
+char *ptsname(int fd);
+int ptsname_r(int fd, char *buf, size_t len);
+
 /* M75: the environment. `getenv` returns a pointer into the environment
  * itself, not a copy - the standard contract, and the reason a caller
  * that wants to keep a value past the next setenv has to copy it. See

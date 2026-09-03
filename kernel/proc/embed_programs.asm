@@ -339,6 +339,15 @@ jobtest_elf_start:
     incbin "build/jobtest.elf"
 jobtest_elf_end:
 
+; M85 (second attempt): the pty fixture. Drives both ends of one
+; pseudo-terminal - see user_space/bin/ptytest.c for what each of its
+; seven checks proves.
+global ptytest_elf_start
+global ptytest_elf_end
+ptytest_elf_start:
+    incbin "build/ptytest.elf"
+ptytest_elf_end:
+
 global syscalltest_elf_start
 global syscalltest_elf_end
 syscalltest_elf_start:

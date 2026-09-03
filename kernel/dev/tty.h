@@ -43,6 +43,17 @@
 #define TTY_LINE_MAX 512
 #define TTY_INBUF    2048
 
+/* M85 (second attempt): the other direction, which the console never
+ * needed and a pty cannot work without.
+ *
+ * The console's output goes to klog because that is where the hardware
+ * is. A pty has no hardware: the thing on the other side of it is a
+ * *program*, and everything the slave writes - plus everything the
+ * discipline echoes - has to be queued somewhere that program can read.
+ * So a terminal grows an output queue, and which of the two sinks it
+ * uses is the only difference between the console and a pty. */
+#define TTY_OUTBUF   4096
+
 typedef struct tty {
     char line[TTY_LINE_MAX];
     uint32_t line_len;
@@ -61,13 +72,34 @@ typedef struct tty {
     int sid;
 
     uint16_t rows, cols;
+
+    /* Where this terminal's output goes. 0 is the console - klog, and the
+     * serial line and framebuffer behind it. 1 is a pty, and the bytes go
+     * into outbuf for whoever holds the master to read. */
+    uint8_t is_pty;
+
+    /* M85: the master has gone.
+     *
+     * A slave whose master has closed can never receive another byte, so
+     * a read on it must report end-of-file rather than block forever.
+     * This is the same line pipe_write_closed draws for a pipe and it is
+     * load-bearing for the same reason: without it every program holding
+     * the slave end of a closed pty hangs instead of exiting. */
+    uint8_t hup;
+
+    char outbuf[TTY_OUTBUF];
+    uint32_t out_head; /* next byte the master takes */
+    uint32_t out_tail; /* next byte the discipline or the slave writes */
 } tty_t;
 
-/* The one terminal this machine has. A second becomes worth having when
- * something can create one - a pty pair, which is what a windowed
- * terminal emulator needs and which M85 deliberately does not build (see
- * the milestone note). One is not a design, it is the honest count. */
+/* The console terminal - the one attached to this machine's own
+ * hardware. Every other terminal here is a pty, created by opening
+ * /dev/ptmx; see kernel/dev/pty.h. */
 tty_t *tty_console(void);
+
+/* M85: bring one up as a pty rather than as the console. Same discipline,
+ * different sink - which is the whole of what "pty" means. */
+void tty_init_pty(tty_t *t);
 
 void tty_init(void);
 
@@ -100,3 +132,25 @@ int tty_may_read(tty_t *t, int sid, int pgid);
  * terminal nobody has claimed signals nobody, which is the state before a
  * shell calls tcsetpgrp. */
 void tty_signal_foreground(tty_t *t, int sig);
+
+/* ---- M85: the output side --------------------------------------------
+ *
+ * tty_write is what the *slave* end does with the bytes a program prints:
+ * output processing (ONLCR) and then the sink. tty_out_read is what the
+ * *master* end takes back out. On the console the sink is klog and
+ * tty_out_read never returns anything, because there is nothing on the
+ * other side of a console to read it. */
+/* M85 (second attempt): the session that owned this terminal has ended.
+ *
+ * POSIX: when a session leader exits, SIGHUP goes to the foreground
+ * process group and the terminal is disassociated. Both halves matter
+ * and the second is the one this machine noticed first - a terminal
+ * still owned by a dead session cannot be claimed by anything, so the
+ * second program to run in a pty is refused its own terminal by a
+ * process that no longer exists. Returns 1 if this terminal was the
+ * session's. */
+int tty_release_session(tty_t *t, int sid);
+
+void tty_write(tty_t *t, const char *buf, uint32_t len);
+uint32_t tty_out_readable(const tty_t *t);
+uint32_t tty_out_read(tty_t *t, char *buf, uint32_t len);

@@ -39,9 +39,16 @@ uint64_t fake_blk_writes(void);
 /* Direct access, for corrupting the image on purpose. */
 uint8_t *fake_blk_sector(uint32_t lba);
 uint32_t fake_blk_sector_count(void);
-/* Make every write from the n'th onward silently do nothing, which is
- * what a disk that has stopped accepting writes looks like from above. */
+/* Q16: make every write from the n'th onward fail and SAY so, which is
+ * what a disk that has stopped accepting writes looks like from above
+ * now that kernel/drivers/blk.h has a return value. */
 void fake_blk_fail_writes_after(int64_t n);
+/* ...and the pre-Q16 version, kept because it is a different question:
+ * a disk that drops writes and reports success asks whether the
+ * filesystem is still consistent when nobody was told. */
+void fake_blk_fail_writes_silently_after(int64_t n);
+/* Q16: and the read side, which had no equivalent at all. */
+void fake_blk_fail_reads_after(int64_t n);
 
 /* ---- fake_net --------------------------------------------------------- */
 /* Frames the stack under test tried to transmit. */
@@ -73,3 +80,41 @@ int fake_socket_delivered_count(void);
 const uint8_t *fake_socket_delivered(int i, uint32_t *len_out, uint16_t *dst_port_out);
 uint16_t fake_socket_delivered_src_port(int i);
 uint32_t fake_socket_delivered_src_ip(int i);
+
+/* ---- fake_spinlock ---------------------------------------------------- */
+/* Every lock this process holds, dropped. The runner calls it between
+ * tests; a test that deliberately provokes a panic has to call it too,
+ * because CHECK_PANIC returns into the middle of the test with whatever
+ * the panicking code was holding still held. */
+void fake_spinlock_release_all(void);
+
+/* ---- fake_arch -------------------------------------------------------- */
+/* The machine kernel/sched/sched.c runs on, reduced to what it asks and
+ * what a test wants to control. See fake_arch.c - especially its note on
+ * what this tier can and cannot grade about a context switch. */
+void fake_arch_reset(void);
+void fake_arch_set_cpu(int cpu);
+int fake_arch_broadcasts(void);
+uint64_t fake_arch_switches(void);
+/* Where this CPU is standing. M106's check panics unless it is inside
+ * the outgoing task's kernel stack, and there is no honest default on a
+ * host - a test says. */
+void fake_arch_stand_on(uint64_t sp);
+unsigned long long fake_cpu_last_msr(unsigned int msr);
+uint8_t *fake_arch_fpu_scratch(void);
+void fake_arch_fire_tick_hook(void);
+
+/* ---- fake_kernel_objects ---------------------------------------------- */
+/* Refcounts on the things a descriptor table points at, so "a task that
+ * died gave back every reference it held" is an assertion. */
+void fake_objects_reset(void);
+int fake_objects_pipe_read_refs(void);
+int fake_objects_pipe_write_refs(void);
+int fake_objects_file_refs(void);
+int fake_objects_socket_refs(void);
+int fake_objects_address_spaces_destroyed(void);
+int fake_objects_shm_frees(void);
+
+/* ---- fake_vmm, Q13 additions ------------------------------------------ */
+uint64_t fake_vmm_cow_breaks(void);
+uint64_t fake_vmm_unmaps_in(void);

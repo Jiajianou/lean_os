@@ -400,6 +400,16 @@ typedef struct task {
      * death, is something that happens to a task at a moment it is not
      * in the middle of something. */
     int pending_stop;
+    /* M85 (second attempt): which signal actually stopped this task, and
+     * whether a waiting parent has been told.
+     *
+     * `pending_stop` is a *request* and is cleared the moment it is
+     * taken; a parent calling waitpid(WUNTRACED) needs the fact that the
+     * stop happened, which outlives the request. And it needs it exactly
+     * once - a shell that printed "[1]+ Stopped" on every loop of its
+     * wait would print it forever, because the child stays stopped. */
+    int stopped_sig;
+    uint8_t stop_reported;
     /* M63: this task's x87/SSE registers while it is not running. 512
      * bytes and 16-byte aligned, both architectural requirements of
      * FXSAVE rather than preferences - see arch/x86_64/fpu.h for why
@@ -973,6 +983,14 @@ void sched_wake_task(task_t *t);
  * every wake in this kernel goes through that function and none of them
  * should be able to resume a suspended process by accident. */
 void sched_resume_stopped(task_t *t);
+
+/* M85: take a pending job-control stop, if this task has one.
+ *
+ * Exported so the syscall boundary can call it - see the note at the
+ * call site in syscall_dispatch for why one check site was not enough,
+ * and take_pending_stop for what taking one does. Returns with the task
+ * still running if there was nothing to take. */
+void sched_take_pending_stop_if_any(task_t *t);
 
 /* M85: raise `sig` on every live member of a process group - what a ^C
  * does, and what SYS_kill's negative-pid form does. */

@@ -152,7 +152,7 @@ uint8_t pmm_frame_refs(uint64_t phys_addr) {
     return i < 0 ? 0 : frames[i].refs;
 }
 
-uint64_t pmm_alloc_contiguous(uint64_t count) {
+static uint64_t alloc_contiguous(uint64_t count, int may_fail) {
     if (count == 0) {
         return 0;
     }
@@ -172,13 +172,31 @@ uint64_t pmm_alloc_contiguous(uint64_t count) {
         total_allocs++;
         return (uint64_t)(uintptr_t)p;
     }
+    if (may_fail) {
+        return 0;
+    }
     panic("pmm_alloc_contiguous: no contiguous run of that size found");
     return 0;
+}
+
+uint64_t pmm_alloc_contiguous(uint64_t count) {
+    return alloc_contiguous(count, 0);
 }
 
 void pmm_free_contiguous(uint64_t phys_addr, uint64_t count) {
     (void)count;
     pmm_free_frame(phys_addr);
+}
+
+/* Q13: the try_ form, which task_fork uses so its own out-of-memory
+ * check is reachable. M102 found that check dead because it had been
+ * written against the panicking variant; this tier is where "a fork that
+ * cannot get a kernel stack returns NULL" gets executed at all. */
+uint64_t pmm_try_alloc_contiguous(uint64_t count) {
+    if (fail_after >= 0 && (int64_t)total_allocs >= fail_after) {
+        return 0;
+    }
+    return alloc_contiguous(count, 1);
 }
 
 void pmm_init(const uint32_t *e820_map) { (void)e820_map; }

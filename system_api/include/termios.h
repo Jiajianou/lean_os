@@ -166,6 +166,22 @@ struct winsize {
  * exist so that one session cannot steal another's terminal. */
 #define TIOCSCTTY  0x540E
 
+/* ---- M85 (second attempt): the two a pty needs ------------------------
+ *
+ * TIOCGPTN answers "which /dev/pts/<n> is the other end of this master",
+ * and it is the only way to find out: opening /dev/ptmx creates a
+ * terminal and returns a descriptor, and the *name* of the slave is not
+ * in that descriptor anywhere. ptsname() is a wrapper over this call and
+ * nothing else.
+ *
+ * TIOCSWINSZ is the write half of TIOCGWINSZ, and a pty is what makes it
+ * meaningful: the console's size is a property of the framebuffer and
+ * nothing should be setting it, but the size of a terminal *emulator's*
+ * window changes when a person drags a corner, and this is how the
+ * program inside is told. */
+#define TIOCGPTN   0x80045430
+#define TIOCSWINSZ 0x5414
+
 #ifdef __cplusplus
 }
 #endif

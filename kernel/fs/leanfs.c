@@ -188,12 +188,56 @@ static void mark_all_blocks(void) {
  * conversion happens here and nowhere else - every other line in this
  * file that used to compute an LBA now computes a block number, which is
  * the same arithmetic with one fewer thing to get wrong. */
+/* ---- Q16: the disk said no, somewhere inside the operation running now -
+ *
+ * Every panic under this filesystem became an error return (see
+ * kernel/drivers/blk.h), and this is where those errors are collected.
+ *
+ * **A flag rather than a return value through every call site, and that
+ * is a design decision rather than a shortcut.** These four helpers are
+ * called from about a hundred places in this file - inode_write_data's
+ * inner loops, dir_add, the bitmap walk, the indirect-table code - and
+ * threading a status through all of them would be a hundred new branches
+ * whose failure paths nothing would ever execute. What a caller of this
+ * filesystem actually needs to know is one thing: *did the operation I
+ * asked for reach the disk*. That question has an answer at the
+ * operation's boundary, and this is a flag that survives from one end of
+ * it to the other.
+ *
+ * It is set and never cleared inside an operation, so the FIRST failure
+ * is what decides the answer and a later success cannot mask it. The
+ * public entry points clear it on the way in and read it on the way out;
+ * `io_begin`/`io_failed` are that pair, and they are named so the two
+ * halves are hard to use singly.
+ *
+ * What this deliberately does NOT do is unwind. A leanfs_write whose
+ * data blocks reached the disk and whose inode table did not returns -1,
+ * and the filesystem is in exactly the state M71's write ordering
+ * promises: the metadata that would have named those blocks was never
+ * written, so they are unreferenced rather than half-referenced, and the
+ * next mount's bitmap rebuild reclaims them. That is the guarantee, and
+ * it is why "report and stop" is a complete answer here and would not be
+ * in a filesystem without one. */
+static int io_error;
+
+static void io_begin(void) {
+    io_error = 0;
+}
+
+static int io_failed(void) {
+    return io_error;
+}
+
 static void block_read(uint32_t block, void *dst) {
-    blk_read(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, dst);
+    if (blk_read(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, dst) != 0) {
+        io_error = 1;
+    }
 }
 
 static void block_write(uint32_t block, const void *src) {
-    blk_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, src);
+    if (blk_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, src) != 0) {
+        io_error = 1;
+    }
 }
 
 /* ---- M104: a metadata block, and why it is a different function -------
@@ -218,18 +262,30 @@ static void block_write(uint32_t block, const void *src) {
  * untouched.
  */
 static void block_write_meta(uint32_t block, const void *src) {
-    blk_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, src);
-    blk_flush();
+    if (blk_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, src) != 0) {
+        io_error = 1;
+    }
+    /* Q16: and the barrier's own answer. A metadata block that was
+     * absorbed by the cache and then failed to reach the device is the
+     * exact case M71's ordering guarantee is about, so the flush is the
+     * half of this function that decides whether it held. */
+    if (blk_flush() != 0) {
+        io_error = 1;
+    }
 }
 
 static void write_run(uint32_t block, size_t blocks, const uint8_t *src) {
-    blk_write(block * LEANFS_SECTORS_PER_BLOCK,
-              (uint32_t)blocks * LEANFS_SECTORS_PER_BLOCK, src);
+    if (blk_write(block * LEANFS_SECTORS_PER_BLOCK,
+                  (uint32_t)blocks * LEANFS_SECTORS_PER_BLOCK, src) != 0) {
+        io_error = 1;
+    }
 }
 
 static void read_run(uint32_t block, size_t blocks, uint8_t *dst) {
-    blk_read(block * LEANFS_SECTORS_PER_BLOCK,
-             (uint32_t)blocks * LEANFS_SECTORS_PER_BLOCK, dst);
+    if (blk_read(block * LEANFS_SECTORS_PER_BLOCK,
+                 (uint32_t)blocks * LEANFS_SECTORS_PER_BLOCK, dst) != 0) {
+        io_error = 1;
+    }
 }
 
 /* Writes only what changed. Runs of adjacent dirty sectors go out as one
@@ -1577,17 +1633,24 @@ int leanfs_is_dir(const char *path) {
 }
 
 int64_t leanfs_read(const char *path, void *buf, size_t maxlen) {
+    io_begin();
     int idx = resolve(path);
     if (!inode_valid(idx) || inodes[idx].type != LEANFS_TYPE_FILE) {
         return -1;
     }
-    return inode_read_data(idx, buf, maxlen);
+    int64_t n = inode_read_data(idx, buf, maxlen);
+    /* Q16: -1 rather than a short read or a buffer of zeros. blk_read
+     * zeroes what it could not fetch precisely so that a caller which
+     * ignores this cannot parse rubbish, and this is the caller that
+     * does not ignore it. */
+    return io_failed() ? -1 : n;
 }
 
 int leanfs_write(const char *path, const void *buf, size_t len) {
     if (len > LEANFS_MAX_FILE_SIZE) {
         return -1;
     }
+    io_begin();
     int parent;
     char leaf[LEANFS_MAX_NAME + 1];
     if (resolve_parent(path, &parent, leaf) != 0) {
@@ -1622,10 +1685,14 @@ int leanfs_write(const char *path, const void *buf, size_t len) {
         return -1;
     }
     save_meta();
-    return 0;
+    /* Q16: the disk refused something on the way through. See io_error -
+     * the filesystem is consistent, and what did not happen is the part
+     * the caller has to be told about. */
+    return io_failed() ? -1 : 0;
 }
 
 int leanfs_mkdir(const char *path) {
+    io_begin();
     int parent;
     char leaf[LEANFS_MAX_NAME + 1];
     if (resolve_parent(path, &parent, leaf) != 0) {
@@ -1649,7 +1716,7 @@ int leanfs_mkdir(const char *path) {
         return -1;
     }
     save_meta();
-    return 0;
+    return io_failed() ? -1 : 0;
 }
 
 uint32_t leanfs_free_blocks(void) {
@@ -2174,13 +2241,16 @@ int leanfs_open(const char *path, int create) {
 }
 
 int64_t leanfs_handle_read(int handle, void *buf, size_t len, uint32_t off) {
+    io_begin();
     if (!inode_valid(handle) || inodes[handle].type != LEANFS_TYPE_FILE) {
         return -1;
     }
-    return inode_pread(handle, buf, len, off);
+    int64_t n = inode_pread(handle, buf, len, off);
+    return io_failed() ? -1 : n;
 }
 
 int64_t leanfs_handle_write(int handle, const void *buf, size_t len, uint32_t off) {
+    io_begin();
     if (!inode_valid(handle) || inodes[handle].type != LEANFS_TYPE_FILE) {
         return -1;
     }
@@ -2188,7 +2258,7 @@ int64_t leanfs_handle_write(int handle, const void *buf, size_t len, uint32_t of
     if (n > 0) {
         save_meta();
     }
-    return n;
+    return io_failed() ? -1 : n;
 }
 
 uint32_t leanfs_handle_size(int handle) {

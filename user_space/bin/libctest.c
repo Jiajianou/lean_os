@@ -23,6 +23,7 @@
 #include <langinfo.h>
 #include <math.h>
 #include <poll.h>
+#include <sys/select.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -713,6 +714,127 @@ int main(void) {
 
             close(pf[0]);
             close(pf[1]);
+        }
+    }
+
+    /* M88 (second attempt): select, which is poll with the descriptor
+     * set written as a bitmap.
+     *
+     * The same three states in the same order and for the same reason -
+     * a set that always said yes would pass a test that only checked the
+     * middle one. What is checked *beyond* poll is the part select gets
+     * wrong everywhere: the sets are modified in place, so a descriptor
+     * the caller set and that turned out not to be ready has to come
+     * back CLEAR. A program that rebuilds its set every time round the
+     * loop (which is what every correct select caller does) would never
+     * notice; a program that does not, hangs.
+     */
+    {
+        int sf[2];
+        if (pipe(sf) != 0) {
+            fail("pipe() for the select test");
+        } else {
+            fd_set r;
+            struct timeval tv;
+
+            FD_ZERO(&r);
+            FD_SET(sf[0], &r);
+            tv.tv_sec = 0;
+            tv.tv_usec = 30000;
+            if (select(sf[0] + 1, &r, 0, 0, &tv) != 0) {
+                fail("select: an empty pipe reported ready");
+            }
+            if (FD_ISSET(sf[0], &r)) {
+                fail("select: a descriptor that was not ready came back set");
+            }
+
+            if (write(sf[1], "y", 1) != 1) {
+                fail("select: could not write to the pipe");
+            } else {
+                FD_ZERO(&r);
+                FD_SET(sf[0], &r);
+                tv.tv_sec = 0;
+                tv.tv_usec = 200000;
+                if (select(sf[0] + 1, &r, 0, 0, &tv) != 1 || !FD_ISSET(sf[0], &r)) {
+                    fail("select: a pipe with a byte in it did not report readable");
+                }
+            }
+
+            char got = 0;
+            if (read(sf[0], &got, 1) != 1 || got != 'y') {
+                fail("select: the byte did not read back");
+            }
+
+            /* Two descriptors, one ready and one not, in one call - which
+             * is the whole reason select takes a set rather than an fd.
+             * The count is what is asserted: a select that reported
+             * "something happened" without saying how many would pass
+             * every check above. */
+            {
+                int other[2];
+                if (pipe(other) != 0) {
+                    fail("second pipe() for the select test");
+                } else {
+                    if (write(other[1], "z", 1) != 1) {
+                        fail("select: could not write to the second pipe");
+                    }
+                    FD_ZERO(&r);
+                    FD_SET(sf[0], &r);
+                    FD_SET(other[0], &r);
+                    int max = sf[0] > other[0] ? sf[0] : other[0];
+                    tv.tv_sec = 0;
+                    tv.tv_usec = 200000;
+                    int n = select(max + 1, &r, 0, 0, &tv);
+                    if (n != 1) {
+                        printf("libctest: select reported %d ready, expected 1\n", n);
+                        fail("select: the wrong number of descriptors was ready");
+                    }
+                    if (!FD_ISSET(other[0], &r) || FD_ISSET(sf[0], &r)) {
+                        fail("select: the ready descriptor was not the one with the byte");
+                    }
+                    close(other[0]);
+                    close(other[1]);
+                }
+            }
+
+            /* Writability, which this machine always reports - see
+             * <sys/select.h> for why that is the honest answer rather
+             * than a shortcut, and asserted here so the day it stops
+             * being true the claim in that header fails with it. */
+            {
+                fd_set w;
+                FD_ZERO(&w);
+                FD_SET(sf[1], &w);
+                tv.tv_sec = 0;
+                tv.tv_usec = 0;
+                if (select(sf[1] + 1, 0, &w, 0, &tv) != 1 || !FD_ISSET(sf[1], &w)) {
+                    fail("select: a writable descriptor was not reported writable");
+                }
+            }
+
+            /* exceptfds comes back empty, always. There is no
+             * out-of-band data in this stack to put in it. */
+            {
+                fd_set e;
+                FD_ZERO(&e);
+                FD_SET(sf[0], &e);
+                tv.tv_sec = 0;
+                tv.tv_usec = 0;
+                if (select(sf[0] + 1, 0, 0, &e, &tv) != 0 || FD_ISSET(sf[0], &e)) {
+                    fail("select: exceptfds reported an exceptional condition");
+                }
+            }
+
+            /* An empty wait with a deadline is a sleep, exactly as
+             * poll's is - and nfds of 0 must not be an error. */
+            tv.tv_sec = 0;
+            tv.tv_usec = 20000;
+            if (select(0, 0, 0, 0, &tv) != 0) {
+                fail("select: an empty set with a timeout was not a sleep");
+            }
+
+            close(sf[0]);
+            close(sf[1]);
         }
     }
 

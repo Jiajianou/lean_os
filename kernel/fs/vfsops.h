@@ -33,6 +33,8 @@
 
 #include "leanfs.h" /* leanfs_stat_t, leanfs_dir_entry_t - the shapes every filesystem here reports in */
 
+struct tty; /* kernel/dev/tty.h - see the tty_of hook below */
+
 typedef struct vfs_ops {
     /* `rel` is the path with the mount's prefix removed, always starting
      * with '/' - so a mount at "/dev" sees "/null", and the mount point
@@ -68,6 +70,35 @@ typedef struct vfs_ops {
      * refcount 0 - so a file held open by two dup2'd descriptors is
      * closed once, when the second one goes. */
     void (*close)(int handle);
+
+    /* M85: would a read on this handle return without blocking?
+     *
+     * Optional - NULL means "always", which is the truth for every
+     * filesystem here except one. A file on a disk is never a reason to
+     * wait; neither is /dev/zero or /proc/uptime. A pty is, and it is the
+     * first object reachable by path on this machine that is genuinely
+     * sometimes empty and sometimes not.
+     *
+     * Two callers, and they have to agree or the machine hangs:
+     * SYS_read parks when this says 0, and SYS_waitfds reports the
+     * descriptor not-ready when this says 0. A hangup must answer 1 -
+     * see fd_is_ready's note on a pipe whose writer has gone. */
+    int (*readable)(int handle);
+
+    /* M85: which terminal, if any, does this handle name?
+     *
+     * SYS_ioctl has to answer TCGETS on a descriptor open on
+     * /dev/pts/3, and the alternative to this hook is a general
+     * `ioctl(handle, cmd, arg)` in this table - which is the door
+     * sys_ioctl's own comment says it refuses to open. A question with
+     * one answer ("that fd is this terminal") keeps the five commands in
+     * one place and keeps the filesystem out of the business of
+     * interpreting them.
+     *
+     * `*pty_number` is set to the pty's number for a master or slave and
+     * to -1 for the console, which is what TIOCGPTN reports and the only
+     * thing that distinguishes them here. */
+    struct tty *(*tty_of)(int handle, int *pty_number);
 } vfs_ops_t;
 
 /* ---- handles ----------------------------------------------------------

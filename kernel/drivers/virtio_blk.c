@@ -144,6 +144,14 @@ int virtio_blk_init(void) {
     pci_enable_device(&dev);
     io_base = pci_bar0_io_base(&dev);
     if (io_base == 0) {
+        /* Q16: a memory-mapped BAR. blk_init falls back to ATA, which is
+         * exactly the path a machine with no virtio device takes - so
+         * "this card is addressed a way this driver cannot use" and
+         * "there is no card" arrive at the same, working, place. */
+        klog_puts("[virtio-blk] BAR0 is memory-mapped - falling back.\n");
+        return 0;
+    }
+    if (io_base == 0) {
         return 0;
     }
 
@@ -232,7 +240,13 @@ uint64_t virtio_blk_capacity(void) {
  * chained. Descriptors 0/1/2 every time, because this driver has exactly
  * one request in flight and a free-list over three entries would be
  * bookkeeping with nothing to book. */
-static void submit(uint32_t type, uint64_t sector, uint32_t len, int device_writes) {
+static uint32_t errors;
+
+uint32_t virtio_blk_error_count(void) {
+    return errors;
+}
+
+static int submit(uint32_t type, uint64_t sector, uint32_t len, int device_writes) {
     req_hdr->type = type;
     req_hdr->reserved = 0;
     req_hdr->sector = sector;
@@ -274,42 +288,61 @@ static void submit(uint32_t type, uint64_t sector, uint32_t len, int device_writ
     __asm__ volatile("" ::: "memory");
     outw((uint16_t)(io_base + VIO_QUEUE_NOTIFY), 0);
 
-    /* Polled. See the header for why there is no interrupt here. The
-     * bound is generous and ends in a panic for the same reason ata.c's
+    /* Polled. See the header for why there is no interrupt here.
+     *
+     * Q16: the bound used to end in a panic, "for the same reason ata.c's
      * does: a wedged disk is not something this kernel can carry on
-     * around. */
+     * around". That was an argument rather than a measurement, and it is
+     * wrong in the direction that costs most: a machine that halts on a
+     * bad sector loses the desktop, the unsaved editor buffer and the
+     * chance to say what happened, in exchange for nothing. It reports
+     * now, and the caller decides.
+     *
+     * The stale used-index is deliberately NOT resynchronised on a
+     * timeout. A request that never completed may complete later, and a
+     * driver that moved past it would then read somebody else's
+     * completion as its own - so `last_used_idx` stays where it is and
+     * the next request notices the extra entry. One request in flight is
+     * what makes that safe. */
     for (uint32_t spin = 0; spin < 200000000u; spin++) {
         if (used->idx != last_used_idx) {
             last_used_idx = used->idx;
             (void)inb((uint16_t)(io_base + VIO_ISR)); /* read-to-clear */
             if (*req_status != 0) {
-                panic("virtio-blk: device reported an error");
+                errors++;
+                return -1;
             }
-            return;
+            return 0;
         }
         __asm__ volatile("pause");
     }
-    panic("virtio-blk: request never completed");
+    errors++;
+    return -1;
 }
 
-void virtio_blk_read(uint64_t lba, uint32_t count, void *buf) {
+int virtio_blk_read(uint64_t lba, uint32_t count, void *buf) {
     uint8_t *dst = (uint8_t *)buf;
     while (count > 0) {
         uint32_t n = count > BOUNCE_SECTORS ? BOUNCE_SECTORS : count;
-        submit(VIRTIO_BLK_T_IN, lba, n * SECTOR_SIZE, 1);
+        if (submit(VIRTIO_BLK_T_IN, lba, n * SECTOR_SIZE, 1) != 0) {
+            return -1;
+        }
         k_memcpy(dst, bounce, n * SECTOR_SIZE);
         dst += n * SECTOR_SIZE;
         lba += n;
         count -= n;
     }
+    return 0;
 }
 
-void virtio_blk_write(uint64_t lba, uint32_t count, const void *buf) {
+int virtio_blk_write(uint64_t lba, uint32_t count, const void *buf) {
     const uint8_t *src = (const uint8_t *)buf;
     while (count > 0) {
         uint32_t n = count > BOUNCE_SECTORS ? BOUNCE_SECTORS : count;
         k_memcpy(bounce, src, n * SECTOR_SIZE);
-        submit(VIRTIO_BLK_T_OUT, lba, n * SECTOR_SIZE, 0);
+        if (submit(VIRTIO_BLK_T_OUT, lba, n * SECTOR_SIZE, 0) != 0) {
+            return -1;
+        }
         src += n * SECTOR_SIZE;
         lba += n;
         count -= n;
@@ -317,6 +350,10 @@ void virtio_blk_write(uint64_t lba, uint32_t count, const void *buf) {
     /* M71's ordering guarantee is what makes the absence of a journal
      * defensible, and it is a guarantee about what has reached the disk.
      * A flush after every write is what makes it still true through a
-     * device that has a cache of its own. */
-    submit(VIRTIO_BLK_T_FLUSH, 0, 0, 0);
+     * device that has a cache of its own.
+     *
+     * Q16: and its answer is the call's answer. A write reported
+     * successful whose flush failed is precisely the case that ordering
+     * guarantee cannot survive. */
+    return submit(VIRTIO_BLK_T_FLUSH, 0, 0, 0);
 }

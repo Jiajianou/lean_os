@@ -31,6 +31,10 @@ static uint32_t disk_sectors;
 static uint64_t reads;
 static uint64_t writes;
 static int64_t fail_writes_after = -1;
+/* Q16 */
+static int64_t fail_reads_after = -1;
+static int silent_writes;
+static uint64_t errors;
 
 void fake_blk_reset(uint32_t sectors);
 void fake_blk_free(void);
@@ -40,6 +44,8 @@ uint64_t fake_blk_writes(void);
 uint8_t *fake_blk_sector(uint32_t lba);
 uint32_t fake_blk_sector_count(void);
 void fake_blk_fail_writes_after(int64_t n);
+void fake_blk_fail_writes_silently_after(int64_t n);
+void fake_blk_fail_reads_after(int64_t n);
 
 void fake_blk_reset(uint32_t sectors) {
     /* Q4: the allocation is reused when the size has not changed.
@@ -61,6 +67,9 @@ void fake_blk_reset(uint32_t sectors) {
     }
     reads = writes = 0;
     fail_writes_after = -1;
+    fail_reads_after = -1;   /* Q16 */
+    silent_writes = 0;
+    errors = 0;
 }
 
 void fake_blk_free(void) {
@@ -73,7 +82,23 @@ void fake_blk_reset_counters(void) { reads = writes = 0; }
 uint64_t fake_blk_reads(void) { return reads; }
 uint64_t fake_blk_writes(void) { return writes; }
 uint32_t fake_blk_sector_count(void) { return disk_sectors; }
-void fake_blk_fail_writes_after(int64_t n) { fail_writes_after = n; }
+void fake_blk_fail_writes_after(int64_t n) {
+    fail_writes_after = n;
+    silent_writes = 0;
+}
+
+/* Q16: the pre-Q16 behaviour, kept on purpose and named for what it is.
+ * A disk that drops writes and reports success is a different test from
+ * one that reports the failure - the first asks whether the filesystem
+ * is still consistent when nobody was told, which is the question M71's
+ * ordering guarantee exists to answer, and it stops being reachable the
+ * moment the honest path is the only one. */
+void fake_blk_fail_writes_silently_after(int64_t n) {
+    fail_writes_after = n;
+    silent_writes = 1;
+}
+
+void fake_blk_fail_reads_after(int64_t n) { fail_reads_after = n; }
 
 uint8_t *fake_blk_sector(uint32_t lba) {
     if (!disk || lba >= disk_sectors) {
@@ -95,23 +120,43 @@ static void range_check(uint32_t lba, uint32_t count, const char *what) {
     }
 }
 
-void blk_read(uint32_t lba, uint32_t count, void *buf) {
+int blk_read(uint32_t lba, uint32_t count, void *buf) {
     range_check(lba, count, "fake_blk: read past the end of the disk");
+    if (fail_reads_after >= 0 && (int64_t)reads >= fail_reads_after) {
+        /* Q16: refused, and the buffer zeroed - which is what the real
+         * one does and is the half a caller that ignores the return
+         * value depends on. See kernel/drivers/blk.h. */
+        memset(buf, 0, (size_t)count * BLK_SECTOR_SIZE);
+        reads += count;
+        errors++;
+        return -1;
+    }
     memcpy(buf, disk + (size_t)lba * BLK_SECTOR_SIZE, (size_t)count * BLK_SECTOR_SIZE);
     reads += count;
+    return 0;
 }
 
-void blk_write(uint32_t lba, uint32_t count, const void *buf) {
+int blk_write(uint32_t lba, uint32_t count, const void *buf) {
     range_check(lba, count, "fake_blk: write past the end of the disk");
     if (fail_writes_after >= 0 && (int64_t)writes >= fail_writes_after) {
-        /* Counted but not performed - a disk that has stopped taking
-         * writes and has not said so, which is the failure a write
-         * ordering guarantee is supposed to survive. */
+        /* Counted but not performed.
+         *
+         * Q3 wrote this as "a disk that has stopped taking writes and
+         * has not said so, which is the failure a write ordering
+         * guarantee is supposed to survive" - a *silent* failure, and
+         * that was the only kind available while blk_write was `void`.
+         * Q16 gave it a return value, so this now says so, and the
+         * silent variant is fake_blk_fail_writes_silently_after below.
+         * The two are different tests: one asks whether leanfs reports
+         * the failure, and the other asks whether the filesystem is
+         * still consistent when nobody was told. */
         writes += count;
-        return;
+        errors++;
+        return silent_writes ? 0 : -1;
     }
     memcpy(disk + (size_t)lba * BLK_SECTOR_SIZE, buf, (size_t)count * BLK_SECTOR_SIZE);
     writes += count;
+    return 0;
 }
 
 void blk_init(void) {}
@@ -134,7 +179,22 @@ void blk_stats(blk_stats_t *out) {
  * and this device is holding nothing by construction. A fake that
  * counted flushes would be a fake with an opinion about an
  * implementation detail of the real one. */
-void blk_flush(void) {
+int blk_flush(void) {
+    return 0;
+}
+
+/* Q16: the block layer's own fault injector, present here so that a unit
+ * compiled against blk.h links either way. The host tier injects through
+ * fake_blk_fail_*_after instead, which is the same idea with the
+ * counters this fake already keeps. */
+void blk_fault_inject(int64_t reads_after, int64_t writes_after) {
+    fail_reads_after = reads_after;
+    fail_writes_after = writes_after;
+    silent_writes = 0;
+}
+
+uint64_t blk_error_count(void) {
+    return errors;
 }
 
 /* Likewise: there is nothing to read ahead OF. Accepted so that a unit

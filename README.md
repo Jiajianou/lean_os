@@ -4,7 +4,7 @@ A desktop operating system for x86-64, written from scratch: bootloader,
 kernel, drivers, filesystem, window system and applications. No GRUB, no
 libc, no third-party code anywhere in the OS itself.
 
-![94 milestones](https://img.shields.io/badge/milestones-94-informational)
+![100 milestones](https://img.shields.io/badge/milestones-100-informational)
 
 ```
 UEFI firmware
@@ -37,6 +37,13 @@ UEFI firmware
   ATA one kept as the fallback, and a cache in front of both: the same
   megabyte costs 95 ms through PIO, 5.6 ms through DMA and 2.5 ms warm.
   See M90-M93 in [milestones.md](milestones.md).
+- **A terminal that is a device.** A line discipline with canonical
+  and raw modes, sessions, process groups and job control - and
+  **pseudo-terminals**: `/dev/ptmx`, `/dev/pts/<n>`, `openpty` and
+  `forkpty`, so a program can run another program on a terminal it
+  cannot tell from the console. `^C` interrupts the foreground job and
+  `^Z` suspends it, with `waitpid(WUNTRACED)` reporting the stop. See
+  M85 in [milestones.md](milestones.md).
 - **Unix-shaped enough to build against.** An environment inherited
   across a spawn and a real working directory, so a relative path means
   something; signals a program can *catch*, delivered through a frame on
@@ -122,7 +129,11 @@ Four instruments, and none of them subsumes another:
   leanfs, every network parser - for the machine you are sitting at and
   run them under ASan and UBSan in under a second. They exist to reach
   the error paths a booted machine cannot: a full disk, a failed
-  allocation, a corrupt superblock, a malformed packet. 123 tests.
+  allocation, a corrupt superblock, a malformed packet. It also
+  compiles the **scheduler** (Q13) - 2,157 lines whose bugs have
+  historically presented as "about one boot in ten hangs" - against a
+  fake timer and a fake CPU, so a tick is a function call and a
+  fairness property can be checked at every task count. 227 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
   image and grade the serial log against 80 markers and five performance
   budgets. They prove every subsystem still works from the inside.
@@ -156,6 +167,11 @@ Four instruments, and none of them subsumes another:
   host wrote down. It is how a source tree reaches this disk at all, and
   both halves are needed: the host half alone is a well-formed image
   nothing has opened.
+- **A fault-injected disk** (`tools/disk-fault-test.sh`) boots the
+  machine with QEMU's `blkdebug` refusing **every** write, through
+  virtio and through ATA, and requires it to reach PID 1 anyway. Every
+  device error in the block and network drivers used to be a `panic`;
+  Q16 made them errors that propagate, and this is what says so.
 - **A crash test** (`tools/crash-test.sh`) cuts the power mid-write with
   `SIGKILL`, reboots, and checks the filesystem with an independent
   reader. Sixteen cuts across the heaviest metadata window; the

@@ -53,10 +53,25 @@ int pci_find_device(uint16_t vendor_id, uint16_t device_id, pci_device_t *out) {
     return 0;
 }
 
+/* ---- Q16: a memory-mapped BAR is a fact about the card ----------------
+ *
+ * These two halted, and the triage that milestone asks for is what
+ * reclassified them: "BAR0 is memory-mapped, not I/O-mapped" is not a
+ * kernel bug and it is not an impossible state. It is a perfectly
+ * ordinary card that this kernel's three PCI drivers cannot drive,
+ * because all three of them speak port I/O - and the same part number
+ * genuinely ships both ways. On QEMU's `pc` machine they are always
+ * I/O-mapped, which is why nine milestones of PCI work never saw it.
+ *
+ * 0 means "not an I/O BAR", and 0 is a safe sentinel rather than a
+ * convenient one: port 0 is not a device address on x86 and every caller
+ * here compares against it before using the value. A driver that gets 0
+ * declines the card, and a machine whose sound card is memory-mapped
+ * boots to a desktop with no sound instead of not booting. */
 uint16_t pci_bar1_io_base(const pci_device_t *dev) {
     uint32_t bar1 = pci_config_read32(dev->bus, dev->slot, dev->func, PCI_REG_BAR1);
     if ((bar1 & 1) == 0) {
-        panic("pci_bar1_io_base: BAR1 is memory-mapped, not I/O-mapped");
+        return 0;
     }
     return (uint16_t)(bar1 & 0xFFFC);
 }
@@ -64,7 +79,7 @@ uint16_t pci_bar1_io_base(const pci_device_t *dev) {
 uint16_t pci_bar0_io_base(const pci_device_t *dev) {
     uint32_t bar0 = pci_config_read32(dev->bus, dev->slot, dev->func, PCI_REG_BAR0);
     if ((bar0 & 1) == 0) {
-        panic("pci_bar0_io_base: BAR0 is memory-mapped, not I/O-mapped");
+        return 0;
     }
     return (uint16_t)(bar0 & 0xFFFC);
 }

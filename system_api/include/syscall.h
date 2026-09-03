@@ -357,10 +357,17 @@ extern "C" {
  * death by signal is the signal in the low seven bits. <sys/wait.h>
  * decodes it.
  *
- * `options` is WNOHANG (1) or 0. With WNOHANG and a child that is alive,
- * the answer is 0 rather than a block - which is the difference between
- * a shell that can report a background job and one that stops to wait
- * for it.
+ * `options` is WNOHANG (1), WUNTRACED (2), both, or 0. With WNOHANG and
+ * a child that is alive, the answer is 0 rather than a block - which is
+ * the difference between a shell that can report a background job and
+ * one that stops to wait for it.
+ *
+ * M85 (second attempt): WUNTRACED also reports a child that has been
+ * STOPPED, with 0x7F in the low byte and the signal above it - the one
+ * low byte that is neither an exit nor a kill. That child is NOT reaped:
+ * it is alive, and the parent will wait for it again when it finally
+ * exits. It is reported once, because a child stays stopped and a shell
+ * that printed "[1]+ Stopped" on every loop would print it forever.
  *
  * This is what SYS_wait (4) could not be. That call returns an exit code
  * and an exit code cannot tell exit(139) from a death by SIGSEGV, since
@@ -368,6 +375,7 @@ extern "C" {
  * and therefore ambiguous. SYS_wait stays: every caller in this project
  * uses it and means it. */
 #define WNOHANG 1
+#define WUNTRACED 2
 #define SYS_waitpid    84
 
 /* M84: (fd, cmd, arg) -> the answer, or -1.

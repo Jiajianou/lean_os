@@ -209,6 +209,15 @@ else
     # Q17: the one guarantee the filesystem makes, tested by taking the
     # power away rather than by reading the code that provides it.
     run_stage "crash consistency (16 power cuts)" ./tools/crash-test.sh
+    # Q16: and a disk that refuses, from BELOW the driver. The [q16] boot
+    # marker injects at the block layer, which grades the filesystem and
+    # the recovery; this grades the two drivers themselves, because a
+    # fault above ata_read_sectors never reaches the ERR bit it polls
+    # for. Both backends, because they fail in completely different
+    # places - a status byte and a status register.
+    run_stage "a disk that refuses, below the driver" ./tools/disk-fault-test.sh
+    run_stage "the same, through ATA" \
+      bash -c 'QEMU_DISK=ide ./tools/disk-fault-test.sh'
   else
     run_stage "interactive suite (--quick subset)" ./tools/qemu-input-test.sh --quick
   fi

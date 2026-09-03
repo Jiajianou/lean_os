@@ -45,8 +45,47 @@ void blk_init(void);
  * for the self-test that reports both numbers. */
 const char *blk_backend_name(void);
 
-void blk_read(uint32_t lba, uint32_t count, void *buf);
-void blk_write(uint32_t lba, uint32_t count, const void *buf);
+/* ---- Q16: these return now, and every one of them can fail ------------
+ *
+ * 0 on success, -1 if the device refused. Both were `void` from M92
+ * until Q16, which was accurate about a machine that had only ever run
+ * under an emulator whose disk does not fail: the drivers underneath
+ * halted, so there was nothing to report.
+ *
+ * A failed READ leaves the caller's buffer ZEROED rather than as it was
+ * found. That is a decision about a caller that ignores the return
+ * value, and there will be one: zeros are not a valid superblock, inode
+ * or directory entry, so such a caller fails its next check instead of
+ * following a pointer made of whatever was in its buffer.
+ *
+ * A WRITE that the cache absorbed returns success and means it - the
+ * cache has taken responsibility for those bytes, and blk_flush is where
+ * the device gets its say. That is M104's contract unchanged; Q16 only
+ * makes its failures visible. A line that fails to write back stays
+ * DIRTY, so the next barrier retries it and an eviction will not discard
+ * it. */
+int blk_read(uint32_t lba, uint32_t count, void *buf);
+int blk_write(uint32_t lba, uint32_t count, const void *buf);
+
+/* Q16: a disk that fails on purpose, and how many times it has.
+ *
+ * `blk_fault_inject(r, w)` makes the r'th device read and the w'th
+ * device write from now on fail, and every one after it; -1 for either
+ * means "never". Both counters restart on every call, and
+ * `blk_fault_inject(-1, -1)` puts the disk back.
+ *
+ * A counter rather than a probability, deliberately: "the tenth write
+ * from now" is reproducible and "one write in ten" is not, and a
+ * reproducible failure is the difference between a test and an anecdote.
+ * It lives at this layer because this is where the two drivers meet, so
+ * one test grades whichever backend the machine actually has -
+ * `QEMU_DISK=ide` and virtio are supported paths on the same terms.
+ *
+ * blk_error_count is the number a machine with an occasionally-failing
+ * disk reports and one with a healthy disk does not, which is what makes
+ * the two distinguishable from outside. */
+void blk_fault_inject(int64_t fail_reads_after, int64_t fail_writes_after);
+uint64_t blk_error_count(void);
 
 /* M92: the cache's own numbers, so the milestone can report a ratio
  * rather than an adjective. Hits and misses since boot, and the count of
@@ -81,7 +120,7 @@ void blk_stats(blk_stats_t *out);
  *
  * Called by vfs_sync, SYS_fsync, SYS_sync, the shutdown path, and by
  * leanfs's own save_meta and save_superblock. */
-void blk_flush(void);
+int blk_flush(void);
 
 /* M104: how many lines to fetch past the end of a sequential read. 0
  * disables it, which is what the milestone's own measurement compares

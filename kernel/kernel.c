@@ -122,7 +122,8 @@
     X(proftest)                    \
     X(oomtest)                                                                \
     X(futextest)                   \
-    X(fswriter)
+    X(fswriter)                    \
+    X(ptytest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -10022,6 +10023,149 @@ static void boot_selftests_system(void) {
                    "rejected - self-test passed.\n\n");
     }
 
+    /* ---- Q16 self-test: a disk that fails, and a machine that does not --
+     *
+     * Six halts in two block drivers and three in the NIC were device
+     * errors, and every one of them stopped the machine. Under QEMU they
+     * never fire, which is exactly why they survived ninety milestones
+     * with nothing on the other side of them ever executing.
+     *
+     * This is that other side, executed. The fault is injected at the
+     * block layer (kernel/drivers/blk.h) rather than in either driver,
+     * so this test grades whichever backend the machine actually has -
+     * `QEMU_DISK=ide` runs it through kernel/drivers/ata.c and the
+     * default runs it through virtio, and neither needs a word of its
+     * own here.
+     *
+     * The bar the milestone sets: a disk that fails every write from the
+     * tenth onward leaves a machine that reports an error, keeps its
+     * desktop, and mounts to a consistent filesystem afterwards.
+     */
+    {
+        int all_ok = 1;
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        uint64_t errors_before = blk_error_count();
+        static char q16_buf[4096];
+
+        /* A baseline, so a "the write failed" result below is known to
+         * mean the fault and not the path. */
+        k_memset(q16_buf, 'a', sizeof(q16_buf));
+        if (vfs_write("/tmp/q16-before", q16_buf, sizeof(q16_buf)) != 0) {
+            klog_puts("[q16] a healthy disk refused an ordinary write\n");
+            all_ok = 0;
+        }
+
+        /* ---- every write from now on fails ---------------------------- */
+        if (all_ok) {
+            blk_fault_inject(-1, 0);
+            k_memset(q16_buf, 'b', sizeof(q16_buf));
+            int rc = vfs_write("/tmp/q16-during", q16_buf, sizeof(q16_buf));
+            blk_fault_inject(-1, -1);
+
+            if (rc == 0) {
+                klog_puts("[q16] a write to a disk that refuses every write reported success\n");
+                all_ok = 0;
+            }
+            if (all_ok && blk_error_count() <= errors_before) {
+                klog_puts("[q16] the disk failed and nothing counted it\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- and the machine is still here ---------------------------- */
+        if (all_ok) {
+            /* The file written before the fault is still readable, which
+             * is the half that says the failure was contained: a
+             * filesystem that lost an unrelated file to a failed write
+             * elsewhere would pass every check above. */
+            k_memset(q16_buf, 0, sizeof(q16_buf));
+            int64_t n = vfs_read("/tmp/q16-before", q16_buf, sizeof(q16_buf));
+            if (n != (int64_t)sizeof(q16_buf) || q16_buf[0] != 'a' ||
+                q16_buf[sizeof(q16_buf) - 1] != 'a') {
+                klog_puts("[q16] a file written before the fault did not survive it\n");
+                all_ok = 0;
+            }
+        }
+        if (all_ok) {
+            k_memset(q16_buf, 'c', sizeof(q16_buf));
+            if (vfs_write("/tmp/q16-after", q16_buf, sizeof(q16_buf)) != 0) {
+                klog_puts("[q16] the disk recovered and the filesystem did not\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- a read that fails is a read that says so ----------------- */
+        if (all_ok) {
+            /* Cold, or the cache answers and the device is never asked -
+             * which is the cache working and would make this test pass
+             * without touching the path it is about. */
+            blk_cache_drop();
+            blk_fault_inject(0, -1);
+            k_memset(q16_buf, 'z', sizeof(q16_buf));
+            int64_t n = vfs_read("/tmp/q16-before", q16_buf, sizeof(q16_buf));
+            blk_fault_inject(-1, -1);
+            if (n >= 0) {
+                klog_puts("[q16] a read from a disk that refuses every read reported success\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- and the zero-fill, asked of the block layer itself -------
+         *
+         * Not of vfs_read, and the reason is a finding rather than a
+         * detail: the FIRST read that call makes is not the file's data,
+         * it is the directory, because resolving a path walks one. So a
+         * disk that refuses every read fails the lookup and returns
+         * before a byte of the caller's buffer is touched - which is
+         * correct, and is not what blk.h's zero-fill contract is about.
+         * That contract is between the block layer and whoever calls it,
+         * so it is asked there. */
+        if (all_ok) {
+            static uint8_t q16_raw[BLK_SECTOR_SIZE];
+            k_memset(q16_raw, 'z', sizeof(q16_raw));
+            blk_cache_drop();
+            blk_fault_inject(0, -1);
+            int rc = blk_read(0, 1, q16_raw);
+            blk_fault_inject(-1, -1);
+            if (rc == 0) {
+                klog_puts("[q16] the block layer reported success on a refused read\n");
+                all_ok = 0;
+            }
+            if (all_ok && q16_raw[0] == 'z') {
+                klog_puts("[q16] a failed read left the caller's buffer as it found it\n");
+                all_ok = 0;
+            }
+        }
+
+        /* ---- and the filesystem is consistent ------------------------- */
+        if (all_ok) {
+            blk_cache_drop();
+            if (vfs_check() != 0) {
+                klog_puts("[q16] the filesystem is inconsistent after a disk that failed\n");
+                all_ok = 0;
+            }
+        }
+
+        vfs_unlink("/tmp/q16-before");
+        vfs_unlink("/tmp/q16-during");
+        vfs_unlink("/tmp/q16-after");
+        blk_fault_inject(-1, -1);
+
+        if (!all_ok) {
+            panic("Q16 self-test: this machine does not survive a disk that fails");
+        }
+        klog_puts("[q16] devices that fail, and a machine that keeps running: a write to a "
+                   "disk that refuses every write reported an error and was counted, a file "
+                   "written before it survived, the next write after it succeeded, a failed "
+                   "read reported an error and left zeros rather than stale bytes at the "
+                   "block layer and an error at the filesystem, and the "
+                   "filesystem is consistent afterwards - through ");
+        klog_puts(blk_backend_name());
+        klog_puts(" - self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
+    }
+
     /* ---- M78 self-test: memory that can be given back -------------------
      *
      * /bin/mmaptest carries the assertions a *program* can make - that a
@@ -11617,34 +11761,42 @@ static void boot_selftests_system(void) {
             tty->tio.c_lflag = saved;
         }
 
-        /* ---- ^C, ^Z and SIGCONT: built, and NOT tested here -------------
+        /* ---- ^Z and SIGCONT: driven from user space, not from here -----
          *
-         * This is the honest state of M85 and it is written here rather
-         * than left as an absence.
+         * M85's first attempt left job control untested, recorded that
+         * its test hung the boot, and wrote down what to try next:
+         * *"raise SIGTSTP directly with sched_raise_signal on a spawned
+         * task and check the state transition, with no terminal involved
+         * at all."* That was tried here, and it is written down because
+         * it did not work and the reason is worth more than the test
+         * would have been:
          *
-         * The mechanism exists and is described at length in
-         * kernel/dev/tty.c and kernel/sched/sched.c: TASK_STOPPED,
-         * pending_stop taken at the same two points a fatal signal is,
-         * sched_resume_stopped as the only thing that undoes it,
-         * SIG_DEFAULT_ACTION's four rows, and tty_signal_foreground
-         * raising on a process group. What is missing is a boot self-test
-         * that drives it end to end.
+         * **The observation, stated without a cause, because the cause
+         * is not known:** jobtest was spawned here, SIGTSTP was raised
+         * on it, and four seconds of real time later it was still
+         * TASK_READY with `pending_stop` still set - it had executed no
+         * instructions and printed nothing, and neither had `tcp-timer`,
+         * which was also READY the whole time. The self-tests that spawn
+         * a child and block in SYS_wait (M83, M84) work; this one waits
+         * with SYS_waitfds and the child never ran.
          *
-         * The test that was written for it spawned /bin/jobtest, handed
-         * it the terminal, and fed ^Z - and it hung the boot with no
-         * output at all, before even the first marker it prints. It was
-         * removed rather than left in: a self-test that hangs the machine
-         * is worse than no self-test, because it takes every milestone
-         * after it down too. The line discipline above is real coverage
-         * and passes; this half is not covered and saying so is the point
-         * of this comment.
+         * What that is NOT: the stop machinery. Q13 compiles this
+         * scheduler for a host and drives it a tick at a time, and
+         * round-robin, the blocked/stopped states and the stop
+         * checkpoints all hold there. So the difference is in how this
+         * self-test waits rather than in what it is waiting for - and a
+         * test that cannot tell those two apart is exactly what M85's
+         * first attempt was warning about, which is why this one was
+         * removed rather than adjusted until it passed.
          *
-         * What the next attempt should do first, because it is the
-         * cheapest thing that would have told me: raise SIGTSTP directly
-         * with sched_raise_signal on a spawned task and check the state
-         * transition, with no terminal involved at all. That separates
-         * "the stop machinery is wrong" from "the terminal path into it
-         * is wrong", which the test as written could not tell apart. */
+         * So job control is graded where it actually lives: /bin/ptytest
+         * below stops a child with a ^Z typed at a terminal, sees it
+         * stopped through waitpid(WUNTRACED), resumes it with SIGCONT and
+         * watches it finish. The parent there blocks in waitpid, which is
+         * the path that works - and it exercises the terminal, the
+         * foreground group, the signal and the scheduler at once, which
+         * is more than the check written here would have.
+         */
 
         /* ---- a background job that reads is stopped, not served -------
          *
@@ -11681,13 +11833,116 @@ static void boot_selftests_system(void) {
             tty_read(tty, drain, sizeof(drain));
         }
 
+        /* ---- M85's sixth bullet: a terminal with no hardware -----------
+         *
+         * The pty, which is the one thing M85 shipped without and the
+         * oldest open box in this half of the file. Two checks, in two
+         * places, because they fail for different reasons:
+         *
+         * Here, from the kernel: /dev/ptmx is a path that produces a
+         * terminal, /dev/pts/<n> appears when it does, and the two ends
+         * carry bytes in both directions. This is the devfs wiring, and
+         * it can be wrong while everything in user space is right.
+         *
+         * Below, from /bin/ptytest: the whole thing as a program sees it
+         * - openpty, a fork, a controlling terminal, the line discipline,
+         * ^C reaching the foreground group, and a hangup that ends a read
+         * rather than blocking it. */
+        if (all_ok) {
+            int mh = vfs_open("/dev/ptmx", 0);
+            if (mh < 0) {
+                klog_puts("[m85] /dev/ptmx would not open\n");
+                all_ok = 0;
+            } else {
+                /* The slave's path exists now and did not before, which
+                 * is the check that /dev/pts is a directory whose
+                 * contents follow the pairs rather than a fixed list. */
+                if (!vfs_exists("/dev/pts/0")) {
+                    klog_puts("[m85] /dev/pts/0 did not appear when a pty was made\n");
+                    all_ok = 0;
+                }
+                int sh_ = vfs_open("/dev/pts/0", 0);
+                if (sh_ < 0) {
+                    klog_puts("[m85] the slave end of a fresh pty would not open\n");
+                    all_ok = 0;
+                } else {
+                    char got[16];
+                    k_memset(got, 0, sizeof(got));
+                    /* Master -> discipline -> slave. "hi" then Enter,
+                     * and nothing readable at the slave until the Enter
+                     * - the same rule the console obeys above. */
+                    vfs_handle_write(mh, "hi", 2, 0);
+                    if (vfs_handle_readable(sh_)) {
+                        klog_puts("[m85] a pty delivered a half-typed line to its slave\n");
+                        all_ok = 0;
+                    }
+                    vfs_handle_write(mh, "\n", 1, 0);
+                    int64_t n = vfs_handle_read(sh_, got, sizeof(got) - 1, 0);
+                    if (n != 3 || got[0] != 'h' || got[1] != 'i' || got[2] != '\n') {
+                        klog_puts("[m85] a line typed at a pty master did not arrive whole at the slave\n");
+                        all_ok = 0;
+                    }
+                    /* Slave -> master, with ONLCR: two bytes written and
+                     * three arrive, which is output processing happening
+                     * on this path rather than somewhere else. */
+                    k_memset(got, 0, sizeof(got));
+                    vfs_handle_write(sh_, "y\n", 2, 0);
+                    n = vfs_handle_read(mh, got, sizeof(got) - 1, 0);
+                    if (n < 3 || got[n - 2] != '\r' || got[n - 1] != '\n') {
+                        klog_puts("[m85] the slave's output did not reach the master with ONLCR\n");
+                        all_ok = 0;
+                    }
+                    /* The master closing hangs the slave up: readable
+                     * says yes and the read says zero, which is what
+                     * turns a wait into an end-of-file. */
+                    vfs_handle_close(mh);
+                    if (!vfs_handle_readable(sh_)) {
+                        klog_puts("[m85] a slave whose master closed would have blocked forever\n");
+                        all_ok = 0;
+                    }
+                    if (vfs_handle_read(sh_, got, sizeof(got) - 1, 0) != 0) {
+                        klog_puts("[m85] a hung-up pty slave did not read end-of-file\n");
+                        all_ok = 0;
+                    }
+                    vfs_handle_close(sh_);
+                }
+                /* And the pair goes back: eight is the ceiling, and a
+                 * terminal emulator that exits without giving one back
+                 * leaks it for the life of the boot. */
+                if (vfs_exists("/dev/pts/0")) {
+                    klog_puts("[m85] a pty was not recycled when both ends closed\n");
+                    all_ok = 0;
+                }
+            }
+        }
+
+        if (all_ok) {
+            size_t pt_bytes = 0;
+            uint8_t *pt_img = read_program(PATH_BIN_DIR "ptytest", &pt_bytes);
+            if (!pt_img) {
+                panic("M85 self-test: /bin/ptytest is not on this disk");
+            }
+            const char *pt_argv[] = {PATH_BIN_DIR "ptytest", 0};
+            task_t *pt = process_spawnv("ptytest", pt_img, pt_bytes, pt_argv);
+            long rc = pt ? do_syscall(SYS_wait, (uint64_t)pt->id, 0, 0) : -1;
+            kfree(pt_img);
+            if (rc != 0) {
+                klog_puts("[m85] ptytest exited ");
+                klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+                klog_puts(" - see user_space/bin/ptytest.c for what each code means\n");
+                all_ok = 0;
+            }
+        }
+
         if (!all_ok) {
             panic("M85 self-test: this machine's terminal is not a terminal");
         }
         klog_puts("[m85] a terminal that is a device: a line assembled with backspaces and "
                    "delivered whole only on Enter, nothing readable before it, ^U discarding "
-                   "it, ICANON off delivering a byte immediately, and a background job "
-                   "refused its terminal while the foreground job is served - self-test "
+                   "it, ICANON off delivering a byte immediately, a background job "
+                   "refused its terminal while the foreground job is served, SIGTSTP "
+                   "stopping a task and SIGCONT resuming it, and a pseudo-terminal "
+                   "carrying a line, an echo and a ^C between two processes - self-test "
                    "passed (");
         klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         klog_puts(" ms).\n\n");

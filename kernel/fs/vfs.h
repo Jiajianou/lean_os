@@ -100,6 +100,17 @@ int vfs_handle_truncate(int handle);
  * descriptor is not the last one until the refcount says so. */
 void vfs_handle_close(int handle);
 
+/* M85: would a read on this handle return without blocking? 1 for yes,
+ * which is the answer for every regular file and for every filesystem
+ * that supplies no readable hook. See vfs_ops_t.readable. */
+int vfs_handle_readable(int handle);
+
+/* M85: the terminal this handle names, or NULL. See vfs_ops_t.tty_of -
+ * this is how SYS_ioctl answers TCGETS on a descriptor open on
+ * /dev/pts/<n> rather than only on fd 0/1/2. */
+struct tty;
+struct tty *vfs_handle_tty(int handle, int *pty_number);
+
 /* M87: truncate to any length - see leanfs_handle_truncate_to. */
 int vfs_handle_truncate_to(int handle, uint32_t len);
 

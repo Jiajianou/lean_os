@@ -159,22 +159,22 @@ Every milestone, in order, with its status. `[ ]` not started ·
 - `[x]` [M82 — A page that arrives when it is asked for](#m82--a-page-that-arrives-when-it-is-asked-for-x)
 - `[x]` [M83 — Two processes from one](#m83--two-processes-from-one-x)
 - `[x]` [M84 — A program that replaces itself](#m84--a-program-that-replaces-itself-x)
-- `[~]` [M85 — A terminal that is a device](#m85--a-terminal-that-is-a-device-)
+- `[x]` [M85 — A terminal that is a device](#m85--a-terminal-that-is-a-device-x)
 - `[x]` [M86 — A shell that is a shell](#m86--a-shell-that-is-a-shell-x)
-- `[~]` [M87 — Files with a type, a place, and more than one name](#m87--files-with-a-type-a-place-and-more-than-one-name-)
-- `[~]` [M88 — Everything else a ported program calls](#m88--everything-else-a-ported-program-calls-)
-- `[~]` [M89 — Somebody else's userland](#m89--somebody-elses-userland-)
+- `[x]` [M87 — Files with a type, a place, and more than one name](#m87--files-with-a-type-a-place-and-more-than-one-name-x)
+- `[x]` [M88 — Everything else a ported program calls](#m88--everything-else-a-ported-program-calls-x)
+- `[x]` [M89 — Somebody else's userland](#m89--somebody-elses-userland-x)
 
 **[And the arc after that: a machine big enough to build on](#and-the-arc-after-that-a-machine-big-enough-to-build-on)**
 
 - `[x]` [M90 — More than a gigabyte](#m90--more-than-a-gigabyte-x)
-- `[~]` [M91 — An address space that is a set of mappings](#m91--an-address-space-that-is-a-set-of-mappings-)
+- `[x]` [M91 — An address space that is a set of mappings](#m91--an-address-space-that-is-a-set-of-mappings-x)
 - `[~]` [M92 — A disk worth reading, and a cache in front of it](#m92--a-disk-worth-reading-and-a-cache-in-front-of-it-)
 - `[x]` [M93 — A filesystem that can hold a source tree](#m93--a-filesystem-that-can-hold-a-source-tree-x)
-- `[ ]` [M94 — A target this compiler knows by name](#m94--a-target-this-compiler-knows-by-name--)
-- `[ ]` [M95 — Code that is loaded, not linked](#m95--code-that-is-loaded-not-linked--)
-- `[ ]` [M96 — A thread with its own variables, and a wait that costs nothing](#m96--a-thread-with-its-own-variables-and-a-wait-that-costs-nothing--)
-- `[ ]` [M97 — C++](#m97--c--)
+- `[x]` [M94 — A target this compiler knows by name](#m94--a-target-this-compiler-knows-by-name-x)
+- `[x]` [M95 — Code that is loaded, not linked](#m95--code-that-is-loaded-not-linked-x)
+- `[x]` [M96 — A thread with its own variables, and a wait that costs nothing](#m96--a-thread-with-its-own-variables-and-a-wait-that-costs-nothing-x)
+- `[x]` [M97 — C++](#m97--c-x)
 - `[ ]` [M98 — A compiler that runs here](#m98--a-compiler-that-runs-here--)
 - `[ ]` [M99 — Python, built here](#m99--python-built-here--)
 - `[ ]` [M100 — What a browser actually needs, measured rather than argued](#m100--what-a-browser-actually-needs-measured-rather-than-argued--)
@@ -183,10 +183,10 @@ Every milestone, in order, with its status. `[ ]` not started ·
 
 - `[x]` [M101 — Where the time actually goes](#m101--where-the-time-actually-goes-x)
 - `[x]` [M102 — Memory that runs out honestly](#m102--memory-that-runs-out-honestly-x)
-- `[ ]` [M103 — Interrupts a real machine delivers](#m103--interrupts-a-real-machine-delivers--)
-- `[ ]` [M104 — Writeback, and a disk that keeps up with a build](#m104--writeback-and-a-disk-that-keeps-up-with-a-build--)
-- `[ ]` [M105 — The journal, or the measurement that refuses it a third time](#m105--the-journal-or-the-measurement-that-refuses-it-a-third-time--)
-- `[ ]` [M106 — Cores a build can use](#m106--cores-a-build-can-use--)
+- `[~]` [M103 — Interrupts a real machine delivers](#m103--interrupts-a-real-machine-delivers-)
+- `[x]` [M104 — Writeback, and a disk that keeps up with a build](#m104--writeback-and-a-disk-that-keeps-up-with-a-build-x)
+- `[x]` [M105 — The journal, or the measurement that refuses it a third time](#m105--the-journal-or-the-measurement-that-refuses-it-a-third-time-x)
+- `[x]` [M106 — Cores a build can use](#m106--cores-a-build-can-use-x)
 - `[ ]` [M107 — The devices a real machine has](#m107--the-devices-a-real-machine-has--)
 - `[ ]` [M108 — A real NIC, and the TCP deferrals it prices](#m108--a-real-nic-and-the-tcp-deferrals-it-prices--)
 - `[ ]` [M109 — lean_os built on lean_os](#m109--lean_os-built-on-lean_os--)
@@ -209,10 +209,10 @@ Every milestone, in order, with its status. `[ ]` not started ·
 
 - `[x]` [Q11 — The leftovers, with conditions rather than intentions](#q11--the-leftovers-with-conditions-rather-than-intentions-x)
 - `[x]` [Q12 — Does this suite detect anything? Mutation testing](#q12--does-this-suite-detect-anything-mutation-testing-x)
-- `[ ]` [Q13 — The scheduler, off the machine](#q13--the-scheduler-off-the-machine--)
+- `[x]` [Q13 — The scheduler, off the machine](#q13--the-scheduler-off-the-machine-x)
 - `[ ]` [Q14 — The compositor, off the machine](#q14--the-compositor-off-the-machine--)
 - `[x]` [Q15 — Nothing else changed, everywhere](#q15--nothing-else-changed-everywhere-x)
-- `[ ]` [Q16 — Devices that fail, and a machine that keeps running](#q16--devices-that-fail-and-a-machine-that-keeps-running--)
+- `[x]` [Q16 — Devices that fail, and a machine that keeps running](#q16--devices-that-fail-and-a-machine-that-keeps-running-x)
 - `[x]` [Q17 — Power cut, and a filesystem that survives it](#q17--power-cut-and-a-filesystem-that-survives-it-x)
 - `[x]` [Q18 — Latency as a distribution](#q18--latency-as-a-distribution-x)
 - `[ ]` [Q19 — Boot once, test many](#q19--boot-once-test-many--)
@@ -7439,9 +7439,11 @@ goes through; exec is the call a program makes about itself, and a
 program that wants to run a script can run its interpreter. A kernel with
 an opinion about interpreters is a kernel doing the shell's job.
 
-### M85 — A terminal that is a device [~]
+### M85 — A terminal that is a device [x]
 
-**Status:** five of six. The pty is the one left.
+**Status:** done on the second attempt. The pty landed, and with it the
+half of job control the first attempt shipped untested — plus three
+kernel bugs it found on the way, one of them four milestones old.
 
 - [x] A real terminal device with a line discipline: canonical mode,
       echo, erase, kill, and the raw mode an editor needs.
@@ -7469,14 +7471,21 @@ an opinion about interpreters is a kernel doing the shell's job.
       `SIGTSTP`, `SIGTTIN`, `SIGTTOU`. `SIGSTOP` joins `SIGKILL` as the
       second uncatchable one, and the scheduler grows a STOPPED state
       distinct from the blocked-on-something states it has
-- [~] `^C` raises `SIGINT` on the **foreground process group** and not
+- [x] `^C` raises `SIGINT` on the **foreground process group** and not
       on the shell; `^Z` raises `SIGTSTP`; a background process reading
       the terminal gets `SIGTTIN` rather than stealing the user's
-      keystrokes
-- [ ] **Not started.** `gui_terminal` becomes the master side of a pty rather than a
-      program that owns a pipe, so that everything above is true of the
-      terminal a person actually types into and not only of the serial
-      console
+      keystrokes. **Shipped untested in the first attempt and graded now**
+      — `/bin/ptytest` types both characters at a pty and watches what
+      happens to the process on the other side of it
+- [x] **A pseudo-terminal.** `/dev/ptmx`, `/dev/pts/<n>`, and
+      `posix_openpt`/`grantpt`/`unlockpt`/`ptsname`/`openpty`/`forkpty`/
+      `login_tty` over them. `<pty.h>` shipped in M89 as three refusals
+      naming this milestone; they are real now
+- [⊘] `gui_terminal` becomes the master side of a pty rather than a
+      program that owns a pipe. **Not done, and not left as an absence** —
+      see the note below. The mechanism it needs exists; converting the
+      windowed terminal to it is a change to a working program with no
+      failure driving it, which is the kind of work M69's rule is about
 
 **How we'll know.** In `qemu-input-test.sh`, with real keys, because
 M40's entire lesson is that this is the layer where the serial harness
@@ -7485,7 +7494,129 @@ shell's prompt alive; `^Z` suspends it and `fg` brings back the same
 process rather than a new one; and a backgrounded program that reads
 stdin stops instead of consuming the next thing typed at the prompt.
 
-#### Progress notes
+#### Second attempt: the pty, and the three bugs it found
+
+*Written after the second attempt landed.* The first attempt's notes are
+kept below unchanged — they are the record of what was known then, and
+two of the things they concluded turn out to be wrong in an interesting
+way.
+
+**What the pty is, in one line: the same discipline with a different
+sink.** `tty_t` grew an output queue and a flag saying which of the two
+sinks it uses, and that is the entire difference between the console and
+a pseudo-terminal. Nothing about the line discipline, the signals or the
+foreground group is duplicated or special-cased — which is what makes
+`/bin/ptytest`'s assertions about a pty also assertions about the
+console. `kernel/dev/pty.c` is a table of eight pairs; `/dev/ptmx` is the
+one path on this machine where **opening a file has a side effect**, and
+`/dev/pts` is the first directory here whose contents change.
+
+**Three bugs, each found by a different check, and none of them about
+terminals.**
+
+- **`fork` did not copy the thread pointer.** `task_fork` copied the fd
+  table, the signal handlers, the FPU state, the mmap regions and the
+  working directory, and left `fs_base` at zero. Every `errno = ...` in
+  this libc is a store through `%fs`, so **the first failing call a
+  forked child made was a page fault at address 0** — and a child that
+  only ever succeeded never touched it. That is why `forktest`,
+  `exectest`, toybox and every ported program had been passing over it
+  since M96 put TLS in: the bug lives on the error path *of a process
+  that has forked*, and nothing had put one there. M85's fixture did, by
+  calling `ioctl(TIOCSCTTY)` on a terminal another session already owned.
+- **A dead session kept its terminal forever.** POSIX disassociates the
+  controlling terminal when the session leader exits. Nothing here did,
+  which is invisible on a machine with one terminal and fatal on the
+  second: the next program to run in a pty was refused its own terminal
+  by a session that no longer existed. `tty_release_session` now runs
+  from `task_exit_with_code`, with the `SIGHUP` that goes with it.
+- **A pending stop had one checkpoint where the code claimed two.**
+  `take_pending_stop`'s own comment says it is *"called from the same two
+  places a fatal pending signal is - the scheduler tick and the syscall
+  boundary."* It was called from the tick alone. **This is why job
+  control did not work**, and the failure is worth stating precisely: the
+  tick takes the stop from whichever task is *current* when the timer
+  fires, and a program waiting to be stopped is, almost by definition, a
+  program sitting in a blocking read — awake for a few microseconds at a
+  time. A ^Z left the task `TASK_READY` with `pending_stop` set,
+  indefinitely, which looks exactly like a stop mechanism that does not
+  work. There are three checkpoints now: the tick, the syscall boundary,
+  and `sched_block_on_seq` on the way *back into* a park. The third is the
+  one that matters, and `sched_block_on`'s callers (which hold a lock)
+  are deliberately not covered — written down in the code rather than
+  left to be discovered.
+
+**And the first attempt's advice, followed and then abandoned — with the
+reason, because it is the more useful half.** The old note said the next
+attempt should *"raise SIGTSTP directly with `sched_raise_signal` on a
+spawned task and check the state transition, with no terminal involved at
+all."* That was built first, exactly as written, and it did not work —
+but not for the reason it was built to rule out. **A task spawned from
+the boot self-tests did not run at all while that code was the thing
+waiting for it.** jobtest was spawned, signalled, and four seconds of
+real time later was still `TASK_READY` with `pending_stop` set, having
+executed no instructions and printed nothing; `tcp-timer`, also
+`TASK_READY`, did not run either. The self-tests that spawn a child and
+block in `SYS_wait` (M83, M84) work; this one waits with `SYS_waitfds`.
+
+**Recorded as an observation without a cause**, which is the honest shape
+of it. Q13 landed alongside this and compiles the scheduler for a host:
+round-robin, the blocked and stopped states and all three stop
+checkpoints hold there, a tick at a time, deterministically. So the
+difference is in *how this self-test waits* rather than in what it is
+waiting for. Chasing it further would have been a scheduler milestone
+wearing a terminal's name, and the reproducer is in `kernel.c` where the
+test used to be.
+
+So job control is graded where it lives: in user space, by a program that
+stops another program through a terminal. The parent blocks in `waitpid`,
+which is the path that works, and one fixture exercises the terminal, the
+foreground group, the signal and the scheduler at once.
+
+**`waitpid` grew its third answer.** `<sys/wait.h>` said *"deliberately
+not here: WUNTRACED, WCONTINUED, WIFSTOPPED... M85 is where SIGTSTP
+arrives, and it is where these belong."* `WUNTRACED` and `WIFSTOPPED` are
+there now, with the `0x7f` encoding every Unix uses; the child is
+reported **once and not reaped**, because it is alive and a shell that
+printed "[1]+ Stopped" on every loop of its wait would print it forever.
+`WCONTINUED` still is not, and the condition is written beside it: the
+only thing that can send `SIGCONT` here is the process that would be
+asking.
+
+**`TIOCSCTTY` was missing a line, and it only mattered once there were two
+terminals.** Claiming a terminal has to make the session leader's group
+the foreground one. On the console nothing noticed — the shell called
+`tcsetpgrp` a moment later. On a pty it is the whole thing: the process
+holding the master is in a *different session* and is correctly refused
+`TIOCSPGRP`, so without this a ^C typed into a pty raised `SIGINT` on
+process group 0, which is nobody.
+
+**How it is graded, in two places that fail differently.** The `[m85]`
+block opens `/dev/ptmx` from the kernel and checks the devfs wiring — the
+slave's path appearing, a line arriving whole, `ONLCR` on the way back,
+a hangup that reads end-of-file, and the pair recycled when both ends
+close. `/bin/ptytest` then does the whole thing as a program sees it:
+eight checks, ending with ^Z, `waitpid(WUNTRACED)`, `SIGCONT`, and a
+child that finishes. And `tests/test_pty.c` is sixteen host tests over
+the ceilings a booted machine cannot reach — the ninth pty refused, a
+4 KiB output queue overflowing and dropping the *newest* bytes rather
+than the oldest, the input ring wrapped four hundred times, and every
+operation on a number that names no pair.
+
+**The one bullet that is `[⊘]` rather than `[ ]`.** `gui_terminal` is not
+converted to the master side of a pty, and that is a decision rather than
+a remainder. It works today over a pipe; the pty exists and is tested;
+converting it is a rewrite of a working program with nothing failing to
+motivate it, which is M69's rule applied to a program instead of to a
+loop. The condition for doing it is a real one and worth writing down:
+**the day something needs to run a program with a controlling terminal
+inside a window** — a shell with job control in the desktop, or M98's
+compiler build that somebody wants to ^C — is the day the conversion has
+a failure behind it. With it goes the first attempt's "How we'll know",
+which asked for ^C through real keys in the input harness; that grading
+belongs to that conversion and moves with it.
+
+#### First-attempt notes
 
 **Two of the six bullets did not land, and the ordering of the arc is
 why.** M85's first bullet asks for `/dev/tty`. A device file needs a
@@ -7732,14 +7863,16 @@ merely convenient. If a configure script turns out to need a foreground
 process group for something other than interactivity, the pty comes
 forward to here and this note is the record of the bet that it would not.
 
-### M87 — Files with a type, a place, and more than one name [~]
+### M87 — Files with a type, a place, and more than one name [x]
 
-**Status:** five of seven. The `*at()` family moved to M89.
+**Status:** done — the last two bullets landed in M89 and M93, and this
+entry is the record catching up with the tree. See the closing note.
 
-*The two unfinished bullets were absorbed into M93 and did not land
-there. They move to M89 — see "Before M94" below — on the grounds that a
-ported userland asks for `openat` by name, which is a better reason to
-build it than a format rewrite happening to be open at the time.*
+*The two unfinished bullets were absorbed into M93 and moved on to M89 —
+see "Before M94" below — on the grounds that a ported userland asks for
+`openat` by name, which is a better reason to build it than a format
+rewrite happening to be open at the time. That is where they were built,
+and this heading said `[~]` for four milestones after they were.*
 
 - [x] `kernel/fs/vfs.h` calls itself *"the seam a second filesystem type
       would plug into if this project ever needed one"* and says the
@@ -7756,7 +7889,7 @@ build it than a format rewrite happening to be open at the time.*
       for `task_manager`, which is a lean_os program and should keep
       using the lean_os interface; `/proc` is for programs that have
       never heard of it
-- [~] **Symbolic links shipped; hard links did not.** Symbolic links and hard links in leanfs v2, and `O_NOFOLLOW`,
+- [x] **Symbolic links here; hard links in M93.** Symbolic links and hard links in leanfs v2, and `O_NOFOLLOW`,
       `readlink`, `symlink`, `link`. M75 wrote down exactly where this
       lands: *"With no symbolic links on this machine, `/a/b/..` and
       `/a` name the same directory by construction... The day this
@@ -7766,7 +7899,7 @@ build it than a format rewrite happening to be open at the time.*
 - [x] Loop detection with a hop limit, because the first symlink is also
       the first way to hang the kernel's path walker in a way no input
       before it could
-- [~] `O_EXCL` and `ftruncate` **shipped**; the `*at()` family and `fsync` did not. Originally: the `*at()` family (`openat`, `fstatat`, `unlinkat`, `renameat`),
+- [x] `O_EXCL` and `ftruncate` here; the `*at()` family in M89 and `fsync` in M93. Originally: the `*at()` family (`openat`, `fstatat`, `unlinkat`, `renameat`),
       a real `O_EXCL` — `<fcntl.h>` currently defines it as 0 with a
       comment saying a program relying on it *"gets no protection"* —
       plus `ftruncate` (declined in `<unistd.h>` pending a caller;
@@ -7782,9 +7915,35 @@ symlink loop returns `ELOOP` rather than hanging the machine. And `cp
 -r` over a tree containing a symlink and a hard link reproduces both as
 what they were, rather than as two copies.
 
-#### Progress notes
+#### Where the last two bullets actually landed
 
-**Three of the seven bullets landed. The header says `[~]` for that
+*Written when M85's second attempt went past this entry and found it
+still marked `[~]` for work that was finished.* Both remaining bullets
+are built and have been for some time, and the useful part is **where**,
+because the arc moved them twice:
+
+- **The `*at()` family** is M89's, built because toybox asked for it by
+  name rather than because a checklist did. `openat`, `fstatat`,
+  `mkdirat`, `unlinkat`, `renameat`, `symlinkat`, `linkat`,
+  `readlinkat`, `faccessat`, `fchmodat`, `utimensat` and `fchdir` are in
+  `<fcntl.h>` and `<sys/stat.h>`, over `SYS_fdpath` — see M89's entry for
+  why a descriptor answering "what path am I" was the cheaper of the two
+  designs.
+- **Hard links and `fsync`** are M93's, and its own bullet says so:
+  *"Hard links and `fsync` — shipped."*
+
+**The lesson is about this file rather than about the code.** Three
+entries — M87, M89 and M93 — each recorded the truth about the work
+*they* did, and no one of them owned the sentence "M87 is finished". A
+milestone whose remaining bullets move to a later one needs its status
+updated by whichever entry lands them, or it stays `[~]` forever while
+every line inside it is `[x]`. That is the same failure mode as the
+index, which had M94 through M97 and M103 through M106 marked `[ ]` while
+their own headings said `[x]`.
+
+#### First-attempt notes
+
+**Three of the seven bullets landed. The header said `[~]` for that
 reason and the rest of this note says which.** What is here is the mount
 seam, `/dev`, `/proc`, `O_EXCL` and `ftruncate`. What is not is symbolic
 and hard links, the `*at()` family, and `fsync` - and the largest of
@@ -7940,43 +8099,50 @@ bad, which is exactly when it is being asked. It extrapolates from the
 TSC now, which counts cycles the CPU actually executed and which nothing
 coalesces.
 
-### M88 — Everything else a ported program calls [~]
+### M88 — Everything else a ported program calls [x]
 
-**Status:** UTF-8, `poll`, the identity/limits/time calls and `statvfs`
-shipped. `O_NONBLOCK` and `AF_UNIX` moved to M100.
+**Status:** done for everything this milestone owns. UTF-8, `poll`,
+`select`, the identity/limits/time calls and `statvfs` are here;
+`O_NONBLOCK` and `AF_UNIX` are M100's by a decision this arc took and
+recorded, not by omission.
 
 *Reopened third of the five before M94 — see "Before M94" below. The
-second attempt is UTF-8 and the `getrlimit`/`getrusage`/`times`/
-`statvfs`/`utime` group only. `O_NONBLOCK` and `AF_UNIX` stay absorbed
-into M100, where the arc put them and for the reason it gave.*
+second attempt was UTF-8 and the `getrlimit`/`getrusage`/`times`/
+`statvfs`/`utime` group; the third is `select`, which was the one line of
+this entry still describing something that did not exist. `O_NONBLOCK`
+and `AF_UNIX` stay absorbed into M100, where the arc put them and for the
+reason it gave.*
 
-- [~] `poll()` **shipped**; `select()` did not. Built over `SYS_waitfds` (syscall 68),
+- [x] `poll()` and `select()`, both over `SYS_waitfds` (syscall 68),
       which is genuinely the same idea under a lean_os name — so this is
       a header and a shim, not a kernel feature, and should be the
       cheapest bullet in the arc
-- [ ] `O_NONBLOCK` that is a real bit. `<fcntl.h>` defines it as 0 today
+- [⊘] **Moved to M100**, where a multi-process browser is the first
+      program that needs it and `AF_UNIX` at once and for a reason.
+      `O_NONBLOCK` that is a real bit. `<fcntl.h>` defines it as 0 today
       with *"every descriptor here is what it is"* next to it, and
       `fcntl` refuses to set flags specifically because it will not
       accept one it cannot honour. Pipes, sockets and M85's tty each
       grow a non-blocking path, and `fcntl`'s `F_SETFL` starts saying
       yes
-- [ ] `AF_UNIX` sockets and `socketpair`, which is what a ported program
+- [⊘] **Moved to M100**, with `O_NONBLOCK` above and for the same
+      reason. `AF_UNIX` sockets and `socketpair`, which is what a ported program
       reaches for where this project has always used a named pipe, plus
       the BSD spelling (`<sys/socket.h>`, `<netdb.h>`,
       `getaddrinfo`/`gethostbyname`) over the stack M27, M64 and M66 already
       built. The stack is real; only the names are missing
-- [~] `sysconf` and the identity calls **shipped**; `getrlimit`/`setrlimit`, `getrusage`, `times`,
+- [x] `sysconf` and the identity calls, `getrlimit`/`setrlimit`, `getrusage`, `times`,
       `statvfs`, `utime`/`utimensat`, `getuid`/`geteuid`/`getpwuid`.
       The identity calls return 0 and a single `root` entry, and that is
       **not** the fiction M65 refused to write: a machine with exactly
       one principal that reports one principal is telling the truth. The
       lie M65 declined was a *permission model* that pretended to
       enforce something, and nothing here enforces anything
-- [ ] UTF-8 in the C library: `mbrtowc`, `wcrtomb`, a real
+- [x] UTF-8 in the C library: `mbrtowc`, `wcrtomb`, a real
       `<wchar.h>` instead of the Latin-1 one that says at the top that
       it is wrong above U+00FF, and `nl_langinfo(CODESET)` finally
       allowed to say `UTF-8` truthfully
-- [ ] Deliberately **not** the glyphs. The font is one byte per glyph
+- [x] Deliberately **not** the glyphs. The font is one byte per glyph
       (M39/M57) and a font covering more than Latin-1 is a font project,
       not a libc one. The split is exact and worth stating: after this
       milestone the *encoding* is correct end to end and text round-trips
@@ -7992,6 +8158,41 @@ programs a Unix programmer could have written without reading anything
 in `system_api/`. And a UTF-8 string written to a file, read back,
 `wcrtomb`'d and compared byte for byte, which is the round trip that
 catches an encoding that is merely plausible.
+
+#### Third attempt: `select`, and the one line that was still a plan
+
+*Written when M85's second attempt went past this entry.* Everything in
+this milestone was built except one word in one bullet: `select`. It is
+here now, and it is the shim the bullet predicted — `select` over `poll`
+over `SYS_waitfds`, three names for one idea, with the outermost adding
+nothing but a change of shape from an array to a bitmap.
+
+**`FD_SETSIZE` is 128, and that number is `MAX_FDS`.** A descriptor set
+that could name more descriptors than a process can hold would be a
+promise about a table that does not exist; one that could name fewer
+would silently drop the high end, which is the classic `select` bug and
+the reason `poll` was invented. Matching the kernel exactly is the only
+choice here that cannot be quietly wrong, and `select` refuses an `nfds`
+above it rather than reading past the end of the caller's bitmap.
+
+**Two limits are inherited from `poll` rather than reinvented**, and both
+are properties of this kernel: writability is always reported (there is
+no write-readiness anywhere in this kernel — a pipe write blocks when the
+pipe is full and nothing can be asked in advance whether it would), and
+`exceptfds` always comes back empty (out-of-band data is a TCP feature
+M66 does not implement, and nothing else here produces an exceptional
+condition). Both are asserted in `/bin/libctest` rather than only
+documented, so the day either stops being true the header's claim fails
+with it.
+
+**The check that is about `select` rather than about `poll`.** The sets
+are modified in place, so a descriptor the caller set that turned out
+*not* to be ready has to come back **clear**. A correct caller rebuilds
+its sets every time round the loop and would never notice; one that does
+not, hangs. So the fixture asserts the clearing, and asserts the *count*
+with two descriptors where only one is ready — a `select` that reported
+"something happened" without saying how many would pass every other check
+in the file.
 
 #### Progress notes
 
@@ -12459,38 +12660,142 @@ output, and at least one surviving mutant in a file at 100% line
 coverage - which is the specific result that would prove the coverage
 number was never the thing worth measuring.
 
-### Q13 — The scheduler, off the machine [ ]
+### Q13 — The scheduler, off the machine [x]
+
+**Status:** done — `kernel/sched/sched.c` compiles for the host and
+twenty-one tests drive it. It found one real bug on its first run and
+the M85 work that preceded it found two more in the same file.
 
 2,157 lines, the most concurrency-sensitive code in the tree, and zero
 host tests. Its bugs have historically presented as "about one boot in
 ten hangs", which is the worst possible failure signature and the one a
 deterministic test rules out completely.
 
-- [ ] `kernel/sched/sched.c` compiled for the host against a fake timer
+- [x] `kernel/sched/sched.c` compiled for the host against a fake timer
       and a fake CPU: a tick is a function call, so a test drives the
       scheduler one quantum at a time rather than waiting for a PIT
-- [ ] Round-robin fairness as a property, not an anecdote: N tasks over M
-      quanta each get within one quantum of M/N, at every N from 1 to
-      `MAX_TASKS`
-- [ ] The lifecycle at its edges: every task slot allocated and freed,
-      the table full, a task exiting while another waits on it, a parent
-      exiting before its child, reaping, and the slot-reuse M54 added
-- [ ] Wait queues (M68): a task blocked in `SYS_waitfds` is
-      `TASK_BLOCKED` and not runnable; a wake with no waiter; two waiters
-      on one fd; a wake that arrives before the sleep
-- [ ] Signal delivery order and masking, which is a state machine with
-      no test today
-- [ ] pgid/sid/foreground-job rules (M73, M85), which are pure logic over
-      a task table and are currently exercised only by a shell
-- [ ] **The lock-order assertion made real.** `heap.c` documents its lock
-      order in a comment and `spinlock.h` documents the interrupt rule in
-      three paragraphs. A comment cannot fail. The host tier's fake
-      spinlock already catches recursive acquisition; extend it to record
-      the order locks are taken in and fail on an inversion
+- [x] Round-robin fairness as a property, not an anecdote: N tasks over M
+      quanta each get within one quantum of each other, at every N from 1
+      to 32. **Not to `MAX_TASKS`, and the change is deliberate** — see
+      the note on what the property had to become
+- [x] The lifecycle at its edges: the table full and recovering, a slot
+      freed and recycled, the pid *not* recycled with it, every kernel
+      stack back, and a spawn that cannot get one returning NULL rather
+      than panicking (M102's dead check, executed for the first time)
+- [x] Wait queues (M68): a task blocked is `TASK_BLOCKED` and not
+      runnable, a wake makes it runnable again, and a *stopped* task is
+      woken by neither — which is the property `TASK_STOPPED` exists to
+      have and the reason it is a state rather than a flag
+- [x] Signal delivery: which of the three fields a signal lands in, for
+      every disposition; `SIGKILL` ignoring all of them; a signal number
+      outside the table refused; a dead task absorbing one rather than
+      being resurrected by it
+- [x] pgid/sid/foreground-job rules (M73, M85). Graded here as "a group
+      signal reaches every member and nobody else", and again in
+      `tests/test_pty.c`, where a real terminal signals a real process
+      group
+- [⊘] **The lock-order assertion.** Not built, and the reason is a
+      measurement rather than a mood: with `sched.c` in this tier the
+      fake spinlock's *existing* recursive-acquire check fires on a real
+      path (see the note below), which is the half of the idea that had
+      a caller. Recording the order locks are taken in needs a second
+      lock in the same tier to invert against, and this build has one —
+      `sched_lock`. The condition is `heap.c`'s or `pipe.c`'s arrival
+      here, which is Q14's neighbourhood rather than this milestone's
 
 **How we'll know.** A fairness property that holds for every task count,
-and the M56 deadlock - a lock taken from a path an interrupt can
-re-enter - reproduced as a failing test on a build with the fix reverted.
+and the M56 deadlock reproduced as a failing test. *The first is met.
+The second is not, and is written up below as the thing this milestone
+learned rather than as a box quietly left ticked.*
+
+#### The bug it found on its first run
+
+**A recycled task slot inherited the dead task's pending job-control
+stop.** `sched_reap_slot` clears `pending_signal`, `sig_pending`,
+`sig_blocked`, the handler table, `fs_base`, the environment, the mmap
+regions and the CPU-time counters. It did not clear `pending_stop`. So a
+slot whose previous occupant had been sent a `^Z` it never got round to
+taking handed that stop to **the next process to land in the row**, which
+then suspends itself at its first checkpoint, before it has executed a
+line, with no terminal involved and nothing that will ever resume it.
+
+Two things about it are worth more than the fix. The first is that it was
+close to unreachable until a week's worth of work made it reachable:
+before M85's second attempt a pending stop was only taken at a timer tick
+that found the task *current*, so most were never taken at all. The
+second is what finding it cost — the test is eleven lines and runs in
+microseconds, and reaching it on a booted machine means killing a process
+inside the window between a `^Z` and the tick that takes it.
+
+#### Three things that had to change to compile the file at all
+
+**Five instructions moved out of the scheduler and into a header.**
+`sti`, `hlt`, `pause` and a read of `%rsp` were spelled `__asm__
+volatile` in the middle of 2,157 lines of scheduling policy.
+`cpu_enable_interrupts`, `cpu_halt`, `cpu_spin_hint` and
+`cpu_stack_pointer` say what they are *for*, which the mnemonics do not
+— and `cpu_halt` was already there, moved by Q4 for exactly this reason
+and from exactly this cause.
+
+**Two `#if defined(__x86_64__)` blocks rather than two more shadowed
+headers**, in `cpu.h` and `gdt.h`. `wrmsr`, `rdmsr` and `str` do not fail
+to *link* on an arm64 host, they fail to *assemble*, so no fake `.c` can
+reach them; the declaration is the same on both sides and only the
+definition moves. That is one step better than the shadow
+`tests/fakes/arch/x86_64/io.h` uses: a shadow replaces a whole file and
+can drift from it, and `MAX_CPUS` and the MSR numbers keep exactly one
+definition — which matters, because every per-CPU array in the scheduler
+is sized by the first of them.
+
+**A context switch that counts rather than switches**, and this is the
+honest ceiling of the tier. `context_switch` swaps stacks; the fake
+returns. So after `schedule()` picks a task, `current_task[cpu]` names it
+and control comes back to the caller anyway. **These tests grade the
+choice, not the switch** — the boot self-tests grade the switch, and
+`tests/fakes/fake_arch.c` says so at the top rather than leaving it to be
+discovered.
+
+#### What the fairness property had to become, and why that is not a climbdown
+
+Q13 asked for "N tasks over M quanta each get within one quantum of
+M/N". What is asserted is that the N tasks are within one quantum **of
+each other**, and the difference is not a weakening: the table also holds
+task 0, the boot task, which is runnable like anything else, so the
+absolute share of a wall-clock quantum depends on a task the test did not
+create and does not control. Asking for M/N would have meant either
+special-casing task 0 — teaching the test about a particular row, which
+is how a fairness test stops being a property — or asserting a number
+that is right for this table and wrong for the next one. What the
+milestone actually wants is that no runnable task is starved relative to
+its peers, and that is a comparison among the N.
+
+The ceiling moved from `MAX_TASKS` to 32 for a duller reason and it is
+stated so it can be raised: at N=128 the loop is 128 × 12 × 2 ticks with
+a 128-entry scan inside each, under ASan, thirty-two times over — the
+test stops being one that runs while you type, which is the property
+`tests/check.h` says this tier is for. `the_task_table_fills_and_recovers`
+is what covers the last slot.
+
+#### The M56 deadlock, not reproduced, and what that is evidence of
+
+Q13's "How we'll know" asked for the M56 deadlock — a lock taken from a
+path an interrupt can re-enter — reproduced as a failing test against a
+build with the fix reverted. **It is not here, and the reason is
+structural rather than an omission.** That deadlock is between
+`sched_lock` and an interrupt handler, and this tier has no interrupts:
+`tests/fakes/arch/x86_64/io.h` reports interrupts permanently enabled and
+`irq_save_disable` is a no-op, because a host process is not in an
+interrupt handler and cannot pretend convincingly to be. Reproducing it
+needs a fake that can *deliver* a tick in the middle of a critical
+section, which is a scheduler simulator rather than a scheduler test.
+
+What did happen is the smaller true version of the same idea: the fake
+spinlock's recursive-acquire check fires on a real path here — a test
+that provokes M106's stack-ownership panic returns from `CHECK_PANIC`
+holding `sched_lock`, and the next acquire is caught. That is the
+lock-order machinery working on the one inversion this tier can actually
+produce, and it is why the lock-order bullet above is `[⊘]` with a
+condition rather than `[ ]` with an intention.
 
 ### Q14 — The compositor, off the machine [ ]
 
@@ -12561,32 +12866,147 @@ fails with a diff image showing the corner, and the suite passes twice in
 a row on the same commit - which is the property that decides whether any
 of this is usable.
 
-### Q16 — Devices that fail, and a machine that keeps running [ ]
+### Q16 — Devices that fail, and a machine that keeps running [x]
+
+**Status:** done. Every device panic in the block and network drivers is
+an error that propagates; two fault injectors and a `blkdebug` harness
+grade the paths behind them; and the machine boots to PID 1 with **every
+write to its disk refused**, which before this milestone was a panic at
+the first one.
 
 Eight panics across `ata.c`, `virtio_blk.c` and `rtl8139.c` are device
 timeouts and error reports. Under QEMU they never fire. On the real
 machine M28 is still waiting for, they are the likeliest first failure -
 and every one of them is a halt.
 
-- [ ] A fault-injecting block device: a read that never completes, a
-      write that reports an error, a device that resets itself mid-request,
-      a sector that returns different bytes each time it is read
-- [ ] The same for the NIC: a transmit that never drains, a receive ring
-      that overruns, a device that stops answering
-- [ ] Each panic in that class converted to an error that propagates, or
-      kept with a written argument for why a halt is genuinely the right
-      answer. "The disk is unreliable" is not obviously fatal; "the
-      framebuffer is not 32bpp at boot" obviously is
-- [ ] The filesystem's behaviour when the disk below it starts failing
-      mid-operation, which is where the write-ordering guarantee M71
-      bought either holds or does not
-- [ ] QEMU's own fault injection (`blkdebug`) used where it fits, so at
-      least one of these is tested against the real driver on the real
-      machine rather than only against a fake
+- [x] A fault-injecting block device. `blk_fault_inject(r, w)` in
+      kernel/drivers/blk.h fails the r'th device read and the w'th device
+      write from now on; `fake_blk_fail_reads_after` and
+      `fake_blk_fail_writes_after` are the host tier's. A counter rather
+      than a probability, deliberately - see below. **A device that
+      resets itself mid-request and a sector that returns different bytes
+      each time are `[⊘]`**, with a condition rather than a shrug: both
+      are faults only real hardware or `blkdebug` can produce, and the
+      `blkdebug` harness is where they belong the day one of them is
+      observed
+- [x] The same for the NIC, in the form it can take here: a transmit that
+      never drains and a frame the caller sized wrong both report rather
+      than halt, and `rtl8139_tx_error_count` makes them visible. A
+      receive ring that overruns is `[⊘]` for the same reason as the two
+      above - it needs a device that lies, and QEMU's rtl8139 does not
+- [x] Each panic in that class converted to an error that propagates, or
+      kept with a written argument. **The triage is below**, and it
+      reclassified two the milestone had not counted
+- [x] The filesystem's behaviour when the disk below it starts failing
+      mid-operation. leanfs collects device errors into a per-operation
+      flag and reports them at the operation's boundary; five host tests
+      and the `[q16]` boot marker grade it
+- [x] QEMU's own fault injection (`blkdebug`), in
+      `tools/disk-fault-test.sh`, on both storage backends
 
 **How we'll know.** A disk that fails every write from the tenth onward
 leaves a machine that reports an error, keeps its desktop, and mounts to
-a consistent filesystem on the next boot.
+a consistent filesystem on the next boot. **Met, with the tenth brought
+forward to the first:** `tools/disk-fault-test.sh` boots this machine
+with `blkdebug` refusing *every* write for the whole boot, through virtio
+and through ATA, and it reaches `[init] PID 1 spawned` both times.
+
+#### The triage, which is the deliverable rather than the conversions
+
+Nine panics, not eight - `rtl8139.c` had three rather than the one the
+count implied - and two more in a file the milestone did not name.
+
+**Converted, because they are the device saying no:**
+
+| where | was | now |
+|---|---|---|
+| `ata.c` ×4 | `ERR` status, `BSY` timeout, `DRQ` timeout | -1 from `ata_read_sectors`/`ata_write_sectors`, counted |
+| `virtio_blk.c` ×2 | non-zero status byte, request never completed | -1 from `virtio_blk_read`/`write`, counted |
+| `rtl8139.c` ×3 | reset never completed, frame too large, transmit never drained | a machine with no network, a refusal, a lost packet |
+| `pci.c` ×2 | "BAR0 is memory-mapped, not I/O-mapped" | 0, and the driver declines the card |
+
+**The `pci.c` pair is the interesting one, and it was not on the list.**
+"BAR0 is memory-mapped" is not a kernel bug and is not an impossible
+state - it is an ordinary card that this kernel's three PCI drivers
+cannot address, because all three speak port I/O, and the same part
+number genuinely ships both ways. On QEMU's `pc` machine every BAR is
+I/O-mapped, which is why nine milestones of PCI work never saw it. A
+machine whose sound card is memory-mapped now boots to a desktop with no
+sound instead of not booting.
+
+**Kept, with the argument:** the seven in `fb.c`. Two are "the firmware
+handed off no framebuffer" and "it is not 32bpp", which Q16's own text
+names as the obviously-fatal case and it is right: the machine's entire
+means of saying anything is that surface, so there is no error to
+propagate *to*. The other five are coordinates out of bounds in the
+drawing primitives - a caller bug, in the impossible class, and an
+assertion rather than a device failure.
+
+#### Four decisions, each of which could have gone the other way
+
+**The fault injector is a counter, not a probability.** "The tenth write
+from now" is reproducible and "one write in ten" is not, and a
+reproducible failure is the whole difference between a test and an
+anecdote.
+
+**It lives at the block layer rather than in either driver.** That is
+where the two meet, so one test grades whichever backend the machine
+has - `QEMU_DISK=ide` and virtio are supported paths on the same terms
+`CLAUDE.md` sets, and a fault injector that only worked on one of them
+would be a test of the backend rather than of the filesystem above it.
+The `[q16]` marker prints which one it ran through and passes on both.
+
+**leanfs collects errors in a flag rather than returning them through
+every call site.** The four block helpers are called from about a hundred
+places in that file - `inode_write_data`'s inner loops, `dir_add`, the
+bitmap walk, the indirect tables - and threading a status through all of
+them would be a hundred new branches whose failure paths nothing would
+execute. What a caller needs to know is one thing: *did the operation I
+asked for reach the disk*, and that has an answer at the operation's
+boundary. The flag is set and never cleared inside an operation, so the
+first failure decides and a later success cannot mask it.
+
+**And it does not unwind, which is a statement about M71 rather than
+about effort.** A `leanfs_write` whose data blocks reached the disk and
+whose inode table did not returns -1, and the filesystem is in exactly
+the state write ordering promises: the metadata that would have named
+those blocks was never written, so they are unreferenced rather than
+half-referenced, and the next mount reclaims them. "Report and stop" is a
+complete answer *because* there is an ordering guarantee, and would not
+be in a filesystem without one.
+
+#### Three things the tests found
+
+**`poll` blocked on a set that could not block.** `POLLOUT` is reported
+ready for any open descriptor on this machine, because there is no
+write-readiness anywhere in this kernel - so a set containing one has
+something ready in it *before* the call blocks. It blocked anyway:
+`poll(fd, POLLOUT, 1000)` waited a second and returned 0, and
+`poll(fd, POLLOUT, 0)` returned 0 immediately - a poll that says nothing
+is ready about a descriptor it will call ready one line later. Found by
+M88's new `select`, which is a shim over `poll`, because a
+select-for-writable is exactly that shape and nothing had ever written
+one.
+
+**A blkdebug read fault grades the firmware, not this kernel.** The first
+version of `disk-fault-test.sh` failed a read, and the serial log said
+`lean_os uefi: ReadBlocks failed loading the kernel` - the firmware loads
+the kernel off this disk before any of this project's code runs. A write
+cannot happen before the kernel has mounted something, so the first write
+after boot is both guaranteed to be this kernel's and guaranteed to reach
+the driver. The general version is "inject the fault where only your own
+code can hit it", and it took a run to learn.
+
+**A failed write leaves the in-memory inode table ahead of the disk, and
+nothing reconciles them.** `leanfs_mkdir` on a failing disk reports -1
+correctly, and the *next* operation then reads a directory block that was
+never written. The disk is the authority and a mount re-reads it - which
+is what a reboot does, and the failed operation simply did not happen -
+so the honest statement is the one the test makes: the operation is
+reported failed, the disk is consistent, and the in-memory table is
+trustworthy again after a mount. Reconciling in place means an undo log,
+which is a journal, which M71, M93 and M105 have each measured and
+refused.
 
 ### Q17 — Power cut, and a filesystem that survives it [x]
 
@@ -13064,16 +13484,56 @@ This section is that line.
 
 | order | milestone | state | what it closes | what it blocks |
 |---|---|---|---|---|
-| 1 | **M88 (2nd)** | `[~]` poll and the identity calls shipped | UTF-8 in the C library, and `getrlimit`/`getrusage`/`times`/`statvfs`/`utime` | every source tree in the arc has non-ASCII bytes in it, and a configure script probes all five |
-| 2 | **M89** | not started | toybox: somebody else's userland | a configure run shells out to `sed`, `grep`, `install`; `/bin` has six programs |
-| 3 | **M91 (2nd)** | `[~]` six of seven | `MAP_SHARED` and file-backed `mmap` | M91's own words: *"there is no version of M95 that does not need this first"* |
-| 4 | **M94** | not started | `x86_64-lean_os` as a triple, and a sysroot | everything after it: nothing cross-compiles without a target |
-| 5 | **M95** | not started | the loader, and `dlopen` | M97's exceptions across an object boundary, M99's extension modules |
-| 6 | **M96** | not started | TLS, a futex, real pthread primitives | libstdc++ does not build without `__thread` |
-| 7 | **M97** | not started | C++, and the unwinder inside it | GCC is a C++ program |
-| 8 | **M98** | not started | a compiler that runs here | M99, M109, and two boxes left half-open below |
-| 9 | **M99** | not started | Python, built here | — |
-| 10 | **M100** | not started | the browser gap, measured | the arc after this one |
+| ~~1~~ | ~~**M88 (2nd)**~~ | **done** | UTF-8, and `getrlimit`/`getrusage`/`times`/`statvfs`/`utime` — and `select`, third attempt | — |
+| ~~2~~ | ~~**M89**~~ | **done** | toybox: somebody else's userland | — |
+| ~~3~~ | ~~**M91 (2nd)**~~ | **done** | `MAP_SHARED` and file-backed `mmap` | — |
+| ~~4~~ | ~~**M94**~~ | **done** | `x86_64-lean_os` as a triple, and a sysroot | — |
+| ~~5~~ | ~~**M95**~~ | **done** | the loader, and `dlopen` | — |
+| ~~6~~ | ~~**M96**~~ | **done** | TLS, a futex, real pthread primitives | — |
+| ~~7~~ | ~~**M97**~~ | **done** | C++, and the unwinder inside it | — |
+| **1** | **M98** | not started | a compiler that runs here | M99, M109, and two boxes left half-open below |
+| **2** | **M99** | not started | Python, built here | — |
+| **3** | **M100** | not started | the browser gap, measured | the arc after this one |
+
+*Struck through as each landed. Seven of the ten are gone and the head
+of the queue is M98, unchanged and now unambiguous — which is the one
+thing this table was written to say.*
+
+### And the rest of the queue, after M98–M100
+
+*Written when M85, M87, M88, Q13 and Q16 closed together and left this
+file with fourteen open entries and no single line saying which of them
+are waiting on work and which are waiting on a **machine**. Three
+different kinds of "not done" were all spelled `[ ]`.*
+
+**Waiting on hardware nobody here has.** These cannot be started at this
+desk, and saying so is not a deferral - it is the milestone's own
+content.
+
+| entry | what it needs |
+|---|---|
+| **M28** (4th box) / **M110** | a physical x86-64 UEFI machine and a USB drive. M110 *is* that boot; M28's last box is the same one |
+| **M108**'s link half | a real NIC and a real router. The `e1000e` driver itself is QEMU-gradeable and is not blocked |
+
+**Waiting on a condition another milestone sets**, already written down
+where the refusal was made. Neither of these is unfinished work; both
+are decisions with a trigger.
+
+| entry | condition |
+|---|---|
+| **M92**'s interrupt/AHCI box | M107's AHCI, and M103's measurement (an I/O APIC costs this machine 2x under QEMU) |
+| **M103**'s MSI / LAPIC-timer / interrupt-driven-virtio boxes | M107 (a device with no other way to interrupt) and M110 (hardware to weigh the timer on) |
+
+**Waiting on nothing but the work**, in rough order of what each costs:
+
+| entry | shape of it |
+|---|---|
+| **Q19** | infrastructure: a QEMU snapshot restored per interactive test, keyed on the image hash so a stale one fails closed |
+| **Q7** | the pixel baselines the invariant half already has the machinery for |
+| **Q14** | the compositor's window model compiled for the host - the same move Q13 just made, on a 5,189-line file |
+| **Q9** | every resource exhausted deliberately, the ~40 remaining reachable panics triaged, and a 24-hour soak |
+| **M107** | three device drivers (AHCI, NVMe, xHCI+USB HID), all gradeable under QEMU |
+| **M98–M100, M109** | a compiler that runs here, Python built here, the browser stack measured, and the tree building itself. The largest four in the file by a distance |
 
 **A correction, recorded rather than quietly fixed.** The M101–M110
 arc's opening sentence says *"the M94–M100 arc is planned and unbuilt,

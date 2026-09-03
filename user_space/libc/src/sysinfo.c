@@ -141,14 +141,16 @@ ssize_t writev(int fd, const struct iovec *iov, int count) {
 
 /* ---- the calls this machine does not have ---------------------------
  *
- * Each returns -1 with ENOSYS rather than 0. See <sys/mount.h> and
- * <pty.h> for why each is missing and, for the pty, which milestone it
- * is scheduled in. A stub returning success here would be the most
+ * Each returns -1 with ENOSYS rather than 0. See <sys/mount.h> for why
+ * each is missing. A stub returning success here would be the most
  * expensive kind of lie: mount would have a program believe a filesystem
- * is present, and openpty would hand back a descriptor that is not a
- * terminal.
+ * is present.
+ *
+ * M85 (second attempt): openpty, forkpty and login_tty used to be here
+ * and are not any more. They are real now - user_space/libc/src/pty.c
+ * over /dev/ptmx - which is the outcome this comment was written
+ * expecting.
  */
-#include <pty.h>
 #include <sys/mount.h>
 
 int mount(const char *source, const char *target, const char *fstype,
@@ -171,33 +173,6 @@ int umount(const char *target) {
 int umount2(const char *target, int flags) {
     (void)target;
     (void)flags;
-    errno = ENOSYS;
-    return -1;
-}
-
-int openpty(int *primary, int *secondary, char *name,
-            const struct termios *tio, const struct winsize *ws) {
-    (void)primary;
-    (void)secondary;
-    (void)name;
-    (void)tio;
-    (void)ws;
-    errno = ENOSYS; /* M98 - see <pty.h> */
-    return -1;
-}
-
-pid_t forkpty(int *primary, char *name,
-              const struct termios *tio, const struct winsize *ws) {
-    (void)primary;
-    (void)name;
-    (void)tio;
-    (void)ws;
-    errno = ENOSYS;
-    return (pid_t)-1;
-}
-
-int login_tty(int fd) {
-    (void)fd;
     errno = ENOSYS;
     return -1;
 }

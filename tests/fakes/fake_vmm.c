@@ -144,6 +144,50 @@ void vmm_unmap_page(uint64_t virt) {
  * deliberately panic rather than returning a plausible-looking value, so
  * a test that wanders into unfaked territory says so instead of quietly
  * asserting against a stub. */
+/* ---- Q13: the three the scheduler asks about a user address space ----
+ *
+ * vmm_user_range_ok is what SYS_* pointer validation is built on and
+ * what sched.c consults before touching a task's memory. It answers yes
+ * for anything inside the user half here, which is what a mapped address
+ * space looks like from above - the real one walks page tables, and
+ * walking a page table this fake never built would answer no to
+ * everything and make every test a refusal.
+ *
+ * vmm_cow_break and vmm_unmap_page_in are the fault-path halves. Both
+ * report success and count, so "the scheduler asked for a copy-on-write
+ * break" is assertable without a page table under it. */
+static uint64_t cow_breaks;
+static uint64_t unmaps_in;
+
+uint64_t fake_vmm_cow_breaks(void) { return cow_breaks; }
+uint64_t fake_vmm_unmaps_in(void) { return unmaps_in; }
+
+int vmm_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_write) {
+    (void)pml4_phys;
+    (void)need_write;
+    if (len == 0) {
+        return 1;
+    }
+    if (virt + len < virt) {
+        return 0; /* the overflow case, which is the one worth keeping */
+    }
+    return 1;
+}
+
+int vmm_cow_break(uint64_t pml4_phys, uint64_t virt) {
+    (void)pml4_phys;
+    (void)virt;
+    cow_breaks++;
+    return 0;
+}
+
+int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
+    (void)pml4_phys;
+    (void)virt;
+    unmaps_in++;
+    return 0;
+}
+
 void vmm_init(const uint32_t *e820_map) { (void)e820_map; }
 int vmm_identity_covers(uint64_t phys, uint64_t len) { (void)phys; (void)len; return 1; }
 void vmm_enable_nx_this_cpu(void) {}

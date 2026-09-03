@@ -38,5 +38,13 @@ uint64_t virtio_blk_capacity(void);
 /* Both panic on a device-reported error, matching ata.c: there is no
  * retry story anywhere in this kernel and inventing one for a single
  * driver would be a rule that lives in one place. */
-void virtio_blk_read(uint64_t lba, uint32_t count, void *buf);
-void virtio_blk_write(uint64_t lba, uint32_t count, const void *buf);
+/* Q16: 0 on success, -1 on a device error or a request that never
+ * completed. Both of those used to be a panic - see the note in
+ * submit() for why halting on a bad sector is the more expensive of the
+ * two answers, and kernel/drivers/blk.h for what the caller does with
+ * this one. */
+int virtio_blk_read(uint64_t lba, uint32_t count, void *buf);
+int virtio_blk_write(uint64_t lba, uint32_t count, const void *buf);
+
+/* Q16: commands this driver has failed since boot. See ata_error_count. */
+uint32_t virtio_blk_error_count(void);

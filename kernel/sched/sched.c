@@ -1,5 +1,8 @@
 #include "sched.h"
 
+#include "dev/pty.h" /* M85: a session leader that exits gives its terminal back */
+#include "dev/tty.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -289,9 +292,9 @@ void sched_idle_exit(void) {
  * whose entire body is a `hlt`. */
 static void idle_task_body(void *arg) {
     (void)arg;
-    __asm__ volatile("sti");
+    cpu_enable_interrupts();
     for (;;) {
-        __asm__ volatile("hlt");
+        cpu_halt();
     }
 }
 
@@ -415,6 +418,11 @@ void sched_resume_stopped(task_t *t) {
         t->full_slices = 0;
         t->wait_chan = (const void *)0;
         t->wake_deadline_ms = 0;
+        /* M85: it is not stopped any more, so there is no stop left to
+         * report. A parent that had not yet asked must not be told about
+         * one that is over. */
+        t->stopped_sig = 0;
+        t->stop_reported = 0;
         event_seq++;
     }
     spin_unlock(&sched_lock);
@@ -430,13 +438,33 @@ void sched_resume_stopped(task_t *t) {
  * TASK_READY" test does the rest, and nothing will pick it again until
  * sched_resume_stopped says so. */
 static void take_pending_stop(task_t *t) {
+    int sig = t->pending_stop;
     t->pending_stop = 0;
     uint64_t flags = irq_save_disable();
     spin_lock(&sched_lock);
     t->state = TASK_STOPPED;
+    /* M85: the fact, kept for a parent in waitpid(WUNTRACED). Set under
+     * the lock beside the state so a parent can never see one without
+     * the other. */
+    t->stopped_sig = sig;
+    t->stop_reported = 0;
+    event_seq++;
     spin_unlock(&sched_lock);
     irq_restore(flags);
+    /* A parent blocked on this child, or on the poll channel waiting for
+     * any child, has to be woken - a stop is an event a wait reports,
+     * and until M85 the only such event was a death. Both channels,
+     * because waitpid parks on the child for a specific pid and on the
+     * poll channel for -1. */
+    sched_wake_all((const void *)t);
+    sched_wake_all(SCHED_POLL_CHAN);
     schedule();
+}
+
+void sched_take_pending_stop_if_any(task_t *t) {
+    if (t && t->pending_stop != 0) {
+        take_pending_stop(t);
+    }
 }
 
 static void deliver_pending_signal_and_exit(task_t *t) __attribute__((noreturn));
@@ -1229,6 +1257,28 @@ static void unblock_self(task_t *self) {
 
 void sched_block_on_seq(const void *chan, uint64_t deadline_ms, uint64_t expected_seq) {
     sched_deliver_pending_signal(); /* noreturn if one is pending - see sched_block_on */
+    /* M85 (second attempt): and a job-control stop, before parking again.
+     *
+     * This is the third checkpoint and the one that makes ^Z work on a
+     * program that is waiting for input - which is nearly every program
+     * anybody types ^Z at. The other two are the scheduler tick and the
+     * syscall boundary, and neither reaches this case: a task blocked in
+     * a read is not current when the tick fires, and it is already
+     * *inside* the syscall, so it never crosses the boundary again. It
+     * wakes, finds nothing to read, and parks - here - forever.
+     *
+     * Safe from exactly this position: the caller of this function holds
+     * no lock (that is what distinguishes it from sched_block_on) and
+     * has not yet marked itself blocked, so a stop taken here is a stop
+     * taken by a task that is simply running.
+     *
+     * sched_block_on's callers DO hold a lock and are not covered.
+     * Written down rather than left implicit: the paths that matter for
+     * job control - a terminal read, a poll, a wait - all come through
+     * this function, and pipe_read is the one that does not. A pipeline
+     * stage blocked on a pipe takes its stop at the next tick that finds
+     * it current, which is where M85's first attempt left everything. */
+    sched_take_pending_stop_if_any(current_task[smp_current_cpu()]);
 
     int cpu = smp_current_cpu();
     uint64_t sflags = irq_save_disable();
@@ -1420,8 +1470,7 @@ void schedule(void) {
      * neither is described by kernel_stack_top (both are 0, deliberately
      * - see sched_init_ap). */
     if (prev->kernel_stack_top != 0) {
-        uint64_t sp;
-        __asm__ volatile("movq %%rsp, %0" : "=r"(sp));
+        uint64_t sp = cpu_stack_pointer();
         uint64_t base = (uint64_t)(uintptr_t)prev->stack_base;
         if (sp < base || sp >= prev->kernel_stack_top) {
             klog_puts("[sched] cpu ");
@@ -1536,6 +1585,21 @@ void task_exit_with_code(int code) {
      * of the machine. Nothing can read it after this point - a spawn is
      * something a *running* task does. */
     sched_release_env(t);
+
+    /* M85 (second attempt): a session leader that exits hands back its
+     * controlling terminal, and its foreground job gets a SIGHUP.
+     *
+     * Here for the same reason everything above is: this runs exactly
+     * once per task. Missing it is not a leak, it is a terminal that
+     * cannot be claimed again - the second program to run in a pty is
+     * refused by a session that no longer exists, which is precisely how
+     * this was found. Both the console and every pty are asked, because
+     * which terminal a session owns is a fact about the terminal rather
+     * than about the task. */
+    if (t->sid != 0 && t->sid == t->id) {
+        tty_release_session(tty_console(), t->sid);
+        pty_release_session(t->sid);
+    }
 
     /* M54: and the address space, which nothing has ever reclaimed - M29
      * documented the leak, M50 measured it at ~15 frames per dead
@@ -1793,7 +1857,7 @@ void sched_reap_slot(task_t *t) {
                 sched_dump_cpus();
                 panic("sched_reap_slot: a terminated task never left its kernel stack");
             }
-            __asm__ volatile("pause");
+            cpu_spin_hint();
         }
     }
     /* The kernel stack goes back rather than at exit, because at exit the
@@ -1863,6 +1927,26 @@ void sched_reap_slot(task_t *t) {
     t->generation++;
     t->state = TASK_FREE;
     t->pending_signal = 0;
+    /* Q13: and the job-control stop, which this list did not clear.
+     *
+     * Found by the first host test that asked what a recycled slot
+     * inherits. `pending_signal` was cleared here from the beginning and
+     * `pending_stop` was not, so a slot whose previous occupant had been
+     * sent a ^Z it never got round to taking handed that stop to the
+     * next process to land in the row - which suspends itself at its
+     * first checkpoint, before it has run a line, with no terminal
+     * involved and nothing to resume it.
+     *
+     * It was close to unreachable before M85's second attempt, because
+     * a pending stop was only ever taken at a timer tick that found the
+     * task current, so most of them were never taken at all. Adding the
+     * two checkpoints that make ^Z work is what made this one bite, and
+     * this tier is what found it - reaching it on a booted machine
+     * means killing a process in the window between a ^Z and the tick
+     * that takes it. */
+    t->pending_stop = 0;
+    t->stopped_sig = 0;
+    t->stop_reported = 0;
     t->reaped = 0;
     /* M88: and the CPU time goes with the occupant, not the slot. Zeroed
      * both here and at spawn on purpose: this is the release path, and a
@@ -2513,6 +2597,27 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     for (size_t i = 0; i < sizeof(t->fpu_state); i++) {
         t->fpu_state[i] = parent->fpu_state[i];
     }
+
+    /* M85 (second attempt): the thread pointer, which was NOT copied
+     * here and had to be.
+     *
+     * A fork duplicates the address space, so the TLS block the parent's
+     * %fs points at exists in the child at the same address - and the
+     * child was getting fs_base 0. Every `errno = ...` in this libc is a
+     * store through %fs, so the first *failing* call a forked child made
+     * was a page fault at address 0. A child that only ever succeeded
+     * never touched it, which is why forktest, exectest and every ported
+     * program that works has been passing over this for four milestones:
+     * the bug is on the error path of a process that has forked, and
+     * nothing had put one there.
+     *
+     * Found by M85's pty fixture, whose child calls ioctl(TIOCSCTTY) on
+     * a terminal another session already owned and died decoding the -1.
+     * The two reset sites this pairs with are exec (a new address space,
+     * so the pointer is stale) and slot recycling (a new process
+     * entirely); a fork is the one case where carrying it over is the
+     * correct answer, and it was the one case that did not. */
+    t->fs_base = parent->fs_base;
 
     t->heap_brk = parent->heap_brk;
     t->heap_mapped_end = parent->heap_mapped_end;

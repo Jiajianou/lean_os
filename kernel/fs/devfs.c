@@ -19,6 +19,7 @@
 #include "vfsops.h"
 
 #include "arch/x86_64/tsc.h"
+#include "dev/pty.h"
 #include "dev/tty.h"
 #include "drivers/klog.h"
 #include "lib/libk.h"
@@ -34,12 +35,33 @@ enum {
     DEV_URANDOM,
     DEV_TTY,
     DEV_CONSOLE,
+    DEV_PTMX,
     DEV_COUNT
 };
 
 static const char *const DEV_NAMES[DEV_COUNT] = {
-    "", "null", "zero", "full", "random", "urandom", "tty", "console",
+    "", "null", "zero", "full", "random", "urandom", "tty", "console", "ptmx",
 };
+
+/* ---- M85: the pty numbers, above the fixed table ----------------------
+ *
+ * `/dev/pts` is a directory whose contents change, which is the first
+ * thing under /dev that is not one of a fixed list - so it gets codes of
+ * its own above DEV_COUNT rather than a row in the table. The three
+ * bases are far enough apart to read at a glance in a log, which is
+ * worth more here than density: every one of these numbers ends up in a
+ * file descriptor and in an inode number.
+ *
+ * DEV_PTM_BASE is never returned by lookup(). A master has no path -
+ * opening /dev/ptmx *creates* one, and there is no name that names an
+ * existing master. That asymmetry is real and is why /dev/ptmx exists at
+ * all rather than /dev/ptm/<n>. */
+#define DEV_PTS_DIR  0x100
+#define DEV_PTS_BASE 0x200 /* + n: the slave, /dev/pts/<n> */
+#define DEV_PTM_BASE 0x300 /* + n: the master, from opening /dev/ptmx */
+
+#define DEV_IS_PTS(c) ((c) >= DEV_PTS_BASE && (c) < DEV_PTS_BASE + PTY_MAX)
+#define DEV_IS_PTM(c) ((c) >= DEV_PTM_BASE && (c) < DEV_PTM_BASE + PTY_MAX)
 
 /* ---- the number generator, and exactly what it is not -----------------
  *
@@ -90,6 +112,33 @@ static int lookup(const char *rel) {
             return i;
         }
     }
+    /* M85: /dev/pts, and the numbers in it.
+     *
+     * A slave that names a pair nobody allocated does not exist, rather
+     * than existing and failing to open - which is what makes
+     * `ls /dev/pts` show the terminals that are actually running and
+     * makes a stale path in a saved session fail at the open with
+     * "no such file". */
+    if (k_strcmp(rel + 1, "pts") == 0) {
+        return DEV_PTS_DIR;
+    }
+    if (rel[1] == 'p' && rel[2] == 't' && rel[3] == 's' && rel[4] == '/') {
+        const char *d = rel + 5;
+        if (*d == '\0') {
+            return -1;
+        }
+        int n = 0;
+        for (; *d; d++) {
+            if (*d < '0' || *d > '9') {
+                return -1; /* /dev/pts/x is not a terminal, it is a typo */
+            }
+            n = n * 10 + (*d - '0');
+            if (n >= PTY_MAX) {
+                return -1;
+            }
+        }
+        return pty_valid(n) ? DEV_PTS_BASE + n : -1;
+    }
     return -1;
 }
 
@@ -98,7 +147,8 @@ static int dev_exists(const char *rel) {
 }
 
 static int dev_is_dir(const char *rel) {
-    return lookup(rel) == DEV_DIR;
+    int c = lookup(rel);
+    return (c == DEV_DIR || c == DEV_PTS_DIR);
 }
 
 /* ---- M89: inode numbers, and why these start where they do ------------
@@ -125,7 +175,7 @@ static int dev_stat(const char *rel, leanfs_stat_t *out) {
     }
     out->size = 0; /* a device has no length - see dev_size */
     out->mtime = 0;
-    out->is_dir = (d == DEV_DIR) ? 1 : 0;
+    out->is_dir = (d == DEV_DIR || d == DEV_PTS_DIR) ? 1 : 0;
     out->is_link = 0;
     out->inode = DEVFS_INO_BASE + (uint32_t)d; /* M89 - see DEVFS_INO_BASE */
     return 0;
@@ -134,8 +184,23 @@ static int dev_stat(const char *rel, leanfs_stat_t *out) {
 static int dev_open(const char *rel, int create) {
     (void)create; /* nothing here can be created, and asking is not an error */
     int d = lookup(rel);
-    if (d < 0 || d == DEV_DIR) {
+    if (d < 0 || d == DEV_DIR || d == DEV_PTS_DIR) {
         return -1;
+    }
+    /* M85: the one path on this machine where opening a file has a side
+     * effect. /dev/ptmx is not a device you read - it is a *request for a
+     * terminal*, and every open of it produces a different one. That is
+     * unusual enough to say out loud; it is also exactly what every Unix
+     * does, and the reason ptsname() exists to ask which one you got. */
+    if (d == DEV_PTMX) {
+        int n = pty_alloc();
+        if (n < 0) {
+            return -1; /* all eight in use - see pty.h */
+        }
+        return DEV_PTM_BASE + n;
+    }
+    if (DEV_IS_PTS(d)) {
+        pty_slave_opened(d - DEV_PTS_BASE);
     }
     return d;
 }
@@ -151,7 +216,8 @@ static uint32_t dev_size(int handle) {
 }
 
 static int dev_handle_stat(int handle, leanfs_stat_t *out) {
-    if (handle <= 0 || handle >= DEV_COUNT) {
+    int fixed = (handle > 0 && handle < DEV_COUNT);
+    if (!fixed && !DEV_IS_PTS(handle) && !DEV_IS_PTM(handle)) {
         return -1;
     }
     out->size = 0;
@@ -165,6 +231,12 @@ static int dev_handle_stat(int handle, leanfs_stat_t *out) {
 static int64_t dev_read(int handle, void *buf, size_t len, uint32_t off) {
     (void)off; /* a device is not seekable; every read is "now" */
     uint8_t *b = (uint8_t *)buf;
+    if (DEV_IS_PTM(handle)) {
+        return pty_master_read(handle - DEV_PTM_BASE, (char *)b, (uint32_t)len);
+    }
+    if (DEV_IS_PTS(handle)) {
+        return pty_slave_read(handle - DEV_PTS_BASE, (char *)b, (uint32_t)len);
+    }
     switch (handle) {
     case DEV_NULL:
         return 0; /* end of file, immediately and always */
@@ -197,6 +269,17 @@ static int64_t dev_read(int handle, void *buf, size_t len, uint32_t off) {
 static int64_t dev_write(int handle, const void *buf, size_t len, uint32_t off) {
     (void)off;
     const char *b = (const char *)buf;
+    /* The two halves of a pty, and they are not symmetrical. A write to
+     * the master is a *keystroke* and goes through the line discipline;
+     * a write to the slave is a program's output and goes through output
+     * processing. Getting these the same way round is the whole of the
+     * device. */
+    if (DEV_IS_PTM(handle)) {
+        return pty_master_write(handle - DEV_PTM_BASE, b, (uint32_t)len);
+    }
+    if (DEV_IS_PTS(handle)) {
+        return pty_slave_write(handle - DEV_PTS_BASE, b, (uint32_t)len);
+    }
     switch (handle) {
     case DEV_NULL:
     case DEV_ZERO:
@@ -227,18 +310,106 @@ static int64_t dev_write(int handle, const void *buf, size_t len, uint32_t off) 
     }
 }
 
+/* M85: the last thing holding this handle has gone.
+ *
+ * This is why vfs_ops_t grew a close hook in M101, and a pty is the
+ * second filesystem object here to need one: the fixed table has eight
+ * rows and a terminal emulator that exits without giving one back leaks
+ * it for the life of the boot. */
+static void dev_close(int handle) {
+    if (DEV_IS_PTM(handle)) {
+        pty_master_closed(handle - DEV_PTM_BASE);
+    } else if (DEV_IS_PTS(handle)) {
+        pty_slave_closed(handle - DEV_PTS_BASE);
+    }
+}
+
+/* M85: would a read on this handle return without waiting?
+ *
+ * Every other device under /dev answers "yes, always" and means it -
+ * /dev/zero has infinite bytes and /dev/null has none, and neither is a
+ * reason to block. A pty is the first thing here that is genuinely
+ * sometimes empty, which is what this hook exists for. */
+static int dev_readable(int handle) {
+    if (DEV_IS_PTM(handle)) {
+        return pty_master_readable(handle - DEV_PTM_BASE);
+    }
+    if (DEV_IS_PTS(handle)) {
+        return pty_slave_readable(handle - DEV_PTS_BASE);
+    }
+    if (handle == DEV_TTY) {
+        /* /dev/tty is the console, and the console's input arrives from
+         * a keyboard interrupt. Same question, same answer shape. */
+        return tty_readable(tty_console()) > 0 ? 1 : 0;
+    }
+    return 1;
+}
+
+/* M85: which terminal does this handle name? See vfs_ops_t.tty_of.
+ *
+ * /dev/tty and /dev/console are the console's two names, and both answer
+ * with it - which is what makes `stty` work on either. A master and its
+ * slave answer with the *same* terminal, because they are two ends of
+ * one: setting the window size on the master is how a terminal emulator
+ * tells the program in it that the window changed, and a pair with two
+ * termios structs would be two terminals wearing one name. */
+static struct tty *dev_tty_of(int handle, int *pty_number) {
+    if (DEV_IS_PTM(handle)) {
+        *pty_number = handle - DEV_PTM_BASE;
+        return (struct tty *)pty_tty(*pty_number);
+    }
+    if (DEV_IS_PTS(handle)) {
+        *pty_number = handle - DEV_PTS_BASE;
+        return (struct tty *)pty_tty(*pty_number);
+    }
+    if (handle == DEV_TTY || handle == DEV_CONSOLE) {
+        *pty_number = -1;
+        return (struct tty *)tty_console();
+    }
+    return (struct tty *)0;
+}
+
 static int dev_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *out) {
-    if (lookup(rel) != DEV_DIR) {
+    int c = lookup(rel);
+    /* M85: /dev/pts lists the terminals that exist right now, which makes
+     * it the first directory on this machine whose contents change
+     * between two readdir calls. The cookie is still an index and still
+     * cannot go stale in the way leanfs's byte offset can - a pair freed
+     * mid-walk is skipped rather than misread. */
+    if (c == DEV_PTS_DIR) {
+        for (uint32_t n = *cookie; n < PTY_MAX; n++) {
+            if (!pty_valid((int)n)) {
+                continue;
+            }
+            out->inode = DEV_PTS_BASE + n;
+            out->is_dir = 0;
+            out->is_link = 0;
+            out->name[0] = (char)('0' + (n % 10));
+            out->name[1] = '\0';
+            *cookie = n + 1;
+            return 1;
+        }
+        return 0;
+    }
+    if (c != DEV_DIR) {
         return -1;
     }
     /* The cookie is the next index, which is the simplest thing that can
-     * be resumed - and unlike leanfs's byte offset it cannot go stale,
-     * because this directory never changes. */
+     * be resumed. Index DEV_COUNT is `pts`, which has no row in the
+     * fixed table because it is a directory rather than a device. */
     uint32_t i = *cookie;
     if (i == 0) {
         i = 1; /* index 0 is the directory itself, not an entry in it */
     }
-    if (i >= DEV_COUNT) {
+    if (i == DEV_COUNT) {
+        out->inode = DEV_PTS_DIR;
+        out->is_dir = 1;
+        out->is_link = 0;
+        k_strlcpy(out->name, "pts", sizeof(out->name));
+        *cookie = i + 1;
+        return 1;
+    }
+    if (i > DEV_COUNT) {
         return 0;
     }
     out->inode = i;
@@ -259,6 +430,9 @@ static const vfs_ops_t DEVFS_OPS = {
     .size = dev_size,
     .handle_stat = dev_handle_stat,
     .readdir = dev_readdir,
+    .close = dev_close,
+    .readable = dev_readable,
+    .tty_of = dev_tty_of,
 };
 
 const vfs_ops_t *devfs_ops(void) {

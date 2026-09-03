@@ -98,38 +98,98 @@ static blk_stats_t stats;
  * in the pmm sense - blk_init allocates, but nothing after it does. */
 static spinlock_t blk_lock;
 
-static void device_read(uint32_t lba, uint32_t count, void *buf) {
+/* ---- Q16: a disk that fails, on purpose -------------------------------
+ *
+ * Under QEMU the disk does not fail, which is why six halts in two
+ * drivers survived ninety milestones without one of them ever running.
+ * A fault this layer injects is the instrument that makes the *other*
+ * side of every one of those - the error path - a thing that has
+ * executed.
+ *
+ * It lives here rather than in the drivers because here is the one place
+ * both of them meet, so a test written against it grades whichever
+ * driver the machine actually has. `QEMU_DISK=ide` and virtio are
+ * supported paths on the same terms, and a fault-injection facility that
+ * only worked on one of them would be a test of the backend rather than
+ * of the filesystem above it.
+ *
+ * Deliberately a counter rather than a probability: "the tenth write
+ * from now" is reproducible and "one write in ten" is not, and a
+ * reproducible failure is the whole difference between a test and an
+ * anecdote. QEMU's own `blkdebug` is the other half - see
+ * tools/run-qemu.sh - and covers the case this cannot, which is a driver
+ * that is lied to by real hardware rather than by the layer above it. */
+static int64_t fault_reads_after = -1;  /* -1: never */
+static int64_t fault_writes_after = -1;
+static uint64_t reads_issued;
+static uint64_t writes_issued;
+static uint64_t io_errors;
+
+void blk_fault_inject(int64_t fail_reads_after, int64_t fail_writes_after) {
+    fault_reads_after = fail_reads_after;
+    fault_writes_after = fail_writes_after;
+    reads_issued = 0;
+    writes_issued = 0;
+}
+
+uint64_t blk_error_count(void) {
+    return io_errors;
+}
+
+static int device_read(uint32_t lba, uint32_t count, void *buf) {
     stats.device_reads += count;
+    if (fault_reads_after >= 0 && (int64_t)reads_issued++ >= fault_reads_after) {
+        io_errors++;
+        return -1;
+    }
     if (have_virtio) {
-        virtio_blk_read(lba, count, buf);
-        return;
+        if (virtio_blk_read(lba, count, buf) != 0) {
+            io_errors++;
+            return -1;
+        }
+        return 0;
     }
     /* ata_read_sectors takes a uint8_t count, so a run longer than 255
      * has to be split - the same loop leanfs used to carry itself. */
     uint8_t *dst = (uint8_t *)buf;
     while (count > 0) {
         uint32_t n = count > 255 ? 255 : count;
-        ata_read_sectors(lba, (uint8_t)n, dst);
+        if (ata_read_sectors(lba, (uint8_t)n, dst) != 0) {
+            io_errors++;
+            return -1;
+        }
         dst += n * BLK_SECTOR_SIZE;
         lba += n;
         count -= n;
     }
+    return 0;
 }
 
-static void device_write(uint32_t lba, uint32_t count, const void *buf) {
+static int device_write(uint32_t lba, uint32_t count, const void *buf) {
     stats.device_writes += count;
+    if (fault_writes_after >= 0 && (int64_t)writes_issued++ >= fault_writes_after) {
+        io_errors++;
+        return -1;
+    }
     if (have_virtio) {
-        virtio_blk_write(lba, count, buf);
-        return;
+        if (virtio_blk_write(lba, count, buf) != 0) {
+            io_errors++;
+            return -1;
+        }
+        return 0;
     }
     const uint8_t *src = (const uint8_t *)buf;
     while (count > 0) {
         uint32_t n = count > 255 ? 255 : count;
-        ata_write_sectors(lba, (uint8_t)n, src);
+        if (ata_write_sectors(lba, (uint8_t)n, src) != 0) {
+            io_errors++;
+            return -1;
+        }
         src += n * BLK_SECTOR_SIZE;
         lba += n;
         count -= n;
     }
+    return 0;
 }
 
 void blk_init(void) {
@@ -200,8 +260,8 @@ const char *blk_backend_name(void) {
 /* Forward declarations: the write path defines these and the read path
  * uses them, and the read path is first in this file because that is the
  * order they were written in. */
-static void flush_line(uint32_t s);
-static void flush_all_locked(void);
+static int flush_line(uint32_t s);
+static int flush_all_locked(void);
 static void flush_if_overdue_locked(void);
 
 static uint32_t slot_of(uint32_t line_no) {
@@ -288,7 +348,7 @@ void blk_set_readahead(uint32_t lines) {
     spin_unlock_irqrestore(&blk_lock, irq);
 }
 
-void blk_read(uint32_t lba, uint32_t count, void *buf) {
+int blk_read(uint32_t lba, uint32_t count, void *buf) {
     uint64_t irq = spin_lock_irqsave(&blk_lock);
     flush_if_overdue_locked();
     int sequential = (lba == last_read_end);
@@ -308,10 +368,23 @@ void blk_read(uint32_t lba, uint32_t count, void *buf) {
                      BLK_SECTOR_SIZE);
         }
         spin_unlock_irqrestore(&blk_lock, irq);
-        return;
+        return 0;
     }
 
-    device_read(lba, count, dst);
+    if (device_read(lba, count, dst) != 0) {
+        /* Q16: zeroed rather than left as it was found.
+         *
+         * A caller that ignores the return value - and there will be one
+         * eventually, because this call has been `void` since M92 -
+         * would otherwise parse whatever was already in its buffer as
+         * filesystem metadata. Zeros are not a valid superblock, a valid
+         * inode or a valid directory entry, so a caller that ignores the
+         * error fails at the next check instead of following a pointer
+         * made of somebody else's stack. */
+        k_memset(dst, 0, (uint64_t)count * BLK_SECTOR_SIZE);
+        spin_unlock_irqrestore(&blk_lock, irq);
+        return -1;
+    }
 
     for (uint32_t ln = first_line; ln <= last_line; ln++) {
         uint32_t line_lba = ln * BLK_PER_LINE;
@@ -349,7 +422,15 @@ void blk_read(uint32_t lba, uint32_t count, void *buf) {
             if (tags[s].dirty) {
                 break; /* not worth evicting unwritten bytes to guess */
             }
-            device_read(ln * BLK_PER_LINE, BLK_PER_LINE, line_ptr[s]);
+            if (device_read(ln * BLK_PER_LINE, BLK_PER_LINE, line_ptr[s]) != 0) {
+                /* A readahead is a guess. A guess that fails is not an
+                 * error the caller asked about - its own data is already
+                 * in its buffer - so this stops guessing and says
+                 * nothing, which is the only behaviour that keeps
+                 * readahead from turning a healthy read into a failed
+                 * one. */
+                break;
+            }
             if (!tags[s].valid) {
                 stats.resident++;
             }
@@ -360,27 +441,50 @@ void blk_read(uint32_t lba, uint32_t count, void *buf) {
         }
     }
     spin_unlock_irqrestore(&blk_lock, irq);
+    return 0;
 }
 
 /* Writes one dirty line back and clears the flag. Caller holds the
- * lock. */
-static void flush_line(uint32_t s) {
+ * lock.
+ *
+ * Q16: a write that fails leaves the line DIRTY, which is the whole of
+ * the recovery story and is worth stating. The bytes are still the only
+ * copy that exists, so the next barrier tries again and an eviction
+ * refuses to discard them; a flush_line that cleared the flag on failure
+ * would silently drop a filesystem's writes, which is the failure mode
+ * that only appears in the runs nobody is watching. */
+static int flush_line(uint32_t s) {
     if (!tags[s].valid || !tags[s].dirty) {
-        return;
+        return 0;
     }
-    device_write(tags[s].line_no * BLK_PER_LINE, BLK_PER_LINE, line_ptr[s]);
+    if (device_write(tags[s].line_no * BLK_PER_LINE, BLK_PER_LINE, line_ptr[s]) != 0) {
+        return -1;
+    }
     tags[s].dirty = 0;
     stats.writebacks++;
+    return 0;
 }
 
-static void flush_all_locked(void) {
+static int flush_all_locked(void) {
     if (stats.dirty == 0) {
-        return; /* the common case, and it must cost nothing */
+        return 0; /* the common case, and it must cost nothing */
     }
+    /* Q16: every line is attempted even after one fails, and the count
+     * of those still dirty replaces the unconditional `stats.dirty = 0`.
+     *
+     * Stopping at the first failure would leave lines that would have
+     * been written unwritten, on the theory that a disk which failed
+     * once will fail again - which is a guess, and the cheap version of
+     * being wrong about it is losing data the device would have
+     * accepted. */
+    uint32_t still_dirty = 0;
     for (uint32_t i = 0; i < cache_lines; i++) {
-        flush_line(i);
+        if (flush_line(i) != 0) {
+            still_dirty++;
+        }
     }
-    stats.dirty = 0;
+    stats.dirty = still_dirty;
+    return still_dirty == 0 ? 0 : -1;
 }
 
 /* M104: the deadline, checked on the way through rather than from a
@@ -412,7 +516,8 @@ static void flush_if_overdue_locked(void) {
     }
 }
 
-void blk_write(uint32_t lba, uint32_t count, const void *buf) {
+int blk_write(uint32_t lba, uint32_t count, const void *buf) {
+    int failed = 0;
     uint64_t irq = spin_lock_irqsave(&blk_lock);
     flush_if_overdue_locked();
     const uint8_t *src = (const uint8_t *)buf;
@@ -449,7 +554,20 @@ void blk_write(uint32_t lba, uint32_t count, const void *buf) {
              * evicted is written back first, or its bytes would be
              * lost. */
             if (tags[s].valid && tags[s].dirty && tags[s].line_no != line_no) {
-                flush_line(s);
+                if (flush_line(s) != 0) {
+                    /* Q16: the eviction failed, so the bytes already in
+                     * this slot are still the only copy. Overwriting
+                     * them to absorb the new write would lose them
+                     * silently, which is the one outcome this cache must
+                     * never produce - so the new write goes straight to
+                     * the device instead, and both stay accounted for. */
+                    if (device_write(lba + i, BLK_PER_LINE,
+                                     src + (uint64_t)i * BLK_SECTOR_SIZE) != 0) {
+                        failed = 1;
+                    }
+                    i += BLK_PER_LINE;
+                    continue;
+                }
             }
             if (!tags[s].valid) {
                 stats.resident++;
@@ -472,7 +590,9 @@ void blk_write(uint32_t lba, uint32_t count, const void *buf) {
         /* A partial line: through to the device, and into the cache if
          * the line happens to be resident so a later read does not see
          * the old bytes. */
-        device_write(lba + i, 1, src + (uint64_t)i * BLK_SECTOR_SIZE);
+        if (device_write(lba + i, 1, src + (uint64_t)i * BLK_SECTOR_SIZE) != 0) {
+            failed = 1;
+        }
         uint32_t s = slot_of(line_no);
         if (tags[s].valid && tags[s].line_no == line_no) {
             k_memcpy(line_ptr[s] + (uint64_t)within * BLK_SECTOR_SIZE,
@@ -481,6 +601,14 @@ void blk_write(uint32_t lba, uint32_t count, const void *buf) {
         i++;
     }
     spin_unlock_irqrestore(&blk_lock, irq);
+    /* A whole-line write that was absorbed returns success, and that is
+     * not a lie: the cache has accepted responsibility for those bytes
+     * and the barrier before the metadata that names them is where the
+     * device gets its say. M71's ordering guarantee is a statement about
+     * barriers, not about individual writes, and this is the same
+     * contract M104 already established - Q16 only makes its failures
+     * visible. */
+    return failed ? -1 : 0;
 }
 
 /* M104: everything dirty, to the device, now.
@@ -489,10 +617,11 @@ void blk_write(uint32_t lba, uint32_t count, const void *buf) {
  * metadata - they are the same operation and giving them two names would
  * suggest they could differ. See cache_tag_t's note for why a barrier is
  * what preserves M71's ordering guarantee across a writeback cache. */
-void blk_flush(void) {
+int blk_flush(void) {
     uint64_t irq = spin_lock_irqsave(&blk_lock);
-    flush_all_locked();
+    int r = flush_all_locked();
     spin_unlock_irqrestore(&blk_lock, irq);
+    return r;
 }
 
 void blk_stats(blk_stats_t *out) {

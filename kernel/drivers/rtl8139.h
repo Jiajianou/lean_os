@@ -36,4 +36,14 @@ const uint8_t *rtl8139_mac(void);
  * caller's buffer is safe to reuse/free the instant this returns. len
  * must be <= RTL8139_MAX_FRAME. */
 #define RTL8139_MAX_FRAME 1514 /* 14-byte Ethernet header + 1500-byte MTU, no 802.1Q tag */
-void rtl8139_send(const uint8_t *frame, uint16_t len);
+/* Q16: 0 sent, -1 refused or never drained.
+ *
+ * Both used to be a panic. A frame the caller sized wrong is a caller
+ * bug and gets a refusal; a transmit that never completed is a cable
+ * pulled or a card that stopped answering, and every protocol above this
+ * one is built to survive a lost packet - which is more than can be said
+ * for a halted machine. */
+int rtl8139_send(const uint8_t *frame, uint16_t len);
+
+/* Q16: transmits this driver has failed since boot. */
+uint32_t rtl8139_tx_error_count(void);

@@ -116,14 +116,32 @@ static void rtl8139_irq(isr_regs_t *regs) {
     }
 }
 
-static void rtl8139_reset(void) {
+/* Q16: transmits this driver has failed since boot. See ata_error_count
+ * for why an error that propagates still needs a counter: it is
+ * invisible from outside the caller that saw it. */
+static uint32_t tx_errors;
+
+uint32_t rtl8139_tx_error_count(void) {
+    return tx_errors;
+}
+
+/* Q16: 0 if the reset never completed.
+ *
+ * This used to halt the machine, and halting is the wrong answer for a
+ * card that will not come up: a desktop with no network is a desktop,
+ * and a desktop that will not boot because the NIC is sulking is not.
+ * The init path below already knows how to report "no card" - a machine
+ * with no RTL8139 at all takes that path on every real laptop - so a
+ * card that fails its reset takes the same one. */
+static int rtl8139_reset(void) {
     outb(io_base + REG_CMD, CMD_RST);
     for (int i = 0; i < TX_POLL_LIMIT; i++) {
         if (!(inb(io_base + REG_CMD) & CMD_RST)) {
-            return;
+            return 1;
         }
     }
-    panic("rtl8139: reset did not complete");
+    klog_puts("[rtl8139] reset did not complete - carrying on without a network.\n");
+    return 0;
 }
 
 int rtl8139_init(void) {
@@ -133,9 +151,15 @@ int rtl8139_init(void) {
     }
     pci_enable_device(&dev);
     io_base = pci_bar0_io_base(&dev);
+    if (io_base == 0) {
+        klog_puts("[rtl8139] BAR0 is memory-mapped - this driver speaks port I/O only.\n");
+        return 0; /* Q16 - see pci_bar0_io_base */
+    }
 
     outb(io_base + REG_CONFIG1, 0x00); /* power on */
-    rtl8139_reset();
+    if (!rtl8139_reset()) {
+        return 0; /* Q16: a card that will not reset is a machine with no network, not a dead machine */
+    }
 
     for (int i = 0; i < 6; i++) {
         mac[i] = inb(io_base + REG_IDR0 + i);
@@ -185,9 +209,15 @@ const uint8_t *rtl8139_mac(void) {
     return mac;
 }
 
-void rtl8139_send(const uint8_t *frame, uint16_t len) {
+int rtl8139_send(const uint8_t *frame, uint16_t len) {
+    /* Q16: refused rather than fatal. An over-long frame is a bug in the
+     * caller - ethernet.c is the only one - and the honest answer to a
+     * caller's bug is to refuse the operation and let it see that,
+     * rather than to take the machine down with it. Counted, so a caller
+     * that is quietly getting this wrong is visible from outside. */
     if (len > RTL8139_MAX_FRAME) {
-        panic("rtl8139_send: frame too large");
+        tx_errors++;
+        return -1;
     }
 
     int slot = tx_next_descriptor;
@@ -211,8 +241,14 @@ void rtl8139_send(const uint8_t *frame, uint16_t len) {
 
     for (int i = 0; i < TX_POLL_LIMIT; i++) {
         if (inl(io_base + REG_TSD0 + (uint32_t)slot * 4) & TSD_OWN) {
-            return;
+            return 0;
         }
     }
-    panic("rtl8139_send: timed out waiting for transmit to complete");
+    /* Q16: a transmit that never drained. On a real link this is a cable
+     * pulled or a card that has stopped answering, and neither is a
+     * reason to stop the machine - the packet is lost and every protocol
+     * above this one is built to survive a lost packet. That is more
+     * than can be said for a panic. */
+    tx_errors++;
+    return -1;
 }

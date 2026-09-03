@@ -91,6 +91,13 @@ void ac97_init(void) {
     pci_enable_device(&dev);
     mixer_base = pci_bar0_io_base(&dev);
     bm_base = pci_bar1_io_base(&dev);
+    if (mixer_base == 0 || bm_base == 0) {
+        /* Q16: a sound card this driver cannot address. A desktop with
+         * no sound is a desktop; a machine that will not boot because
+         * the sound card is memory-mapped is not. */
+        klog_puts("[ac97] BARs are memory-mapped - carrying on without sound.\n");
+        return;
+    }
 
     /* Cold-reset the link, then the codec. Writing anything to the
      * mixer's reset register is the reset - the value is ignored. */

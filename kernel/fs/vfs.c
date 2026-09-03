@@ -628,6 +628,26 @@ int vfs_handle_truncate(int handle) {
     return r;
 }
 
+/* M85: see vfs.h and vfs_ops_t.readable. A filesystem that supplies no
+ * hook has nothing that ever blocks, which is why the default is 1
+ * rather than 0 - the wrong default here is a hang, not an error. */
+int vfs_handle_readable(int handle) {
+    uint32_t m = VFS_HANDLE_MOUNT(handle);
+    if (m > 0 && m <= (uint32_t)mount_count && mounts[m - 1].ops->readable) {
+        return mounts[m - 1].ops->readable(VFS_HANDLE_LOCAL(handle));
+    }
+    return 1;
+}
+
+/* M85: see vfs.h and vfs_ops_t.tty_of. */
+struct tty *vfs_handle_tty(int handle, int *pty_number) {
+    uint32_t m = VFS_HANDLE_MOUNT(handle);
+    if (m > 0 && m <= (uint32_t)mount_count && mounts[m - 1].ops->tty_of) {
+        return mounts[m - 1].ops->tty_of(VFS_HANDLE_LOCAL(handle), pty_number);
+    }
+    return (struct tty *)0;
+}
+
 /* M101: see vfs.h. Deliberately silent about a handle it does not
  * recognise - this is called from a teardown path (the last close, and
  * the task-exit walk that closes a dead process's whole table), and a

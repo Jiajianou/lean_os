@@ -15,10 +15,11 @@
  * written elsewhere test these macros, not the layout, but the layout is
  * what makes the macros they were compiled against work.
  *
- * Deliberately not here: WUNTRACED, WCONTINUED, WIFSTOPPED. Those are
- * about job control - a stopped process is one a terminal suspended -
- * and nothing on this machine can stop a process yet. M85 is where
- * SIGTSTP arrives, and it is where these belong.
+ * This header said "deliberately not here: WUNTRACED, WCONTINUED,
+ * WIFSTOPPED... M85 is where SIGTSTP arrives, and it is where these
+ * belong." M85's second attempt is that milestone finishing, so
+ * WUNTRACED, WIFSTOPPED and WSTOPSIG are below. WCONTINUED still is not,
+ * with the reason written beside them rather than left as an absence.
  */
 #pragma once
 
@@ -43,9 +44,28 @@ extern "C" {
  * that stops to wait for it. */
 #define WNOHANG 1
 
+/* M85 (second attempt): also report a child that has been STOPPED rather
+ * than only one that has died. This is what makes a shell able to print
+ * "[1]+ Stopped" instead of waiting forever for a job that ^Z suspended,
+ * and it is the reason the note above says these belong to M85.
+ *
+ * WCONTINUED is still not here, and that is a smaller gap than it looks:
+ * it reports a child that was resumed, and on this machine the thing
+ * that resumes a child is the same process that would be asking. The day
+ * something else can send SIGCONT - a job-control shell in one terminal
+ * resuming a process another one stopped - is the day it means
+ * something. */
+#define WUNTRACED 2
+
 #define WIFEXITED(status)   (((status) & 0x7F) == 0)
 #define WEXITSTATUS(status) (((status) >> 8) & 0xFF)
-#define WIFSIGNALED(status) (((status) & 0x7F) != 0)
+/* 0x7F is the one low byte that is neither "exited" (0) nor a signal
+ * number, which is why every Unix spells a stop this way and why
+ * WIFSIGNALED has to exclude it. It did not have to before M85, because
+ * nothing on this machine could stop a process. */
+#define WIFSTOPPED(status)  (((status) & 0xFF) == 0x7F)
+#define WSTOPSIG(status)    (((status) >> 8) & 0xFF)
+#define WIFSIGNALED(status) (((status) & 0x7F) != 0 && !WIFSTOPPED(status))
 #define WTERMSIG(status)    ((status) & 0x7F)
 
 /* Reaps a terminated child and reports which and how.
