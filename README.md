@@ -133,7 +133,9 @@ Four instruments, and none of them subsumes another:
   compiles the **scheduler** (Q13) - 2,157 lines whose bugs have
   historically presented as "about one boot in ten hangs" - against a
   fake timer and a fake CPU, so a tick is a function call and a
-  fairness property can be checked at every task count. 227 tests.
+  fairness property can be checked at every task count, and it learns
+  the order locks are taken in so an inversion is an error rather than
+  a comment (Q9). 231 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
   image and grade the serial log against 80 markers and five performance
   budgets. They prove every subsystem still works from the inside.
@@ -142,7 +144,10 @@ Four instruments, and none of them subsumes another:
   proves the path a person's hands take - a distinction learned the hard
   way (M40). Most of its tests check that something *did* change; two of
   them check the opposite, that nothing else did, which is the only way to
-  catch a flicker (Q7).
+  catch a flicker (Q7). Since Q19 it boots **once per image** and
+  restores a snapshot of the painted desktop per test - 440 s to 337 s
+  for fifty tests - with the snapshot keyed on a hash of the image, so a
+  stale one is refused rather than quietly used.
 - **Fuzzers** (`make fuzz-run`) feed the network parsers and the
   filesystem mount path arbitrary bytes. The network target manages about
   150,000 inputs a second.
@@ -167,6 +172,10 @@ Four instruments, and none of them subsumes another:
   host wrote down. It is how a source tree reaches this disk at all, and
   both halves are needed: the host half alone is a well-formed image
   nothing has opened.
+- **Exhaustion** (`/bin/exhausttest`, graded by the `[q9]` boot marker)
+  takes descriptors, pipes, shared-memory segments and sockets to their
+  ceilings and requires each to refuse, recover, and work again - twice
+  over, with a leak audit across 2,200 rounds either side of it.
 - **A fault-injected disk** (`tools/disk-fault-test.sh`) boots the
   machine with QEMU's `blkdebug` refusing **every** write, through
   virtio and through ATA, and requires it to reach PID 1 anyway. Every

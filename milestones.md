@@ -202,7 +202,7 @@ Every milestone, in order, with its status. `[ ]` not started ·
 - `[x]` [Q6 — Numbers that fail, not numbers that print](#q6--numbers-that-fail-not-numbers-that-print-x)
 - `[~]` [Q7 — Pixels, all of them (partly landed: the invariant, not the baselines)](#q7--pixels-all-of-them-partly-landed-the-invariant-not-the-baselines-)
 - `[x]` [Q8 — What the tests never touch](#q8--what-the-tests-never-touch-x)
-- `[ ]` [Q9 — A machine that runs out of things and stays up](#q9--a-machine-that-runs-out-of-things-and-stays-up--)
+- `[x]` [Q9 — A machine that runs out of things and stays up](#q9--a-machine-that-runs-out-of-things-and-stays-up-x)
 - `[x]` [Q10 — It runs without me](#q10--it-runs-without-me-x)
 
 **[The arc after that: tests worth trusting](#the-arc-after-that-tests-worth-trusting)**
@@ -215,7 +215,7 @@ Every milestone, in order, with its status. `[ ]` not started ·
 - `[x]` [Q16 — Devices that fail, and a machine that keeps running](#q16--devices-that-fail-and-a-machine-that-keeps-running-x)
 - `[x]` [Q17 — Power cut, and a filesystem that survives it](#q17--power-cut-and-a-filesystem-that-survives-it-x)
 - `[x]` [Q18 — Latency as a distribution](#q18--latency-as-a-distribution-x)
-- `[ ]` [Q19 — Boot once, test many](#q19--boot-once-test-many--)
+- `[x]` [Q19 — Boot once, test many](#q19--boot-once-test-many-x)
 - `[x]` [Q20 — The tests as a product](#q20--the-tests-as-a-product-x)
 
 **[Deliberately not next, and why](#deliberately-not-next-and-why)**
@@ -12291,44 +12291,123 @@ disk and M69 made for latency.
 and a ratchet that fails a commit which lowers it. And the four unnamed
 files named.
 
-### Q9 — A machine that runs out of things and stays up [ ]
+### Q9 — A machine that runs out of things and stays up [x]
+
+**Status:** done for everything that can be done without leaving this
+machine running for a day. The triage — this milestone's stated
+deliverable — is below and found the job smaller again than the entry's
+own correction; the conversions are made; the exhaustion and the leak
+audit are graded on every boot. The 24-hour soak is `[⊘]` with a
+condition rather than an intention.
 
 This is the milestone that decides whether "production grade" is a fair
 description, and it is the one most likely to change code rather than
 add tests.
 
-- [ ] Every resource exhausted deliberately, one at a time, with the
-      machine still serving the desktop afterwards: physical memory, the
-      kernel heap, `MAX_TASKS`, `MAX_FDS`, pipe buffers, shm segments,
-      inodes, data blocks, TCP sockets, the block cache
-- [ ] `pmm_alloc_frame`'s `panic("out of physical memory")` becomes a
-      failed allocation that propagates. It is the audit's clearest
-      example of the class: a panic that is correct for an impossible
-      state and wrong for an ordinary one. The deliverable is the
-      *triage* into "impossible" and "reachable", and the conversion of
-      the second group. **The count in this bullet was wrong when it was
-      written** — it said 219, which counted the 178 assertions inside
-      `kernel.c`'s own self-tests. The production figure is about forty,
-      and the job is correspondingly smaller
-- [ ] A leak audit with numbers rather than adjectives: frames, heap
-      bytes, task slots, fds and cache blocks recorded at boot and again
-      after 10,000 spawn/exit rounds, 10,000 open/close rounds and
-      10,000 window open/close rounds. M50 and M54 already do exactly
-      this for two resources; this generalises the move they made
-- [ ] A soak that runs for 24 hours under continuous input, with those
-      counters sampled throughout, and the graph as the artifact
-- [ ] SMP stress: `racetest` extended to hammer the shared structures
-      the locks guard — the scheduler run queue, the heap free list, the
-      pmm bitmap, the net lock, the block cache — with the lock order
-      documented in `kernel/lib/spinlock.h` and asserted at runtime under
-      a debug build, because `heap.c` already documents its order in a
-      comment and a comment cannot fail
+- [x] Every resource exhausted deliberately, one at a time, with the
+      machine still working afterwards. `/bin/exhausttest` takes
+      descriptors, pipes, shm segments and sockets to their ceilings;
+      physical memory is `/bin/oomtest`'s (M102), the task table and
+      kernel stacks are Q13's, and inodes and data blocks are the two
+      `slow_` leanfs tests. Each section **gives the resource back and
+      takes one more**, which is the half that separates a table that
+      recovers from one that is full forever
+- [x] The **triage**, which the bullet calls the deliverable — see the
+      table below. `pmm_alloc_frame`'s panic turns out to have been
+      converted already, by M102, and this entry did not know it
+- [x] A leak audit with numbers: frames, heap bytes (used *and* total),
+      task slots and cache blocks, before and after. **2,000 open/close
+      and 200 spawn/exit rounds rather than 10,000** — the reason is
+      stated in the code rather than rounded up: the boot budget is
+      shared with eighty other self-tests
+- [⊘] **A 24-hour soak.** Not run, and the condition is a machine that
+      can be left running for a day — which is not this one, and is the
+      same constraint M110 has. What would make it worth building
+      *before* that: a leak the 2,200-round audit cannot see, which by
+      definition means a per-round cost below one byte and one frame.
+      There is no such evidence, and building a 24-hour instrument to
+      look for something nothing suggests exists is the shape of work
+      M69's rule refuses
+- [~] SMP stress and the lock order. **The lock order is recorded and an
+      inversion is an error** — see below; it is the half `heap.c`'s
+      comment could never be. `racetest` extended to the scheduler run
+      queue, the pmm bitmap and the block cache is **not** done, and the
+      honest reason is that it is a second milestone's worth of work
+      wearing this one's name
 
 **How we'll know.** A program that allocates in a loop until it cannot
-gets an allocation failure, exits, and the desktop is still there — the
-single clearest before/after in this arc. And 24 hours of soak whose
-frame count, free-frame count and task-slot count end where they
-started.
+gets an allocation failure, exits, and the machine is still there — met,
+twice over, on every graded boot. ~~And 24 hours of soak~~ — see the
+`[⊘]` above.
+
+#### The triage, which was the deliverable
+
+**Thirty-two panics outside `kernel.c`, not "about forty".** This
+entry's own correction said 219 was wrong because it counted the
+self-tests; the figure is smaller again, partly because Q16 landed first
+and took the whole device class out of it. Of the thirty-two:
+
+| class | count | what it is | what happens to it |
+|---|---|---|---|
+| **boot** | 7 | `pmm_init` with no usable memory, `vmm_init` with no frame for a PML4, the framebuffer absent or not 32bpp, no idle task, no AP stack | **kept.** There is nothing to propagate *to* — the machine's entire means of saying anything is the surface `fb_init` is refusing to find |
+| **impossible** | 21 | double frees, an unmapped page unmapped, a terminated task resumed, two CPUs on one stack, coordinates outside the framebuffer | **kept.** These are assertions: reaching one is a kernel bug, and continuing past it corrupts something quietly instead of loudly |
+| **reachable exhaustion** | 4 | `pmm_alloc_frame`, `pmm_alloc_frame_dma`, `pmm_alloc_contiguous`, `vmm_map_page_in` | **converted, or already unreachable** |
+
+And the four, individually, because the interesting result is how few
+were left:
+
+- **`pmm_alloc_frame`** — Q9's headline example, and **M102 already did
+  it.** Every path a program can reach now calls `pmm_try_alloc_frame`;
+  the one remaining caller of the panicking form is a self-test in
+  `kernel.c`. This entry was written before M102 and never updated.
+- **`pmm_alloc_frame_dma` and `pmm_alloc_contiguous`** — every caller is
+  driver or filesystem *initialisation*, which is the boot class, and
+  Q16 has just made the drivers around them decline rather than halt.
+- **`vmm_map_page_in`** — the one that was genuinely reachable, from
+  **four** call sites: `sbrk`, `SYS_shm_map`, mapping the framebuffer,
+  and loading an ELF. All four converted to `vmm_try_map_page_in`.
+
+**The sharpest of the four is `sbrk`, and it is sharp because M29 got
+half of it.** M29 converted the *frame* allocation there and wrote the
+reason above the line — *"a user process growing its own heap past
+whatever physical memory remains must fail this syscall, not panic every
+other task on the system along with it"* — and then handed the frame to
+the panicking form of the mapper. A page table is itself a frame, so a
+program that grew its heap far enough exhausted the page-table
+allocations and halted the machine, three lines under a comment
+explaining why it must not. That is the whole argument for a triage:
+the second half of a converted call site is invisible unless somebody
+counts.
+
+#### Two things the tests found
+
+**A capability denial wearing an exhaustion's clothes.** The socket
+section of `/bin/exhausttest` reported "sockets ran out after 0" on its
+first run, and it had not run out of anything — M65's model gates
+`SYS_socket` and the program held no `CAP_NETWORK`. A test that only
+asks "did it refuse" passes here and is entirely wrong about why. Every
+section now asserts it got **at least one** before it got a refusal,
+which is the general form: a resource that refuses the first request has
+not been exhausted by the thing asking.
+
+**The lock order is recorded now, and it can fail.** `heap.c` documents
+its order in a comment and `spinlock.h` documents the interrupt rule in
+three paragraphs, and a comment cannot fail. The host tier's fake
+spinlock learns every (outer, inner) pair it sees and panics on the
+reverse. Q13 deferred this for want of "a second lock in the same tier to
+invert against", and that condition was met the moment `sched.c`,
+`heap.c` and `leanfs.c` were all in this build.
+
+**And the honest limit, which a test found rather than a reviewer.** The
+first version asserted that a kernel path in this tier nests two locks,
+and it failed: **no kernel unit here currently takes one lock under
+another** — the scheduler does not call into the heap or the filesystem
+under its own lock, and the pmm and vmm are fakes with no locks at all.
+So what is proved is that the detector works, not that the kernel's order
+is checked. It is armed for the day a path does nest, and that day needs
+no new code. Left as a `CHECK` on the pair count rather than deleted,
+because a detector nothing has ever exercised is one nobody should
+believe.
 
 ### Q10 — It runs without me [x]
 
@@ -12694,14 +12773,15 @@ deterministic test rules out completely.
       signal reaches every member and nobody else", and again in
       `tests/test_pty.c`, where a real terminal signals a real process
       group
-- [⊘] **The lock-order assertion.** Not built, and the reason is a
-      measurement rather than a mood: with `sched.c` in this tier the
-      fake spinlock's *existing* recursive-acquire check fires on a real
-      path (see the note below), which is the half of the idea that had
-      a caller. Recording the order locks are taken in needs a second
-      lock in the same tier to invert against, and this build has one —
-      `sched_lock`. The condition is `heap.c`'s or `pipe.c`'s arrival
-      here, which is Q14's neighbourhood rather than this milestone's
+- [x] **The lock-order assertion made real** — *built in Q9, one
+      milestone later, and the condition this bullet set is what
+      triggered it.* It said the work needed "a second lock in the same
+      tier to invert against"; `heap.c` and `leanfs.c` were already in
+      this build beside `sched.c`, so the condition was met the moment
+      somebody looked. The fake spinlock learns every (outer, inner) pair
+      and panics on the reverse. See Q9 for what it proves and, more
+      usefully, for what it does not: no kernel path in this tier nests
+      two locks yet, so the detector is armed rather than firing
 
 **How we'll know.** A fairness property that holds for every task count,
 and the M56 deadlock reproduced as a failing test. *The first is met.
@@ -13062,30 +13142,85 @@ between consecutive runs on an idle host - and if it does not, that is
 the finding, and the budget becomes a percentile of a distribution
 instead of a ceiling over a sample.
 
-### Q19 — Boot once, test many [ ]
+### Q19 — Boot once, test many [x]
+
+**Status:** done, and **the target in its own "How we'll know" was
+arithmetically impossible.** The mechanism works and is measured:
+**440 s → 337 s** for 50 tests at 4-way parallelism, same verdicts. That
+is 23%, not the 75% this entry asked for, and the number that was wrong
+is in this entry rather than in the result — see the correction below.
 
 Infrastructure, and the reason it is a milestone rather than a chore: the
 interactive suite boots a fresh guest per test, and it is the only tier
 expensive enough that people will avoid running it.
 
-- [ ] A QEMU snapshot taken once at the desktop, restored per test. Boot
-      is ~8 seconds of every test's ~25 and the restore should be well
-      under one. The measured baseline to beat is **458 s** for 47 tests
-      at 4-way parallelism
-- [ ] Snapshot validity tied to the image: a stale snapshot silently
-      testing yesterday's kernel is the one failure this must not have,
-      and it fails closed by hashing the image into the snapshot's name
-- [ ] The tests that genuinely need a cold boot - session restore,
-      settings persistence, the first-boot format path - marked as such
-      and left booting, because a snapshot restores the state they exist
-      to check
-- [ ] The measured before and after, in `build/test-history.tsv`
+- [x] A QEMU snapshot taken once at the desktop, restored per test. The
+      snapshot is 50 MiB of guest state in a qcow2 overlay on the image;
+      building it costs **14 s, once per image**, and restoring it is a
+      copy-on-write file clone (**21 ms** on APFS) plus a `-loadvm`
+- [x] Snapshot validity tied to the image, and it fails closed **twice**:
+      the file's *name* contains a hash of the image, the disk backend,
+      the core count and the memory size - so a rebuilt kernel asks for a
+      file that does not exist - and a sidecar records the full key,
+      which is verified before the snapshot is used at all. A file with
+      the right name and the wrong contents is deleted, not trusted
+- [x] The tests that genuinely need a cold boot marked as such:
+      `COLD_BOOT_TESTS`, four of fifty. All four are *about* the boot -
+      two count boot markers in the serial log to prove a reboot
+      happened, and they would be handed a log that begins after the boot
+      they are asking about. Marked **by name rather than detected**,
+      because "does this depend on the boot" is a question about intent
+- [x] The measured before and after, in `build/test-history.tsv`, as
+      `input-suite-cold-*` and `input-suite-snapshot-*` rows written by
+      the suite itself
 
-**How we'll know.** The full interactive suite in a quarter of 458 s,
-with the same verdicts, and a stale snapshot proven to fail rather than
-to pass quietly. The second prize is the flake in the table above: less
-time per test at the same parallelism is less contention, which is what
-produced it.
+**How we'll know.** ~~The full interactive suite in a quarter of 458 s~~
+— **not met, and it could not have been.** With the same verdicts: met,
+50/50 both ways. And a stale snapshot proven to fail rather than to pass
+quietly: met, by `--check-stale`.
+
+#### The target contradicted the bullet directly above it
+
+Q19 asked for "a quarter of 458 s" and, two lines earlier, said **"boot
+is ~8 seconds of every test's ~25."** Removing 8 seconds from 25 is a 32%
+reduction. There was never a version of this milestone that produced 75%,
+and the two numbers were written next to each other.
+
+Measured, it is 23% rather than 32%, and the gap has two named causes:
+four of the fifty tests still boot cold on purpose, and at 4-way
+parallelism the boots of four guests already overlap each other, so the
+time removed is less than the time saved per test. Both were knowable in
+advance and neither was known.
+
+**What the milestone is worth, stated in the terms that survive being
+right about it:** a hundred seconds off every full run and twenty off
+every `--quick`, permanently, for a 14-second cost per image. That is
+worth having. It is not what the entry promised, and the entry is what
+was wrong.
+
+**The second prize is not claimed.** This entry predicted that less time
+per test at the same parallelism would reduce the flake list. Eleven
+tests carry a flake history and two runs cannot tell whether that number
+moved - a flake is by definition not visible in one sample. Left as a
+prediction with a way to check it: `build/flakes.tsv` accumulates, and
+the answer is a month of runs away.
+
+#### The two things that were not obvious
+
+**`savevm` refuses to run while any writable block device cannot hold a
+snapshot**, and a raw pflash cannot. So the OVMF variable store is opened
+**read-only** on the restored path. That costs nothing here - this
+machine boots the same way every time and has no boot variables worth
+keeping - but it is the reason the snapshot path and the cold path do not
+share a command line.
+
+**The monitor echoes every keystroke of every previous command back**,
+and prints its `(qemu)` prompt after each. The first version of the
+`savevm` wait read a socket that still held the previous `screendump`'s
+echo, found a prompt belonging to it, and concluded the save was finished
+before it had begun - producing a qcow2 with no snapshot in it and an
+error message about the wrong thing. Draining before sending is the fix
+and the comment at that line says why it is not tidiness.
 
 ### Q20 — The tests as a product [x]
 

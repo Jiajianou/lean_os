@@ -95,9 +95,44 @@ static void *grow_heap(uint64_t pages) {
     return (void *)0;
 }
 
+/* ---- Q9: what this heap is holding -----------------------------------
+ *
+ * A leak audit needs a number, and until Q9 this allocator kept none: it
+ * could say whether a particular pointer was free and could say nothing
+ * at all about the total. "Heap bytes at boot and after ten thousand
+ * rounds" was therefore an assertion nobody could make.
+ *
+ * Two numbers rather than one, because they answer different questions.
+ * `heap_used_bytes` is the sum of the live blocks - what a leak grows.
+ * `heap_total_bytes` is what the allocator has taken from the VMM and
+ * never gives back (grow_heap only ever grows), so a run where used
+ * returns to its starting value while total has risen is fragmentation
+ * rather than a leak, and the two numbers are what tells them apart.
+ *
+ * Maintained inside the lock the allocator already takes, so they cost
+ * an add and a subtract on paths that are already doing list surgery. */
+static size_t heap_used;
+static size_t heap_total;
+
+size_t heap_used_bytes(void) {
+    uint64_t f = spin_lock_irqsave(&heap_lock);
+    size_t n = heap_used;
+    spin_unlock_irqrestore(&heap_lock, f);
+    return n;
+}
+
+size_t heap_total_bytes(void) {
+    uint64_t f = spin_lock_irqsave(&heap_lock);
+    size_t n = heap_total;
+    spin_unlock_irqrestore(&heap_lock, f);
+    return n;
+}
+
 void heap_init(void) {
     heap_virt_end = vmm_kernel_heap_base();
     heap_head = (block_header_t *)0;
+    heap_used = 0;
+    heap_total = 0;
     klog_puts("[heap] kernel heap starts at 0x");
     klog_put_hex64(heap_virt_end);
     klog_putc('\n');
@@ -126,6 +161,7 @@ void *kmalloc(size_t size) {
                 b->size = size;
             }
             b->free = 0;
+            heap_used += b->size;
             spin_unlock_irqrestore(&heap_lock, irq_flags);
             return (void *)(b + 1);
         }
@@ -153,6 +189,8 @@ void *kmalloc(size_t size) {
     b->size = (size_t)(pages * PAGE_SIZE) - sizeof(block_header_t);
     b->free = 0;
     b->next = (block_header_t *)0;
+    heap_used += b->size;
+    heap_total += (size_t)(pages * PAGE_SIZE);
 
     if (prev) {
         prev->next = b;
@@ -174,6 +212,7 @@ void kfree(void *ptr) {
         panic("kfree: double free");
     }
     b->free = 1;
+    heap_used -= b->size;
 
     /* Forward-only coalescing: the list is kept in address order (splits
      * insert adjacent, growth only ever appends at the high end), so the

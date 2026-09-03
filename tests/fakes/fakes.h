@@ -87,6 +87,10 @@ uint32_t fake_socket_delivered_src_ip(int i);
  * because CHECK_PANIC returns into the middle of the test with whatever
  * the panicking code was holding still held. */
 void fake_spinlock_release_all(void);
+/* Q9: how many distinct (outer, inner) lock pairs this run has observed.
+ * A test asserts it is non-zero, because a lock-order checker that has
+ * never seen a nested acquisition is a checker that cannot fail. */
+int fake_spinlock_order_pairs(void);
 
 /* ---- fake_arch -------------------------------------------------------- */
 /* The machine kernel/sched/sched.c runs on, reduced to what it asks and

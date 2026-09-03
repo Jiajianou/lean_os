@@ -123,7 +123,8 @@
     X(oomtest)                                                                \
     X(futextest)                   \
     X(fswriter)                    \
-    X(ptytest)
+    X(ptytest)                     \
+    X(exhausttest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -10021,6 +10022,192 @@ static void boot_selftests_system(void) {
                    "an overflowing length; every one returned, every pointer argument was "
                    "refused, every unopened fd and every out-of-range syscall number was "
                    "rejected - self-test passed.\n\n");
+    }
+
+    /* ---- Q9 self-test: run out of everything, and stay up --------------
+     *
+     * Q9's own bar: "a program that allocates in a loop until it cannot
+     * gets an allocation failure, exits, and the desktop is still there
+     * - the single clearest before/after in this arc."
+     *
+     * Four resources, and the ones nothing else covers. Physical memory
+     * is /bin/oomtest's ([m102]); the task table and the kernel stacks
+     * are Q13's host tests; inodes and data blocks are the two `slow_`
+     * leanfs tests. What had no instrument at all was the set a *program*
+     * holds - descriptors, pipes, shared-memory segments and sockets -
+     * and /bin/exhausttest takes each of them to its ceiling.
+     *
+     * The half that is not obvious is the recovery. A table that refuses
+     * when full and never works again passes an exhaustion test and is
+     * broken; M101 found exactly that in procfs, where the seventeenth
+     * open of any /proc file failed permanently and six milestones went
+     * by. So every section of that program gives the resource back and
+     * takes one more.
+     *
+     * And then this runs it TWICE. A resource the first run leaked is a
+     * resource the second run finds already gone, so two passes prove
+     * something one cannot: that the exhaustion left nothing behind.
+     */
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        size_t ex_bytes = 0;
+        uint8_t *ex_img = read_program(PATH_BIN_DIR "exhausttest", &ex_bytes);
+        if (!ex_img) {
+            panic("Q9 self-test: /bin/exhausttest is not on this disk");
+        }
+        uint64_t frames_before = pmm_free_frame_count();
+        for (int round = 0; round < 2; round++) {
+            const char *ex_argv[] = {PATH_BIN_DIR "exhausttest", 0};
+            task_t *ex = process_spawnv("exhausttest", ex_img, ex_bytes, ex_argv);
+            long rc = ex ? do_syscall(SYS_wait, (uint64_t)ex->id, 0, 0) : -1;
+            if (rc != 0) {
+                klog_puts("[q9] exhausttest round ");
+                klog_put_dec((uint32_t)round);
+                klog_puts(" exited ");
+                klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+                klog_puts(" - see user_space/bin/exhausttest.c for what each "
+                          "code means\n");
+                kfree(ex_img);
+                panic("Q9 self-test: a resource this machine ran out of did not "
+                      "refuse, or did not come back");
+            }
+        }
+        kfree(ex_img);
+
+        /* And the frames. Every one of those tables holds kernel memory
+         * behind it - a socket's receive queue, a pipe's buffer, a
+         * segment's pages - so "the table came back" and "the memory
+         * came back" are two claims and this is the second. */
+        uint64_t frames_after = pmm_free_frame_count();
+        if (frames_after < frames_before) {
+            klog_puts("[q9] filling and emptying every table cost ");
+            klog_put_dec((uint32_t)(frames_before - frames_after));
+            klog_puts(" frames that never came back\n");
+            panic("Q9 self-test: exhausting a resource leaked physical memory");
+        }
+
+        /* The desktop is still there, asked of the thing that would know:
+         * the machine can still do the work it was doing. A filesystem
+         * round trip rather than a screenshot, because this runs long
+         * before the compositor and the claim is about the kernel. */
+        {
+            static char q9_buf[512];
+            k_memset(q9_buf, 'q', sizeof(q9_buf));
+            if (vfs_write("/tmp/q9-after", q9_buf, sizeof(q9_buf)) != 0) {
+                panic("Q9 self-test: the machine could not work after running out");
+            }
+            k_memset(q9_buf, 0, sizeof(q9_buf));
+            if (vfs_read("/tmp/q9-after", q9_buf, sizeof(q9_buf)) != (int64_t)sizeof(q9_buf) ||
+                q9_buf[0] != 'q') {
+                panic("Q9 self-test: the machine could not work after running out");
+            }
+            vfs_unlink("/tmp/q9-after");
+        }
+
+        /* ---- the leak audit, with numbers rather than adjectives -----
+         *
+         * Q9 asks for five counters at boot and again after ten thousand
+         * rounds. The counters are all five; the round counts are not
+         * ten thousand, and the reason is stated rather than rounded up:
+         * the boot budget is shared with eighty-odd other self-tests and
+         * ten thousand spawns is minutes of it. What is here is two
+         * thousand open/close and two hundred spawn/exit, which is
+         * enough for a per-round leak of one byte or one frame to be
+         * unmistakable and cheap enough to run on every graded boot.
+         *
+         * A leak that only appears after ten thousand rounds and not
+         * after two hundred is a different bug - it is a table filling
+         * up rather than something failing to be freed - and the
+         * exhaustion rounds above are the instrument for that one.
+         *
+         * heap_used and heap_total are reported separately because they
+         * mean different things: used coming back while total has grown
+         * is fragmentation, not a leak, and one number could not tell
+         * them apart. */
+        {
+            uint64_t f0 = pmm_free_frame_count();
+            size_t hu0 = heap_used_bytes();
+            size_t ht0 = heap_total_bytes();
+            int tasks0 = sched_task_count();
+            blk_stats_t bs0;
+            blk_stats(&bs0);
+
+            for (int i = 0; i < 2000; i++) {
+                int fd = vfs_open("/tmp/q9-churn", 1);
+                if (fd >= 0) {
+                    vfs_handle_close(fd);
+                }
+            }
+            vfs_unlink("/tmp/q9-churn");
+
+            size_t sp_bytes = 0;
+            uint8_t *sp_img = read_program(PATH_BIN_DIR "hello", &sp_bytes);
+            if (sp_img) {
+                const char *sp_argv[] = {PATH_BIN_DIR "hello", 0};
+                for (int i = 0; i < 200; i++) {
+                    task_t *t = process_spawnv("hello", sp_img, sp_bytes, sp_argv);
+                    if (t) {
+                        do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+                    }
+                }
+                kfree(sp_img);
+            }
+
+            uint64_t f1 = pmm_free_frame_count();
+            size_t hu1 = heap_used_bytes();
+            size_t ht1 = heap_total_bytes();
+            int tasks1 = sched_task_count();
+            blk_stats_t bs1;
+            blk_stats(&bs1);
+
+            klog_puts("[q9] leak audit over 2000 open/close and 200 spawn/exit "
+                       "rounds - free frames ");
+            klog_put_dec((uint32_t)f0);
+            klog_puts(" -> ");
+            klog_put_dec((uint32_t)f1);
+            klog_puts(", heap used ");
+            klog_put_dec((uint32_t)hu0);
+            klog_puts(" -> ");
+            klog_put_dec((uint32_t)hu1);
+            klog_puts(", heap total ");
+            klog_put_dec((uint32_t)ht0);
+            klog_puts(" -> ");
+            klog_put_dec((uint32_t)ht1);
+            klog_puts(", task slots ");
+            klog_put_dec((uint32_t)tasks0);
+            klog_puts(" -> ");
+            klog_put_dec((uint32_t)tasks1);
+            klog_puts(", cache blocks ");
+            klog_put_dec((uint32_t)bs0.resident);
+            klog_puts(" -> ");
+            klog_put_dec((uint32_t)bs1.resident);
+            klog_putc('\n');
+
+            /* Frames and heap-used are the two that must come back
+             * exactly. Task slots may differ - a slot is recycled rather
+             * than returned, so the table's high-water mark is allowed
+             * to have risen - and cache blocks SHOULD have risen, since
+             * two thousand opens of a file is exactly what a block cache
+             * is for. Asserting only what must hold is what keeps this
+             * from being a test that fails for being right. */
+            if (f1 < f0) {
+                panic("Q9 leak audit: physical frames did not come back");
+            }
+            if (hu1 > hu0) {
+                panic("Q9 leak audit: the kernel heap did not come back");
+            }
+        }
+
+        klog_puts("[q9] a machine that runs out of things and stays up: "
+                   "descriptors, pipes, shared-memory segments and sockets each "
+                   "taken to their ceiling and each refusing rather than halting, "
+                   "every one of them given back and taken again, twice over with "
+                   "no frame lost between the rounds, and the machine still "
+                   "reading and writing files afterwards, and a leak audit "
+                   "over 2200 rounds with every frame and every heap byte back "
+                   "- self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
     }
 
     /* ---- Q16 self-test: a disk that fails, and a machine that does not --

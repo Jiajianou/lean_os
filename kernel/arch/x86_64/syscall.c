@@ -2313,7 +2313,27 @@ static long sys_sbrk(uint64_t increment_u, uint64_t a2, uint64_t a3, uint64_t a4
         if (phys == 0) {
             return -1;
         }
-        vmm_map_page_in(cur->pml4_phys, cur->heap_mapped_end, phys, VMM_FLAG_WRITABLE | VMM_FLAG_USER);
+        /* Q9: and the MAPPING can run out too, which the comment above
+         * did not cover and this call did not survive.
+         *
+         * M29 converted the frame allocation here for exactly the reason
+         * it gives - "a user process growing its own heap past whatever
+         * physical memory remains must fail *this* syscall, not panic
+         * every other task on the system along with it" - and then
+         * handed the frame to the panicking form of the mapper. A page
+         * table is itself a frame, so a program that grows its heap far
+         * enough exhausts the page-table allocations too, and did it by
+         * halting the machine. The argument is M29's, unchanged; this is
+         * the other half of the same line.
+         *
+         * The frame goes back rather than being left mapped-nowhere:
+         * nothing points at it, so unlike the pages already mapped it is
+         * not "genuinely-owned, valid memory" - it is a leak. */
+        if (vmm_try_map_page_in(cur->pml4_phys, cur->heap_mapped_end, phys,
+                                VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
+            pmm_free_frame(phys);
+            return -1;
+        }
         cur->heap_mapped_end += PAGE_SIZE;
     }
     cur->heap_brk = new_brk;
@@ -2478,8 +2498,15 @@ static long sys_fb_map(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint6
     uint64_t size = fb_mapped_bytes();
     uint64_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     for (uint64_t i = 0; i < pages; i++) {
-        vmm_map_page_in(cur->pml4_phys, USER_FB_BASE + i * PAGE_SIZE, phys_base + i * PAGE_SIZE,
-                         VMM_FLAG_WRITABLE | VMM_FLAG_USER);
+        /* Q9: a mapping that runs out of page tables refuses the call
+         * rather than the machine. Partial mappings are left in place -
+         * the address space is torn down with the process, and the
+         * caller has been told the framebuffer is not there. */
+        if (vmm_try_map_page_in(cur->pml4_phys, USER_FB_BASE + i * PAGE_SIZE,
+                                phys_base + i * PAGE_SIZE,
+                                VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
+            return (long)(uint64_t)-1;
+        }
     }
     /* Q7: the screen now has a user-space owner, so the kernel console
      * stops writing to it. Until this line, every process's stdout was

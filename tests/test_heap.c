@@ -445,3 +445,77 @@ TEST(heap, the_growth_page_count_is_rounded_up_not_down) {
         kfree(p);
     }
 }
+
+/* ---- Q9: the two numbers a leak audit needs --------------------------
+ *
+ * This allocator kept no total until Q9, so "heap bytes at boot and
+ * again after ten thousand rounds" was a measurement nobody could take.
+ * Two numbers rather than one, and these tests are about the difference
+ * between them: used comes back and total does not.
+ */
+
+TEST(heap, used_bytes_tracks_what_is_live) {
+    heap_fixture();
+    size_t before = heap_used_bytes();
+
+    void *a = kmalloc(1000);
+    REQUIRE(a != NULL);
+    size_t with_one = heap_used_bytes();
+    /* At least what was asked for - the allocator rounds up to its
+     * alignment, and asserting the exact figure would be asserting
+     * HEAP_ALIGN rather than the accounting. */
+    CHECK(with_one >= before + 1000);
+
+    void *b = kmalloc(1000);
+    REQUIRE(b != NULL);
+    CHECK(heap_used_bytes() >= with_one + 1000);
+
+    kfree(b);
+    kfree(a);
+    /* Exactly back, not approximately: every byte kmalloc counted, kfree
+     * has to uncount. A coalescing allocator makes that easy to get
+     * wrong in one direction - merging two free blocks must not subtract
+     * anything, because neither was live. */
+    CHECK_EQ(heap_used_bytes(), before);
+}
+
+TEST(heap, total_bytes_only_ever_grows_and_used_comes_back) {
+    heap_fixture();
+    size_t used_before = heap_used_bytes();
+    size_t total_before = heap_total_bytes();
+
+    /* Enough churn to force the heap to grow at least once. */
+    void *held[64];
+    for (int i = 0; i < 64; i++) {
+        held[i] = kmalloc(4096);
+        REQUIRE(held[i] != NULL);
+    }
+    CHECK(heap_total_bytes() > total_before);
+    size_t total_at_peak = heap_total_bytes();
+
+    for (int i = 0; i < 64; i++) {
+        kfree(held[i]);
+    }
+    /* This is the pair that makes the audit readable: used returns to
+     * where it started and total does not, because grow_heap never gives
+     * pages back. A run where used also failed to return is a leak; a
+     * run where only total grew is fragmentation, and one number could
+     * not tell you which. */
+    CHECK_EQ(heap_used_bytes(), used_before);
+    CHECK_EQ(heap_total_bytes(), total_at_peak);
+}
+
+TEST(heap, a_reused_free_block_is_counted_once) {
+    heap_fixture();
+    size_t before = heap_used_bytes();
+    for (int round = 0; round < 200; round++) {
+        void *p = kmalloc(512);
+        REQUIRE(p != NULL);
+        kfree(p);
+    }
+    /* Two hundred allocate/free rounds through the same block. An
+     * accounting that added on the split path and forgot the reuse path
+     * would drift upward here and nowhere else, which is precisely the
+     * shape of the bug a leak audit would then report as a leak. */
+    CHECK_EQ(heap_used_bytes(), before);
+}

@@ -12,3 +12,10 @@
 void heap_init(void);
 void *kmalloc(size_t size);
 void kfree(void *ptr);
+
+/* Q9: bytes in live blocks, and bytes this allocator has ever taken from
+ * the VMM. A leak grows the first; fragmentation grows the second while
+ * the first returns to where it started, and telling those two apart is
+ * the whole reason there are two numbers. See heap.c. */
+size_t heap_used_bytes(void);
+size_t heap_total_bytes(void);

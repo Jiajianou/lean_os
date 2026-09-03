@@ -38,6 +38,7 @@
 #include "fakes/fakes.h"
 
 #include "arch/x86_64/cpu.h" /* MAX_CPUS, MSR_FS_BASE - the two the switch touches */
+#include "lib/spinlock.h"
 #include "sched/sched.h"
 #include "signal.h" /* system_api/include/signal.h */
 
@@ -791,4 +792,50 @@ TEST(sched, a_switch_loads_the_incoming_tasks_thread_pointer) {
 
     q13_kill(a);
     q13_kill(b);
+}
+
+/* ---- Q9: the lock order, and a checker that can fail ------------------
+ *
+ * `heap.c` documents its lock order in a comment and `spinlock.h`
+ * documents the interrupt rule in three paragraphs, and a comment cannot
+ * fail. tests/fakes/fake_spinlock.c records every (outer, inner) pair it
+ * sees and panics on the reverse; these two tests are what stop that
+ * from being a mechanism nothing exercises.
+ */
+
+TEST(sched, taking_two_locks_in_both_orders_is_caught) {
+    /* The failure M56 cost "about one boot in ten" to find, made into an
+     * assertion.
+
+     * Two locks of this test's own rather than the kernel's, and that is
+     * a limitation worth stating plainly rather than hiding: **no kernel
+     * unit in this tier currently nests one lock inside another.** The
+     * first version of this pair asserted that it did, and failed - the
+     * scheduler takes its lock without calling into the heap or the
+     * filesystem under it, and the pmm and vmm here are fakes with no
+     * locks at all. So what is proved is that the detector works, not
+     * that the kernel's order is checked; it is armed for the day a path
+     * does nest, and that day it needs no new code.
+     *
+     * Provoking a real inversion would mean writing one into the kernel,
+     * and a test that needs the bug present to prove the detector works
+     * is a test nobody can run twice. */
+    static spinlock_t a, b;
+    a.locked = 0;
+    b.locked = 0;
+
+    int pairs_before = fake_spinlock_order_pairs();
+    spin_lock(&a);
+    spin_lock(&b);
+    spin_unlock(&b);
+    spin_unlock(&a);
+    /* The order was learned. Without this the check below could pass
+     * against a detector that had recorded nothing and was comparing an
+     * empty table. */
+    CHECK(fake_spinlock_order_pairs() > pairs_before);
+
+    /* Now the other way round, which is the inversion. */
+    spin_lock(&b);
+    CHECK_PANIC(spin_lock(&a), "lock order inversion");
+    fake_spinlock_release_all();
 }

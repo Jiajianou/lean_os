@@ -206,7 +206,15 @@ int shm_map_into(int id, uint64_t pml4_phys, uint64_t vaddr, uint64_t flags) {
     }
     shm_segment_t *seg = &segments[id];
     for (uint64_t i = 0; i < seg->page_count; i++) {
-        vmm_map_page_in(pml4_phys, vaddr + i * PAGE_SIZE, seg->frames[i], flags);
+        /* Q9: mapping a shared segment can run out of page tables, and
+         * this is a syscall an ordinary program makes. Refusing is the
+         * answer; the pages already mapped stay, and go with the address
+         * space when the process ends. */
+        if (vmm_try_map_page_in(pml4_phys, vaddr + i * PAGE_SIZE,
+                                seg->frames[i], flags) != 0) {
+            spin_unlock_irqrestore(&shm_lock, irqf);
+            return -1;
+        }
     }
     spin_unlock_irqrestore(&shm_lock, irqf);
     return 0;

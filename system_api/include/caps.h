@@ -263,6 +263,14 @@ static const cap_grant_t CAP_GRANTS[] = {
      * default - the other three subsystems it races (fs, shm, pipes) are
      * ungated, which is itself the manifest saying something true. */
     {"racetest",      CAP_APP_DEFAULT | CAP_NETWORK},
+    /* Q9: the same grant for the same reason - it fills the socket table
+     * to prove the table refuses rather than halts. Worth noting how
+     * this entry came to exist: without it SYS_socket refused this
+     * program's very FIRST request, and the test recorded "sockets ran
+     * out after 0" - a capability denial wearing an exhaustion's
+     * clothes. The program now refuses to call that exhaustion, which is
+     * the more useful half of the fix. */
+    {"exhausttest",   CAP_APP_DEFAULT | CAP_NETWORK},
     {"nettime",       CAP_APP_DEFAULT | CAP_NETWORK | CAP_SET_TIME},
     /* M73: names and bytes. `fetch` is the first program on this machine
      * that can bring in something nobody here compiled, which is the

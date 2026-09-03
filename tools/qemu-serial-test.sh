@@ -407,6 +407,7 @@ REQUIRED_MARKERS=(
   "[m82] a page that arrives when it is asked for:"
   "[m83] two processes from one:"
   "[m84] a program that replaces itself:"
+  "[q9] a machine that runs out of things and stays up:"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

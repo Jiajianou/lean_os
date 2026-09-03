@@ -348,6 +348,14 @@ ptytest_elf_start:
     incbin "build/ptytest.elf"
 ptytest_elf_end:
 
+; Q9: runs the machine out of every fixed table a program can exhaust,
+; and requires each one to refuse, recover, and work again.
+global exhausttest_elf_start
+global exhausttest_elf_end
+exhausttest_elf_start:
+    incbin "build/exhausttest.elf"
+exhausttest_elf_end:
+
 global syscalltest_elf_start
 global syscalltest_elf_end
 syscalltest_elf_start:

@@ -332,7 +332,15 @@ uint64_t elf_load_at(uint64_t pml4_phys, const uint8_t *image, size_t image_size
             if (ph[i].p_flags & PF_X) {
                 seg_flags |= VMM_FLAG_EXEC;
             }
-            vmm_map_page_in(pml4_phys, page_va, phys, seg_flags);
+            /* Q9: a program that cannot be mapped is a spawn that
+             * fails, not a machine that stops. This is the path every
+             * SYS_spawn and SYS_execve takes, so it is reachable by
+             * anything that can start a program - which on this machine
+             * is anything at all. */
+            if (vmm_try_map_page_in(pml4_phys, page_va, phys, seg_flags) != 0) {
+                klog_debug("[elf] out of page tables mapping a segment\n");
+                return 0;
+            }
         }
     }
 
