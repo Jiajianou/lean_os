@@ -119,6 +119,16 @@ int fake_objects_socket_refs(void);
 int fake_objects_address_spaces_destroyed(void);
 int fake_objects_shm_frees(void);
 
+/* ---- fake_user_syscalls, M98 -------------------------------------------
+ *
+ * The host-side sbrk/mmap under user_space/lib/malloc.c, so the
+ * allocator can be tested off the machine. */
+void fake_user_heap_reset(void);
+void fake_user_sbrk_refuse(int on);
+size_t fake_user_heap_used(void);
+
 /* ---- fake_vmm, Q13 additions ------------------------------------------ */
 uint64_t fake_vmm_cow_breaks(void);
 uint64_t fake_vmm_unmaps_in(void);
+/* M98: what vmm_rss_peak_pages answers for every address space here. */
+void fake_vmm_set_rss_peak(uint64_t pages);

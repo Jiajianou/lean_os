@@ -51,16 +51,25 @@ void *realloc(void *ptr, size_t size) {
  * __lean_run_exit_handlers in env.c, and <unistd.h>'s note on _exit,
  * which predicted this distinction becoming real. */
 extern void __lean_run_exit_handlers(void);
+/* M98: stdio buffers its writes now, so a program that printf'd and
+ * returned from main must have those bytes flushed before the process
+ * ends - which is what every C library does at exit and what C requires
+ * ("all open streams are flushed"). Declared here rather than in a
+ * header because it is not part of the interface: nothing but exit()
+ * has any business calling it. */
+extern void __lean_stdio_flush_all(void);
 
 void exit(int status) {
     __lean_run_exit_handlers();
+    __lean_stdio_flush_all();
     sys_exit(status);
     for (;;) {
     }
 }
 
 void abort(void) {
-    /* Deliberately does NOT run the exit handlers. abort() means the
+    /* Deliberately does NOT run the exit handlers, and since M98
+     * deliberately does not flush stdio either. abort() means the
      * program has decided its own state is not trustworthy, and running
      * a flush over a corrupt buffer is how a crash turns into a
      * corrupted file. C says the same thing in more words. */

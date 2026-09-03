@@ -170,6 +170,30 @@ extern "C" {
  * Linux's errno numbers because <errno.h> already made that promise. */
 #define OS_ERR_NOENT 2
 #define OS_ERR_FAULT 14
+/* ---- M98's second one, and the decision it reverses ------------------
+ *
+ * A blocking read that a caught signal ended used to return **0**, and
+ * M76 said so on purpose in three places: *"every caller of a blocking
+ * read on this machine already loops on a short read, and the handler
+ * runs on the way out"*. That was true, and it was true because every
+ * caller on this machine had been written here.
+ *
+ * GNU make is the program that made it false. Its job server hands out
+ * one byte per parallel slot through a pipe, and `jobserver_acquire`
+ * reads one byte and then decides: EINTR, EBADF or EAGAIN means "a
+ * child finished, go round again", and **anything else is fatal**. A
+ * read of 0 is not one of the three, so `make -j4` on this machine died
+ * with `read jobs pipe` and whatever errno happened to be lying around -
+ * and 0 does not merely fail to say EINTR, it says end of file, which is
+ * a lie about the pipe.
+ *
+ * So the three interrupted-read paths return -OS_ERR_INTR when they have
+ * transferred nothing, and a short count when they have transferred
+ * something - which is what POSIX specifies and what every program
+ * nobody here wrote was written against. In-tree callers are unaffected
+ * by construction: each one tests `<= 0`, and -1 is on the same side of
+ * that test as 0 was. */
+#define OS_ERR_INTR  4
 #define SYS_rmdir  43 /* (path) -> 0 or -1. M59: the same gap SYS_unlink closed for files in M56, left open there because nothing had asked. Empty directories only - recursive delete is one keystroke away from losing everything under a path, and this OS has no trash to take it back out of. */
 #define SYS_time   44 /* (os_datetime_t *out, may be NULL) -> seconds since 1970, or 0 on a machine with no readable CMOS clock. The first thing in this project that can answer "what time is it" rather than "how long has this been switched on". */
 

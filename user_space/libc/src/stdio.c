@@ -24,24 +24,123 @@ struct FILE {
      * of every assembly file became code, and the machine's own `as`
      * could not assemble a comment. Every reader consults this first. */
     int unget;
+    /* ---- M98: a write buffer, and the measurement that asked for it ---
+     *
+     * There was none. Every `fputc`, `fputs`, `fwrite` and `fprintf` was
+     * one `write` syscall, and `fflush` said so honestly: *"nothing is
+     * buffered on the way out - every write is a syscall"*.
+     *
+     * M98 counted them. Profiling one C++ compile on this machine with
+     * M101's syscall counter: **221,676 syscalls, of which 199,385 -
+     * 89% - were `write`**, producing a 1.5 MB assembly file at about
+     * seven bytes per call, and `vfs_handle_write` was 14% of all kernel
+     * time in the sampler's histogram. A compiler writing its output
+     * one `fprintf` at a time is the ordinary case, not an unusual one.
+     *
+     * `mode` is one of the three <stdio.h> names: fully buffered (a
+     * file), line buffered (a terminal), or unbuffered. The defaults are
+     * the ones every Unix picks and each for a reason that matters here:
+     * a file is fully buffered because that is where the syscalls were;
+     * stdout is line buffered so a prompt appears before the read that
+     * follows it; stderr is unbuffered so a diagnostic survives the
+     * crash that produced it.
+     *
+     * The buffer is IN the FILE rather than allocated, because a FILE
+     * here is one of nineteen static structures (three standard streams
+     * plus FOPEN_MAX_FILES) and an allocation would make `fopen` able to
+     * fail in a second way. 1024 bytes is BUFSIZ, which is what a
+     * program that asks gets told. */
+    char wbuf[BUFSIZ];
+    int wlen;
+    int mode;
 };
 
 /* stdin/stdout/stderr are the three descriptors every process here starts
  * with (or, for stdin in a GUI terminal's child, does not - see
  * gui_terminal.c, which closes fd 0 deliberately). Static rather than
  * allocated so they exist before main does. */
-static FILE std_files[3] = {{0, 0, 1, 0, -1}, {1, 0, 1, 0, -1}, {2, 0, 1, 0, -1}};
+static FILE std_files[3] = {
+    {0, 0, 1, 0, -1, {0}, 0, _IOLBF},
+    {1, 0, 1, 0, -1, {0}, 0, _IOLBF},
+    {2, 0, 1, 0, -1, {0}, 0, _IOLBF},
+};
 FILE *stdin = &std_files[0];
 FILE *stdout = &std_files[1];
 /* fd 2 has never existed in this OS - a process gets stdin and stdout and
  * nothing else (sched.h's fd table). Pointing stderr at fd 1 is the
  * honest mapping: a ported program's diagnostics go where its output
  * goes, which on this desktop is the terminal window that launched it. */
-static FILE stderr_file = {1, 0, 1, 0, -1};
+static FILE stderr_file = {1, 0, 1, 0, -1, {0}, 0, _IONBF};
 FILE *stderr = &stderr_file;
 
 #define FOPEN_MAX_FILES 16
 static FILE open_files[FOPEN_MAX_FILES];
+
+/* ---- M98: the buffer's four operations ------------------------------
+ *
+ * Everything that writes goes through `stream_put`, and everything that
+ * has to see the file as the kernel sees it - a read, a seek, a close,
+ * exit - calls `stream_flush` first. Missing one of those is the classic
+ * buffering bug and is why there is exactly one of each rather than a
+ * flush at every call site. */
+static int stream_flush(FILE *f) {
+    if (!f || f->wlen == 0) {
+        return 0;
+    }
+    int len = f->wlen;
+    f->wlen = 0; /* cleared FIRST: a failed write must not be retried
+                  * forever by a caller that flushes in a loop, and the
+                  * bytes are gone either way. */
+    long n = sys_write(f->fd, f->wbuf, (size_t)len);
+    if (n != (long)len) {
+        f->err = 1;
+        return EOF;
+    }
+    return 0;
+}
+
+static int stream_write(FILE *f, const char *p, size_t len) {
+    if (!f || len == 0) {
+        return 0;
+    }
+    if (f->mode == _IONBF) {
+        /* Unbuffered still goes through here, so that a stream switched
+         * to _IONBF mid-life cannot leave buffered bytes behind it. */
+        if (stream_flush(f) != 0) {
+            return EOF;
+        }
+        return sys_write(f->fd, p, len) == (long)len ? 0 : EOF;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (f->wlen == (int)sizeof(f->wbuf)) {
+            if (stream_flush(f) != 0) {
+                return EOF;
+            }
+        }
+        f->wbuf[f->wlen++] = p[i];
+        if (f->mode == _IOLBF && p[i] == '\n') {
+            if (stream_flush(f) != 0) {
+                return EOF;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Every stream this libc knows about, for exit(). A fixed list rather
+ * than a registry because the set is fixed: three standard streams and
+ * FOPEN_MAX_FILES slots, all of them static. */
+void __lean_stdio_flush_all(void) {
+    for (int i = 0; i < 3; i++) {
+        stream_flush(&std_files[i]);
+    }
+    stream_flush(&stderr_file);
+    for (int i = 0; i < FOPEN_MAX_FILES; i++) {
+        if (open_files[i].used) {
+            stream_flush(&open_files[i]);
+        }
+    }
+}
 
 FILE *fopen(const char *path, const char *mode) {
     uint32_t flags = 0;
@@ -64,6 +163,10 @@ FILE *fopen(const char *path, const char *mode) {
             open_files[i].eof = 0;
             open_files[i].err = 0;
             open_files[i].unget = -1;
+            open_files[i].wlen = 0;
+            /* A file is fully buffered, which is where M98's 199,385
+             * write syscalls were. */
+            open_files[i].mode = _IOFBF;
             open_files[i].used = 1;
             return &open_files[i];
         }
@@ -76,6 +179,7 @@ int fclose(FILE *f) {
     if (!f || !f->used) {
         return EOF;
     }
+    stream_flush(f); /* M98: before the descriptor goes, not after */
     sys_close(f->fd);
     if (f >= open_files && f < open_files + FOPEN_MAX_FILES) {
         f->used = 0;
@@ -84,6 +188,13 @@ int fclose(FILE *f) {
 }
 
 size_t fread(void *buf, size_t size, size_t count, FILE *f) {
+    /* M98: a stream opened "r+" can be written and then read, and the
+     * kernel's file position is where the buffered bytes have not gone
+     * yet. Flush before reading or the read returns what the write was
+     * supposed to have replaced. */
+    if (f) {
+        stream_flush(f);
+    }
     if (!f || size == 0 || count == 0) {
         return 0;
     }
@@ -107,20 +218,35 @@ size_t fread(void *buf, size_t size, size_t count, FILE *f) {
 }
 
 size_t fwrite(const void *buf, size_t size, size_t count, FILE *f) {
-    if (!f || size == 0) {
+    if (!f || size == 0 || count == 0) {
         return 0;
     }
-    long n = sys_write(f->fd, buf, size * count);
-    if (n <= 0) {
+    size_t bytes = size * count;
+    /* Past the buffer's own size there is nothing to gain by copying:
+     * flush what is pending, so ordering is kept, and write the caller's
+     * bytes straight through. */
+    if (bytes >= sizeof(f->wbuf)) {
+        if (stream_flush(f) != 0) {
+            return 0;
+        }
+        long n = sys_write(f->fd, buf, bytes);
+        if (n <= 0) {
+            f->err = 1;
+            return 0;
+        }
+        return (size_t)n / size;
+    }
+    if (stream_write(f, (const char *)buf, bytes) != 0) {
         return 0;
     }
-    return (size_t)n / size;
+    return count;
 }
 
 int fseek(FILE *f, long offset, int whence) {
     if (!f) {
         return -1;
     }
+    stream_flush(f); /* M98: the pending bytes belong at the OLD position */
     /* A pushed-back character the seek discards was still consumed from
      * the underlying file, so a relative seek has to account for it or
      * land one byte past where the caller's arithmetic says. */
@@ -137,6 +263,11 @@ long ftell(FILE *f) {
     if (!f) {
         return -1;
     }
+    /* M98: buffered bytes are logically written, so the position a
+     * caller is told has to include them. Flushing is the simplest way
+     * to make that true and is what ftell costs on every libc that
+     * buffers. */
+    stream_flush(f);
     long pos = sys_lseek(f->fd, 0, SEEK_CUR);
     if (pos > 0 && f->unget >= 0) {
         pos -= 1; /* the pushed-back character is logically unread */
@@ -145,10 +276,15 @@ long ftell(FILE *f) {
 }
 
 int fflush(FILE *f) {
-    (void)f;
-    /* Nothing is buffered on the way out - every write is a syscall - so
-     * this is honest about having nothing to do rather than pretending. */
-    return 0;
+    /* M98: this used to be honest about having nothing to do, because
+     * there was no buffer. There is one now, and fflush(NULL) means
+     * "every stream" - which is what a program calls before it forks, or
+     * before it does something that might not come back. */
+    if (!f) {
+        __lean_stdio_flush_all();
+        return 0;
+    }
+    return stream_flush(f);
 }
 
 int feof(FILE *f) {
@@ -191,17 +327,32 @@ void rewind(FILE *f) {
  * had nothing to do. A program that calls setvbuf to get *unbuffered*
  * behaviour already has it; one that asks for full buffering gets
  * unbuffered, which is slower and never wrong. */
+/* M98: the mode is real now; the caller's buffer is not.
+ *
+ * `buf` and `size` are ignored deliberately rather than half-honoured: a
+ * FILE here carries its own BUFSIZ buffer inside a static structure, and
+ * adopting a caller's array would mean a stream whose buffer can be
+ * freed out from under it - which is the one way this can go wrong that
+ * a program cannot debug. What a caller actually wants from setvbuf is
+ * almost always the MODE (make this unbuffered; line-buffer this), and
+ * that is honoured exactly. Returning 0 with the mode applied is the
+ * behaviour a program depends on; returning -1 because the buffer was
+ * not adopted would make it think buffering is unavailable. */
 int setvbuf(FILE *f, char *buf, int mode, size_t size) {
-    (void)f;
     (void)buf;
-    (void)mode;
     (void)size;
+    if (!f || (mode != _IOFBF && mode != _IOLBF && mode != _IONBF)) {
+        return -1;
+    }
+    stream_flush(f); /* the old mode's pending bytes leave under the old rules */
+    f->mode = mode;
     return 0;
 }
 
 void setbuf(FILE *f, char *buf) {
-    (void)f;
-    (void)buf;
+    /* The standard's own definition: setvbuf with _IOFBF and BUFSIZ, or
+     * _IONBF when the buffer is NULL. */
+    setvbuf(f, buf, buf ? _IOFBF : _IONBF, BUFSIZ);
 }
 
 /* A one-character pushback, which is all the standard guarantees. Kept
@@ -261,6 +412,7 @@ int fgetc(FILE *f) {
         f->unget = -1;
         return c;
     }
+    stream_flush(f); /* M98 - see fread */
     char c;
     if (sys_read(f->fd, &c, 1) != 1) {
         f->eof = 1;
@@ -293,12 +445,17 @@ char *fgets(char *buf, int n, FILE *f) {
 
 int fputc(int c, FILE *f) {
     char ch = (char)c;
-    return (f && sys_write(f->fd, &ch, 1) == 1) ? c : EOF;
+    if (!f || stream_write(f, &ch, 1) != 0) {
+        return EOF;
+    }
+    return c;
 }
 
 int fputs(const char *s, FILE *f) {
-    size_t n = strlen(s);
-    return (f && sys_write(f->fd, s, n) == (long)n) ? 0 : EOF;
+    if (!f) {
+        return EOF;
+    }
+    return stream_write(f, s, strlen(s)) == 0 ? 0 : EOF;
 }
 
 int putchar(int c) {
@@ -464,7 +621,11 @@ static int format_frac(double v, int prec, char *out, int ipart_odd) {
 static int is_nan(double v) { return v != v; }
 static int is_inf(double v) { return v != 0.0 && v * 0.5 == v; }
 
-static void emit_double(sink_t *s, double v, int prec, int sci, int upper) {
+/* `alt` is printf's `#` flag: a decimal point is written even when the
+ * precision is zero (C99 7.19.6.1). It changes nothing else - the digits
+ * are the digits - which is why it is one parameter and not a mode. */
+static void emit_double(sink_t *s, double v, int prec, int sci, int upper,
+                        int alt) {
     if (is_nan(v)) {
         emit_str(s, upper ? "NAN" : "nan", 3);
         return;
@@ -514,6 +675,8 @@ static void emit_double(sink_t *s, double v, int prec, int sci, int upper) {
     if (prec > 0) {
         emit(s, '.');
         emit_str(s, frac, prec);
+    } else if (alt) {
+        emit(s, '.'); /* the whole of what `#` does to a float */
     }
     if (sci) {
         emit(s, upper ? 'E' : 'e');
@@ -582,12 +745,27 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
             continue;
         }
 
-        int left = 0, zero = 0, plus = 0, space = 0;
+        /* M98: `#`, the fifth flag, and the one that was missing.
+         *
+         * Found by GCC compiling C++ ON this machine. dwarf2out.cc emits
+         * `fprintf (asm_out_file, "\t.cfi_personality %#x,", enc)`, and
+         * a formatter that does not know `#` fell through to the
+         * unknown-conversion path, printed the three characters `%#x`
+         * into the assembly, and produced a file the machine's own `as`
+         * then refused. Twenty-eight times, in a compile that had
+         * already run for fifteen minutes.
+         *
+         * Nothing in tests/printf/cases.tsv had a `#` in it, which is
+         * why five bug classes were found there and this one was not:
+         * the differential test is only as good as its case list, and
+         * the case list is the part a person writes. */
+        int left = 0, zero = 0, plus = 0, space = 0, alt = 0;
         for (;; p++) {
             if (*p == '-') left = 1;
             else if (*p == '0') zero = 1;
             else if (*p == '+') plus = 1;
             else if (*p == ' ') space = 1;
+            else if (*p == '#') alt = 1;
             else break;
         }
         int width = 0;
@@ -637,6 +815,11 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
         char body[512];
         sink_t b = {body, sizeof(body), 0};
         char conv = *p;
+        /* How many characters at the front of `body` are a prefix rather
+         * than a digit - the "0x" of `%#x`. The zero-padding rule below
+         * treats it exactly as it treats a sign: `%#010x` of 0xdead is
+         * 0x0000dead, with the zeros AFTER the prefix. */
+        int alt_prefix = 0;
 
         if (conv == 'd' || conv == 'i') {
             long long v = lng ? va_arg(ap, long) : va_arg(ap, int);
@@ -661,6 +844,26 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
             int base = conv == 'u' ? 10 : (conv == 'o' ? 8 : 16);
             char nbuf[24];
             int nlen = (prec == 0 && v == 0) ? 0 : format_uint(v, base, conv == 'X', nbuf);
+            /* C99 7.19.6.1: `#` prefixes a NON-ZERO hexadecimal with
+             * 0x/0X, and forces an octal to begin with a zero - by
+             * raising the precision, which is why it is done here rather
+             * than by emitting a character: `%#.3o` of 8 is 010, not
+             * 0010. It means nothing for %u and is ignored there, as it
+             * is for every conversion the standard does not name. */
+            if (alt && (conv == 'x' || conv == 'X') && v != 0) {
+                alt_prefix = 2;
+            }
+            if (alt && conv == 'o' && (nlen == 0 || nbuf[0] != '0') &&
+                prec <= nlen) {
+                prec = nlen + 1;
+            }
+            /* The 0 flag pads to the width AFTER the prefix, which
+             * emit_pad below cannot know about - so the prefix is
+             * emitted into the body and the width arithmetic downstream
+             * counts it, exactly as it counts a sign. */
+            if (alt_prefix) {
+                emit_str(&b, conv == 'X' ? "0X" : "0x", 2);
+            }
             if (prec > nlen) {
                 emit_pad(&b, '0', prec - nlen);
             }
@@ -724,9 +927,9 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
             }
             emit_str(&b, str, len);
         } else if (conv == 'f' || conv == 'F') {
-            emit_double(&b, va_arg(ap, double), prec, 0, conv == 'F');
+            emit_double(&b, va_arg(ap, double), prec, 0, conv == 'F', alt);
         } else if (conv == 'e' || conv == 'E') {
-            emit_double(&b, va_arg(ap, double), prec, 1, conv == 'E');
+            emit_double(&b, va_arg(ap, double), prec, 1, conv == 'E', alt);
         } else if (conv == 'g' || conv == 'G') {
             /* %g's precision is SIGNIFICANT digits, not decimal places -
              * the standard's rule is: with exponent X and precision P,
@@ -759,11 +962,16 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
             }
             size_t start = b.len;
             if (X >= -4 && X < P) {
-                emit_double(&b, v, P - 1 - X, 0, 0);
+                emit_double(&b, v, P - 1 - X, 0, 0, alt);
             } else {
-                emit_double(&b, v, P - 1, 1, conv == 'G');
+                emit_double(&b, v, P - 1, 1, conv == 'G', alt);
             }
-            trim_g_zeros(&b, start);
+            /* `#` on a %g means "keep the trailing zeros", which is the
+             * one place the flag does something by NOT doing something.
+             * C99 7.19.6.1: the trim is suppressed entirely. */
+            if (!alt) {
+                trim_g_zeros(&b, start);
+            }
         } else if (conv == '\0') {
             break;
         } else {
@@ -780,12 +988,22 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
         int isfloat = conv == 'f' || conv == 'F' || conv == 'e' ||
                       conv == 'E' || conv == 'g' || conv == 'G';
         int zpad = zero && !left && (prec < 0 || isfloat);
+        /* A sign is one character; `%#x`'s prefix is two. Both are
+         * "characters the zeros go after", which is the only property
+         * this arithmetic cares about. */
+        int keep = 0;
+        if (zpad && blen > 0) {
+            if (body[0] == '-' || body[0] == '+' || body[0] == ' ') {
+                keep = 1;
+            } else if (alt_prefix && blen >= 2) {
+                keep = alt_prefix;
+            }
+        }
         if (pad > 0 && !left) {
-            if (zpad && blen > 0 &&
-                (body[0] == '-' || body[0] == '+' || body[0] == ' ')) {
-                emit(&s, body[0]);
+            if (keep) {
+                emit_str(&s, body, keep);
                 emit_pad(&s, '0', pad);
-                emit_str(&s, body + 1, blen - 1);
+                emit_str(&s, body + keep, blen - keep);
             } else {
                 emit_pad(&s, zpad ? '0' : ' ', pad);
                 emit_str(&s, body, blen);
@@ -812,7 +1030,7 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
     int n = vsnprintf(line, sizeof(line), fmt, ap);
     int len = n < (int)sizeof(line) - 1 ? n : (int)sizeof(line) - 1;
     if (len > 0) {
-        sys_write(f->fd, line, (size_t)len);
+        stream_write(f, line, (size_t)len);
     }
     return n;
 }
@@ -978,8 +1196,7 @@ int vprintf(const char *fmt, va_list ap) {
 }
 
 size_t __fpending(FILE *f) {
-    (void)f;
-    return 0; /* there is no buffer - see <stdio.h> */
+    return f ? (size_t)f->wlen : 0; /* M98: there is a buffer now */
 }
 
 /* ---- M97: position as an opaque token, and two ways to open ----------

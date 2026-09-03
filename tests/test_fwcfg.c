@@ -126,6 +126,41 @@ TEST(fwcfg, the_selftest_file_is_read_and_only_exactly_one_enables_them) {
     }
 }
 
+TEST(fwcfg, the_three_switches_are_read_independently_of_each_other) {
+    /* M98 added a third fw_cfg question and the failure worth ruling out
+     * is a shared cache: one `static int cached` behind three accessors
+     * makes whichever is asked first the answer to all of them, which is
+     * exactly the shape of bug that shows up as "the bootstrap boot ran
+     * the whole self-test battery". */
+    with_signature();
+    dir_begin(3);
+    dir_add("opt/leanos/selftest", 1, 0x0100);
+    dir_add("opt/leanos/ioapic", 1, 0x0101);
+    dir_add("opt/leanos/bootstrap", 1, 0x0102);
+    fake_fwcfg_set_item(0x0100, (const uint8_t *)"0", 1);
+    fake_fwcfg_set_item(0x0101, (const uint8_t *)"0", 1);
+    fake_fwcfg_set_item(0x0102, (const uint8_t *)"1", 1);
+    fwcfg_init();
+    CHECK_EQ(boot_bootstrap_enabled(), 1);
+    CHECK_EQ(boot_selftests_enabled(), 0);
+    CHECK_EQ(boot_ioapic_enabled(), 0);
+    /* And asked twice, because each answer is cached after the first
+     * call and a cache that answers differently the second time is worse
+     * than none. */
+    CHECK_EQ(boot_bootstrap_enabled(), 1);
+    CHECK_EQ(boot_selftests_enabled(), 0);
+}
+
+TEST(fwcfg, a_machine_with_no_bootstrap_file_runs_no_build) {
+    with_signature();
+    dir_begin(1);
+    dir_add("opt/leanos/selftest", 1, 0x0100);
+    fake_fwcfg_set_item(0x0100, (const uint8_t *)"1", 1);
+    fwcfg_init();
+    CHECK_EQ(boot_selftests_enabled(), 1);
+    CHECK_EQ(boot_bootstrap_enabled(), 0);
+}
+
 TEST(fwcfg, a_present_device_with_no_such_file_runs_no_tests) {
     with_signature();
     dir_begin(2);

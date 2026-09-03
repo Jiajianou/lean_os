@@ -73,6 +73,16 @@ int getrusage(int who, struct rusage *usage) {
     usage->ru_utime.tv_usec = (long)((r.user_ticks % (unsigned long)hz) * (1000000u / (unsigned long)hz));
     usage->ru_stime.tv_sec = (time_t)(r.sys_ticks / (unsigned long)hz);
     usage->ru_stime.tv_usec = (long)((r.sys_ticks % (unsigned long)hz) * (1000000u / (unsigned long)hz));
+    /* M98: and the one memory field this machine now measures. Kilobytes,
+     * because that is what ru_maxrss means on every system a program was
+     * written against - the kernel reports pages, and the page size comes
+     * from the same place sysconf's _SC_PAGESIZE does rather than from a
+     * 4096 written here. */
+    long page_kb = sysconf(_SC_PAGESIZE) / 1024;
+    if (page_kb < 1) {
+        page_kb = 1;
+    }
+    usage->ru_maxrss = (long)(r.max_rss_pages * (unsigned long)page_kb);
     return 0;
 }
 

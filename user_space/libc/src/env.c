@@ -32,6 +32,9 @@
 
 char **environ;
 
+/* M98: stdio's buffers, flushed when main returns - see __lean_start. */
+extern void __lean_stdio_flush_all(void);
+
 /* Set once `environ` points at storage this file owns. Before that it
  * points into the kernel's argument region, which must not be freed,
  * grown, or written past. */
@@ -266,8 +269,17 @@ int __lean_start(int argc, char **argv, char **envp) {
     /* Falling off the end of main is a call to exit(), not to _exit() -
      * C says so, and it is why a program that returns from main still
      * gets its atexit handlers run. crt0 calls sys_exit with what this
-     * returns, so the handlers have to run here. */
+     * returns, so the handlers have to run here.
+     *
+     * M98: and so does the stdio flush, for exactly the same reason and
+     * with a sharper consequence. stdio buffers its writes now; before
+     * this line existed, a program that printf'd and then returned from
+     * main lost every byte that had not filled a buffer - which is most
+     * short programs, which is most programs. exit() flushes in the same
+     * order (handlers, then streams) so that a handler's own output is
+     * carried out with everything else. */
     __lean_run_exit_handlers();
+    __lean_stdio_flush_all();
     return rc;
 }
 

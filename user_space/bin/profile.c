@@ -326,7 +326,17 @@ int main(int argc, char **argv) {
         }
         /* Wait for the child, but not forever: a workload that hangs
          * should still produce the profile of it hanging, which is
-         * usually the report somebody wanted. */
+         * usually the report somebody wanted.
+         *
+         * M98: parked rather than yielded, and on a one-core machine the
+         * difference is the whole measurement. `sys_yield` leaves this
+         * task READY, so the scheduler alternates between the profiler
+         * and the workload every quantum - the thing being profiled runs
+         * at half speed and half the samples land in the waiter. A
+         * 200 ms park costs five wakes a second and gets the CPU out of
+         * the way, which is what a profiler owes the thing it is
+         * measuring. sys_waitfds with no descriptors and a timeout is
+         * this machine's sleep (see libc's sleep_ms). */
         long deadline = sys_uptime_ms() + (long)secs * 1000;
         for (;;) {
             if (sys_wait_nb((int)pid) != -2) {
@@ -335,7 +345,8 @@ int main(int argc, char **argv) {
             if (sys_uptime_ms() >= deadline) {
                 break;
             }
-            sys_yield();
+            int nofds = -1;
+            (void)sys_waitfds(&nofds, 0, 200);
         }
         sys_profile(PROFILE_OP_STOP, NULL, 0);
         return report(20);

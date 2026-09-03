@@ -141,4 +141,60 @@ fi
 "$PUT" "$IMAGE" tests/binutils/m98c.c /tests/m98c.c >/dev/null || exit 1
 "$PUT" -r "$IMAGE" tests/binutils/m98mk /tests/m98mk >/dev/null || exit 1
 
+# ---- M98's fourth box: the fixtures the measurement boot builds --------
+#
+# tests/bootstrap/run.sh is the script the kernel spawns when a boot is
+# given opt/leanos/bootstrap=1 (tools/bootstrap-test.sh is what passes
+# it). What it needs on the disk: its own two files, a clean copy of
+# somebody else's source tree, and the objects the CROSS compiler
+# produces from that tree - which is what lets the machine compare its
+# own compiler's output byte for byte with the one that built it.
+#
+# bzip2 rather than a fixture written here, for M89's reason applied to
+# a build system instead of to a userland: a Makefile nobody here wrote,
+# with its own test suite that grades the result against reference files
+# nobody here produced. Skipped, with a message, when its source is
+# absent - tools/build-thirdparty.sh is what fetches it, and an image
+# without it is a valid image.
+"$PUT" -r "$IMAGE" tests/bootstrap /tests/bootstrap >/dev/null || exit 1
+
+BZSRC=build/thirdparty-src/bzip2-1.0.8
+if [ -d "$BZSRC" ]; then
+  BZSTAGE=build/native/bzip2-src
+  BZREF=build/native/bzip2-ref
+  rm -rf "$BZSTAGE" "$BZREF"
+  mkdir -p "$BZSTAGE"
+  # Only what a build needs, and nothing it produced: the source tree in
+  # build/ has been built in, and putting yesterday's objects on the
+  # image would let the machine's `make` decide there was nothing to do.
+  for f in "$BZSRC"/*.c "$BZSRC"/*.h "$BZSRC"/Makefile \
+           "$BZSRC"/sample*.ref "$BZSRC"/sample*.bz2 "$BZSRC"/words*; do
+    [ -f "$f" ] && cp "$f" "$BZSTAGE/"
+  done
+  cp -R "$BZSTAGE" "$BZREF"
+  # The reference build, with the cross compiler and the exact flags
+  # run.sh passes on the machine. -g is deliberately not among them: it
+  # records the compilation directory, which differs by construction.
+  BZCFLAGS="-Wall -Winline -O2 -D_FILE_OFFSET_BITS=64"
+  ( cd "$BZREF" && make -s CC="$ROOT/$CROSS/bin/x86_64-lean_os-gcc" \
+      AR="$ROOT/$CROSS/bin/x86_64-lean_os-ar" \
+      RANLIB="$ROOT/$CROSS/bin/x86_64-lean_os-ranlib" \
+      CFLAGS="$BZCFLAGS" libbz2.a bzip2 bzip2recover \
+      > cross-build.log 2>&1 ) || {
+    echo "install-native-toolchain: the cross reference build of bzip2 failed:" >&2
+    tail -20 "$BZREF/cross-build.log" >&2
+    exit 1
+  }
+  "$PUT" -r "$IMAGE" "$BZSTAGE" /tests/bzip2 >/dev/null || exit 1
+  mkdir -p build/native/bzip2-ref-objs
+  for o in "$BZREF"/*.o; do
+    cp "$o" build/native/bzip2-ref-objs/
+  done
+  "$PUT" -r "$IMAGE" build/native/bzip2-ref-objs /tests/bzip2-ref >/dev/null || exit 1
+  echo "install-native-toolchain: bzip2's source in /tests/bzip2, and the cross compiler's own objects beside it"
+else
+  echo "install-native-toolchain: no bzip2 source at $BZSRC - the bootstrap boot will skip the build half."
+  echo "          tools/build-thirdparty.sh fetches it."
+fi
+
 echo "install-native-toolchain: gcc, g++, cpp, make, headers and libraries under /usr"

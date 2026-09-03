@@ -53,9 +53,17 @@ int gettimeofday(struct timeval *tv, void *tz) {
      * thing here that ticks faster than a second. It is not phase-locked
      * to the wall clock - the two are different counters - so this is
      * "some number of milliseconds within the current second" rather
-     * than "the fraction of this second that has elapsed". Enough for a
-     * program measuring intervals, and not enough for one setting a
-     * clock; the second one should use SYS_uptime_ms directly. */
+     * than "the fraction of this second that has elapsed".
+     *
+     * M98 sharpened what that costs, because the sentence that used to
+     * stand here - "enough for a program measuring intervals" - is
+     * false. The two counters drift against each other, so a pair taken
+     * either side of a wall-clock second can be SMALLER than the one
+     * before it: /bin/measure's first version subtracted two of these
+     * and reported an assembler that finished 530 ms before it started.
+     * A program measuring an interval wants CLOCK_MONOTONIC below,
+     * which is SYS_uptime_ms and cannot go backwards. This call is for
+     * asking what time it is. */
     tv->tv_usec = (long)(sys_uptime_ms() % 1000) * 1000;
     return 0;
 }

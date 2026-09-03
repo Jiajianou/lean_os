@@ -391,3 +391,9 @@ global fswriter_elf_end
 fswriter_elf_start:
     incbin "build/fswriter.elf"
 fswriter_elf_end:
+
+global measure_elf_start
+global measure_elf_end
+measure_elf_start:
+    incbin "build/measure.elf"
+measure_elf_end:

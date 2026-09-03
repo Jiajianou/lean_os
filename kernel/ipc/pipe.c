@@ -1,6 +1,7 @@
 #include "pipe.h"
 
 #include "drivers/pit.h"
+#include "syscall.h" /* system_api/include/syscall.h - OS_ERR_INTR (M98) */
 #include "lib/libk.h"
 #include "lib/spinlock.h"
 #include "mm/heap.h"
@@ -360,7 +361,13 @@ long pipe_read(pipe_t *p, void *buf, size_t maxlen) {
              * copes with; the handler runs during the return. */
             if (sched_signal_pending()) {
                 spin_unlock_irqrestore(&pipe_lock, f);
-                return (long)n;
+                /* M98: a short count when something was read, and
+                 * -OS_ERR_INTR when nothing was. The 0 that used to be
+                 * returned here says "end of file" to every program
+                 * written against POSIX, and GNU make's job server is
+                 * the one that said so out loud - see OS_ERR_INTR in
+                 * system_api/include/syscall.h for the whole story. */
+                return n ? (long)n : -OS_ERR_INTR;
             }
             continue;
         }

@@ -92,12 +92,20 @@ struct rlimit {
     rlim_t rlim_max;
 };
 
-/* The fields this machine measures are the two time ones. Every other
- * member is zero, and that is `getrusage`'s documented behaviour for a
- * field the implementation does not track rather than an accident -
- * nothing here counts page faults, resident pages or context switches,
- * and a plausible-looking number would be worse than a zero a caller can
- * recognise. See <sys/times.h> on the unit. */
+/* The fields this machine measures are the two time ones and, since M98,
+ * `ru_maxrss`. Every other member is zero, and that is `getrusage`'s
+ * documented behaviour for a field the implementation does not track
+ * rather than an accident - nothing here counts page faults or context
+ * switches, and a plausible-looking number would be worse than a zero a
+ * caller can recognise. See <sys/times.h> on the unit.
+ *
+ * ru_maxrss is in kilobytes, as it is on Linux, and it is the peak
+ * resident set of the address space rather than a current one: for
+ * RUSAGE_SELF the largest this process has ever been (across an exec,
+ * which is what makes it meaningful for a compiler driver), and for
+ * RUSAGE_CHILDREN the largest any single reaped child ever reached. The
+ * kernel counts it in kernel/mm/vmm.c; M98's build measurements are what
+ * asked for it. */
 struct rusage {
     struct timeval ru_utime;
     struct timeval ru_stime;

@@ -238,6 +238,17 @@ else
     run_stage "a disk that refuses, below the driver" ./tools/disk-fault-test.sh
     run_stage "the same, through ATA" \
       bash -c 'QEMU_DISK=ide ./tools/disk-fault-test.sh'
+    # M98: the machine builds somebody else's program with its own
+    # toolchain, and reports what that costs. In --full and nowhere else,
+    # because it is twenty minutes of real compiling - and it is here at
+    # all rather than left as a script somebody remembers to run, because
+    # every one of the four bugs it has found so far was invisible to
+    # every other instrument in this file: an mmap ceiling a compiler
+    # reaches and nothing else does, a read that returned 0 where POSIX
+    # says EINTR, a printf flag no case list had, and an assembler fed
+    # the result of that flag.
+    run_stage "the toolchain, building somebody else's program here" \
+      ./tools/bootstrap-test.sh
   else
     run_stage "interactive suite (--quick subset)" ./tools/qemu-input-test.sh --quick
   fi

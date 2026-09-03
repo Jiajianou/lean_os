@@ -7,6 +7,7 @@
  * two spellings is the only thing that was stopping it.
  */
 #include <fcntl.h>
+#include <termios.h> /* M98: isatty asks tcgetattr, like every other Unix */
 #include <unistd.h>
 
 #include "syscall_wrappers.h"
@@ -116,7 +117,20 @@ int getpid(void) {
 }
 
 long read(int fd, void *buf, size_t count) {
-    return sys_read(fd, buf, count);
+    long r = sys_read(fd, buf, count);
+    /* M98: the one error code this call can carry a reason for. The
+     * kernel returns -OS_ERR_INTR when a signal ended a blocking read
+     * before a single byte arrived; POSIX spells that -1 with errno set
+     * to EINTR, and a program that was written against POSIX - GNU
+     * make's job server is the one that found this - retries on exactly
+     * that and dies on anything else. Every other failure is still a
+     * bare -1 with errno untouched, which is <errno.h>'s doctrine here:
+     * a reason is set only where the system genuinely knows one. */
+    if (r == -OS_ERR_INTR) {
+        errno = EINTR;
+        return -1;
+    }
+    return r;
 }
 
 long write(int fd, const void *buf, size_t count) {
@@ -187,16 +201,34 @@ long spawnve(const char *path, char *const argv[], char *const envp[]) {
 /* ---- M80 groundwork ---------------------------------------------------- */
 
 int isatty(int fd) {
-    /* fd 0 and 1 are the implicit stdin/stdout every task starts with
-     * (kernel/sched/sched.h's fd table); everything else is a pipe, a
-     * socket or a file. There is no terminal device to ask, so this is
-     * the honest approximation - and it is right for the one thing a
-     * ported program uses it for, which is deciding whether to prompt.
+    /* ---- M98: ask, rather than guess from the number -------------------
      *
-     * A GUI terminal's child has had fd 0 closed deliberately
-     * (gui_terminal.c), and a read on it fails - so a program that asks
-     * and then reads gets a consistent answer. */
-    return (fd == 0 || fd == 1) ? 1 : 0;
+     * This used to answer "yes" for fd 0 and fd 1 and "no" for
+     * everything else, on the reasoning that those two are the
+     * stdin/stdout every task starts with and that the answer is only
+     * used for deciding whether to prompt. Both halves were true of
+     * programs written here, and both are wrong the moment a shell
+     * redirects: `prog > file` leaves fd 1 pointing at a file that this
+     * function cheerfully called a terminal.
+     *
+     * bzip2 is the program that found it. `bzip2 -1 < in > out` begins
+     * by refusing to write compressed data to a terminal - which is
+     * exactly the right thing for it to do and exactly what this said
+     * fd 1 was - and its diagnostic then went INTO the output file,
+     * because stderr here is fd 1 as well. A build that failed with no
+     * message at all, twice, until the file was read instead of the log.
+     *
+     * The answer comes from the kernel now, by the same route every
+     * Unix uses: tcgetattr succeeds on a terminal and fails with ENOTTY
+     * on anything else, and kernel/dev/tty.c's tty_for_fd is what
+     * actually knows. termios.c's own comment already called this
+     * "isatty-by-tcgetattr" - it just had no caller. */
+    struct termios t;
+    if (tcgetattr(fd, &t) == 0) {
+        return 1;
+    }
+    errno = ENOTTY;
+    return 0;
 }
 
 long lseek(int fd, long offset, int whence) {

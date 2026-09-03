@@ -529,6 +529,24 @@ typedef struct task {
     uint64_t sys_ticks;
     uint64_t child_user_ticks;
     uint64_t child_sys_ticks;
+    /* M98: the high-water mark of this task's resident set, in pages,
+     * and the largest one any child it has reaped ever reached.
+     *
+     * The live number lives in the VMM, keyed on the address space (see
+     * vmm_rss_peak_pages) - which is right, because an address space is
+     * what has a resident set. These two exist because an address space
+     * does not outlive the process: exec throws one away and exit frees
+     * it, so the peak has to be *taken off* the address space at both of
+     * those points or the number is gone before anyone can ask for it.
+     *
+     * child_max_rss_pages is a maximum rather than a sum, and that is
+     * what getrusage(RUSAGE_CHILDREN)'s ru_maxrss means everywhere: the
+     * biggest a child ever got, which is the number that decides whether
+     * a machine can host a build. Summing would answer a question - "how
+     * much memory did the whole build use at once" - that is false for
+     * any two children that did not overlap. */
+    uint64_t max_rss_pages;
+    uint64_t child_max_rss_pages;
     /* M101: how deep this TASK is inside a sched_idle_enter/exit bracket
      * - a task halted waiting for the clock, which pit_sleep_ms does.
      *

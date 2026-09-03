@@ -1,0 +1,257 @@
+/* tests/test_malloc.c - M98
+ *
+ * The user-space allocator, off the machine.
+ *
+ * ---- why this file exists, which is a measurement -----------------------
+ *
+ * M98 profiled a C++ compile ON this machine with M101's sampler. 72% of
+ * every non-idle sample landed on two adjacent instructions in
+ * user_space/lib/malloc.c: the first-fit loop, which walked a list of
+ * every block the process had ever allocated. GCC makes hundreds of
+ * thousands of small allocations, so that walk was quadratic and the
+ * compiler spent most of its life in it.
+ *
+ * The fix - free blocks on their own size-binned lists, threaded through
+ * the free block's own payload - is the kind of change that either works
+ * or hands out a pointer into the middle of a live allocation. A bug
+ * like that on this machine presents as a compiler that dies somewhere
+ * else, twenty minutes into a boot. So the allocator joins the
+ * scheduler, the heap and leanfs on the host tier.
+ *
+ * ---- how it is compiled -------------------------------------------------
+ *
+ * By including the source, with malloc/free/realloc renamed. The test
+ * binary is linked against the HOST's libc and every other test in it
+ * calls the host's malloc; linking a second definition of the name would
+ * hijack all of them, which is exactly what happened on the first
+ * attempt (ASan caught fake_pmm.c's free landing in this allocator). The
+ * renaming keeps this allocator addressable and nobody else's.
+ */
+#include "check.h"
+#include "fakes/fakes.h"
+
+#include <string.h>
+
+#define malloc lean_malloc
+#define free lean_free
+#define calloc lean_calloc
+#define realloc lean_realloc
+#define malloc_usable_size lean_malloc_usable_size
+#include "../user_space/lib/malloc.c"
+#undef malloc
+#undef free
+#undef calloc
+#undef realloc
+#undef malloc_usable_size
+
+/* The allocator keeps its state in file statics, and each test starts
+ * from a fresh heap - which means resetting both sides: the fake sbrk
+ * arena, and the lists that point into the arena it just threw away. */
+static void malloc_reset(void) {
+    fake_user_heap_reset();
+    heap_head = (block_header_t *)0;
+    heap_tail = (block_header_t *)0;
+    for (int i = 0; i < NBINS; i++) {
+        bins[i] = (block_header_t *)0;
+    }
+    fake_user_sbrk_refuse(0);
+}
+
+/* Every block on the address-ordered chain, checked for the invariants
+ * the bins depend on. Called at the end of the tests that churn, because
+ * the failure mode this file exists to catch is a list that is wrong in
+ * a way no single allocation notices. */
+static void check_lists(void) {
+    int free_on_chain = 0;
+    block_header_t *last = (block_header_t *)0;
+    for (block_header_t *b = heap_head; b; b = b->next) {
+        /* Address order, which is what free()'s coalesce assumes. */
+        if (last) {
+            CHECK((unsigned char *)b > (unsigned char *)last);
+        }
+        if (b->is_free) {
+            free_on_chain++;
+        }
+        last = b;
+    }
+    CHECK_EQ(last, heap_tail);
+
+    int free_in_bins = 0;
+    for (int i = 0; i < NBINS; i++) {
+        block_header_t *prev = (block_header_t *)0;
+        for (block_header_t *b = bins[i]; b; b = LINKS(b)->fnext) {
+            CHECK(b->is_free);            /* a bin holds free blocks only */
+            CHECK_EQ(bin_of(b->size), i); /* and each one in its own class */
+            CHECK_EQ(LINKS(b)->fprev, prev);
+            prev = b;
+            free_in_bins++;
+            CHECK(free_in_bins < 100000); /* a cycle would otherwise hang */
+        }
+    }
+    /* Every free block is on exactly one bin, and nothing else is. */
+    CHECK_EQ(free_in_bins, free_on_chain);
+}
+
+TEST(malloc, a_block_is_usable_aligned_and_its_own) {
+    malloc_reset();
+    void *a = lean_malloc(64);
+    void *b = lean_malloc(64);
+    REQUIRE(a != NULL);
+    REQUIRE(b != NULL);
+    CHECK(a != b);
+    CHECK_EQ(((unsigned long)a) % 8, 0u);
+    memset(a, 0xAA, 64);
+    memset(b, 0x55, 64);
+    CHECK_EQ(((unsigned char *)a)[63], 0xAA);
+    CHECK_EQ(((unsigned char *)b)[0], 0x55);
+    lean_free(a);
+    lean_free(b);
+    check_lists();
+}
+
+TEST(malloc, a_freed_block_is_handed_out_again) {
+    malloc_reset();
+    void *a = lean_malloc(128);
+    REQUIRE(a != NULL);
+    lean_free(a);
+    void *b = lean_malloc(128);
+    /* The same block, because it is on the free list of exactly the
+     * right size class. Before M98 this was true because the search
+     * walked everything; the point of the bins is that it is still true
+     * without the walk. */
+    CHECK_EQ(b, a);
+    lean_free(b);
+    check_lists();
+}
+
+TEST(malloc, a_small_request_does_not_get_a_huge_block_when_a_small_one_fits) {
+    malloc_reset();
+    void *big = lean_malloc(4096);
+    void *guard = lean_malloc(64); /* keeps the two holes from merging */
+    void *small = lean_malloc(32);
+    REQUIRE(big != NULL);
+    REQUIRE(guard != NULL);
+    REQUIRE(small != NULL);
+    lean_free(small);
+    lean_free(big);
+    /* Two holes, 4096 and 32, and they cannot coalesce because `guard`
+     * sits between them. 32 bytes must come back from the 32-byte hole
+     * rather than by splitting the 4 KiB one - which is what searching
+     * from the request's own size class upward means, and what one
+     * first-fit list in address order cannot promise: it would find the
+     * 4 KiB block first, because it is at the lower address. */
+    void *again = lean_malloc(32);
+    CHECK_EQ(again, small);
+    lean_free(again);
+    lean_free(guard);
+    check_lists();
+}
+
+TEST(malloc, two_adjacent_frees_become_one_block) {
+    malloc_reset();
+    void *a = lean_malloc(200);
+    void *b = lean_malloc(200);
+    void *c = lean_malloc(200);
+    REQUIRE(a && b && c);
+    /* b first, then a, and the order is the test: this allocator
+     * coalesces FORWARD only (it has no back pointer and no footer, and
+     * milestones.md says so), so freeing a while b is already free is
+     * what merges them. The merged block has to take b OFF its bin on
+     * the way, or the allocator keeps a free-list pointer into the
+     * middle of what is now one block and hands it out later. That is
+     * the bug this test is really about. */
+    lean_free(b);
+    lean_free(a);
+    void *big = lean_malloc(400);
+    CHECK_EQ(big, a);
+    lean_free(big);
+    lean_free(c);
+    check_lists();
+}
+
+TEST(malloc, ten_thousand_allocations_stay_consistent) {
+    malloc_reset();
+    /* The workload that found the original bug, in miniature: many small
+     * allocations, most of them kept, some freed and replaced. What is
+     * asserted is not speed - a host test cannot claim that honestly -
+     * but that the lists survive it, which is what makes the speed
+     * possible. */
+    static void *live[2000];
+    for (int i = 0; i < 2000; i++) {
+        live[i] = lean_malloc(16 + (i % 97));
+        REQUIRE(live[i] != NULL);
+        memset(live[i], i & 0xFF, 16);
+    }
+    for (int round = 0; round < 4; round++) {
+        for (int i = round; i < 2000; i += 4) {
+            lean_free(live[i]);
+            live[i] = lean_malloc(16 + ((i * 7) % 89));
+            REQUIRE(live[i] != NULL);
+            memset(live[i], i & 0xFF, 16);
+        }
+    }
+    for (int i = 0; i < 2000; i++) {
+        CHECK_EQ(((unsigned char *)live[i])[0], (unsigned char)(i & 0xFF));
+    }
+    check_lists();
+    for (int i = 0; i < 2000; i++) {
+        lean_free(live[i]);
+    }
+    check_lists();
+}
+
+TEST(malloc, a_tiny_request_still_makes_a_block_that_can_be_freed) {
+    malloc_reset();
+    /* Four bytes is smaller than the two links a free block carries in
+     * its own payload. Without the minimum size, freeing this block
+     * writes those links past the end of it - which is a heap corruption
+     * that shows up somewhere else entirely. */
+    void *a = lean_malloc(4);
+    REQUIRE(a != NULL);
+    CHECK(lean_malloc_usable_size(a) >= 2 * sizeof(void *));
+    memset(a, 0xFF, 4);
+    lean_free(a);
+    check_lists();
+}
+
+TEST(malloc, a_heap_that_cannot_grow_returns_null_and_still_works) {
+    malloc_reset();
+    void *keep = lean_malloc(64);
+    REQUIRE(keep != NULL);
+    lean_free(keep);
+    fake_user_sbrk_refuse(1);
+    /* The free list still has the block above, so a request that fits it
+     * succeeds even with no memory to be had - which is the property
+     * that makes an allocator degrade rather than fail. */
+    void *again = lean_malloc(64);
+    CHECK_EQ(again, keep);
+    /* And one that does not fit fails cleanly rather than returning
+     * something. Deliberately below MMAP_THRESHOLD: past it an
+     * allocation gets its own mapping and never touches the heap at all
+     * (M78), so a megabyte here would be testing mmap rather than the
+     * heap that has just been told it cannot grow. */
+    void *huge = lean_malloc(32 * 1024);
+    CHECK_EQ(huge, NULL);
+    lean_free(again);
+    check_lists();
+}
+
+TEST(malloc, zero_is_no_allocation_and_free_of_null_is_nothing) {
+    malloc_reset();
+    CHECK_EQ(lean_malloc(0), NULL);
+    lean_free(NULL);
+    check_lists();
+}
+
+TEST(malloc, a_large_allocation_comes_from_its_own_mapping_and_goes_back) {
+    malloc_reset();
+    size_t before = fake_user_heap_used();
+    /* Past MMAP_THRESHOLD, so this must not come out of the sbrk heap at
+     * all - M78's split, still true after the bins. */
+    void *big = lean_malloc(256 * 1024);
+    REQUIRE(big != NULL);
+    memset(big, 0x11, 256 * 1024);
+    CHECK_EQ(fake_user_heap_used(), before);
+    lean_free(big);
+    check_lists();
+}

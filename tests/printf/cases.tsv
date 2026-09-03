@@ -118,3 +118,33 @@ plain text no conversion	n
 # ---- literal text around a conversion ----
 value=%d end	d	5
 [%s]	s	mid
+
+# ---- M98: the # flag, which was missing entirely ----
+# GCC's dwarf2out emits `.cfi_personality %#x,` - a formatter that did
+# not know `#` wrote the three characters %#x into the assembly file and
+# the machine's own `as` refused what it produced. Nothing in this file
+# had a `#` in it before these lines, which is the case list's own
+# lesson: a differential test is only as good as the cases somebody
+# thought to write.
+%#x	u	48879
+%#X	u	48879
+%#x	u	0
+%#o	u	8
+%#o	u	0
+%#.3o	u	8
+%#.4x	u	255
+%#010x	u	48879
+%#10x	u	48879
+%-#10x	u	48879
+%#x	u	1
+%#o	u	1
+%#u	u	42
+%#.0f	f	2.5
+%#.0f	f	1.0
+%#f	f	1.5
+%#e	f	1500.0
+%#.0e	f	1500.0
+%#g	f	1.0
+%#g	f	100000.0
+%#.3g	f	1.0
+%#G	f	0.0001

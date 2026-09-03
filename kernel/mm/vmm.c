@@ -138,6 +138,142 @@ static inline uint64_t *phys_to_table(uint64_t phys) {
     return (uint64_t *)phys;
 }
 
+/* ---- M98: the resident set, per address space -------------------------
+ *
+ * M102 deferred swap because "the peak that matters is a GCC
+ * bootstrap's, and that is M98's". M98 then went looking for that
+ * number and found nothing anywhere in this kernel counted resident
+ * pages at all: <sys/resource.h> zeroed ru_maxrss on purpose, and
+ * proc.h's own comment said a maximum resident set is "something
+ * nothing here counts". This is what makes it counted.
+ *
+ * **Where the counter lives, and why it is not in task_t.** Threads
+ * share an address space (M79), so a per-task counter would count the
+ * same page once per thread. The thing with a resident set is the
+ * address space, and the address space's only identity in this kernel
+ * is its PML4's physical address - so the table is keyed on that.
+ *
+ * **Why a table and not a field.** vmm.c is handed a pml4_phys and
+ * nothing else; it has no task_t and must not learn about one (sched.h
+ * includes nothing from here for the same reason in reverse). A fixed
+ * table of slots, claimed when an address space is created and
+ * released when it is destroyed, keeps every line of this accounting
+ * inside the file where every map and unmap already funnels through
+ * four functions.
+ *
+ * **What is counted:** present leaf entries in a user address space,
+ * charged where they are written and discharged where they are
+ * cleared. A copy-on-write break is deliberately NOT a charge - the
+ * page was already resident and stays resident; what changes is which
+ * frame it names. Shared-memory pages ARE counted, as they are on
+ * Linux: a page mapped into this address space is resident in it
+ * whoever else also has it.
+ *
+ * **What is not counted:** the kernel's own address space. Its heap
+ * grows through the same vmm_try_map_page_in, and folding that into a
+ * process's number would make the first process to trigger a heap
+ * growth look like it had allocated it.
+ *
+ * Slot exhaustion reports zero rather than a wrong number: an address
+ * space with no slot is untracked, `vmm_rss_peak_pages` answers 0 for
+ * it, and the one caller that reports it says "not measured" rather
+ * than "no memory". There are MAX_TASKS (128) tasks, threads share a
+ * space, so 144 slots cannot be reached by processes alone - but a
+ * ceiling that cannot be hit is still a ceiling and it fails honestly.
+ */
+#define VMM_RSS_SLOTS 144
+
+typedef struct {
+    uint64_t pml4_phys; /* 0 = free slot */
+    uint64_t pages;
+    uint64_t peak;
+} vmm_rss_slot_t;
+
+static vmm_rss_slot_t rss_slots[VMM_RSS_SLOTS];
+
+/* All four of these assume vmm_lock is held: every caller is already
+ * inside the critical section that wrote the page-table entry, and
+ * doing the arithmetic there is what makes the count and the tables
+ * agree at every instant rather than eventually. */
+/* One-entry cache, and it is not a micro-optimisation: this lookup runs
+ * on every page a demand-paged process ever touches, and M102's own
+ * self-test faults a million pages in. Consecutive charges are
+ * overwhelmingly to the same address space - a process is filling in its
+ * own memory - so remembering the last slot turns a 144-entry scan into
+ * one compare for the case that happens almost every time. Cleared by
+ * rss_release, because a stale index into a reused slot would charge the
+ * wrong address space. */
+static int rss_recent;
+
+static vmm_rss_slot_t *rss_find(uint64_t pml4_phys) {
+    if (rss_slots[rss_recent].pml4_phys == pml4_phys && pml4_phys != 0) {
+        return &rss_slots[rss_recent];
+    }
+    for (int i = 0; i < VMM_RSS_SLOTS; i++) {
+        if (rss_slots[i].pml4_phys == pml4_phys) {
+            rss_recent = i;
+            return &rss_slots[i];
+        }
+    }
+    return (vmm_rss_slot_t *)0;
+}
+
+static void rss_claim(uint64_t pml4_phys) {
+    if (pml4_phys == kernel_pml4_phys || rss_find(pml4_phys)) {
+        return;
+    }
+    for (int i = 0; i < VMM_RSS_SLOTS; i++) {
+        if (rss_slots[i].pml4_phys == 0) {
+            rss_slots[i].pml4_phys = pml4_phys;
+            rss_slots[i].pages = 0;
+            rss_slots[i].peak = 0;
+            return;
+        }
+    }
+}
+
+static void rss_release(uint64_t pml4_phys) {
+    vmm_rss_slot_t *s = rss_find(pml4_phys);
+    if (s) {
+        s->pml4_phys = 0;
+        s->pages = 0;
+        s->peak = 0;
+        rss_recent = 0; /* the cache must not point at a freed slot */
+    }
+}
+
+static void rss_charge(uint64_t pml4_phys, int64_t delta) {
+    vmm_rss_slot_t *s = rss_find(pml4_phys);
+    if (!s) {
+        return;
+    }
+    if (delta < 0) {
+        uint64_t take = (uint64_t)(-delta);
+        s->pages = (s->pages > take) ? s->pages - take : 0;
+    } else {
+        s->pages += (uint64_t)delta;
+        if (s->pages > s->peak) {
+            s->peak = s->pages;
+        }
+    }
+}
+
+uint64_t vmm_rss_pages(uint64_t pml4_phys) {
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
+    vmm_rss_slot_t *s = rss_find(pml4_phys);
+    uint64_t n = s ? s->pages : 0;
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
+    return n;
+}
+
+uint64_t vmm_rss_peak_pages(uint64_t pml4_phys) {
+    uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
+    vmm_rss_slot_t *s = rss_find(pml4_phys);
+    uint64_t n = s ? s->peak : 0;
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
+    return n;
+}
+
 /* M102: 0 when there is no frame to be had, rather than a panic.
  *
  * Every intermediate page table this kernel builds comes through here, so
@@ -364,6 +500,7 @@ int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
         return -1;
     }
     pt[PT_INDEX(virt)] = 0;
+    rss_charge(pml4_phys, -1); /* M98 */
     /* invlpg only touches this CPU's TLB, and this address is private to
      * one process's address space (PML4[1]) - so the only CPU that can
      * have it cached is one that has run this task, and it will reload
@@ -396,6 +533,7 @@ uint64_t vmm_unmap_page_take(uint64_t pml4_phys, uint64_t virt) {
     }
     uint64_t phys = pt[PT_INDEX(virt)] & PTE_ADDR_MASK;
     pt[PT_INDEX(virt)] = 0;
+    rss_charge(pml4_phys, -1); /* M98 */
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory"); /* see vmm_unmap_page_in on why one CPU is enough */
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
     return phys;
@@ -429,6 +567,13 @@ int vmm_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64
         return -1;
     }
 
+    /* M98: only a page that was NOT already present is a new resident
+     * page. Replacing a live entry - which the demand-pager and the
+     * loader both do - moves a mapping rather than adding one, and
+     * charging for it would make the count drift upward forever. */
+    if (!(pt[PT_INDEX(virt)] & PTE_PRESENT)) {
+        rss_charge(pml4_phys, 1);
+    }
     pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | leaf_flags(flags);
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
@@ -572,6 +717,7 @@ static int addr_in_owned(uint64_t virt, const vmm_range_t *owned, int owned_coun
 
 void vmm_destroy_address_space(uint64_t pml4_phys, const vmm_range_t *owned, int owned_count) {
     uint64_t irq_flags = spin_lock_irqsave(&vmm_lock);
+    rss_release(pml4_phys); /* M98: the slot goes back with the address space */
     uint64_t *pml4 = phys_to_table(pml4_phys);
     /* From 1, not 0. PML4[0] is the kernel's own map, shared by reference
      * with every address space - see this function's header. */
@@ -721,6 +867,7 @@ uint64_t vmm_unmap_range_free(uint64_t pml4_phys, uint64_t start, uint64_t end) 
         }
     }
 
+    rss_charge(pml4_phys, -(int64_t)freed); /* M98 */
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
     return freed;
 }
@@ -739,6 +886,7 @@ uint64_t vmm_fork_address_space(uint64_t src_pml4_phys, const vmm_range_t *owned
         dst[i] = 0;
     }
     dst[0] = src[0]; /* the kernel's map, shared by reference */
+    rss_claim(dst_phys); /* M98 - the child's own slot, filled below */
 
     int ok = 1;
     for (uint64_t i = 1; ok && i < ENTRIES_PER_TABLE; i++) {
@@ -814,6 +962,11 @@ uint64_t vmm_fork_address_space(uint64_t src_pml4_phys, const vmm_range_t *owned
                         __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
                     }
                     d_pt[l] = shared;
+                    /* M98: a copy-on-write page is resident in BOTH
+                     * address spaces - one frame, two residents - which
+                     * is what "resident set" has always meant on a
+                     * system with fork. */
+                    rss_charge(dst_phys, 1);
                     pmm_frame_ref(phys);
                 }
             }
@@ -915,6 +1068,7 @@ uint64_t vmm_create_address_space(void) {
     }
     uint64_t *new_pml4 = phys_to_table(new_phys);
     new_pml4[0] = kernel_pml4[0]; /* share the kernel's identity map + heap */
+    rss_claim(new_phys); /* M98 */
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
     return new_phys;
 }

@@ -27,6 +27,13 @@
  *   8  a refused flag combination was accepted
  *   9  a PROT_NONE guard mapping was refused (M91 - it used to be, and
  *      the note by the check says why that changed)
+ *  10  the region table filled up on three hundred adjacent one-page
+ *      mappings - M98's ceiling, the one a compiler found
+ *  11  a page under a merged region lost its contents
+ *  12  a hole could not be punched in the middle of a merged region
+ *  13  that hole was not reused by the next mapping
+ *  14  mprotect could not split a merged region - the bug that hung the
+ *      boot in vmtest for seven hundred seconds
  */
 #include <stdio.h>
 #include <string.h>
@@ -188,6 +195,95 @@ int main(void) {
             return 5;
         }
         free(p);
+    }
+
+    /* ---- M98: a program that maps three hundred times ----------------
+     *
+     * The ceiling this found is worth a test of its own, because it is
+     * invisible until a real program hits it and then it is fatal: the
+     * mmap table has MAX_MMAP_REGIONS (128) entries, one per call, and
+     * GCC's garbage collector asks for half a megabyte at a time until
+     * it has what it needs. On this machine that stopped cc1 at about
+     * 60 MiB with `virtual memory exhausted` while four gigabytes were
+     * free.
+     *
+     * Three hundred separate one-page mappings, each of which the
+     * allocator places directly after the last, are ONE region if
+     * adjacent anonymous mappings with the same protection are merged
+     * and are 300 table entries if they are not. So this loop passes
+     * only when they are merged - it is the ceiling, expressed as a
+     * program.
+     *
+     * Then the middle one is freed and remade, which is the case the
+     * merge must not get wrong in the other direction: unmapping inside
+     * a merged region has to split it, and remapping the hole has to
+     * close it again. */
+    unsigned char *many[300];
+    for (int i = 0; i < 300; i++) {
+        many[i] = mmap(0, PAGE, PROT_READ | PROT_WRITE,
+                       MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (many[i] == MAP_FAILED) {
+            printf("mmaptest: mapping %d of 300 was refused - the region "
+                   "table filled up\n", i);
+            return 10;
+        }
+        many[i][0] = (unsigned char)i;
+    }
+    /* Every one still readable: a merge that lost a region would have
+     * lost the pages under it. */
+    for (int i = 0; i < 300; i++) {
+        if (many[i][0] != (unsigned char)i) {
+            return 11;
+        }
+    }
+    if (munmap(many[150], PAGE) != 0) {
+        return 12; /* a hole punched in the middle of a merged region */
+    }
+    /* Asked for by address rather than by "give me anything", because
+     * that is the question with one right answer: an address hint is
+     * honoured only when the range is genuinely free, so getting this
+     * page back proves the merged region really was split around the
+     * hole rather than left covering it. "Give me anything" would land
+     * in whichever hole the allocator found first - including the one
+     * the malloc loop above left - and would prove nothing about this
+     * one. */
+    unsigned char *refill = mmap(many[150], PAGE, PROT_READ | PROT_WRITE,
+                                 MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (refill != many[150]) {
+        printf("mmaptest: the hole in a merged region was not reused "
+               "(%p vs %p)\n", (void *)refill, (void *)many[150]);
+        return 13;
+    }
+    refill[0] = 42;
+    for (int i = 0; i < 300; i++) {
+        if (i != 150 && many[i][0] != (unsigned char)i) {
+            return 11;
+        }
+    }
+    /* And the case that the merge got WRONG, which is worth more than
+     * the case it got right: mprotect in the middle of a merged region
+     * has to split it - and the kernel's split works by shrinking the
+     * region and inserting the remainder, which an unconditional merge
+     * put straight back. The boot hung in vmtest for seven hundred
+     * seconds over exactly this. Here it is as three lines a program can
+     * run: protect one page in the middle, then check the pages either
+     * side of it still behave differently from it. */
+    if (mprotect(many[100], PAGE, PROT_READ) != 0) {
+        printf("mmaptest: mprotect inside a merged region was refused\n");
+        return 14;
+    }
+    many[99][0] = 99;  /* still writable */
+    many[101][0] = 101;
+    if (many[99][0] != 99 || many[101][0] != 101) {
+        return 11;
+    }
+    if (mprotect(many[100], PAGE, PROT_READ | PROT_WRITE) != 0) {
+        return 14;
+    }
+    many[100][0] = 100;
+
+    for (int i = 0; i < 300; i++) {
+        munmap(many[i], PAGE);
     }
 
     munmap(big + 32 * PAGE, 32 * PAGE);

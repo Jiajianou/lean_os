@@ -494,11 +494,16 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
                 sched_block_on_seq(SCHED_KEYBOARD_CHAN, 0, seq);
                 /* M76: and a caught signal is a reason to stop waiting.
                  * A shell parked here is exactly the process a Ctrl+C is
-                 * aimed at. Returning 0 rather than -1: every caller of
-                 * a blocking read on this machine already loops on a
-                 * short read, and the handler runs on the way out. */
+                 * aimed at.
+                 *
+                 * M98 changed what it returns when nothing has been
+                 * read. M76's own line said "returning 0 rather than -1:
+                 * every caller of a blocking read on this machine
+                 * already loops on a short read" - true, and true only
+                 * of callers written here. A zero means end of file to
+                 * everyone else. See OS_ERR_INTR. */
                 if (sched_signal_pending()) {
-                    return (long)n;
+                    return n ? (long)n : -OS_ERR_INTR;
                 }
                 continue;
             }
@@ -547,10 +552,10 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
             }
             sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
             if (sched_signal_pending()) {
-                /* Same answer as the keyboard path above: 0, because
-                 * every blocking reader on this machine loops on a short
-                 * read and the handler runs on the way out. */
-                return 0;
+                /* Same answer as the keyboard path above, and M98
+                 * changed both together: -OS_ERR_INTR, because nothing
+                 * has been read and a 0 here claims end of file. */
+                return -OS_ERR_INTR;
             }
         }
         int64_t n = vfs_handle_read(slot->file->handle, dst, (size_t)len, slot->file->offset);
@@ -1853,9 +1858,15 @@ static long sys_rusage(uint64_t who, uint64_t out_ptr, uint64_t a3,
     if (who == OS_RUSAGE_SELF) {
         r.user_ticks = self->user_ticks;
         r.sys_ticks = self->sys_ticks;
+        /* M98: the live address space's peak, which is the only one this
+         * task can still be adding to, against everything already
+         * captured from an exec'd-away image or a joined thread. */
+        uint64_t peak = vmm_rss_peak_pages(self->pml4_phys);
+        r.max_rss_pages = (peak > self->max_rss_pages) ? peak : self->max_rss_pages;
     } else if (who == OS_RUSAGE_CHILDREN) {
         r.user_ticks = self->child_user_ticks;
         r.sys_ticks = self->child_sys_ticks;
+        r.max_rss_pages = self->child_max_rss_pages;
     } else {
         return -1; /* a third value would be a fourth meaning nothing here has */
     }
@@ -3186,10 +3197,95 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
  * which is exactly the table below plus a decision this project has not
  * had to make.
  */
+static void mmap_slot_remove(task_t *t, int index);
+
+/* ---- M98: two mappings that are one mapping ---------------------------
+ *
+ * Found by the first build this machine ever ran for itself. GCC's
+ * garbage collector asks the kernel for memory in half-megabyte chunks
+ * and keeps asking; at the hundred and twenty-eighth chunk SYS_mmap
+ * started returning -1 and cc1 stopped with `virtual memory exhausted`
+ * at about 60 MiB - on a machine with four gigabytes free. The ceiling
+ * was never bytes. It was MAX_MMAP_REGIONS, one table entry per call,
+ * and a compiler that asks two hundred times gets refused however much
+ * memory there is.
+ *
+ * Two anonymous, private mappings that are adjacent and carry the same
+ * protection are indistinguishable, to every path in this kernel, from
+ * one mapping that spans both: the fault handler reads `prot` and
+ * nothing else, munmap already cuts a region into head and tail, and
+ * mprotect already splits one. So they are stored as one, which is what
+ * every Unix does with a VMA and for exactly this reason.
+ *
+ * Deliberately NOT merged: anything file-backed (two adjacent regions of
+ * a file are only one region if their file offsets are adjacent too, and
+ * getting that wrong silently maps the wrong page of the wrong file) and
+ * anything shared (its frames come from and go back to filemap, and the
+ * bookkeeping is per-region). Both are refused by returning 0 here
+ * rather than by being handled, because the case that pays is the
+ * anonymous one and a merge rule nobody needs is a merge rule nobody
+ * tests.
+ *
+ * The alternative was to raise MAX_MMAP_REGIONS, and it is the wrong
+ * fix: 128 entries is 4 KiB in every task_t, a build that wants 200
+ * would want 2,000 next, and a ceiling raised to fit one program is a
+ * ceiling the next program finds again. This makes the number a limit on
+ * how *fragmented* an address space is rather than on how many times a
+ * program has called mmap.
+ */
+static int mmap_mergeable(const mmap_region_t *r, uint32_t prot, int handle,
+                          int shared) {
+    return r->pages != 0 && r->handle == -1 && handle == -1 &&
+           !r->shared && !shared && r->prot == prot;
+}
+
+/* `merge` is what tells a NEW mapping from a piece of surgery, and it is
+ * not an optimisation switch - it is a correctness one. The first
+ * version of this merged unconditionally, and mmap_split_for below then
+ * could not split: it shrank a region to end at the cut, inserted the
+ * remainder starting AT the cut, watched the insert merge the two back
+ * into the region it had just taken apart, and rescanned - forever. The
+ * boot hung in `vmtest`, which is the self-test that mprotects the
+ * middle of a mapping, and it hung there for the whole seven-hundred
+ * second ceiling with no output at all.
+ *
+ * So: a caller adding a mapping asks to merge, and a caller cutting one
+ * up says no. The two are different operations that happened to share a
+ * function. */
 static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32_t prot,
-                                int handle, uint32_t file_page, int shared) {
+                                int handle, uint32_t file_page, int shared, int merge) {
     /* Inserts, keeping the array sorted by base with free slots (pages
      * == 0) pushed to the end. Returns 0, or -1 if the table is full. */
+    uint64_t end = base + (uint64_t)pages * PAGE_SIZE;
+    for (int i = 0; merge && i < MAX_MMAP_REGIONS; i++) {
+        if (t->mmaps[i].pages == 0) {
+            break; /* sorted: nothing live follows */
+        }
+        if (!mmap_mergeable(&t->mmaps[i], prot, handle, shared)) {
+            continue;
+        }
+        uint64_t rstart = t->mmaps[i].base;
+        uint64_t rend = rstart + (uint64_t)t->mmaps[i].pages * PAGE_SIZE;
+        if (rend == base) {
+            t->mmaps[i].pages += pages;
+            /* And the one after it, if this new range has just closed
+             * the gap between two live regions - which is what happens
+             * when a program frees a chunk out of the middle of its
+             * arena and then asks for one the same size. */
+            if (i + 1 < MAX_MMAP_REGIONS &&
+                mmap_mergeable(&t->mmaps[i + 1], prot, handle, shared) &&
+                t->mmaps[i + 1].base == end) {
+                t->mmaps[i].pages += t->mmaps[i + 1].pages;
+                mmap_slot_remove(t, i + 1);
+            }
+            return 0;
+        }
+        if (rstart == end) {
+            t->mmaps[i].base = base;
+            t->mmaps[i].pages += pages;
+            return 0;
+        }
+    }
     int free_slot = -1;
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         if (t->mmaps[i].pages == 0) {
@@ -3430,8 +3526,10 @@ static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     if (base == 0) {
         return -1;
     }
+    /* The one caller that merges: this is a new mapping, and a new
+     * mapping next to an identical one is one mapping. */
     if (mmap_slot_cmp_insert(self, base, (uint32_t)pages, (uint32_t)prot,
-                             handle, file_page, shared) != 0) {
+                             handle, file_page, shared, 1) != 0) {
         return -1; /* the table is full - see MAX_MMAP_REGIONS */
     }
 
@@ -3528,7 +3626,7 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
                                       self->mmaps[i].prot, self->mmaps[i].handle,
                                       self->mmaps[i].file_page +
                                           (uint32_t)((cut_end - rstart) / PAGE_SIZE),
-                                      self->mmaps[i].shared) != 0) {
+                                      self->mmaps[i].shared, 0) != 0) {
                 return -1;
             }
             i = -1; /* the array was re-sorted underneath; rescan from the start */
@@ -3625,8 +3723,11 @@ static int mmap_split_for(task_t *t, uint64_t addr, uint64_t end) {
         uint32_t fp = t->mmaps[i].file_page + (uint32_t)((cut - rstart) / PAGE_SIZE);
         int shared = t->mmaps[i].shared;
         t->mmaps[i].pages = (uint32_t)((cut - rstart) / PAGE_SIZE);
+        /* No merge: this call exists to CREATE the boundary at `cut`, and
+         * a merge would put it straight back - see the note on the
+         * parameter. */
         if (mmap_slot_cmp_insert(t, cut, (uint32_t)((rend - cut) / PAGE_SIZE), prot,
-                                 handle, fp, shared) != 0) {
+                                 handle, fp, shared, 0) != 0) {
             /* Put it back rather than leaving a region shorter than the
              * memory it describes - a mapping the caller can still touch
              * with nothing saying what it may become is worse than a
@@ -4955,6 +5056,16 @@ static long sys_execve(isr_regs_t *regs) {
     /* ---- the point of no return -------------------------------------- */
 
     uint64_t old_pml4 = self->pml4_phys;
+    /* M98: the peak of the image being replaced, taken before the
+     * address space that holds it is destroyed two lines down. A process
+     * that execs is still the same process, so its high-water mark spans
+     * the exec - which matters here more than anywhere, because every
+     * compile on this machine is a shell that exec'd a driver that
+     * spawned a cc1. */
+    uint64_t peak = vmm_rss_peak_pages(old_pml4);
+    if (peak > self->max_rss_pages) {
+        self->max_rss_pages = peak;
+    }
     self->pml4_phys = new_pml4;
     /* Switched before the old one is destroyed, and this CPU is running
      * on a kernel stack in PML4[0] - shared by every address space - so

@@ -56,7 +56,27 @@ long sys_read(int fd, void *b, unsigned long n) {
     file_pos += take;
     return take;
 }
-long sys_write(int fd, const void *b, unsigned long n) { (void)fd; (void)b; return (long)n; }
+/* M98: writes are recorded rather than swallowed, because the buffer
+ * this libc grew is graded on two things a counter cannot see - WHAT
+ * arrived and HOW MANY calls it took. */
+static char written[8192];
+static long written_len;
+static int write_calls;
+
+void fake_write_reset(void) { written_len = 0; write_calls = 0; written[0] = 0; }
+const char *fake_written(void) { written[written_len] = 0; return written; }
+long fake_written_len(void) { return written_len; }
+int fake_write_calls(void) { return write_calls; }
+
+long sys_write(int fd, const void *b, unsigned long n) {
+    (void)fd;
+    write_calls++;
+    if (written_len + (long)n < (long)sizeof(written) - 1) {
+        memcpy(written + written_len, b, n);
+        written_len += (long)n;
+    }
+    return (long)n;
+}
 long sys_lseek(int fd, long off, int whence) {
     if (fd != 100) return -1;
     long target = whence == 0 ? off : whence == 1 ? file_pos + off : file_len + off;
@@ -91,7 +111,18 @@ int lean_fseek(lean_FILE *f, long off, int whence);
 long lean_ftell(lean_FILE *f);
 long lean_getdelim(char **line, size_t *n, int delim, lean_FILE *f);
 int lean_feof(lean_FILE *f);
+unsigned long lean_fwrite(const void *b, unsigned long sz, unsigned long n, lean_FILE *f);
+int lean_fputc(int c, lean_FILE *f);
+int lean_fputs(const char *s, lean_FILE *f);
+int lean_fflush(lean_FILE *f);
+int lean_fprintf(lean_FILE *f, const char *fmt, ...);
+int lean_setvbuf(lean_FILE *f, char *buf, int mode, size_t size);
+unsigned long lean___fpending(lean_FILE *f);
 void fake_file(const char *data);
+void fake_write_reset(void);
+const char *fake_written(void);
+long fake_written_len(void);
+int fake_write_calls(void);
 
 static int failures;
 #define CHECK(cond, what) do { \
@@ -165,18 +196,92 @@ int main(void) {
     CHECK(lean_fgetc(f) == EOF, "EOF again after it");
     lean_fclose(f);
 
+    /* ---- M98: the write buffer ------------------------------------
+     *
+     * The measurement that asked for it: one C++ compile on the machine
+     * made 199,385 `write` syscalls, 89% of every syscall it made, to
+     * produce a 1.5 MB file - about seven bytes a call, because there
+     * was no buffer at all. These checks are what a buffer has to get
+     * right, and each one is a way of losing somebody's bytes. */
+
+    /* 6. Many small writes become few syscalls, and every byte arrives
+     * in order. */
+    fake_file("");
+    fake_write_reset();
+    f = lean_fopen("x", "w");
+    CHECK(f != 0, "fopen for writing");
+    for (int i = 0; i < 500; i++) {
+        lean_fputc('a' + (i % 26), f);
+    }
+    CHECK(fake_write_calls() == 0, "500 fputc calls are not 500 syscalls");
+    CHECK(lean___fpending(f) == 500, "the pending count is what is buffered");
+    lean_fclose(f);
+    CHECK(fake_write_calls() == 1, "fclose flushed once");
+    CHECK(fake_written_len() == 500, "every byte arrived");
+    CHECK(fake_written()[0] == 'a' && fake_written()[25] == 'z' &&
+          fake_written()[26] == 'a', "in order");
+
+    /* 7. fflush is what a caller uses when order matters, and it empties
+     * the buffer rather than merely claiming to. */
+    fake_write_reset();
+    f = lean_fopen("x", "w");
+    lean_fputs("half", f);
+    CHECK(fake_write_calls() == 0, "buffered so far");
+    CHECK(lean_fflush(f) == 0, "fflush");
+    CHECK(fake_write_calls() == 1, "fflush wrote");
+    CHECK(strcmp(fake_written(), "half") == 0, "and wrote the right bytes");
+    CHECK(lean___fpending(f) == 0, "nothing left pending");
+    lean_fclose(f);
+    CHECK(fake_write_calls() == 1, "an empty buffer does not write again");
+
+    /* 8. A write larger than the buffer goes straight through, in one
+     * call, after whatever was pending - which is the ordering rule that
+     * makes a mixed program's output make sense. */
+    fake_write_reset();
+    f = lean_fopen("x", "w");
+    lean_fputs("first", f);
+    static char big[4096];
+    memset(big, 'B', sizeof big);
+    CHECK(lean_fwrite(big, 1, sizeof big, f) == sizeof big, "big fwrite");
+    CHECK(fake_write_calls() == 2, "pending flushed, then written through");
+    CHECK(fake_written_len() == 5 + (long)sizeof big, "both arrived");
+    CHECK(memcmp(fake_written(), "firstBBB", 8) == 0, "in that order");
+    lean_fclose(f);
+
+    /* 9. Line buffering: a newline is what makes a prompt appear before
+     * the read that follows it. */
+    fake_write_reset();
+    f = lean_fopen("x", "w");
+    CHECK(lean_setvbuf(f, 0, 1 /*_IOLBF*/, 1024) == 0, "setvbuf line mode");
+    lean_fputs("no newline yet", f);
+    CHECK(fake_write_calls() == 0, "still buffered");
+    lean_fputc('\n', f);
+    CHECK(fake_write_calls() == 1, "the newline flushed it");
+    lean_fclose(f);
+
+    /* 10. Unbuffered means unbuffered, which is what stderr is. */
+    fake_write_reset();
+    f = lean_fopen("x", "w");
+    CHECK(lean_setvbuf(f, 0, 2 /*_IONBF*/, 0) == 0, "setvbuf unbuffered");
+    lean_fputs("a", f);
+    lean_fputs("b", f);
+    CHECK(fake_write_calls() == 2, "each write went out on its own");
+    lean_fclose(f);
+
     if (failures) {
         printf("stdio-test: %d check(s) failed\n", failures);
         return 1;
     }
-    printf("stdio-test: the FILE layer honours ungetc everywhere a reader looks\n");
+    printf("stdio-test: the FILE layer honours ungetc everywhere a reader "
+           "looks, and buffers its writes without losing one\n");
     return 0;
 }
 EOF
 
 # The same rename list printf-test.sh uses, checked the same way.
 RENAMES=""
-for s in __assert_fail __fpending clearerr dprintf fclose fdopen feof \
+for s in __assert_fail __fpending __lean_stdio_flush_all \
+         clearerr dprintf fclose fdopen feof \
          ferror fflush fgetc fgetpos fgets fileno fopen fprintf fputc \
          fputs fread freopen fseek fsetpos ftell fwrite getc getchar \
          getdelim getline perror printf putc putchar puts remove rename \

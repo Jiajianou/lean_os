@@ -100,3 +100,23 @@ int boot_selftests_enabled(void);
  * byte-identical either way, so "the tested image is the shipped image"
  * stays true. */
 int boot_ioapic_enabled(void);
+
+/* ---- M98: the build this machine is asked to run for itself ----------
+ *
+ * True when `-fw_cfg name=opt/leanos/bootstrap,string=1` was passed.
+ *
+ * A third switch rather than a fourth self-test, because what it turns
+ * on is not a self-test: it is a *measurement*, it takes minutes rather
+ * than seconds, and its output is numbers rather than a pass. M98's
+ * fourth box asks for the peak resident set of the largest translation
+ * unit, the disk a build tree costs and the wall-clock of a bootstrap,
+ * all taken on the machine; tools/bootstrap-test.sh is what asks, and
+ * this is the question it asks with.
+ *
+ * Independent of the self-test switch on purpose. The battery costs
+ * ~335 s of scheduler-bound waiting that has nothing to do with a build,
+ * and a measurement that ran after it would be timing a machine that had
+ * just spawned two hundred processes. Passing both is allowed and is
+ * what a full run does; passing only this one is the measurement's own
+ * boot. */
+int boot_bootstrap_enabled(void);

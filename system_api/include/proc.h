@@ -110,19 +110,35 @@ typedef struct {
 #define OS_RUSAGE_SELF     0
 #define OS_RUSAGE_CHILDREN 1
 
-/* Two numbers, in PIT ticks at _SC_CLK_TCK (100 Hz).
+/* Two numbers, in PIT ticks at _SC_CLK_TCK (100 Hz), and since M98 a
+ * third one in pages.
  *
  * Deliberately not a `struct rusage`-shaped record with fourteen fields
- * this machine does not measure. A page-fault count, a maximum resident
- * set and a voluntary-context-switch count are all things nothing here
- * counts, and a struct full of zeros is a struct a program will divide
- * by. libc's getrusage() zeroes the fields it cannot fill - which POSIX
+ * this machine does not measure. A page-fault count and a
+ * voluntary-context-switch count are still things nothing here counts,
+ * and a struct full of zeros is a struct a program will divide by.
+ * libc's getrusage() zeroes the fields it cannot fill - which POSIX
  * explicitly allows - but it does so at the boundary where "not
  * measured" is documented, rather than in the ABI where it would look
- * like data. */
+ * like data.
+ *
+ * **M98 moved one field across that line, which is the only way a field
+ * should ever cross it.** This comment used to name "a maximum resident
+ * set" among the things nothing counts. Then M98 needed the peak of a
+ * compiler's largest translation unit to decide whether this machine
+ * can host a build - and M102 needed the same number to decide whether
+ * swap is worth a milestone - so the kernel learned to count resident
+ * pages per address space (kernel/mm/vmm.c) and the number arrived
+ * here. It is in PAGES, not bytes and not kilobytes: a page is what the
+ * VMM counts, and os_meminfo_t reports the page size for the conversion
+ * that libc's ru_maxrss (kilobytes, as everywhere else) then does.
+ *
+ * Zero means "no accounting slot for this address space" rather than
+ * "no memory" - see vmm.h - and a caller that reports it should say so. */
 typedef struct {
     uint64_t user_ticks;
     uint64_t sys_ticks;
+    uint64_t max_rss_pages;
 } os_rusage_t;
 
 /* ---- M89: SYS_meminfo --------------------------------------------------

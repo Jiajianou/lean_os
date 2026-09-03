@@ -552,6 +552,111 @@ TEST(sched, a_recycled_slot_inherits_nothing_from_the_task_that_had_it) {
     q13_kill(reused);
 }
 
+/* ---- M98: the resident-set high-water mark -----------------------------
+ *
+ * The number M102's swap decision and M98's own fourth box both wait on:
+ * how big a process ever got. The counting itself is the VMM's and is
+ * graded on the machine; what these three grade is the accounting the
+ * scheduler does around it, which is where the number would be lost.
+ *
+ * A maximum and not a sum, which is the whole substance of the field:
+ * "the biggest a single compile got" is a fact about a machine's
+ * capacity, and adding two compiles that never ran at the same time
+ * would answer a question nobody asked with a number nothing can use.
+ */
+TEST(sched, a_reaped_childs_peak_resident_set_reaches_its_parent) {
+    q13_boot();
+    task_t *parent = q13_spawn("parent");
+    task_t *child = q13_spawn("child");
+    REQUIRE(parent != NULL);
+    REQUIRE(child != NULL);
+    child->parent_id = parent->id;
+    child->max_rss_pages = 4096; /* 16 MiB, captured at the child's exit */
+
+    child->state = TASK_TERMINATED;
+    sched_reap_slot(child);
+
+    CHECK_EQ(parent->child_max_rss_pages, 4096u);
+    /* And not the parent's OWN peak: a child's memory is not this
+     * process's memory, which is exactly the distinction RUSAGE_SELF and
+     * RUSAGE_CHILDREN exist to make. */
+    CHECK_EQ(parent->max_rss_pages, 0u);
+    q13_kill(parent);
+}
+
+TEST(sched, a_parent_keeps_the_largest_childs_peak_not_the_last_one) {
+    q13_boot();
+    task_t *parent = q13_spawn("parent");
+    REQUIRE(parent != NULL);
+
+    const uint64_t peaks[] = {1000, 9000, 300};
+    for (int i = 0; i < 3; i++) {
+        task_t *c = q13_spawn("child");
+        REQUIRE(c != NULL);
+        c->parent_id = parent->id;
+        c->max_rss_pages = peaks[i];
+        c->state = TASK_TERMINATED;
+        sched_reap_slot(c);
+    }
+    /* 9000, not 300 (the last) and not 10300 (the sum). */
+    CHECK_EQ(parent->child_max_rss_pages, 9000u);
+
+    /* A grandchild's peak arrives through its own parent's
+     * child_max_rss_pages, the same way a grandchild's ticks do. */
+    task_t *mid = q13_spawn("mid");
+    REQUIRE(mid != NULL);
+    mid->parent_id = parent->id;
+    mid->child_max_rss_pages = 20000;
+    mid->state = TASK_TERMINATED;
+    sched_reap_slot(mid);
+    CHECK_EQ(parent->child_max_rss_pages, 20000u);
+    q13_kill(parent);
+}
+
+TEST(sched, a_joined_threads_peak_is_the_processs_own_not_a_childs) {
+    q13_boot();
+    task_t *proc = q13_spawn("proc");
+    REQUIRE(proc != NULL);
+    task_t *thread = q13_spawn("thread");
+    REQUIRE(thread != NULL);
+    /* A thread of the same process - the shape sched_reap_slot's tick
+     * accounting already distinguishes, applied to the new field. The
+     * two share an address space, so their peak is ONE peak and it
+     * belongs to the process. */
+    thread->parent_id = proc->id;
+    thread->is_thread = 1;
+    thread->tgid = proc->tgid;
+    thread->max_rss_pages = 7777;
+
+    thread->state = TASK_TERMINATED;
+    sched_reap_slot(thread);
+
+    CHECK_EQ(proc->max_rss_pages, 7777u);
+    CHECK_EQ(proc->child_max_rss_pages, 0u);
+    q13_kill(proc);
+}
+
+TEST(sched, a_recycled_slot_reports_no_peak_from_the_task_before_it) {
+    q13_boot();
+    task_t *t = q13_spawn("big");
+    REQUIRE(t != NULL);
+    t->max_rss_pages = 500000;       /* ~2 GiB, on a machine with 4 */
+    t->child_max_rss_pages = 500000;
+    int slot = PID_SLOT(t->id);
+    q13_kill(t);
+
+    task_t *reused = q13_spawn("small");
+    REQUIRE(reused != NULL);
+    CHECK_EQ(PID_SLOT(reused->id), slot);
+    /* The same argument as every other field on the recycled-slot list:
+     * a program that has allocated nothing must not report the previous
+     * occupant's peak, or the measurement this milestone exists to take
+     * is a measurement of whoever ran before it. */
+    CHECK_EQ(reused->max_rss_pages, 0u);
+    CHECK_EQ(reused->child_max_rss_pages, 0u);
+    q13_kill(reused);
+}
+
 TEST(sched, the_task_table_fills_and_recovers) {
     q13_boot();
     /* MAX_TASKS is a fixed ceiling and the interesting question is what

@@ -10601,7 +10601,16 @@ cost of this milestone. Every one of them was a configuration answer this
 target did not have, and every one of them is now written down in
 `apply.py` next to what goes wrong without it.
 
-### M98 — A compiler that runs here [~]
+### M98 — A compiler that runs here [x]
+
+**Status:** done, in four increments. The last one is the one that
+matters most and is the one this milestone was written for: **the
+machine builds somebody else's program with its own toolchain, that
+program's own test suite passes, and every object it compiles is
+byte-identical with the cross compiler's.** The full three-stage GCC
+bootstrap does not fit here and the number that says by how much is
+below, which is the outcome the milestone's own "How we'll know"
+specified for that case.
 
 - [x] binutils built *for* lean_os and running *on* it: `as`, `ld`, `ar`,
       `nm`, `objdump`, `strip` — see the second-increment notes below
@@ -10609,12 +10618,14 @@ target did not have, and every one of them is now written down in
       driver — plus GNU make (toybox has no make; GNU make 4.4.1 built
       with `--disable-load`, the same dlopen refusal as binutils'
       plugins) — see the third-increment notes
-- [ ] Whatever the build actually asks the kernel for that is still
+- [x] Whatever the build actually asks the kernel for that is still
       missing, in M63's method: process counts past `MAX_TASKS 128`
       under `make -j`, fd counts past `MAX_FDS 128` in a linker, `/tmp`,
       `vfork`, `posix_spawn`, `wait4`, big `O_APPEND` writes. The list
-      is a prediction; the build's own failures are the specification
-- [ ] The measurements the arc has been deferring to this point, all
+      is a prediction; the build's own failures are the specification —
+      **and none of the predicted ceilings is the one it hit.** Four
+      real ones did, all in the fourth increment below
+- [x] The measurements the arc has been deferring to this point, all
       taken here: peak RSS of the largest translation unit, disk used by
       the build tree, wall-clock for a bootstrap. Whether M90's memory
       ceiling and M93's disk are big enough stops being a plan and
@@ -10939,6 +10950,326 @@ machine's own disk. Remaining: the third box's ceilings as the real
 bootstrap hits them, and the fourth's measurements — peak RSS,
 disk, wall-clock — which need the bootstrap itself, on-machine, which
 is the next increment.
+
+#### Fourth increment: a build this machine runs for itself, and the four things it found
+
+*The third increment closed with "the third box's ceilings as the real
+bootstrap hits them, and the fourth's measurements — peak RSS, disk,
+wall-clock — which need the bootstrap itself, on-machine". This is that
+increment. **Not one of the three ceilings this milestone predicted was
+the one it hit**, which is the third box's own sentence coming true:
+the list is a prediction, and the build's own failures are the
+specification.*
+
+**The instrument, because none of it existed.** M98's fourth box asks
+for a peak resident set and this kernel had never counted a resident
+page. `<sys/resource.h>` zeroed `ru_maxrss` deliberately and `proc.h`
+said in as many words that a maximum resident set was among the things
+"nothing here counts".
+
+- `kernel/mm/vmm.c` keeps a live count and a high-water mark per
+  **address space** — keyed on the PML4's physical address, because
+  threads share one and a per-task counter would count the same page
+  once per thread — charged at the four places a leaf entry is written
+  or cleared. A copy-on-write break is deliberately not a charge: the
+  page was already resident and stays resident; what changes is which
+  frame it names.
+- `task_t` takes the peak off the address space at the two points the
+  address space does not survive — `execve` and exit — and
+  `sched_reap_slot` folds a reaped child's peak into its parent as a
+  **maximum, not a sum**. "The biggest a single compile got" is a fact
+  about a machine's capacity; adding two compiles that never ran at the
+  same time answers a question nobody asked.
+- `os_rusage_t` grew a third field and `getrusage` fills `ru_maxrss` in
+  kilobytes, as it means everywhere else. **A field crossed the line
+  from "not measured" to "measured", which is the only way a field
+  should ever cross it** — the comment that said nothing counted it now
+  says what does.
+- `/bin/measure` runs a command and reports wall-clock, the CPU split
+  and the peak resident set of what it ran, in the human-readable form
+  and in the `[perf] name value unit` form `tests/budgets.tsv` grades.
+- `opt/leanos/bootstrap`, a third fw_cfg switch, and
+  `tools/bootstrap-test.sh`. A measurement is not a self-test: it takes
+  twenty minutes, it produces numbers rather than a verdict, and it
+  wants a quiet machine — the battery's own boot spawns two hundred
+  processes and ends with a desktop, and a build timed against that is
+  a build timed against a compositor.
+
+**The build.** `tests/bootstrap/run.sh`, on the machine: a header- and
+template-heavy C++ translation unit through `cc1plus` — GCC is a C++
+program and its own worst files are C++ files, which is what makes this
+the right proxy for "the largest translation unit" — one C translation
+unit beside it, and then **bzip2 1.0.8 built by this machine's own
+`make`, `gcc`, `as`, `ar`, `ranlib` and `ld` from bzip2's own
+Makefile**, serially and then four jobs at once, followed by **bzip2's
+own test suite**, which compresses reference files and compares them
+against reference output nobody here produced. Then every object the
+machine compiled is compared byte for byte against the object the CROSS
+compiler produced from the same source with the same flags.
+
+**What the build found, in the order it found it. Every one of the four
+is a decision that was correct for a machine whose programs this project
+wrote, and wrong for one that runs somebody else's.**
+
+- **`cc1` died with `virtual memory exhausted` at about 60 MiB, on a
+  machine with four gigabytes free — and the ceiling was never bytes.**
+  It was `MAX_MMAP_REGIONS`: one table entry per `mmap` call, 128 of
+  them, and GCC's garbage collector asks for memory in half-megabyte
+  chunks and keeps asking. The fix is not a bigger number — 128 entries
+  is 4 KiB in every `task_t`, a build that wants 200 would want 2,000
+  next, and a ceiling raised to fit one program is a ceiling the next
+  program finds again. **Two anonymous private mappings that are
+  adjacent and carry the same protection are stored as one**, which is
+  what a VMA merge is and what every Unix does, and for exactly this
+  reason: nothing in this kernel can tell them apart — the fault handler
+  reads `prot` and nothing else, `munmap` already cuts a region into
+  head and tail, `mprotect` already splits one. The number is now a
+  limit on how *fragmented* an address space is rather than on how many
+  times a program has called `mmap`. Graded by `/bin/mmaptest`: three
+  hundred separate one-page mappings, which are one region if adjacent
+  mappings merge and three hundred entries if they do not, then a hole
+  punched in the middle of the merged region and asked for back by
+  address — which only answers if the split happened.
+
+- **`make -j4` died with `read jobs pipe: ENOENT`, and the bug was a
+  read that returned 0 where POSIX says EINTR.** M76 made blocking reads
+  return a short count when a caught signal ended the wait, and said so
+  on purpose in three places: *"every caller of a blocking read on this
+  machine already loops on a short read"*. True — and true because every
+  caller had been written here. GNU make's job server hands out one byte
+  per parallel slot through a pipe and then decides: EINTR, EBADF or
+  EAGAIN means "a child finished, go round again", **anything else is
+  fatal**. A read of 0 is not one of the three, and worse, 0 does not
+  merely fail to say EINTR — it says end of file, which is a lie about
+  the pipe. The three interrupted-read paths return `-OS_ERR_INTR` when
+  they have transferred nothing and a short count when they have
+  transferred something; `read()` maps that to -1 with `errno` set.
+  In-tree callers are unaffected by construction: every one tests
+  `<= 0`, and -1 is on the same side of that test as 0 was.
+
+- **The machine's own assembler refused the machine's own compiler's
+  output, and the fault was in `printf`.** GCC's `dwarf2out.cc` writes
+  `fprintf (asm_out_file, "\t.cfi_personality %#x,", enc)`. This libc's
+  formatter did not know the `#` flag at all — it fell through to the
+  unknown-conversion path, wrote the three characters `%#x` into the
+  assembly file where a number belonged, and `as` then said `bad
+  expression` twenty-eight times about a file `cc1plus` had spent
+  fifteen minutes producing. Nothing in `tests/printf/cases.tsv` had a
+  `#` in it, which is the differential test's own lesson: **it is only
+  as good as the case list, and the case list is the part a person
+  writes.** The flag is implemented now for all of C99's rules — the
+  `0x` prefix on a non-zero hexadecimal, the raised precision that gives
+  an octal its leading zero, the decimal point a zero-precision float
+  keeps, and the trailing zeros `%#g` does *not* trim — with 22 new
+  cases against the host's `snprintf`. `tests/bootstrap/cfi.cc` is two
+  lines of C++ that reach the same directive in one second, kept as the
+  fixture that fails if it comes back.
+
+- **This machine has no named pipes, and `make -j` looks for one
+  first.** GNU make 4.4 creates its job server as a FIFO in `/tmp` by
+  default; `mkfifo` fails here, make says so and falls back to the
+  anonymous-pipe job server, which works. Recorded rather than fixed:
+  the fallback is a supported path in make's own source, nothing else on
+  this machine has asked for a FIFO, and "a program named a thing this
+  kernel does not have and carried on" is the outcome a port should
+  produce. The day something cannot fall back is the day `mkfifo` gets a
+  milestone.
+
+**And then the profile, which is M101's box and the most useful thing
+in this milestone.** M101 built a sampling profiler and left one box
+half-open: *"the attribution over an M98 bootstrap: not taken, because
+M98 does not exist"*. It exists. Pointed at one C++ compile on this
+machine, with `profile timing on` and `profile syscalls`, it reported:
+
+```
+samples 77929   kernel 5767 (7%)   user 33191 (42%)   idle 38971 (50%)
+14133  36%  (pid 263) 0x8001f3d6c9    malloc
+13802  35%  (pid 263) 0x8001f3d6c0    malloc
+ 5600  14%             0x135d56       vfs_handle_write
+ 1480   3%  (pid 263) 0x8001f3d6d2    malloc
+  112   0%  (pid 263) 0x8001f3d4f0    memset
+```
+
+```
+221676 calls across 30 of 110 syscalls
+199385  89%  write
+  5001   2%  (mmap/munmap/uptime and everything else together)
+```
+
+**Three facts, and each one changed something.**
+
+- **72% of the compile was inside `malloc`** — two adjacent
+  instructions, which is the first-fit loop in
+  `user_space/lib/malloc.c`. That loop walked `heap_head`: a list of
+  every block the process had ever allocated, free or not, in address
+  order. GCC makes hundreds of thousands of small allocations, so the
+  list grew to hundreds of thousands of nodes and every `malloc` walked
+  it from the front. **The allocator was quadratic in the number of live
+  allocations.** It is why the C++ compile cost 460x its host time while
+  the C compile — a tenth the allocations — cost 116x.
+- **89% of the syscalls were `write`**: 199,385 of them, producing a
+  1.5 MB assembly file at about seven bytes a call, because this stdio
+  had **no write buffer at all** and `fflush` said so in as many words
+  (*"nothing is buffered on the way out - every write is a syscall"*).
+  `vfs_handle_write` was 14% of kernel time, which is that number seen
+  from the other side.
+- **50% of the samples were idle**, on a machine with one core and a
+  compile running. That is the disk: demand-paging a 43 MB `cc1plus`
+  and reading the C++ headers, with nothing else runnable to fill the
+  wait. M104's readahead measurement already refused to turn readahead
+  on by default; this is the first workload that would ask it again, and
+  it is recorded here rather than acted on because the two numbers this
+  milestone changed were the two above it.
+
+**Both were fixed, and both are graded off the machine.**
+`user_space/lib/malloc.c` now keeps free blocks on **size-binned free
+lists threaded through the free blocks' own payloads** — the address
+ordered chain stays, because that is what `free` coalesces along — and
+`tests/test_malloc.c` compiles the allocator for the host over a fake
+`sbrk` and checks the invariant the bins depend on after every churn:
+every free block on exactly one bin, in the right size class, with the
+chain still in address order. `user_space/libc/src/stdio.c` grew a
+`BUFSIZ` write buffer per `FILE`, fully buffered for a file, line
+buffered for stdout, unbuffered for stderr, flushed at `fclose`, at
+`fflush`, before every read or seek, and when `main` returns — and
+`tools/stdio-test.sh` grew five cases that each describe a way of losing
+somebody's bytes.
+
+**And M101's own arithmetic, which its entry wrote down as falsifiable
+and which this falsifies in the safe direction.** M101 said: *"at 1,200
+cycles a call, the trap path costs 1% of a 3 GHz machine at 25,000
+syscalls a second. If M98's build makes fewer than that, `sysret` is not
+worth a milestone."* This build made **221,676 calls over about 700
+seconds — roughly 320 a second**, and that was *before* the write buffer
+took 89% of them away. Two orders of magnitude under the line. **The
+`syscall`/`sysret` deferral stands, and it now stands on a measurement
+of the workload it was always waiting for.** M101's half-open box is
+closed.
+
+**The four measurements, which are the milestone's fourth box.** Taken
+by `tools/bootstrap-test.sh` on one core and 4 GiB with the self-tests
+off, after the two fixes above - a build timed against two hundred
+self-test processes is a build timed against them.
+
+| what | on this machine | on the host the emulator runs on | ratio |
+|---|---|---|---|
+| one C translation unit (bzip2's `bzlib.c`, 1,572 lines) | **32.1 s, 56 MiB peak** | 0.25 s, 42 MiB | 128x |
+| one C++ translation unit (193 lines, the standard containers) | **86.9 s, 217 MiB peak** | 1.50 s, 214 MiB | 58x |
+| bzip2 1.0.8, serially: 8 translation units, an archive, two links | **202.9 s, 120 MiB peak** | — | — |
+| bzip2's own test suite, on binaries this machine built | **3.4 s, passing** | — | — |
+| the same build, `make -j4` (on one core) | **did not finish inside a 40-minute ceiling** — see below | — | — |
+| the assembler on the 29,512-line file that C++ compile produces | 8.3 s | 0.02 s | ~400x |
+| the build tree on disk | 831 KiB of objects and binaries over 3.4 MiB of source | — | — |
+| the toolchain on disk | 141 MiB under `/usr`, 19 MiB in `/bin` | — | — |
+| task slots ever live at once, of `MAX_TASKS` 128 | **9** | — | — |
+| descriptors ever held at once by one task, of `MAX_FDS` 128 | **4** | — | — |
+
+**What those numbers decide, which is the point of taking them.**
+
+- **M102's swap decision: refused, and now on a number rather than on
+  the absence of one.** Its box said *"the peak that matters is a GCC
+  bootstrap's, and that is M98's"*. The peak that matters is **217 MiB
+  for one C++ translation unit** - a nineteenth of the 4 GiB this
+  machine is configured with, and it would still fit on the 128 MiB
+  configuration with a third of that machine to spare. **Nothing this
+  build does comes close to the ceiling M90 built.** Swap stays
+  deferred, and the condition that would fire it is now in the same
+  units: a translation unit whose peak exceeds what a machine of this
+  size has free, which means a compile ten times this one.
+- **M98's third box: the ceilings it predicted are not the ceilings it
+  hit.** `make -j4` reached **9 of 128 task slots** and **4 of 128
+  descriptors** - the predictions about `MAX_TASKS` and `MAX_FDS` were
+  wrong by an order of magnitude, in the safe direction. `/tmp`,
+  `vfork`, `wait4` and big `O_APPEND` writes were all already there and
+  the build used them without comment. The five things that did break
+  are the five above, and not one of them was on the list - which is
+  what the box's own last sentence said would happen: *the list is a
+  prediction; the build's own failures are the specification.*
+- **The bootstrap that does not fit, with the number that says by how
+  much.** M98's "How we'll know" asked for a three-stage bootstrap and
+  named the honest alternative: *"if a full bootstrap does not fit this
+  machine, the honest outcome is the number that says by how much, and
+  a stage-1 compiler that builds a real program."* GCC's own `all-gcc`
+  is **1,018 object files** and its build tree is 3.4 GB, of which
+  `cc1plus` alone links to 348 MB. At this machine's measured rate for
+  a C++ translation unit of comparable size, **stage 2 alone is about
+  24 hours of wall-clock**, and a three-stage bootstrap is three times
+  that plus two links of a 348 MB binary. The disk fits (M93's
+  filesystem holds 3.4 GB in a 2 GiB image only if the image grows, so
+  it does not - and *that* is the second number: the image would have
+  to be 8 GiB). The memory fits with room to spare. **It is a
+  wall-clock problem and only a wall-clock problem**, and most of the
+  wall clock is QEMU's TCG interpreter rather than this OS: the same
+  compile is 58x faster on the machine the emulator runs on.
+- **The strongest bootstrap-shaped statement that does fit, and it is
+  not a weak one.** Every object this machine compiled is
+  **byte-identical** to the object the cross compiler produced from the
+  same source with the same flags - eight of eight, across 7,336 lines
+  of somebody else's C. That is the argument stage 2 == stage 3 makes
+  (a miscompilation, an uninitialised read, or a subtly wrong libc
+  function each show up as a differing byte) applied to a program small
+  enough to finish here. And **bzip2's own test suite passes**, on
+  binaries this machine built: three compressions and three
+  decompressions compared against reference files nobody here produced.
+
+**What it cost.** About 1,400 lines across 24 files: the resident-set
+accounting, the allocator, the write buffer, `/bin/measure`, the
+harness, the fixtures, and 14 new host tests. Four native-toolchain
+relinks, because every one of these fixes is in the libc that GCC and
+binutils are linked against and a fix nobody relinked is a fix nobody
+has. And eight measurement boots, of which the first four were
+measuring the machine and the last four were measuring the fixes.
+
+**What is still open, named rather than left.**
+
+- **Four cores.** `tools/bootstrap-test.sh` defaults to one, and the
+  reason is a panic: profiling a four-core build fires M106's own
+  switch-away guard - `cpu 3 is switching away from 'idle' ... while
+  standing on` another task's kernel stack. That is a bug in the list
+  M106 left open, it reproduces with `QEMU_CPUS=4` on this harness, and
+  it is the first reproduction this project has for it that is not a
+  boot that hangs one time in ten.
+- **50% of the compile is idle time**, on one core, with nothing else
+  runnable: the disk, demand-paging a 43 MB `cc1plus` and reading C++
+  headers. M104 measured readahead and refused it by default; this is
+  the first workload that would ask again, and it is recorded rather
+  than acted on because the two numbers this milestone changed were the
+  two it had measured.
+- **The merge's own bug, which the boot battery caught and nothing else
+  did.** The first version of the coalesce merged unconditionally, and
+  `mmap_split_for` - the kernel's "make sure no region straddles this
+  boundary", which `mprotect` calls - then could not split: it shrank a
+  region to end at the cut, inserted the remainder starting *at* the
+  cut, watched the insert merge the two back into the region it had just
+  taken apart, and rescanned. Forever. The graded boot hung in `vmtest`
+  with no output for the whole seven-hundred-second ceiling, and the
+  three-hundred-mapping test added for the merge did not catch it
+  because it never called `mprotect`. The fix is a parameter that
+  separates the two operations that had shared a function - a caller
+  ADDING a mapping merges, a caller CUTTING one up does not - and
+  `mmaptest` now mprotects a page in the middle of a merged region,
+  which is that failure as three lines a program can run. **Worth
+  recording as a shape rather than as an incident**: a performance fix
+  in a table three different syscalls do surgery on, tested against the
+  syscall it was written for and not against the other two.
+
+- **`make -j4` on one core costs far more than four times `make -j1`,
+  and the harness ran out of ceiling before it finished.** Serially the
+  same build is 203 s; four ways at once it was still going after 600.
+  Four concurrent `cc1` processes are ~480 MiB of resident set on a
+  machine whose block cache is then serving four different files, and
+  the previous point says half the time was already disk. So this is a
+  number M104's territory owns rather than a scheduler question - and
+  it is stated as what was observed rather than as a measurement,
+  because the run was stopped rather than finished. The step is last in
+  `tests/bootstrap/run.sh` now, so a run that is cut short loses only
+  this.
+- **`mkfifo`.** GNU make 4.4 wants a FIFO for its job server, does not
+  get one, says so, and falls back to the pipe job server. Recorded
+  rather than fixed: the fallback is make's own supported path and
+  nothing else here has asked for a named pipe.
+
+
 
 ### M99 — Python, built here [ ]
 

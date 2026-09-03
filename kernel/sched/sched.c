@@ -821,6 +821,8 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->sys_ticks = 0;
     t->child_user_ticks = 0;
     t->child_sys_ticks = 0;
+    t->max_rss_pages = 0;        /* M98 */
+    t->child_max_rss_pages = 0;  /* M98 */
     /* M75: the working directory is inherited exactly the way the fd
      * table above is, and for the same reason - a child is launched *in*
      * a place, and a launcher that had to pass one as an argument would
@@ -1686,6 +1688,18 @@ void task_exit_with_code(int code) {
     if (t->pml4_phys != vmm_kernel_pml4_phys()) {
         int cpu = smp_current_cpu();
         uint64_t dead = t->pml4_phys;
+        /* M98: take the peak off the address space before anything can
+         * free it. This is one of the two places the number can be
+         * captured at all - the other is execve, which throws an address
+         * space away without the process ending - and after this line
+         * the count belongs to a table entry that is about to be
+         * released. Read before sched_lock is taken: it acquires the
+         * VMM's lock, and the order everywhere else in this kernel is
+         * VMM-then-scheduler or neither. */
+        uint64_t peak = vmm_rss_peak_pages(dead);
+        if (peak > t->max_rss_pages) {
+            t->max_rss_pages = peak;
+        }
         int others = 0;
         uint64_t eflags = irq_save_disable();
         spin_lock(&sched_lock);
@@ -1968,9 +1982,26 @@ void sched_reap_slot(task_t *t) {
             parent->sys_ticks += t->sys_ticks;
             parent->child_user_ticks += t->child_user_ticks;
             parent->child_sys_ticks += t->child_sys_ticks;
+            /* M98: a joined thread shared this address space, so its
+             * peak is this process's own peak and not a child's - the
+             * same split the ticks above make, for the same reason. */
+            if (t->max_rss_pages > parent->max_rss_pages) {
+                parent->max_rss_pages = t->max_rss_pages;
+            }
+            if (t->child_max_rss_pages > parent->child_max_rss_pages) {
+                parent->child_max_rss_pages = t->child_max_rss_pages;
+            }
         } else {
             parent->child_user_ticks += t->user_ticks + t->child_user_ticks;
             parent->child_sys_ticks += t->sys_ticks + t->child_sys_ticks;
+            /* M98: the largest a child or a child's child ever was.
+             * A maximum, not a sum - see sched.h's field comment. */
+            if (t->max_rss_pages > parent->child_max_rss_pages) {
+                parent->child_max_rss_pages = t->max_rss_pages;
+            }
+            if (t->child_max_rss_pages > parent->child_max_rss_pages) {
+                parent->child_max_rss_pages = t->child_max_rss_pages;
+            }
         }
     }
 
@@ -2009,6 +2040,8 @@ void sched_reap_slot(task_t *t) {
     t->sys_ticks = 0;
     t->child_user_ticks = 0;
     t->child_sys_ticks = 0;
+    t->max_rss_pages = 0;        /* M98 */
+    t->child_max_rss_pages = 0;  /* M98 */
     t->exit_signal = 0; /* M84: not killed until something kills it */
     t->exit_code = 0;   /* M106: a free slot holds no verdict either - a stale one made M55's diagnostic report a segfault that never happened */
     t->prio = PRIO_INTERACTIVE; /* M106 - see the note at the spawn site */
@@ -2608,6 +2641,8 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->sys_ticks = 0;
     t->child_user_ticks = 0;
     t->child_sys_ticks = 0;
+    t->max_rss_pages = 0;        /* M98 */
+    t->child_max_rss_pages = 0;  /* M98 */
 
     for (int i = 0; i < PATH_MAX_LEN; i++) {
         t->cwd[i] = parent->cwd[i];

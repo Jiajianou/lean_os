@@ -51,6 +51,8 @@ static uint16_t be16(const uint8_t *p) {
 static int selftest_cached = -1;
 /* M103 - see boot_ioapic_enabled. */
 static int ioapic_cached = -1;
+/* M98 - see boot_bootstrap_enabled. */
+static int bootstrap_cached = -1;
 
 void fwcfg_init(void) {
     /* Q11: a re-probe invalidates the cached answer. On the machine
@@ -59,6 +61,7 @@ void fwcfg_init(void) {
      * the previous device's answer about this one. */
     selftest_cached = -1;
     ioapic_cached = -1; /* M103 */
+    bootstrap_cached = -1; /* M98 */
 
     uint8_t sig[4];
     fwcfg_select(FWCFG_SIGNATURE);
@@ -155,6 +158,17 @@ int boot_ioapic_enabled(void) {
     int n = fwcfg_read_file("opt/leanos/ioapic", buf, sizeof(buf) - 1);
     ioapic_cached = (n == 1 && buf[0] == '1') ? 1 : 0;
     return ioapic_cached;
+}
+
+int boot_bootstrap_enabled(void) {
+    if (bootstrap_cached >= 0) {
+        return bootstrap_cached;
+    }
+    char buf[8];
+    k_memset(buf, 0, sizeof(buf));
+    int n = fwcfg_read_file("opt/leanos/bootstrap", buf, sizeof(buf) - 1);
+    bootstrap_cached = (n == 1 && buf[0] == '1') ? 1 : 0;
+    return bootstrap_cached;
 }
 
 int boot_selftests_enabled(void) {

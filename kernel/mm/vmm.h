@@ -204,6 +204,22 @@ uint64_t vmm_unmap_range_free(uint64_t pml4_phys, uint64_t start, uint64_t end);
 
 uint64_t vmm_fork_address_space(uint64_t src_pml4_phys, const vmm_range_t *owned, int owned_count);
 
+/* ---- M98: the resident set --------------------------------------------
+ *
+ * How many present user pages an address space has now, and the most it
+ * has ever had. Both are maintained inside vmm.c at the four places a
+ * leaf entry is written or cleared, so they cost an add and a compare on
+ * a path that has just walked four page tables.
+ *
+ * Keyed on the PML4's physical address because that is an address
+ * space's only identity here: threads share one and would otherwise be
+ * counted once each. An address space with no accounting slot - and the
+ * kernel's own, which is deliberately never given one - answers 0, which
+ * the one caller that reports these numbers prints as "not measured"
+ * rather than as "no memory". */
+uint64_t vmm_rss_pages(uint64_t pml4_phys);
+uint64_t vmm_rss_peak_pages(uint64_t pml4_phys);
+
 /* M83: a write to a page shared by a fork. Returns 1 if `virt` was a
  * copy-on-write page and this address space now has a private writable
  * copy, 0 if it was not - in which case the fault is as fatal as it has

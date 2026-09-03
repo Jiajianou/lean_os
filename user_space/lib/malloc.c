@@ -29,7 +29,12 @@
 
 typedef struct block_header {
     size_t size; /* usable bytes following this header - excludes the header itself */
-    int free;
+    /* M98: `is_free` rather than `free`. The member had the same name as
+     * the function since M19, which was harmless until this file started
+     * being compiled a second time for the host tests - where the test
+     * renames the FUNCTIONS to keep them out of the host libc's way, and
+     * a macro cannot tell a member from a call. */
+    int is_free;
     struct block_header *next;
     /* M78: this block is its own mmap mapping rather than a slice of the
      * sbrk heap, so free() unmaps it instead of putting it on the list.
@@ -39,7 +44,94 @@ typedef struct block_header {
     int mmapped;
 } block_header_t;
 
+/* ---- M98: the free list stops being the block list --------------------
+ *
+ * **Measured, not guessed.** M98 profiled a C++ compile on this machine
+ * with M101's sampler and 72% of every non-idle sample landed on two
+ * adjacent instructions inside this file: the first-fit loop, which
+ * walked `heap_head` - a list of EVERY block, free or not, in address
+ * order. GCC makes hundreds of thousands of small allocations, so that
+ * list grows to hundreds of thousands of nodes and every `malloc` walks
+ * it from the front. The allocator was quadratic in the number of live
+ * allocations, and a compile that costs 0.25 s of C on the host cost
+ * 116x that here while the same C++ compile cost 460x - the gap between
+ * those two numbers is this loop.
+ *
+ * Two changes, and the second is what makes the first bounded:
+ *
+ * **Free blocks are on their own list**, threaded through the block's
+ * own payload rather than through a bigger header - a free block's bytes
+ * belong to nobody, which is where every real allocator puts these
+ * links. The address-ordered `next` chain stays exactly as it was,
+ * because that is what free() coalesces along.
+ *
+ * **The free list is split by size class**, so a request for 32 bytes
+ * looks at blocks that might fit rather than at every free block on the
+ * machine. Bin i holds blocks whose usable size is in [2^(i+4),
+ * 2^(i+5)) - the first bin starts at 16 bytes because that is the
+ * smallest block that can hold the two links.
+ *
+ * What this is NOT: it is not a best-fit, it does not coalesce
+ * backwards, and it has no per-thread arenas. Each of those is a real
+ * allocator's answer to a measurement nobody here has taken. This one
+ * answers the measurement that WAS taken and stops there. */
+#define MIN_PAYLOAD (2 * sizeof(void *)) /* two links live in a free block's bytes */
+#define NBINS 28                          /* 16 B up to 2 GiB, which is the arena */
+
+typedef struct free_links {
+    struct block_header *fnext;
+    struct block_header *fprev;
+} free_links_t;
+
+#define LINKS(b) ((free_links_t *)((b) + 1))
+
 static block_header_t *heap_head;
+/* The last block in address order, so grow_heap can append without
+ * walking. Before M98 the walk that found it was the same walk that
+ * found a free block, and both were the bug. */
+static block_header_t *heap_tail;
+static block_header_t *bins[NBINS];
+
+/* The bin a block of `size` usable bytes belongs in: the index of its
+ * highest set bit, minus four, clamped. Deliberately a loop rather than
+ * a bit-scan builtin - this is a handful of iterations on a path that
+ * has just done a syscall's worth of work, and the builtin's name
+ * differs between the two compilers this file is built with. */
+static int bin_of(size_t size) {
+    int i = 0;
+    size_t s = size >> 4;
+    while (s > 1 && i < NBINS - 1) {
+        s >>= 1;
+        i++;
+    }
+    return i;
+}
+
+static void bin_insert(block_header_t *b) {
+    int i = bin_of(b->size);
+    LINKS(b)->fnext = bins[i];
+    LINKS(b)->fprev = (block_header_t *)0;
+    if (bins[i]) {
+        LINKS(bins[i])->fprev = b;
+    }
+    bins[i] = b;
+}
+
+static void bin_remove(block_header_t *b) {
+    int i = bin_of(b->size);
+    block_header_t *n = LINKS(b)->fnext;
+    block_header_t *p = LINKS(b)->fprev;
+    if (p) {
+        LINKS(p)->fnext = n;
+    } else if (bins[i] == b) {
+        bins[i] = n;
+    }
+    if (n) {
+        LINKS(n)->fprev = p;
+    }
+    LINKS(b)->fnext = (block_header_t *)0;
+    LINKS(b)->fprev = (block_header_t *)0;
+}
 
 /* ---- M79: one free list, two threads ----------------------------------
  *
@@ -62,9 +154,19 @@ static block_header_t *heap_head;
  */
 static volatile int heap_lock;
 
+/* M98: two spellings of one instruction, because this file is now
+ * compiled twice - once for this machine and once for the host, where
+ * tests/test_malloc.c grades the allocator itself. The x86 form is the
+ * one that ships and is unchanged; the builtin is what the host
+ * compiler has, and a test binary's lock does not have to be the
+ * machine's lock, it has to be A lock. */
 static inline int heap_xchg(volatile int *p, int v) {
+#if defined(__x86_64__)
     __asm__ volatile("lock xchgl %0, %1" : "+r"(v), "+m"(*p) : : "memory");
     return v;
+#else
+    return __sync_lock_test_and_set(p, v);
+#endif
 }
 
 static void heap_acquire(void) {
@@ -73,7 +175,11 @@ static void heap_acquire(void) {
             if (heap_xchg(&heap_lock, 1) == 0) {
                 return;
             }
+#if defined(__x86_64__)
             __asm__ volatile("pause" ::: "memory");
+#else
+            __asm__ volatile("" ::: "memory");
+#endif
         }
         sys_yield();
     }
@@ -107,6 +213,12 @@ void *malloc(size_t size) {
         return (void *)0;
     }
     size = align_up(size, HEAP_ALIGN);
+    /* M98: never smaller than the two links a free block carries in its
+     * own payload. A 4-byte allocation that is later freed still has to
+     * be able to sit on a free list. */
+    if (size < MIN_PAYLOAD) {
+        size = MIN_PAYLOAD;
+    }
 
     /* M78: large allocations get their own mapping, so that freeing one
      * actually returns the pages. See MMAP_THRESHOLD above. */
@@ -120,7 +232,7 @@ void *malloc(size_t size) {
              * the same "the slack is yours" rule the sbrk path below
              * follows, and what makes malloc_usable_size honest. */
             m->size = total - sizeof(block_header_t);
-            m->free = 0;
+            m->is_free = 0;
             m->next = (block_header_t *)0;
             m->mmapped = 1;
             return (void *)(m + 1);
@@ -132,23 +244,38 @@ void *malloc(size_t size) {
     }
 
     heap_acquire();
-    block_header_t *prev = (block_header_t *)0;
-    for (block_header_t *b = heap_head; b; b = b->next) {
-        if (b->free && b->size >= size) {
-            if (b->size >= size + sizeof(block_header_t) + HEAP_ALIGN) {
+    /* The bin this size belongs in, then every larger bin. A block in a
+     * larger bin always fits; a block in this one might not, because a
+     * bin is a size RANGE - so the first list is searched and the rest
+     * are taken from the front. That is first-fit within a size class,
+     * which is close enough to best-fit to keep fragmentation ordinary
+     * and is O(1) in the common case. */
+    for (int i = bin_of(size); i < NBINS; i++) {
+        for (block_header_t *b = bins[i]; b; b = LINKS(b)->fnext) {
+            if (b->size < size) {
+                continue;
+            }
+            bin_remove(b);
+            /* Split only when the remainder can itself be a block that
+             * holds the two links - a smaller tail would be a free
+             * block that cannot go on a free list. */
+            if (b->size >= size + sizeof(block_header_t) + MIN_PAYLOAD) {
                 block_header_t *rem = (block_header_t *)((unsigned char *)(b + 1) + size);
                 rem->size = b->size - size - sizeof(block_header_t);
-                rem->free = 1;
+                rem->is_free = 1;
                 rem->mmapped = 0;
                 rem->next = b->next;
                 b->next = rem;
+                if (heap_tail == b) {
+                    heap_tail = rem;
+                }
                 b->size = size;
+                bin_insert(rem);
             }
-            b->free = 0;
+            b->is_free = 0;
             heap_release();
             return (void *)(b + 1);
         }
-        prev = b;
     }
 
     size_t needed = sizeof(block_header_t) + size;
@@ -163,15 +290,20 @@ void *malloc(size_t size) {
      * slack, same as kernel/mm/heap.c's kmalloc does. */
     size_t pages = (needed + PAGE_SIZE - 1) / PAGE_SIZE;
     b->size = pages * PAGE_SIZE - sizeof(block_header_t);
-    b->free = 0;
+    b->is_free = 0;
     b->next = (block_header_t *)0;
     b->mmapped = 0;
 
-    if (prev) {
-        prev->next = b;
+    /* Appended at the tail rather than at whatever the search stopped
+     * on: sbrk only ever grows upward, so the newest block is always
+     * the highest address, and that is what keeps `next` in address
+     * order - which is the invariant free()'s coalesce depends on. */
+    if (heap_tail) {
+        heap_tail->next = b;
     } else {
         heap_head = b;
     }
+    heap_tail = b;
 
     heap_release();
     return (void *)(b + 1);
@@ -182,7 +314,7 @@ void free(void *ptr) {
         return;
     }
     block_header_t *b = (block_header_t *)ptr - 1;
-    if (b->free) {
+    if (b->is_free) {
         return; /* double free: no abort mechanism in user space yet, so this is a silent no-op rather than corrupting the free list */
     }
     /* M78: a large allocation goes back to the kernel rather than onto
@@ -194,13 +326,24 @@ void free(void *ptr) {
         return;
     }
     heap_acquire();
-    b->free = 1;
+    b->is_free = 1;
 
-    while (b->next && b->next->free &&
+    /* Coalesce forward, exactly as before - and now each absorbed block
+     * has to come OFF its free list first, because a merged block's
+     * bytes are about to become somebody's payload. Forgetting that is
+     * the classic version of this bug: the bin keeps a pointer into the
+     * middle of a live allocation and hands it out later. */
+    while (b->next && b->next->is_free &&
            (unsigned char *)b->next == (unsigned char *)(b + 1) + b->size) {
-        b->size += sizeof(block_header_t) + b->next->size;
-        b->next = b->next->next;
+        block_header_t *victim = b->next;
+        bin_remove(victim);
+        if (heap_tail == victim) {
+            heap_tail = b;
+        }
+        b->size += sizeof(block_header_t) + victim->size;
+        b->next = victim->next;
     }
+    bin_insert(b);
     heap_release();
 }
 

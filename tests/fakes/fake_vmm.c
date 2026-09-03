@@ -188,6 +188,27 @@ int vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
     return 0;
 }
 
+/* ---- M98: the resident-set counters ----------------------------------
+ *
+ * A settable answer rather than a stub returning zero. The scheduler
+ * reads the peak off an address space at two points that matter - the
+ * exit path and getrusage - and a fake that always said 0 would let a
+ * test "pass" while the capture was deleted. fake_vmm_set_rss_peak is
+ * how a test says what the address space's high-water mark is. */
+static uint64_t rss_peak;
+
+void fake_vmm_set_rss_peak(uint64_t pages) { rss_peak = pages; }
+
+uint64_t vmm_rss_pages(uint64_t pml4_phys) {
+    (void)pml4_phys;
+    return rss_peak;
+}
+
+uint64_t vmm_rss_peak_pages(uint64_t pml4_phys) {
+    (void)pml4_phys;
+    return rss_peak;
+}
+
 void vmm_init(const uint32_t *e820_map) { (void)e820_map; }
 int vmm_identity_covers(uint64_t phys, uint64_t len) { (void)phys; (void)len; return 1; }
 void vmm_enable_nx_this_cpu(void) {}

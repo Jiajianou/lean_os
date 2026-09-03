@@ -124,7 +124,8 @@
     X(futextest)                   \
     X(fswriter)                    \
     X(ptytest)                     \
-    X(exhausttest)
+    X(exhausttest)                \
+    X(measure)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -14109,6 +14110,94 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     klog_puts(" slots (high-water mark 0x");
     klog_put_hex32((uint32_t)sched_task_count());
     klog_puts(").\n");
+
+    /* ---- M98's fourth box: a build, on the machine, measured ----------
+     *
+     * Not a self-test. This runs only when the boot was given
+     * `opt/leanos/bootstrap=1` through fw_cfg - tools/bootstrap-test.sh
+     * is what passes it - and what it produces is numbers rather than a
+     * verdict: the peak resident set of the largest translation unit,
+     * the wall-clock of a real build, what that build costs on disk, and
+     * how close `make -j4` comes to this machine's process and
+     * descriptor ceilings.
+     *
+     * Three milestones were waiting on this boot. M98's own third and
+     * fourth boxes are the obvious two. The third is M101's: its
+     * attribution over a bootstrap was left half-open with the words
+     * "because M98 does not exist", and M102's swap decision was left
+     * with "the number that decides it does not exist". Both numbers are
+     * printed below.
+     *
+     * Placed before PID 1 rather than after, and that is a measurement
+     * decision rather than a layout one: the desktop is a compositor and
+     * four clients, all of them awake, and a build timed against them is
+     * a build timed against a screen nobody is looking at.
+     *
+     * The script (tests/bootstrap/run.sh) does the work; this waits for
+     * it, prints what it wrote, and adds the three numbers only the
+     * kernel can see - the task and fd high-water marks, and the free
+     * frame count.
+     */
+    if (boot_bootstrap_enabled()) {
+        os_stat_t bst;
+        if (do_syscall(SYS_stat, (uint64_t)"/tests/bootstrap/run.sh",
+                       (uint64_t)&bst, 0) != 0) {
+            klog_puts("[m98boot] no build fixtures on this image - skipped. "
+                       "tools/install-native-toolchain.sh puts them there, and "
+                       "it needs tools/build-native-toolchain.sh to have run.\n\n");
+        } else {
+            klog_puts("[m98boot] building on this machine - this is minutes, "
+                       "not seconds.\n");
+            uint64_t started = pit_get_ticks();
+            long pid = do_syscall(SYS_spawn,
+                                  (uint64_t)"/tests/bootstrap/run.sh", 0, 0);
+            if (pid < 0) {
+                panic("M98 bootstrap: the build script could not be spawned");
+            }
+            do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            uint64_t elapsed_s = (pit_get_ticks() - started) / PIT_HZ;
+
+            /* Nothing is read back and printed here, and the first
+             * version of this did exactly that - the script collected
+             * its output into /tmp and the kernel dumped the file when
+             * the script finished. The second run of it exceeded the
+             * harness's ceiling, the machine was stopped mid-build, and
+             * every measurement it had already taken went with the file.
+             * A spawned process's stdout on this machine is already the
+             * kernel log, so the script prints as it goes and a run that
+             * is cut short still says how far it got. */
+
+            int fd_task = -1;
+            int fd_peak = sched_fd_high_water(&fd_task);
+            int task_peak = sched_peak_live_tasks();
+            uint64_t page_kb = 4;
+            uint64_t used_frames = pmm_total_frame_count() - pmm_free_frame_count();
+
+            klog_perf("build_wall_s", elapsed_s, "s");
+            klog_perf("build_peak_live_tasks", (uint64_t)task_peak, "tasks");
+            klog_perf("build_peak_fds_one_task", (uint64_t)fd_peak, "fds");
+            klog_perf("build_frames_in_use_after", used_frames * page_kb, "KiB");
+
+            /* The ceilings this milestone predicted the build would hit,
+             * reported as distances rather than as a pass: M98's third
+             * box says the list is a prediction and the build's own
+             * failures are the specification. A build that finished
+             * without reaching either is the specification saying no. */
+            klog_puts("[m98boot] the toolchain built somebody else's program here: "
+                       "the whole build ran in ");
+            klog_put_dec((uint32_t)elapsed_s);
+            klog_puts(" s, and the two ceilings this milestone predicted it would "
+                       "hit were reached at ");
+            klog_put_dec((uint32_t)task_peak);
+            klog_puts(" of ");
+            klog_put_dec((uint32_t)MAX_TASKS);
+            klog_puts(" task slots and ");
+            klog_put_dec((uint32_t)fd_peak);
+            klog_puts(" of ");
+            klog_put_dec((uint32_t)MAX_FDS);
+            klog_puts(" descriptors in one task - measured.\n\n");
+        }
+    }
 
     size_t init_size_bytes = 0;
     uint8_t *init_image = read_program("/bin/init", &init_size_bytes);

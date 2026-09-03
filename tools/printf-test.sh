@@ -170,7 +170,8 @@ THEIRS="$BUILD/printf-theirs"
 # Every external symbol stdio.c defines, renamed on the way in - see the
 # header comment for why the list is checked rather than trusted.
 RENAMES=""
-for s in __assert_fail __fpending clearerr dprintf fclose fdopen feof \
+for s in __assert_fail __fpending __lean_stdio_flush_all \
+         clearerr dprintf fclose fdopen feof \
          ferror fflush fgetc fgetpos fgets fileno fopen fprintf fputc \
          fputs fread freopen fseek fsetpos ftell fwrite getc getchar \
          getdelim getline perror printf putc putchar puts remove rename \
