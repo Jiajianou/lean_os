@@ -149,8 +149,23 @@ char *setstate(char *state);
  * from anything the program wrote. A parameter name in a prototype means
  * nothing to the compiler and everything to the reader, and this reader
  * includes g++. Found by the first C++ program built against this libc. */
+/* M98: the two constants every `<stdlib.h>` has had since C89, and this
+ * one did not. `bfd/elf-properties.c` calls `_exit(EXIT_FAILURE)` having
+ * included only what its own sysdep.h pulls in, which is what a program
+ * is entitled to assume. Absent, it is an undeclared identifier in a
+ * file that has nothing to do with exit codes. */
+#define EXIT_SUCCESS 0
+#define EXIT_FAILURE 1
+
 int mkstemp(char *tmpl);
 char *mkdtemp(char *tmpl);
+/* M98: and the unsafe one, which GNU libiberty's choose-temp.c calls by
+ * name - so its absence was a build failure in the first file of the
+ * first library of binutils. It picks a name that does not exist and
+ * returns it, leaving the name unclaimed until the caller creates it,
+ * which is the race mkstemp exists to close. Provided because absence is
+ * a link error rather than a safer program; see the implementation. */
+char *mktemp(char *tmpl);
 
 /* M85 (second attempt): a terminal for a child process.
  *

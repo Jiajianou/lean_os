@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <errno.h>     /* M89: mkstemp/mkdtemp report why they gave up */
 #include <fcntl.h>     /* M89: O_CREAT|O_EXCL, which is what makes mkstemp safe */
+#include <unistd.h>    /* M98: access/F_OK, which is all mktemp can honestly do */
 #include <string.h>
 #include <sys/stat.h>  /* M89: mkdir, for mkdtemp */
 
@@ -378,6 +379,45 @@ int mkstemp(char *template) {
     }
     errno = EEXIST;
     return -1;
+}
+
+/* M98's probe found this missing, and it is the one of the three that
+ * cannot be made safe.
+ *
+ * `mktemp` picks a name that does not exist and RETURNS it, so between
+ * the check and whatever the caller does with it anything may take the
+ * name. mkstemp exists precisely because of that gap, and every modern
+ * system marks this deprecated. It is here anyway, and the reason is the
+ * same one <sys/mount.h> gives about refusing rather than stubbing: GNU
+ * libiberty's choose-temp.c calls it by name, so absence is a build
+ * failure in the first file of the first library of binutils - and a
+ * caller that has decided it wants this behaviour is not made safer by
+ * being unable to link.
+ *
+ * What IS done about it: the name is chosen with the same three inputs
+ * mkstemp uses and is verified not to exist, and both headers say what
+ * the race is. */
+char *mktemp(char *template) {
+    if (!template) {
+        errno = EINVAL;
+        return (char *)0;
+    }
+    unsigned int salt =
+        (unsigned int)sys_getpid() * 2654435761u + (unsigned int)sys_uptime_ms();
+    for (int attempt = 0; attempt < 128; attempt++) {
+        if (fill_template(template, salt + (unsigned int)attempt * 104729u) != 0) {
+            errno = EINVAL;
+            return (char *)0;
+        }
+        if (access(template, F_OK) != 0) {
+            return template;
+        }
+    }
+    /* POSIX: an empty string, not the untouched template - a caller that
+     * used it anyway would otherwise get a name ending in XXXXXX. */
+    template[0] = '\0';
+    errno = EEXIST;
+    return template;
 }
 
 char *mkdtemp(char *template) {

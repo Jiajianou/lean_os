@@ -18,6 +18,22 @@
 #pragma once
 
 #include <stddef.h>
+/* M98: <strings.h>, from here, because that is where every real system
+ * puts it and therefore where every real build expects to find it.
+ *
+ * glibc's <string.h> pulls in <strings.h> under _DEFAULT_SOURCE, so
+ * `strcasecmp`, `strncasecmp` and `ffs` are visible to anything that
+ * included <string.h> alone. binutils' bfd/sysdep.h includes <string.h>
+ * and nothing else and calls all three - so on this machine they were
+ * implicit declarations and the whole of bfd failed to compile, with
+ * three functions that had existed since M89 sitting in a header nobody
+ * had included.
+ *
+ * This is M94's lesson at a different address, and M94 wrote it in
+ * exactly these words: **a header that has a function and does not
+ * declare it where the standard says is, to a build, indistinguishable
+ * from not having it.** */
+#include <strings.h>
 
 /* M97: C++ linkage.
  *

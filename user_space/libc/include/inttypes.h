@@ -11,6 +11,14 @@
  * platforms and therefore the ones a program cannot hardcode. A program
  * asking for PRId8 gets a compile error rather than a wrong format, which
  * is the right failure.
+ *
+ * M98: and the SCN* family, which was **entirely absent** - this header
+ * had the print half of a header whose name is about both. binutils'
+ * `bfd/archive.c` reads an archive member's size with
+ * `sscanf(hdr.ar_size, "%" SCNu64, ...)`, which on this machine was a
+ * format string ending in a bare `%` and a compile error four tokens
+ * from anything the program wrote. Found by building binutils for this
+ * target; see M98's notes for the other three of the same shape.
  */
 #pragma once
 
@@ -55,6 +63,36 @@ extern "C" {
 #define PRIdMAX "ld"
 #define PRIuMAX "lu"
 #define PRIxMAX "lx"
+
+/* ---- M98: the scanf half ----------------------------------------------
+ *
+ * Same table, and it is a different table rather than an alias for the
+ * printf one: `scanf` needs the length modifier to size the *pointer* it
+ * writes through, so getting one of these wrong corrupts memory rather
+ * than mis-printing. They happen to coincide on this target, and the
+ * comment above says why there is exactly one target - so they are
+ * written out separately anyway, because the day there are two the
+ * coincidence is where the bug goes. */
+#define SCNd32 "d"
+#define SCNi32 "i"
+#define SCNu32 "u"
+#define SCNx32 "x"
+#define SCNo32 "o"
+
+#define SCNd64 "ld"
+#define SCNi64 "li"
+#define SCNu64 "lu"
+#define SCNx64 "lx"
+#define SCNo64 "lo"
+
+#define SCNdPTR "ld"
+#define SCNiPTR "li"
+#define SCNuPTR "lu"
+#define SCNxPTR "lx"
+
+#define SCNdMAX "ld"
+#define SCNuMAX "lu"
+#define SCNxMAX "lx"
 
 typedef long          intmax_t;
 typedef unsigned long uintmax_t;

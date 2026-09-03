@@ -10615,6 +10615,49 @@ target did not have, and every one of them is now written down in
       ceiling and M93's disk are big enough stops being a plan and
       becomes a number
 
+#### First probe: what actually stops binutils, measured rather than argued
+
+*Written before any of M98 proper was attempted, because "port a
+compiler" is a description of a size rather than of a task and this
+milestone needed to know which one it is.*
+
+`build/toolchain` already has the M94 cross compiler, so the cheapest
+real question is: configure and build binutils with
+`--host=x86_64-lean_os` and read the errors. That was done. **The
+configure script succeeded outright**, and what stopped the build was
+not a kernel feature, a syscall, or a missing subsystem. It was four
+gaps in the C library's *headers*, one at a time, in M63's method:
+
+| what stopped it | what it actually was |
+|---|---|
+| `mktemp` implicitly declared | genuinely missing. libiberty's `choose-temp.c` calls it by name, so this was the first file of the first library |
+| `strcasecmp`, `strncasecmp`, `ffs` implicitly declared | **all three had existed since M89.** `bfd/sysdep.h` includes `<string.h>` and nothing else; glibc's `<string.h>` pulls in `<strings.h>` and this one did not |
+| `SCNu64` undeclared | `<inttypes.h>` had the entire `PRI*` family and **not one** `SCN*` — the print half of a header whose name is about both |
+| `EXIT_FAILURE` undeclared | `<stdlib.h>` had neither it nor `EXIT_SUCCESS` |
+
+**Every one of them is M94's rule at a new address**, and M94 stated it
+in exactly these words after finding `wcwidth` in `<wctype.h>` and not
+`<wchar.h>`: *a header that has a function and does not declare it where
+the standard says is, to a build, indistinguishable from not having it.*
+Three of the four were things this libc already had.
+
+**Where the probe stands now**, with those four fixed: `libiberty`
+builds completely, `bfd` builds completely, and the next stop is
+`<sys/param.h>`, missing, in `libctf` — the same class again. `libctf`
+also wants `dlopen`/`dlsym`, which this project has (M95) and which live
+in `libc.so` rather than in the static libc the target's specs link by
+default; that one is a real decision rather than a gap, and it is the
+first thing this probe has found that is not a header.
+
+**What this changes about the milestone's size.** The front of M98 is
+not research. It is `make`, read the error, add what it names — and so
+far every single thing it has named has been a line in a header. What is
+still unmeasured is `gas`, `ld`, GCC itself (which also needs GMP, MPFR
+and MPC built for the target), and then *running* them here, which is
+where the process and descriptor ceilings this milestone predicts
+actually arrive. Those may be as advertised. The first hundred lines of
+it are not.
+
 **How we'll know.** The classic test, and it is classic precisely
 because nothing weaker is convincing: **a three-stage bootstrap where
 stage 2 and stage 3 are byte-identical.** Stage 1 proves the compiler

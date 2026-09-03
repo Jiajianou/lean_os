@@ -838,6 +838,85 @@ int main(void) {
         }
     }
 
+    /* M98: four headers, tested for WHERE they declare things ----------
+     *
+     * Every one of these came from building binutils for this target,
+     * and every one is the same failure: something this libc has, or
+     * ought to have, that is not visible from the header a program
+     * actually includes. M94 wrote the rule after finding `wcwidth` in
+     * <wctype.h> and not <wchar.h>: **a header that has a function and
+     * does not declare it where the standard says is, to a build,
+     * indistinguishable from not having it.**
+     *
+     * So these checks are deliberately about the include, not the
+     * behaviour. Each block includes exactly what a real program would
+     * and uses what that entitles it to.
+     */
+    {
+        /* bfd/sysdep.h includes <string.h> and nothing else, then calls
+         * all three of these. On glibc <string.h> pulls in <strings.h>;
+         * here it did not, so the whole of bfd failed to compile against
+         * three functions that had existed since M89. This file includes
+         * <string.h> above and does not include <strings.h>. */
+        if (strcasecmp("AbC", "aBc") != 0) {
+            fail("strcasecmp is not visible from <string.h>, or is wrong");
+        }
+        if (strncasecmp("AbCxx", "aBcyy", 3) != 0) {
+            fail("strncasecmp is not visible from <string.h>, or is wrong");
+        }
+        if (ffs(0) != 0 || ffs(1) != 1 || ffs(8) != 4) {
+            fail("ffs is not visible from <string.h>, or is wrong");
+        }
+
+        /* bfd/archive.c reads a member size with sscanf("%" SCNu64).
+         * <inttypes.h> here had the whole PRI* family and NOT ONE SCN*,
+         * so that was a format string ending in a bare '%'. */
+        {
+            uint64_t parsed = 0;
+            if (sscanf("1234567890123", "%" SCNu64, &parsed) != 1 ||
+                parsed != 1234567890123ULL) {
+                fail("SCNu64 does not scan a 64-bit value");
+            }
+            long long signed_parsed = 0;
+            if (sscanf("-42", "%" SCNd64, &signed_parsed) != 1 ||
+                signed_parsed != -42) {
+                fail("SCNd64 does not scan a signed 64-bit value");
+            }
+        }
+
+        /* bfd/elf-properties.c calls _exit(EXIT_FAILURE). <stdlib.h>
+         * here had neither constant - undeclared identifiers in a file
+         * with nothing to do with exit codes. Checked for their VALUES
+         * as well as their presence, because a program that returns
+         * EXIT_FAILURE and exits 0 is worse than one that will not
+         * compile. */
+        if (EXIT_SUCCESS != 0 || EXIT_FAILURE == 0) {
+            fail("EXIT_SUCCESS/EXIT_FAILURE are not 0 and non-zero");
+        }
+
+        /* mktemp: genuinely missing, and the first thing that stopped
+         * binutils - libiberty's choose-temp.c calls it by name. It
+         * picks a name that does not exist; see <stdlib.h> for why this
+         * libc provides a call every modern system deprecates. */
+        {
+            char tmpl[] = "/tmp/libctest-mkXXXXXX";
+            char *got = mktemp(tmpl);
+            if (got != tmpl || tmpl[0] == '\0') {
+                fail("mktemp did not produce a name");
+            }
+            if (strncmp(tmpl, "/tmp/libctest-mk", 16) != 0) {
+                fail("mktemp overwrote the part of the template it must keep");
+            }
+            /* The one property it can honestly promise: the name it
+             * returned did not exist when it returned it. */
+            int fd = open(tmpl, O_RDONLY);
+            if (fd >= 0) {
+                close(fd);
+                fail("mktemp returned a name that already existed");
+            }
+        }
+    }
+
     /* M88: the clock advances, and says so when it does not.
      *
      * This check exists because of a failure that took three attempts to
