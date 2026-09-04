@@ -183,6 +183,22 @@ def port_gcc(root, header_src):
         # exclude, which is the worse of the two failures.
         "  thread_file=posix\n"
         "  use_gcc_stdint=provide\n"
+        # M99: and the driver option that says a program uses threads.
+        #
+        # `-pthread` is not a generic GCC option - it is declared per-OS,
+        # in that OS's .opt file, and a target which does not declare it
+        # answers `unrecognized command-line option '-pthread'`. That is
+        # not a cosmetic refusal: CPython's configure link-tests EVERY
+        # libc function with `$CC -pthread`, so on this target every one
+        # of four hundred probes failed and configure concluded the C
+        # library had no snprintf, no waitpid and no uname.
+        #
+        # lean_os.opt declares it; lean_os.h's CPP_SPEC turns it into
+        # -D_REENTRANT. It adds no -lpthread because there is no such
+        # archive here: pthread_create is in libc (M79/M96), which is
+        # the same arrangement glibc has had since 2.34 and the reason
+        # `Ignore` is what several targets in this table use.
+        "  extra_options=\"${extra_options} lean_os.opt\"\n"
         "  ;;\n"
         "*-*-phoenix*)\n  gas=yes\n  gnu_ld=yes\n  default_use_cxa_atexit=yes\n  ;;",
         "the per-OS block in config.gcc")))
@@ -364,6 +380,40 @@ def port_gcc(root, header_src):
     dst = os.path.join(root, "gcc/config/lean_os.h")
     shutil.copyfile(header_src, dst)
     out.append(("gcc/config/lean_os.h", "copied"))
+
+    # M99: the option table for this OS. One entry, and the format is
+    # the one options.texi documents - a name, then what the driver does
+    # with it. `Driver` rather than `Ignore` because CPP_SPEC in
+    # lean_os.h reads it back to define _REENTRANT.
+    out.append(("gcc/config/lean_os.opt", write_file(
+        os.path.join(root, "gcc/config/lean_os.opt"),
+        "; lean_os options. See gcc/config/lean_os.h for what they do.\n"
+        "; Written by tools/toolchain-port/apply.py - M99.\n"
+        "\n"
+        "pthread\n"
+        "Driver\n",
+        "the driver options this OS declares")))
+
+    # And the documentation-URL sidecar GCC 14 requires beside every .opt.
+    #
+    # Not optional and not cosmetic: gcc/Makefile.in has `s-options`
+    # depend on `$(ALL_OPT_FILES:.opt=.opt.urls)`, so an .opt with no
+    # .opt.urls stops the build with "No rule to make target
+    # .../lean_os.opt.urls" - after config.gcc has been read, which is
+    # late enough to look like a makefile bug rather than a missing file.
+    # Upstream generates these from the built HTML manual with
+    # regenerate-opt-urls.py; the honest content for this one is what
+    # rtems.opt.urls has for the same option, which is a comment saying
+    # the manual documents -pthread in two places and neither wins.
+    out.append(("gcc/config/lean_os.opt.urls", write_file(
+        os.path.join(root, "gcc/config/lean_os.opt.urls"),
+        "; Written by tools/toolchain-port/apply.py - M99. Upstream\n"
+        "; autogenerates these from the HTML manual; -pthread is\n"
+        "; documented in two places there and rtems.opt.urls records the\n"
+        "; same standoff.\n"
+        "\n"
+        "; skipping UrlSuffix for 'pthread' due to multiple URLs\n",
+        "the documentation-URL sidecar GCC 14 requires beside every .opt")))
     return out
 
 

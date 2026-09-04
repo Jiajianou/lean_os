@@ -119,6 +119,26 @@ typedef unsigned char cc_t;
  * console has ever had. Said here rather than left to be discovered. */
 #define VMIN   6
 #define VTIME  7
+/* M99: four more indices, carried and not consulted.
+ *
+ * CPython's Modules/termios.c puts every c_cc index in a constant table
+ * with no #ifdef around any of them, which is how these came to be
+ * needed. They occupy the slots NCCS already reserved, so nothing about
+ * the struct's layout changes and no kernel code has to be recompiled
+ * against a different one.
+ *
+ * What they mean here: VSTART and VSTOP name the XON/XOFF characters,
+ * and this discipline has no flow control to start or stop - IXON is
+ * not implemented and never was. VEOL and VEOL2 are additional
+ * line-delimiters in canonical mode, and this discipline delimits on
+ * '\n' and on VEOF alone. A program can set all four and read back what
+ * it set; none of them changes what the terminal does, which is the same
+ * arrangement VMIN and VTIME have had since M89 and is stated for the
+ * same reason. */
+#define VSTART 8
+#define VSTOP  9
+#define VEOL   10
+#define VEOL2  11
 #define NCCS   12
 
 struct termios {

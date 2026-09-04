@@ -356,6 +356,14 @@ exhausttest_elf_start:
     incbin "build/exhausttest.elf"
 exhausttest_elf_end:
 
+; M99: a fault a program can catch. Three signals, twice each, and a
+; child whose own handler faults - which is the loop being cut.
+global faulttest_elf_start
+global faulttest_elf_end
+faulttest_elf_start:
+    incbin "build/faulttest.elf"
+faulttest_elf_end:
+
 global syscalltest_elf_start
 global syscalltest_elf_end
 syscalltest_elf_start:

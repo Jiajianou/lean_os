@@ -68,19 +68,58 @@ struct lconv *localeconv(void) {
  */
 #include <langinfo.h>
 
+/* M99: the C locale's day and month names, in the order <langinfo.h>
+ * numbers them - which is the order a caller indexes them in, because
+ * `nl_langinfo(DAY_1 + tm->tm_wday)` is what these exist for. The spelled
+ * out names come first because DAY_1 is Sunday in POSIX and tm_wday is 0
+ * for Sunday, and the two agreeing is the whole convenience. */
+static const char *const DAY_NAMES[7] = {
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+    "Saturday"};
+static const char *const ABDAY_NAMES[7] = {
+    "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+static const char *const MON_NAMES[12] = {
+    "January", "February", "March", "April", "May", "June", "July",
+    "August", "September", "October", "November", "December"};
+static const char *const ABMON_NAMES[12] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
+    "Nov", "Dec"};
+
 char *nl_langinfo(nl_item item) {
+    if (item >= DAY_1 && item <= DAY_7) {
+        return (char *)DAY_NAMES[item - DAY_1];
+    }
+    if (item >= ABDAY_1 && item <= ABDAY_7) {
+        return (char *)ABDAY_NAMES[item - ABDAY_1];
+    }
+    if (item >= MON_1 && item <= MON_12) {
+        return (char *)MON_NAMES[item - MON_1];
+    }
+    if (item >= ABMON_1 && item <= ABMON_12) {
+        return (char *)ABMON_NAMES[item - ABMON_1];
+    }
     switch (item) {
-    case CODESET:   return (char *)"UTF-8"; /* M88 - see <langinfo.h> for why this changed */
-    case D_T_FMT:   return (char *)"%a %b %e %H:%M:%S %Y";
-    case D_FMT:     return (char *)"%m/%d/%y";
-    case T_FMT:     return (char *)"%H:%M:%S";
-    case AM_STR:    return (char *)"AM";
-    case PM_STR:    return (char *)"PM";
-    case RADIXCHAR: return (char *)".";
-    case THOUSEP:   return (char *)"";
-    case YESEXPR:   return (char *)"^[yY]";
-    case NOEXPR:    return (char *)"^[nN]";
-    default:        return (char *)"";
+    case CODESET:    return (char *)"UTF-8"; /* M88 - see <langinfo.h> for why this changed */
+    case D_T_FMT:    return (char *)"%a %b %e %H:%M:%S %Y";
+    case D_FMT:      return (char *)"%m/%d/%y";
+    case T_FMT:      return (char *)"%H:%M:%S";
+    case T_FMT_AMPM: return (char *)"%I:%M:%S %p";
+    case AM_STR:     return (char *)"AM";
+    case PM_STR:     return (char *)"PM";
+    case RADIXCHAR:  return (char *)".";
+    case THOUSEP:    return (char *)"";
+    case YESEXPR:    return (char *)"^[yY]";
+    case NOEXPR:     return (char *)"^[nN]";
+    /* The C locale has no currency symbol, no era and no alternative
+     * digits. The empty string is the C locale's answer to each of
+     * those, not this library declining to answer. */
+    case CRNCYSTR:
+    case ERA:
+    case ERA_D_FMT:
+    case ERA_D_T_FMT:
+    case ERA_T_FMT:
+    case ALT_DIGITS: return (char *)"";
+    default:         return (char *)"";
     }
 }
 

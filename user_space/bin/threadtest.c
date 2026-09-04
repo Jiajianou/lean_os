@@ -107,6 +107,36 @@ static void *worker_b(void *arg) {
     return (void *)0xB;
 }
 
+/* ---- M99: the stack a thread is entered on ---------------------------
+ *
+ * SysV requires RSP to be 16-byte aligned at the CALL, so a function's
+ * first instruction runs with RSP % 16 == 8 - the return address the
+ * call pushed - and GCC lays out every 16-byte-aligned local on that
+ * assumption. A thread entered with RSP exactly 16-aligned therefore has
+ * every aligned spill slot 8 bytes out, and the first `movaps` to one
+ * is a #GP that kills the thread.
+ *
+ * This is that instruction, on purpose, in a thread. It is written as
+ * inline assembly rather than left to the compiler because the whole
+ * point is to emit the aligned form: a C expression the optimiser can
+ * satisfy with `movups` would test nothing, and which of the two GCC
+ * picks is not something this test should be at the mercy of.
+ *
+ * It cost twenty milestones to find. Nothing that had run on a thread
+ * here spilled an XMM register to an aligned slot until CPython's
+ * test_io did, and then it did not look like a threading bug at all -
+ * it looked like the interpreter crashing in its own text. */
+static volatile int sse_ok;
+
+static void *sse_alignment_probe(void *arg) {
+    (void)arg;
+    double buf[2] __attribute__((aligned(16)));
+    __asm__ volatile("movaps %%xmm0, %0" : "=m"(buf) : : "memory");
+    /* Reached only if the store above did not fault. */
+    sse_ok = 1;
+    return (void *)0xC;
+}
+
 int main(void) {
     /* The same computation, alone, before either thread exists. Whatever
      * this produces is what both threads must produce while competing
@@ -146,6 +176,20 @@ int main(void) {
     }
     if (fp_a != alone || fp_b != alone) {
         return 7;
+    }
+
+    /* M99: and the alignment of a thread's own stack, which is a
+     * different claim from anything above - those threads all ran, and
+     * would have run just as well on a stack that was 8 bytes out. */
+    pthread_t c;
+    if (pthread_create(&c, 0, sse_alignment_probe, 0) != 0) {
+        return 8;
+    }
+    void *rc = 0;
+    if (pthread_join(c, &rc) != 0 || rc != (void *)0xC || !sse_ok) {
+        printf("threadtest: a thread could not store an XMM register to a "
+                "16-byte-aligned local - its stack was entered misaligned\n");
+        return 9;
     }
 
     /* Reported, not asserted - see the header comment. A race is allowed

@@ -15,10 +15,18 @@
  *     it writes, and blocks if it must - and it is a better answer than
  *     never reporting POLLOUT, which would make a program that waits for
  *     it wait forever.
- *   - POLLPRI, POLLRDHUP and the rest of the out-of-band family are not
- *     defined. There is no out-of-band data on this machine to report,
- *     and a constant a program could test but never see set is the
- *     failure mode <fcntl.h> spent a header comment avoiding.
+ *   - POLLPRI and the rest of the out-of-band family are defined and are
+ *     never set. **M99 reversed the original decision here, and the
+ *     reversal is worth reading.** M88 wrote: "a constant a program
+ *     could test but never see set is the failure mode <fcntl.h> spent
+ *     a header comment avoiding", and left them out. The first ported
+ *     program to ask - CPython's Modules/selectmodule.c, which puts
+ *     POLLPRI in a method table with no #ifdef around it - did not
+ *     misinterpret an unset flag. It failed to compile. An absent
+ *     constant is not a smaller failure than an unraised one; it is a
+ *     louder failure at a worse time, and POSIX requires these names.
+ *     They are defined, and this machine never raises them, which is
+ *     exactly what Linux does for a regular file.
  *
  * POLLHUP and POLLERR are real: a pipe whose last writer has gone is
  * exactly the end-of-stream condition SYS_waitfds already reports as
@@ -45,6 +53,17 @@ extern "C" {
 #define POLLERR  0x008 /* only ever set in revents */
 #define POLLHUP  0x010 /* only ever set in revents */
 #define POLLNVAL 0x020 /* the fd was not open - only ever set in revents */
+
+/* M99: the names POSIX requires, and this machine never sets any of
+ * them. See the header note for why an unraised flag beat an absent
+ * one. POLLRDNORM/POLLWRNORM are the "normal data" spellings of POLLIN
+ * and POLLOUT and are aliased to them rather than given bits of their
+ * own, because on this system they are the same condition. */
+#define POLLPRI    0x002 /* out-of-band data - there is none here */
+#define POLLRDNORM POLLIN
+#define POLLWRNORM POLLOUT
+#define POLLRDBAND 0x080 /* priority band data - never set */
+#define POLLWRBAND 0x100 /* priority band writable - never set */
 
 typedef unsigned int nfds_t;
 

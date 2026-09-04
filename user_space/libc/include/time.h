@@ -33,7 +33,13 @@
 extern "C" {
 #endif
 
+/* M99: guarded, and shared with <sys/types.h>, which is where POSIX puts
+ * the type - see the long note there for what a configure script did
+ * with the answer when it was only here. */
+#ifndef __lean_time_t_defined
+#define __lean_time_t_defined
 typedef long time_t;
+#endif
 
 /* M80 groundwork: `struct timespec`, which is what every deadline API
  * written since 1993 takes - including pthread_cond_timedwait, which is
@@ -161,7 +167,10 @@ char *asctime_r(const struct tm *tm, char *buf);
 char *ctime(const time_t *t);
 char *ctime_r(const time_t *t, char *buf);
 
+#ifndef __lean_clock_t_defined
+#define __lean_clock_t_defined
 typedef long clock_t;
+#endif
 
 /* M6's tick is 100 Hz, so this is the honest resolution rather than the
  * conventional 1000000. */

@@ -89,6 +89,35 @@ double tanh(double x);
 double fmax(double a, double b);
 double fmin(double a, double b);
 
+/* ---- M99: the C99 set, and why these seven arrived together ----------
+ *
+ * CPython's configure checks `acosh asinh atanh erf erfc expm1 log1p
+ * log2` in one loop and stops with "Python requires C99 compatible
+ * libm" on the first one missing. log2 was already here; the rest are
+ * the ones whose naive expressions cancel - see math.c for the range
+ * each is written around. nextafter comes with them because
+ * math.nextafter and math.ulp call it unguarded.
+ *
+ * Accuracy: graded against the host's own libm by tools/math-test.sh
+ * rather than against a table written here, with the tolerance stated
+ * per function in tests/math/cases.tsv. */
+double expm1(double x);
+double log1p(double x);
+double asinh(double x);
+double acosh(double x);
+double atanh(double x);
+double erf(double x);
+double erfc(double x);
+double nextafter(double x, double y);
+
+/* And three from CPython's own math module rather than from a standard's
+ * list - see math.c, and fma in particular, which is written out because
+ * this target has no FMA instruction and __builtin_fma without one calls
+ * fma. */
+double cbrt(double x);
+double exp2(double x);
+double fma(double x, double y, double z);
+
 #ifdef __cplusplus
 }
 #endif

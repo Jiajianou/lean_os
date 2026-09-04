@@ -125,6 +125,7 @@
     X(fswriter)                    \
     X(ptytest)                     \
     X(exhausttest)                \
+    X(faulttest)                   \
     X(measure)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
@@ -9076,6 +9077,118 @@ static void boot_selftests_system(void) {
         }
     }
 
+    /* ---- M99 self-test: somebody else's language, on this disk ----------
+     *
+     * M80 was abandoned with `python3 -c "print(1+1)"` not running, and
+     * its own entry named the bar that mattered more than that one: "a
+     * real script with a dict, a class, a loop and a file open". This
+     * runs that script (tests/python/m99.py) and greps for what it says
+     * about itself.
+     *
+     * **The line that could not be written before M93** is the last
+     * check: `import json` reads /usr/lib/python3.12/json/__init__.py
+     * off this filesystem. M80 froze its library into the executable
+     * because M81's filesystem could not hold two thousand small files;
+     * this one does, so the library is on the disk the way it is
+     * everywhere else and `import` is a filesystem operation.
+     *
+     * Skipped when /bin/python3 is absent, for the same reason M89, M94
+     * and M98 skip: tools/build-python.sh needs the network and the
+     * cross compiler, and an image without Python is a valid image.
+     */
+    {
+        os_stat_t py;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/python3", (uint64_t)&py, 0) != 0) {
+            klog_puts("[m99] /bin/python3 is not on this image - skipped. "
+                       "tools/build-python.sh builds it and "
+                       "tools/install-python.sh puts it here.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m99.sh";
+            const char *result = PATH_TMP_DIR "m99.out";
+            /* stdout redirected, stderr left alone on purpose: this
+             * shell has no 2>&1 (user_space/shell/sh.c), and a traceback
+             * on the serial line is the best diagnostic this test could
+             * have - it is written by somebody else's interpreter about
+             * somebody else's language, which is the whole argument for
+             * running one. */
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "/bin/python3 /tests/python/m99.py > " PATH_TMP_DIR "m99.out\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M99 self-test: could not write the fixture");
+            }
+
+            uint64_t started = pit_get_ticks();
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m99] python could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            uint64_t elapsed_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
+
+            static char produced[2048];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m99] python produced no output at all\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"m99: python 3.12", "the interpreter said which version it is"},
+                    {"m99: dict and loop ok", "a class, a dict and a loop"},
+                    {"m99: file write/read ok", "open(), write, read back through Python's own io"},
+                    {"m99: os.stat/listdir/unlink ok", "the os module's syscalls"},
+                    {"m99: exceptions and comprehensions ok", "a raise caught by type, and a generator"},
+                    {"m99: a .py module imported from the disk ok",
+                     "import read a .py file off this filesystem"},
+                    {"m99: fstat answers for a pipe, a console and a bad fd ok",
+                     "fstat on a descriptor that is not a file, and an errno "
+                     "that is not zero"},
+                    {"m99: python runs here", "the script reached its own last line"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m99] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+
+            if (!all_ok) {
+                klog_puts("[m99] what python actually wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m99] ---- end\n");
+                panic("M99 self-test: python does not run here");
+            }
+
+            /* The startup cost, reported rather than budgeted. An
+             * interpreter that reads its own library off the disk at
+             * import time is the first program on this machine whose
+             * start is dominated by small reads, and M104's cache is
+             * what it lands on. No row in budgets.tsv yet, for the
+             * reason tools/bootstrap-test.sh gives: a measurement with
+             * no ceiling is reported so that a ceiling can be chosen
+             * from a number rather than from a guess. */
+            klog_perf("python_fixture_ms", elapsed_ms, "ms");
+
+            klog_puts("[m99] somebody else's language runs here: a class, a dict, a "
+                       "loop, a file written and read back, os.stat and os.listdir, "
+                       "an exception caught by type, and `import json` read as a .py "
+                       "file off this filesystem - CPython 3.12, built by this "
+                       "project's own compiler, self-test passed.\n\n");
+        }
+    }
+
 
     /* ---- M103 self-test: interrupts a real machine delivers -------------
      *
@@ -9995,6 +10108,54 @@ static void boot_selftests_system(void) {
                    "self-test passed.\n\n");
     }
 
+    /* ---- M99 self-test: a FAULT a program can catch ---------------------
+     *
+     * M76's sibling, and the half it excluded. A signal sent by another
+     * process was catchable from M76; a signal raised by the memory
+     * management unit about the instruction that is executing was not -
+     * SIGSEGV was refused by sigaction, and every ring-3 fault of every
+     * kind was reported as SIGSEGV and killed the process.
+     *
+     * CPython is what forced it. `faulthandler.enable()` installs
+     * handlers for SIGSEGV, SIGFPE, SIGILL, SIGBUS and SIGABRT, and
+     * CPython's own test runner calls it before running one test - so
+     * the whole regression suite failed at `sigaction(SIGSEGV)`
+     * returning -1, having run nothing.
+     *
+     * /bin/faulttest is the fixture and its exit code names which claim
+     * failed. The one worth reading twice is code 7/8: a CHILD whose
+     * SIGSEGV handler itself faults must die, once. That is the loop
+     * being cut, and without it any program could hang this machine by
+     * catching a fault badly.
+     */
+    {
+        size_t ft_bytes = 0;
+        uint8_t *ft_img = read_program(PATH_BIN_DIR "faulttest", &ft_bytes);
+        if (!ft_img) {
+            panic("M99 self-test: /bin/faulttest is not on this disk");
+        }
+        const char *ft_argv[] = {PATH_BIN_DIR "faulttest", 0};
+        task_t *ft = process_spawnv("faulttest", ft_img, ft_bytes, ft_argv);
+        long ft_rc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
+        kfree(ft_img);
+        if (ft_rc != 0) {
+            klog_puts("[m99fault] faulttest exited ");
+            klog_put_dec((uint32_t)(ft_rc < 0 ? 99 : ft_rc));
+            klog_puts(" - see user_space/bin/faulttest.c for what each code "
+                       "means\n");
+            panic("M99 self-test: a fault this program caught was not delivered, "
+                  "or one it could not catch did not end it");
+        }
+        klog_puts("[m99] a fault a program can catch: a null dereference, an "
+                   "integer divide by zero and an opcode this CPU does not have, "
+                   "each delivered to its own handler as SIGSEGV, SIGFPE and "
+                   "SIGILL, each survived twice so the mask came back, a "
+                   "child whose own handler faults killed once rather than "
+                   "looping, and a three-argument SA_SIGINFO handler given the "
+                   "address that actually faulted and the pid and status of the "
+                   "child that actually ended - self-test passed.\n\n");
+    }
+
     /* ---- M77 self-test: POSIX names for what is already here ------------
      *
      * The milestone's own statement of proof: "A program written against
@@ -10134,16 +10295,45 @@ static void boot_selftests_system(void) {
                                "had changed - which is the one question SYS_stat cannot answer\n");
                     all_ok = 0;
                 }
-                /* And a descriptor that is not a file at all is refused
-                 * rather than described with invented numbers. */
+                /* And a descriptor that is not a file at all.
+                 *
+                 * **M99 reversed what this checks, and the reversal is
+                 * the point.** M77 required fstat to REFUSE a pipe,
+                 * "rather than described with invented numbers", and
+                 * that was the right instinct pointed at the wrong
+                 * thing: the numbers were never the answer, the TYPE
+                 * was, and there was nowhere in os_stat_t to put it. A
+                 * pipe's size really is 0 and its mtime really is 0;
+                 * what a caller needs to know is that it is a pipe.
+                 *
+                 * The cost of the refusal was found in CPython, which
+                 * fstats its own descriptors 0, 1 and 2 at startup and
+                 * sets any it cannot stat to None - so `print()` on
+                 * this machine wrote nothing and returned successfully.
+                 * os_stat_t.kind is the field that was missing.
+                 *
+                 * A pipe must therefore answer, and answer FIFO with a
+                 * zero length; a descriptor that is not open at all must
+                 * still be refused, which is the half of M77's check
+                 * that was always right. */
                 int pfds[2];
                 if (do_syscall(SYS_pipe, (uint64_t)pfds, 0, 0) == 0) {
-                    if (do_syscall(SYS_fstat, (uint64_t)pfds[0], (uint64_t)&st, 0) != -1) {
-                        klog_puts("[m77] SYS_fstat invented a size and an mtime for a pipe\n");
+                    k_memset(&st, 0, sizeof(st));
+                    if (do_syscall(SYS_fstat, (uint64_t)pfds[0], (uint64_t)&st, 0) != 0 ||
+                        st.kind != OS_STAT_FIFO || st.size != 0 || st.is_dir) {
+                        klog_puts("[m77] SYS_fstat could not say that a pipe is a pipe\n");
                         all_ok = 0;
                     }
                     do_syscall(SYS_close, (uint64_t)pfds[0], 0, 0);
                     do_syscall(SYS_close, (uint64_t)pfds[1], 0, 0);
+                    /* Now closed, so the same descriptor is no longer
+                     * open - and an fstat of it must fail. Without this
+                     * a kernel that answered for everything, open or
+                     * not, would pass the check above. */
+                    if (do_syscall(SYS_fstat, (uint64_t)pfds[0], (uint64_t)&st, 0) != -1) {
+                        klog_puts("[m77] SYS_fstat described a descriptor that is not open\n");
+                        all_ok = 0;
+                    }
                 }
                 do_syscall(SYS_close, (uint64_t)fd, 0, 0);
             }
@@ -10770,7 +10960,9 @@ static void boot_selftests_system(void) {
                    "once, two million increments through a mutex arriving as exactly two "
                    "million, memory written by one thread read by the other, separate tids "
                    "under one pid, each thread's floating-point state surviving the other's, "
-                   "and every frame back when the last of them left - self-test passed.\n\n");
+                   "a thread's stack entered aligned the way a call would have entered it "
+                   "(M99), and every frame back when the last of them left - self-test "
+                   "passed.\n\n");
     }
 
     /* ---- M96 self-test: a thread with its own variables, and a wait
@@ -14196,6 +14388,65 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             klog_puts(" of ");
             klog_put_dec((uint32_t)MAX_FDS);
             klog_puts(" descriptors in one task - measured.\n\n");
+        }
+    }
+
+    /* ---- M99's fourth bullet: somebody else's test suite -------------
+     *
+     * The same shape as the bootstrap block above and for the same
+     * reasons: its own fw_cfg switch, before PID 1 so nothing else is
+     * awake, and every line printed as it happens rather than collected
+     * for the end. tools/python-test.sh is what asks and what grades
+     * what comes back.
+     *
+     * What the kernel adds is the wall-clock and the two counters only
+     * it can see. What the SUITE says about itself - how many tests ran,
+     * how many failed, which ones - is written by CPython's own test
+     * runner, which is the entire point: M99's bullet asks for "the
+     * pass/fail counts recorded rather than summarized", and a count
+     * this project computed would be this project marking its own work.
+     */
+    if (boot_pytest_enabled()) {
+        os_stat_t pst;
+        if (do_syscall(SYS_stat, (uint64_t)"/tests/python/run.sh",
+                       (uint64_t)&pst, 0) != 0) {
+            klog_puts("[m99pytest] no python fixtures on this image - "
+                       "skipped. tools/build-python.sh builds CPython and "
+                       "tools/install-python.sh puts it and its own test "
+                       "suite here.\n\n");
+        } else {
+            klog_puts("[m99pytest] running CPython's own regression suite - "
+                       "this is tens of minutes, not seconds.\n");
+            uint64_t started = pit_get_ticks();
+            long pid = do_syscall(SYS_spawn,
+                                  (uint64_t)"/tests/python/run.sh", 0, 0);
+            if (pid < 0) {
+                panic("M99: the regression-suite script could not be spawned");
+            }
+            do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            uint64_t elapsed_s = (pit_get_ticks() - started) / PIT_HZ;
+
+            int fd_task = -1;
+            int fd_peak = sched_fd_high_water(&fd_task);
+            int task_peak = sched_peak_live_tasks();
+
+            klog_perf("pytest_wall_s", elapsed_s, "s");
+            klog_perf("pytest_peak_live_tasks", (uint64_t)task_peak, "tasks");
+            klog_perf("pytest_peak_fds_one_task", (uint64_t)fd_peak, "fds");
+
+            klog_puts("[m99pytest] somebody else's test suite ran here: "
+                       "the whole list took ");
+            klog_put_dec((uint32_t)elapsed_s);
+            klog_puts(" s, reaching ");
+            klog_put_dec((uint32_t)task_peak);
+            klog_puts(" of ");
+            klog_put_dec((uint32_t)MAX_TASKS);
+            klog_puts(" task slots and ");
+            klog_put_dec((uint32_t)fd_peak);
+            klog_puts(" of ");
+            klog_put_dec((uint32_t)MAX_FDS);
+            klog_puts(" descriptors in one task - and what it says about "
+                       "itself is above, in its own words.\n\n");
         }
     }
 

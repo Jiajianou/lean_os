@@ -130,6 +130,12 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
   # Skips with a message otherwise, same as the three stages above; the
   # [m98] boot marker downstream is what actually grades it.
   run_stage "the native binutils, onto the image" ./tools/install-native-toolchain.sh
+
+  # M99: CPython, its standard library as .py files, and CPython's own
+  # regression suite. Same shape as every stage above - it skips with a
+  # message when tools/build-python.sh has not run, and the [m99] boot
+  # marker downstream is what grades it.
+  run_stage "python and its library, onto the image" ./tools/install-python.sh
 fi
 
 # ---- Stage 1: the host tier ------------------------------------------
@@ -165,6 +171,12 @@ run_stage "the regex engine, against the host's" ./tools/regex-test.sh
 # see tools/scanf-test.sh. In the fast tier, next to them, because it is
 # a second and costs nothing.
 run_stage "scanf, against the host's" ./tools/scanf-test.sh
+# M99: and the fifth, libm - added when CPython's configure refused to
+# proceed without seven C99 functions this project did not have, which
+# made the accuracy of the other twenty-seven load-bearing for somebody
+# else's arithmetic. Its first run found fmod wrong by more than its own
+# modulus whenever the quotient was large; see tests/math/cases.tsv.
+run_stage "libm, against the host's" ./tools/math-test.sh
 # M98: and the fourth, printf - added when binutils made the format
 # engine load-bearing for programs nobody here wrote, and worth having
 # for the same reason as scanf's: its first run found five bug classes,

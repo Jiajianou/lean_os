@@ -120,25 +120,41 @@ speed_t cfgetospeed(const struct termios *t) {
     return 0;
 }
 
-int cfsetispeed(struct termios *t, speed_t speed) {
-    (void)t;
-    (void)speed;
+/* M99: B0 succeeds, everything else still refuses.
+ *
+ * The refusal was M89's and its reasoning stands: there is no UART here,
+ * and a program that needs a real baud rate should find out rather than
+ * be told 0. What M89 did not separate is *setting the speed the line
+ * already has* from setting a speed it cannot have. cfgetispeed answers
+ * B0, so the ordinary save-and-restore - read the settings, change one
+ * flag, write them back - passes B0 straight back in, and refusing that
+ * refuses a program that never asked about baud rates at all.
+ *
+ * CPython's termios.tcsetattr is the one that found it: it calls
+ * cfsetispeed and cfsetospeed with the values tcgetattr gave it, before
+ * every tcsetattr, which makes tty.setraw and everything built on it
+ * fail with EINVAL on a terminal that has no speed to set. */
+static int set_speed(speed_t speed) {
+    if (speed == B0) {
+        return 0;
+    }
     errno = EINVAL;
     return -1;
+}
+
+int cfsetispeed(struct termios *t, speed_t speed) {
+    (void)t;
+    return set_speed(speed);
 }
 
 int cfsetospeed(struct termios *t, speed_t speed) {
     (void)t;
-    (void)speed;
-    errno = EINVAL;
-    return -1;
+    return set_speed(speed);
 }
 
 int cfsetspeed(struct termios *t, speed_t speed) {
     (void)t;
-    (void)speed;
-    errno = EINVAL;
-    return -1;
+    return set_speed(speed);
 }
 
 /* ---- and the one that is not a refusal -------------------------------

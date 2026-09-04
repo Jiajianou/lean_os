@@ -1,0 +1,59 @@
+# tests/math/cases.tsv - M99. What each function in <math.h> is graded on.
+#
+# One row per function DECLARED in user_space/libc/include/math.h, and
+# tools/math-test.sh fails if a declaration has no row here: a libm
+# function nobody grades is the shape this file exists to prevent.
+#
+# kind  1  one double argument, swept over [lo, hi]
+#       2  two double arguments, swept over the same grid pairwise
+#       -  not graded by this harness; the note says why, and a note is
+#          required, because "not graded" without a reason is the same
+#          thing as forgotten
+#
+# rel_tol is what THIS project claims for the function, against the
+# host's own libm as the answer. math.h says "around 1e-12" for the M63
+# set and that is what most of these say. Where a row is looser, the note
+# says what makes it so - a looser tolerance with no reason beside it is
+# a bug that has been written down as a number.
+#
+# name	kind	lo	hi	points	rel_tol	note
+fabs	1	-1e6	1e6	401	0	exact - it clears a sign bit
+sqrt	1	0	1e6	401	1e-15	SSE2's own instruction - but see math.c: on a non-x86 host this row grades the host against itself
+floor	1	-1e18	1e18	401	0	exact - and swept past 2^52, where a long long cast stops being one
+ceil	1	-1e18	1e18	401	0	exact - same sweep as floor
+trunc	1	-1e18	1e18	401	0	exact
+round	1	-1e18	1e18	401	0	exact
+sin	1	-30	30	1201	1e-12	M63's minimax with range reduction
+cos	1	-30	30	1201	1e-12	M63's minimax with range reduction
+tan	1	-1.5	1.5	1201	1e-11	the pole at pi/2 is outside the sweep
+atan	1	-100	100	1201	1e-12
+asin	1	-1	1	1201	1e-11	the endpoints are where the derivative is infinite
+acos	1	-1	1	1201	1e-11	same
+exp	1	-30	30	1201	1e-12
+log	1	1e-8	1e8	1201	1e-12
+log10	1	1e-8	1e8	1201	1e-12
+log2	1	1e-8	1e8	1201	1e-12
+sinh	1	-20	20	801	1e-12
+cosh	1	-20	20	801	1e-12
+tanh	1	-20	20	801	1e-12
+expm1	1	-2	2	1601	1e-14	M99 - the range the direct form cancels in
+log1p	1	-0.9	9	1601	1e-14	M99
+asinh	1	-1e6	1e6	1601	1e-13	M99
+acosh	1	1	1e6	1601	1e-13	M99 - the branch point at 1 is the first sample
+atanh	1	-0.999	0.999	1601	1e-13	M99
+erf	1	-6	6	1601	1e-13	M99 - the series/continued-fraction join is at 2
+erfc	1	-6	26	1601	1e-12	M99 - graded where erf(x) is 1 to every bit
+nextafter	2	-10	10	61	0	M99 - exact or it is not nextafter
+cbrt	1	-1e12	1e12	1601	1e-15	M99 - three Newton steps after an exact exponent split
+exp2	1	-1050	1020	1601	1e-15	M99 - exact at every integer in the sweep, which is the point of it
+fma	3	-8	8	25	0	M99 - exact, or the error term CPython recovers with it is not the error
+pow	2	0.1	8	61	1e-12
+atan2	2	-8	8	61	1e-12
+fmod	2	-100	100	61	0	exact - and the first row this harness ever failed; see math.c
+hypot	2	-1e5	1e5	61	1e-14
+copysign	2	-10	10	61	0	exact
+fmax	2	-10	10	61	0	exact
+fmin	2	-10	10	61	0	exact
+frexp	-	-	-	-	-	takes an int* - graded by the boot self-test with modf
+ldexp	-	-	-	-	-	takes an int
+modf	-	-	-	-	-	takes a double*

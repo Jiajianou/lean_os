@@ -377,6 +377,11 @@ REQUIRED_MARKERS=(
   "[m74] the session remembers:"
   "[m75] environment and a place to stand:"
   "[m76] a signal a program can catch:"
+  # M99: and the half M76 excluded - a fault, delivered to a handler the
+  # faulting program installed. Three different signals from three
+  # different vectors, which is what M52's note said this project could
+  # not tell apart.
+  "[m99] a fault a program can catch:"
   "[m77] POSIX names for what is already here:"
   "[q5] every syscall told a lie:"
   "[m78] memory that can be given back:"
@@ -399,6 +404,12 @@ REQUIRED_MARKERS=(
   # build step - unless the native toolchain was never built, which
   # install-native-toolchain.sh says out loud.
   "[m98] binutils runs here:"
+  # M99: somebody else's language, on the same terms - optional to build,
+  # installed by run-tests.sh before this runs, and the marker is the
+  # sentence rather than a prefix so a shortened one is a failure. The
+  # last clause of it is the one M80 could not have printed at all:
+  # `import json` is a file read off this disk.
+  "[m99] somebody else's language runs here:"
   # M106: the cores. Required on every boot, one core or four - on one
   # it is the serial baseline the four-core number is a ratio against,
   # and it is the only place MAX_TASKS' and MAX_FDS' high-water marks are

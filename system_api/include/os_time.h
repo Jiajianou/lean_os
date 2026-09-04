@@ -52,6 +52,26 @@ typedef struct {
      * Only ever set by SYS_lstat: every other path call follows a link,
      * so by the time they answer there is nothing left to report. */
     uint8_t is_link;
+    /* ---- M99: what KIND of thing this descriptor or path names -------
+     *
+     * A file, a directory, a character device, a pipe or a socket. Until
+     * M99 the answer was "a file or a directory", because SYS_fstat
+     * refused every descriptor that was not FD_FILE - and that refusal
+     * is what stopped CPython from having a `sys.stdout` at all.
+     *
+     * CPython's create_stdio() calls fstat on 0, 1 and 2 before it wraps
+     * them, and a descriptor it cannot stat becomes `None`. So
+     * `print()` on this machine wrote nothing, silently, and returned
+     * successfully - because print with sys.stdout None is defined to do
+     * nothing. Nothing failed anywhere. The interpreter had no output.
+     *
+     * It takes the byte at offset 10, which was padding before it, so
+     * the struct is the same 16 bytes it has always been - see is_link's
+     * note above for why that matters here more than it usually does.
+     * The kernel zeroes the whole struct before filling it now, so the
+     * remaining pad byte is a zero rather than whatever was on the
+     * kernel stack. */
+    uint8_t kind;
     /* M89: the inode number, and the first thing on this machine that
      * makes two paths distinguishable as files.
      *
@@ -66,6 +86,14 @@ typedef struct {
      * and procfs.c where the numbers are chosen. */
     uint32_t inode;
 } os_stat_t;
+
+/* os_stat_t.kind. Ordered so that 0 is a regular file, which is what a
+ * zeroed struct means and what every path that predates M99 answered. */
+#define OS_STAT_FILE 0
+#define OS_STAT_DIR  1
+#define OS_STAT_CHR  2 /* the console, a tty, a pty - anything with no position */
+#define OS_STAT_FIFO 3 /* one end of a pipe */
+#define OS_STAT_SOCK 4
 
 typedef struct {
     uint16_t year;   /* full year, e.g. 2026 */

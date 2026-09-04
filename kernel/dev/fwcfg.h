@@ -120,3 +120,23 @@ int boot_ioapic_enabled(void);
  * what a full run does; passing only this one is the measurement's own
  * boot. */
 int boot_bootstrap_enabled(void);
+
+/* ---- M99: somebody else's test suite, run on this machine -----------
+ *
+ * True when `-fw_cfg name=opt/leanos/pytest,string=1` was passed.
+ *
+ * A fourth switch, on exactly M98's argument for the third: what it
+ * turns on is not a self-test but a *report*. `python3 -m test` over a
+ * subset of CPython's own regression suite takes tens of minutes and
+ * its output is a pass/fail count written by somebody else's test
+ * runner about somebody else's language - which M99's own bullet calls
+ * "the most honest grading instrument this project will ever get",
+ * precisely because nothing here chose what it checks or what counts as
+ * passing.
+ *
+ * Separate from the bootstrap switch rather than folded into it: a
+ * machine running the regression suite is not building anything, the
+ * two take tens of minutes each, and a harness that had to run both to
+ * get either would be a harness nobody runs. tools/python-test.sh is
+ * what asks. */
+int boot_pytest_enabled(void);

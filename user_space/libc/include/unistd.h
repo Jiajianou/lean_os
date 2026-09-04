@@ -27,6 +27,24 @@
  * this macro existed. */
 #define _POSIX_VERSION 200809L
 
+/* M99: and the option macro that says threads are one of the names.
+ *
+ * POSIX puts the per-option macros here rather than in the header that
+ * declares the functions, and a program that wants to know whether it
+ * has threads is required to test this one. CPython's
+ * Include/internal/pycore_condvar.h does exactly that, and its `#else`
+ * is not a fallback - it declares no PyCOND_T at all, so the failure is
+ * "unknown type name 'PyCOND_T'" in a file that mentions neither
+ * pthreads nor this header.
+ *
+ * It is defined because it is true: pthread_create, join, the mutex,
+ * the condition variable and pthread_once are all here (M79, M96), and
+ * pthread_cond_timedwait is the one CPython's GIL is built on. The
+ * options this system does NOT have - _POSIX_SEMAPHORES above all - are
+ * deliberately absent, so a program that needs sem_open finds out by
+ * asking rather than by a link error at the end of a long build. */
+#define _POSIX_THREADS 200809L
+
 /* M97: C++ linkage.
  *
  * Without this every declaration below is a C++ function when a C++
@@ -57,6 +75,8 @@ extern char **environ;
  * need it share one inference. See unistd.c for what it can and cannot
  * tell, which is the part worth reading. */
 int __lean_path_errno(const char *path, int creating);
+/* M99: its counterpart for a descriptor - see the note in unistd.c. */
+int __lean_fd_errno(int fd);
 
 int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
@@ -377,6 +397,14 @@ pid_t vfork(void);
 #define _SC_THREAD_KEYS_MAX   433
 #define _SC_THREAD_STACK_MIN  434
 #define _SC_THREAD_THREADS_MAX 435
+/* M99: the two buffer-size hints for the _r forms of the passwd and
+ * group lookups. CPython's pwdmodule.c calls sysconf(_SC_GETPW_R_SIZE_MAX)
+ * without an #ifdef around the constant - reasonably, since POSIX has
+ * required it since 1995 - and takes a negative answer as "pick your own
+ * size and grow", which is a path it has and this system should let it
+ * take rather than fail to compile. */
+#define _SC_GETPW_R_SIZE_MAX  436
+#define _SC_GETGR_R_SIZE_MAX  437
 
 long sysconf(int name);
 

@@ -45,6 +45,30 @@
  * the reason, which is a change to every path syscall's ABI and is not
  * this milestone. Written down so the next person meets it here.
  */
+/* ---- M99: the same idea, for a descriptor ----------------------------
+ *
+ * `read` and `write` returned -1 over an untouched errno, and <errno.h>'s
+ * standing doctrine said that was correct: "a reason is set only where
+ * the system genuinely knows one". M99 is where that doctrine met a
+ * program that reads errno rather than printing it. An errno of 0 does
+ * not mean "no reason given" to anything written against POSIX - it
+ * means NO ERROR, so a caller that turns errno into an exception
+ * produces `OSError: [Errno 0] Error`, which is a sentence with no
+ * information in it and cost two separate afternoons of this milestone.
+ *
+ * The inference is the narrowest one available and it asks a question
+ * the caller could ask itself: a descriptor the kernel will not stat is
+ * not open, which is EBADF. Anything else is EIO - which is vague, and
+ * is vague honestly: this ABI carries no reason out of a failed read,
+ * and the fix for that is a change to every descriptor syscall's return
+ * convention rather than a guess here. Written down where the next
+ * person meets it, exactly as __lean_path_errno's own note is.
+ */
+int __lean_fd_errno(int fd) {
+    os_stat_t st;
+    return sys_fstat(fd, &st) == 0 ? EIO : EBADF;
+}
+
 int __lean_path_errno(const char *path, int creating) {
     if (!path || !path[0]) {
         return EFAULT;
@@ -130,11 +154,18 @@ long read(int fd, void *buf, size_t count) {
         errno = EINTR;
         return -1;
     }
+    if (r < 0) {
+        errno = __lean_fd_errno(fd);
+    }
     return r;
 }
 
 long write(int fd, const void *buf, size_t count) {
-    return sys_write(fd, buf, count);
+    long r = sys_write(fd, buf, count);
+    if (r < 0) {
+        errno = __lean_fd_errno(fd);
+    }
+    return r;
 }
 
 void _exit(int status) {
@@ -146,7 +177,12 @@ void _exit(int status) {
 }
 
 int close(int fd) {
-    return (int)sys_close(fd);
+    long r = sys_close(fd);
+    if (r < 0) {
+        errno = EBADF; /* the only way a close fails here */
+        return -1;
+    }
+    return (int)r;
 }
 
 int access(const char *path, int mode) {
@@ -231,8 +267,25 @@ int isatty(int fd) {
     return 0;
 }
 
+/* M99: lseek says why it refused.
+ *
+ * It returned -1 over an untouched errno, which CPython reports as
+ * `OSError: [Errno 0] Error` - and it asks, because deciding whether a
+ * stream is seekable is how it decides whether to buffer it.
+ *
+ * Two reasons a seek fails on this machine and they are distinguished
+ * by asking a question the caller could ask itself: a descriptor the
+ * kernel will not stat is not open, which is EBADF; anything else is a
+ * descriptor with no position - the console, a pipe, a socket - which
+ * is exactly what ESPIPE means. Inferred rather than reported, in the
+ * same shape and with the same caveat as __lean_path_errno above. */
 long lseek(int fd, long offset, int whence) {
-    return sys_lseek(fd, offset, whence);
+    long r = sys_lseek(fd, offset, whence);
+    if (r < 0) {
+        os_stat_t st;
+        errno = sys_fstat(fd, &st) == 0 ? ESPIPE : EBADF;
+    }
+    return r;
 }
 
 int dup2(int oldfd, int newfd) {
@@ -306,15 +359,50 @@ int fcntl(int fd, int cmd, ...) {
     }
 }
 
+/* M99: and it says why when it cannot.
+ *
+ * It returned -1 over an untouched errno, and CPython's
+ * `_posixsubprocess.fork_exec` reports that as
+ * "SystemError: <built-in function fork_exec> returned NULL without
+ * setting an exception" - because its own last two lines are
+ * `if (saved_errno) PyErr_SetFromErrno(...)` and
+ * `return pid == -1 ? NULL : PyLong_FromPid(pid)`. A fork that fails
+ * with errno 0 is the one input that makes those two disagree, and the
+ * result is a message about CPython's internals rather than about this
+ * machine. `subprocess` is unusable here without this.
+ *
+ * EAGAIN is the errno POSIX names for it and is the truth: what runs out
+ * is the task table (MAX_TASKS) or the physical memory to copy an
+ * address space into, and both are "try again later" rather than a
+ * permanent condition. Inferred rather than reported, in the same shape
+ * and with the same caveat as __lean_path_errno above - SYS_fork's ABI
+ * carries no reason out. */
 pid_t fork(void) {
-    return (pid_t)sys_fork();
+    long r = sys_fork();
+    if (r < 0) {
+        errno = EAGAIN;
+        return -1;
+    }
+    return (pid_t)r;
 }
 
 /* M84: replaces this program with another. Does not return on success -
  * which is why every caller in the world writes `execve(...); perror(...)`
  * with no `if` around it. */
 int execve(const char *path, char *const argv[], char *const envp[]) {
-    return (int)sys_execve(path, argv, envp);
+    long r = sys_execve(path, argv, envp);
+    if (r < 0) {
+        /* M99: and this one too, for the same reason fork above says
+         * why: an exec that fails silently is reported by whoever called
+         * it as a failure with no cause. The inference is
+         * __lean_path_errno's, which answers ENOENT for a path that is
+         * not there and EACCES for one that is - the two a caller
+         * branches on, and between them the two reasons an exec on this
+         * machine actually fails. */
+        errno = __lean_path_errno(path, 0);
+        return -1;
+    }
+    return (int)r;
 }
 
 int execv(const char *path, char *const argv[]) {
@@ -766,6 +854,15 @@ long sysconf(int name) {
         return 4096;
     case _SC_THREAD_THREADS_MAX:
         return 128; /* MAX_TASKS again: a thread is a task here (M79) */
+    case _SC_GETPW_R_SIZE_MAX:
+    case _SC_GETGR_R_SIZE_MAX:
+        /* 256 bytes, and it is a real bound rather than a shrug: this
+         * machine has one principal (M65), whose name, home and shell
+         * are fixed strings in user_space/libc/src/pwd.c and together
+         * come to well under this. A caller that ignores the number and
+         * grows its buffer is also correct; a caller that trusts it is
+         * not going to be surprised. */
+        return 256;
     default:
         return -1;
     }

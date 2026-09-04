@@ -45,7 +45,15 @@ void fake_file(const char *data) {
     file_pos = 0;
 }
 
-long sys_open(const char *p, unsigned f) { (void)p; (void)f; file_pos = 0; return 100; }
+/* M99: an open that can fail, so the errno contract can be graded. */
+static int open_fails;
+void fake_fail_open(int on) { open_fails = on; }
+long sys_open(const char *p, unsigned f) {
+    (void)p; (void)f;
+    if (open_fails) return -1;
+    file_pos = 0;
+    return 100;
+}
 long sys_close(int fd) { (void)fd; return 0; }
 long sys_read(int fd, void *b, unsigned long n) {
     if (fd != 100) return -1;
@@ -92,6 +100,16 @@ long sys_getpid(void) { return 1; }
 static int fake_errno;
 int *__errno_location(void) { return &fake_errno; }
 char *strerror(int e) { (void)e; return "error"; }
+int fake_get_errno(void) { return fake_errno; }
+void fake_set_errno(int e) { fake_errno = e; }
+/* M99: fopen infers its errno through this, which lives in unistd.c and
+ * is not part of this harness. ENOENT, so the driver can check that
+ * fopen SET errno - the contract CPython's startup depends on - without
+ * this harness having to reimplement the inference itself. */
+int __lean_path_errno(const char *p, int creating) {
+    (void)p; (void)creating;
+    return 2; /* ENOENT */
+}
 EOF
 
 DRIVER="$BUILD/stdio-driver.c"
@@ -119,6 +137,9 @@ int lean_fprintf(lean_FILE *f, const char *fmt, ...);
 int lean_setvbuf(lean_FILE *f, char *buf, int mode, size_t size);
 unsigned long lean___fpending(lean_FILE *f);
 void fake_file(const char *data);
+void fake_fail_open(int on);
+int fake_get_errno(void);
+void fake_set_errno(int e);
 void fake_write_reset(void);
 const char *fake_written(void);
 long fake_written_len(void);
@@ -268,12 +289,36 @@ int main(void) {
     CHECK(fake_write_calls() == 2, "each write went out on its own");
     lean_fclose(f);
 
+    /* 11. M99: a failed fopen SETS ERRNO. Three ways to fail, and all
+     * three used to return NULL over whatever errno happened to hold.
+     *
+     * This is control flow rather than diagnostics, which is why it is
+     * a check rather than a nicety: CPython's startup opens a
+     * `pyvenv.cfg` that is not there and catches FileNotFoundError to
+     * mean "not a virtual environment". The C side builds that
+     * exception FROM ERRNO, so errno 0 produced a bare OSError, the
+     * except clause did not catch it, and the interpreter died before
+     * running a line of anything. The ordinary case was the fatal one.
+     *
+     * errno is set to a sentinel first, so this cannot pass because
+     * something earlier left the right value lying around. */
+    fake_set_errno(0);
+    fake_fail_open(1);
+    CHECK(lean_fopen("nope", "r") == 0, "fopen of a missing file fails");
+    CHECK(fake_get_errno() != 0, "and says why - errno is not left at 0");
+    fake_fail_open(0);
+
+    fake_set_errno(0);
+    CHECK(lean_fopen("x", "z") == 0, "a mode string with no r, w or a fails");
+    CHECK(fake_get_errno() == 22 /*EINVAL*/, "and that failure is EINVAL");
+
     if (failures) {
         printf("stdio-test: %d check(s) failed\n", failures);
         return 1;
     }
     printf("stdio-test: the FILE layer honours ungetc everywhere a reader "
-           "looks, and buffers its writes without losing one\n");
+           "looks, buffers its writes without losing one, and says why "
+           "when it cannot open a file\n");
     return 0;
 }
 EOF

@@ -34,6 +34,21 @@
 #   A static python3 is the one that can run before any of that is
 #   settled, and M99's extension-module bullet is what re-opens it.
 #
+# MODULE_BUILDTYPE=static: and this is the half of that decision that
+#   has to be stated rather than implied. CPython builds the standard
+#   library's C modules as .so files by default and links them with
+#   $(LDSHARED), which in a cross build is the HOST's linker - the first
+#   run of this got "ld: Missing -arch option" from Apple's ld, forty
+#   times. But pointing LDSHARED at the cross compiler would not be the
+#   fix either: **a static program on this machine cannot dlopen**,
+#   because dlopen lives in /lib/ld-lean.so and a static executable
+#   never maps it (M95). So a static python3 gets its C modules linked
+#   in, which is upstream's own supported configuration for exactly this
+#   case and needs no patch. M99's third bullet - extension modules as
+#   shared objects, imported at runtime over M95 - is a *dynamic*
+#   python3, and it is the second increment rather than a flag on this
+#   one.
+#
 # --without-ensurepip / no network: M99 says so in its own last bullet.
 #   pip reaching the network needs TLS and a certificate store, and
 #   neither exists here; a wheel installed from a local file is the same
@@ -71,10 +86,21 @@ if [ ! -f "Python-$PY_VER.tar.xz" ]; then
     "https://www.python.org/ftp/python/$PY_VER/Python-$PY_VER.tar.xz" \
     && mv "Python-$PY_VER.tar.xz.part" "Python-$PY_VER.tar.xz"
 fi
+# The port's fingerprint, for the reason tools/build-toolchain.sh states
+# at length: an anchored edit re-applies when its own replacement text
+# changes, and the copy it added last time stays where it was. A tree
+# that does not belong to the port that is about to edit it gets thrown
+# away rather than edited twice.
+PORT_STAMP=$(cat "$ROOT"/tools/python-port/* | shasum -a 256 | cut -d' ' -f1)
+if [ -d "Python-$PY_VER" ] && \
+   [ "$(cat "Python-$PY_VER/.lean_os-port-stamp" 2>/dev/null)" != "$PORT_STAMP" ]; then
+  echo "build-python: the port changed - unpacking a clean Python-$PY_VER"
+  rm -rf "Python-$PY_VER" "$OUT/build"
+fi
 [ -d "Python-$PY_VER" ] || tar xf "Python-$PY_VER.tar.xz"
 
-python3 "$ROOT/tools/toolchain-port/apply.py" --config-sub \
-  "$SRC/Python-$PY_VER/config.sub" > /dev/null || exit 1
+python3 "$ROOT/tools/python-port/apply.py" "$SRC/Python-$PY_VER" || exit 1
+echo "$PORT_STAMP" > "$SRC/Python-$PY_VER/.lean_os-port-stamp"
 
 # The sysroot is regenerated first for the reason build-native-toolchain.sh
 # gives: this build grades the libc as much as it grades anything, and it
@@ -117,6 +143,7 @@ if [ ! -f Makefile ]; then
     --without-ensurepip \
     --without-readline \
     --with-system-ffi=no \
+    MODULE_BUILDTYPE=static \
     ac_cv_file__dev_ptmx=yes ac_cv_file__dev_ptc=no \
     > configure.log 2>&1 || { tail -40 configure.log >&2; exit 1; }
 fi

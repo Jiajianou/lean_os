@@ -105,16 +105,38 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *old);
  * is broken here; one that loops - which is what every program that
  * handles EINTR correctly already does - works either way.
  */
+/* M99: sa_handler and sa_sigaction are a UNION, which is what every
+ * real system does and what portable code assumes.
+ *
+ * They were two separate fields, and that is a trap rather than a
+ * detail: toybox's xsignal_flags sets `sa_handler` and passes
+ * SA_SIGINFO, because on a union those are the same word. With two
+ * fields the address went into one of them and the kernel was handed
+ * the other, which is NULL - SIG_DFL - so the program was killed by the
+ * signal it had just installed a handler for. Found by
+ * user_space/bin/faulttest.c doing the same thing the other way round.
+ *
+ * The flag, not the field, is what says which shape the function has.
+ * sa_sigaction's third argument is a `ucontext_t *` on other systems and
+ * is NULL here: this kernel has the interrupted register state
+ * (sig_frame_t, on the process's own stack) but no ucontext_t to present
+ * it as, and a pointer to something invented would be worse than a null
+ * one a program faults on immediately. */
 struct sigaction {
-    sighandler_t sa_handler;
+    union {
+        sighandler_t sa_handler;
+        void       (*sa_sigaction)(int, siginfo_t *, void *);
+    };
     sigset_t     sa_mask;   /* accepted; the handler's own signal is blocked regardless */
     int          sa_flags;
-    void       (*sa_sigaction)(int, void *, void *); /* never called - SA_SIGINFO is not supported */
 };
 
 #define SA_RESTART   0x10000000
 #define SA_NODEFER   0x40000000
-#define SA_SIGINFO   0x00000004
+/* SA_SIGINFO is defined in system_api/include/signal.h, because since
+ * M99 the KERNEL reads it: it decides whether a handler is called with
+ * one argument or three, which is a calling convention rather than a
+ * user-space preference. */
 #define SA_ONSTACK   0x08000000
 #define SA_RESETHAND 0x80000000
 /* M89: accepted and ignored, and each for a reason worth one line.
@@ -127,44 +149,17 @@ struct sigaction {
 #define SA_NOCLDSTOP 0x00000001
 #define SA_NOCLDWAIT 0x00000002
 
-/* M89: `siginfo_t`, declared so that a program which writes a
- * three-argument handler compiles.
+/* M99: `siginfo_t` and its si_code constants have MOVED to
+ * system_api/include/signal.h, which this file already includes above.
  *
- * **Nothing ever fills one in.** SA_SIGINFO is not supported - see
- * `sa_sigaction` above, which says the same thing - because delivering
- * one would mean the kernel building a second, larger frame on the
- * process's own stack for information (a faulting address, a sending
- * uid) that this machine either does not have or has already reported
- * another way. A handler installed with SA_SIGINFO is called through
- * sa_handler with the signal number, which is the one argument that is
- * always right; the pointer arguments are never passed.
- *
- * The fields are the POSIX-required ones, so that the day this kernel
- * does fill one in it is not a second struct to reconcile. */
-typedef struct {
-    int si_signo;
-    int si_code;
-    int si_errno;
-    pid_t si_pid;
-    uid_t si_uid;
-    void *si_addr;
-    int si_status;
-    long si_band;
-    union {
-        int sival_int;
-        void *sival_ptr;
-    } si_value;
-} siginfo_t;
-
-/* si_code values a program tests for. All of them are 0 here, because
- * nothing fills a siginfo_t in. */
-#define SI_USER    0
-#define SI_KERNEL  0x80
-#define CLD_EXITED 1
-#define CLD_KILLED 2
-#define CLD_DUMPED 3
-#define CLD_STOPPED 5
-#define CLD_CONTINUED 6
+ * They moved because the kernel fills one in now: a handler installed
+ * with SA_SIGINFO is called with a pointer to one, written onto the
+ * process's own stack by the kernel. That makes the layout a
+ * kernel/user contract in exactly the way `sig_frame_t` and `struct
+ * termios` already are, and this project's rule for those is that they
+ * live in one file both sides read. Two copies of a struct the kernel
+ * writes and a program reads is the class of bug that presents as one
+ * field of it being someone else's. */
 
 int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
 

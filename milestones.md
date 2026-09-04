@@ -11271,22 +11271,37 @@ measuring the machine and the last four were measuring the fixes.
 
 
 
-### M99 — Python, built here [ ]
+### M99 — Python, built here [~]
+
+**Status:** the interpreter runs, its standard library is on this disk as
+`.py` source, CPython's own regression suite runs on the machine and
+reports its own numbers - **1,332 tests, 57 failures** - and the nineteen
+bugs that were in the way are below. Two boxes are open and named at the
+end: extension modules as shared objects, and `./configure && make` *on*
+the machine.
+
+**What it cost.** About 2,600 lines across 55 files. Two new instruments
+(`tools/math-test.sh`, `tools/python-test.sh`), one new fixture
+(`user_space/bin/faulttest.c`), a fourth fw_cfg switch, and edits in the
+kernel's fault path, its signal delivery, its `fstat`, its thread start
+and eleven files of libc. Nine full boots of the graded battery and six
+runs of the regression suite, of which the first four were finding the
+reasons the fifth could run at all.
 
 - [ ] `./configure && make` for CPython **on the machine**, with the
       machine's own compiler — the inverse of M80, which cross-compiled
       and froze and never linked
-- [ ] The standard library as `.py` files on the filesystem, which M81's
+- [x] The standard library as `.py` files on the filesystem, which M81's
       closing note already identified as the thing M93 turns *"from a
       hard constraint into an ordinary choice"*
 - [ ] Extension modules built as shared objects and imported at runtime
       over M95 — which is also the second concrete thing the
       dynamic-linking deferral named: *"a C-extension wheel"*
-- [ ] `python3 -m test` over a subset of CPython's own regression suite,
+- [x] `python3 -m test` over a subset of CPython's own regression suite,
       with the pass/fail counts recorded rather than summarized. A test
       suite someone else wrote, reporting its own failures, is the most
       honest grading instrument this project will ever get
-- [ ] Deliberately **not** `pip` reaching the network. That needs TLS
+- [x] Deliberately **not** `pip` reaching the network. That needs TLS
       and a certificate store, and neither exists; a package installed
       from a local wheel is the same mechanism without the fiction
 
@@ -11294,6 +11309,423 @@ measuring the machine and the last four were measuring the fixes.
 then the bar it said mattered more: a real script with a dict, a class,
 a loop and a file open. Then the regression suite's own numbers, which
 is a bar M80 never got to name.
+
+#### The first increment: an interpreter, and the fifteen things in the way
+
+`tools/build-python.sh` cross-builds CPython 3.12.7 with
+`x86_64-lean_os-gcc`; `tools/install-python.sh` puts it on the image with
+its standard library as source; the `[m99]` boot marker runs
+`tests/python/m99.py` and greps for what it says about itself. That is
+M80's bar and the bar M80 said mattered more, both, in one boot.
+
+**The port is three anchored edits** (`tools/python-port/apply.py`,
+which reuses `tools/toolchain-port/apply.py`'s `edit()` rather than
+copying it): one name added to `config.sub`, and one case added to each
+of the two `case $host in` statements in `configure` whose `*)` arm says
+*"for now, limit cross builds to known configurations"* and stops.
+`ac_sys_system=lean_os` rather than a lie about being Linux, so
+`sys.platform` is `"lean_os"` — the string a `setup.py` will branch on.
+
+Everything else was this system, and the list is the milestone. In the
+order the build found them:
+
+1. **`-pthread` was not a flag this compiler had.** It is declared
+   per-OS in GCC, in that OS's `.opt` file, and a target that does not
+   declare it answers *"unrecognized command-line option '-pthread'"*.
+   CPython's configure link-tests **every** libc function with
+   `$CC -pthread`, so all four hundred probes failed at once and
+   configure concluded this C library had no `snprintf`, no `waitpid`
+   and no `uname`. Fixed in the target port: `gcc/config/lean_os.opt`,
+   `extra_options` in `config.gcc`, and a `CPP_SPEC` that turns the flag
+   into `-D_REENTRANT`. No `-lpthread`, because there is no such archive
+   here — `pthread_create` is in libc, which is glibc's own arrangement
+   since 2.34.
+2. **And an anchored-edit port is only idempotent while the edit does
+   not change.** Adding `extra_options` to the `*-*-lean_os*)` block
+   produced a *second* copy of that block above the first, because
+   `edit()` re-applies when it cannot find its own replacement text.
+   `config.gcc` is a shell `case`; the first arm wins; nothing failed
+   and nothing warned, and half an hour of build later the only symptom
+   was `-pthread` still not existing. Both build scripts now stamp the
+   unpacked tree with a hash of the port that edited it and unpack a
+   clean one when that changes.
+3. **Seven C99 libm functions this project did not have.** CPython's
+   configure checks `acosh asinh atanh erf erfc expm1 log1p log2` in one
+   loop and calls a missing one a fatal error: *"Python requires C99
+   compatible libm"*. Written out in `user_space/libc/src/math.c`, each
+   around the range where its naive expression cancels. `cbrt`, `exp2`
+   and `fma` followed from `Modules/mathmodule.c`, which calls all three
+   by name and none behind a `HAVE_` guard — and `fma` is written out
+   rather than left to `__builtin_fma`, because x86-64's base
+   instruction set has no fused multiply-add and the builtin without one
+   emits a call to `fma`, which here is a call to itself.
+4. **`tools/math-test.sh`, and what it found in its first run.** Eleven
+   new functions in a libm nothing graded is eleven new ways to be
+   quietly wrong, so this libm now gets the treatment `sh`, the regex
+   engine, `scanf` and `printf` already had: compiled for the host, put
+   in one process beside the host's own libm, and required to agree.
+   Nothing in `tests/math/cases.tsv` says what `sin(0.7)` is.
+   **Its first run failed `fmod`**: `fmod(-96.666…, 4.44e-15)` came back
+   as `+7.1e-15` — the wrong sign, and larger than the modulus, which
+   are two things `fmod` is defined never to be. The old form was
+   `x - (long long)(x / y) * y`, which is exact only while the quotient
+   is small enough that rounding it loses nothing; it is the
+   shift-and-subtract every libm uses now, and it is exact rather than
+   accurate. Widening the sweep past 2^52 then found `floor`, `ceil`,
+   `trunc` and `round` casting through `long long`, which is undefined
+   behaviour above 2^63 rather than a large answer, and `round` written
+   as `floor(x + 0.5)`, which is wrong for exactly one input:
+   `0.49999999999999994`. The harness also fails when a function
+   *declared* in `math.h` has no row in the cases file, because a libm
+   function nobody grades is not added on purpose - it is added on a
+   Tuesday.
+5. **`_POSIX_THREADS` was not defined.** POSIX puts the per-option
+   macros in `<unistd.h>`, and CPython's `pycore_condvar.h` tests this
+   one. Its `#else` is not a fallback — it declares no `PyCOND_T` at
+   all, so the failure is *"unknown type name 'PyCOND_T'"* in a file
+   that mentions neither pthreads nor `<unistd.h>`.
+6. **`time_t` was not visible from `<sys/types.h>`.** Autoconf's
+   `AC_CHECK_SIZEOF` includes `sys/types.h`, `stdio.h`, `stdlib.h` and
+   `string.h` and no `time.h`, so the probe did not compile and
+   `configure` wrote **`SIZEOF_TIME_T 0`** into `pyconfig.h`. The build
+   stopped four hundred files later in `Python/pytime.c` at `#error
+   "unsupported time_t size"`. A zero from a probe that failed to
+   compile is the worst kind of configure answer: it is not an error, it
+   is a number.
+7. **`<langinfo.h>` had ten items of the fifty-odd every langinfo has.**
+   The thirty-eight day and month names are listed in
+   `Modules/_localemodule.c` under a comment reading *"These constants
+   should exist on any langinfo implementation"* and under no `#ifdef`.
+   They do now, numbered so `nl_langinfo(DAY_1 + tm_wday)` works, which
+   is what the numbering is for.
+8. **`_SC_GETPW_R_SIZE_MAX`.** Named by `pwdmodule.c` with no guard,
+   because POSIX has required it since 1995. It answers 256 — a real
+   bound, because this machine has one principal whose name, home and
+   shell are fixed strings.
+9. **`POLLPRI`, and a decision reversed.** M88 left the out-of-band poll
+   flags undefined and argued it well: *"a constant a program could test
+   but never see set is the failure mode `<fcntl.h>` spent a header
+   comment avoiding"*. The first ported program to ask —
+   `Modules/selectmodule.c`, which puts `POLLPRI` in a method table with
+   no `#ifdef` — did not misinterpret an unset flag. It failed to
+   compile. An absent constant is not a smaller failure than an unraised
+   one; it is a louder one at a worse time. Defined, never set, which is
+   what Linux does for a regular file. `SOMAXCONN` arrived the same way
+   and is 16, which is the whole TCP control-block pool rather than a
+   conventional 128.
+10. **The `B*` baud rates, and the one of them that is true.** M89 made
+    `cfsetispeed` refuse every speed, on the correct ground that there is
+    no UART here. What it did not separate is *setting the speed the line
+    already has* from setting one it cannot have: `cfgetispeed` answers
+    `B0`, so the ordinary save-and-restore — read the settings, change a
+    flag, write them back — passed `B0` straight back in and got
+    `EINVAL`. Python's `termios.tcsetattr` does exactly that before every
+    `tty.setraw`. `B0` succeeds now; everything else still refuses.
+11. **`fopen` did not set `errno`.** It returned `NULL` over whatever the
+    last syscall had left, usually 0. `open()` has done this properly
+    since M89; `fopen` never did, and nothing here had read `errno` after
+    a failed `fopen`. CPython does, and it is control flow rather than
+    diagnostics: `Modules/getpath.py` opens a `pyvenv.cfg` that is not
+    there and catches `FileNotFoundError` to mean "not a virtual
+    environment". With `errno` 0 the exception is a bare `OSError`, the
+    `except` clause does not catch it, and the interpreter dies during
+    startup with *"Fatal Python error: error evaluating path"*. **The
+    ordinary case was the fatal one.** `tools/stdio-test.sh` grew two
+    checks, and they were run against the unfixed build first.
+12. **`fstat` refused every descriptor that was not a file, and that
+    cost this machine its standard output.** M77 wrote *"only a file has
+    an answer"* and refused pipes, sockets and the console. CPython's
+    `create_stdio()` fstats 0, 1 and 2 before wrapping them and sets any
+    it cannot stat to `None` — and **`print()` with `sys.stdout` set to
+    `None` does nothing and returns successfully.** An interpreter with
+    no output, no error, and an exit status of zero. `os_stat_t` gained
+    a `kind` byte in a pad byte it already had, `SYS_fstat` answers for
+    every open descriptor, and `S_ISCHR`/`S_ISFIFO`/`S_ISSOCK` mean
+    something here for the first time. M77's own self-test asserted the
+    refusal and now asserts the answer — plus the half of it that was
+    always right, that a *closed* descriptor is still refused.
+13. **`lseek` and `fstat` failed without saying why.** Both returned -1
+    over an untouched `errno`, and CPython reports that as
+    `OSError: [Errno 0] Error` — a sentence with no information in it.
+    `lseek` is `ESPIPE` on a descriptor with no position and `EBADF` on
+    one that is not open; `fstat` is `EBADF`. Deciding whether a stream
+    is seekable is how a runtime decides whether to buffer it.
+14. **A fault was not something a program could catch, and CPython's own
+    test runner made that fatal.** M76 excluded `SIGSEGV` with a real
+    argument — *"its handler would run on the address space that just
+    faulted"* — and every ring-3 fault of every kind was reported as
+    `SIGSEGV` and killed the process, with M52's note saying *"they share
+    one exit code because this project has no per-signal handling to tell
+    them apart with"*. `faulthandler.enable()` installs handlers for
+    `SIGSEGV`, `SIGFPE`, `SIGILL`, `SIGBUS` and `SIGABRT`, and
+    `libregrtest` calls it before running one test — so **every module of
+    the regression suite failed at `sigaction(SIGSEGV)` returning -1,
+    having run nothing.** The fault path offers the signal to the program
+    first now, with the vector deciding which signal it is: a divide
+    error and a floating-point exception are `SIGFPE`, an opcode the CPU
+    does not have is `SIGILL`, an alignment check is `SIGBUS`, and a page
+    fault or a `#GP` is `SIGSEGV`. What makes it safe is not an argument
+    but two cuts, and both are Unix's own: a signal is blocked while its
+    own handler runs, so a fault *inside* the handler finds nothing
+    deliverable and takes the terminate path; and the frame is written
+    with `copy_to_user`, so a fault whose cause was the stack cannot be
+    reported on that stack. `/bin/faulttest` proves all three signals,
+    twice each — the second round is the mask, not the fault — and
+    proves a child whose own handler faults dies once rather than
+    looping. It also found the third bug in this group:
+    `sigprocmask(SIG_UNBLOCK)` was filtering `SIGSEGV` out of the mask
+    it was asked to *unblock*, so a program could survive one fault and
+    not two.
+15. **`log(INFINITY)` did not return a wrong answer - it did not
+    return.** The scaling loop inside it is `while (x > sqrt(2)) x *= 0.5`,
+    and infinity halved is infinity. **CPython's own test suite is what
+    found it**, which is the thing that milestone bullet was for:
+    `test_math`'s `testAcosh` calls `acosh(INF)`, `acosh` hands a large
+    argument to `log`, and the module's watchdog fired after five minutes
+    with a traceback whose top frame named the test. Nothing this project
+    wrote would have asked that question.
+    **The more useful half of the fix is in the harness.**
+    `tools/math-test.sh` now asks every one-argument function about
+    `±inf`, `nan`, `±0`, `±1`, the smallest subnormal and the largest
+    finite double, before any sweep runs — and it found three more, all
+    of them hangs or undefined behaviour rather than inaccuracies:
+    `exp(nan)` cast a NaN to a `long long` and then squared a base that
+    many times; `ldexp`'s repeated multiplication ran `exp` times, so
+    `ldexp(1.0, 2000000000)` was not a slow answer but no answer; and
+    `sinh`/`cosh`/`tanh` returned NaN at infinity because each is written
+    in terms of `exp` and inf−inf is NaN. **A range sweep asks whether the
+    answer is right in the middle. The edges are where a range reduction,
+    a cast to an integer or a loop bound stops being valid**, and this
+    harness had no edges in it until a test suite nobody here wrote went
+    looking.
+    One documented divergence came out of the same section and is printed
+    on every run rather than suppressed: `sin`, `cos` and `tan` **refuse**
+    above 2^52, because the quadrant reduction divides by π/2 and rounds
+    to a `long long`, and a correct answer past that needs Payne–Hanek
+    reduction against a thousand bits of π. The harness requires a
+    declared divergence to be a *refusal* — a "known divergence" that
+    returns a number is a wrong answer with a note beside it.
+16. **`SA_SIGINFO` was accepted and dropped, which is not a missing
+    feature - it is the wrong calling convention.** `<signal.h>` said so
+    in as many words: *"a handler installed with SA_SIGINFO is called
+    through sa_handler with the signal number ... the pointer arguments
+    are never passed"*. That is an accurate description of calling a
+    three-argument function with one argument. The handler reads `%rsi`
+    as a pointer and gets whatever the last caller left there.
+    toybox's `timeout` installs exactly that handler for `SIGCHLD` and
+    its first statement is `si->si_status`, so **it faulted at address 5
+    - the offset of that field added to a junk `%rsi` - every single
+    time it ran**, which on this machine was once per module of
+    CPython's regression suite. The fixture used it to bound a module's
+    wall-clock; that is how it was found.
+    So the kernel fills a `siginfo_t` in now. `SYS_sigaction` grew a
+    fourth argument, of which the kernel reads one bit; the struct moved
+    to `system_api/include/signal.h`, because a struct the kernel writes
+    and a program reads is a contract and this project's rule for those
+    is one file both sides include; and the fields carry what this
+    machine actually knows - `si_addr` is CR2, which the kernel has had
+    all along and has never been able to tell anybody, and
+    `si_pid`/`si_status` are recorded on the parent at the moment a
+    child ends. The third argument is `NULL` where every other Unix
+    passes a `ucontext_t *`: there is no ucontext here, and a pointer to
+    something invented would be worse than a null one a program faults
+    on immediately.
+    **Two more bugs came out of writing the test for it**, and both are
+    the same shape - a header that described something the code did not
+    do. `sa_handler` and `sa_sigaction` were separate fields rather than
+    a union, so a program that set one had the kernel handed the other
+    (NULL, which is `SIG_DFL`) and was killed by the signal it had just
+    installed a handler for; and `user_space/bin/libctest.c` had been
+    setting `sa.sa_sigaction = 0` after `sa.sa_handler`, which under the
+    union it should always have been would have cleared the handler. And
+    the query form `sigaction(sig, NULL, &old)` is a read-modify-write
+    here - it installs `SIG_DFL` to learn the old handler and puts it
+    back - so without a user-space shadow of the flags it would have
+    turned a three-argument handler into a one-argument one *by asking a
+    question about it*. `old->sa_flags` is a real answer now instead of
+    the 0 it always was.
+17. **`fork` and `execve` returned -1 over an untouched errno too**, and
+    the report that came back was three steps removed from anything true:
+    `SystemError: <built-in function fork_exec> returned NULL without
+    setting an exception`. CPython's `_posixsubprocess` ends with "set an
+    exception if errno is non-zero" and "return NULL if the pid is -1",
+    and a fork that fails with errno 0 is the one input that makes those
+    two disagree. `subprocess` is unusable without it, and `subprocess`
+    is what a great deal of the standard library is built on.
+    **Chasing the errno found the real cause, and it is a deferral this
+    file already contains.** fork is refused from a *threaded* process on
+    this machine, deliberately, since M83: making a page copy-on-write
+    clears the writable bit in one CPU's page tables and this kernel has
+    no TLB shootdown to tell the others, so a second thread on another
+    core would go on writing to a page the child was just promised is its
+    own. M83 chose a clean refusal over a page that is sometimes shared.
+    What made that bite here is that `libregrtest`'s `--timeout` calls
+    `faulthandler.dump_traceback_later`, **which starts a watchdog
+    thread** - so asking the test runner to bound a test is what made the
+    interpreter threaded, and being threaded is what cost it `fork`. The
+    fixture does not pass `--timeout` now and bounds each module with
+    `toybox timeout` instead; the errno is fixed regardless, because a
+    failure that names itself is worth having whether or not this
+    particular caller is still hitting it.
+18. **A thread's stack was entered misaligned, and had been since M79.**
+    `test_io` crashed the interpreter with a general-protection fault at
+    `0F 29 45 80` - `movaps %xmm0, -0x80(%rbp)` - storing to an address
+    ending in 8. SysV requires RSP to be 16-byte aligned **at the call
+    instruction**, so a function's first instruction runs with
+    `RSP % 16 == 8`, and every function GCC compiles lays out its
+    16-byte-aligned locals on that assumption. `SYS_thread_create`
+    entered a thread with RSP exactly 16-aligned, and its own comment
+    said why: *"that is what the SysV ABI requires at a function's entry
+    and there is no `call` here to have pushed a return address"* - the
+    first half a good rule for the caller, the second half exactly
+    backwards.
+    So every aligned spill slot in every thread on this machine was 8
+    bytes out, for twenty milestones, and it cost nothing the whole time
+    because **nothing that had run on a thread here ever spilled an XMM
+    register to an aligned slot.** M79's own fixture runs floating-point
+    work in both its threads and passed throughout: `fp_work` keeps its
+    values in registers. The kernel starts a thread 8 bytes lower now, so
+    its entry function is entered exactly as a `call` would have entered
+    it, and `threadtest` grew a probe that emits that `movaps` in a
+    thread on purpose - written as inline assembly, because a C
+    expression the optimiser may satisfy with `movups` would test
+    nothing. Run against the unfixed kernel first, as everything here is:
+    it faults, and the fixture exits 9 with its own sentence about why.
+19. **Three things `make install` would have done that a manual install
+    did not.** `_sysconfigdata__lean_os_.py` is generated rather than
+    shipped and is how `sysconfig` answers "what flags was this built
+    with" — CPython's own test runner asks for `CFLAGS` before running a
+    single test. `lib-dynload` has to exist as a directory even when
+    nothing is in it, or every run prints *"Could not find platform
+    dependent libraries"*. And the interpreter in the build tree is
+    called `python.exe` on this machine, not because anything is being
+    built for Windows but because configure appends `.exe` when the build
+    directory is on a case-insensitive filesystem — otherwise `python`
+    and the `Python/` source directory are the same name.
+
+**What the interpreter costs, measured.** `tests/python/m99.py` from
+spawn to exit is **4,400 ms** on this machine — a 10 MB static
+interpreter demand-paged off the disk, the frozen startup modules, then
+`import json` read as `.py` source out of `/usr/lib/python3.12` and
+compiled. It is the first program here whose start is dominated by small
+reads rather than by one big one, which is why it has a row in
+`tests/budgets.tsv` at all. The ceiling is deliberately ~5x rather than
+the usual 2x: the number will move the day a `.pyc` cache exists, and it
+should be re-measured and tightened then rather than left wide.
+
+**Three things named rather than fixed.**
+
+- **A signal frame carries no FPU state**, and it did not before M99
+  either. A handler that uses SSE clobbers the interrupted code's
+  registers, which was survivable while signals arrived from `kill` and
+  is more visible now that they arrive from the instruction that is
+  executing. Named here rather than fixed because nothing has failed on
+  it yet, and the condition that would change it is a program that
+  catches a fault and *returns* rather than unwinding.
+- **`SIGSEGV` still cannot be blocked**, and that is not an
+  inconsistency with catching it. Blocking a signal the MMU is about to
+  raise does not postpone it - the faulting instruction is still there
+  and still cannot execute - so a process that successfully blocked it
+  would fault forever with nothing able to happen. Linux forces the
+  default action on a blocked synchronous `SIGSEGV`, which is the same
+  outcome by a longer road.
+- **The regression-suite list is bounded by wall-clock, not by
+  coverage.** Every module in `tests/python/run.sh` grades something
+  this OS had to grow, and the list stops where a boot stops being a
+  boot. Each module runs under a `toybox timeout` rather than under
+  CPython's own `--timeout`, and the reason is item 17 above: `--timeout`
+  starts a watchdog thread, a threaded process cannot fork here, and
+  `subprocess` is worth more than a per-test watchdog.
+
+#### What CPython's own regression suite says about this machine
+
+M99's fourth bullet asked for *"the pass/fail counts recorded rather than
+summarized"*, and this is that. Eighteen modules, one interpreter each,
+`tools/python-test.sh` driving a boot with `opt/leanos/pytest=1`. **3,225 s
+of wall clock, 1,332 tests run, 57 failures**, and a peak of **90 of 128
+task slots** live at once - which is itself a number worth reading: the
+same run before `fork` and thread stacks were fixed peaked at 9.
+
+| module | run | failures | skipped |
+|---|---|---|---|
+| `test_math` | 79 | 6 | 3 |
+| `test_float` | 50 | 0 | 1 |
+| `test_cmath` | 33 | 5 | 0 |
+| `test_int` | 45 | 0 | 1 |
+| `test_dict` | 112 | 0 | 0 |
+| `test_list` | 61 | 0 | 0 |
+| `test_exceptions` | 99 | 1 | 3 |
+| `test_types` | 116 | 0 | 1 |
+| `test_stat` | 0 | — | — |
+| `test_posixpath` | 82 | 0 | 0 |
+| `test_os` | 344 | 38 | 87 |
+| `test_fileio` | 93 | 3 | 0 |
+| `test_io` | — | — | — |
+| `test_time` | 59 | 4 | 9 |
+| `test_json` | 0 | — | — |
+| `test_re` | 159 | 0 | 4 |
+| `test_subprocess` | 0 | — | — |
+| `test_threading` | — | — | — |
+| **total** | **1,332** | **57** | **109** |
+
+**The five modules that reported no counts, each with the sentence it
+failed on.** These are worth more than the failure totals, because each
+one names something this OS does not have rather than something it gets
+wrong:
+
+- `test_stat` - `socket.socket(AF_UNIX)` raises `EAFNOSUPPORT` at
+  *import* time, and CPython's `skip_unless_bind_unix_socket` catches
+  only `PermissionError`. **AF_UNIX does not exist here**, and it is
+  already scheduled: M100's third bullet names it.
+- `test_io` - `OSError: [Errno 9] EBADF` from a thread. **A thread here
+  gets a COPY of the file-descriptor table, not a share of it**, which
+  `<pthread.h>` has said in its own header since M79: *"a descriptor
+  opened AFTER a thread starts is not visible to it"*. POSIX requires
+  threads to share one table. This is the largest single divergence the
+  suite found, and it is a fact about `sched_vm_owner`'s scope rather
+  than a bug in a function.
+- `test_threading` - `Fatal Python error: gilstate_tss_set: failed to set
+  current tstate (TSS)`. `pthread_setspecific` runs out somewhere past
+  the thread counts CPython's own suite uses; `PTHREAD_KEYS_MAX` here is
+  32.
+- `test_subprocess` - `OSError: [Errno 5] EIO`, which is this libc's new
+  "the read failed and this ABI carries no reason out" answer. It is
+  vague honestly, and the fix for the vagueness is a return convention
+  rather than a better guess.
+- `test_json` - `OSError: [Errno 0] Error`, which means there is at
+  least one more call in this libc that fails without saying why. Five
+  were found and fixed this milestone; the suite says there is a sixth.
+
+**None of that is a grade and the harness does not treat it as one.**
+`tools/python-test.sh` requires the *report* to be real - every module
+reached, CPython's own runner having printed its own counts, the script's
+last line - and prints the totals. `--require-clean` exists for the day
+zero is the honest expectation, and it is not passed today.
+
+**The two boxes that are open, with what each one is waiting for.**
+
+- **Extension modules as shared objects.** The interpreter here is
+  static, and that is not an oversight: **a static program on this
+  machine cannot `dlopen`**, because `dlopen` lives in `/lib/ld-lean.so`
+  and a static executable never maps it (M95). So the standard library's
+  C modules are linked in, which is upstream's own supported
+  configuration for exactly this case and needed no patch. What the
+  bullet asks for is a *dynamic* python3 - `--enable-shared`, a
+  `libpython3.12.so`, and forty extension `.so` files the loader opens
+  at import time. The pieces it needs are named rather than guessed:
+  four `case $ac_sys_system` arms in CPython's configure (the same shape
+  as the two the port already adds), `-pie` on the executable, and
+  `MAX_OBJECTS` in `user_space/ld/ld-lean.c`, which is 16 - a number
+  chosen for a program that opens a library or two, against an
+  interpreter that opens one per module it imports.
+- **`./configure && make` on the machine.** Not attempted yet, and the
+  honest reason is arithmetic rather than doubt: M98 measured one C
+  translation unit here at 32 s and a compile at 128x the host's, and
+  CPython is about 450 of them plus a `configure` that runs several
+  hundred compile-and-link probes. M98's own "How we'll know" already
+  wrote down what to do when a build does not fit a boot - *"the honest
+  outcome is the number that says by how much"* - and that is what this
+  box will produce.
 
 ### M100 — What a browser actually needs, measured rather than argued [ ]
 
@@ -14374,7 +14806,7 @@ ten it knows how to write.**
 | order | milestone | state | why here and not elsewhere |
 |---|---|---|---|
 | **1** | **M98** — a compiler that runs here | started | the probe is in the tree: configure succeeded outright, libiberty and bfd build, and the next stop is `<sys/param.h>` in libctf. Still the unambiguous head, and still carrying three deliverables — its own three-stage bootstrap, the attribution that closes M101, and the peak-RSS number that decides M102 |
-| **2** | **M99** — Python, built here | not started | built *with* row 1's compiler by definition; nothing else about its position is a decision |
+| **2** | **M99** — Python, built here | three of five boxes | the interpreter runs, the library is on the disk as `.py` source, and CPython's own regression suite reports its own numbers here. Extension modules as shared objects and the on-machine `./configure && make` are the two that are open, and both are named in M99's own entry |
 | **3** | **M100** — the browser gap, measured | not started | the last milestone of its arc, and the one that specifies the arc after it. TLS lives here — which is also the fetch M108's three TCP deferrals are conditioned on |
 | **4** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not. Placed before the device arc — see the note below the table |
 | **5** | **Q14** — the compositor, off the machine | not started | the same move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded by tests that run in milliseconds rather than only through a booted screendump |
@@ -14394,6 +14826,21 @@ jump the queue is suspended: its blocker is now a decision as well as an
 object, and the decision is the user's. Until then, work refines the OS
 through rows 1–9, all of which are gradeable at this desk under QEMU —
 including M108's driver half, which was always the QEMU-gradeable part.
+
+**The hold restated, and the reading it was given.** The instruction the
+day M99 was worked on was "finish the open items, with the exception of
+the hardware related work". Two readings were available and this file
+already contains the narrower one, so that is the one taken: *hardware
+work* means work that cannot be graded at this desk — M110 entire, M28's
+last box, M108's link half, and M103's two boxes that wait on M110's
+measurements. It does **not** mean M107 and M108's driver half, because
+those are drivers for parts QEMU implements and the milestone that owns
+them says in its own fourth bullet that every one of them is *"graded
+under QEMU first ... so the drivers are debugged here and only their
+assumptions are debugged on metal"*. Recorded here rather than assumed
+silently, per the loop's own rule: where the instruction and this file
+leave a question open, take the reading most consistent with the file
+and write the assumption down.
 
 Three notes, so the table cannot be misread:
 

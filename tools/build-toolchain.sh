@@ -75,12 +75,44 @@ fetch "https://ftp.gnu.org/gnu/binutils/binutils-$BINUTILS_VER.tar.xz" \
 fetch "https://ftp.gnu.org/gnu/gcc/gcc-$GCC_VER/gcc-$GCC_VER.tar.xz" \
       "gcc-$GCC_VER.tar.xz"
 
+# ---- M99: the port's own fingerprint, and why an unpacked tree is not
+# ---- kept across a change to it ---------------------------------------
+#
+# tools/toolchain-port/apply.py is a set of ANCHORED EDITS, and an
+# anchored edit is idempotent only while the edit itself does not change:
+# it re-applies when it cannot find its own replacement text, and it
+# finds its anchor in the pristine text either side of the block it added
+# last time. So changing an edit adds a SECOND copy of it, and leaves the
+# first.
+#
+# That was not theoretical. M99 added `extra_options` to the `*-*-lean_os*)`
+# block in gcc/config.gcc, ran the build, and got a compiler that still
+# refused -pthread: config.gcc is a shell `case`, the old block was above
+# the new one, and **the first arm wins**. Nothing failed, nothing warned,
+# and half an hour of build later the only symptom was the option still
+# not existing.
+#
+# The fix is to make an unpacked tree belong to the port that edited it.
+# The stamp is a hash of every file in tools/toolchain-port/, so any
+# change to an edit throws the tree away and unpacks a clean one - which
+# costs a re-extract and a rebuild, and is the price of the edits being
+# readable rather than a patch series.
+PORT_STAMP=$(cat "$ROOT"/tools/toolchain-port/* | shasum -a 256 | cut -d' ' -f1)
+for d in "binutils-$BINUTILS_VER" "gcc-$GCC_VER"; do
+  if [ -d "$d" ] && [ "$(cat "$d/.lean_os-port-stamp" 2>/dev/null)" != "$PORT_STAMP" ]; then
+    echo "build-toolchain: the target port changed - unpacking a clean $d"
+    rm -rf "$d" "$SRC/build-${d%%-*}"
+  fi
+done
+
 [ -d "binutils-$BINUTILS_VER" ] || tar xf "binutils-$BINUTILS_VER.tar.xz"
 [ -d "gcc-$GCC_VER" ] || tar xf "gcc-$GCC_VER.tar.xz"
 
 echo "build-toolchain: applying the target port"
 python3 "$ROOT/tools/toolchain-port/apply.py" \
         "$SRC/binutils-$BINUTILS_VER" "$SRC/gcc-$GCC_VER" || exit 1
+echo "$PORT_STAMP" > "$SRC/binutils-$BINUTILS_VER/.lean_os-port-stamp"
+echo "$PORT_STAMP" > "$SRC/gcc-$GCC_VER/.lean_os-port-stamp"
 
 # GCC needs gmp/mpfr/mpc. Homebrew's are what this machine has; pointed
 # at explicitly rather than left to configure's search, because a

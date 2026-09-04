@@ -71,6 +71,23 @@
     builtin_assert ("system=unix");       \
   } while (0)
 
+/* ---- M99: what -pthread means here -----------------------------------
+ *
+ * `-D_REENTRANT`, and nothing else. Every hosted target defines that
+ * macro for -pthread and a handful of headers key on it; this libc does
+ * not, but somebody else's source might, and the definition costs
+ * nothing and is what the flag means everywhere.
+ *
+ * What is deliberately absent is `-lpthread`. There is no such archive
+ * on this system - pthread_create, the mutexes and the futex wait are
+ * in libc itself (M79, M96) - which is glibc's own arrangement since
+ * 2.34. A LIB_SPEC that added -lpthread would fail the link of every
+ * threaded program with "cannot find -lpthread", which is a worse
+ * answer than the truth.
+ */
+#undef CPP_SPEC
+#define CPP_SPEC "%{pthread:-D_REENTRANT}"
+
 /* The startup files, in the order the ELF ABI requires and for the
  * reason user_space/lib/crti.asm gives: _init and _fini are built out of
  * fragments, so crti.o has to open them before crtbegin.o contributes to

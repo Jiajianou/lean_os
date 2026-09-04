@@ -92,6 +92,18 @@ UEFI firmware
   self-test — five programs nobody here wrote, four pipes, five forked
   and exec'd processes. See M89 in [milestones.md](milestones.md) for
   the eight bugs running it found.
+- **Somebody else's language.** CPython 3.12.7, cross-built with this
+  project's own compiler from a three-edit port, with its standard
+  library on the disk as `.py` source rather than frozen into the
+  binary — so `import json` is a file this filesystem opens. A boot
+  self-test runs a real script; `python3 -m test` runs **CPython's own
+  regression suite** here and reports its own pass and fail counts,
+  which is the only instrument in this project that neither wrote its
+  own assertions nor chose what to assert. It found nineteen bugs in
+  this OS, including a thread stack that had been entered misaligned
+  since M79 and an `fstat` that refused every descriptor which was not
+  a file — which is why `print()` on this machine used to write nothing
+  and return successfully. See M99 in [milestones.md](milestones.md).
 
 ## Build and run
 
@@ -156,15 +168,19 @@ Four instruments, and none of them subsumes another:
   is the only instrument here that grades the *tests* rather than the
   machine, and the first thing it found was a file at 100% line coverage
   whose mutation score was zero.
-- **Three differential tests** (`tools/sh-test.sh`,
-  `tools/regex-test.sh`, `tools/scanf-test.sh`) compile this project's
-  own shell, regular-expression engine and `sscanf` from the same source
-  the machine runs, for the machine you are sitting at, and require
-  every fixture to produce byte-identical output to the host's own.
-  Nothing in those fixtures says what the right answer is - a program
-  nobody here wrote decides, which is the only useful standard for code
-  whose whole job is to agree with every other implementation of itself.
-  Each of the three found real bugs on its first run.
+- **Five differential tests** (`tools/sh-test.sh`,
+  `tools/regex-test.sh`, `tools/scanf-test.sh`, `tools/printf-test.sh`
+  and `tools/math-test.sh`) compile this project's own shell,
+  regular-expression engine, `sscanf`, `printf` and libm from the same
+  source the machine runs, for the machine you are sitting at, and
+  require every fixture to agree with the host's own. Nothing in those
+  fixtures says what the right answer is - a program nobody here wrote
+  decides, which is the only useful standard for code whose whole job is
+  to agree with every other implementation of itself. Every one of them
+  found real bugs on its first run; the libm one (M99) found `fmod`
+  returning the wrong sign and a result larger than its own modulus, and
+  then, once it learned to ask about infinity, a `log` that did not
+  return at all.
 - **An image-tree test** (`tools/image-tree-test.sh`) has a host tool
   write a directory tree into a leanfs image, compares the image with an
   independent reader against the tree it came from, then boots it and has

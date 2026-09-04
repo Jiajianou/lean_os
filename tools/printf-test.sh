@@ -162,6 +162,12 @@ long sys_getpid(void) { return 1; }
 static int fake_errno;
 int *__errno_location(void) { return &fake_errno; }
 char *strerror(int e) { (void)e; return "error"; }
+/* M99: fopen infers its errno through this, which lives in unistd.c and
+ * is not part of this harness - see the same stub in stdio-test.sh. */
+int __lean_path_errno(const char *p, int creating) {
+    (void)p; (void)creating;
+    return 2; /* ENOENT */
+}
 EOF
 
 OURS="$BUILD/printf-ours"

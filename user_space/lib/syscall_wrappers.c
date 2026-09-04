@@ -72,8 +72,14 @@ long sys_spawnv(const char *path, const char *const *argv) {
     return sys_spawnve(path, argv, (const char *const *)environ);
 }
 
-long sys_sigaction(int signo, void *handler, void (*restorer)(void)) {
-    return do_syscall(SYS_sigaction, signo, (long)handler, (long)restorer);
+/* M99: a fourth argument, so do_syscall6 rather than do_syscall. The
+ * kernel reads exactly one bit of it - SA_SIGINFO - and that bit is a
+ * calling convention: it decides whether the handler is entered with
+ * one argument or with three. */
+long sys_sigaction(int signo, void *handler, void (*restorer)(void),
+                   unsigned int flags) {
+    return do_syscall6(SYS_sigaction, signo, (long)handler, (long)restorer,
+                       (long)flags, 0, 0);
 }
 
 long sys_sigprocmask(int how, unsigned int mask, unsigned int *old_out) {

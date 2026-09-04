@@ -15,7 +15,22 @@ static void fill(struct stat *out, const os_stat_t *st) {
     memset(out, 0, sizeof(*out));
     /* M87: three types now, and the order matters - a link is checked
      * first because a link's own is_dir says nothing about the link. */
-    out->st_mode = st->is_link ? S_IFLNK : (st->is_dir ? S_IFDIR : S_IFREG);
+    /* M99: five types now, not three. os_stat_t.kind is what SYS_fstat
+     * answers for a descriptor that is not a file at all - the console,
+     * a pipe, a socket - and S_ISCHR/S_ISFIFO/S_ISSOCK mean something on
+     * this machine as a result. A link is still checked first, because a
+     * link's own kind describes the link rather than its target. */
+    if (st->is_link) {
+        out->st_mode = S_IFLNK;
+    } else {
+        switch (st->kind) {
+        case OS_STAT_DIR:  out->st_mode = S_IFDIR; break;
+        case OS_STAT_CHR:  out->st_mode = S_IFCHR; break;
+        case OS_STAT_FIFO: out->st_mode = S_IFIFO; break;
+        case OS_STAT_SOCK: out->st_mode = S_IFSOCK; break;
+        default:           out->st_mode = S_IFREG; break;
+        }
+    }
     out->st_size = (off_t)st->size;
     out->st_mtime = (time_t)st->mtime;
     out->st_atime = out->st_mtime; /* leanfs stores one timestamp, not three */
@@ -89,7 +104,18 @@ int lstat(const char *path, struct stat *out) {
 
 int fstat(int fd, struct stat *out) {
     os_stat_t st;
-    if (!out || sys_fstat(fd, &st) != 0) {
+    if (!out) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (sys_fstat(fd, &st) != 0) {
+        /* M99: and it says why. Since M99 the kernel answers for every
+         * OPEN descriptor whatever kind it is, so the only way this
+         * fails is a descriptor that is not open - which is EBADF. It
+         * used to return -1 over an untouched errno, and CPython turned
+         * that into `OSError: [Errno 0] Error`, which is a sentence with
+         * no information in it. */
+        errno = EBADF;
         return -1;
     }
     fill(out, &st);

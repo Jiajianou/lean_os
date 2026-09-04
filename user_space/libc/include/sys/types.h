@@ -44,6 +44,35 @@ typedef unsigned int  gid_t;
 typedef unsigned long blksize_t;
 typedef unsigned long blkcnt_t;
 
+/* ---- M99: the time types, which POSIX puts HERE ----------------------
+ *
+ * <time.h> declares the functions; <sys/types.h> is where the standard
+ * says the types themselves are visible, and a program is entitled to
+ * see `time_t` having included this header alone. Autoconf's
+ * AC_CHECK_SIZEOF does exactly that - its default includes are
+ * sys/types.h, stdio.h, stdlib.h, string.h and no time.h - so CPython's
+ * configure decided `sizeof(time_t)` was **0**, wrote SIZEOF_TIME_T 0
+ * into pyconfig.h, and the build stopped four hundred files later in
+ * Python/pytime.c with `#error "unsupported time_t size"`. A zero from a
+ * probe that failed to compile is the worst kind of configure answer:
+ * it is not an error, it is a number.
+ *
+ * The guard macro is how the two headers agree without one including the
+ * other: whichever is read first defines the type, and the second sees
+ * that it is already there. A plain repeat of the typedef is legal C11
+ * and is not legal C99, and this libc is compiled by other people's
+ * build systems with other people's -std flags.
+ */
+#ifndef __lean_time_t_defined
+#define __lean_time_t_defined
+typedef long time_t;
+#endif
+#ifndef __lean_clock_t_defined
+#define __lean_clock_t_defined
+typedef long clock_t;
+#endif
+typedef long suseconds_t;
+
 #ifdef __cplusplus
 }
 #endif

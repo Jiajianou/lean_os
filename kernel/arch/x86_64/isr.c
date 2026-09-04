@@ -11,6 +11,7 @@
 #include "smp.h"    /* M103 - smp_current_cpu, for the per-CPU counters */
 #include "sched/sched.h" /* M52 - task_exit_with_code/sched_current, so a ring-3 fault kills one task instead of the machine */
 #include "signal.h"      /* system_api/include/signal.h - SIGSEGV, the exit code a killed-for-faulting task gets */
+#include "arch/x86_64/syscall_entry.h" /* M99 - signal_deliver_fault, so a program can catch its own fault */
 
 #define PAGE_FAULT_VECTOR 14
 #define BREAKPOINT_VECTOR 3
@@ -214,6 +215,57 @@ void isr_handler(isr_regs_t *r) {
      * has always carried. */
     if ((r->cs & 3) == 3) {
         task_t *t = sched_current();
+        /* ---- M99: offered to the program first ----------------------
+         *
+         * M52's note above ends "they share one exit code because this
+         * project has no per-signal handling to tell them apart with".
+         * It has since M76, and M99 is where the fault path finally uses
+         * it: the vector says which signal this is, and a program that
+         * installed a handler for that signal gets to run it instead of
+         * dying.
+         *
+         * The mapping is the one every Unix uses, and each row is a
+         * statement about the hardware rather than a convention: a
+         * divide error and a floating-point exception are SIGFPE; an
+         * opcode the CPU does not have is SIGILL; an alignment check is
+         * SIGBUS; a page fault and a general-protection fault are both
+         * "you touched something that is not yours", which is SIGSEGV.
+         *
+         * signal_deliver_fault returns 0 for everything that is not a
+         * caught, deliverable fault - no handler, the signal blocked
+         * (which it is inside its own handler), or a stack the frame
+         * cannot be written to - and the terminate path below is then
+         * exactly what it was. */
+        int fault_signo;
+        switch (r->vector) {
+        case 0:  /* divide error */
+        case 16: /* x87 floating-point */
+        case 19: /* SIMD floating-point */
+            fault_signo = SIGFPE;
+            break;
+        case 6:  /* invalid opcode */
+            fault_signo = SIGILL;
+            break;
+        case 17: /* alignment check */
+            fault_signo = SIGBUS;
+            break;
+        default:
+            fault_signo = SIGSEGV;
+            break;
+        }
+        /* CR2 only means something for a page fault; for every other
+         * vector it holds whatever the last one left there, so it is
+         * passed as zero rather than as a stale address a handler would
+         * read as si_addr. */
+        uint64_t fault_addr = (r->vector == PAGE_FAULT_VECTOR) ? read_cr2() : 0;
+        if (signal_deliver_fault(r, fault_signo, fault_addr)) {
+            /* Deliberately silent. A caught fault is not a machine
+             * event - it is a program using a mechanism the way it is
+             * meant to be used, and a garbage collector taking a write
+             * barrier would otherwise fill the serial log. The
+             * uncaught case below still logs everything it ever did. */
+            return;
+        }
         /* M106: one report, not four cores' worth of lines shuffled
          * together. See klog.c on why this bracket exists and why it has
          * to be re-entrant - the same report can end in panic(). */
@@ -233,7 +285,14 @@ void isr_handler(isr_regs_t *r) {
          * SIGKILL/SIGTERM path already does from inside IRQ0's handler
          * (sched.c's deliver_pending_signal_and_exit), which is why this
          * is safe from interrupt context at all. */
-        task_exit_with_signal(SIGSEGV);
+        /* M99: the signal the vector actually says, not SIGSEGV for
+         * everything. M52 used one code because nothing could tell the
+         * four apart; a program that does not catch its divide error is
+         * still owed the truth about what killed it, and `128 + 8` in a
+         * shell is a different sentence from `128 + 11`. A null
+         * dereference is still 139, which is what [m52]'s marker
+         * checks. */
+        task_exit_with_signal(fault_signo);
     }
 
     uint64_t msg = klog_begin();

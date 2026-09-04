@@ -95,7 +95,8 @@ long sys_getcwd(char *buf, size_t maxlen);
  * rather than these - sys_sigaction in particular takes a `restorer`
  * that only user_space/lib/crt0.asm can supply, and getting it wrong is
  * a handler that returns into whatever was on the stack. */
-long sys_sigaction(int signo, void *handler, void (*restorer)(void));
+long sys_sigaction(int signo, void *handler, void (*restorer)(void),
+                   unsigned int flags);
 long sys_sigprocmask(int how, unsigned int mask, unsigned int *old_out);
 /* Blocks (cooperatively) until `pid` has terminated; returns its exit
  * code, or -1 if `pid` was never valid. */

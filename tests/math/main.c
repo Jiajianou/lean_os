@@ -1,0 +1,340 @@
+/* tests/math/main.c - M99: this project's libm, against the host's.
+ *
+ * The fourth instrument of the kind tools/sh-test.sh introduced and
+ * tools/regex-test.sh, scanf-test.sh and printf-test.sh followed:
+ * compile this project's own source for the machine you are sitting at,
+ * run it beside an implementation nobody here wrote, and let the other
+ * one decide what the right answer is.
+ *
+ * It is the right instrument for a libm for the same reason it was right
+ * for a shell. Nothing in tests/math/cases.tsv says what sin(0.7) is.
+ * A table of expected values written here would be a table of whatever
+ * this implementation happened to produce on the day it was written, and
+ * every one of its rows would pass forever - which is precisely the
+ * shape of test the mutation harness (Q12) exists to catch.
+ *
+ * The build renames every function this libc declares to lean_*, so both
+ * libms are in one process and the comparison is a subtraction rather
+ * than two runs of a program. See tools/math-test.sh.
+ */
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* This project's, renamed at compile time by -Dname=lean_name. */
+double lean_fabs(double), lean_sqrt(double), lean_floor(double);
+double lean_ceil(double), lean_trunc(double), lean_round(double);
+double lean_sin(double), lean_cos(double), lean_tan(double);
+double lean_atan(double), lean_asin(double), lean_acos(double);
+double lean_exp(double), lean_log(double), lean_log10(double), lean_log2(double);
+double lean_sinh(double), lean_cosh(double), lean_tanh(double);
+double lean_expm1(double), lean_log1p(double);
+double lean_asinh(double), lean_acosh(double), lean_atanh(double);
+double lean_erf(double), lean_erfc(double);
+double lean_cbrt(double), lean_exp2(double);
+double lean_fma(double, double, double);
+double lean_pow(double, double), lean_atan2(double, double);
+double lean_fmod(double, double), lean_hypot(double, double);
+double lean_copysign(double, double), lean_nextafter(double, double);
+double lean_fmax(double, double), lean_fmin(double, double);
+
+typedef double (*fn1)(double);
+typedef double (*fn2)(double, double);
+typedef double (*fn3)(double, double, double);
+
+struct entry {
+    const char *name;
+    fn1 ours1, theirs1;
+    fn2 ours2, theirs2;
+    fn3 ours3, theirs3;
+};
+
+/* The host's are taken by address rather than called through a macro, so
+ * that what runs is the C library's function and not something the
+ * compiler folded at -O2 into a constant of its own opinion. */
+static const struct entry TABLE[] = {
+    {"fabs", lean_fabs, fabs, 0, 0, 0, 0},
+    {"sqrt", lean_sqrt, sqrt, 0, 0, 0, 0},
+    {"floor", lean_floor, floor, 0, 0, 0, 0},
+    {"ceil", lean_ceil, ceil, 0, 0, 0, 0},
+    {"trunc", lean_trunc, trunc, 0, 0, 0, 0},
+    {"round", lean_round, round, 0, 0, 0, 0},
+    {"sin", lean_sin, sin, 0, 0, 0, 0},
+    {"cos", lean_cos, cos, 0, 0, 0, 0},
+    {"tan", lean_tan, tan, 0, 0, 0, 0},
+    {"atan", lean_atan, atan, 0, 0, 0, 0},
+    {"asin", lean_asin, asin, 0, 0, 0, 0},
+    {"acos", lean_acos, acos, 0, 0, 0, 0},
+    {"exp", lean_exp, exp, 0, 0, 0, 0},
+    {"log", lean_log, log, 0, 0, 0, 0},
+    {"log10", lean_log10, log10, 0, 0, 0, 0},
+    {"log2", lean_log2, log2, 0, 0, 0, 0},
+    {"sinh", lean_sinh, sinh, 0, 0, 0, 0},
+    {"cosh", lean_cosh, cosh, 0, 0, 0, 0},
+    {"tanh", lean_tanh, tanh, 0, 0, 0, 0},
+    {"expm1", lean_expm1, expm1, 0, 0, 0, 0},
+    {"log1p", lean_log1p, log1p, 0, 0, 0, 0},
+    {"asinh", lean_asinh, asinh, 0, 0, 0, 0},
+    {"acosh", lean_acosh, acosh, 0, 0, 0, 0},
+    {"atanh", lean_atanh, atanh, 0, 0, 0, 0},
+    {"erf", lean_erf, erf, 0, 0, 0, 0},
+    {"erfc", lean_erfc, erfc, 0, 0, 0, 0},
+    {"pow", 0, 0, lean_pow, pow, 0, 0},
+    {"atan2", 0, 0, lean_atan2, atan2, 0, 0},
+    {"fmod", 0, 0, lean_fmod, fmod, 0, 0},
+    {"hypot", 0, 0, lean_hypot, hypot, 0, 0},
+    {"copysign", 0, 0, lean_copysign, copysign, 0, 0},
+    {"nextafter", 0, 0, lean_nextafter, nextafter, 0, 0},
+    {"fmax", 0, 0, lean_fmax, fmax, 0, 0},
+    {"fmin", 0, 0, lean_fmin, fmin, 0, 0},
+    {"cbrt", lean_cbrt, cbrt, 0, 0, 0, 0},
+    {"exp2", lean_exp2, exp2, 0, 0, 0, 0},
+    {"fma", 0, 0, 0, 0, lean_fma, fma},
+};
+
+/* Relative where the answer is not near zero, absolute where it is -
+ * the alternative is grading sin(pi) against a denominator of 1e-16 and
+ * calling every implementation on earth broken. */
+static double err_of(double got, double want) {
+    if (isnan(want)) {
+        return isnan(got) ? 0.0 : 1.0;
+    }
+    if (isinf(want)) {
+        return (isinf(got) && ((got > 0) == (want > 0))) ? 0.0 : 1.0;
+    }
+    if (isnan(got) || isinf(got)) {
+        return 1.0;
+    }
+    double d = fabs(got - want);
+    double scale = fabs(want);
+    return scale > 1e-300 ? d / scale : d;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <cases.tsv>\n", argv[0]);
+        return 2;
+    }
+    FILE *f = fopen(argv[1], "r");
+    if (!f) {
+        perror(argv[1]);
+        return 2;
+    }
+
+    int failures = 0, graded = 0, skipped = 0;
+
+    /* ---- the special values, before any sweep ------------------------
+     *
+     * M99 added this section after CPython's own test suite found what
+     * the sweeps could not: `log(INFINITY)` did not return a wrong
+     * answer, it did not return. The scaling loop inside it is
+     * `while (x > sqrt(2)) x *= 0.5`, and infinity halved is infinity.
+     *
+     * A range sweep asks "is the answer right in the middle". These ask
+     * "is there an answer at all at the edges", and the edges are where
+     * a range reduction, a cast to an integer, or a loop bound stops
+     * being valid. Every one-argument function in the table is asked
+     * about every one of them, so a function added later is covered by
+     * arithmetic rather than by somebody remembering.
+     *
+     * The oracle is the same as everywhere else in this file: the
+     * host's libm. Nothing here says what acosh(inf) should be.
+     *
+     * A hang is not caught here and cannot be - a test that hangs is a
+     * harness that hangs. What this catches is the wrong ANSWER at an
+     * edge; the hang it was written for is caught by the function
+     * returning at all. */
+    {
+        static const struct { const char *name; double v; } SPECIALS[] = {
+            {"+inf", 0}, {"-inf", 0}, {"nan", 0}, {"+0", 0.0}, {"-0", -0.0},
+            {"1", 1.0}, {"-1", -1.0}, {"tiny", 5e-324}, {"huge", 1.7976931348623157e308},
+        };
+        double values[9];
+        values[0] = INFINITY;
+        values[1] = -INFINITY;
+        values[2] = NAN;
+        values[3] = 0.0;
+        values[4] = -0.0;
+        values[5] = 1.0;
+        values[6] = -1.0;
+        values[7] = 5e-324;
+        values[8] = 1.7976931348623157e308;
+
+        /* Divergences this project has decided on, with the reason. A
+         * row here is not a suppression - it is printed on every run,
+         * and it is why the harness can be strict everywhere else. The
+         * rule for adding one: the divergence has to be a REFUSAL (a
+         * NaN, an error) rather than a plausible wrong number, and the
+         * reason has to be written in the source it refers to. */
+        static const struct {
+            const char *fn; const char *at; const char *why;
+        } DIVERGE[] = {
+            {"sin", "huge", "no Payne-Hanek reduction past 2^52 - math.c refuses rather than guessing"},
+            {"cos", "huge", "same"},
+            {"tan", "huge", "same"},
+        };
+
+        int special_failures = 0;
+        for (size_t i = 0; i < sizeof(TABLE) / sizeof(TABLE[0]); i++) {
+            if (!TABLE[i].ours1) {
+                continue; /* one-argument functions only */
+            }
+            for (size_t v = 0; v < sizeof(values) / sizeof(values[0]); v++) {
+                double got = TABLE[i].ours1(values[v]);
+                double want = TABLE[i].theirs1(values[v]);
+                if (err_of(got, want) <= 1e-12) {
+                    continue;
+                }
+                const char *why = 0;
+                for (size_t d = 0; d < sizeof(DIVERGE) / sizeof(DIVERGE[0]); d++) {
+                    if (strcmp(DIVERGE[d].fn, TABLE[i].name) == 0 &&
+                        strcmp(DIVERGE[d].at, SPECIALS[v].name) == 0) {
+                        why = DIVERGE[d].why;
+                        break;
+                    }
+                }
+                if (why) {
+                    /* And it must be a refusal. A "known divergence" that
+                     * returns a number is a wrong answer with a note
+                     * beside it. */
+                    if (!isnan(got)) {
+                        printf("FAIL %-10s at %-5s is a known divergence but "
+                               "returned %.17g rather than refusing\n",
+                               TABLE[i].name, SPECIALS[v].name, got);
+                        special_failures++;
+                    } else {
+                        printf("     %-10s at %-5s refuses: %s\n",
+                               TABLE[i].name, SPECIALS[v].name, why);
+                    }
+                    continue;
+                }
+                printf("FAIL %-10s at %-5s: ours %.17g, the host's %.17g\n",
+                       TABLE[i].name, SPECIALS[v].name, got, want);
+                special_failures++;
+            }
+        }
+        if (special_failures == 0) {
+            printf("ok   %-10s every one-argument function at "
+                   "+-inf, nan, +-0, +-1, the smallest subnormal and the "
+                   "largest finite double\n", "specials");
+        }
+        failures += special_failures;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n') {
+            continue;
+        }
+        char name[64], kind[8], note[256];
+        double lo, hi, tol;
+        int points;
+        char *tab = strchr(line, '\t');
+        if (!tab) {
+            continue;
+        }
+        *tab = '\0';
+        snprintf(name, sizeof(name), "%s", line);
+        if (sscanf(tab + 1, "%7s", kind) != 1) {
+            continue;
+        }
+        if (kind[0] == '-') {
+            skipped++;
+            continue;
+        }
+        char lobuf[64], hibuf[64], ptbuf[64], tolbuf[64];
+        note[0] = '\0';
+        if (sscanf(tab + 1, "%7s %63s %63s %63s %63s", kind, lobuf, hibuf,
+                   ptbuf, tolbuf) != 5) {
+            fprintf(stderr, "math-test: malformed row for %s\n", name);
+            return 2;
+        }
+        lo = strtod(lobuf, NULL);
+        hi = strtod(hibuf, NULL);
+        points = atoi(ptbuf);
+        tol = strtod(tolbuf, NULL);
+
+        const struct entry *e = NULL;
+        for (size_t i = 0; i < sizeof(TABLE) / sizeof(TABLE[0]); i++) {
+            if (strcmp(TABLE[i].name, name) == 0) {
+                e = &TABLE[i];
+                break;
+            }
+        }
+        if (!e) {
+            fprintf(stderr, "math-test: %s has a row but no entry in the "
+                            "table in tests/math/main.c\n", name);
+            return 2;
+        }
+
+        double worst = 0.0, worst_x = 0.0, worst_y = 0.0;
+        double worst_got = 0.0, worst_want = 0.0;
+        int n = points > 1 ? points : 2;
+        double step = (hi - lo) / (double)(n - 1);
+        if (kind[0] == '1') {
+            for (int i = 0; i < n; i++) {
+                double x = lo + step * (double)i;
+                double got = e->ours1(x), want = e->theirs1(x);
+                double err = err_of(got, want);
+                if (err > worst) {
+                    worst = err; worst_x = x; worst_got = got; worst_want = want;
+                }
+            }
+        } else if (kind[0] == '2') {
+            for (int i = 0; i < n; i++) {
+                double x = lo + step * (double)i;
+                for (int j = 0; j < n; j++) {
+                    double y = lo + step * (double)j;
+                    double got = e->ours2(x, y), want = e->theirs2(x, y);
+                    double err = err_of(got, want);
+                    if (err > worst) {
+                        worst = err; worst_x = x; worst_y = y;
+                        worst_got = got; worst_want = want;
+                    }
+                }
+            }
+        } else {
+            /* Three arguments, which only fma has. The third is not
+             * reported in the failure line and does not need to be: an
+             * fma that is wrong is wrong for a whole plane of z. */
+            for (int i = 0; i < n; i++) {
+                double x = lo + step * (double)i;
+                for (int j = 0; j < n; j++) {
+                    double y = lo + step * (double)j;
+                    for (int k = 0; k < n; k++) {
+                        double z = lo + step * (double)k;
+                        double got = e->ours3(x, y, z);
+                        double want = e->theirs3(x, y, z);
+                        double err = err_of(got, want);
+                        if (err > worst) {
+                            worst = err; worst_x = x; worst_y = y;
+                            worst_got = got; worst_want = want;
+                        }
+                    }
+                }
+            }
+        }
+        graded++;
+        if (worst > tol) {
+            failures++;
+            if (kind[0] == '1') {
+                printf("FAIL %-10s worst %.3g > %.3g at x=%.17g: "
+                       "ours %.17g, the host's %.17g\n",
+                       name, worst, tol, worst_x, worst_got, worst_want);
+            } else {
+                printf("FAIL %-10s worst %.3g > %.3g at (%.17g, %.17g): "
+                       "ours %.17g, the host's %.17g\n",
+                       name, worst, tol, worst_x, worst_y, worst_got, worst_want);
+            }
+        } else {
+            printf("ok   %-10s worst %.3g (claimed %.3g)\n", name, worst, tol);
+        }
+    }
+    fclose(f);
+
+    printf("math-test: %d functions graded against the host's libm, "
+           "%d not graded here, %d over their claimed tolerance\n",
+           graded, skipped, failures);
+    return failures ? 1 : 0;
+}

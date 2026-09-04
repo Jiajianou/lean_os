@@ -637,19 +637,43 @@ static long sys_thread_create(uint64_t entry, uint64_t arg, uint64_t stack_top,
     if (stack_top < USER_REGION_BASE || stack_top >= USER_REGION_LIMIT) {
         return -1;
     }
-    /* The stack top must be 16-byte aligned, because that is what the
-     * SysV ABI requires at a function's entry and there is no `call`
-     * here to have pushed a return address. Checked rather than rounded:
-     * a stack silently moved from where the caller put it is a stack
-     * whose guard page is in the wrong place. */
+    /* ---- M99: the alignment, and the sentence that had it backwards --
+     *
+     * M79 wrote: "the stack top must be 16-byte aligned, because that is
+     * what the SysV ABI requires at a function's entry and there is no
+     * `call` here to have pushed a return address". The first half is a
+     * good rule for the caller and the second half is exactly wrong.
+     *
+     * SysV requires RSP to be 16-byte aligned **at the call
+     * instruction**, which means a function's first instruction runs
+     * with `RSP % 16 == 8` - the return address the call pushed. Every
+     * function GCC compiles is built on that: it lays out its
+     * 16-byte-aligned locals at offsets from RBP that are correct only
+     * if RSP was 8 mod 16 on entry.
+     *
+     * So entering a thread with RSP exactly 16-aligned puts every
+     * aligned spill slot in that thread 8 bytes out, and the first
+     * `movaps` to one is a #GP. It cost nothing for twenty milestones
+     * because nothing that ran on a thread here spilled an XMM register
+     * to an aligned slot. **CPython's test_io does**, and the crash is
+     * `0F 29 45 80` - `movaps %xmm0, -0x80(%rbp)` - at an address ending
+     * in 8.
+     *
+     * The check stays, because 16-byte alignment is a real and checkable
+     * property of the memory the caller allocated and rounding it
+     * silently would move a stack away from its guard page. What changes
+     * is what the kernel does with it: the thread starts 8 bytes below,
+     * so its entry function is entered exactly as a `call` would have
+     * entered it. */
     if ((stack_top & 15) != 0) {
         return -1;
     }
+    uint64_t entry_rsp = stack_top - 8;
     if (!sched_has_free_task_slot()) {
         return -1;
     }
     task_t *self = sched_current();
-    task_t *t = process_spawn_thread(self->name, entry, stack_top, arg);
+    task_t *t = process_spawn_thread(self->name, entry, entry_rsp, arg);
     return t ? (long)t->id : -1;
 }
 
@@ -1953,10 +1977,16 @@ static long sys_lstat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3,
      * os_time.h's own header comment says they are deliberately not the
      * same type. */
     os_stat_t out;
+    k_memset(&out, 0, sizeof(out)); /* M99 - see sys_stat */
     out.size = st.size;
     out.mtime = st.mtime;
     out.is_dir = st.is_dir;
     out.is_link = st.is_link;
+    /* M99: a link is a link first. `kind` says what the entry IS, and
+     * is_link is what says the caller is looking at the link rather than
+     * through it - so a link's kind is the kind of the link itself,
+     * which on this filesystem is a file with a path in it. */
+    out.kind = st.is_dir ? OS_STAT_DIR : OS_STAT_FILE;
     out.inode = st.inode; /* M89 */
     return copy_to_user(out_ptr, &out, sizeof(out));
 }
@@ -3161,9 +3191,14 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
         return -OS_ERR_NOENT;
     }
     os_stat_t out;
+    /* M99: zeroed first. The struct has a pad byte in it and this is
+     * copied to user space wholesale; an uninitialised pad byte is a
+     * byte of kernel stack handed to a program. */
+    k_memset(&out, 0, sizeof(out));
     out.size = st.size;
     out.mtime = st.mtime;
     out.is_dir = st.is_dir;
+    out.kind = st.is_dir ? OS_STAT_DIR : OS_STAT_FILE; /* M99 */
     /* M87: always 0 here, and truthfully so - this resolve follows
      * links, so whatever it landed on is by definition not one.
      * SYS_lstat is the call that can say otherwise. */
@@ -3864,22 +3899,61 @@ static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
         return -1;
     }
     fd_slot_t *slot = &sched_current()->fds[fd];
-    if (slot->type != FD_FILE) {
-        return -1;
-    }
-    leanfs_stat_t st;
-    if (vfs_handle_stat(slot->file->handle, &st) != 0) {
-        return -1;
-    }
     os_stat_t out;
-    out.size = st.size;
-    out.mtime = st.mtime;
-    out.is_dir = st.is_dir;
-    /* M87: a descriptor cannot name a link. Opening one follows it, so
-     * what this handle refers to is whatever the link pointed at - which
-     * is why fstat has no lstat counterpart anywhere. */
-    out.is_link = 0;
-    out.inode = st.inode; /* M89 */
+    k_memset(&out, 0, sizeof(out)); /* M99 - see sys_stat */
+
+    /* ---- M99: every open descriptor has an answer --------------------
+     *
+     * M77 wrote "only a file has an answer" and refused the rest, and
+     * for the callers that existed then that was fine: nothing asked
+     * fstat about a pipe or about its own stdout.
+     *
+     * CPython does, on every start. Its create_stdio() fstats 0, 1 and 2
+     * before wrapping them, and a descriptor it cannot stat becomes
+     * `None` - so on this machine `print()` wrote nothing and returned
+     * successfully, because print with sys.stdout None is defined to do
+     * nothing at all. No error anywhere, and an interpreter with no
+     * output.
+     *
+     * What each kind can truthfully say is below. The size of a thing
+     * with no length is 0 and its mtime is 0 - those are answers, not
+     * placeholders - and `kind` is the field that carries the rest, so
+     * <sys/stat.h>'s S_ISCHR and S_ISFIFO mean something here for the
+     * first time. */
+    switch (slot->type) {
+    case FD_FILE: {
+        leanfs_stat_t st;
+        if (vfs_handle_stat(slot->file->handle, &st) != 0) {
+            return -1;
+        }
+        out.size = st.size;
+        out.mtime = st.mtime;
+        out.is_dir = st.is_dir;
+        out.kind = st.is_dir ? OS_STAT_DIR : OS_STAT_FILE;
+        /* M87: a descriptor cannot name a link. Opening one follows it,
+         * so what this handle refers to is whatever the link pointed at
+         * - which is why fstat has no lstat counterpart anywhere. */
+        out.is_link = 0;
+        out.inode = st.inode; /* M89 */
+        break;
+    }
+    case FD_STDIN:
+    case FD_STDOUT:
+        /* The console, and it is a character device in the strict sense
+         * the word has: no length, no position, and a read that blocks
+         * until somebody types. */
+        out.kind = OS_STAT_CHR;
+        break;
+    case FD_PIPE_READ:
+    case FD_PIPE_WRITE:
+        out.kind = OS_STAT_FIFO;
+        break;
+    case FD_SOCKET:
+        out.kind = OS_STAT_SOCK;
+        break;
+    default:
+        return -1; /* FD_NONE: not an open descriptor */
+    }
     return copy_to_user(out_ptr, &out, sizeof(out)) == 0 ? 0 : -1;
 }
 
@@ -4494,8 +4568,7 @@ static long sys_klog_total(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
  * done here.
  */
 static long sys_sigaction(uint64_t signo, uint64_t handler, uint64_t restorer,
-                           uint64_t a4, uint64_t a5, uint64_t a6) {
-    (void)a4;
+                           uint64_t flags, uint64_t a5, uint64_t a6) {
     (void)a5;
     (void)a6;
     if (!SIG_IS_CATCHABLE((int)signo)) {
@@ -4522,6 +4595,15 @@ static long sys_sigaction(uint64_t signo, uint64_t handler, uint64_t restorer,
     }
     long prev = (long)self->sig_handler[signo];
     self->sig_handler[signo] = handler;
+    /* M99: whether this handler wants three arguments. It is a calling
+     * convention rather than a feature flag - see sched.h's sig_siginfo
+     * and the header note in system_api/include/signal.h for the program
+     * that faulted every time because the two disagreed. */
+    if (flags & SA_SIGINFO) {
+        self->sig_siginfo |= (1u << signo);
+    } else {
+        self->sig_siginfo &= ~(1u << signo);
+    }
     if (handler == SIG_IGN_ADDR || handler == SIG_DFL_ADDR) {
         /* Anything already queued for a signal that has just stopped
          * being caught would otherwise be delivered to an address that
@@ -4555,9 +4637,32 @@ static long sys_sigprocmask(uint64_t how, uint64_t mask, uint64_t old_out,
     /* Silently cleared rather than refused - a program that asks to block
      * "everything" is asking for a thing it can have almost all of, and
      * failing the whole call would leave it with no idea which bit was
-     * the problem. */
-    want &= ~(1u << SIGKILL);
-    want &= ~(1u << SIGSEGV);
+     * the problem.
+     *
+     * M99: and NOT cleared for SIG_UNBLOCK, which is the direction that
+     * has to work. signal_deliver blocks a signal while its own handler
+     * runs, and a handler that leaves by siglongjmp rather than by
+     * returning never reaches sigreturn to put the mask back - so
+     * unblocking it by hand is the only way out, and it is exactly what
+     * siglongjmp does. Filtering the unblock mask made SIGSEGV blocked
+     * for the rest of the process's life after the first fault it
+     * caught, which is a program that can survive one fault and not
+     * two. */
+    /* M99: SIGSEGV is catchable now (see signal.h) and it is still not
+     * blockable, which is not an inconsistency. Blocking a signal the
+     * MMU is about to raise does not postpone it - the faulting
+     * instruction is still there and still cannot execute - so a
+     * process that successfully blocked it would fault forever with
+     * nothing able to happen. Linux resolves this by forcing the default
+     * action on a blocked synchronous SIGSEGV, which is the same outcome
+     * by a longer road; this refuses the block instead and the task is
+     * terminated with the fault it had. What still blocks it, and must,
+     * is signal_deliver's automatic block for the duration of its own
+     * handler. */
+    if (how != SIG_UNBLOCK) {
+        want &= ~(1u << SIGKILL);
+        want &= ~(1u << SIGSEGV);
+    }
     switch (how) {
     case SIG_BLOCK:
         self->sig_blocked |= want;
@@ -5114,6 +5219,15 @@ static long sys_execve(isr_regs_t *regs) {
         }
     }
     self->sig_restorer = 0;
+    /* M99: and every SA_SIGINFO bit, which describes a handler that has
+     * just gone back to the default. A bit left set here would mean the
+     * next handler the new image installs with plain signal() is entered
+     * with three arguments - a calling convention inherited from a
+     * program that is no longer running. */
+    self->sig_siginfo = 0;
+    self->si_pid = 0;
+    self->si_status = 0;
+    self->si_addr = 0;
 
     /* The name a person sees in the task manager should be the program
      * that is actually running. */
@@ -5378,14 +5492,51 @@ static int signal_deliver(isr_regs_t *regs) {
         return 0;
     }
 
+    /* M99: does this handler want a siginfo_t, and if so, build one.
+     *
+     * Filled here rather than at raise time because only some of it is
+     * known at raise time: si_pid and si_status are recorded on the task
+     * by whoever raised SIGCHLD, si_addr by the fault path, and si_code
+     * follows from which of those it was. Everything not known is zero,
+     * and zero is the answer rather than a gap - see the struct's own
+     * note in system_api/include/signal.h. */
+    int want_info = (self->sig_siginfo & (1u << signo)) != 0;
+    siginfo_t info;
+    if (want_info) {
+        k_memset(&info, 0, sizeof(info));
+        info.si_signo = signo;
+        if (signo == SIGCHLD) {
+            info.si_pid = self->si_pid;
+            info.si_status = self->si_status;
+            info.si_code = CLD_EXITED;
+        } else if (signo == SIGSEGV || signo == SIGBUS) {
+            info.si_addr = (void *)self->si_addr;
+            info.si_code = SI_KERNEL;
+        } else if (signo == SIGFPE || signo == SIGILL) {
+            info.si_code = SI_KERNEL;
+        } else {
+            info.si_code = SI_USER;
+        }
+    }
+
     /* 128 bytes of clearance below the interrupted RSP before the frame,
      * then 16-byte alignment for the frame itself, then one word below it
      * for the return address - which leaves RSP % 16 == 8 at the handler's
      * first instruction, exactly as it is after a `call`. Getting that
      * wrong does not fault; it makes any SSE spill inside the handler
-     * fault instead, some arbitrary distance away. */
+     * fault instead, some arbitrary distance away.
+     *
+     * M99: the siginfo_t goes below the frame in the same reservation,
+     * so a handler that keeps the pointer past its own return is looking
+     * at stack the sigreturn has released - which is exactly as true of
+     * it on Linux. */
     uint64_t sp = regs->rsp;
     sp -= 128;
+    if (want_info) {
+        sp -= sizeof(siginfo_t);
+        sp &= ~15ULL;
+    }
+    uint64_t info_addr = sp;
     sp -= sizeof(sig_frame_t);
     sp &= ~15ULL;
     uint64_t frame_addr = sp;
@@ -5428,6 +5579,11 @@ static int signal_deliver(isr_regs_t *regs) {
         return 0;
     }
 
+    if (want_info && copy_to_user(info_addr, &info, sizeof(info)) != 0) {
+        self->sig_pending &= ~(1u << signo);
+        return 0;
+    }
+
     self->sig_pending &= ~(1u << signo);
     /* The handler's own signal is blocked while it runs, and put back by
      * sigreturn. Without this a signal arriving during its own handler
@@ -5437,8 +5593,53 @@ static int signal_deliver(isr_regs_t *regs) {
     regs->rsp = new_rsp;
     regs->rip = handler;
     regs->rdi = (uint64_t)signo; /* void handler(int) - SysV's first argument */
+    /* M99: and the other two, when the handler was installed asking for
+     * them. %rdx is the ucontext_t argument every other Unix passes and
+     * this one does not have - NULL rather than a pointer to something
+     * invented, so a program that reads it faults at once instead of
+     * believing a fiction. */
+    regs->rsi = want_info ? info_addr : 0;
+    regs->rdx = 0;
     regs->rax = 0;
     return 1;
+}
+
+/* M99 - see syscall_entry.h. A synchronous fault, offered to the
+ * handler the program installed for it.
+ *
+ * The signal is raised directly into sig_pending rather than through
+ * sched_raise_signal, and the difference matters: sched_raise_signal
+ * applies the DEFAULT action when there is no handler, and the default
+ * here is already the caller's business - it is the terminate-with-this-
+ * signal path that has existed since M52 and that reports the fault. A
+ * second opinion about it would be a task that exits twice. */
+int signal_deliver_fault(isr_regs_t *regs, int signo, uint64_t fault_addr) {
+    task_t *self = sched_current();
+    if (!self || (regs->cs & 3) != 3) {
+        return 0;
+    }
+    if (signo <= 0 || signo > SIG_MAX || !SIG_IS_CATCHABLE(signo)) {
+        return 0;
+    }
+    uint64_t handler = self->sig_handler[signo];
+    if (handler == SIG_DFL_ADDR || handler == SIG_IGN_ADDR) {
+        /* SIG_IGN on a fault is not "carry on" - carrying on re-executes
+         * the instruction that faulted, forever. Ignoring a synchronous
+         * fault means the same thing it means on every other Unix: the
+         * default action happens anyway. */
+        return 0;
+    }
+    if (self->sig_blocked & (1u << signo)) {
+        /* Blocked, which is precisely the state inside its own handler.
+         * This is where a handler that faults stops being a loop. */
+        return 0;
+    }
+    /* M99: the address the CPU faulted on, which is CR2 and is the one
+     * fact a SIGSEGV handler actually wants. Recorded before the raise
+     * so signal_deliver can put it in si_addr. */
+    self->si_addr = fault_addr;
+    self->sig_pending |= (1u << signo);
+    return signal_deliver(regs);
 }
 
 static int signal_return(isr_regs_t *regs) {

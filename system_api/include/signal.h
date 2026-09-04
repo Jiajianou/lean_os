@@ -115,9 +115,15 @@ extern "C" {
  * than a copy:
  *
  *   SIGTRAP  - a debugger's breakpoint. There is no debugger.
- *   SIGBUS   - an unaligned or unbacked access. This kernel reports
- *              every ring-3 fault as SIGSEGV (M52), deliberately, and
- *              nothing distinguishes the two.
+ *   SIGBUS   - an unaligned or unbacked access. M99: this is real now.
+ *              An alignment check (#AC) from ring 3 raises SIGBUS, a
+ *              divide error or a floating-point exception raises SIGFPE,
+ *              and an opcode this CPU does not have raises SIGILL - see
+ *              kernel/arch/x86_64/isr.c. M52's "every ring-3 fault is
+ *              SIGSEGV" was true when nothing could catch one; the note
+ *              it left - "they share one exit code because this project
+ *              has no per-signal handling to tell them apart with" - is
+ *              what stopped being true.
  *   SIGURG   - out-of-band TCP data. M66's TCP does not implement the
  *              urgent pointer.
  *   SIGXCPU  - a CPU-time limit. M88's getrlimit reports limits and
@@ -150,14 +156,107 @@ extern "C" {
 #define SIG_MAX  31
 
 /* 1 if `sig` is a signal a process may install a handler for, block, or
- * ignore. SIGKILL and SIGSEGV are the two that cannot be argued with -
- * one by definition, the other because its handler would run on the
- * address space that just faulted. Written as a macro rather than a
- * table so the kernel and user space cannot hold two different opinions
- * about it. */
+ * ignore. SIGKILL and SIGSTOP are the two that cannot be argued with,
+ * both by definition. Written as a macro rather than a table so the
+ * kernel and user space cannot hold two different opinions about it.
+ *
+ * ---- M99: SIGSEGV moved from that list to this one ------------------
+ *
+ * M76 excluded it with a real argument - "its handler would run on the
+ * address space that just faulted" - and that argument is true and is
+ * not sufficient. Every Unix lets a program catch SIGSEGV, and the
+ * programs that do are not being clever: a garbage collector uses it for
+ * write barriers, a JIT for lazy compilation, a runtime for
+ * stack-overflow detection, and a crash reporter to say what happened
+ * before it dies.
+ *
+ * CPython is the one that forced it here. `faulthandler.enable()`
+ * installs handlers for SIGBUS, SIGILL, SIGFPE, SIGABRT and SIGSEGV so
+ * that a crashed interpreter prints a Python traceback, and its OWN test
+ * runner calls it before running a single test - so **every module of
+ * CPython's regression suite failed on this machine at
+ * `sigaction(SIGSEGV)` returning -1**, having run nothing.
+ *
+ * What makes it safe is not an argument, it is the two places the loop
+ * is cut, and both are Unix's own:
+ *
+ *   - signal_deliver() blocks a signal while its own handler runs. A
+ *     fault INSIDE the SIGSEGV handler therefore finds SIGSEGV blocked,
+ *     finds nothing deliverable, and takes the terminate path. A handler
+ *     that faults kills the process, once.
+ *   - the frame is written with copy_to_user, so a fault whose cause was
+ *     the stack itself cannot be reported on that stack: the write
+ *     fails, the signal is dropped, and the process is terminated with
+ *     the fault it actually had.
+ *
+ * A handler that returns without fixing anything re-executes the
+ * faulting instruction and faults again, forever. That is also what
+ * Linux does, it is preemptible, and it is the program's own bug. */
 #define SIG_IS_CATCHABLE(sig) \
-    ((sig) > 0 && (sig) <= SIG_MAX && (sig) != SIGKILL && (sig) != SIGSEGV && \
-     (sig) != SIGSTOP)
+    ((sig) > 0 && (sig) <= SIG_MAX && (sig) != SIGKILL && (sig) != SIGSTOP)
+
+/* M99: the one sa_flag the KERNEL has to know about, because it decides
+ * how a handler is called rather than what it does. Everything else in
+ * <signal.h>'s SA_ list is user-space policy and stays there. */
+#define SA_SIGINFO 0x00000004
+
+/* ---- M89/M99: `siginfo_t`, and who fills one in ----------------------
+ *
+ * M89 declared this so that a program writing a three-argument handler
+ * would compile, and said plainly that nothing ever filled one in:
+ * "a handler installed with SA_SIGINFO is called through sa_handler
+ * with the signal number ... the pointer arguments are never passed."
+ *
+ * That was an accurate description of an unsafe arrangement. A handler
+ * WRITTEN as three arguments and CALLED with one reads %rsi and %rdx as
+ * pointers, and they contain whatever the last caller left there.
+ * toybox's `timeout` installs exactly that handler for SIGCHLD and its
+ * first statement is `si->si_status`; on this machine it faulted at
+ * address 5 - the offset of that field added to a junk %rsi - every
+ * time it ran. M99 found it while running CPython's regression suite,
+ * whose fixture uses `timeout` to bound a module.
+ *
+ * So the kernel fills one in now, and this struct moved here from
+ * <signal.h> because that makes its layout a kernel/user contract - the
+ * same reason `sig_frame_t` below is here and `struct termios` is in
+ * system_api at all. What each field actually holds on this machine:
+ *
+ *   si_signo   always the signal.
+ *   si_code    CLD_EXITED or CLD_KILLED for SIGCHLD; SI_KERNEL for a
+ *              fault the CPU raised; SI_USER for a signal `kill` sent.
+ *   si_pid     SIGCHLD only: which child ended.
+ *   si_status  SIGCHLD only: its exit code, or the signal that killed it.
+ *   si_addr    SIGSEGV and SIGBUS only: the address that faulted, which
+ *              is CR2 and is a fact this kernel has had all along and
+ *              has never been able to tell anybody.
+ *   si_errno, si_uid, si_band, si_value  zero, and zero is the answer
+ *              rather than a gap: there is one principal (M65), no
+ *              out-of-band data, and no realtime signals to carry a
+ *              value.
+ */
+typedef struct {
+    int si_signo;
+    int si_code;
+    int si_errno;
+    int si_pid;
+    unsigned int si_uid;
+    void *si_addr;
+    int si_status;
+    long si_band;
+    union {
+        int sival_int;
+        void *sival_ptr;
+    } si_value;
+} siginfo_t;
+
+/* si_code values a program tests for. */
+#define SI_USER    0
+#define SI_KERNEL  0x80
+#define CLD_EXITED 1
+#define CLD_KILLED 2
+#define CLD_DUMPED 3
+#define CLD_STOPPED 5
+#define CLD_CONTINUED 6
 
 /* M85: what happens to a process that has installed no handler.
  *

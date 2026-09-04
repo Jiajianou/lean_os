@@ -614,6 +614,35 @@ typedef struct task {
     uint64_t sig_restorer;
     uint32_t sig_pending;
     uint32_t sig_blocked;
+    /* ---- M99: SA_SIGINFO, and the facts a siginfo_t carries ----------
+     *
+     * `sig_siginfo` is one bit per signal: the handler for it was
+     * installed with SA_SIGINFO and therefore expects THREE arguments,
+     * not one. That distinction is a calling convention, and getting it
+     * wrong is not a missing feature - it is a program reading %rsi and
+     * %rdx as pointers when nothing put anything in them.
+     *
+     * It was wrong here. <signal.h> said "a handler installed with
+     * SA_SIGINFO is called through sa_handler with the signal number ...
+     * the pointer arguments are never passed", which is an accurate
+     * description of an unsafe thing to do: toybox's `timeout` installs
+     * exactly such a handler for SIGCHLD and its first line is
+     * `si->si_status`. It faulted at address 5 - offsetof(si_status)
+     * added to whatever happened to be in %rsi - every single time,
+     * which is how M99 found it.
+     *
+     * The three scratch fields are what the kernel knows at the moment
+     * it raises a signal and cannot reconstruct later: which child ended
+     * and how (SIGCHLD), and which address faulted (SIGSEGV/SIGBUS).
+     * One set rather than one per signal, and that is a documented
+     * imprecision rather than an oversight: signals here are bits, not a
+     * queue (see above), so two children ending before the parent runs
+     * are already one SIGCHLD, and this reports the second. Every Unix
+     * without real-time signals has the same property. */
+    uint32_t sig_siginfo;
+    int32_t  si_pid;    /* SIGCHLD: which child */
+    int32_t  si_status; /* SIGCHLD: its exit status, in wait()'s encoding */
+    uint64_t si_addr;   /* SIGSEGV/SIGBUS: the address that faulted */
     /* ---- M78: the mmap arena's bookkeeping ---------------------------
      *
      * One entry per live anonymous mapping, kept sorted by base address

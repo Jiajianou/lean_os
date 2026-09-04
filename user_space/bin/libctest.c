@@ -1043,10 +1043,12 @@ int main(void) {
      * reading back is the whole surface a ported program uses. */
     {
         struct sigaction sa, old;
+        /* M99: sa_handler and sa_sigaction are a union now, as they are
+         * on every real system - so the `sa.sa_sigaction = 0;` that
+         * stood here would clear the handler that was just assigned. */
         sa.sa_handler = usr_handler;
         sa.sa_flags = 0;
         sigemptyset(&sa.sa_mask);
-        sa.sa_sigaction = 0;
         if (sigaction(SIGUSR1, &sa, &old) != 0) {
             fail("sigaction could not install a handler");
         }

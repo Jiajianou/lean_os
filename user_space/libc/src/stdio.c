@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <unistd.h> /* M99: __lean_path_errno - see fopen */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -142,6 +143,24 @@ void __lean_stdio_flush_all(void) {
     }
 }
 
+/* ---- M99: fopen sets errno, and it did not ---------------------------
+ *
+ * Every one of the three failures below returned NULL and left errno at
+ * whatever the last syscall had put there - usually 0, because the last
+ * thing to succeed cleared nothing. `open()` in unistd.c has done this
+ * properly since M89; fopen never did, and the difference had never
+ * mattered because nothing here read errno after a failed fopen.
+ *
+ * CPython does, and it is not a diagnostic - it is control flow.
+ * Modules/getpath.py opens `pyvenv.cfg` in two candidate directories and
+ * catches FileNotFoundError to mean "not a virtual environment"; the C
+ * side turns errno into the exception class. With errno 0 the exception
+ * is a bare OSError, the `except (FileNotFoundError, PermissionError)`
+ * does not catch it, and the interpreter dies during startup with
+ * "Fatal Python error: error evaluating path" - before any of it runs.
+ * A missing file is the ORDINARY case there, which is what makes a
+ * wrong errno fatal rather than untidy.
+ */
 FILE *fopen(const char *path, const char *mode) {
     uint32_t flags = 0;
     for (const char *m = mode; *m; m++) {
@@ -151,10 +170,12 @@ FILE *fopen(const char *path, const char *mode) {
         if (*m == '+') flags |= OPEN_READ | OPEN_WRITE;
     }
     if (!flags) {
+        errno = EINVAL; /* a mode string with no r, w or a in it */
         return (FILE *)0;
     }
     long fd = sys_open(path, flags);
     if (fd < 0) {
+        errno = __lean_path_errno(path, (flags & OPEN_CREATE) != 0);
         return (FILE *)0;
     }
     for (int i = 0; i < FOPEN_MAX_FILES; i++) {
@@ -171,7 +192,11 @@ FILE *fopen(const char *path, const char *mode) {
             return &open_files[i];
         }
     }
+    /* The descriptor opened; there is no FILE to wrap it in. EMFILE is
+     * the right one - FOPEN_MAX streams is a limit of this library, and
+     * it is the limit <stdio.h> names. */
     sys_close((int)fd);
+    errno = EMFILE;
     return (FILE *)0;
 }
 

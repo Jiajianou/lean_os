@@ -114,6 +114,18 @@ struct linger {
 
 int socket(int domain, int type, int protocol);
 int bind(int fd, const struct sockaddr *addr, socklen_t len);
+/* M99: the ceiling a caller is told to expect from listen().
+ *
+ * 16, and it is the truth rather than a conventional 128: every socket
+ * on this machine comes out of one pool of TCP_MAX_TCBS control blocks
+ * (kernel/net/tcp.h), and a connection that arrives with no block free
+ * is refused with a reset. So the number is not a per-listener backlog
+ * at all - it is every connection this machine has, and a program that
+ * asks for more is asking for something no part of this system can
+ * hold. CPython's socketmodule.c names it with no #ifdef, which is how
+ * it came to be defined here. */
+#define SOMAXCONN 16
+
 int listen(int fd, int backlog);
 int accept(int fd, struct sockaddr *addr, socklen_t *len);
 int connect(int fd, const struct sockaddr *addr, socklen_t len);

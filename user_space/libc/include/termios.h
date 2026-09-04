@@ -68,6 +68,42 @@ extern "C" {
 
 typedef unsigned int speed_t;
 
+/* ---- M99: the baud rates, and the one of them that is true ----------
+ *
+ * The names, because CPython's Modules/termios.c lists them in a
+ * constant table with no #ifdef and a system without them does not
+ * degrade, it fails to compile. The values are the traditional ones.
+ *
+ * **Only B0 can be set on this machine**, and that is not a limitation
+ * bolted on - it is M89's decision, kept, with the one case it got
+ * wrong repaired. B0 on a real terminal means "no line", which is the
+ * closest true statement about a console with no UART behind it, and
+ * cfgetispeed has answered B0 since M89. What M89 got wrong is that
+ * cfsetispeed refused *every* speed including that one, so a program
+ * doing the ordinary save-and-restore - read the settings, change a
+ * flag, write them back - failed on the way back with EINVAL. Python's
+ * termios.tcsetattr does exactly that, which is how it was found. So
+ * setting the speed this line already has now succeeds, and setting any
+ * other still returns -1: a program that needs 9600 baud still finds
+ * out, and a program that never wanted a baud rate is no longer told
+ * about one. */
+#define B0     0
+#define B50    1
+#define B75    2
+#define B110   3
+#define B134   4
+#define B150   5
+#define B200   6
+#define B300   7
+#define B600   8
+#define B1200  9
+#define B1800  10
+#define B2400  11
+#define B4800  12
+#define B9600  13
+#define B19200 14
+#define B38400 15
+
 int tcgetattr(int fd, struct termios *out);
 int tcsetattr(int fd, int optional_actions, const struct termios *in);
 

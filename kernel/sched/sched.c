@@ -860,6 +860,10 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->sig_restorer = 0;
     t->sig_pending = 0;
     t->sig_blocked = 0;
+    t->sig_siginfo = 0; /* M99 - reset with the handlers it describes */
+    t->si_pid = 0;
+    t->si_status = 0;
+    t->si_addr = 0;
     /* M78: an empty arena. Not inherited for the same reason the heap
      * cursor above is not: this is a fresh address space, so every
      * address the parent had mapped means nothing here. */
@@ -1759,6 +1763,14 @@ void task_exit_with_code(int code) {
     if (t->parent_id >= 0) {
         task_t *parent = sched_task_by_id(t->parent_id);
         if (parent && parent != t) {
+            /* M99: which child, and how it went, recorded before the
+             * signal is raised so an SA_SIGINFO handler has something
+             * true to read. The status is wait()'s encoding, which is
+             * what si_status means and what a handler comparing against
+             * CLD_EXITED is about to do arithmetic on. */
+            parent->si_pid = (int32_t)t->id;
+            parent->si_status = t->exit_signal ? (int32_t)(t->exit_signal & 0x7F)
+                                               : (int32_t)(t->exit_code & 0xFF);
             sched_raise_signal(parent, SIGCHLD);
         }
     }
@@ -2058,6 +2070,13 @@ void sched_reap_slot(task_t *t) {
     t->sig_pending = 0;
     t->sig_blocked = 0;
     t->sig_restorer = 0;
+    /* M99: and the SA_SIGINFO bits with them - this slot is about to be
+     * reused, and nothing the task that just died installed belongs to
+     * whatever runs here next. */
+    t->sig_siginfo = 0;
+    t->si_pid = 0;
+    t->si_status = 0;
+    t->si_addr = 0;
     for (int i = 0; i <= SIG_MAX; i++) {
         t->sig_handler[i] = SIG_DFL_ADDR;
     }
@@ -2667,6 +2686,15 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
      * good: a signal was sent to the parent, and a child that had not
      * existed when it was sent has no business acting on it. */
     t->sig_pending = 0;
+    /* M99: the SA_SIGINFO bits ARE inherited, because the handlers they
+     * describe are - a fork keeps the parent's address space and its
+     * dispositions, so a handler that expected three arguments before
+     * the fork expects three after it. The scratch fields are not: they
+     * describe a signal raised on the parent. */
+    t->sig_siginfo = parent->sig_siginfo;
+    t->si_pid = 0;
+    t->si_status = 0;
+    t->si_addr = 0;
 
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         t->mmaps[i] = parent->mmaps[i];
