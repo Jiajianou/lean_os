@@ -147,9 +147,9 @@ Four instruments, and none of them subsumes another:
   fake timer and a fake CPU, so a tick is a function call and a
   fairness property can be checked at every task count, and it learns
   the order locks are taken in so an inversion is an error rather than
-  a comment (Q9). 231 tests.
+  a comment (Q9). 247 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 80 markers and five performance
+  image and grade the serial log against 109 markers and 31 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It
@@ -220,9 +220,13 @@ user_space/bin   the applications
 third_party/     source nobody here wrote, kept clearly separate
 tools/           build scripts, the QEMU harnesses, the font generator
 docs/            per-subsystem design notes
-milestones.md    the living record: what was built, in what order, and why
+milestones.md    the live record: where this is, what is open, what is next
+milestones-archive.md   every milestone entry M0-M110 and Q1-Q20, frozen
 ```
 
-**`milestones.md` is the real documentation.** Every milestone says what
-was added, what it cost, and - most usefully - what went wrong and what
-that taught. Start there.
+**`milestones.md` is the real documentation.** It carries the current
+state, every open box with the condition attached, and the order the work
+goes in. Start there. Behind it,
+[milestones-archive.md](milestones-archive.md) holds every milestone
+entry ever written - what was added, what it cost, and, most usefully,
+what went wrong and what that taught.
