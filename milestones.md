@@ -76,7 +76,7 @@ that has never happened.
 | **Head of the queue** | **M100** — M99 closed 2026-09-04 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
 | **Host unit tests** | 247/247 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 110 required, graded on every self-test boot |
+| **Boot markers** | 111 required, graded on every self-test boot |
 | **Performance budgets** | 31 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean at `b927826`; nothing half-landed anywhere |
@@ -734,6 +734,51 @@ doing when three hours of QEMU is cheaper than the argument, which is
 not today; and the honest note is that the extrapolation ignores
 CPython's own generated-code steps and its two links, so it is a floor.
 
+### M100 (first increment) — the first library of the stack `[~]`
+
+*Landed 2026-09-04.* M100's first bullet is nine libraries in dependency
+order, each unmodified, "every one a real test of M94 through M97".
+**zlib 1.3.1 is the first**, built by this project's own compiler with no
+edit to anything — the first port in this tree that needed no edit at
+all, `config.sub` included, because zlib does not have one — and graded
+by the `[m100]` boot marker running **zlib's own `example` program** on
+the machine: compress/uncompress, deflate/inflate whole and in chunks, a
+preset dictionary, and the gz file layer opening, seeking and reading a
+real file, plus a `minigzip` round trip through this filesystem.
+
+Nothing here chose what that program checks. It is the argument M99 made
+for CPython's regression suite, applied one layer down to a library.
+
+**It is a library port, and that is a different shape from every port
+before it.** bzip2, GNU hello, toybox and CPython are programs: they are
+built and they are run. zlib has to be *installed into the sysroot* -
+`libz.a`, `libz.so`, `zlib.h`, `zconf.h` - because libpng, freetype and
+the rest of the list are each one `-lz` away from it, and a header a
+build cannot find is indistinguishable from a library that does not
+exist.
+
+**Two facts about this target, found by the first library and recorded
+rather than fixed** — which is what M100 is *for*:
+
+- **`fseeko` is missing.** zlib's configure probes for it, does not find
+  it, defines `NO_FSEEKO` and carries on with a 32-bit offset in its
+  `gz*` layer. A libc gap with a name. Left standing on M63's rule: the
+  next library that actually needs it is the one that should pay for it,
+  and every gap this project has closed was named by a build rather than
+  by a checklist.
+- **`attempted static link of dynamic object`.** zlib builds a second
+  copy of its two test programs against `libz.so` with no `-pie`,
+  because **on every other ELF system the default link is dynamic and
+  here it is static.** Those two targets cannot link. Left standing
+  deliberately: a static default is the right one for a machine whose
+  kernel loads `ET_EXEC` directly, and this is precisely the kind of
+  assumption M100 exists to find and count rather than to absorb. The
+  day a port needs the other answer, it will say so with a link error
+  naming it.
+
+**Next in the order:** libpng and libjpeg, both of which link `-lz` and
+neither of which has been tried.
+
 ---
 
 *Below this line, the snapshot as written on 2026-09-04.*
@@ -777,9 +822,11 @@ write nothing and return successfully).
 
 ### M100 — the browser gap, measured `[ ]`
 
-- [ ] zlib, libpng, libjpeg, freetype, harfbuzz, expat, sqlite, ICU and a
+- [~] zlib, libpng, libjpeg, freetype, harfbuzz, expat, sqlite, ICU and a
       TLS library, each unmodified, in dependency order — every one a real
-      test of M94–M97
+      test of M94–M97. **zlib 1.3.1 landed 2026-09-04**, graded by the
+      `[m100]` marker running zlib's own test program here, and installed
+      into the sysroot so the next one can link against it. Eight to go.
 - [ ] TLS end to end over M66's TCP: the first `https://` this machine has
       had
 - [ ] `O_NONBLOCK` and `AF_UNIX`/`socketpair`, absorbed here because a

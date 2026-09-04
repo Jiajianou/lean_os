@@ -377,6 +377,11 @@ REQUIRED_MARKERS=(
   # "somebody else's project builds and runs" are two claims in the log
   # rather than one sentence that could lose half of itself.
   "[m94] somebody else's project: bzip2, built with"
+  # M100's first bullet: the library stack, in dependency order. This is
+  # the first entry that is a LIBRARY rather than a program, and the
+  # marker says so - what it grades is somebody else's test program
+  # passing here, not this project's opinion of somebody else's library.
+  "[m100] the first library of the stack:"
   "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m73] names, not numbers:"
   "[m74] the session remembers:"

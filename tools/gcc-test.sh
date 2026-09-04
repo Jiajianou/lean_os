@@ -73,7 +73,13 @@ fi
 # for GNU hello and builds bzip2 beside it; if they are there, they go on
 # the image too, and the [m94] self-test runs them. Not built here,
 # because they need the network - see that script.
-for prog in gnuhello bzip2; do
+# M100 adds zlibtest and minigzip to the list, and they are a different
+# kind of thing: `zlibtest` is zlib's OWN test program (its `example`),
+# which asserts its way through compress/uncompress, deflate/inflate,
+# a dictionary, and the gz* file layer, and returns non-zero when any of
+# them is wrong. Nothing here chose what it checks - which is the same
+# argument M99 made for CPython's regression suite, applied to a library.
+for prog in gnuhello bzip2 zlibtest minigzip; do
   src="build/thirdparty/$prog"
   if [ -f "$IMAGE" ] && [ -x "$src" ]; then
     build/leanfs-put "$IMAGE" "$src" "/bin/$prog" >/dev/null || exit 1

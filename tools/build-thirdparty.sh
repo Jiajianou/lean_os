@@ -44,6 +44,35 @@
 #                                       indistinguishable from not having
 #                                       it
 #
+# ---- M100: and the library stack a browser links against --------------
+#
+# M100's first bullet is nine libraries in dependency order, each one
+# unmodified and each one a real test of M94-M97. zlib is the first
+# because everything else in the list depends on it, and because it is
+# the smallest thing that is a *library* rather than a program: it has
+# to be installed into the sysroot so the next one can link against it,
+# which is a step none of the ports above ever needed.
+#
+# What zlib found on its way in, both of which are facts about this
+# target rather than bugs in zlib:
+#
+#   fseeko is missing. zlib's configure probes for it, does not find
+#   it, defines NO_FSEEKO and carries on with a 32-bit file offset in
+#   its gz* layer. Recorded rather than fixed here: it is a libc gap
+#   with a name, and the next library that wants it is the one that
+#   should pay for it - which is M63's rule and the reason every port
+#   in this file found what it found.
+#
+#   `attempted static link of dynamic object`. zlib builds a second
+#   copy of its test programs against libz.so, with no -pie on the
+#   link line, because on every other ELF system the default link is
+#   DYNAMIC. Here it is static (LINK_SPEC in gcc/config/lean_os.h), so
+#   that link fails. This is exactly the kind of assumption M100 exists
+#   to find and count, and it is left standing rather than papered over
+#   by changing the default: a static default is what a machine whose
+#   kernel loads ET_EXEC directly should have, and the day a port needs
+#   the other answer it will say so with a link error naming it.
+#
 # Usage: tools/build-thirdparty.sh
 set -uo pipefail
 
@@ -105,3 +134,44 @@ python3 "$ROOT/tools/toolchain-port/apply.py" --config-sub \
 cp hello-2.12.1/hello "$OUT/gnuhello"
 echo "build-thirdparty: GNU hello -> $OUT/gnuhello"
 echo "build-thirdparty: the configure log is $SRC/hello-2.12.1/config.log"
+
+# ---- M100, first library: zlib ----------------------------------------
+#
+# A hand-written configure (not autotools) and a plain Makefile. Cross
+# built by naming CHOST, which is zlib's own documented way and needs no
+# edit to anything - the first port in this file that needed no edit at
+# all, config.sub included, because zlib does not have one.
+#
+# `make libz.a libz.so.1.3.1 example minigzip` rather than `make`: the
+# default target also builds `examplesh` and `minigzipsh`, the same two
+# programs linked against libz.so without -pie, which cannot link here.
+# See the header.
+ZLIB_VER=1.3.1
+fetch https://zlib.net/fossils/zlib-$ZLIB_VER.tar.gz zlib-$ZLIB_VER.tar.gz
+rm -rf "zlib-$ZLIB_VER"
+tar xf "zlib-$ZLIB_VER.tar.gz"
+(
+  cd "zlib-$ZLIB_VER"
+  CHOST=x86_64-lean_os CC=x86_64-lean_os-gcc AR=x86_64-lean_os-ar \
+    RANLIB=x86_64-lean_os-ranlib ./configure --prefix=/usr \
+    > configure.log 2>&1 &&
+  make libz.a "libz.so.$ZLIB_VER" example minigzip > make.log 2>&1
+) || {
+  echo "build-thirdparty: zlib did not build:" >&2
+  tail -20 "$SRC/zlib-$ZLIB_VER/make.log" >&2
+  exit 1
+}
+cp "zlib-$ZLIB_VER/example"  "$OUT/zlibtest"
+cp "zlib-$ZLIB_VER/minigzip" "$OUT/minigzip"
+cp "zlib-$ZLIB_VER/libz.so.$ZLIB_VER" "$OUT/libz.so.1"
+
+# Into the sysroot, which is the part that makes this a LIBRARY port
+# rather than a third program: libpng, freetype and the rest are all
+# `-lz` away from here, and a header a build cannot find is
+# indistinguishable from a library that does not exist.
+SYSROOT="$ROOT/build/sysroot"
+cp "zlib-$ZLIB_VER/libz.a"           "$SYSROOT/usr/lib/libz.a"
+cp "zlib-$ZLIB_VER/libz.so.$ZLIB_VER" "$SYSROOT/usr/lib/libz.so"
+cp "zlib-$ZLIB_VER/zlib.h"           "$SYSROOT/usr/local/include/zlib.h"
+cp "zlib-$ZLIB_VER/zconf.h"          "$SYSROOT/usr/local/include/zconf.h"
+echo "build-thirdparty: zlib $ZLIB_VER -> $OUT/zlibtest, $OUT/minigzip, and libz in the sysroot"

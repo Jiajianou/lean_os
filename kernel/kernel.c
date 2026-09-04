@@ -9461,6 +9461,121 @@ static void boot_selftests_system(void) {
         }
     }
 
+    /* ---- M100 self-test: the first library of the stack ---------------
+     *
+     * M100's first bullet is nine libraries in dependency order, each
+     * one unmodified, "and every one is a real test of M94 through
+     * M97". zlib is the first, and this is what running it here proves
+     * that building it does not.
+     *
+     * `/bin/zlibtest` is zlib's own `example` program, not a fixture
+     * written here. It asserts its way through compress/uncompress,
+     * deflate/inflate in one piece and in small chunks, a preset
+     * dictionary, and the whole gz* file layer - which means it opens,
+     * writes, seeks, reads back and unlinks a real file on this
+     * filesystem - and it calls exit(1) with its own message the moment
+     * any of it is wrong. Nothing here chose what it checks, which is
+     * the argument M99 made for CPython's test suite applied to a
+     * library.
+     *
+     * `/bin/minigzip` is the same library through a program: it
+     * compresses a file and decompresses it again, so the round trip
+     * goes through this machine's open/read/write rather than through a
+     * buffer in one address space.
+     *
+     * Skipped when absent, for the reason [m94] and [m95] skip:
+     * tools/build-thirdparty.sh needs the compiler M94 built and the
+     * network, and is not part of `make`.
+     */
+    {
+        os_stat_t zst;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/zlibtest", (uint64_t)&zst, 0) != 0) {
+            klog_puts("[m100] /bin/zlibtest is not on this image - skipped. "
+                       "tools/build-thirdparty.sh builds zlib.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m100.sh";
+            const char *result = PATH_TMP_DIR "m100.out";
+            /* zlib's example writes its gz fixture into the working
+             * directory, so the script moves there first - a test that
+             * needs a writable cwd is a test of this filesystem too.
+             *
+             * minigzip round-trips a file through the library and back:
+             * -d is decompress, and `cmp` is toybox's, so the comparison
+             * is made by a program nobody here wrote either. */
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "cd " PATH_TMP_DIR "\n"
+                "/bin/zlibtest > " PATH_TMP_DIR "m100.out 2>&1\n"
+                "echo \"zlibtest exit $?\" >> " PATH_TMP_DIR "m100.out\n"
+                "echo 'the quick brown fox, and enough text after it that "
+                "deflate has something to find - the quick brown fox, and "
+                "enough text after it that deflate has something to find' "
+                "> " PATH_TMP_DIR "m100.txt\n"
+                "/bin/minigzip < " PATH_TMP_DIR "m100.txt > "
+                PATH_TMP_DIR "m100.gz\n"
+                "/bin/minigzip -d < " PATH_TMP_DIR "m100.gz > "
+                PATH_TMP_DIR "m100.back\n"
+                "toybox cmp " PATH_TMP_DIR "m100.txt " PATH_TMP_DIR "m100.back"
+                " && echo 'round trip identical' >> " PATH_TMP_DIR "m100.out\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M100 self-test: could not write the fixture");
+            }
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m100] zlibtest could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            static char produced[1024];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m100] zlib's own test program produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                /* zlib's example prints nothing on success except its
+                 * own progress lines, and exits 0. The exit status is
+                 * what it says about itself, so that is what is
+                 * checked - along with the round trip, which is this
+                 * project's own question rather than zlib's. */
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"zlibtest exit 0",
+                     "zlib's own test program, on this machine, saying it passed"},
+                    {"round trip identical",
+                     "a file compressed and decompressed through the filesystem"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m100] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            if (!all_ok) {
+                klog_puts("[m100] what zlib's own test program wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m100] ---- end\n");
+                panic("M100 self-test: the first library of the stack does not work here");
+            }
+            klog_puts("[m100] the first library of the stack: zlib 1.3.1, built "
+                       "unmodified by this project's own compiler, and its OWN "
+                       "test program passing on this machine - compress and "
+                       "uncompress, deflate and inflate in one piece and in "
+                       "chunks, a preset dictionary, and the gz file layer "
+                       "opening, seeking and reading a real file - plus a round "
+                       "trip through minigzip that this filesystem carried "
+                       "- self-test passed.\n\n");
+        }
+    }
+
     /* ---- M99 self-test: the loader past M95's ceiling ------------------
      *
      * [m95] proves a program can open *a* library. This one proves the
