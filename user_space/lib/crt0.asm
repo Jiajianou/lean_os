@@ -18,7 +18,8 @@
 ;     [rdi + 8]              argv[0..argc], NULL-terminated
 ;     [rdi + 8 + 8*(argc+1)] envp[0..envc], NULL-terminated
 ;
-; so this unpacks all three into __lean_start(argc, argv, envp), which
+; so this unpacks all three into __lean_start(argc, argv, envp, main),
+; which
 ; publishes `environ` and then calls main. envp is found the way every C
 ; runtime since V7 Unix has found it - one slot past argv's NULL - which
 ; is why the kernel puts it there rather than at an address this file
@@ -33,6 +34,7 @@
 bits 64
 
 extern __lean_start
+extern main
 extern sys_exit
 
 global _start
@@ -43,6 +45,22 @@ _start:
     lea rsi, [rdi + 8]          ; argv
     lea rdx, [rsi + rax*8 + 8]  ; envp = argv + argc + 1
     mov rdi, rax                ; argc
+    ; M99: main, as an ARGUMENT rather than as something libc goes and
+    ; finds. glibc's crt1.o does exactly this and the reason is the one
+    ; that bit here: a shared libc that CALLS main has an undefined
+    ; `main` in its dynamic symbol table, so every program linked
+    ; against it has to EXPORT main - and CPython builds with
+    ; -fvisibility=hidden, which is the ordinary arrangement for a
+    ; program whose API is marked, so its main is hidden and the link
+    ; fails with "hidden symbol `main' is referenced by DSO". The
+    ; program's entry point is the startup file's business; it is not
+    ; the C library's, and it never was.
+    ;
+    ; RIP-relative, which is right in both files: main is defined in the
+    ; same object this one is linked into, statically at 512 GiB or in a
+    ; PIE wherever the kernel put it, and either way it is a fixed
+    ; distance from here that needs no relocation at run time.
+    lea rcx, [rel main]
     call __lean_start
     mov edi, eax    ; main's return value -> sys_exit's argument
     call sys_exit

@@ -1,0 +1,25 @@
+/* tests/dynamic/manylib.c.in - M99's fixture for the loader's ceiling.
+ *
+ * A template, not a source file. tools/build-dynamic.sh substitutes @N@
+ * and builds twenty-four of these, each with its own SONAME and its own
+ * answer, so that "the loader opened twenty-four distinct objects" is a
+ * claim twenty-four different return values can falsify - rather than
+ * one object opened twenty-four times, which is what a de-duplicating
+ * loader would do and what the name-comparison in load_object() would
+ * make it do if the names were the same.
+ *
+ * Each calls into libc.so, for the reason libdyn.c gives: an object that
+ * was mapped but not relocated returns the right constant by accident
+ * and this one does not.
+ */
+#include <string.h>
+
+int many_answer_@N@(void);
+
+int many_answer_@N@(void) {
+    /* strlen of a string this object owns, times its own number, plus
+     * its own number - so a mixed-up dlsym across two of these gives a
+     * wrong answer rather than a plausible one. */
+    static const char tag[] = "manylib";
+    return (int)strlen(tag) * @N@ + @N@;
+}

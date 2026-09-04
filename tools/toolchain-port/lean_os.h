@@ -42,19 +42,96 @@
  *                   underneath. A program compiled with a red zone loses
  *                   128 bytes of live data the first time it takes a
  *                   signal.
- *   -fno-pic        there is no dynamic loader on this machine yet; a
- *                   GOT nothing fills in is a null dereference at the
- *                   first global. M95 is where this line changes.
+ *   -fno-pic        a GOT nothing fills in is a null dereference at the
+ *                   first global. True of a static program, and only of
+ *                   a static program - see below.
  *
  * Each is guarded so an explicit flag from the caller wins - a driver
  * that could not be overridden would be worse than one that needed
  * arguments.
+ *
+ * ---- M99: and the two of them that were only right for a static link -
+ *
+ * M94 wrote "there is no dynamic loader on this machine yet ... M95 is
+ * where this line changes", and M95 changed LINK_SPEC and STARTFILE_SPEC
+ * and did not change this one. The result was a driver that could link a
+ * PIE and could not compile the objects for it: `-pie` got
+ * -mcmodel=large and -fno-pic anyway, and the honest evidence that this
+ * was wrong is tools/build-dynamic.sh, every link in which reads
+ * `-pie -fPIE -mcmodel=small`. Three flags invented by hand, in the one
+ * file in this tree that exists to demonstrate the feature, against the
+ * rule this spec block opens with.
+ *
+ * It was affordable while the only dynamic programs here were fixtures
+ * this project wrote. It stopped being affordable at CPython, whose
+ * Makefile compiles ~450 translation units with $(CFLAGS) and links the
+ * interpreter with $(LINKFORSHARED): there is no place in it to put
+ * "and also -mcmodel=small, but only for the objects that end up in a
+ * shared object", because on every other target the question does not
+ * exist. The driver is the only place that knows, so the driver answers:
+ *
+ *   -shared  ->  -mcmodel=small -fPIC
+ *   -pie     ->  -mcmodel=small -fPIE
+ *   neither  ->  -mcmodel=large -fno-pic
+ *
+ * A shared object is mapped wherever there is room and reaches itself
+ * RIP-relative, which is the small model by construction; the large
+ * model's absolute 64-bit references would each need a relocation, which
+ * is the opposite of what position independence is for.
+ *
+ * The code model asks about the PIC flags as well as about -shared and
+ * -pie, and that is not redundancy - it is the case the first draft of
+ * this got wrong. A compile line has no -shared on it. CPython builds a
+ * module's objects with `$(CC) -c $(CCSHARED)`, which is -fPIC and
+ * nothing else, and links them with `$(CC) -shared` afterwards; keying
+ * only on the link flags gave those objects the large model, and a
+ * large-model object in a shared library is a page of "relocation
+ * truncated to fit" at the end of the compile rather than at the start.
+ * **Position-independent code on this target is small-model code**, and
+ * the flag that says which is the one on the line being read.
  */
+/* ---- M99: and which TLS model a shared object gets --------------------
+ *
+ * initial-exec, because general-dynamic needs `__tls_get_addr` and this
+ * system does not have one. That is a real limitation of
+ * user_space/ld/ld-lean.c, written down where it is: a general-dynamic
+ * reference asks the loader for the address of a thread-local at run
+ * time, through a per-module dynamic thread vector that exists so an
+ * object dlopen'ed after threads already started can still have
+ * `__thread` variables. Initial-exec resolves to a fixed offset from the
+ * thread pointer instead, computed when the static TLS block is laid
+ * out.
+ *
+ * This project already knew that and had already written the flag down
+ * twice - once in the Makefile's libc.so rule and once in
+ * tools/build-dynamic.sh - which is two copies of a fact about the
+ * target in two build scripts, and no copy at all in the place a
+ * stranger's build system would find it. CPython is that stranger: its
+ * Makefile has no -ftls-model anywhere, its shared libpython uses
+ * `__thread`, and the link ended with "undefined reference to
+ * `__tls_get_addr'" from a linker that was right.
+ *
+ * The cost is stated rather than hidden, and it is the one M95 already
+ * recorded: **an object dlopen'ed after startup cannot have
+ * thread-local variables.** Since M99 that is a dlopen that returns
+ * NULL with a message rather than a process that exits, which is the
+ * difference between an ImportError and a shell prompt. What would
+ * change it is a dynamic thread vector and a `__tls_get_addr` in the
+ * loader; the condition for building one is a program on this machine
+ * whose dlopen'ed object has a PT_TLS, and CPython's forty extension
+ * modules turn out not to be it.
+ *
+ * Not applied to -pie or -fPIE: an executable's own thread-locals are
+ * local-exec, which is what GCC already picks and is strictly better -
+ * one fewer indirection through the GOT. */
 #undef DRIVER_SELF_SPECS
-#define DRIVER_SELF_SPECS                                       \
-  "%{!mcmodel=*:-mcmodel=large} "                               \
-  "%{!mred-zone:-mno-red-zone} "                                \
-  "%{!fpic:%{!fPIC:%{!fpie:%{!fPIE:-fno-pic}}}}"
+#define DRIVER_SELF_SPECS                                               \
+  "%{!mcmodel=*:"                                                       \
+  "%{shared|pie|fpic|fPIC|fpie|fPIE:-mcmodel=small;:-mcmodel=large}} "  \
+  "%{!mred-zone:-mno-red-zone} "                                        \
+  "%{!ftls-model=*:%{shared|fpic|fPIC:-ftls-model=initial-exec}} "      \
+  "%{!fpic:%{!fPIC:%{!fpie:%{!fPIE:"                                    \
+  "%{shared:-fPIC;pie:-fPIE;:-fno-pic}}}}}"
 
 /* The preprocessor's view. `__lean_os__` is what the toybox port already
  * keys on (tools/build-toybox.sh passes -D__lean_os__ by hand today, and
@@ -132,9 +209,33 @@
 /* The library. -lc is enough because this libc is one archive; -lgcc is
  * added by the driver itself. Written with the group so that a program
  * whose object references something in libc that references libgcc links
- * without the caller having to order them. */
+ * without the caller having to order them.
+ *
+ * ---- M99: and the loader, on the line of every dynamic executable ----
+ *
+ * dlopen, dlsym, dlclose and dlerror are in ld-lean.so. They have to be:
+ * the loader is the only thing that knows what is loaded, and a copy of
+ * that knowledge in libc would be a second copy that goes out of date
+ * the first time either side changes. There is no libdl here holding
+ * stubs that trampoline into it, which is glibc's own arrangement since
+ * 2.34 and, unlike glibc's, was never anything else.
+ *
+ * So a program that calls dlopen has to name the loader at link time,
+ * and M95's answer - a path typed on the link line, in
+ * tools/build-dynamic.sh - is not an answer somebody else's build system
+ * can give. `-l:ld-lean.so` finds it in the sysroot beside libc, and
+ * `x86_64-lean_os-gcc -pie prog.c -o prog` links a program that can call
+ * dlopen with nothing supplied by hand. The loader registers itself in
+ * its own object table before it walks DT_NEEDED (see ld-lean.c), so a
+ * PIE that never calls dlopen carries one extra DT_NEEDED naming an
+ * object that is already mapped, and costs nothing.
+ *
+ * Only for -pie, not for -shared: a shared object that calls dlopen gets
+ * it resolved from the executable's scope, and adding it here would put
+ * the loader in the DT_NEEDED list of every C extension module on the
+ * disk. */
 #undef LIB_SPEC
-#define LIB_SPEC "-lc"
+#define LIB_SPEC "%{!shared:%{pie:-l:ld-lean.so}} -lc"
 
 /* ---- M97: which libgcc, and it is not always the archive -------------
  *
@@ -190,12 +291,34 @@
  *                  makes it a dynamic program at all.
  *   otherwise      static, at 512 GiB, under the script every lean_os
  *                  program has always linked with.
+ *
+ * ---- M99: and --no-relax on the static link ---------------------------
+ *
+ * The same fact as -mcmodel=large, one layer down. ld relaxes
+ * `mov foo@GOTPCREL(%rip), %reg` into `lea foo(%rip), %reg` when it can
+ * prove the target is within 2 GiB - which it never is here, because a
+ * static lean_os program is linked at 512 GiB and an unresolved weak
+ * symbol resolves to address zero. The linker does not fall back; it
+ * stops, with "failed to convert GOTPCREL relocation against
+ * 'pthread_cancel'; relink with --no-relax", naming the flag it wants.
+ *
+ * It arrived with M99's code-model change and is the honest consequence
+ * of it: GCC builds libgcc_eh.a - the unwinder every static C++ program
+ * links - with -fPIC, and -fPIC now means the small model on this
+ * target, correctly, because position-independent code here reaches
+ * itself RIP-relative. Those objects are fine at 512 GiB as long as
+ * their GOT references stay GOT references, and this is the line that
+ * says so. Nothing is lost but one indirection in code that was already
+ * going through the GOT.
+ *
+ * Only on the static branch: a PIE and a shared object are placed
+ * wherever there is room, relaxation reaches, and taking it is right.
  */
 #undef LINK_SPEC
 #define LINK_SPEC                                                       \
   "%{shared:-shared} "                                                  \
   "%{!shared:%{pie:-pie -dynamic-linker /lib/ld-lean.so}"               \
-  "%{!pie:-static -T lean_os.ld%s}}"
+  "%{!pie:-static --no-relax -T lean_os.ld%s}}"
 
 /* Where the driver looks. Empty rather than /usr/lib, because
  * --sysroot supplies the prefix and a second copy of the path here would

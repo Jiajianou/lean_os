@@ -696,7 +696,43 @@ $(LIBC_SO): $(LIBC_SO_SRCS) $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
 	$(LD) -shared -soname libc.so -o $@ $(UOBJ)/pic/*.o \
 	  $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
 
-sysroot: $(LIBC_A) $(LIBC_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
+# ---- M99: the dynamic linker, in the sysroot ---------------------------
+#
+# M95 built ld-lean.so inside tools/build-dynamic.sh with the
+# x86_64-lean_os compiler, which was right for M95 and is one milestone
+# out of date. Two things changed:
+#
+#   1. **dlopen lives in here, not in libc.** A dynamic program that
+#      calls dlopen has to have the loader on its link line, and M95's
+#      answer was to name a path by hand -
+#      `"$OUT/ld-lean.so"` on every link - which is precisely the flag
+#      invented by hand that M94 exists to abolish. `-lc` finds libc
+#      because libc is in the sysroot; the loader has to be there for the
+#      same reason, and then LIB_SPEC can add it and nobody passes
+#      anything.
+#   2. **The ordering is the same one libc.so already has.** The
+#      toolchain's own build regenerates the sysroot and links against
+#      it, so the sysroot cannot contain a file that only the toolchain
+#      can produce. Built with x86_64-elf-gcc, exactly like libc.so and
+#      for the argument written above it.
+#
+# -fvisibility=hidden and -e _start for the reasons ld-start.S gives at
+# length: everything in this object is its own, and the four dl* entry
+# points are the only things a program may resolve against it.
+LD_SO := $(BUILD)/ld-lean.so
+
+$(LD_SO): user_space/ld/ld-lean.c user_space/ld/ld-start.S
+	@mkdir -p $(UOBJ)/pic
+	$(CC) -c -o $(UOBJ)/pic/ld-start.o user_space/ld/ld-start.S \
+	  -Isystem_api/include
+	$(CC) -c -o $(UOBJ)/pic/ld-lean.o user_space/ld/ld-lean.c \
+	  -std=c11 -O2 -ffreestanding -fno-stack-protector -fPIC \
+	  -mcmodel=small -mno-red-zone -fvisibility=hidden \
+	  -Wall -Wextra -Isystem_api/include
+	$(LD) -shared -soname ld-lean.so -e _start --no-undefined \
+	  -o $@ $(UOBJ)/pic/ld-start.o $(UOBJ)/pic/ld-lean.o
+
+sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
 	@rm -rf $(SYSROOT)
 	@mkdir -p $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include $(SYSROOT)/usr/lib
 	@cp -R user_space/libc/include/. $(SYSROOT)/usr/local/include/
@@ -704,6 +740,9 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
 	@cp user_space/lib/syscall_wrappers.h $(SYSROOT)/usr/include/
 	@cp $(LIBC_A) $(SYSROOT)/usr/lib/libc.a
 	@cp $(LIBC_SO) $(SYSROOT)/usr/lib/libc.so
+	@# M99: the loader, so that -pie can find dlopen without a path
+	@# being typed. See $(LD_SO)'s rule above.
+	@cp $(LD_SO) $(SYSROOT)/usr/lib/ld-lean.so
 	@cp $(UOBJ)/crt0.o $(SYSROOT)/usr/lib/crt1.o
 	@# M97: and the PIE startup under the name the driver looks for.
 	@# crt0-pie.asm is crt0.asm with its two calls routed through the
@@ -734,6 +773,17 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
 	@# have to rediscover.
 	@rm -f $(SYSROOT)/usr/lib/libm.a
 	@$(AR) rcs $(SYSROOT)/usr/lib/libm.a 2>/dev/null || true
+	@# M99: libdl.a, empty, and for exactly the argument libm.a makes
+	@# above. dlopen, dlsym, dlclose and dlerror are in the dynamic
+	@# linker - they have to be, because the loader is the only thing
+	@# that knows what is loaded - and LIB_SPEC puts it on the line of
+	@# every -pie link. But `-ldl` is what a configure script from the
+	@# last thirty years writes down when it wants them, and glibc
+	@# answers that today with an empty stub for the same reason: the
+	@# truthful shape is "there is nothing in libdl that is not already
+	@# reachable", not "no such library".
+	@rm -f $(SYSROOT)/usr/lib/libdl.a
+	@$(AR) rcs $(SYSROOT)/usr/lib/libdl.a 2>/dev/null || true
 	@echo "sysroot: $(SYSROOT) - $$(ls $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include | grep -c . ) header entries, libc.a $$(du -h $(LIBC_A) | cut -f1)"
 
 # M93 (second attempt): the same list, for a script that preseeds an image

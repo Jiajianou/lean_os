@@ -6,6 +6,7 @@ as work lands — status, what it cost, what went wrong, and what that
 taught. The last part is the most valuable thing in it.
 
 *Snapshot written 2026-09-04, at commit `b927826`, after M99 landed.*
+*Entries added since are in* Landed since this snapshot, *above the snapshot body.*
 
 **The history moved.** Everything from M0 to M106 and Q1 to Q20 — every
 entry, every cost, every bug and what it taught — is now
@@ -72,10 +73,10 @@ that has never happened.
 |---|---|
 | **Milestones** | M0–M110 numbered: 101 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 5 not started (M100, M107–M110) |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
-| **Head of the queue** | M99's two open boxes, then M100 — see *The queue* |
+| **Head of the queue** | M99's last open box, then M100 — see *The queue* |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
 | **Host unit tests** | 247/247 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 109 required, graded on every self-test boot |
+| **Boot markers** | 110 required, graded on every self-test boot |
 | **Performance budgets** | 31 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean at `b927826`; nothing half-landed anywhere |
@@ -365,7 +366,7 @@ unbuilt is the drift *Deferred* exists to catch.
 
 | # | milestone | state | why here |
 |---|---|---|---|
-| **1** | **M99 (2nd)** — Python's two open boxes | 3 of 5 boxes done | extension modules as shared objects over M95, and `./configure && make` for CPython *on* the machine. Both are named in M99's own entry with the pieces they need; neither needs anything from any other row |
+| **1** | **M99 (2nd)** — Python's last open box | 4 of 5 boxes done | extension modules as shared objects landed 2026-09-04. What is left is `./configure && make` for CPython *on* the machine, and M98's rule applies to it: if the build does not fit, the number that says by how much is the deliverable |
 | **2** | **M100** — the browser gap, measured | not started | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
 | **3** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not |
 | **4** | **Q14** — the compositor, off the machine | not started | the move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded in milliseconds rather than only through a screendump |
@@ -422,7 +423,163 @@ debugged here and only their assumptions are debugged on metal"*.
 
 ## Landed since this snapshot
 
-*Nothing yet — this snapshot was written the day M99's third box closed.*
+### M99 (second increment) — a Python that loads its modules `[x]`
+
+*Landed 2026-09-04.* The fourth of M99's five boxes: **extension modules
+as shared objects, over M95's loader.** `python3` on this machine is now
+an 8 KB position-independent executable that `/lib/ld-lean.so` relocates
+against a 6.6 MB `libpython3.12.so.1.0`, with **58 C extension modules in
+`/usr/lib/python3.12/lib-dynload`, each `dlopen`ed by full path at the
+moment something imports it.** `import _socket` opens a file.
+
+**What it actually turned out to be about.** M99's own entry named the
+pieces — "four `case $ac_sys_system` arms in CPython's configure, `-pie`
+on the executable, and `MAX_OBJECTS` in `user_space/ld/ld-lean.c`" — and
+got the count right, one of the members wrong, and the *subject* wrong.
+It reads as work on the loader. Four of the six defects were in the two
+places this project tells other people's builds to look: the compiler's
+target description and the C library.
+
+**The compiler could link a PIE and could not compile the objects for
+one.** M94 wrote `DRIVER_SELF_SPECS` and said what it was for — *every
+flag invented by hand is a flag someone else's build system will not
+pass* — and M95 grew `LINK_SPEC` and `STARTFILE_SPEC` for dynamic
+linking and left that one alone. So `-pie` still got `-mcmodel=large`
+and `-fno-pic`. The evidence had been sitting in
+`tools/build-dynamic.sh` for four milestones: every link in the file
+that demonstrates this feature read `-pie -fPIE -mcmodel=small
+-nostdlib -nostartfiles Scrt1.o libc.so ld-lean.so crti.o crtn.o`. Nine
+things by hand, in the demonstration. CPython's Makefile has nowhere to
+put them, which is what turned a loader box into a target-description
+box.
+
+`gcc/config/lean_os.h` now answers four questions from the flags every
+other target answers them from:
+
+| given | code model | PIC | else |
+|---|---|---|---|
+| `-shared` | small | `-fPIC` | `-lc`, no crt1 |
+| `-pie` | small | `-fPIE` | `Scrt1.o`, `-l:ld-lean.so`, `-lc` |
+| `-fPIC`/`-fpic`/`-fPIE` on a `-c` line | small | as given | — |
+| neither | large | `-fno-pic` | `-static --no-relax -T lean_os.ld` |
+
+The third row is the one the first draft got wrong, and it is worth
+keeping: **a compile line has no `-shared` on it.** CPython builds a
+module's objects with `$(CC) -c $(CCSHARED)` — `-fPIC` and nothing more —
+and links them with `$(CC) -shared` afterwards. Keying the code model on
+the link flags alone gave those objects the large model, which is a page
+of relocation errors at the end of the compile rather than the start.
+Position-independent code on this target is small-model code, and the
+flag that says which is the one on the line being read.
+
+`-ftls-model=initial-exec` joined them for `-shared`, and that fact had
+been written down twice in this tree — once in the Makefile's `libc.so`
+rule and once in `build-dynamic.sh` — and not once where a stranger's
+build would find it. `libpython3.12.so` uses `__thread`; the link ended
+with "undefined reference to `__tls_get_addr`" from a linker that was
+right. The cost is the limitation M95 already recorded: **an object
+`dlopen`ed after startup cannot have thread-local variables.** Checked
+rather than assumed — none of the 58 extension modules has a `PT_TLS`,
+only `libpython` does, and it loads at startup.
+
+`--no-relax` on the static branch is the honest consequence of the
+code-model change and arrived as a regression in the C++ test. GCC
+builds `libgcc_eh.a` — the unwinder every static C++ program links —
+with `-fPIC`, which now means small model, correctly. ld then tries to
+relax `mov pthread_cancel@GOTPCREL(%rip)` into a `lea`, cannot reach
+from 512 GiB, and stops naming the flag it wants. Nothing is lost but
+one indirection in code already going through the GOT.
+
+**The C library knew the name of `main`.** `libc.so` carried an
+undefined `main`, because `__lean_start` calls it. Correct in a static
+`libc.a`; wrong in a shared `libc.so`, and this file is built both ways.
+CPython builds with `-fvisibility=hidden` and marks its public API — the
+ordinary arrangement — so its `main` is hidden, and the link ended with
+`hidden symbol 'main' in Programs/python.o is referenced by DSO`: an
+error about the C library, from a program that had done nothing unusual.
+`crt0.asm` and `crt0-pie.asm` pass `main` to `__lean_start` in `%rcx`
+now, which is what glibc's `crt1.o` does and for this exact reason. **A
+C library that knows the name of a program's entry point has an opinion
+it has no way to be right about.**
+
+**Three in the loader, two of them found by twelve lines of fixture.**
+
+- `MAX_OBJECTS` 16 → 96, and 16 was never a *tested* number: nothing
+  here had ever opened two. `dlclose`'s own note names the condition for
+  raising it — "a program that dlopens more than MAX_OBJECTS things over
+  its life" — and Python is that program.
+- **`open_lib()` never tried the name it was given.** It searched
+  `LD_LIBRARY_PATH`, `/lib`, `/usr/lib`, so an absolute path became
+  `/lib//usr/lib/python3.12/lib-dynload/_socket.cpython-312.so` and the
+  loader reported "cannot find" about a file it had been pointed
+  straight at. Every dynamic linker opens a name with a slash in it as a
+  pathname; leaving that out was a bug, not a simplification, and M95's
+  fixtures asked for `libdyn.so` so nothing noticed.
+- **`dlopen` could not fail.** Eighteen call sites of `dl_fail`, which
+  prints and `exit(127)`s. Right at startup — a program whose libraries
+  are missing has not begun and there is nobody to tell — and wrong for
+  `dlopen`, which POSIX says returns NULL. The consequence is not the
+  missing file, which a program can stat for itself: **an interpreter
+  `dlopen`s a candidate and expects to be told no**, and against a
+  loader that exits, one unresolved symbol in one extension module ends
+  the process with no traceback. The loader has its own
+  sixteen-instruction `_dl_setjmp`/`_dl_longjmp` now (`ld-start.S`),
+  because the C library that would have supplied one is a thing this
+  file loads.
+
+**And one in the kernel, which presented as the wrong thing entirely.**
+
+```
+[oom] out of physical memory filling 0x000000A0001CCF10 for task
+      python3 pid 0x00002C0A - killing it, not the machine.
+      1036379 frames free.
+```
+
+Four gigabytes free and an out-of-memory kill. `FILEMAP_MAX_PAGES` was
+**512** — 2 MiB of shared file mapping across the whole machine — under
+a comment from M91 that said "more than anything on this machine maps",
+which was true when it was written and stopped being true the moment
+this machine had a 30 MB shared library. `libpython3.12.so`'s read-only
+text is 1,217 pages on its own. 8192 now, 32 MiB, 192 KiB of kernel
+`.bss`. **The second time in this project that a fixed-size table's
+ceiling has presented as a memory failure somewhere else**, and the
+message was accurate about the mechanism and misleading about the cause.
+
+**The measurement, and it went the other way.** `python_fixture_ms`
+**4400 ms → 3640 ms**: the same fixture is *faster* dynamic than static,
+which is the opposite of what a loader is usually assumed to cost. The
+static interpreter demand-paged one 12 MB file whether or not a byte of
+it was reached; the dynamic one pages in the part of `libpython` it
+touches and the two extension modules it imports. The budget row is
+re-measured rather than left at the old number.
+
+**What grades it.** A new boot marker, `[m99ld]`, running
+`tests/dynamic/manydyn.c` against 24 generated shared objects: 24 open
+at once (past 16, inside 96 — the only interval where a test can tell
+the old ceiling from the new one), a symbol resolved out of each *after*
+all of them are open, every one named by a full path into `/lib/many`
+which is on no search list, and a path that is not there refused **as a
+path** rather than starting a search. It failed twice on the way in and
+found two of the three loader bugs. `tests/python/m99.py` gained the
+other half — `_socket.__file__` is a `.so` that exists, is not the
+interpreter, and lives beside `array`'s — and skips rather than fails
+under `LEANOS_PYTHON_LINK=static`, because that is a configuration the
+build script still offers.
+
+**Cost:** four rebuilds of GCC. Which is also the reason
+`tools/build-toolchain.sh`'s port stamp no longer hashes `lean_os.h`:
+the stamp exists because an *anchored edit* re-applies and leaves its
+old copy behind, and `lean_os.h` is **copied**, whole, over whatever was
+there. Hashing it made every change to the target description throw away
+binutils and GCC and rebuild both — the tightest loop in this port
+paying the price of the loosest one.
+
+**Still open in M99:** `./configure && make` for CPython *on the
+machine*. Unchanged, and see *Every open box*.
+
+---
+
+*Below this line, the snapshot as written on 2026-09-04.*
 
 **This is where new entries go**, in full and in the archive's own form: a
 status line, the boxes with their marks, what it cost, what went wrong and
@@ -450,17 +607,10 @@ that had been entered misaligned since M79 and an `fstat` that refused
 every descriptor which was not a file (which is why `print()` used to
 write nothing and return successfully).
 
-- [ ] **Extension modules as shared objects.** The interpreter is static,
-      and **a static program on this machine cannot `dlopen`** — `dlopen`
-      lives in `/lib/ld-lean.so` and a static executable never maps it
-      (M95). The standard library's C modules are linked in, which is
-      upstream's own supported configuration and needed no patch. What is
-      wanted is a *dynamic* python3. The pieces are named rather than
-      guessed: four `case $ac_sys_system` arms in CPython's configure (the
-      same shape as the two the port already adds), `-pie` on the
-      executable, and `MAX_OBJECTS` in `user_space/ld/ld-lean.c`, which is
-      **16** — chosen for a program that opens a library or two, against
-      an interpreter that opens one per module it imports.
+- [x] **Extension modules as shared objects.** Landed 2026-09-04 — see
+      *Landed since this snapshot*. 58 of them, `dlopen`ed by full path
+      out of `lib-dynload`, against a PIE interpreter and a shared
+      `libpython`. Six defects, four of them outside the loader.
 - [ ] **`./configure && make` for CPython on the machine.** Not attempted,
       and the reason is arithmetic rather than doubt: one C translation
       unit is 32 s here, CPython is ~450 of them plus a configure that

@@ -37,95 +37,73 @@ fi
 make -s sysroot >/dev/null || exit 1
 mkdir -p "$OUT"
 
-INC="-I$ROOT/system_api/include"
+SYSROOT="$ROOT/build/sysroot/usr/lib"
 
-# ---- the linker -------------------------------------------------------
+# ---- M99: what this script stopped doing ------------------------------
 #
-# -nostdlib because there is no library it could use - it is the program
-# that loads them. -fPIC and -shared because it is an ET_DYN and has to
-# relocate itself. -mcmodel=large comes from the driver (M94's
-# DRIVER_SELF_SPECS) and is wrong here: a shared object mapped in the
-# mmap arena is reached by RIP-relative addressing within itself, and the
-# large model's absolute 64-bit references would each need a relocation
-# this early code cannot apply. So it is overridden - which the specs
-# allow on purpose, and this is the one place in the tree that needs to.
-echo "build-dynamic: ld-lean.so"
-# -fvisibility=hidden for the same reason ld-start.S marks _start hidden:
-# every symbol in this object is its own, nothing here is interposable,
-# and a hidden symbol is reached without a GOT - which matters because
-# the GOT is not filled in until this object has relocated itself.
-"$CC" -shared -fPIC -mcmodel=small -nostdlib -nostartfiles \
-      -fvisibility=hidden \
-      -ffreestanding -fno-stack-protector -O2 -Wall -Wextra \
-      $INC \
-      -Wl,-e,_start -Wl,--no-undefined \
-      -Wl,-soname,ld-lean.so \
-      -o "$OUT/ld-lean.so" \
-      user_space/ld/ld-start.S user_space/ld/ld-lean.c || exit 1
-
-# ---- libc, as a shared object -----------------------------------------
+# M95 built ld-lean.so and libc.so here, with the cross compiler, and
+# linked every fixture with a line that read
 #
-# The same sources the static libc.a is built from. -fPIC and
-# -mcmodel=small for the reason above; the static library keeps the large
-# model because a static program is linked at 512 GiB and a shared object
-# is not.
+#     -pie -fPIE -mcmodel=small ... -nostdlib -nostartfiles \
+#     "$OUT/Scrt1.o" "$OUT/libc.so" "$OUT/ld-lean.so" crti.o crtn.o
 #
-# -ftls-model=initial-exec, and this is the one flag here that is a
-# design decision rather than a mechanical necessity. Without it GCC uses
-# the general-dynamic model for a shared object, which reaches every
-# `__thread` variable through a call to `__tls_get_addr` - a function the
-# dynamic linker would have to provide, over a per-module TLS list that
-# exists so that a dlopen'ed object can have thread-locals. Initial-exec
-# resolves to a fixed offset from the thread pointer instead, which the
-# linker computes when it lays out the static TLS block. The cost is
-# exactly the thing that is not supported and is written down: an object
-# dlopen'ed after startup cannot have thread-local variables.
+# Nine things supplied by hand, in the file whose subject is that this
+# machine can load code. Every one of them was a fact about the target
+# that the target description should have known, and M94's own rule says
+# what that costs: **every flag invented by hand is a flag someone else's
+# build system will not pass.** It was exactly the flags on this line
+# that CPython's Makefile had no place to put, which is how a box that
+# looked like "teach the loader to open more objects" turned out to be
+# about gcc/config/lean_os.h.
 #
-# The include order is the Makefile's and matters: <signal.h> and
-# <termios.h> exist in both header trees and the libc one reaches the
-# system_api one with #include_next, so libc's directory has to come
-# first. Getting it backwards gives "unknown type name 'speed_t'" from a
-# header that plainly declares it.
-echo "build-dynamic: libc.so"
-LIBC_SRCS=$(ls user_space/libc/src/*.c)
-LIB_SRCS="user_space/lib/syscall_wrappers.c user_space/lib/str.c \
-          user_space/lib/malloc.c user_space/lib/dns.c"
-"$CC" -shared -fPIC -mcmodel=small -nostdlib -nostartfiles \
-      -ffreestanding -fno-stack-protector -O2 \
-      -ftls-model=initial-exec \
-      -I$ROOT/user_space/lib -I$ROOT/user_space/libc/include $INC \
-      -Wl,-soname,libc.so \
-      -o "$OUT/libc.so" $LIBC_SRCS $LIB_SRCS \
-      build/user_obj/setjmp.o build/user_obj/symtab.o || exit 1
-
-# ---- the fixtures -----------------------------------------------------
+# So: the loader and libc are built by `make sysroot` now, with the same
+# x86_64-elf-gcc that has always built libc.so and for the ordering
+# reason written above that rule; the startup files were already there
+# since M97; and the links below are what somebody else's build system
+# would write.
 #
-# -pie, which the driver turns into ld's default script plus
-# `-dynamic-linker /lib/ld-lean.so` - see M94's LINK_SPEC. Nothing about
-# tests/dynamic/dyntest.c says it is dynamic; that is the point.
-# The PIE startup file. crt1.o's calls are PC-relative to a global,
-# which ld refuses in a PIE - see user_space/lib/crt0-pie.asm, which is
-# crt0.asm with those two calls routed through the PLT. Named Scrt1.o
-# because that is the name every toolchain uses for it.
-echo "build-dynamic: Scrt1.o"
-nasm -f elf64 -o "$OUT/Scrt1.o" user_space/lib/crt0-pie.asm || exit 1
+#     x86_64-lean_os-gcc -pie prog.c -o prog
+#     x86_64-lean_os-gcc -shared lib.c -o lib.so
+#
+# That is the whole interface, and this script is now a demonstration of
+# it rather than a workaround for its absence.
+echo "build-dynamic: ld-lean.so and libc.so come from the sysroot"
+cp "$SYSROOT/ld-lean.so" "$OUT/ld-lean.so" || exit 1
+cp "$SYSROOT/libc.so"    "$OUT/libc.so"    || exit 1
 
 echo "build-dynamic: dyntest"
-"$CC" -pie -fPIE -mcmodel=small -O2 -Wall \
-      -L"$OUT" -Wl,-rpath,/lib \
-      -o "$OUT/dyntest" tests/dynamic/dyntest.c \
-      "$OUT/libc.so" "$OUT/ld-lean.so" -nostdlib -nostartfiles \
-      "$OUT/Scrt1.o" \
-      "$ROOT/build/sysroot/usr/lib/crti.o" \
-      "$ROOT/build/sysroot/usr/lib/crtn.o" || exit 1
+"$CC" -pie -O2 -Wall -o "$OUT/dyntest" tests/dynamic/dyntest.c || exit 1
 
 # Built AFTER dyntest and never named on its link line - which is what
 # makes dlopen of it a real test rather than a spelling of a static
 # reference.
 echo "build-dynamic: libdyn.so"
-"$CC" -shared -fPIC -mcmodel=small -nostdlib -nostartfiles \
-      -O2 -Wall -o "$OUT/libdyn.so" tests/dynamic/libdyn.c \
-      -Wl,-soname,libdyn.so "$OUT/libc.so" || exit 1
+"$CC" -shared -O2 -Wall -o "$OUT/libdyn.so" tests/dynamic/libdyn.c \
+      -Wl,-soname,libdyn.so || exit 1
+
+# ---- M99: and the fixture for the thing that actually changed ---------
+#
+# dyntest opens one library. An interpreter opens one per module it
+# imports, and MAX_OBJECTS was sixteen - a number M95 chose for a machine
+# whose programs linked against libc and nothing else, and which
+# dlclose's own note names as the condition for revisiting it. Sixteen
+# was also never *tested*: nothing here had ever opened two.
+#
+# manydyn opens twenty-four, by name, one at a time, and calls a function
+# out of each that returns the object's own number. Twenty-four is past
+# the old ceiling and inside the new one, which is the only interval
+# where this test can tell the two apart. It also opens them by FULL
+# PATH, which is the second half of M99's loader work and the bug that
+# would otherwise have been found by CPython instead of by this.
+echo "build-dynamic: manylib0..23 and manydyn"
+MANY=""
+for i in $(seq 0 23); do
+  sed "s/@N@/$i/g" tests/dynamic/manylib.c.in > "$OUT/manylib$i.c" || exit 1
+  "$CC" -shared -O2 -Wall -o "$OUT/manylib$i.so" "$OUT/manylib$i.c" \
+        -Wl,-soname,"manylib$i.so" || exit 1
+  MANY="$MANY $OUT/manylib$i.so"
+done
+"$CC" -pie -O2 -Wall -o "$OUT/manydyn" tests/dynamic/manydyn.c || exit 1
 
 # ---- M97: the same boundary, in C++ -----------------------------------
 #
@@ -155,7 +133,7 @@ echo "build-dynamic: libdyn.so"
 CXX="$PREFIX/bin/x86_64-lean_os-g++"
 if [ -x "$CXX" ] && [ -f "$PREFIX/x86_64-lean_os/lib/libstdc++.so" ]; then
   echo "build-dynamic: libthrow.so"
-  "$CXX" -shared -fPIC -O1 -Wall -Itests/cxx \
+  "$CXX" -shared -O1 -Wall -Itests/cxx \
         -o "$OUT/libthrow.so" tests/cxx/throwlib.cpp \
         -Wl,-soname,libthrow.so || exit 1
 
@@ -168,10 +146,9 @@ if [ -x "$CXX" ] && [ -f "$PREFIX/x86_64-lean_os/lib/libstdc++.so" ]; then
   # objects for one type. That is the failure M97's bullet describes,
   # and it looks like a catch clause that simply does not match.
   echo "build-dynamic: throwmain"
-  "$CXX" -pie -fPIE -O1 -Wall -Itests/cxx \
-        -Wl,--export-dynamic -Wl,-rpath,/lib \
-        -o "$OUT/throwmain" tests/cxx/throwmain.cpp \
-        "$OUT/ld-lean.so" || exit 1
+  "$CXX" -pie -O1 -Wall -Itests/cxx \
+        -Wl,--export-dynamic \
+        -o "$OUT/throwmain" tests/cxx/throwmain.cpp || exit 1
 else
   echo "build-dynamic: no shared C++ runtime yet - the cross-object throw is skipped."
 fi
@@ -181,6 +158,22 @@ if [ -f "$IMAGE" ]; then
   build/leanfs-put "$IMAGE" "$OUT/libc.so"    /lib/libc.so    >/dev/null || exit 1
   build/leanfs-put "$IMAGE" "$OUT/libdyn.so"  /lib/libdyn.so  >/dev/null || exit 1
   build/leanfs-put "$IMAGE" "$OUT/dyntest"    /bin/dyntest    >/dev/null || exit 1
+  build/leanfs-put "$IMAGE" "$OUT/manydyn"    /bin/manydyn    >/dev/null || exit 1
+  # M99: opened by FULL PATH out of a directory that is not searched, so
+  # that finding them is the loader doing what it was told rather than
+  # what it guesses. /lib/many is that directory.
+  for i in $(seq 0 23); do
+    build/leanfs-put "$IMAGE" "$OUT/manylib$i.so" "/lib/many/manylib$i.so" \
+      >/dev/null || exit 1
+  done
+  # M99: libgcc_s.so.1 is a DT_NEEDED of every -pie link now - LIBGCC_SPEC
+  # asks for the shared unwinder whenever the link is dynamic, which it
+  # has since M97 and which used to be reached only through the C++
+  # fixtures. It is not conditional on them any more, because dyntest
+  # needs it too.
+  build/leanfs-put "$IMAGE" \
+    "$PREFIX/x86_64-lean_os/lib/libgcc_s.so.1" /lib/libgcc_s.so.1 \
+    >/dev/null || exit 1
   if [ -f "$OUT/throwmain" ]; then
     # libstdc++.so.6 by its SONAME, which is the name the loader will
     # look for - the .so.6.0.33 file and the bare .so symlink are a
@@ -191,16 +184,13 @@ if [ -f "$IMAGE" ]; then
     # .eh_frame tables. Two static copies is two registries, and a throw
     # that crosses between them finds no handler and aborts.
     build/leanfs-put "$IMAGE" \
-      "$PREFIX/x86_64-lean_os/lib/libgcc_s.so.1" /lib/libgcc_s.so.1 \
-      >/dev/null || exit 1
-    build/leanfs-put "$IMAGE" \
       "$PREFIX/x86_64-lean_os/lib/libstdc++.so.6.0.33" /lib/libstdc++.so.6 \
       >/dev/null || exit 1
     build/leanfs-put "$IMAGE" "$OUT/libthrow.so" /lib/libthrow.so >/dev/null || exit 1
     build/leanfs-put "$IMAGE" "$OUT/throwmain"   /bin/throwmain   >/dev/null || exit 1
     echo "build-dynamic: installed /lib/libstdc++.so.6, /lib/libthrow.so, /bin/throwmain"
   fi
-  echo "build-dynamic: installed /lib/ld-lean.so, /lib/libc.so, /lib/libdyn.so, /bin/dyntest"
+  echo "build-dynamic: installed /lib/ld-lean.so, /lib/libc.so, /lib/libdyn.so, /lib/libgcc_s.so.1, /bin/dyntest, /bin/manydyn and 24 objects under /lib/many"
 fi
 
 echo "build-dynamic: done - $OUT"

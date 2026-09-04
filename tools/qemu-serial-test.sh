@@ -368,6 +368,11 @@ REQUIRED_MARKERS=(
   # actually about.
   "[m95] code that is loaded, not linked:"
   "shared library pages held:"
+  # M99's second increment. A separate marker from [m95] because it is a
+  # separate claim: [m95] says a program can open a library, this says
+  # the loader can carry an interpreter - twenty-four objects at once,
+  # every one named by a path rather than found by a search.
+  "[m99ld] a loader an interpreter can use:"
   # M94's own bar, and a separate marker so that "the compiler works" and
   # "somebody else's project builds and runs" are two claims in the log
   # rather than one sentence that could lose half of itself.

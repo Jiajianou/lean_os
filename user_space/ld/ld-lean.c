@@ -128,8 +128,64 @@ static void dl_hex(u64 v) {
     dl_write(buf);
 }
 
+/* ---- M99: where a failure goes ---------------------------------------
+ *
+ * At startup, nowhere: a program whose libraries cannot be loaded has
+ * not begun, there is nobody to return an error to, and printing and
+ * exiting is the whole of the right answer.
+ *
+ * Inside dlopen it is a different question with a different answer, and
+ * conflating them was a bug rather than a simplification. POSIX says
+ * dlopen returns NULL and leaves a message for dlerror(); this loader
+ * called exit(127) from eighteen places, so `dlopen` of anything that
+ * did not work killed the caller. The fixture that found it is
+ * tests/dynamic/manydyn.c, whose last check is the one that fails - and
+ * the reason it matters is not the missing file, which a program can
+ * stat for itself. It is that **an interpreter dlopens a module and
+ * expects to be told no**: CPython turns a failed dlopen into an
+ * ImportError, and against a loader that exits, one unresolved symbol in
+ * one extension module ends the process with no traceback and no
+ * message.
+ *
+ * `dl_recovering` is set only for the span of a dlopen. The recovery
+ * point is _dl_setjmp's (see ld-start.S, which has this linker's own
+ * sixteen-instruction copy, because the C library that would have
+ * provided one is a thing this file loads).
+ */
+static u64 dl_recover[8];
+static int dl_recovering;
+static char dl_fail_text[256];
+
+static void dl_fail_record(const char *what, const char *detail) {
+    u64 n = 0;
+    for (const char *p = what; *p && n < sizeof(dl_fail_text) - 1; p++) {
+        dl_fail_text[n++] = *p;
+    }
+    if (detail) {
+        const char *sep = ": ";
+        for (const char *p = sep; *p && n < sizeof(dl_fail_text) - 1; p++) {
+            dl_fail_text[n++] = *p;
+        }
+        for (const char *p = detail; *p && n < sizeof(dl_fail_text) - 1; p++) {
+            dl_fail_text[n++] = *p;
+        }
+    }
+    dl_fail_text[n] = 0;
+}
+
+void _dl_longjmp(u64 *buf, int val) __attribute__((noreturn));
+int _dl_setjmp(u64 *buf);
+
 __attribute__((noreturn))
 static void dl_fail(const char *what, const char *detail) {
+    if (dl_recovering) {
+        /* Recorded rather than printed: the caller asked a question and
+         * is going to be told the answer through dlerror(). A loader
+         * that also wrote to stderr would make every probe an
+         * interpreter makes look like a fault in the log. */
+        dl_fail_record(what, detail);
+        _dl_longjmp(dl_recover, 1);
+    }
     dl_write("ld-lean: ");
     dl_write(what);
     if (detail) {
@@ -277,17 +333,30 @@ typedef struct {
 
 /* ---- the loaded objects ----------------------------------------------
  *
- * A flat array rather than a list, and a small one. This machine's
- * programs link against libc.so and nothing else; sixteen is more than
- * anything here will reach and makes the search that resolves a symbol a
- * loop somebody can read.
+ * A flat array rather than a list. The order matters and is the ELF
+ * search scope: the program is first, then its DT_NEEDED objects in the
+ * order they were named, breadth first. A symbol resolves to the FIRST
+ * definition found, which is what makes a program able to override a
+ * library's.
  *
- * The order matters and is the ELF search scope: the program is first,
- * then its DT_NEEDED objects in the order they were named, breadth
- * first. A symbol resolves to the FIRST definition found, which is what
- * makes a program able to override a library's.
+ * ---- M99: why this stopped being sixteen ------------------------------
+ *
+ * M95 wrote sixteen and said why: "this machine's programs link against
+ * libc.so and nothing else". That was true of every program that
+ * existed. It is not true of an interpreter, which opens one object per
+ * C extension module it imports - CPython's standard library has more
+ * than forty - and the condition dlclose's note names for revisiting
+ * this is exactly "a program that dlopens more than MAX_OBJECTS things
+ * over its life". Python is that program.
+ *
+ * Ninety-six, and the number is not a guess: 40-odd extension modules,
+ * the program, libc.so, the loader itself, and room for the same again.
+ * The cost is `96 * sizeof(Object)` of .bss - about 13 KiB - in a
+ * process that has already mapped an interpreter. The search stays a
+ * readable loop because it is still linear over objects that are
+ * actually loaded, not over the array.
  */
-#define MAX_OBJECTS 16
+#define MAX_OBJECTS 96
 
 typedef struct {
     u64 base;          /* where this object was loaded */
@@ -323,13 +392,21 @@ static int object_count;
  * Only two things are allocated: the names of objects being loaded and
  * nothing else. 4 KiB of .bss is more than enough and costs nothing that
  * is not already in the image. */
-static char name_arena[1024];
+/* M99: 8 KiB rather than 1 KiB, for the same reason MAX_OBJECTS grew.
+ * A CPython extension module's file name is its own - the arena holds
+ * "_multiprocessing.cpython-312-x86_64-lean_os.so" and its forty
+ * siblings, which is sixty bytes each rather than the nine "libc.so"
+ * costs. */
+static char name_arena[8192];
 static u64 name_used;
 
 static const char *dl_strdup(const char *s) {
     u64 n = dl_strlen(s) + 1;
     if (name_used + n > sizeof(name_arena)) {
-        dl_fail("too many shared objects", s);
+        /* Named for what actually ran out: "too many shared objects" is
+         * MAX_OBJECTS's message and sent the first reader of this to the
+         * wrong constant. */
+        dl_fail("no room left in the shared-object name arena for", s);
     }
     char *p = name_arena + name_used;
     dl_memcpy(p, s, n);
@@ -597,9 +674,43 @@ static Object *load_object(const char *soname);
 static const char *ld_library_path;
 
 /* Finds the file: LD_LIBRARY_PATH first, then /lib, then /usr/lib.
- * Returns an open descriptor, or -1. */
+ * Returns an open descriptor, or -1.
+ *
+ * ---- M99: a name with a slash in it is a pathname --------------------
+ *
+ * This is what every dynamic linker does and what POSIX says dlopen
+ * means, and leaving it out was a real bug rather than a simplification.
+ * M95's programs asked for "libdyn.so" and got /lib/libdyn.so, so
+ * nothing here ever noticed. CPython's dynload_shlib.c hands dlopen the
+ * *full path* of the module it found on sys.path -
+ * /usr/lib/python3.12/lib-dynload/_socket.cpython-312-x86_64-lean_os.so
+ * - and this function turned that into "/lib//usr/lib/python3.12/..."
+ * and then reported "cannot find shared object", naming a file that was
+ * sitting on the disk at the name it had been given.
+ *
+ * A search path is for a SONAME. A pathname is already the answer, and
+ * searching for it is how a loader ends up looking everywhere except
+ * where it was told.
+ */
 static int open_lib(const char *soname, char *path, u64 cap) {
     static const char *const defaults[] = {"/lib/", "/usr/lib/", 0};
+
+    for (const char *q = soname; *q; q++) {
+        if (*q != '/') {
+            continue;
+        }
+        u64 n = 0;
+        while (soname[n] && n < cap - 1) {
+            path[n] = soname[n];
+            n++;
+        }
+        path[n] = 0;
+        if (soname[n]) {
+            return -1; /* a path too long to open is not a path we have */
+        }
+        i64 fd = sys(SYS_open, (long)path, 1 /* OPEN_READ */, 0);
+        return fd >= 0 ? (int)fd : -1;
+    }
 
     for (const char *p = ld_library_path; p && *p;) {
         u64 n = 0;
@@ -662,7 +773,12 @@ static Object *load_object(const char *soname) {
         dl_fail("too many shared objects", soname);
     }
 
-    char path[128];
+    /* M99: 256 rather than 128. A SONAME is short; the full pathname of
+     * a CPython extension module under /usr/lib/python3.12/lib-dynload
+     * is 76 characters before anyone nests a virtual environment inside
+     * it, and a truncated path is a "cannot find" for a file that is
+     * there. */
+    char path[256];
     int fd = open_lib(soname, path, sizeof(path));
     if (fd < 0) {
         dl_fail("cannot find shared object", soname);
@@ -1064,9 +1180,54 @@ void *dlopen(const char *file, int flags) {
         dl_error_msg = "too many shared objects loaded";
         return 0;
     }
-    int before = object_count;
+
+    /* M99: volatile because they are read after a _dl_setjmp that can
+     * return twice, which is the one place C says a local may not be in
+     * a register. */
+    volatile int before = object_count;
+    volatile u64 name_mark = name_used;
+
+    /* dlopen nests: an object's init_array runs inside this call and may
+     * dlopen something of its own. There is one recovery buffer, so the
+     * inner call saves the outer one and puts it back - otherwise the
+     * inner longjmp lands in the outer call's handler, which would
+     * abandon an object that had loaded perfectly well, and the inner
+     * call's own `return 0` would never happen. */
+    volatile int was_recovering = dl_recovering;
+    volatile u64 saved_recover[8];
+    for (int i = 0; i < 8; i++) {
+        saved_recover[i] = dl_recover[i];
+    }
+
+    if (_dl_setjmp(dl_recover)) {
+        /* Arrived from dl_fail somewhere below. Everything this call
+         * added is discarded: the object slots, and the names bump-
+         * allocated after the mark, which belong to exactly those slots
+         * and nothing older.
+         *
+         * The MAPPINGS are not discarded, and that is the same deliberate
+         * leak dlclose's note describes rather than a new one - a
+         * half-relocated object's pages are address space nobody can
+         * reach any more, and unmapping them here would mean unmapping
+         * on a path where the reason for failing might have been that
+         * the object was not what it claimed to be. */
+        dl_recovering = was_recovering;
+        for (int i = 0; i < 8; i++) {
+            dl_recover[i] = saved_recover[i];
+        }
+        object_count = before;
+        name_used = name_mark;
+        dl_error_msg = dl_fail_text;
+        return 0;
+    }
+    dl_recovering = 1;
+
     Object *o = load_object(file);
     if (!o) {
+        dl_recovering = was_recovering;
+        for (int i = 0; i < 8; i++) {
+            dl_recover[i] = saved_recover[i];
+        }
         dl_error_msg = "cannot load shared object";
         return 0;
     }
@@ -1091,6 +1252,10 @@ void *dlopen(const char *file, int flags) {
                 objects[k].init_array[j]();
             }
         }
+    }
+    dl_recovering = was_recovering;
+    for (int i = 0; i < 8; i++) {
+        dl_recover[i] = saved_recover[i];
     }
     return o;
 }

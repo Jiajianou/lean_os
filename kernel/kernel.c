@@ -9146,6 +9146,8 @@ static void boot_selftests_system(void) {
                     {"m99: exceptions and comprehensions ok", "a raise caught by type, and a generator"},
                     {"m99: a .py module imported from the disk ok",
                      "import read a .py file off this filesystem"},
+                    {"m99: C extension modules dlopen'ed from lib-dynload ok",
+                     "a C extension module opened from a .so on the disk"},
                     {"m99: fstat answers for a pipe, a console and a bad fd ok",
                      "fstat on a descriptor that is not a file, and an errno "
                      "that is not zero"},
@@ -9456,6 +9458,100 @@ static void boot_selftests_system(void) {
                        "GOT, a library dlopen'ed by name that did not exist when the "
                        "program was compiled, and a second copy of the program paying "
                        "for none of the library again - self-test passed.\n\n");
+        }
+    }
+
+    /* ---- M99 self-test: the loader past M95's ceiling ------------------
+     *
+     * [m95] proves a program can open *a* library. This one proves the
+     * two things M99 had to change about that, and it exists because
+     * neither was ever exercised by a fixture that opened one:
+     *
+     *   1. **Twenty-four objects at once.** MAX_OBJECTS was sixteen,
+     *      chosen in M95 for programs that "link against libc.so and
+     *      nothing else", and never tested above one. An interpreter
+     *      opens one per C extension module it imports. Twenty-four is
+     *      past the old ceiling and inside the new one, which is the
+     *      only interval where a test can tell them apart.
+     *   2. **A pathname is not a search key.** open_lib() searched
+     *      LD_LIBRARY_PATH, /lib and /usr/lib and never tried the name
+     *      it had been handed, so an absolute path became
+     *      "/lib//lib/many/manylib0.so" and the loader said "cannot
+     *      find" about a file it had been pointed straight at. Every
+     *      dlopen here is a full path into /lib/many, which is on no
+     *      search list, so finding them is the loader obeying rather
+     *      than guessing.
+     *
+     * The last check in the fixture is the opposite one - a path that is
+     * not there must fail *as a path* rather than fall back to a search
+     * - because a loader that treats a pathname as a hint would pass
+     * every check above and load the wrong file the first time two
+     * directories held the same name.
+     *
+     * Skipped when the fixture is absent, for the reason [m95] gives.
+     */
+    {
+        os_stat_t md;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/manydyn", (uint64_t)&md, 0) != 0) {
+            klog_puts("[m99ld] /bin/manydyn is not on this image - skipped. "
+                       "tools/build-dynamic.sh builds it.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m99ld.sh";
+            const char *result = PATH_TMP_DIR "m99ld.out";
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "/bin/manydyn > " PATH_TMP_DIR "m99ld.out\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M99 loader self-test: could not write the fixture");
+            }
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m99ld] manydyn could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            static char produced[512];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m99ld] manydyn produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"24 objects open at once",
+                     "twenty-four shared objects loaded at the same time"},
+                    {"answered for itself",
+                     "a symbol out of each one, resolved after all of them were open"},
+                    {"a pathname that is not there fails as one",
+                     "a missing path failing as a path rather than starting a search"},
+                    {"every check passed", "every check in the fixture"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m99ld] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            if (!all_ok) {
+                klog_puts("[m99ld] what manydyn wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m99ld] ---- end\n");
+                panic("M99 loader self-test: the loader cannot carry an interpreter");
+            }
+            klog_puts("[m99ld] a loader an interpreter can use: twenty-four shared "
+                       "objects open at once, every one opened by a full path out of "
+                       "a directory nothing searches, a symbol resolved from each "
+                       "after all of them were loaded, and a path that is not there "
+                       "refused as a path - self-test passed.\n\n");
         }
     }
 

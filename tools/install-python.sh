@@ -37,6 +37,26 @@ PY_MAJMIN=3.12
 # case-insensitive by default, so this is the ordinary case on this
 # machine and `$PYBUILD/python` - which is what this script looked for
 # first - is a directory full of object files.
+# ---- M99: asking the Makefile rather than reading it -------------------
+#
+# BUILDEXE below is a literal and a `sed` gets it. INSTSONAME and
+# SHAREDMODS are not: they are written in make's own language -
+# `libpython$(LDVERSION).so.1.0`, and LDVERSION is `$(VERSION)$(ABIFLAGS)`
+# - so reading the line gives a string with variables still in it, and
+# expanding them by hand is a small recursive interpreter that is wrong
+# the day upstream adds a level.
+#
+# make already has one. This asks it, through a two-line makefile that
+# includes CPython's own, which is the only way to get an answer that is
+# right by construction rather than right today.
+pymake_var() {
+  ( cd "$PYBUILD" 2>/dev/null || exit 0
+    printf 'include Makefile\n__leanos_print:\n\t@echo $(%s)\n' "$1" \
+      > .leanos-print.mk
+    make -s -f .leanos-print.mk __leanos_print 2>/dev/null
+    rm -f .leanos-print.mk )
+}
+
 BUILDEXE=$(sed -n 's/^BUILDEXE=[[:space:]]*//p' "$PYBUILD/Makefile" 2>/dev/null)
 PYBIN="$PYBUILD/python$BUILDEXE"
 
@@ -56,6 +76,25 @@ cp "$PYBIN" "$STAGE/python3" || exit 1
 "$CROSS_STRIP" "$STAGE/python3" || exit 1
 "$PUT" "$IMAGE" "$STAGE/python3" /bin/python3 >/dev/null || exit 1
 "$PUT" -s "$IMAGE" /bin/python3 /bin/python >/dev/null 2>&1 || true
+
+# ---- M99's second increment: the interpreter library -------------------
+#
+# A shared build puts the interpreter in libpython3.12.so.1.0 and leaves
+# python3 as a PIE that loads it. Installed under the SONAME the linker
+# recorded rather than under the unversioned name - the .so symlink is a
+# build-time convenience for `-lpython3.12` and means nothing at run
+# time, which is the same reasoning M97 wrote down for libstdc++.so.6.
+#
+# /lib, because that is the first place ld-lean.so looks. Absent in a
+# static build, which is not an error - LEANOS_PYTHON_LINK=static is a
+# supported configuration and produces no library at all.
+SONAME=$(pymake_var INSTSONAME)
+if [ -n "$SONAME" ] && [ -f "$PYBUILD/$SONAME" ]; then
+  cp "$PYBUILD/$SONAME" "$STAGE/$SONAME" || exit 1
+  "$CROSS_STRIP" "$STAGE/$SONAME" || exit 1
+  "$PUT" "$IMAGE" "$STAGE/$SONAME" "/lib/$SONAME" >/dev/null || exit 1
+  echo "install-python: /lib/$SONAME ($(du -h "$STAGE/$SONAME" | cut -f1))"
+fi
 
 # The standard library. Everything CPython's own `make install` would
 # put in $prefix/lib/python3.12, minus the parts that are meaningless
@@ -84,14 +123,34 @@ SYSCONFIGDATA=$(find "$PYBUILD/build" -name '_sysconfigdata_*.py' | head -1)
 cp "$SYSCONFIGDATA" "$LIBSTAGE/" || exit 1
 
 # And lib-dynload, which is where a Python with SHARED extension modules
-# keeps them. This one has none - they are linked in (see
-# tools/build-python.sh) - but getpath looks for the directory and prints
-# "Could not find platform dependent libraries <exec_prefix>" on every
-# single run when it is missing. An empty directory is the truthful
-# answer: the place exists and there is nothing in it, which is exactly
-# the state of affairs. M99's extension-module bullet is what puts
-# something in it.
+# keeps them.
+#
+# M99's first increment left this directory EMPTY and said why: a static
+# interpreter cannot dlopen, so its C modules were linked in, and the
+# directory existed only because getpath prints "Could not find platform
+# dependent libraries <exec_prefix>" on every run when it is missing. The
+# comment there ended "M99's extension-module bullet is what puts
+# something in it." This is that bullet: fifty-eight shared objects, each
+# opened by full path at the moment something imports it.
+#
+# Copied from $(SHAREDMODS) as configure computed it rather than from a
+# glob, so that a module which failed to build is a missing file this
+# script names rather than a module that quietly is not there. The test
+# modules are the one exception, taken by glob because CPython's own
+# regression suite imports them and nothing else does.
 mkdir -p "$LIBSTAGE/lib-dynload"
+SHAREDMODS=$(pymake_var SHAREDMODS)
+NMODS=0
+for m in $SHAREDMODS; do
+  if [ ! -f "$PYBUILD/$m" ]; then
+    echo "install-python: $m was configured but not built" >&2
+    exit 1
+  fi
+  cp "$PYBUILD/$m" "$LIBSTAGE/lib-dynload/" || exit 1
+  "$CROSS_STRIP" "$LIBSTAGE/lib-dynload/$(basename "$m")" || exit 1
+  NMODS=$((NMODS + 1))
+done
+[ "$NMODS" = 0 ] || echo "install-python: $NMODS extension modules as shared objects in lib-dynload"
 
 "$PUT" -r "$IMAGE" "$LIBSTAGE" /usr/lib/python$PY_MAJMIN >/dev/null || exit 1
 

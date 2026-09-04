@@ -43,13 +43,38 @@
 
 /* How many file pages may be shared at once, across the whole machine.
  *
- * 512 pages is 2 MiB of shared file mapping, which is more than anything
- * on this machine maps and small enough that the table is a linear scan
- * rather than a hash. A mapping that cannot get a slot fails at the
- * fault, which kills the process that asked - see filemap_get's return
- * and sched_fault_fill's handling of it. That is a real ceiling and it
- * is reported rather than worked around. */
-#define FILEMAP_MAX_PAGES 512
+ * A mapping that cannot get a slot fails at the fault, which kills the
+ * process that asked - see filemap_get's return and sched_fault_fill's
+ * handling of it. That is a real ceiling and it is reported rather than
+ * worked around.
+ *
+ * ---- M99: why it is no longer 512 -------------------------------------
+ *
+ * M91 wrote 512 and justified it: "2 MiB of shared file mapping, which
+ * is more than anything on this machine maps". That was true, and it
+ * stopped being true the moment this machine had a 30 MB shared library.
+ * CPython's dynamic build is libpython3.12.so with a 5 MB read-only text
+ * segment - 1,217 pages, mapped MAP_SHARED so that two interpreters cost
+ * one copy - plus libc.so, libgcc_s.so.1 and whichever of fifty-eight
+ * extension modules an import reaches.
+ *
+ * What that looked like was **an OOM kill on a machine with four
+ * gigabytes free**: "[oom] out of physical memory filling 0x...
+ * for task python3 ... 1036379 frames free." The message was accurate
+ * about the mechanism and misleading about the cause - the frame
+ * allocator had a million frames and this table had no slot - and it is
+ * the second time in this project that a fixed-size table's ceiling has
+ * presented as a memory failure somewhere else.
+ *
+ * 8192 pages, 32 MiB, 192 KiB of kernel .bss. Sized to what is actually
+ * mapped rather than doubled until it worked: an interpreter's resident
+ * shared text is the largest single claim on this table and there is
+ * room for several of it. The table is still a linear scan and that is
+ * still a measurement rather than an assumption - see M99's entry for
+ * the number, taken because raising a linearly-scanned table by sixteen
+ * times without measuring it is the mistake this one is a correction
+ * for. */
+#define FILEMAP_MAX_PAGES 8192
 
 /* The frame holding page `index` of `handle`, read in from the file if
  * this is the first mapper. Takes a reference. Returns 0 if the table is

@@ -93,11 +93,27 @@ fetch "https://ftp.gnu.org/gnu/gcc/gcc-$GCC_VER/gcc-$GCC_VER.tar.xz" \
 # not existing.
 #
 # The fix is to make an unpacked tree belong to the port that edited it.
-# The stamp is a hash of every file in tools/toolchain-port/, so any
-# change to an edit throws the tree away and unpacks a clean one - which
-# costs a re-extract and a rebuild, and is the price of the edits being
-# readable rather than a patch series.
-PORT_STAMP=$(cat "$ROOT"/tools/toolchain-port/* | shasum -a 256 | cut -d' ' -f1)
+# The stamp is a hash of the ANCHORED EDITS, so any change to one throws
+# the tree away and unpacks a clean one - which costs a re-extract and a
+# rebuild, and is the price of the edits being readable rather than a
+# patch series.
+#
+# ---- M99: and why lean_os.h is not in the stamp ------------------------
+#
+# It was, and that was wrong in a way that cost an hour before anybody
+# looked at it. The hazard above is specific to an *anchored edit*: it
+# re-applies when it cannot find its own replacement text, so changing
+# one leaves the old copy in place. gcc/config/lean_os.h is not edited -
+# apply.py copies the whole file over whatever was there, which is
+# idempotent by construction and has no old copy to leave behind.
+#
+# Hashing it anyway made every change to the target description - the
+# specs, the startup files, what -pthread means, the file this port
+# exists to install - throw away binutils and gcc and rebuild both from
+# source. That is the tightest loop in this port paying the price of the
+# loosest one, and it is why M99's driver work was cheaper to reason
+# about than to try.
+PORT_STAMP=$(cat "$ROOT"/tools/toolchain-port/apply.py | shasum -a 256 | cut -d' ' -f1)
 for d in "binutils-$BINUTILS_VER" "gcc-$GCC_VER"; do
   if [ -d "$d" ] && [ "$(cat "$d/.lean_os-port-stamp" 2>/dev/null)" != "$PORT_STAMP" ]; then
     echo "build-toolchain: the target port changed - unpacking a clean $d"

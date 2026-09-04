@@ -41,8 +41,6 @@ extern void __lean_stdio_flush_all(void);
 static int environ_is_ours;
 static int environ_cap; /* slots in the owned array, terminator included */
 
-extern int main(int argc, char **argv, char **envp);
-
 /* crt0 calls this instead of main. The whole reason it exists is the
  * assignment below: `environ` has to be live before main's first line,
  * and a program that declares `int main(void)` cannot be the one to set
@@ -240,7 +238,30 @@ void setprogname(const char *name) {
 /* M96: thread-local storage, before anything that might use it. */
 extern void *__lean_tls_setup(void);
 
-int __lean_start(int argc, char **argv, char **envp) {
+/* ---- M99: main arrives as an argument -------------------------------
+ *
+ * It used to be `extern int main(...)` above and a direct call below,
+ * which is correct in a static libc.a and wrong in a shared libc.so -
+ * and this file is built both ways. In the shared one that declaration
+ * becomes an UNDEFINED `main` in libc.so's dynamic symbol table, so
+ * every program linked against it has to export its own main for the
+ * library to reach back into.
+ *
+ * CPython is the program that showed why that is not acceptable. It
+ * builds with -fvisibility=hidden and marks its public API explicitly,
+ * which is the ordinary arrangement for a shared library with an API;
+ * `main` is not part of that API, so it is hidden, and the link ends
+ * with "hidden symbol `main' in Programs/python.o is referenced by
+ * DSO" - an error about the C library, from a program that has done
+ * nothing unusual.
+ *
+ * glibc's crt1.o passes main to __libc_start_main for exactly this
+ * reason. The entry point belongs to the startup file, which is linked
+ * INTO the program and can see whatever it likes; a C library that
+ * knows the name of a program's entry point is a library that has an
+ * opinion it has no way to be right about. */
+int __lean_start(int argc, char **argv, char **envp,
+                 int (*mainfn)(int, char **, char **)) {
     /* FIRST, before environ, before the program name, before any
      * constructor: `errno` is a `__thread` variable now, and every line
      * below this one might set it. A constructor that ran before the
@@ -265,7 +286,7 @@ int __lean_start(int argc, char **argv, char **envp) {
             (*p)(argc, argv, envp);
         }
     }
-    int rc = main(argc, argv, envp);
+    int rc = mainfn(argc, argv, envp);
     /* Falling off the end of main is a call to exit(), not to _exit() -
      * C says so, and it is why a program that returns from main still
      * gets its atexit handlers run. crt0 calls sys_exit with what this

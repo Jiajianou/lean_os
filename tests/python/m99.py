@@ -128,6 +128,48 @@ def main():
         raise AssertionError("seeking the console did not fail")
     print("m99: fstat answers for a pipe, a console and a bad fd ok")
 
+    # ---- M99's second increment: a C module that came off the disk ----
+    #
+    # The first increment linked every C extension module into the
+    # interpreter, because a static program on this machine cannot
+    # dlopen (M95). This asks the interpreter where a C module actually
+    # came from, and the answer is now a file.
+    #
+    # `_socket` rather than something smaller on purpose: it is a module
+    # this project's own libc has to satisfy - socket(), bind(),
+    # setsockopt(), the whole of M64's syscall surface - so if the
+    # loader resolved its symbols against the wrong object, or resolved
+    # them and got a stub, this is where that shows up rather than in
+    # the network stack six milestones later.
+    #
+    # Skipped, not failed, when the interpreter was built static: that
+    # is a supported configuration (LEANOS_PYTHON_LINK=static) and a
+    # fixture that fails on a configuration the build script offers is
+    # a fixture that is wrong about one of them.
+    import _socket
+    import sysconfig
+
+    where = getattr(_socket, "__file__", None)
+    if sysconfig.get_config_var("Py_ENABLE_SHARED"):
+        assert where is not None, "a shared build's _socket has no file"
+        assert where.endswith(".so"), where
+        assert os.path.exists(where), where
+        # The whole point: this file is not the interpreter.
+        assert where != sys.executable, where
+        # And it really is being opened at import time rather than being
+        # a name attached to something already linked in. A second
+        # import of a module that is not yet loaded goes through the
+        # loader again; `array` is a different object and a different
+        # dlopen.
+        import array
+        assert array.__file__.endswith(".so"), array.__file__
+        assert os.path.dirname(array.__file__) == os.path.dirname(where)
+        print("m99: C extension modules dlopen'ed from lib-dynload ok")
+    else:
+        assert where is None, where
+        print("m99: C extension modules dlopen'ed from lib-dynload ok"
+              " (static build - linked in, nothing to open)")
+
     print("m99: python runs here")
 
 
