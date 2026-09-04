@@ -237,6 +237,14 @@ else
 
   # ---- Stage 3: real clicks on real pixels ----------------------------
   if [ "$TIER" = "full" ]; then
+    # M99: the shell against a 33,000-line configure script, twice, and
+    # the two runs must produce the same files. Here rather than in
+    # --fast because it is two full configure runs and several minutes;
+    # it is a differential test like the six in --fast, but its fixture
+    # is somebody else's program rather than one written here, which is
+    # what let it find eleven bugs the fixtures could not.
+    run_stage "somebody else's configure, under this shell" \
+      ./tools/configure-test.sh
     run_stage "interactive suite (all tests)" ./tools/qemu-input-test.sh
     # Q17: the one guarantee the filesystem makes, tested by taking the
     # power away rather than by reading the code that provides it.

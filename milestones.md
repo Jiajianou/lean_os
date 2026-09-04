@@ -577,6 +577,93 @@ paying the price of the loosest one.
 **Still open in M99:** `./configure && make` for CPython *on the
 machine*. Unchanged, and see *Every open box*.
 
+### M99 (third increment) — a shell somebody else's configure can run `[x]`
+
+*Landed 2026-09-04.* M99's last box asks for `./configure && make` for
+CPython **on the machine**, and says the deliverable is the number that
+says by how much it does not fit. **The number was not the answer, and
+finding that out cost one command:**
+
+```
+$ build/sh-host .../Python-3.12.7/configure --help
+sh: syntax error near `&&` or `||` with nothing after it
+```
+
+Not a wall-clock problem. Not a memory problem. This project's shell
+could not run somebody else's configure script at all, and would not
+have got as far as being slow.
+
+**The instrument that made that a one-command question is M86's**, and
+this is the second time it has paid for itself: `tools/sh-test.sh`
+compiles `user_space/shell/sh.c` *for the host*, so the shell the
+machine runs can be pointed at a 33,000-line script without booting
+anything. A loop that would have been a QEMU boot each time was a
+second.
+
+**Eleven bugs, and not one of them was reachable from anything in this
+tree.** That is the finding, more than the list:
+
+| what | why nothing here had found it |
+|---|---|
+| **A one-token peek with a side effect.** `parse_command` peeked ahead to ask "is this a function definition?" and rolled `lx.i` back if not. Lexing a newline *collects here-document bodies*; rolling back a position does not roll back a lex. So `cat <<EOF \|\| fail=1` read the body **and then executed it** | needs a here-document, an operator, and a last command that is a bare assignment. Line 32,443 of configure |
+| **Pending here-documents were a stack.** `cat <<A; cat <<B` filled B from A's body | nothing here had ever written two on one line |
+| **`"..."` ended at the first `"` inside a `` `...` ``.** So `"#define `printf "%s\n" "HAVE_$h" \| $as_tr_cpp` 1"` became several words | needs a substitution inside a quoted string whose body is itself quoted |
+| **Here-document bodies expanded `$` and not `` ` ``** | half of "as if in double quotes", and the half no fixture used |
+| **No `$(( ))`** | autoconf's own suitability probe is `test $(( 1 + 1 )) = 2 \|\| exit 1` |
+| **No `exec`** | `exec 5>>config.log` is how configure opens the log every later `>&5` writes to |
+| **No `trap`** | configure cleans up and gets its exit status right with `trap '...' 0` |
+| **`set -e` was a positional parameter.** `set -e` *replaced the arguments* with the word `-e` | `Modules/makesetup` is `#! /bin/sh` then `set -e`, and its own parser then saw `-e` and printed its usage |
+| **No `[...]` in patterns.** Every bracket expression fell through to the default arm, silently | `case $val in [\\/$]* )` — how configure asks "is this an absolute path" |
+| **`${*-word}` asked the variable table**, where there is no entry called `*` | `for i in ${*-Setup}` is makesetup's main loop |
+| **`"$@"` with no parameters was one empty field**, and `${1+"$@"}` collapsed to one; a backslash-newline inside `"..."` was two characters rather than a continuation | POSIX corners that only a generated script writes |
+
+**What it took to find them, in order, is the point.** Each fix moved
+the failure forward and the next one was somewhere new: a parse error →
+`invalid host type: $@` → every `sizeof` reported as **0** → `makesetup
+failed` → a Makefile with no modules in it. The third one is this
+project's own recorded lesson arriving from a different direction — *a
+configure probe that fails to compile writes a number, not an error* -
+and the fifth is worse than a failure, because configure exited 0.
+
+**The result, and it is a differential one.** `./configure` for CPython
+3.12.7 now runs to completion under this project's shell: **753 checks,
+and `pyconfig.h`, `Modules/config.c` and the `Makefile` byte-identical
+with the same configure run by the host's own `/bin/sh`.** 56,084 bytes
+of answers about a system, and the two shells agree on all of them.
+
+`tools/configure-test.sh` is that comparison, run twice on demand, in
+`--full`. It is a seventh differential test and the first whose
+*fixture* is somebody else's program:
+
+> sh-test grades fixtures somebody here wrote against an oracle nobody
+> here wrote, which is the right shape and has a ceiling — a fixture can
+> only test a construct somebody thought of, and the whole difficulty
+> with a shell is the constructs nobody thinks of.
+
+Three fixture files grew to cover the bugs by hand as well (`05`, `07`,
+`08`, and new `09-arithmetic.sh`, `10-exec-and-trap.sh`,
+`11-set-options.sh`), because the configure test is minutes and the
+fixtures are a second, and because a bug that is only caught by a
+33,000-line script is a bug nobody will bisect.
+
+**What was implemented rather than accepted.** `set -e` is real
+errexit, suspended inside `if`/`while`/`until` conditions, the left of
+`&&`/`||`, and under `!` — which is the part everyone gets wrong and the
+part the host oracle decides. `set -u`, `-f`, `-x` and `-o` came with
+it; an option this shell does not have is an **error**, not a no-op,
+which is M65's rule. `trap` runs its action between commands and says so
+in a comment, because arbitrary script inside a signal handler is not
+something any shell attempts.
+
+**One process note, recorded rather than hidden:** one run of the
+default tier's boot stage failed and the two runs either side of it -
+one standalone at 110/110, one full tier - passed. Nothing was changed
+between them. It is not reproduced and it is not explained.
+
+**Still open in M99:** `./configure && make` for CPython **on the
+machine**. The shell is no longer the answer to why not; what is left is
+the wall clock, and that is a measurement this increment did not take.
+
 ---
 
 *Below this line, the snapshot as written on 2026-09-04.*
@@ -611,12 +698,15 @@ write nothing and return successfully).
       *Landed since this snapshot*. 58 of them, `dlopen`ed by full path
       out of `lib-dynload`, against a PIE interpreter and a shared
       `libpython`. Six defects, four of them outside the loader.
-- [ ] **`./configure && make` for CPython on the machine.** Not attempted,
-      and the reason is arithmetic rather than doubt: one C translation
-      unit is 32 s here, CPython is ~450 of them plus a configure that
-      runs several hundred compile-and-link probes. M98's rule applies —
-      if the build does not fit, *the number that says by how much* is the
-      deliverable.
+- [~] **`./configure && make` for CPython on the machine.** The
+      *configure* half is answered off the machine and the answer was not
+      arithmetic: this project's shell could not run it. It can now —
+      753 checks, byte-identical with the host shell's run, graded by
+      `tools/configure-test.sh` (M99's third increment, above). What is
+      left is the wall clock, on the machine, and M98's rule still
+      applies to it: one C translation unit is 32 s here and CPython is
+      ~450 of them, so if the build does not fit, *the number that says
+      by how much* is the deliverable.
 
 ### M100 — the browser gap, measured `[ ]`
 

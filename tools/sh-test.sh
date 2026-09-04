@@ -48,8 +48,28 @@ fi
 # -DSH_HOST_BUILD is not needed and deliberately not used: the point is
 # that this is the same translation unit the machine gets, with no
 # conditional compilation deciding which shell is being tested.
+# ---- M99: why the include path is one file rather than one directory ---
+#
+# It was -Isystem_api/include, which is there for exactly one header -
+# paths.h, where PATH_DEFAULT and PATH_HOME are written down. That
+# directory also holds this project's own <signal.h>, which is the
+# KERNEL/USER ABI header and defines `siginfo_t` as the machine's own
+# struct. Ahead of the host's headers on the search path, it shadows the
+# host's <signal.h>, and the first thing that noticed was the compile of
+# a shell that had just learned `trap`:
+#
+#   error: typedef redefinition with different types
+#          ('struct __siginfo' vs 'struct siginfo_t')
+#
+# So the directory becomes the one file it was ever for. sh.c is
+# unchanged and still has no idea which machine it is being built for,
+# which is the property this whole script exists to preserve.
+SHINC="$BUILD/sh-host-include"
+mkdir -p "$SHINC"
+cp system_api/include/paths.h "$SHINC/paths.h"
+
 if ! $HOSTCC -std=c11 -O1 -Wall -Wextra -Werror \
-     -Isystem_api/include -o "$OURS" user_space/shell/sh.c 2>"$BUILD/sh-host.log"; then
+     -I"$SHINC" -o "$OURS" user_space/shell/sh.c 2>"$BUILD/sh-host.log"; then
   echo "sh-test: the shell does not compile for the host:" >&2
   cat "$BUILD/sh-host.log" >&2
   exit 1

@@ -61,6 +61,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>   /* M99: trap */
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -83,6 +84,44 @@ extern char **environ;
 
 static int last_status;      /* $? */
 static int interactive;      /* a prompt, not a script - see syntax() */
+/* M99: set by the `exec` builtin when it is given no command, read by
+ * exec_simple, which is the only place that could act on it - see both. */
+static int exec_keep_redirs;
+
+/* ---- M99: the `set -e` family -----------------------------------------
+ *
+ * `set` here took every argument as a positional parameter, so `set -e`
+ * did not turn on errexit - it replaced the script's arguments with the
+ * single word `-e`. CPython's Modules/makesetup is `#! /bin/sh` and then
+ * `set -e` on line 2, so by line 58 its own argument parser was looking
+ * at `-e`, did not recognise it, and printed its usage. configure had by
+ * then run 753 checks and written pyconfig.h, and stopped on the last
+ * line of the last step with "makesetup failed".
+ *
+ * Implemented rather than accepted-and-ignored, which is the M65 rule:
+ * a `set -e` that returns 0 and changes nothing is worse than an error,
+ * because the script it is in was written on the understanding that a
+ * failed command stops it.
+ *
+ *   -e  errexit. Suspended inside a condition - see errexit_suspend.
+ *   -u  nounset: expanding an unset parameter is an error.
+ *   -f  noglob.
+ *   -x  xtrace: write each command to stderr, `+ ` first.
+ *   -o  by name, plus `posix`, which is a no-op here because POSIX
+ *       behaviour is the only behaviour this shell has - there is no
+ *       second mode for it to switch out of.
+ *
+ * An option this shell does not have is an ERROR rather than a no-op,
+ * for the same reason as above. */
+static int opt_errexit;
+static int opt_nounset;
+static int opt_noglob;
+static int opt_xtrace;
+/* Non-zero while a command's status is being *asked about* rather than
+ * relied on: an `if`/`while`/`until` condition, the left of `&&`/`||`,
+ * anything under `!`. POSIX exempts every one of them from errexit, and
+ * a shell that did not would exit on the first `if test -f x`. */
+static int errexit_suspend;
 static int shell_pid;        /* $$ */
 
 /* ---- flow control ------------------------------------------------------
@@ -438,6 +477,86 @@ static void set_positional(char **argv, int n) {
  * A pattern that matches nothing is left alone, which is what sh does
  * and what keeps `echo *.c` in an empty directory printing something.
  */
+/* ---- M99: [...] and backslash --------------------------------------
+ *
+ * This matcher understood `*` and `?` and nothing else, which is enough
+ * for `*.c` and is not a POSIX pattern. The two missing pieces are the
+ * bracket expression and the backslash escape, and both are used by
+ * `case` far more than by filename globbing - `case` is where a shell
+ * script does its branching, and a generated script brackets everything.
+ *
+ * What found it: CPython's configure asking whether a directory name is
+ * absolute -
+ *
+ *     case $ac_val in
+ *       [\\/$]* | ?:[\\/]* ) continue;;
+ *     esac
+ *     as_fn_error $? "expected an absolute directory name for --$ac_var"
+ *
+ * - and the answer here was always "no", so configure stopped on
+ * `--bindir: ${exec_prefix}/bin`, a value it had produced itself and
+ * was about to expand.
+ *
+ * Returns a pointer past the closing `]`, or 0 if this is not a bracket
+ * expression at all - an unmatched `[` is a literal `[`, which is what
+ * POSIX says and what keeps `echo [` printing a bracket. */
+static const char *bracket_end(const char *pat) {
+    const char *p = pat + 1;
+    if (*p == '!' || *p == '^') {
+        p++;
+    }
+    if (*p == ']') {
+        p++; /* a `]` first is the character, not the end */
+    }
+    while (*p && *p != ']') {
+        if (*p == '\\' && p[1]) {
+            p++;
+        }
+        p++;
+    }
+    return *p == ']' ? p + 1 : 0;
+}
+
+/* Does `c` belong to the bracket expression starting at `pat`? */
+static int bracket_has(const char *pat, char c) {
+    const char *p = pat + 1;
+    int negate = 0;
+    if (*p == '!' || *p == '^') {
+        negate = 1;
+        p++;
+    }
+    int found = 0;
+    int first = 1;
+    while (*p && (*p != ']' || first)) {
+        first = 0;
+        char lo = *p;
+        if (lo == '\\' && p[1]) {
+            p++;
+            lo = *p;
+        }
+        p++;
+        /* A `-` that is not last is a range. `[a-]` and `[-a]` are the
+         * two places a literal hyphen is written, and both fall out of
+         * checking that something follows it. */
+        if (*p == '-' && p[1] && p[1] != ']') {
+            p++;
+            char hi = *p;
+            if (hi == '\\' && p[1]) {
+                p++;
+                hi = *p;
+            }
+            p++;
+            if ((unsigned char)c >= (unsigned char)lo &&
+                (unsigned char)c <= (unsigned char)hi) {
+                found = 1;
+            }
+        } else if (c == lo) {
+            found = 1;
+        }
+    }
+    return negate ? !found : found;
+}
+
 static int glob_match(const char *pat, const char *name) {
     while (*pat && *name) {
         if (*pat == '*') {
@@ -451,6 +570,29 @@ static int glob_match(const char *pat, const char *name) {
                 }
             }
             return 0;
+        }
+        if (*pat == '[') {
+            const char *end = bracket_end(pat);
+            if (end) {
+                if (!bracket_has(pat, *name)) {
+                    return 0;
+                }
+                pat = end;
+                name++;
+                continue;
+            }
+            /* Unmatched `[` - a literal one, handled below. */
+        }
+        if (*pat == '\\' && pat[1]) {
+            /* A backslash quotes the next character, so `\*` is a star
+             * and not "anything". */
+            pat++;
+            if (*pat != *name) {
+                return 0;
+            }
+            pat++;
+            name++;
+            continue;
         }
         if (*pat != '?' && *pat != *name) {
             return 0;
@@ -467,6 +609,13 @@ static int glob_match(const char *pat, const char *name) {
 static int has_glob(const char *s) {
     for (const char *p = s; *p; p++) {
         if (*p == '*' || *p == '?') {
+            return 1;
+        }
+        /* A `[` counts only when it closes - see bracket_end. Otherwise
+         * `echo [` would become a pathname expansion that matches
+         * nothing and prints itself, which is the same answer by a
+         * longer road, and `find . -name x[` would not be. */
+        if (*p == '[' && bracket_end(p)) {
             return 1;
         }
     }
@@ -792,6 +941,65 @@ static Tok lex_next(void) {
                     lx.i += 2;
                     continue;
                 }
+                /* ---- M99: a substitution inside a quoted string -----
+                 *
+                 * `"..."` ends at the next `"` - except inside a
+                 * `` `...` `` or a `$(...)`, where the quoting starts
+                 * again from scratch. POSIX says so, and autoconf
+                 * depends on it in the line that defines every
+                 * HAVE_ macro a configure run produces:
+                 *
+                 *   printf "%s\n" "#define `printf "%s\n" \
+                 *     "HAVE_$ac_header" | $as_tr_cpp` 1" >>confdefs.h
+                 *
+                 * Reading that as "quoted string, then bare text" ends
+                 * the string at the `"` in `"%s\n"` and the rest of the
+                 * line becomes several words. What it produced here was
+                 * not an error: confdefs.h got a line reading
+                 * `#define ` + the whole unexecuted pipeline, and the
+                 * first compile after it failed with "macro name must
+                 * be an identifier" - 6,357 lines into config.log,
+                 * about a header check that had said `yes`.
+                 *
+                 * Copied across whole, with depth counting for `$(`,
+                 * so it reaches expansion time intact and is parsed
+                 * there by a lexer that starts fresh - which is exactly
+                 * what "the quoting starts again" means. */
+                if (lx.src[lx.i] == '`') {
+                    sb_putc(&w, lx.src[lx.i++]);
+                    while (lx.src[lx.i] && lx.src[lx.i] != '`') {
+                        if (lx.src[lx.i] == '\\' && lx.src[lx.i + 1]) {
+                            sb_putc(&w, lx.src[lx.i]);
+                            lx.i++;
+                        }
+                        sb_putc(&w, lx.src[lx.i++]);
+                    }
+                    if (lx.src[lx.i]) {
+                        sb_putc(&w, lx.src[lx.i++]);
+                    }
+                    continue;
+                }
+                if (lx.src[lx.i] == '$' && lx.src[lx.i + 1] == '(') {
+                    int depth = 0;
+                    sb_putc(&w, lx.src[lx.i++]); /* $ */
+                    for (;;) {
+                        char d = lx.src[lx.i];
+                        if (!d) {
+                            break;
+                        }
+                        if (d == '(') {
+                            depth++;
+                        } else if (d == ')') {
+                            depth--;
+                        }
+                        sb_putc(&w, d);
+                        lx.i++;
+                        if (depth == 0) {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 sb_putc(&w, lx.src[lx.i++]);
             }
             if (!lx.src[lx.i]) {
@@ -1058,8 +1266,18 @@ static Redir *parse_redirect(void) {
          * `$` into a file. */
         r->expand = !tok.quoted;
         r->word = unquote(r->word);
-        r->here_next = lx.pending_here;
-        lx.pending_here = r;
+        /* M99: appended, not prepended. Two here-documents on one line
+         * are filled in the ORDER THEY APPEAR - `cat <<A; cat <<B`
+         * reads A's body first - and a stack read them backwards, so
+         * B's delimiter was hunted for in A's body and swallowed both.
+         * Never noticed because nothing in this tree had ever written
+         * two on one line; configure writes them constantly. */
+        r->here_next = 0;
+        Redir **tail = &lx.pending_here;
+        while (*tail) {
+            tail = &(*tail)->here_next;
+        }
+        *tail = r;
     }
     advance();
     return r;
@@ -1339,8 +1557,43 @@ static Node *parse_command(void) {
         int was_quoted = tok.quoted;
         size_t save_i = lx.i;
         Tok save_tok = tok;
-        advance();
-        if (!was_quoted && tok_is_op("(")) {
+        /* ---- M99: peek at CHARACTERS, not at a token -----------------
+         *
+         * This used to `advance()` and roll the lexer back if the next
+         * token was not `(`. Rolling back a position is not the same as
+         * rolling back a lex, because lexing a newline has a side
+         * effect: it collects the bodies of any here-documents pending
+         * on that line (see gather_heredocs). So a peek that crossed a
+         * newline consumed the here-document body, then put lx.i back
+         * in front of it, and the body was parsed a second time - as
+         * script.
+         *
+         *     cat <<EOF || fail=1
+         *     body
+         *     EOF
+         *
+         * printed `body` from cat, and then `sh: body: command not
+         * found`. It needed all three parts: a here-document, an
+         * operator, and a last command that is a bare assignment - a
+         * command with a word after it (`|| echo x`) rolls back before
+         * ever reaching the newline. That combination is 32,443 lines
+         * into CPython's configure, which is where it was found.
+         *
+         * A function definition is `name ( ) compound-command`, and
+         * POSIX allows only blanks between the name and the `(`. So the
+         * question the peek is asking can be answered by looking at the
+         * next non-blank character, which costs nothing and cannot
+         * consume anything. `advance()` is only called once the answer
+         * is yes, and then it cannot be crossing a newline. */
+        size_t peek = lx.i;
+        while (is_blank(lx.src[peek])) {
+            peek++;
+        }
+        int looks_like_func = !was_quoted && lx.src[peek] == '(';
+        if (looks_like_func) {
+            advance();
+        }
+        if (looks_like_func && tok_is_op("(")) {
             advance();
             if (!tok_is_op(")")) {
                 syntax("a function definition with no `)`");
@@ -1358,9 +1611,9 @@ static Node *parse_command(void) {
             parse_depth--;
             return n;
         }
-        /* Not a function: put the word back by re-lexing from where it
-         * started. Cheaper than a token queue, and this is the only place
-         * that needs two tokens of lookahead. */
+        /* Not a function. Nothing was consumed unless the peek said
+         * yes, so the rollback is only needed in the one case where it
+         * is provably safe: `(` is not a newline. */
         lx.i = save_i;
         tok = save_tok;
         n = parse_simple();
@@ -1497,16 +1750,31 @@ typedef struct {
     Vec *out;
     int split;        /* unquoted expansions become several fields */
     int glob;
+    /* M99: set when `"$@"` expanded to no parameters at all, cleared the
+     * moment any real text joins the field. POSIX: `"$@"` with nothing
+     * in it is ZERO fields, not one empty one - so `for x in "$@"` with
+     * no arguments runs its body zero times, and this shell ran it once
+     * with x empty. Adjacent text still wins, because `a"$@"b` is the
+     * one field `ab` everywhere. */
+    int at_killed;
 } Ex;
 
 static void ex_flush(Ex *e) {
+    if (e->at_killed && !e->cur.p) {
+        /* An empty `"$@"` and nothing else - see at_killed. */
+        e->started = 0;
+        e->quoted_here = 0;
+        e->at_killed = 0;
+        return;
+    }
+    e->at_killed = 0;
     if (!e->started) {
         return;
     }
     char *field = e->cur.p ? e->cur.p : xstrdup("");
     if (!e->cur.p) {
         vec_push(e->out, field);
-    } else if (e->glob && !e->quoted_here && has_glob(field)) {
+    } else if (e->glob && !opt_noglob && !e->quoted_here && has_glob(field)) {
         glob_expand(field, e->out);
         free(field);
     } else {
@@ -1518,6 +1786,9 @@ static void ex_flush(Ex *e) {
 }
 
 static void ex_add(Ex *e, const char *s, size_t n) {
+    if (n) {
+        e->at_killed = 0; /* real text joined the field - see at_killed */
+    }
     sb_putn(&e->cur, s, n);
     e->started = 1;
 }
@@ -1666,10 +1937,54 @@ static char *strip_affix(const char *value, const char *pat, int from_end, int l
 }
 
 static void expand_dollar(Ex *e, const char **pp, int in_quotes);
+static void expand_word(const char *raw, Vec *out, int split, int do_glob);
+
+/* ---- M99: expanding the WORD inside ${name+word} -----------------------
+ *
+ * Every `${name-word}`, `${name+word}`, `${name#pattern}` has a word in
+ * it that is itself expanded, and this file used to do that with a small
+ * private loop that understood `$` and nothing else. Two things that
+ * scripts write constantly went wrong:
+ *
+ *   ${x+"$y"}   the quotes were literal characters and the `$y` inside
+ *               them came out as the two characters `$y`.
+ *   ${1+"$@"}   which is how every autoconf-generated script forwards
+ *               its arguments, and which has to produce N FIELDS.
+ *
+ * A private expander that has to grow quotes, and then fields, is the
+ * word expander with a different name. This calls the real one. `split`
+ * is 0 because the word's own IFS splitting is not the ${} operator's
+ * business - but "$@" still produces one field per parameter, because
+ * that is done by the $@ expansion itself and not by splitting. */
+static void expand_braced_word(Ex *e, const char *word, int in_quotes) {
+    Vec wv;
+    vec_init(&wv);
+    /* Splitting is decided HERE and once. An unquoted `${x-$y}` splits
+     * its default on IFS; a quoted one does not; and either way the
+     * fields that come back are final - re-splitting them afterwards is
+     * what turned `${1+"$@"}` with `b c` in it into two arguments. */
+    expand_word(word, &wv, !in_quotes, 0);
+    for (int i = 0; i < wv.n; i++) {
+        if (i) {
+            ex_flush(e);
+        }
+        ex_add(e, wv.v[i], strlen(wv.v[i]));
+        if (in_quotes) {
+            e->quoted_here = 1;
+        }
+    }
+    if (wv.n == 0) {
+        e->at_killed = 1;
+    }
+    vec_free(&wv);
+}
 
 /* ${...} - the brace form, where the whole `:-` family lives. */
 static void expand_braced(Ex *e, const char *body, int in_quotes) {
-    if (body[0] == '#' && body[1]) {
+    /* `${#name}` is a length and `${#-word}` is `$#` with a default,
+     * and the character after the `#` is the only thing that tells them
+     * apart: an operator there means `#` was the parameter. */
+    if (body[0] == '#' && body[1] && !strchr(":-+=?", body[1])) {
         char *v = param_value(body + 1);
         char *len = xstrdup(num_to_str((long)strlen(v)));
         free(v);
@@ -1707,7 +2022,7 @@ static void expand_braced(Ex *e, const char *body, int in_quotes) {
                 e->quoted_here = 1;
             }
             if (pos_count == 0) {
-                e->started = 0;
+                e->at_killed = 1;
             }
             return;
         }
@@ -1735,25 +2050,12 @@ static void expand_braced(Ex *e, const char *body, int in_quotes) {
         }
         char *v = param_value(name);
         /* The pattern is itself expanded first: `${x#$prefix}` is a
-         * thing scripts write. */
+         * thing scripts write. Through the real word expander since
+         * M99 - see expand_braced_word for what the private one could
+         * not do. */
         Vec pv;
         vec_init(&pv);
-        Ex pe;
-        memset(&pe, 0, sizeof(pe));
-        sb_init(&pe.cur);
-        pe.out = &pv;
-        pe.split = 0;
-        pe.glob = 0;
-        const char *p = word;
-        while (*p) {
-            if (*p == '$') {
-                expand_dollar(&pe, &p, 1);
-                continue;
-            }
-            ex_add(&pe, p, 1);
-            p++;
-        }
-        ex_flush(&pe);
+        expand_word(word, &pv, 0, 0);
         char *result = strip_affix(v, pv.n ? pv.v[0] : "", kind == '%', longest);
         vec_free(&pv);
         free(v);
@@ -1771,6 +2073,26 @@ static void expand_braced(Ex *e, const char *body, int in_quotes) {
     int unset_or_empty = colon ? (v[0] == '\0') : !var_is_set(name);
     if (name[0] >= '1' && name[0] <= '9') {
         unset_or_empty = colon ? (v[0] == '\0') : (atoi(name) > pos_count);
+    } else if (name[1] == '\0' && strchr("*@#?$0", name[0])) {
+        /* ---- M99: the special parameters are not variables ----------
+         *
+         * `var_is_set` asks the variable table, and there is no variable
+         * called `*`, so `${*-Setup}` said "unset" and produced the
+         * default even with eight arguments in hand. CPython's
+         * Modules/makesetup opens its main loop with exactly that -
+         * `for i in ${*-Setup}` - so it processed one file named
+         * `Setup`, which does not exist, and configure produced a
+         * Makefile with no modules in it and did not fail.
+         *
+         * `$*` and `$@` are set when there is at least one positional
+         * parameter. `$#`, `$?`, `$$` and `$0` always are - there is
+         * always a count, always a last status, always a pid and always
+         * a name, even when they are zero or empty. */
+        if (name[0] == '*' || name[0] == '@') {
+            unset_or_empty = colon ? (v[0] == '\0') : (pos_count == 0);
+        } else {
+            unset_or_empty = colon ? (v[0] == '\0') : 0;
+        }
     }
 
     if (kind == '-' || kind == '=' || kind == '+' || kind == '?') {
@@ -1785,48 +2107,32 @@ static void expand_braced(Ex *e, const char *body, int in_quotes) {
         }
         if (use_word) {
             /* The default is a word in its own right and gets expanded,
-             * which is what makes `${x:-$HOME}` work. */
-            Vec wv;
-            vec_init(&wv);
-            Ex we;
-            memset(&we, 0, sizeof(we));
-            sb_init(&we.cur);
-            we.out = &wv;
-            we.split = 0;
-            we.glob = 0;
-            const char *p = word;
-            while (*p) {
-                if (*p == '$') {
-                    expand_dollar(&we, &p, 1);
-                    continue;
-                }
-                if (*p == '\'' || *p == '"') {
-                    char q = *p++;
-                    while (*p && *p != q) {
-                        ex_add(&we, p, 1);
-                        p++;
-                    }
-                    if (*p) {
-                        p++;
-                    }
-                    we.started = 1;
-                    continue;
-                }
-                ex_add(&we, p, 1);
-                p++;
-            }
-            ex_flush(&we);
-            char *val = wv.n ? xstrdup(wv.v[0]) : xstrdup("");
-            vec_free(&wv);
+             * which is what makes `${x:-$HOME}` work. M99 replaced a
+             * private loop here with the real word expander: the old one
+             * stripped quotes and copied their contents literally, so
+             * `${x+"$y"}` produced the two characters `$y`, and it could
+             * only ever produce one field, so `${1+"$@"}` - how every
+             * autoconf script forwards its arguments - collapsed to the
+             * first one. */
             if (kind == '=') {
+                /* `:=` assigns, and an assignment is one string. Taking
+                 * the first field is what the operator means: the value
+                 * of a variable is not a list. */
+                Vec wv;
+                vec_init(&wv);
+                expand_word(word, &wv, 0, 0);
+                char *val = xstrdup(wv.n ? wv.v[0] : "");
+                vec_free(&wv);
                 var_set(name, val);
-            }
-            if (in_quotes) {
-                ex_add(e, val, strlen(val));
+                if (in_quotes) {
+                    ex_add(e, val, strlen(val));
+                } else {
+                    ex_add_split(e, val);
+                }
+                free(val);
             } else {
-                ex_add_split(e, val);
+                expand_braced_word(e, word, in_quotes);
             }
-            free(val);
         } else if (kind != '+') {
             if (in_quotes) {
                 ex_add(e, v, strlen(v));
@@ -1850,8 +2156,332 @@ static void expand_braced(Ex *e, const char *body, int in_quotes) {
     free(name);
 }
 
+
+/* ---- M99: $(( )) -------------------------------------------------------
+ *
+ * Added because somebody else's configure asked for it by name. CPython's
+ * `configure` decides whether the shell running it is fit for the job by
+ * evaluating a block it calls `as_required`, and the last line of that
+ * block is
+ *
+ *     test $(( 1 + 1 )) = 2 || exit 1
+ *
+ * so a shell without arithmetic expansion is rejected before configure
+ * has printed a single line - which is what this one was, and why M99's
+ * last box turned out not to be about wall clock at all.
+ *
+ * A recursive-descent evaluator over `long`, with C's precedence, which
+ * is what POSIX specifies: the operators and their meanings are "the
+ * same as in the ISO C standard", so the reference implementation is a
+ * language everyone already agrees about. What is deliberately NOT here:
+ *
+ *   - assignment, `++` and `--`. POSIX makes them optional and autoconf
+ *     does not use them. A wrong answer is worse than a refusal, and a
+ *     refusal here is a syntax error naming the operator.
+ *   - unsigned, floating point, and integer overflow behaviour beyond
+ *     what C gives. Division by zero is an error rather than a trap.
+ *
+ * A bare name inside the parentheses is a shell variable read as a
+ * number, and an unset or empty one is zero - POSIX says so, and it is
+ * why `$(( i + 1 ))` works on the first pass of a loop.
+ */
+typedef struct {
+    const char *p;
+    int error;
+} Arith;
+
+static long arith_expr(Arith *a);
+static char *expand_one(const char *raw);
+
+static void arith_skip(Arith *a) {
+    while (*a->p == ' ' || *a->p == '\t' || *a->p == '\n') {
+        a->p++;
+    }
+}
+
+/* True when the next characters are `op` AND are not the prefix of a
+ * longer operator that starts the same way - so `<` does not match
+ * inside `<<` and `&` does not match inside `&&`. */
+static int arith_eat(Arith *a, const char *op, const char *longer) {
+    arith_skip(a);
+    size_t n = strlen(op);
+    if (strncmp(a->p, op, n) != 0) {
+        return 0;
+    }
+    if (longer && strncmp(a->p, longer, strlen(longer)) == 0) {
+        return 0;
+    }
+    a->p += n;
+    return 1;
+}
+
+static long arith_primary(Arith *a) {
+    arith_skip(a);
+    if (*a->p == '(') {
+        a->p++;
+        long v = arith_expr(a);
+        arith_skip(a);
+        if (*a->p == ')') {
+            a->p++;
+        } else {
+            a->error = 1;
+        }
+        return v;
+    }
+    if (*a->p == '-') {
+        a->p++;
+        return -arith_primary(a);
+    }
+    if (*a->p == '+') {
+        a->p++;
+        return arith_primary(a);
+    }
+    if (*a->p == '!') {
+        a->p++;
+        return !arith_primary(a);
+    }
+    if (*a->p == '~') {
+        a->p++;
+        return ~arith_primary(a);
+    }
+    if (*a->p >= '0' && *a->p <= '9') {
+        /* 0x for hex and a leading 0 for octal, which is what C says and
+         * therefore what POSIX says. strtol with base 0 is exactly this
+         * rule and is already in this libc. */
+        char *end = 0;
+        long v = strtol(a->p, &end, 0);
+        if (end == a->p) {
+            a->error = 1;
+            return 0;
+        }
+        a->p = end;
+        return v;
+    }
+    if (is_name_char(*a->p) && !(*a->p >= '0' && *a->p <= '9')) {
+        const char *start = a->p;
+        while (is_name_char(*a->p)) {
+            a->p++;
+        }
+        char *name = astrndup(start, (size_t)(a->p - start));
+        const char *val = var_get(name);
+        if (!val || !*val) {
+            return 0; /* unset or empty is zero - POSIX */
+        }
+        Arith inner;
+        inner.p = val;
+        inner.error = 0;
+        long v = arith_expr(&inner);
+        if (inner.error) {
+            a->error = 1;
+        }
+        return v;
+    }
+    a->error = 1;
+    return 0;
+}
+
+static long arith_mul(Arith *a) {
+    long v = arith_primary(a);
+    for (;;) {
+        if (arith_eat(a, "*", 0)) {
+            v = v * arith_primary(a);
+        } else if (arith_eat(a, "/", 0)) {
+            long d = arith_primary(a);
+            if (d == 0) {
+                a->error = 1;
+                return 0;
+            }
+            v = v / d;
+        } else if (arith_eat(a, "%", 0)) {
+            long d = arith_primary(a);
+            if (d == 0) {
+                a->error = 1;
+                return 0;
+            }
+            v = v % d;
+        } else {
+            return v;
+        }
+    }
+}
+
+static long arith_add(Arith *a) {
+    long v = arith_mul(a);
+    for (;;) {
+        if (arith_eat(a, "+", 0)) {
+            v = v + arith_mul(a);
+        } else if (arith_eat(a, "-", 0)) {
+            v = v - arith_mul(a);
+        } else {
+            return v;
+        }
+    }
+}
+
+static long arith_shift(Arith *a) {
+    long v = arith_add(a);
+    for (;;) {
+        if (arith_eat(a, "<<", 0)) {
+            v = v << arith_add(a);
+        } else if (arith_eat(a, ">>", 0)) {
+            v = v >> arith_add(a);
+        } else {
+            return v;
+        }
+    }
+}
+
+static long arith_rel(Arith *a) {
+    long v = arith_shift(a);
+    for (;;) {
+        /* `<=` before `<`, and `<` refused when it is really `<<`. */
+        if (arith_eat(a, "<=", 0)) {
+            v = (v <= arith_shift(a));
+        } else if (arith_eat(a, ">=", 0)) {
+            v = (v >= arith_shift(a));
+        } else if (arith_eat(a, "<", "<<")) {
+            v = (v < arith_shift(a));
+        } else if (arith_eat(a, ">", ">>")) {
+            v = (v > arith_shift(a));
+        } else {
+            return v;
+        }
+    }
+}
+
+static long arith_eq(Arith *a) {
+    long v = arith_rel(a);
+    for (;;) {
+        if (arith_eat(a, "==", 0)) {
+            v = (v == arith_rel(a));
+        } else if (arith_eat(a, "!=", 0)) {
+            v = (v != arith_rel(a));
+        } else {
+            return v;
+        }
+    }
+}
+
+static long arith_band(Arith *a) {
+    long v = arith_eq(a);
+    while (arith_eat(a, "&", "&&")) {
+        v = v & arith_eq(a);
+    }
+    return v;
+}
+
+static long arith_bxor(Arith *a) {
+    long v = arith_band(a);
+    while (arith_eat(a, "^", 0)) {
+        v = v ^ arith_band(a);
+    }
+    return v;
+}
+
+static long arith_bor(Arith *a) {
+    long v = arith_bxor(a);
+    while (arith_eat(a, "|", "||")) {
+        v = v | arith_bxor(a);
+    }
+    return v;
+}
+
+static long arith_land(Arith *a) {
+    long v = arith_bor(a);
+    /* Both sides are evaluated. C short-circuits and so does every
+     * shell, and the difference is only observable through a side
+     * effect - which needs assignment, `++` or a command substitution
+     * inside the parentheses, and none of those is here. Written down
+     * because it is the thing to fix first if assignment ever is. */
+    while (arith_eat(a, "&&", 0)) {
+        long r = arith_bor(a);
+        v = (v && r);
+    }
+    return v;
+}
+
+static long arith_lor(Arith *a) {
+    long v = arith_land(a);
+    while (arith_eat(a, "||", 0)) {
+        long r = arith_land(a);
+        v = (v || r);
+    }
+    return v;
+}
+
+static long arith_expr(Arith *a) {
+    return arith_lor(a);
+}
+
+/* Evaluates `text` (already expanded, so `$x` has become its value) and
+ * returns the answer as a freshly allocated decimal string. A malformed
+ * expression is a diagnostic and a zero, which is what dash does; bash
+ * exits, and the difference is not worth a divergence in a shell whose
+ * whole job is to agree with the others about the ordinary cases. */
+static char *arith_eval(const char *text) {
+    Arith a;
+    a.p = text;
+    a.error = 0;
+    long v = arith_expr(&a);
+    arith_skip(&a);
+    if (*a.p) {
+        a.error = 1;
+    }
+    if (a.error) {
+        errmsg("arithmetic syntax error: ", text, 0);
+        v = 0;
+    }
+    return xstrdup(num_to_str(v));
+}
+
 static void expand_dollar(Ex *e, const char **pp, int in_quotes) {
     const char *p = *pp + 1; /* past '$' */
+    if (p[0] == '(' && p[1] == '(') {
+        /* M99: arithmetic, and it has to be tested before command
+         * substitution because `$((` is a prefix of `$(`. The closing
+         * `))` is found by counting parentheses from the inner one, so
+         * that `$(( (1+2)*3 ))` closes in the right place - a scan for
+         * the first `))` would stop inside it. */
+        const char *start = p + 2;
+        const char *q = start;
+        int depth = 1;
+        while (*q) {
+            if (*q == '(') {
+                depth++;
+            } else if (*q == ')') {
+                if (--depth == 0) {
+                    break;
+                }
+            }
+            q++;
+        }
+        if (depth != 0 || q[0] != ')' || q[1] != ')') {
+            /* Not a closed `$(( ... ))`. POSIX says this is then a
+             * command substitution of a subshell - `$( (list) )` - and
+             * falling through says so without a special case. */
+        } else {
+            size_t len = (size_t)(q - start);
+            char *raw = (char *)malloc(len + 1);
+            if (!raw) {
+                die_oom();
+            }
+            memcpy(raw, start, len);
+            raw[len] = '\0';
+            /* Expanded first, then evaluated: `$(( $x + 1 ))` and
+             * `$(( x + 1 ))` must mean the same thing, and only the
+             * second is the evaluator's business. */
+            char *expanded = expand_one(raw);
+            free(raw);
+            char *result = arith_eval(expanded ? expanded : "");
+            free(expanded);
+            /* Never split and never globbed: the result is one field, a
+             * number, in quotes or out of them. */
+            ex_add(e, result, strlen(result));
+            free(result);
+            *pp = q + 2;
+            return;
+        }
+    }
     if (*p == '(') {
         int depth = 0;
         const char *start = p + 1;
@@ -1927,6 +2557,13 @@ static void expand_dollar(Ex *e, const char **pp, int in_quotes) {
                 ex_add(e, pos_params[i], strlen(pos_params[i]));
                 e->quoted_here = 1;
             }
+            if (pos_count == 0) {
+                /* M99: zero fields, not one empty one - see at_killed.
+                 * This is the BARE `$@` site; the `${@}` one above had
+                 * the same line and this one did not, which is why
+                 * `for x in "$@"` with no arguments ran its body once. */
+                e->at_killed = 1;
+            }
             *pp = p;
             return;
         }
@@ -1984,6 +2621,17 @@ static void expand_word(const char *raw, Vec *out, int split, int do_glob) {
             e.started = 1;
             e.quoted_here = 1;
             while (*p && *p != '"') {
+                /* M99: a backslash-newline inside double quotes is a
+                 * LINE CONTINUATION - both characters disappear. POSIX
+                 * says so, and CPython's configure writes a
+                 * twenty-one-line `SRCDIRS="\` that way. Keeping them
+                 * put a backslash and a newline into a Makefile
+                 * variable, which is not an error anywhere and is a
+                 * different Makefile. */
+                if (*p == '\\' && p[1] == '\n') {
+                    p += 2;
+                    continue;
+                }
                 if (*p == '\\' && p[1] && strchr("$`\"\\", p[1])) {
                     ex_add(&e, p + 1, 1);
                     p += 2;
@@ -2147,6 +2795,10 @@ static int heredoc_fd(Redir *r, RedirSave *save) {
         e.glob = 0;
         const char *p = r->word;
         while (*p) {
+            if (*p == '\\' && p[1] == '\n') {
+                p += 2; /* M99: a line continuation - see expand_word */
+                continue;
+            }
             if (*p == '\\' && p[1] && strchr("$`\\", p[1])) {
                 ex_add(&e, p + 1, 1);
                 p += 2;
@@ -2154,6 +2806,43 @@ static int heredoc_fd(Redir *r, RedirSave *save) {
             }
             if (*p == '$') {
                 expand_dollar(&e, &p, 1);
+                continue;
+            }
+            /* ---- M99: and a backtick, which is half of "as if inside
+             * double quotes" and was the missing half.
+             *
+             * An unquoted here-document delimiter means the body gets
+             * parameter expansion, command substitution and arithmetic
+             * expansion - the same three a double-quoted string gets.
+             * This did the first and not the second, and what that
+             * looked like is the reason it is worth a comment: every
+             * `#define HAVE_...` in a configure run is written by
+             *
+             *     cat >>confdefs.h <<_ACEOF
+             *     #define `printf "%s\n" "HAVE_$ac_hdr" | $as_tr_cpp` 1
+             *     _ACEOF
+             *
+             * so confdefs.h received the *text of the pipeline*, and
+             * every compile after it failed with "macro name must be an
+             * identifier" - while configure carried on reporting `yes`
+             * for the headers it had just failed to record, and then
+             * reported every `sizeof` as 0. Which is the lesson this
+             * project already had written down from binutils: a
+             * configure probe that fails to compile writes a NUMBER,
+             * not an error. */
+            if (*p == '`') {
+                const char *q = ++p;
+                while (*q && *q != '`') {
+                    if (*q == '\\' && q[1]) {
+                        q++;
+                    }
+                    q++;
+                }
+                char *body = astrndup(p, (size_t)(q - p));
+                char *result = capture_command(body);
+                ex_add(&e, result, strlen(result));
+                free(result);
+                p = *q ? q + 1 : q;
                 continue;
             }
             ex_add(&e, p, 1);
@@ -2375,7 +3064,10 @@ static int is_builtin(const char *name) {
     static const char *const names[] = {
         "cd", "pwd", "exit", "echo", "export", "unset", "set", "shift",
         "read", "test", "[", "true", "false", ":", "return", "break",
-        "continue", ".", "source", "eval", "wait", "env", "unalias", 0
+        "continue", ".", "source", "eval", "wait", "env", "unalias",
+        /* M99: both asked for by name by somebody else's configure -
+         * see run_builtin. */
+        "exec", "trap", 0
     };
     for (int i = 0; names[i]; i++) {
         if (strcmp(name, names[i]) == 0) {
@@ -2401,6 +3093,157 @@ static int read_line_fd(int fd, Sbuf *out) {
     }
 }
 
+
+/* ---- M99: trap ---------------------------------------------------------
+ *
+ * The second thing CPython's configure asks of a shell that this one did
+ * not have. It uses two forms and both matter:
+ *
+ *   trap 'exit_status=$?; ...; rm -f ...; exit $exit_status' 0
+ *   trap 'as_fn_exit 1' 1 2 13 15
+ *
+ * The first is how configure cleans up its temporary files, and without
+ * it a configure run leaves conftest.* behind and - worse - the `exit
+ * $exit_status` never happens, so the exit status of the whole script is
+ * whatever the last command did.
+ *
+ * Signal 0 is EXIT and is not a signal at all: it means "when this shell
+ * exits, for any reason". It is kept separately below for that reason
+ * rather than as slot zero of an array of handlers, so that nothing can
+ * accidentally kill(0) it.
+ *
+ * ---- what a trapped signal does here, and what it does not ------------
+ *
+ * The action is recorded and the signal is caught with a handler that
+ * sets a flag; the flag is drained between commands, which is where
+ * every shell runs a trap and is the only place a shell CAN run one -
+ * running arbitrary script inside a signal handler is not something a
+ * shell can do safely on any system. The consequence, stated because it
+ * is a real divergence: a trap on a signal that arrives while a
+ * foreground child is running is run when that child finishes, not the
+ * instant it arrives.
+ *
+ * `trap - SIG` restores the default, `trap '' SIG` ignores it, and
+ * `trap` with no arguments lists what is set - all three POSIX, all
+ * three used by scripts in the wild.
+ */
+#define TRAP_MAX_SIG 32
+
+static char *trap_action[TRAP_MAX_SIG]; /* by signal number */
+static char *trap_exit_action;          /* signal 0 - see above */
+static volatile sig_atomic_t trap_pending[TRAP_MAX_SIG];
+static volatile sig_atomic_t trap_any_pending;
+
+static void trap_handler(int sig) {
+    if (sig > 0 && sig < TRAP_MAX_SIG) {
+        trap_pending[sig] = 1;
+        trap_any_pending = 1;
+    }
+}
+
+/* The names POSIX requires, without the SIG prefix, so that `trap x INT`
+ * and `trap x 2` and `trap x SIGINT` are all the same thing. */
+typedef struct { const char *name; int sig; } TrapName;
+
+static const TrapName TRAP_NAMES[] = {
+    {"EXIT", 0},   {"HUP", SIGHUP},   {"INT", SIGINT},
+    {"QUIT", SIGQUIT}, {"ILL", SIGILL}, {"ABRT", SIGABRT},
+    {"FPE", SIGFPE}, {"KILL", SIGKILL}, {"SEGV", SIGSEGV},
+    {"PIPE", SIGPIPE}, {"ALRM", SIGALRM}, {"TERM", SIGTERM},
+    {"USR1", SIGUSR1}, {"USR2", SIGUSR2}, {"CHLD", SIGCHLD},
+    {"CONT", SIGCONT}, {"STOP", SIGSTOP}, {"TSTP", SIGTSTP},
+    {0, 0}
+};
+
+/* The NAME for a number, for the listing form. POSIX says `trap` with no
+ * arguments writes something that can be read back as input, and every
+ * shell writes the name - so a number here would be a listing that is
+ * correct and does not match, which is the only kind of difference a
+ * differential test can see and the only kind worth having it see. */
+static const char *trap_signame(int sig) {
+    for (int i = 0; TRAP_NAMES[i].name; i++) {
+        if (TRAP_NAMES[i].sig == sig) {
+            return TRAP_NAMES[i].name;
+        }
+    }
+    return 0;
+}
+
+static int trap_signo(const char *name) {
+    const TrapName *NAMES = TRAP_NAMES;
+    if (name[0] >= '0' && name[0] <= '9') {
+        int n = atoi(name);
+        return (n >= 0 && n < TRAP_MAX_SIG) ? n : -1;
+    }
+    if (strncmp(name, "SIG", 3) == 0) {
+        name += 3;
+    }
+    for (int i = 0; NAMES[i].name; i++) {
+        if (strcmp(name, NAMES[i].name) == 0) {
+            return NAMES[i].sig;
+        }
+    }
+    return -1;
+}
+
+static void trap_set(int sig, const char *action) {
+    char **slot = (sig == 0) ? &trap_exit_action : &trap_action[sig];
+    free(*slot);
+    *slot = 0;
+    if (action) {
+        *slot = xstrdup(action);
+    }
+    if (sig == 0) {
+        return;
+    }
+    /* SIGKILL and SIGSTOP cannot be caught anywhere, and saying so by
+     * refusing to install rather than by pretending is the same choice
+     * `chmod` made in M65. */
+    if (sig == SIGKILL || sig == SIGSTOP) {
+        return;
+    }
+    if (!action) {
+        signal(sig, SIG_DFL);
+    } else if (action[0] == '\0') {
+        signal(sig, SIG_IGN);
+    } else {
+        signal(sig, trap_handler);
+    }
+}
+
+/* Run between commands - see the note above on why not in the handler. */
+static void trap_run_pending(void) {
+    if (!trap_any_pending) {
+        return;
+    }
+    trap_any_pending = 0;
+    for (int sig = 1; sig < TRAP_MAX_SIG; sig++) {
+        if (!trap_pending[sig]) {
+            continue;
+        }
+        trap_pending[sig] = 0;
+        if (trap_action[sig] && trap_action[sig][0]) {
+            int saved = last_status;
+            exec_text(trap_action[sig]);
+            last_status = saved;
+        }
+    }
+}
+
+/* Run on the way out, from every path that leaves the shell. `$?` inside
+ * the action is the status the shell is exiting with, which is what
+ * configure's own trap reads on its first line. */
+static void trap_run_exit(void) {
+    char *action = trap_exit_action;
+    if (!action || !action[0]) {
+        return;
+    }
+    /* Cleared first: an EXIT trap that itself exits must not re-enter. */
+    trap_exit_action = 0;
+    exec_text(action);
+    free(action);
+}
+
 static int run_builtin(int argc, char **argv) {
     const char *cmd = argv[0];
 
@@ -2414,6 +3257,101 @@ static int run_builtin(int argc, char **argv) {
         flow = FLOW_EXIT;
         exit_code = argc > 1 ? atoi(argv[1]) : last_status;
         return exit_code;
+    }
+    /* ---- M99: exec --------------------------------------------------
+     *
+     * Two jobs in one word, and configure uses both:
+     *
+     *   exec 5>>config.log     redirections that OUTLIVE the command,
+     *                          because there is no command. Every
+     *                          `>&5` in the rest of the script depends
+     *                          on this one line having worked.
+     *   exec sh "$0" "$@"      replace this shell with a program.
+     *                          autoconf's preamble re-executes itself
+     *                          under a better shell this way.
+     *
+     * The first falls out for free and is the reason `exec` has to be a
+     * builtin rather than a program: apply_redirs has already run by
+     * the time this is reached, and returning without asking for them
+     * to be undone is exactly "make them permanent". exec_simple is
+     * what honours the flag.
+     */
+    if (strcmp(cmd, "exec") == 0) {
+        if (argc == 1) {
+            exec_keep_redirs = 1;
+            return 0;
+        }
+        char **args = argv + 1;
+        /* PATH lookup, and then the diagnostic. POSIX says a
+         * non-interactive shell EXITS when exec cannot find the
+         * program, and that is not pedantry here: autoconf's re-exec is
+         * followed by `printf ... "could not re-execute"; exit 255`,
+         * which is dead code on every working shell and must stay dead
+         * on this one. */
+        execvp(args[0], args);
+        errmsg("exec: ", args[0], ": not found");
+        if (!interactive) {
+            trap_run_exit();
+            _exit(127);
+        }
+        return 127;
+    }
+    if (strcmp(cmd, "trap") == 0) {
+        if (argc == 1) {
+            /* POSIX: list the traps in a form that can be re-read as
+             * input. The quoting is single quotes, which is what dash
+             * and bash both emit. */
+            /* Written with this shell's own out_fd_str rather than
+             * with printf, and that is not style. Everything else here
+             * reaches fd 1 through write(); stdio buffers. Mixing the
+             * two reorders the output - the listing came out at exit,
+             * after lines that were written later - which the fixture
+             * caught as a diff in position rather than in content. */
+            for (int sig = 0; sig < TRAP_MAX_SIG; sig++) {
+                const char *action = (sig == 0) ? trap_exit_action
+                                                : trap_action[sig];
+                if (!action) {
+                    continue;
+                }
+                const char *name = trap_signame(sig);
+                out_fd_str(1, "trap -- '");
+                out_fd_str(1, action);
+                out_fd_str(1, "' ");
+                out_fd_str(1, name ? name : num_to_str(sig));
+                out_fd_str(1, "\n");
+            }
+            return 0;
+        }
+        /* `trap ACTION SIG...`, and the one ambiguity POSIX resolves by
+         * looking at the first argument: `trap - INT` and `trap 2` mean
+         * different things, because a first argument that is a valid
+         * signal name with no signals after it is a RESET of that
+         * signal rather than an action. */
+        int first = 1;
+        const char *action = argv[1];
+        int reset = 0;
+        if (strcmp(action, "-") == 0) {
+            reset = 1;
+            first = 2;
+        } else if (argc == 2 && trap_signo(action) >= 0) {
+            reset = 1;
+            first = 1;
+        } else {
+            first = 2;
+        }
+        if (first >= argc) {
+            errmsg("trap: ", "no signal given", 0);
+            return 1;
+        }
+        for (int i = first; i < argc; i++) {
+            int sig = trap_signo(argv[i]);
+            if (sig < 0) {
+                errmsg("trap: ", argv[i], ": bad signal");
+                return 1;
+            }
+            trap_set(sig, reset ? 0 : action);
+        }
+        return 0;
     }
     if (strcmp(cmd, "return") == 0) {
         flow = FLOW_RETURN;
@@ -2519,10 +3457,70 @@ static int run_builtin(int argc, char **argv) {
             return 0;
         }
         int i = 1;
-        if (strcmp(argv[1], "--") == 0) {
-            i = 2;
+        int saw_dashdash = 0;
+        for (; i < argc; i++) {
+            const char *a = argv[i];
+            if (strcmp(a, "--") == 0) {
+                saw_dashdash = 1;
+                i++;
+                break;
+            }
+            if (a[0] != '-' && a[0] != '+') {
+                break;
+            }
+            if (!a[1]) {
+                break; /* a bare `-` is an argument, not an option */
+            }
+            int on = (a[0] == '-');
+            if (a[1] == 'o') {
+                /* `set -o` with no name lists; with one, sets it. */
+                if (i + 1 >= argc) {
+                    static const struct { const char *name; int *flag; } OPTS[] = {
+                        {"errexit", &opt_errexit}, {"nounset", &opt_nounset},
+                        {"noglob", &opt_noglob},   {"xtrace", &opt_xtrace},
+                        {0, 0}
+                    };
+                    for (int k = 0; OPTS[k].name; k++) {
+                        out_fd_str(1, OPTS[k].name);
+                        out_fd_str(1, *OPTS[k].flag ? "\ton\n" : "\toff\n");
+                    }
+                    /* Named because configure asks for it by name, and
+                     * the answer is true: this shell has one mode. */
+                    out_fd_str(1, "posix\ton\n");
+                    continue;
+                }
+                const char *name = argv[++i];
+                if (strcmp(name, "errexit") == 0) { opt_errexit = on; }
+                else if (strcmp(name, "nounset") == 0) { opt_nounset = on; }
+                else if (strcmp(name, "noglob") == 0) { opt_noglob = on; }
+                else if (strcmp(name, "xtrace") == 0) { opt_xtrace = on; }
+                else if (strcmp(name, "posix") == 0) { /* the only mode */ }
+                else {
+                    errmsg("set: ", name, ": no such option");
+                    return 2;
+                }
+                continue;
+            }
+            for (const char *f = a + 1; *f; f++) {
+                switch (*f) {
+                    case 'e': opt_errexit = on; break;
+                    case 'u': opt_nounset = on; break;
+                    case 'f': opt_noglob = on; break;
+                    case 'x': opt_xtrace = on; break;
+                    default: {
+                        char one[2] = {*f, 0};
+                        errmsg("set: -", one, ": no such option");
+                        return 2;
+                    }
+                }
+            }
         }
-        set_positional(argv + i, argc - i);
+        /* POSIX: options alone leave the positional parameters ALONE.
+         * Only `--` or a first non-option argument replaces them - and
+         * `set --` with nothing after it clears them. */
+        if (saw_dashdash || i < argc) {
+            set_positional(argv + i, argc - i);
+        }
         return 0;
     }
     if (strcmp(cmd, "shift") == 0) {
@@ -2881,6 +3879,21 @@ static int exec_simple(Node *n) {
         expand_word(n->words[i], &argv, 1, 1);
     }
 
+    /* M99: `set -x`. After expansion, because what a person debugging a
+     * script needs to see is the command that is about to run and not
+     * the one that was written. `+ ` and a space between words is the
+     * format every shell uses, and PS4 is not honoured here because
+     * nothing sets it and a variable nobody writes is a feature that
+     * cannot be wrong. */
+    if (opt_xtrace && argv.n) {
+        out_fd_str(2, "+");
+        for (int i = 0; i < argv.n; i++) {
+            out_fd_str(2, " ");
+            out_fd_str(2, argv.v[i]);
+        }
+        out_fd_str(2, "\n");
+    }
+
     if (argv.n == 0) {
         /* Assignments alone, or a bare redirect: `x=1` and `> file` are
          * both commands that do something and run nothing. */
@@ -2925,10 +3938,17 @@ static int exec_simple(Node *n) {
             free(value);
             free(copy);
         }
+        /* M99: `exec` with no command sets this, and what it means is
+         * "do not put the descriptors back". That is the whole of the
+         * first half of exec: the redirections have already been
+         * applied above, so making them permanent is not doing
+         * something extra - it is skipping the undo. */
+        exec_keep_redirs = 0;
         int st = f ? call_function(f, argv.v, argv.n) : run_builtin(argv.n, argv.v);
-        if (n->redirs) {
+        if (n->redirs && !exec_keep_redirs) {
             undo_redirs(&save);
         }
+        exec_keep_redirs = 0;
         vec_free(&argv);
         return st;
     }
@@ -3060,7 +4080,11 @@ static int exec_for(Node *n) {
 static int exec_while(Node *n, int until) {
     int st = 0;
     for (;;) {
+        /* The condition is asked about, not relied on - see
+         * errexit_suspend. */
+        errexit_suspend++;
         int cond = exec_list_node(n->left);
+        errexit_suspend--;
         if (flow != FLOW_NONE) {
             break;
         }
@@ -3104,10 +4128,33 @@ static int exec_forked(Node *body) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
+static int exec_node_inner(Node *n);
+
 static int exec_node(Node *n) {
     if (!n || flow != FLOW_NONE) {
         return last_status;
     }
+    /* M99: a trapped signal runs HERE - between commands - and not in
+     * the handler that caught it. That is where every shell runs one and
+     * it is the only place a shell can: the action is arbitrary script,
+     * and arbitrary script inside a signal handler is not something any
+     * of them attempts. See trap_run_pending. */
+    trap_run_pending();
+    int st_ee = exec_node_inner(n);
+    /* M99: `set -e`. Checked here, once, where every command comes back,
+     * and only for the kinds whose status is RELIED ON rather than asked
+     * about - a compound command runs its own children through this same
+     * function, so checking it again would exit on an `if` whose
+     * condition was simply false. */
+    if (opt_errexit && st_ee != 0 && !errexit_suspend && flow == FLOW_NONE &&
+        (n->kind == N_SIMPLE || n->kind == N_PIPE)) {
+        flow = FLOW_EXIT;
+        exit_code = st_ee;
+    }
+    return st_ee;
+}
+
+static int exec_node_inner(Node *n) {
     switch (n->kind) {
         case N_SIMPLE:
             return exec_simple(n);
@@ -3120,7 +4167,14 @@ static int exec_node(Node *n) {
             return exec_node(n->right);
         }
         case N_AND: {
+            /* The LEFT of `&&` is a condition and is exempt from
+             * errexit; the right is not, because its status is the
+             * status of the whole thing. POSIX spells this out, and it
+             * is the difference between `set -e` being usable and every
+             * `grep -q x file && something` ending the script. */
+            errexit_suspend++;
             int st = exec_node(n->left);
+            errexit_suspend--;
             last_status = st;
             if (st != 0 || flow != FLOW_NONE) {
                 return st;
@@ -3128,7 +4182,9 @@ static int exec_node(Node *n) {
             return exec_node(n->right);
         }
         case N_OR: {
+            errexit_suspend++;
             int st = exec_node(n->left);
+            errexit_suspend--;
             last_status = st;
             if (st == 0 || flow != FLOW_NONE) {
                 return st;
@@ -3136,7 +4192,9 @@ static int exec_node(Node *n) {
             return exec_node(n->right);
         }
         case N_NOT: {
+            errexit_suspend++;
             int st = exec_node(n->left);
+            errexit_suspend--;
             return st == 0 ? 1 : 0;
         }
         case N_PIPE:
@@ -3169,7 +4227,13 @@ static int exec_node(Node *n) {
             if (n->redirs && apply_redirs(n->redirs, &save) != 0) {
                 return 1;
             }
+            /* The condition is asked about, not relied on - see
+             * errexit_suspend. Without this, `set -e` plus any
+             * `if test -f x` ends the script the first time the file is
+             * not there, which is the opposite of what the `if` is for. */
+            errexit_suspend++;
             int cond = exec_list_node(n->left);
+            errexit_suspend--;
             int st;
             if (flow != FLOW_NONE) {
                 st = cond;
@@ -3376,6 +4440,24 @@ static int run_script_file(const char *path) {
     return flow == FLOW_EXIT ? exit_code : st;
 }
 
+/* M99: the last thing the top-level shell does.
+ *
+ * Only the top-level shell: every other exit in this file is a forked
+ * child - a pipeline stage, a subshell, a command substitution - and
+ * POSIX says a subshell starts with the parent's caught traps reset to
+ * their defaults. Running the parent's EXIT action once per subshell
+ * would delete configure's temporary files in the middle of the run
+ * that is using them.
+ *
+ * `$?` inside the action is the status the shell is exiting with, which
+ * is what the first line of configure's own EXIT trap reads. */
+static int shell_leaving(int status) {
+    last_status = status;
+    flow = FLOW_NONE; /* an `exit` already unwound; the action gets to run */
+    trap_run_exit();
+    return status;
+}
+
 int main(int argc, char **argv) {
     shell_pid = getpid();
 
@@ -3417,7 +4499,7 @@ int main(int argc, char **argv) {
             set_positional(argv + 3, argc - 3);
         }
         int st = exec_text(argv[2]);
-        return flow == FLOW_EXIT ? exit_code : st;
+        return shell_leaving(flow == FLOW_EXIT ? exit_code : st);
     }
 
     if (argc > 1 && argv[1][0]) {
@@ -3425,9 +4507,9 @@ int main(int argc, char **argv) {
         if (argc > 2) {
             set_positional(argv + 2, argc - 2);
         }
-        return run_script_file(argv[1]);
+        return shell_leaving(run_script_file(argv[1]));
     }
 
     interactive_loop();
-    return flow == FLOW_EXIT ? exit_code : last_status;
+    return shell_leaving(flow == FLOW_EXIT ? exit_code : last_status);
 }

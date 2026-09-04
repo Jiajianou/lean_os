@@ -23,3 +23,23 @@ echo "[$x]"
 echo "status-in-sub=$(false; echo $?)"
 pre=abc
 echo "${pre}def"
+
+# ---- M99: the special parameters are not variables --------------------
+#
+# `${*-word}` asks whether `$*` is SET, and this shell answered by
+# looking in the variable table - where there is no entry called `*` - so
+# it produced the default even with arguments in hand. CPython's
+# Modules/makesetup opens its main loop with `for i in ${*-Setup}`, so it
+# processed one file called `Setup`, which does not exist, and configure
+# produced a Makefile with no modules in it and did not fail.
+set -- alpha beta
+for i in ${*-DEFAULT}; do echo "star: $i"; done
+for i in ${@-DEFAULT}; do echo "at: $i"; done
+echo "count: [${#-DEFAULT}] status: [${?-DEFAULT}] name-set: [${0+yes}]"
+set --
+for i in ${*-DEFAULT}; do echo "empty star: $i"; done
+echo "count now: [${#}]"
+# And the length form still means length, which is the ambiguity the
+# character after the `#` resolves.
+word=abcde
+echo "len=${#word} argc=${#}"
