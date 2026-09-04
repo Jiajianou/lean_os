@@ -14546,6 +14546,50 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         }
     }
 
+    /* ---- M99's last box: what CPython's own build would cost here ----
+     *
+     * A fifth fw_cfg switch, on the argument the third and fourth make:
+     * a measurement rather than a self-test, minutes long, whose output
+     * is numbers. The script (tests/pybuild/run.sh) measures two units
+     * on this machine - one configure probe and one translation unit -
+     * and tools/python-build-test.sh multiplies them by counts taken
+     * from CPython's real configure and real Makefile.
+     *
+     * The wall-clock and the two counters the kernel adds are the same
+     * three M98's bootstrap block reports and for the same reason: a
+     * build's cost is not only its clock, and how close it came to
+     * MAX_TASKS is a fact only this side can see.
+     */
+    if (boot_pybuild_enabled()) {
+        os_stat_t bst;
+        if (do_syscall(SYS_stat, (uint64_t)"/tests/pybuild/run.sh",
+                       (uint64_t)&bst, 0) != 0) {
+            klog_puts("[m99build] no pybuild fixture on this image - "
+                       "skipped.\n\n");
+        } else {
+            klog_puts("[m99build] measuring what CPython's own build would "
+                       "cost on this machine.\n");
+            uint64_t started = pit_get_ticks();
+            long pid = do_syscall(SYS_spawn,
+                                  (uint64_t)"/tests/pybuild/run.sh", 0, 0);
+            if (pid < 0) {
+                panic("M99: the pybuild script could not be spawned");
+            }
+            do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            uint64_t elapsed_s = (pit_get_ticks() - started) / PIT_HZ;
+            int fd_task = -1;
+            int fd_peak = sched_fd_high_water(&fd_task);
+            int task_peak = sched_peak_live_tasks();
+            klog_perf("pybuild_wall_s", elapsed_s, "s");
+            klog_perf("pybuild_peak_live_tasks", (uint64_t)task_peak, "tasks");
+            klog_perf("pybuild_peak_fds_one_task", (uint64_t)fd_peak, "fds");
+            klog_puts("[m99build] the units are measured: what they multiply "
+                       "out to is tools/python-build-test.sh's arithmetic, "
+                       "printed there so it can be checked rather than "
+                       "believed.\n\n");
+        }
+    }
+
     size_t init_size_bytes = 0;
     uint8_t *init_image = read_program("/bin/init", &init_size_bytes);
     int64_t init_size = (int64_t)init_size_bytes;

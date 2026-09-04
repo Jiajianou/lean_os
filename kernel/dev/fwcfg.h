@@ -140,3 +140,21 @@ int boot_bootstrap_enabled(void);
  * get either would be a harness nobody runs. tools/python-test.sh is
  * what asks. */
 int boot_pytest_enabled(void);
+
+/* ---- M99: what CPython's own build costs on this machine -------------
+ *
+ * True when `-fw_cfg name=opt/leanos/pybuild,string=1` was passed.
+ *
+ * A fifth switch, on the third's argument again: a measurement, minutes
+ * long, whose output is numbers. M99's last box asks what
+ * `./configure && make` for CPython costs **here**, and M98's rule says
+ * that if the build does not fit, the number that says by how much is
+ * the deliverable.
+ *
+ * Separate from the bootstrap switch because it measures a different
+ * thing on a different scale: M98's harness times a build that FITS -
+ * bzip2, 203 s, and then grades the objects byte for byte. This one
+ * times the units of a build that does not, so that the answer is
+ * arithmetic over measurements rather than arithmetic over guesses.
+ * tools/python-build-test.sh is what asks. */
+int boot_pybuild_enabled(void);

@@ -269,6 +269,12 @@ else
     # the result of that flag.
     run_stage "the toolchain, building somebody else's program here" \
       ./tools/bootstrap-test.sh
+    # M99: and what a build that does NOT fit would cost, which is the
+    # other half of the same question and the only answer M99's last box
+    # asks for. A minute, next to the twenty above, because it measures
+    # the units rather than running the build - see the script.
+    run_stage "what CPython's own build would cost here" \
+      ./tools/python-build-test.sh
   else
     run_stage "interactive suite (--quick subset)" ./tools/qemu-input-test.sh --quick
   fi

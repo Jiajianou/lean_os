@@ -157,6 +157,11 @@ fi
 # absent - tools/build-thirdparty.sh is what fetches it, and an image
 # without it is a valid image.
 "$PUT" -r "$IMAGE" tests/bootstrap /tests/bootstrap >/dev/null || exit 1
+# M99: and the build-cost fixture, which needs the same compiler and the
+# same /tests/bzip2 this one installs - so it goes on beside it rather
+# than in install-python.sh, which runs whether or not there is a native
+# toolchain here to measure.
+"$PUT" -r "$IMAGE" tests/pybuild /tests/pybuild >/dev/null || exit 1
 
 BZSRC=build/thirdparty-src/bzip2-1.0.8
 if [ -d "$BZSRC" ]; then

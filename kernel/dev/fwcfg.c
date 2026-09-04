@@ -53,6 +53,8 @@ static int selftest_cached = -1;
 static int ioapic_cached = -1;
 /* M98 - see boot_bootstrap_enabled. */
 static int bootstrap_cached = -1;
+/* M99 - see boot_pybuild_enabled. */
+static int pybuild_cached = -1;
 /* M99 - see boot_pytest_enabled. */
 static int pytest_cached = -1;
 
@@ -64,6 +66,7 @@ void fwcfg_init(void) {
     selftest_cached = -1;
     ioapic_cached = -1; /* M103 */
     bootstrap_cached = -1; /* M98 */
+    pybuild_cached = -1;   /* M99 */
     pytest_cached = -1;    /* M99 */
 
     uint8_t sig[4];
@@ -183,6 +186,17 @@ int boot_pytest_enabled(void) {
     int n = fwcfg_read_file("opt/leanos/pytest", buf, sizeof(buf) - 1);
     pytest_cached = (n == 1 && buf[0] == '1') ? 1 : 0;
     return pytest_cached;
+}
+
+int boot_pybuild_enabled(void) {
+    if (pybuild_cached >= 0) {
+        return pybuild_cached;
+    }
+    char buf[8];
+    k_memset(buf, 0, sizeof(buf));
+    int n = fwcfg_read_file("opt/leanos/pybuild", buf, sizeof(buf) - 1);
+    pybuild_cached = (n == 1 && buf[0] == '1') ? 1 : 0;
+    return pybuild_cached;
 }
 
 int boot_selftests_enabled(void) {

@@ -73,7 +73,7 @@ that has never happened.
 |---|---|
 | **Milestones** | M0–M110 numbered: 101 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 5 not started (M100, M107–M110) |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
-| **Head of the queue** | M99's last open box, then M100 — see *The queue* |
+| **Head of the queue** | **M100** — M99 closed 2026-09-04 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
 | **Host unit tests** | 247/247 passing, 3 slow ones skipped in `--fast` |
 | **Boot markers** | 110 required, graded on every self-test boot |
@@ -366,7 +366,7 @@ unbuilt is the drift *Deferred* exists to catch.
 
 | # | milestone | state | why here |
 |---|---|---|---|
-| **1** | **M99 (2nd)** — Python's last open box | 4 of 5 boxes done | extension modules as shared objects landed 2026-09-04. What is left is `./configure && make` for CPython *on* the machine, and M98's rule applies to it: if the build does not fit, the number that says by how much is the deliverable |
+| ~~**1**~~ | ~~**M99 (2nd)**~~ | **done 2026-09-04** | all five boxes closed across three increments — see *Landed since this snapshot*. Neither open box was about what its own entry predicted: the loader box was mostly a target-description box, and the build box was a shell box |
 | **2** | **M100** — the browser gap, measured | not started | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
 | **3** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not |
 | **4** | **Q14** — the compositor, off the machine | not started | the move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded in milliseconds rather than only through a screendump |
@@ -664,6 +664,76 @@ between them. It is not reproduced and it is not explained.
 machine**. The shell is no longer the answer to why not; what is left is
 the wall clock, and that is a measurement this increment did not take.
 
+### M99 (fourth increment) — what the build would cost, measured `[x]`
+
+*Landed 2026-09-04.* **M99 is closed.** Its last box asked for
+`./configure && make` for CPython on the machine, with M98's rule
+attached: if the build does not fit, *the number that says by how much*
+is the deliverable. The third increment answered the half nobody
+expected — the shell — and this one takes the number.
+
+```
+  MEASURED HERE, by tests/pybuild/run.sh:
+    one configure probe, first run          4830 ms
+    one configure probe, steady (mean 3)    7490 ms
+    one C translation unit                 17010 ms   peak RSS 57920 KiB
+
+  COUNTED from real runs of CPython 3.12.7's own build:
+    checks its configure ran                753   (tools/configure-test.sh)
+    objects its make produced               272   (the cross build)
+
+  MULTIPLIED:
+    ./configure   7490 ms x 753 = 5639 s (93 min)
+    make         17010 ms x 272 = 4626 s (77 min)
+    together                      10265 s (2 h 51 min)
+```
+
+**The surprise is which half is bigger.** `./configure` costs *more*
+than compiling all 272 objects — 93 minutes against 77. Nobody would
+guess that, and it is why the box said measure. A configure script is
+753 compile-and-link cycles of a ten-line program, and on this machine
+each one costs 7.5 s of which the compiler is a small part; 272
+translation units at 17 s each is the part everyone thinks of. **The
+build that does not fit does not fit mostly because of the questions,
+not the answers.**
+
+**And the second measurement inside the first, which was backwards from
+the guess.** The first probe is *cheaper* than the three after it — 4,830
+ms against a 7,490 ms mean — and the split says why: user time is flat
+at ~80 cs while **system time doubles**, 142 cs to 283. The obvious
+story is "the first one pays for demand-paging cc1"; what actually
+changes after the first run is that there is now a previous output on
+the disk to overwrite and dirty blocks to write back. The compiler is
+not what this machine is waiting for. That is M98's own finding
+("50% of the compile is idle time... the disk") arriving from a
+completely different direction, and it is the first number that would
+argue for reopening M104's readahead refusal.
+
+**Method, stated because the method is the deliverable.** Two units
+measured *on the machine* by a fixture the kernel spawns under a fifth
+fw_cfg switch (`opt/leanos/pybuild=1`, the same argument the third and
+fourth make: a measurement, not a self-test). Two counts taken from
+**real runs** rather than from the source — the check count from
+`tools/configure-test.sh`'s own configure run, the object count from the
+cross build — because grepping `configure` for "checking" undercounts by
+a third (many checks are inside loops) and counting `*.c` overcounts (a
+configured build compiles what it was configured for). The
+multiplication is printed with every input beside it, and the script
+says in as many words that a product of measurements is an argument
+about numbers and not an observation: **this machine has never built
+CPython, and the number is what says by how much.**
+
+`tools/python-build-test.sh` is in `--full`, next to M98's bootstrap
+harness, and takes about a minute against that one's twenty.
+
+**What it did not do, and the condition.** Putting CPython's 40 MB
+source tree on the image and running the real thing is now a wall-clock
+decision rather than a capability one — the shell runs configure, the
+compiler compiles, the disk holds a source tree (M93). It becomes worth
+doing when three hours of QEMU is cheaper than the argument, which is
+not today; and the honest note is that the extrapolation ignores
+CPython's own generated-code steps and its two links, so it is a floor.
+
 ---
 
 *Below this line, the snapshot as written on 2026-09-04.*
@@ -684,7 +754,7 @@ The queue says what order. This says exactly what is unfinished, in the
 words of the entry that left it open, so nothing has to be reconstructed
 from a 15,000-line archive.
 
-### M99 — Python, built here `[~]`
+### M99 — Python, built here `[x]` (closed 2026-09-04)
 
 Landed: the interpreter runs, its standard library is on the disk as
 `.py` source, and `python3 -m test` runs CPython's own regression suite
@@ -698,15 +768,12 @@ write nothing and return successfully).
       *Landed since this snapshot*. 58 of them, `dlopen`ed by full path
       out of `lib-dynload`, against a PIE interpreter and a shared
       `libpython`. Six defects, four of them outside the loader.
-- [~] **`./configure && make` for CPython on the machine.** The
-      *configure* half is answered off the machine and the answer was not
-      arithmetic: this project's shell could not run it. It can now —
-      753 checks, byte-identical with the host shell's run, graded by
-      `tools/configure-test.sh` (M99's third increment, above). What is
-      left is the wall clock, on the machine, and M98's rule still
-      applies to it: one C translation unit is 32 s here and CPython is
-      ~450 of them, so if the build does not fit, *the number that says
-      by how much* is the deliverable.
+- [x] **`./configure && make` for CPython on the machine.** Both halves
+      closed 2026-09-04, and neither was where the box expected. The
+      *configure* half was the shell, not the clock (third increment).
+      The clock is **2 h 51 min**, measured rather than estimated, and
+      `./configure` is the bigger half of it (fourth increment). See
+      both in *Landed since this snapshot*.
 
 ### M100 — the browser gap, measured `[ ]`
 
