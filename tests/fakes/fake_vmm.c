@@ -38,8 +38,17 @@ static uint8_t mapped[MAX_PAGES];
 static uint64_t mapped_phys[MAX_PAGES];
 static uint64_t mapped_count;
 
+/* M100: how many more mappings succeed before vmm_try_map_page_in starts
+ * refusing. -1 is "never refuse", which is the default and what every
+ * test that does not ask for this gets. See the note on
+ * vmm_try_map_page_in below for why this is a real failure and not an
+ * invented one. */
+static int map_fail_after = -1;
+static int maps_attempted;
+
 void fake_vmm_reset(void);
 uint64_t fake_vmm_mapped_pages(void);
+void fake_vmm_fail_map_after(int n);
 
 static void ensure_region(void) {
     if (region) {
@@ -65,6 +74,8 @@ void fake_vmm_reset(void) {
         mapped_phys[i] = 0;
     }
     mapped_count = 0;
+    map_fail_after = -1;
+    maps_attempted = 0;
     /* Discard the old contents so a test never sees the previous test's
      * heap. MADV_FREE/MADV_DONTNEED differ across hosts; re-mapping the
      * same range is portable and unambiguous. */
@@ -75,6 +86,17 @@ void fake_vmm_reset(void) {
 }
 
 uint64_t fake_vmm_mapped_pages(void) { return mapped_count; }
+
+/* Refuse the (n+1)th and every later mapping. `n` counts attempts since
+ * the last fake_vmm_reset, so fake_vmm_fail_map_after(3) means "three
+ * pages map, the fourth does not" - the same shape and the same counting
+ * as fake_pmm_fail_after, deliberately, because a test that has to
+ * remember which of two injectors counts differently is a test that will
+ * be read wrong. */
+void fake_vmm_fail_map_after(int n) {
+    map_fail_after = n;
+    maps_attempted = 0;
+}
 
 static uint64_t page_index(uint64_t virt) {
     ensure_region();
@@ -99,15 +121,36 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
 
 /* M102: the failable form the heap now uses.
  *
- * It never fails here, and that is correct rather than a gap. On the
- * machine this returns -1 when there is no frame for a *page table*; the
- * fake has no page tables, so the only way a mapping can fail in this
- * tier is the one the heap already checks separately - pmm having no
- * frame for the page itself, which fake_pmm_fail_after drives. Making
- * this fail too would be inventing a failure mode the fake cannot
- * honestly model. */
+ * ---- M100: it fails on demand now, and the old note was too broad ----
+ *
+ * This used to never fail, under a comment saying that making it fail
+ * "would be inventing a failure mode the fake cannot honestly model".
+ * Half of that is right and the half that is wrong left grow_heap's
+ * unwind path at zero coverage from M102 until M100 looked.
+ *
+ * The real vmm_try_map_page_in returns -1 for one reason: it needed a
+ * frame for a **page table** and pmm had none. That is a distinct
+ * outcome from the one the heap checks a line earlier - pmm having no
+ * frame for the page itself - and on a nearly-full machine it is the
+ * more likely of the two, because a page table is allocated at the
+ * moment a mapping crosses into an unpopulated PDE and the heap has no
+ * way to see that coming. The fake having no page tables of its own is
+ * a reason it cannot decide *when* to fail; it is not a reason it cannot
+ * be told.
+ *
+ * So the injector is explicit and a test has to ask for it. What it
+ * models is exactly the documented return, no more: the mapping does not
+ * happen, and the caller still owns the frame it was handed - which is
+ * the whole point, because whether grow_heap gives that frame back is
+ * the difference between failing to allocate and losing a page every
+ * time you try. */
 int vmm_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
     (void)pml4_phys;
+    if (map_fail_after >= 0 && maps_attempted >= map_fail_after) {
+        maps_attempted++;
+        return -1;
+    }
+    maps_attempted++;
     vmm_map_page(virt, phys, flags);
     return 0;
 }

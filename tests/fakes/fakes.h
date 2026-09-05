@@ -20,6 +20,10 @@ uint64_t fake_pmm_total_allocs(void);
 /* ---- fake_vmm --------------------------------------------------------- */
 void fake_vmm_reset(void);
 uint64_t fake_vmm_mapped_pages(void);
+/* M100: refuse the (n+1)th mapping and every one after it, modelling the
+ * one way the real vmm_try_map_page_in returns -1 - no frame for a page
+ * table. -1 restores "never refuse". Reset by fake_vmm_reset. */
+void fake_vmm_fail_map_after(int n);
 
 /* ---- fake_klog -------------------------------------------------------- */
 void klog_capture_reset(void);

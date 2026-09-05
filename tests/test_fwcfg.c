@@ -135,40 +135,55 @@ TEST(fwcfg, the_four_switches_are_read_independently_of_each_other) {
      *
      * M99 added a fourth and this test grew with it rather than beside
      * it: a switch that is only checked against the three that existed
-     * when it was written is a switch nobody has checked. Each of the
-     * four is set on its own below, with the other three off, so a
-     * shared cache fails whichever one is asked second. */
+     * when it was written is a switch nobody has checked.
+     *
+     * ---- and then it happened anyway ---------------------------------
+     *
+     * M99's fourth increment added a **fifth**, `opt/leanos/pybuild`, and
+     * did not come back here. `boot_pybuild_enabled` was at zero
+     * coverage, `kernel/dev/fwcfg.c` had been under its own floor since,
+     * and the sentence above had been sitting three lines up the whole
+     * time. A warning in a comment is not a test.
+     *
+     * So the table is the thing to add a row to, and the loop derives
+     * everything else from it - the directory, the selector numbers, the
+     * expectations and the count. A sixth switch is one line here and
+     * fails the build if its accessor is missing, which is the closest
+     * this file can get to noticing on its own. */
     static const struct {
-        const char *set;
-        int selftest, ioapic, bootstrap, pytest;
-    } CASES[] = {
-        {"opt/leanos/selftest",  1, 0, 0, 0},
-        {"opt/leanos/ioapic",    0, 1, 0, 0},
-        {"opt/leanos/bootstrap", 0, 0, 1, 0},
-        {"opt/leanos/pytest",    0, 0, 0, 1},
+        const char *name;
+        int (*ask)(void);
+    } SWITCHES[] = {
+        {"opt/leanos/selftest",  boot_selftests_enabled},
+        {"opt/leanos/ioapic",    boot_ioapic_enabled},
+        {"opt/leanos/bootstrap", boot_bootstrap_enabled},
+        {"opt/leanos/pytest",    boot_pytest_enabled},
+        {"opt/leanos/pybuild",   boot_pybuild_enabled},
     };
-    for (unsigned i = 0; i < sizeof(CASES) / sizeof(CASES[0]); i++) {
+    const unsigned N = sizeof(SWITCHES) / sizeof(SWITCHES[0]);
+
+    for (unsigned i = 0; i < N; i++) {
         with_signature();
-        dir_begin(4);
-        dir_add("opt/leanos/selftest", 1, 0x0100);
-        dir_add("opt/leanos/ioapic", 1, 0x0101);
-        dir_add("opt/leanos/bootstrap", 1, 0x0102);
-        dir_add("opt/leanos/pytest", 1, 0x0103);
-        for (unsigned k = 0; k < 4; k++) {
+        dir_begin((int)N);
+        for (unsigned k = 0; k < N; k++) {
+            dir_add(SWITCHES[k].name, 1, (uint16_t)(0x0100 + k));
+        }
+        for (unsigned k = 0; k < N; k++) {
             fake_fwcfg_set_item((uint16_t)(0x0100 + k),
                                 (const uint8_t *)"0", 1);
         }
         fake_fwcfg_set_item((uint16_t)(0x0100 + i), (const uint8_t *)"1", 1);
         fwcfg_init();
-        CHECK_EQ(boot_selftests_enabled(), CASES[i].selftest);
-        CHECK_EQ(boot_ioapic_enabled(), CASES[i].ioapic);
-        CHECK_EQ(boot_bootstrap_enabled(), CASES[i].bootstrap);
-        CHECK_EQ(boot_pytest_enabled(), CASES[i].pytest);
-        /* And asked twice, because each answer is cached after the first
-         * call and a cache that answers differently the second time is
-         * worse than none. */
-        CHECK_EQ(boot_selftests_enabled(), CASES[i].selftest);
-        CHECK_EQ(boot_pytest_enabled(), CASES[i].pytest);
+        /* Every switch asked, twice, on every case. Once is what catches
+         * a shared cache; the second time is what catches a cache that
+         * answers differently after it is populated - and asking only
+         * two of the five twice, which is what this loop used to do, is
+         * how three of those second answers went unexecuted. */
+        for (int round = 0; round < 2; round++) {
+            for (unsigned k = 0; k < N; k++) {
+                CHECK_EQ(SWITCHES[k].ask(), k == i ? 1 : 0);
+            }
+        }
     }
 }
 

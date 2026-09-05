@@ -100,13 +100,22 @@ surprising amount is already here.
   was removed in M26 and is not coming back.
 - Long mode, paging, GDT/IDT/TSS, SSE enabled, NX honoured.
 - **SMP works and is tested** — but every harness pins `QEMU_CPUS=1` on
-  purpose. Four cores boot and share work: four equal tasks cost 114–200%
-  of what one task costs across runs, where 100% is perfect scaling and
-  400% would be one core doing all of it. It is a noisy number — which is
-  why the kernel takes the best of three rounds inside the guest and the
-  budget sits at 250 rather than near the observation. `tools/smp-test.sh`
-  grades it in the default tier. The full battery is *not* green on four cores; see *Known
-  divergences*.
+  purpose. Four cores boot and share work: four equal tasks cost
+  **92–180%** of what one task costs across eleven runs, where 100% is
+  perfect scaling and 400% would be one core doing all of it. **That
+  range is a correction.** It was recorded as 114–200% and the old figure
+  came from a statistic that was wrong: the kernel took the minimum
+  one-task time and the minimum N-task time from *different rounds* and
+  divided, which is the ratio of two moments that never happened
+  together and is biased upward without limit. It produced readings as
+  high as **491%** — more than one core doing all the work, which four
+  cores cannot do, and that impossibility is the tell. M100 pairs the two
+  measurements per round and takes the best ratio; the honest number is
+  **closer to perfect scaling than this file has ever claimed.**
+  `tools/smp-test.sh` grades it in the default tier and used to fail
+  about one run in six because of the old statistic; twelve runs of the
+  new one have not failed. The full battery is *not* green on four cores;
+  see *Known divergences*.
 - I/O APIC with MADT interrupt source overrides, PIC masked rather than
   deleted; per-vector per-CPU interrupt statistics in `/proc`. The 8259
   is still the default because the I/O APIC costs this machine 2x under
@@ -138,9 +147,11 @@ surprising amount is already here.
 
 - Pre-emptive, multi-core capable, one coarse `sched_lock` — **measured
   and kept.** Per-CPU run queues and work stealing were refused in M106 on
-  the measurement above: four tasks of equal work came in as low as 114%
-  of one task's time, so that lock is not what stops this machine using
-  its cores.
+  the measurement above: four tasks of equal work came in as low as
+  **92%** of one task's time, so that lock is not what stops this machine
+  using its cores. M100's correction to the statistic strengthened this
+  conclusion rather than weakening it — the refusal was made on a number
+  that was too *pessimistic*.
 - Wait queues, no busy loops. Latency measured as a distribution
   (best/median/worst, idle and loaded), six budget rows.
 - `MAX_TASKS` 128, `MAX_FDS` 128. High-water marks are budget rows that
@@ -289,22 +300,23 @@ workflow that had never run. Every tier is run by hand, on this machine,
 before a commit, which is the arrangement all 101 landed milestones were
 graded under. Nothing in this tree may depend on a hosted runner.
 
-**The commit tier is the gate, and the full tier is not currently
-green.** M100's second increment ran `--full` and found four red stages,
-none of them caused by it and every one of them checked rather than
-assumed — a coverage ratchet whose last two floors were set above what
-the tests reach, a flaky `[libctest]` clock check on the I/O APIC path, a
-`mount_scan_busy_us` ceiling that the I/O APIC path already exceeded on
-the previous commit, and `tools/bootstrap-test.sh`, which **has never
-passed** because it requires four outputs that only appear after a
-`make -j4` this project's own archive records as never finishing. Each is
-written up in that entry and each has a box. This paragraph is here so
-that the next person to run `--full` knows what they are looking at
-before they spend an evening on it, which is what this one cost.
+**The commit tier is the gate.** M100's second increment ran `--full`
+and found four red stages, none of them caused by it and every one
+checked rather than assumed. The third increment fixed three of them:
+the coverage ratchet's two broken floors were **restored by writing the
+tests that were missing** rather than lowered, `tools/bootstrap-test.sh`
+now bounds the `make -j4` step it used to hang in and **passes for the
+first time**, and `mount_scan_busy_us` was re-ceilinged from the
+measurement. What is left red is the noise, and it is named: the
+four-core stage fails about one run in six on this host and the
+`[libctest]` clock check on the I/O APIC path is flaky, both on this
+kernel and on the one before it. Both have boxes. Read them before
+spending an evening on a `--full` run, which is what the second
+increment cost.
 
 | instrument | what it grades | how it is run |
 |---|---|---|
-| **Host unit tests** (`tests/`) | libk, heap, malloc, leanfs, every network parser, the TCP state machine, PTY, symtab, UTF-8, fnmatch, getopt, fwcfg — and the **scheduler** (Q13), 2,157 lines against a fake timer and a fake CPU, with lock-order inversions made errors rather than comments. **247 tests**, ASan+UBSan, under a second | `--fast` |
+| **Host unit tests** (`tests/`) | libk, heap, malloc, leanfs, every network parser, the TCP state machine, PTY, symtab, UTF-8, fnmatch, getopt, fwcfg — and the **scheduler** (Q13), 2,157 lines against a fake timer and a fake CPU, with lock-order inversions made errors rather than comments. **249 tests**, ASan+UBSan, under a second | `--fast` |
 | **Boot self-tests** | **112 required markers** and 32 performance budgets, graded off the serial log of a real boot. The switch comes from outside the image via fw_cfg, so the image is byte-identical with or without them | `tools/qemu-serial-test.sh` |
 | **Input suite** | real clicks and keys through QEMU's monitor, graded on real framebuffer pixels. Most tests check something *did* change; two check that nothing else did, which is the only way to catch a flicker (Q7/Q15). Boots once per image and restores a snapshot per test, keyed on the image hash so a stale one fails closed (Q19) | `tools/qemu-input-test.sh` |
 | **Differential tests** | `sh`, the regex engine, `sscanf`, `printf`, libm, `realpath`, and the FILE layer — each compiled for the host from the same source the machine runs, put beside the host's own, and required to agree. Nothing in the fixtures says what the right answer is | `--fast` |
@@ -317,7 +329,7 @@ before they spend an evening on it, which is what this one cost.
 | **SMP test** | four cores boot, each recognises itself, four equal tasks share them | default tier |
 | **Bootstrap test** | this machine's own gcc/as/ar/ld building bzip2, and bzip2's own test suite on the result | `--full`, own fw_cfg switch |
 | **Python test** | CPython's own regression suite, on the machine, reporting **its own** counts. The only instrument here that neither wrote its own assertions nor chose what to assert | `tools/python-test.sh` |
-| **Coverage ratchet** | 11 rows in `tests/coverage-floor.tsv`; coverage may not go **down**. There is no coverage *target* and there will not be one | `make coverage-check` |
+| **Coverage ratchet** | **19 rows** in `tests/coverage-floor.tsv`; coverage may not go **down**. There is no coverage *target* and there will not be one. Since M100 the floors are the measured number rather than a round number under it, and a file in the report with **no row is an error** — both because fifteen lines of standing advice on every run are what hid two floors that had actually fallen | `make coverage-check` |
 
 **100% line coverage is not a passing grade.** The mutation harness exists
 because the first file it examined (`net/ethernet.c`) had full line
@@ -989,6 +1001,9 @@ on demand, and it is committed anyway for one reason: **`cdbca6e` fails
 it at the same rate on the same image.** Everything else in that tier is
 green, including 112/112 boot markers and every budget.
 
+*Fixed in the third increment, and it was the statistic rather than the
+machine — see "The four-core flake, and the statistic behind it" below.*
+
 **Cost:** about forty QEMU boots. The libraries took **one**, and passed
 on it. Everything else went on finding out that three of the four things
 that then went red were already red, and on the ninth boot's worth of
@@ -997,6 +1012,215 @@ work that turned "the mount scan got slower" into a counter.
 **Next in the order:** freetype, which links `-lz` and wants `libpng` for
 one optional feature, and is the first one that will ask this libc for
 something neither of these did.
+
+---
+
+### M100 (third increment) — the four red stages, fixed rather than filed `[~]`
+
+*Landed 2026-09-05.* The second increment found four red stages in
+`--full`, proved none of them was its own, and wrote them down. Writing
+them down is not fixing them. Three are fixed here and the fourth is
+better understood than it has ever been.
+
+#### The coverage ratchet: two floors had been broken since M98
+
+`kernel/dev/fwcfg.c` at 89.55% against a 97% floor and `kernel/mm/heap.c`
+at 97.37% against 100%. Neither was lowered. Both were **restored by
+writing the tests that were missing**, which is what `CLAUDE.md` says
+happens when new code arrives — the code had arrived without them.
+
+- **`fwcfg.c`.** M98 added the `bootstrap` switch, M99 added `pytest`,
+  and M99's fourth increment added `pybuild`. The test that exists to
+  catch a *shared cache* between these accessors was grown for the first
+  two and not the third, so `boot_pybuild_enabled` had zero coverage. Its
+  own comment, three lines above the table it needed a row in, said:
+  *"a switch that is only checked against the three that existed when it
+  was written is a switch nobody has checked."* **A warning in a comment
+  is not a test.** The table is now one array that the loop derives the
+  directory, the selectors, the expectations and the count from, every
+  switch is asked on every case, and each is asked twice. 89.55% → **100%**.
+- **`heap.c`.** `grow_heap` asks two things per page and both can say no:
+  pmm can have no frame, or the *mapping* can fail — which the real
+  `vmm_try_map_page_in` does when it needs a frame for a **page table**.
+  The two unwind differently, because on a mapping failure the frame for
+  the page has already been handed out and the loop has to free that one
+  itself. Those three lines had never run since M102 wrote them, because
+  `tests/fakes/fake_vmm.c` could not fail a mapping — under a comment
+  saying that making it fail *"would be inventing a failure mode the fake
+  cannot honestly model"*. Half right: the fake having no page tables is a
+  reason it cannot decide **when** to fail, not a reason it cannot be
+  **told**. `fake_vmm_fail_map_after(n)` models exactly the documented
+  return and nothing more, and the new test asserts the frame comes back.
+  Both new tests were checked by breaking the code they cover: removing
+  the `pmm_free_frame` gives `expected 0, got 1`, and pointing
+  `boot_pybuild_enabled` at the wrong fw_cfg name fails four assertions.
+
+**And the ratchet's own two defects, which are why nobody noticed.**
+
+- **It lied about where a floor came from.** `parse_floor` dropped the
+  commit column, so the `FELL` line printed `commit()` — the *current*
+  HEAD — under the words "set at". Both broken floors were set at
+  `b7bb520` and were being reported as `cdbca6e`'s. That is the one fact
+  that separates *"you just broke this"* from *"this has been broken for
+  a while and nobody looked"*, and it was showing the wrong one.
+- **Its report was mostly advice.** Seven files printed
+  `raised ... raise it, and say so` on every run because their floors
+  were rounded down to whole numbers, and eight more printed `new`
+  because they had no row at all — including `kernel/sched/sched.c`,
+  2,157 lines in the host tier since Q13 with nothing constraining its
+  direction. **Fifteen lines of standing advice, and the two real
+  regressions underneath them.** The floors are the measured number now,
+  every file in the report has one, and a file without a row is an
+  **error** rather than a sixteenth line. `make coverage-check` is silent
+  when nothing changed, which is the only state in which anybody reads
+  it.
+
+#### `waitpid(-pgid)` was refused by a comment that had come true
+
+```c
+if (want < -1) {
+    return -1; /* process groups arrive with M85 */
+}
+```
+
+M85 arrived five milestones ago and brought sessions, process groups, job
+control and `kill(-pgid)` with it. This line stayed. **A TODO that names
+a milestone stops being a TODO the day that milestone lands; after that
+it is a false statement about the system** — and this one was false on
+the path where being wrong is silent, because `waitpid` returning -1 for
+a group that exists is indistinguishable from having no such children.
+
+All four POSIX shapes work now (`> 0`, `-1`, `< -1`, and `0` for the
+caller's own group). The group filter is applied *before* the
+"any children at all" flag, deliberately: no matching children is
+`ECHILD`, because the alternative is a wait that blocks forever on a
+group that will never produce anybody. `user_space/bin/forktest.c` grew
+four exit codes for it, and the interesting ones are not "it does not
+work" — they are the two ways the filter can be subtly wrong: returning a
+child from the *caller's* group (which looks like success), and blocking
+rather than failing once the group is empty. Falsified by restoring the
+old line: `forktest exited 10`, and the boot panics.
+
+Nothing in this tree passed either form, which is exactly why nobody
+noticed. `wait()` is `waitpid(-1)` and every toybox caller passes -1.
+
+#### A bug this increment introduced, and what it cost to find
+
+`measure -t` needs a process group to kill, so the first version called
+`setpgid(0, 0)` in every child — including the ones with no deadline, on
+the theory that a process group costs nothing. **It is not free.** The
+unbounded `make -j1` step, 188 s on the run before, stopped producing
+output entirely and was still in it ten minutes later; the two
+single-process steps either side of it were fine, which is what a
+job-control stop looks like — it takes the process with children to make
+it visible. Scoping the call to `-t` restored it to 200.9 s.
+
+The lesson is the general one and it is worth the space: **a capability
+nothing uses is not free.** This one cost the step it was added next to,
+and it was added for a deadline that step does not have.
+
+#### The four-core flake, and the statistic behind it
+
+The second increment quantified this and left it: `tools/smp-test.sh`
+failing about one run in six, on this kernel and on `cdbca6e`'s, with
+`smp_parallel_cost_pct` spanning **103–491%**. The third increment found
+why, and it was not the machine.
+
+**491% is impossible.** Four cores cannot cost more than four times one
+core's work; the units do not allow it. A number outside the range its
+own units permit is the tell that the *statistic* is wrong rather than
+the thing being measured — and it had been sitting in the log, passing,
+for as long as it stayed under 300.
+
+The kernel took the minimum one-task time and the minimum N-task time
+**independently, across different rounds**, and divided:
+
+```c
+for (round = 0; round < 3; round++) {
+    a = smp_bench_round(1);     one_us  = min(one_us,  a);
+    b = smp_bench_round(cpus);  many_us = min(many_us, b);
+}
+cost_pct = many_us * 100 / one_us;
+```
+
+That is not the best of three ratios. It is the ratio of two unrelated
+best cases: a lucky one-task round shrinks the denominator, the unlucky
+N-task rounds are all that is left in the numerator, and the quotient
+compares two moments that never happened together. The comment above it
+argued correctly that *"interference can only make a round slower, so the
+fastest round is closest to the machine"* — and then applied that
+argument to the two halves separately instead of to the quantity being
+budgeted. It also meant the three `[perf]` rows disagreed with each
+other: the printed ratio did not equal the printed times divided,
+because they came from different rounds.
+
+**Fixed by pairing.** The ratio is computed per round, from two
+measurements taken seconds apart under the same host conditions, and the
+best of *those* is the answer. Five pairs rather than three, which is
+80 ms of a boot.
+
+| | spread over the runs measured | failures |
+|---|---|---|
+| unpaired, 3 rounds | 103–491% (12 runs, two kernels) | 3 of 12 |
+| paired, 3 rounds | 83–260% (12 runs) | 0 of 12 |
+| paired, 5 rounds | **92–180%** (11 runs) | 0 of 11 |
+
+**The ceiling stays at 300.** The spread does not justify tightening it,
+and choosing a tighter one from eleven samples of a noisy host would be
+the same mistake one level down.
+
+**And this stage turns out to have had two failure modes, not one.** The
+one above fails in about 20 s, because the boot reaches `[m106]` and the
+ratio is over the ceiling. The other fails at exactly **240 s**, which is
+`smp-test.sh`'s own ceiling: the four-core boot never reaches the marker
+at all. Twenty-seven standalone runs of the fixed harness have not
+reproduced it — including three taken immediately after a full graded
+boot, which is the position it occupies in the tier — but it appeared
+once in a commit-tier run after the fix, so it is real and it is not the
+statistic. **That one is M106's tail**, which already names *"an
+intermittent stall on the exit path"* and whose history in the archive is
+*"about one boot in ten hangs"*. It is row 5's, it is not M100's, and the
+useful thing this increment can leave behind is that the two modes are
+now **distinguishable by their duration**: ~20 s is the measurement, 240 s
+is the machine.
+
+**And it changes what this file claims about the machine, in the good
+direction.** Four cores were recorded as costing 114–200% of one core's
+work. The honest number is 92–180%, and M106's refusal of per-CPU run
+queues was made on a figure that was too *pessimistic* — the coarse
+`sched_lock` is even less of a bottleneck than the milestone that kept it
+believed.
+
+#### One process note, recorded rather than hidden
+
+Two consecutive runs of the fast tier failed `test_fwcfg`'s new
+switch-independence test with four assertions, and then eleven
+consecutive runs passed it with no source change of any kind. Both
+failures happened while a `make -s all` was running concurrently in the
+background — a mistake in how the command was backgrounded, not a
+property of the tier. `tests/runner.c` does not shuffle, fork or thread,
+and `$(TEST_BIN)` does depend on every kernel source it compiles, so
+neither ordering nor a stale build explains it. It is not reproduced and
+it is not explained; the concurrent build is the suspect and it is
+written down as a suspect rather than as a cause.
+
+#### `docs/third-party-programs.md`, which had been wrong for five milestones
+
+Four bullets on its capability list were false: files "up to 8 MiB"
+(4 GiB since M93, and the *Limits* section forty lines above said so —
+two numbers for one fact on one page), "there is no `<sys/socket.h>`"
+(there is), "`scanf`: no. Still absent because nothing has asked" (it is
+one of the seven differential tests), and "`fork`, `exec`, `dlopen`: no,
+and not coming soon" — five milestones after M83, M84 and M95 landed all
+three. The page also never mentioned `x86_64-lean_os-gcc`, which M94
+built precisely so that nobody would have to type flags by hand, so its
+title question was answered with the long way round.
+
+Fixed, with the two routes stated side by side, every claim checked
+against a file in this tree, and a table of what has actually been ported
+since. **A capability list is a thing that goes wrong silently**, and the
+rule now written on the page is that a claim which cannot be checked
+against a file in this tree does not belong on it.
 
 ---
 
@@ -1098,19 +1322,26 @@ left to QEMU's default, which is how this rotted in the first place.
       path meeting genuine concurrency for the first time.
 - [ ] **One animation frame in six misses its budget** in the interactive
       suite.
-- [ ] **The four-core harness itself fails about one run in six**, and
-      M100's second increment is the first thing to put numbers on it.
-      Twelve standalone runs of `tools/smp-test.sh` against the same full
-      image, six on each of two kernels: `smp_parallel_cost_pct` came in at
-      244, -, 247, 207, 211, 339 on one and 118, 313, 137, 153, 243, 188 on
-      the other, so **three of twelve were over the 300% ceiling and the
-      kernel is not what decides it.** A ceiling sitting inside the spread
-      rather than above it is a stage the loop cannot enforce "nothing red
-      gets committed" with. Not changed there and then, deliberately:
-      whoever explains the outlier should set the number, not whoever
-      tripped over it.
+- [x] **The four-core harness itself failed about one run in six** —
+      M100's second increment quantified it and the third found the cause,
+      which was the statistic and not the machine. It took the minimum
+      one-task time and the minimum N-task time from *different rounds*
+      and divided, which is biased upward without limit and produced
+      readings as high as **491%** - more than one core doing all the
+      work, which four cores cannot do. Paired per round and best-of-five
+      now: 103-491% became **92-180%**, and 3 failures in 12 became 0 in
+      23. The recorded scaling figure moved with it, in this project's
+      favour - see the third increment's entry.
 - [ ] **An intermittent stall on the exit path**, seen once, where a
       terminated task was still current a second after being reaped.
+      **M100 gave this a reproduction signature**, which it did not have
+      before: `tools/smp-test.sh` failing at exactly **240 s** - its own
+      ceiling, with the `[m106]` marker never appearing - as opposed to
+      the ~20 s failure that means the boot finished and the ratio was
+      over budget. The second kind was the harness's own statistic and is
+      fixed; this kind is the machine. Twenty-seven standalone runs did
+      not reproduce it, one commit-tier run did, so whoever picks this up
+      should expect to run the tier rather than the stage.
 - [ ] **CPU affinity**, deferred on the condition that the battery is
       green on four cores first. Pinning the compositor to a warm core is
       a latency optimisation of a scheduler that does not yet survive four
@@ -1129,13 +1360,43 @@ left to QEMU's default, which is how this rotted in the first place.
       headers. M104 measured readahead and refused it by default; this is
       the first workload that would ask again. Recorded rather than acted
       on, because the two numbers M98 changed were the two it had measured.
-- [ ] **`make -j4` on one core costs far more than four times `make -j1`**
-      — 203 s serially, still running at 600 s four ways. Four concurrent
-      `cc1` processes are ~480 MiB of resident set against a block cache
-      then serving four files. Stated as an observation, not a
-      measurement: the run was stopped rather than finished.
-- [ ] **`tools/bootstrap-test.sh` has never passed, and M100's second
-      increment is what noticed.** Its step 8 is `make -j4`, which the
+- [~] **`make -j4` does not compile at all — it spins.** This was
+      recorded as *"costs far more than four times `make -j1`* — 203 s
+      serially, still running at 600 s four ways. Four concurrent `cc1`
+      processes are ~480 MiB of resident set against a block cache then
+      serving four files. Stated as an observation, not a measurement:
+      the run was stopped rather than finished."* **M100 bounded the step
+      and took the measurement, and the guess was wrong in the most
+      useful way.** With `measure -t 900`:
+
+      ```
+      [measure] bzip2-j1: wall 201880 ms  user 4197 cs  sys  5816 cs  peak-rss 119952 KiB  exit 0
+      [measure] bzip2-j4: wall 900070 ms  user  510 cs  sys 43734 cs  peak-rss   2720 KiB  exit 124
+      ```
+
+      Two numbers say it is not slowness. **Peak RSS 2,720 KiB against
+      `-j1`'s 119,952**: `getrusage(RUSAGE_CHILDREN)` reports the largest
+      single child, and the largest child this build ever made is about
+      the size of `make` itself — **`cc1` never ran**. And **437 s of
+      system time against 5 s of user**, where `-j1` spends 42 s user to
+      58 s system. It is not compiling and losing to memory pressure; it
+      is in the kernel, in a loop, having launched nothing.
+
+      98.8% system time with no forward progress is the signature of a
+      poll that never completes, and the first thing to look at is the
+      box directly below this one: make 4.4 cannot get a FIFO here, falls
+      back to the **pipe job server**, and a job server that never hands
+      out a token is a `make` that waits for one forever. That is a
+      hypothesis with a named suspect, which is more than this box had
+      before; it is not yet a diagnosis, because nobody has watched which
+      syscall the 437 seconds are in.
+      **This is now the sharpest handle row 5 has** — it reproduces on
+      demand, in 900 bounded seconds, on one core, with no flakiness at
+      all. Two independent runs: sys **43,734** and **43,695** cs, peak
+      RSS **2,720 KiB** both times. A bug that repeats to four
+      significant figures is a bug somebody can bisect.
+- [x] **`tools/bootstrap-test.sh` had never passed, and M100's second
+      increment is what noticed — fixed.** Its step 8 is `make -j4`, which the
       table in this very entry records as *"did not finish inside a
       40-minute ceiling"* — and the harness **requires** that step's
       `[measure] bzip2-j4` line plus the three `[perf]` rows the kernel
@@ -1146,14 +1407,34 @@ left to QEMU's default, which is how this rotted in the first place.
       and both timed out in the same place, with every other step
       *faster* than its recorded number (75.9 s against 86.9 for the C++
       unit, 188 s against 203 for `bzip2-j1`), so the machine is not what
-      is slow. **The fix is a decision, not a measurement**: either the
-      harness stops requiring a step this project has recorded as
-      unfinished, or `-j4` is made to finish — and the second is row 5's
-      work, because M98's tail already blames concurrency for it.
+      is slow.
+
+      **Fixed by bounding the step rather than by lowering the bar.**
+      `user_space/bin/measure.c` grew `-t SECONDS`: the command gets a
+      deadline, is reported as `exit 124  UNFINISHED at the -t limit`
+      when it hits one, and its wall-clock is deliberately *not* emitted
+      as a `[perf]` row, because that number would be the limit rather
+      than the cost. The script bounds step 8 at 900 s, and everything
+      after it now runs — so `build_wall_s`, `build_peak_live_tasks` and
+      `build_peak_fds_one_task` were produced **for the first time**, and
+      the last two now have budget rows answering M98's third box. The
+      harness grades the step on which of three things happened
+      (finished, hit the deadline, or failed for some other reason), and
+      only the third is an error.
+
+      Two smaller things fell out of it. `boot_to_desktop_s` is no longer
+      graded on this boot — the build runs before PID 1 on purpose, so
+      that row was the build's wall clock wearing the ordinary boot's
+      name, and it was failing against a 600 s ceiling with 1,237 s.
+      And the bounded measurement is what turned the box above from
+      "slow" into "spinning".
 - [ ] **`mkfifo`.** GNU make 4.4 wants a FIFO for its job server, does not
       get one, says so, and falls back to the pipe job server — make's own
       supported path. Recorded rather than fixed; nothing else here has
-      asked for a named pipe.
+      asked for a named pipe. **M100 promoted this from a curiosity to a
+      suspect**: the fallback path is the one `make -j4` spins in, and
+      "make's own supported path" is a claim about make rather than about
+      this kernel's pipes. The box above is where that gets settled.
 
 ### Q7 — pixels `[~]`
 

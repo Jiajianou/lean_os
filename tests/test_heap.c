@@ -235,6 +235,54 @@ TEST(heap, a_failed_growth_gives_back_every_frame_it_took) {
     CHECK_EQ(fake_vmm_mapped_pages(), 0);
 }
 
+/* M100: and the other way a growth fails part way, which is the one the
+ * test above cannot reach.
+ *
+ * grow_heap asks two things per page and both can say no. pmm can have
+ * no frame - the test above - or the mapping itself can fail, which the
+ * real vmm_try_map_page_in does when it needs a frame for a **page
+ * table** and pmm has none. The two are a line apart in grow_heap and
+ * they unwind differently: on a mapping failure the frame for the page
+ * has ALREADY been handed out, so the loop has to free that one itself
+ * before unwinding the pages behind it.
+ *
+ * Those three lines had never run. They were written in M102 with the
+ * rest of the unwind and the fake could not fail a mapping until M100
+ * gave it fake_vmm_fail_map_after, so `kernel/mm/heap.c` sat below its
+ * own 100% floor and the ratchet had been red about it for four
+ * milestones. The bug the lines exist to prevent is the expensive kind:
+ * one frame lost per failed allocation, on a machine that is failing
+ * allocations because it is nearly out of them.
+ *
+ * Frames available, mappings refused after the third: three pages map,
+ * the fourth takes a frame and cannot be mapped. Every frame back and
+ * every page unmapped, or this is a leak. */
+TEST(heap, a_growth_that_cannot_map_gives_back_the_frame_it_had_taken) {
+    heap_fixture();
+
+    fake_vmm_fail_map_after(3);
+    void *p = kmalloc(PAGE_SIZE * 8);
+    CHECK(p == NULL);
+    /* The one the mapping refused is included: this is 0 rather than 1
+     * only if grow_heap frees the frame it is still holding at the
+     * moment vmm says no. */
+    CHECK_EQ(fake_pmm_outstanding(), 0);
+    CHECK_EQ(fake_vmm_mapped_pages(), 0);
+
+    /* And the heap is not poisoned by it - same claim as the test below,
+     * reached through the other failure. */
+    fake_vmm_fail_map_after(-1);
+    void *ok = kmalloc(64);
+    REQUIRE(ok != NULL);
+    for (int i = 0; i < 64; i++) {
+        ((char *)ok)[i] = (char)i;
+    }
+    for (int i = 0; i < 64; i++) {
+        CHECK_EQ(((char *)ok)[i], (char)i);
+    }
+    kfree(ok);
+}
+
 /* A failed allocation must not poison the heap. The next one, for
  * something that fits, has to work. */
 TEST(heap, the_heap_still_works_after_an_allocation_fails) {

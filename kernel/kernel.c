@@ -3284,15 +3284,58 @@ static void boot_selftests_system(void) {
          * for this question: interference from outside the guest can
          * only ever make a round slower, so the fastest round is the one
          * that came closest to measuring the machine rather than the
-         * host. Six rounds of ~20 ms is a fifth of a second. */
+         * host. Ten rounds of ~20 ms is a third of a second.
+         *
+         * ---- M100: best-of WHAT, which is where this was wrong -------
+         *
+         * The first version took the minimum of the one-task times and
+         * the minimum of the N-task times **independently**, across
+         * different rounds, and divided one by the other. That is not
+         * the best of three ratios; it is the ratio of two unrelated
+         * best-cases, and it is biased upward without limit. The lucky
+         * one-task round shrinks the denominator, the unlucky N-task
+         * rounds are all that is left in the numerator, and the quotient
+         * is a comparison between two moments that never happened
+         * together.
+         *
+         * What it cost: `tools/smp-test.sh` failed about **one run in
+         * six** against a 300% ceiling, on this kernel and on the one
+         * before it, with observations spanning 103% to 491% - and 491%
+         * is more than one core doing all the work, which is not a thing
+         * four cores can do. A number outside the range its own units
+         * allow is the tell that the statistic is wrong rather than the
+         * machine.
+         *
+         * The ratio is now computed **per round**, from two measurements
+         * taken seconds apart under the same host conditions, and the
+         * best of those ratios is the answer - which is the same
+         * best-of argument the paragraph above makes, applied to the
+         * quantity actually being budgeted. The one-task and N-task
+         * times reported beside it come from the winning round, so the
+         * three [perf] rows now agree with each other; before, they
+         * could each come from a different round and the printed ratio
+         * did not equal the printed times divided. */
         uint64_t one_us = 0, many_us = 0;
-        for (int round = 0; round < 3; round++) {
+        uint32_t cost_pct = 0;
+        /* Five paired rounds rather than three, and both numbers below
+         * are measured rather than expected. With the pairing fixed,
+         * twelve runs at three rounds spanned **83-260%**; eleven runs
+         * at five spanned **92-180%**. The remaining tail is host
+         * interference landing on one half of a pair, and two more pairs
+         * cost 80 ms of a boot to halve it. The ceiling stays at 300 -
+         * the spread does not justify tightening it, and a ceiling
+         * chosen from eleven samples of a noisy host would be the same
+         * mistake one level down. */
+        for (int round = 0; round < 5; round++) {
             uint64_t a = smp_bench_round(1);
             uint64_t b = smp_bench_round(cpus);
-            if (one_us == 0 || a < one_us) {
-                one_us = a;
+            if (a == 0 || b == 0) {
+                continue;
             }
-            if (many_us == 0 || b < many_us) {
+            uint32_t pct = (uint32_t)((b * 100u) / a);
+            if (one_us == 0 || pct < cost_pct) {
+                cost_pct = pct;
+                one_us = a;
                 many_us = b;
             }
         }
@@ -3301,8 +3344,6 @@ static void boot_selftests_system(void) {
          * holds ceilings, and "K tasks cost no more than 100% of what one
          * task cost" is a ceiling. 100 means the work went wide, which is
          * what K cores are for; K*100 means one core did all of it. */
-        uint32_t cost_pct = one_us ? (uint32_t)((many_us * 100u) / one_us) : 0;
-
         if (one_us == 0 || many_us == 0) {
             panic("M106 self-test: the parallel benchmark measured nothing");
         }

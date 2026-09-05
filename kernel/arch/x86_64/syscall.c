@@ -4953,8 +4953,33 @@ static long sys_waitpid(uint64_t pid_arg, uint64_t status_ptr, uint64_t options,
     (void)a6;
     task_t *self = sched_current();
     int64_t want = (int64_t)pid_arg;
+    /* ---- M100: and the process groups that arrived in M85 ------------
+     *
+     * This used to be `if (want < -1) return -1;` under the words
+     * "process groups arrive with M85". M85 landed - sessions, process
+     * groups, job control, `kill(-pgid)`, `^C` interrupting a pipeline -
+     * and this line stayed, so `waitpid(-pgid, ...)` was still refused
+     * five milestones later by a comment that read like a plan.
+     *
+     * A TODO that names a milestone stops being a TODO the day that
+     * milestone lands. After that it is a false statement about the
+     * system, and this one was on the one path where being wrong is
+     * silent: waitpid returning -1 for a group that exists is
+     * indistinguishable, to the caller, from having no such children.
+     *
+     * POSIX has three shapes and this now has all three:
+     *   pid  > 0   that child
+     *   pid == -1  any child
+     *   pid <  -1  any child in process group -pid
+     *   pid ==  0  any child in the CALLER's process group
+     * The last two are the ones that were missing. Nothing in this tree
+     * passed either - `wait()` is `waitpid(-1)` and toybox's callers all
+     * pass -1 - which is exactly why nobody noticed. */
+    int want_pgid = 0;
     if (want < -1) {
-        return -1; /* process groups arrive with M85 */
+        want_pgid = (int)(-want);
+    } else if (want == 0) {
+        want_pgid = self->pgid;
     }
     if (status_ptr && !user_range_ok(status_ptr, sizeof(int), 1)) {
         return -1;
@@ -5001,6 +5026,19 @@ static long sys_waitpid(uint64_t pid_arg, uint64_t status_ptr, uint64_t options,
                  * lookup would be answered by a recycled generation. */
                 task_t *t = sched_task_by_slot(i);
                 if (!t || t->parent_id != self->id || t->reaped) {
+                    continue;
+                }
+                /* M100: and in the group, when one was asked for.
+                 *
+                 * Filtered BEFORE `any_children`, which is the whole of
+                 * the decision here. A caller with children but none in
+                 * the named group has no *matching* children, and POSIX
+                 * spells that ECHILD - the same answer as having none at
+                 * all - because the alternative is a wait that blocks
+                 * forever on a group that will never produce anybody.
+                 * Setting any_children from a child the caller did not
+                 * ask about is how that happens. */
+                if (want_pgid && t->pgid != want_pgid) {
                     continue;
                 }
                 any_children = 1;

@@ -14,6 +14,33 @@ This is the other way: compile your program with the same toolchain,
 then write it straight onto an already-built disk image without
 rebuilding the kernel at all.
 
+## Two routes, and which one you want (M100)
+
+Everything below this section was written before M94, when
+`tools/build-user-program.sh` was the only way in. It still works and it
+is still the shortest path for a single `.c` file. But it is no longer
+the interesting one, and a page that does not say so sends people the
+long way round:
+
+| | `tools/build-user-program.sh` | `x86_64-lean_os-gcc` |
+|---|---|---|
+| what it is | a script that pulls this project's own flags out of the Makefile and links against `user_space/lib` | **a real target triple** in binutils and GCC (M94), built by `tools/build-toolchain.sh` |
+| you type | `tools/build-user-program.sh myapp.c myapp` | `x86_64-lean_os-gcc hello.c -o hello` |
+| flags by hand | none, because the script supplies them | **none, because the compiler already knows** — load address, code model, red zone and startup files all come from the target description |
+| somebody else's build system | no. `./configure` will not run this script | **yes**: `./configure --host=x86_64-lean_os && make` |
+| what it links | `user_space/lib` | the sysroot: this project's libc, and whatever else has been installed into it |
+
+**If you are porting something that has its own build system, use the
+second one.** That is the whole reason it exists — M94's own sentence is
+*every flag invented by hand is a flag someone else's build system will
+not pass* — and it is what bzip2, GNU hello, toybox, CPython, zlib,
+libpng and libjpeg are built with. See M94 and M100 in
+[milestones.md](../milestones.md), and `tools/build-thirdparty.sh` for
+seven worked examples of the second route, three of which are libraries
+that install into the sysroot so the next one can link them.
+
+The rest of this page is the first route.
+
 ## The workflow
 
 ```sh
@@ -199,7 +226,9 @@ before adding to it:
 - **A real `argv`: yes** (M60), including argument counts and quoting
   from the terminal.
 - **Files: yes** (M59) — `fopen`/`fread`/`fseek` over real descriptors,
-  and files up to 8 MiB.
+  and files up to **4 GiB** since M93. (This bullet said 8 MiB until
+  M100, while the *Limits* section forty lines above it said 4 GiB. Two
+  numbers for the same fact on one page is how a page stops being read.)
 - **Memory: `SYS_sbrk`, and since M78 an `mmap`/`munmap` arena too.** A
   process's address-space layout is still fixed in `kernel/proc/proc.h`,
   but a mapping can now be *given back*, and `malloc` routes anything
@@ -223,19 +252,63 @@ before adding to it:
   caught signal is delivered on the way back from a syscall, so a
   program in a pure compute loop that never syscalls does not run its
   handler until it does.
-- **`struct tm`, `localtime`, `strftime`: yes** (M80 groundwork), with
+- **`struct tm`, `localtime`, `strftime`: yes** (M80's groundwork, which
+  outlived M80 itself — the milestone was abandoned and superseded by
+  M99), with
   one honest caveat: `localtime` and `gmtime` are the same function,
   because this machine keeps UTC and knows of no other zone.
 - **Sockets: yes** (M64/M66) — as ordinary file descriptors, gated on
-  `CAP_NETWORK`. There is no `<sys/socket.h>`; the interface is
-  `system_api/include/os_net.h`, which is a different spelling of the
-  same idea and would be a thin header away from the POSIX one.
-- **`scanf`: no.** Still absent because nothing has asked. A program
-  that wants one says so at link time, which is the specification - and
-  that rule is what produced the whole M80 list: thirteen headers and
-  several hundred lines of libc, every one of them named by CPython's
-  own source refusing to compile rather than guessed at in advance.
-- **`fork`, `exec`, `dlopen`: no, and not coming soon.** `SYS_spawn` is
-  a combined fork+exec by design (M13) and there is no dynamic loader
-  (see "Deliberately not next" in milestones.md). A program built around
-  `fork` needs a decision, not a header.
+  `CAP_NETWORK`. `<sys/socket.h>` **does** exist (this bullet said it did
+  not, until M100): `socket(AF_INET, ...)` with `SOCK_STREAM` and
+  `SOCK_DGRAM` is what a ported program actually writes, and
+  `system_api/include/os_net.h` is the layer underneath it.
+  **`AF_UNIX` is defined and refused** — `<sys/un.h>` exists so that code
+  carrying a Unix-domain path it never takes still compiles, and
+  `socket()` says no. That is M100's third bullet and it is still open.
+- **`scanf`: yes**, and it is one of the seven differential tests.
+  `tools/scanf-test.sh` compiles this project's `sscanf` for the host
+  from the same source the machine runs, puts it beside the host's, and
+  requires every fixture to agree — so what it does is decided by a
+  program nobody here wrote. (This bullet said "no. Still absent because
+  nothing has asked" until M100. Something asked.)
+- **`fork`, `exec`, `dlopen`: yes, all three.** M83 gave this kernel a
+  real `fork` with copy-on-write, M84 `execve`, and M95 a dynamic loader
+  (`/lib/ld-lean.so`) with `dlopen`/`dlsym`. `SYS_spawn` is still there
+  and is still what the desktop uses; it is no longer the only way. Two
+  caveats that are facts rather than gaps:
+  **`fork` is refused from a threaded process** (M83 — there is no TLB
+  shootdown, so a second thread on another core could write to a page the
+  child was just promised is its own, and a clean refusal was chosen over
+  a page that is sometimes shared), and **an object `dlopen`ed after
+  startup cannot have thread-local variables** (M99 — `initial-exec` TLS,
+  no `__tls_get_addr`).
+
+  This bullet said "no, and not coming soon" for five milestones after
+  all three landed, which is the failure this whole page had: **a
+  capability list is a thing that goes wrong silently.** Every claim on
+  it was checked against the headers and the milestone entries when M100
+  rewrote these four bullets, and a claim here that is not checkable
+  against a file in this tree does not belong on the page.
+
+---
+
+# What has actually been ported since (M89–M100)
+
+Whetstone was the first and is no longer the interesting one. What is on
+this machine now, none of it edited to suit this OS:
+
+| | what it is | how it is graded here |
+|---|---|---|
+| **bzip2 1.0.8** (M94) | a plain Makefile | its own test suite, and — since M98 — **built by this machine's own gcc**, with all eight objects byte-identical with the cross compiler's |
+| **GNU hello 2.12.1** (M94) | `./configure --host=x86_64-lean_os && make`, dragging ~50 gnulib modules whose whole job is to probe a system | it runs |
+| **toybox** (M89) | one static binary behind 143 command names in `/bin` | a boot self-test pipes `find \| xargs grep \| sort \| uniq \| sort` — five programs nobody here wrote, four pipes |
+| **binutils, GCC, GNU make** (M98) | the toolchain, running **on the machine** | it builds bzip2 here |
+| **CPython 3.12.7** (M99) | a three-edit port, stdlib on disk as `.py`, 58 extension modules `dlopen`ed | `python3 -m test` runs **CPython's own regression suite** here and reports its own counts — the only instrument in this project that neither wrote its assertions nor chose what to assert. It found nineteen bugs in this OS |
+| **zlib 1.3.1** (M100) | no edit at all, `config.sub` included | zlib's own `example` program |
+| **libpng 1.6.44, libjpeg 9f** (M100) | one `config.sub` line each; libpng links the zlib beside it in the sysroot | libjpeg's own `make test`: seven **byte-exact** comparisons against output the IJG's encoder and decoder produced in 1995 |
+
+The pattern is the one M63 set and every port since has followed:
+**the failing build is the specification.** Run it, read the error, add
+exactly what it named. Every predicted list of missing features in this
+project has been wrong, including the four bullets above that this page
+had to correct in M100.

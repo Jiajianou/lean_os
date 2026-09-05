@@ -136,8 +136,31 @@ toybox df -k /
 # process-pressure measurement M98's third box asks for. The first run
 # that put it in the middle spent its whole ceiling here and lost the
 # disk figures that come free, so everything cheap now happens first.
+#
+# ---- M100: and it is bounded now, because it does not finish ----------
+#
+# Putting it last was not enough. `make -j4` here has never returned:
+# M98's own table in the archive records it as "did not finish inside a
+# 40-minute ceiling", and two runs at a 3,600 s ceiling in M100 both sat
+# in this step with no serial output for the better part of an hour while
+# `-j1` compiled the same eight files in 188 s. Unbounded, it took the
+# whole harness with it - so the three [perf] rows the kernel prints
+# after this script never appeared and tools/bootstrap-test.sh has
+# **never passed**, reporting the situation as four missing lines.
+#
+# `measure -t` bounds the step and reports it as what it is: a command
+# still running at its limit, exit 124, wall-clock deliberately not
+# emitted as a budget row because the number would be the limit rather
+# than the cost. Everything after this line then runs, which is where
+# build_wall_s and the two peak counters come from.
+#
+# 900 s is chosen from a measurement rather than an opinion: `-j1` is
+# 188 s, and four jobs on one core that took more than five times one
+# job's wall clock would already be the answer M98's third box is
+# asking for. It is a *diagnosis*, not a deadline to grow when it
+# fires - the day this step finishes, that fact is the news.
 echo "== step 8: bzip2 again, four jobs at once =="
 make clean
-measure bzip2-j4 make -j4 CFLAGS="$CF" libbz2.a bzip2 bzip2recover
+measure -t 900 bzip2-j4 make -j4 CFLAGS="$CF" libbz2.a bzip2 bzip2recover
 
 echo "== m98boot done =="

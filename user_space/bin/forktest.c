@@ -31,10 +31,15 @@
  *   7  an inherited descriptor did not work in the child
  *   8  a round of fork/exit/wait reported the wrong exit code
  *   9  the machine ran out of task slots
+ *  10  waitpid(-pgid) did not find a child in that process group
+ *  11  waitpid(-pgid) returned a child that was NOT in that group
+ *  12  waitpid(0) did not wait for the caller's own process group
+ *  13  waitpid(-pgid) for a group with no children of ours did not fail
  */
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/wait.h>   /* M100: waitpid, for the process-group forms */
 #include <unistd.h>
 
 /* Three project calls, and this include is the honest way to say so.
@@ -236,6 +241,107 @@ int main(int argc, char **argv) {
             printf("forktest: round %d waited for %d and got %ld\n",
                    round, (round % 100) + 1, rc);
             return 8;
+        }
+    }
+
+    /* ---- M100: waiting for a process GROUP -----------------------------
+     *
+     * `waitpid(pid, ...)` with pid < -1 means "any child in process group
+     * -pid", and pid == 0 means "any child in mine". Both were refused by
+     * this kernel until M100, by a line that returned -1 under the words
+     * "process groups arrive with M85" - and M85 arrived five milestones
+     * earlier, bringing sessions, groups, job control and kill(-pgid)
+     * with it. The comment stopped being a plan and became a false
+     * statement about the system, and nothing here called either form, so
+     * nothing said so.
+     *
+     * Four claims, because the interesting failures are not "it does not
+     * work" - they are the three ways a filter can be subtly wrong.
+     */
+    {
+        /* Two children in a group of their own, and one left in ours.
+         * The first child becomes the group leader by taking its own pid
+         * as the group id; the second joins it. Both are set from the
+         * PARENT as well, because whether the child has run yet is a race
+         * and setpgid is idempotent - which is exactly why POSIX allows
+         * both sides to call it. */
+        pid_t a_pid = fork();
+        if (a_pid < 0) {
+            return 9;
+        }
+        if (a_pid == 0) {
+            sys_setpgid(0, 0);
+            for (volatile int i = 0; i < 200000; i++) { }
+            sys_exit(41);
+        }
+        sys_setpgid(a_pid, a_pid);
+
+        pid_t b_pid = fork();
+        if (b_pid < 0) {
+            return 9;
+        }
+        if (b_pid == 0) {
+            sys_setpgid(0, a_pid);
+            for (volatile int i = 0; i < 400000; i++) { }
+            sys_exit(42);
+        }
+        sys_setpgid(b_pid, a_pid);
+
+        /* And one that stays in OUR group and exits first. If the group
+         * filter is not applied, this is the child a waitpid(-a_pid)
+         * would come back with - which is the bug worth catching, because
+         * it looks like success. */
+        pid_t mine = fork();
+        if (mine < 0) {
+            return 9;
+        }
+        if (mine == 0) {
+            sys_exit(43);
+        }
+
+        /* Both members of the group, and only them. */
+        int seen_a = 0, seen_b = 0;
+        for (int i = 0; i < 2; i++) {
+            int st = 0;
+            pid_t got = waitpid(-a_pid, &st, 0);
+            if (got < 0) {
+                printf("forktest: waitpid(-%d) found nothing\n", (int)a_pid);
+                return 10;
+            }
+            if (got == mine) {
+                printf("forktest: waitpid(-%d) returned %d, which is in our "
+                       "own group\n", (int)a_pid, (int)got);
+                return 11;
+            }
+            if (got == a_pid) {
+                seen_a = 1;
+            } else if (got == b_pid) {
+                seen_b = 1;
+            } else {
+                return 11;
+            }
+        }
+        if (!seen_a || !seen_b) {
+            return 10;
+        }
+
+        /* The group is empty of our children now, and "no matching
+         * children" is ECHILD rather than a wait that never returns. A
+         * kernel that counted any child as a match would block here
+         * forever, which is why this check is worth more than it looks:
+         * the failure it catches is a hang, and the assertion is that we
+         * get here at all. */
+        if (waitpid(-a_pid, NULL, 0) >= 0) {
+            return 13;
+        }
+
+        /* And pid 0 - our own group - which is still holding `mine`. */
+        int st = 0;
+        pid_t got = waitpid(0, &st, 0);
+        if (got != mine) {
+            printf("forktest: waitpid(0) returned %d, wanted %d\n",
+                   (int)got, (int)mine);
+            return 12;
         }
     }
 

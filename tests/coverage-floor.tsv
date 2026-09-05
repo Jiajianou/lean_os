@@ -26,15 +26,38 @@
 # now fails when a name in this file is absent from the report, so the
 # next time that happens it is an error rather than a silence.
 #
+# M100: the floors are the MEASURED number now, not a round number under
+# it, and every file in the report has one.
+#
+# Both changes are the same repair. Rounding 83.82 down to 83 meant the
+# ratchet printed "raised ... raise it, and say so" for seven files on
+# every run, forever, and eight more files had no row at all and printed
+# "new" on every run. Fifteen lines of advice nobody was going to act on,
+# on every single run - and underneath them, two floors that had actually
+# FALLEN and had been falling since M98. The noise is what hid them.
+#
+# So: exact values, and tools/coverage-ratchet.py now fails on a file
+# with no row rather than printing one more line. The report should be
+# silent when nothing changed, because that is the only state in which
+# anybody reads it.
+#
 # file<TAB>line_coverage_floor<TAB>commit<TAB>note
 kernel/lib/libk.c	100.00	b7bb520	Every line. Mutation score 73.8%, which is the more interesting number.
 kernel/mm/heap.c	100.00	b7bb520	Mutation score 89.4% after Q12's split and coalescing tests.
 kernel/fs/leanfs.c	55.00	b7bb520	The error paths are covered; the indirect and double-indirect block chains largely are not.
-kernel/net/arp.c	83.00	b7bb520	Mutation score 76.6%.
-kernel/net/ip.c	62.00	b7bb520	The send path was entirely unexercised until Q12.
-kernel/net/icmp.c	74.00	b7bb520	Mutation score 59.4%; the unreachable part is the error-message paths.
-kernel/net/udp.c	96.00	b7bb520	Was 28% before Q12's checksum tests. Mutation score 80.5%.
+kernel/net/arp.c	83.82	HEAD	M100: exact rather than 83, for the reason in this file's header.
+kernel/net/ip.c	62.07	HEAD	M100: exact rather than 62. The send path was entirely unexercised until Q12.
+kernel/net/icmp.c	74.47	HEAD	M100: exact rather than 74. Mutation score 59.4%; the unreachable part is the error-message paths.
+kernel/net/udp.c	96.30	HEAD	M100: exact rather than 96. Was 28% before Q12's checksum tests. Mutation score 80.5%.
 kernel/net/ethernet.c	100.00	b7bb520	Was 90% lines at a 0% mutation score - the file that proved why this table is not enough on its own.
-kernel/net/tcp.c	62.00	b7bb520	Was 3.74% and the largest hole in the suite from Q8 until Q11. tests/test_tcp_states.c drives the eleven-state machine one segment at a time and found two remotely-triggerable defects on its first run.
-kernel/dev/fwcfg.c	97.00	b7bb520	Added with tests, which is why it starts high.
-user_space/lib/symtab.c	97.00	HEAD	M101: the profile report's symbol resolver, and the first user-space file in this tier. 97.87% measured - the two uncovered lines are the guards for a symbol file that is not ascending, which the parser cannot produce and only a hand-written one can. Four hand-run mutations against its tests were all caught, which is the number that matters more than this one.
+kernel/net/tcp.c	62.62	HEAD	M100: exact rather than 62. Was 3.74% and the largest hole in the suite from Q8 until Q11. tests/test_tcp_states.c drives the eleven-state machine one segment at a time and found two remotely-triggerable defects on its first run.
+kernel/dev/fwcfg.c	100.00	HEAD	M100: 89.55% until M100, and under this floor since M98 - three fw_cfg switches were added (bootstrap, pytest, pybuild) and the test that exists to catch a shared cache between them was grown for the first two and not the third. Its own comment had warned about exactly that, three lines above the table it needed a row in. 100% now: the switch table in tests/test_fwcfg.c is derived from one array, every switch is asked on every case, and each is asked twice.
+user_space/lib/symtab.c	97.87	HEAD	M100: exact rather than 97. M101: the profile report's symbol resolver, and the first user-space file in this tier. The two uncovered lines are the guards for a symbol file that is not ascending, which the parser cannot produce and only a hand-written one can. Four hand-run mutations against its tests were all caught, which is the number that matters more than this one.
+kernel/dev/pty.c	100.00	HEAD	M100: first floor. M85's pseudo-terminals, every line reached by tests/test_pty.c.
+kernel/dev/tty.c	82.09	HEAD	M100: first floor. The line discipline - canonical and raw modes, signals, job control. The uncovered part is the paths that need a real framebuffer console under them.
+kernel/sched/sched.c	49.86	HEAD	M100: first floor, and the most overdue row in this file. 2,157 lines, in the host tier since Q13 against a fake timer and a fake CPU, and until M100 nothing constrained its direction at all - it printed "new" on every run for as long as nobody read past the summary. Half the file is the multi-core and signal-delivery paths that Q13's harness does not drive yet; raising this is the measurable half of the queue's row 5.
+user_space/libc/src/errno.c	100.00	HEAD	M100: first floor. One line, and M99 is the milestone that proved it matters - five syscalls returned -1 over an untouched errno and the visible symptom was print() writing nothing and exiting 0.
+user_space/libc/src/fnmatch.c	90.91	HEAD	M100: first floor. The uncovered part is the character-class names inside bracket expressions.
+user_space/libc/src/getopt.c	87.05	HEAD	M100: first floor.
+user_space/libc/src/libgen.c	100.00	HEAD	M100: first floor. dirname and basename, both entirely reached.
+user_space/libc/src/wchar.c	48.50	HEAD	M100: first floor, and the honest number for a file that exists because GNU hello's first line asked for it (M94). Half of it is the wide stdio family, which nothing in the host tier calls.
