@@ -104,6 +104,19 @@ UEFI firmware
   since M79 and an `fstat` that refused every descriptor which was not
   a file — which is why `print()` on this machine used to write nothing
   and return successfully. See M99 in [milestones.md](milestones.md).
+- **Somebody else's *libraries*.** zlib 1.3.1, libpng 1.6.44 and
+  libjpeg 9f, built for this machine by this project's own compiler
+  with **no edit to any of their source**, installed into the sysroot
+  by their own `make install` so the next one links the last — libpng's
+  `./configure` will not proceed until it finds `-lz` here. Each is
+  graded by its own test suite on the machine, and libjpeg's is the
+  sharpest instrument in this tree: it ships the PPM, GIF, BMP and JPEG
+  files the IJG's own encoder and decoder produced in **1995**, and its
+  `make test` requires byte equality with them. All seven comparisons
+  pass here — baseline and progressive, decode and encode, and a
+  `jpegtran` transcode that turns the progressive file back into the
+  original file byte for byte. See M100 in
+  [milestones.md](milestones.md).
 
 ## Build and run
 
@@ -149,7 +162,7 @@ Four instruments, and none of them subsumes another:
   the order locks are taken in so an inversion is an error rather than
   a comment (Q9). 247 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 109 markers and 31 performance
+  image and grade the serial log against 112 markers and 32 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It

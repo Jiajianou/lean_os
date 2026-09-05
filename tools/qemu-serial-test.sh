@@ -382,6 +382,14 @@ REQUIRED_MARKERS=(
   # marker says so - what it grades is somebody else's test program
   # passing here, not this project's opinion of somebody else's library.
   "[m100] the first library of the stack:"
+  # M100's second increment, and a separate marker because it is a
+  # sharper claim than [m100] is. zlib's own test checks its answers
+  # against itself; libjpeg ships REFERENCE OUTPUT, so the seven
+  # comparisons behind this marker are byte equality with pictures the
+  # IJG's own encoder and decoder produced in 1995. libpng is here too,
+  # and it is the first library in the stack that links the one before
+  # it - `-lz`, out of the sysroot.
+  "[m100b] two more libraries, graded by their own suites:"
   "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m73] names, not numbers:"
   "[m74] the session remembers:"

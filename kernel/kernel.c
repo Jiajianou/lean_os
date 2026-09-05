@@ -9517,7 +9517,12 @@ static void boot_selftests_system(void) {
                 "/bin/minigzip -d < " PATH_TMP_DIR "m100.gz > "
                 PATH_TMP_DIR "m100.back\n"
                 "toybox cmp " PATH_TMP_DIR "m100.txt " PATH_TMP_DIR "m100.back"
-                " && echo 'round trip identical' >> " PATH_TMP_DIR "m100.out\n";
+                " && echo 'round trip identical' >> " PATH_TMP_DIR "m100.out\n"
+                /* Same reason as [m100b]'s last line below: what a
+                 * self-test leaves on the disk is on it when [m105]
+                 * scans, and is on it for good after `make run`. */
+                "toybox rm -f " PATH_TMP_DIR "m100.txt " PATH_TMP_DIR
+                "m100.gz " PATH_TMP_DIR "m100.back foo.gz\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M100 self-test: could not write the fixture");
@@ -9572,6 +9577,175 @@ static void boot_selftests_system(void) {
                        "chunks, a preset dictionary, and the gz file layer "
                        "opening, seeking and reading a real file - plus a round "
                        "trip through minigzip that this filesystem carried "
+                       "- self-test passed.\n\n");
+        }
+    }
+
+    /* ---- M100 self-test: two libraries, graded by their own suites -----
+     *
+     * The second and third entries in M100's dependency order, and the
+     * first two that link the one before them: libpng 1.6.44 (`-lz`,
+     * and its configure will not proceed without it) and libjpeg 9f.
+     *
+     * What makes this a sharper instrument than [m100] is what the
+     * comparison is against. zlib's `example` checks its own answers
+     * against itself - compress, uncompress, and assert you got back
+     * what you put in - which cannot catch a codec that is
+     * self-consistently wrong. The IJG shipped *reference output*:
+     * testimg.ppm is what their decoder produced from testorig.jpg in
+     * 1995, and testimg.jpg is what their encoder produced from that
+     * PPM. `make test` requires byte equality, and this runs exactly
+     * the seven commands and seven comparisons in its own check-local
+     * target, on this machine, with toybox's `cmp` deciding.
+     *
+     * Byte equality out of a DCT is a much harder thing to pass than it
+     * sounds: it grades this compiler's integer arithmetic and this
+     * libc's memory, on 100 KB of pixels, against an answer computed by
+     * somebody else's machine thirty years ago. A decoder that is one
+     * bit wrong anywhere fails it, and "the picture looks right" cannot.
+     *
+     * libpng's half is its own `pngtest --strict`, which reads a PNG,
+     * writes one, reads that back, and compares the two chunk by chunk
+     * and row by row - so the file it grades is one this filesystem
+     * carried, and the ancillary chunks it checks are ones it wrote.
+     *
+     * Skipped when absent, for the reason [m94], [m95] and [m100] skip:
+     * tools/build-thirdparty.sh needs the compiler M94 built and the
+     * network, and is not part of `make`.
+     */
+    {
+        os_stat_t jst;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/djpeg", (uint64_t)&jst, 0) != 0) {
+            klog_puts("[m100b] /bin/djpeg is not on this image - skipped. "
+                       "tools/build-thirdparty.sh builds libpng and libjpeg.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m100b.sh";
+            const char *result = PATH_TMP_DIR "m100b.out";
+            /* The seven commands are libjpeg's check-local target,
+             * copied command for command including its flags: -dct int
+             * because the reference files were made with the integer
+             * DCT and the floating-point one is allowed to differ, and
+             * -colors 256 because the BMP reference is 8-bit.
+             *
+             * jpegtran is the last and the most interesting: it
+             * rewrites the *progressive* file as a baseline one, and
+             * the answer has to be the original 1995 JPEG back again,
+             * byte for byte - a round trip through two entropy coders
+             * with no pixels in between. */
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "cd " PATH_TMP_DIR "\n"
+                "D=/usr/share/m100\n"
+                "O=" PATH_TMP_DIR "m100b.out\n"
+                "/bin/djpeg -dct int -ppm -outfile jout.ppm $D/testorig.jpg\n"
+                "/bin/djpeg -dct int -gif -outfile jout.gif $D/testorig.jpg\n"
+                "/bin/djpeg -dct int -bmp -colors 256 -outfile jout.bmp "
+                "$D/testorig.jpg\n"
+                "/bin/cjpeg -dct int -outfile jout.jpg $D/testimg.ppm\n"
+                "/bin/djpeg -dct int -ppm -outfile joutp.ppm $D/testprog.jpg\n"
+                "/bin/cjpeg -dct int -progressive -opt -outfile joutp.jpg "
+                "$D/testimg.ppm\n"
+                "/bin/jpegtran -outfile joutt.jpg $D/testprog.jpg\n"
+                "toybox cmp $D/testimg.ppm jout.ppm && echo 'jpeg ppm' >> $O\n"
+                "toybox cmp $D/testimg.gif jout.gif && echo 'jpeg gif' >> $O\n"
+                "toybox cmp $D/testimg.bmp jout.bmp && echo 'jpeg bmp' >> $O\n"
+                "toybox cmp $D/testimg.jpg jout.jpg && echo 'jpeg encode' >> $O\n"
+                "toybox cmp $D/testimg.ppm joutp.ppm && echo 'jpeg progressive"
+                " decode' >> $O\n"
+                "toybox cmp $D/testimgp.jpg joutp.jpg && echo 'jpeg progressive"
+                " encode' >> $O\n"
+                "toybox cmp $D/testorig.jpg joutt.jpg && echo 'jpeg transcode'"
+                " >> $O\n"
+                "/bin/pngtest --strict $D/pngtest.png > " PATH_TMP_DIR
+                "m100b.png.log 2>&1\n"
+                "echo \"pngtest exit $?\" >> $O\n"
+                "toybox grep -h 'libpng passes test' " PATH_TMP_DIR
+                "m100b.png.log >> $O\n"
+                /* And take its own outputs back off the disk.
+                 *
+                 * A quarter of a megabyte and a dozen inodes. The graded
+                 * harness runs with `snapshot=on` so they never reach
+                 * the image file, but they are on the filesystem for the
+                 * rest of THIS boot - and [m105]'s mount scan, which
+                 * M100's second increment found to be the most
+                 * size-sensitive number in budgets.tsv, runs later in it.
+                 * An ordinary `make run` has no snapshot at all and
+                 * keeps them for good. A self-test that enlarges the
+                 * thing a later self-test measures is a self-test with a
+                 * side effect; $O survives only because the kernel still
+                 * has to read it. */
+                "toybox rm -f jout.ppm jout.gif jout.bmp jout.jpg joutp.ppm"
+                " joutp.jpg joutt.jpg pngout.png " PATH_TMP_DIR
+                "m100b.png.log\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M100b self-test: could not write the fixture");
+            }
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m100b] the fixture could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            static char produced[1024];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m100b] neither suite produced any output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                /* Nine lines, and every one of them is somebody else's
+                 * answer: seven files the IJG shipped, and libpng's own
+                 * sentence about itself. */
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"jpeg ppm",
+                     "testorig.jpg decoded to the exact PPM the IJG shipped"},
+                    {"jpeg gif",
+                     "the same JPEG decoded to their GIF, palette and all"},
+                    {"jpeg bmp",
+                     "and to their 256-colour BMP"},
+                    {"jpeg encode",
+                     "their PPM re-encoded to the byte-identical baseline JPEG"},
+                    {"jpeg progressive decode",
+                     "the progressive JPEG decoded to the same PPM as the baseline one"},
+                    {"jpeg progressive encode",
+                     "their PPM encoded progressively, byte-identical"},
+                    {"jpeg transcode",
+                     "jpegtran turning the progressive file back into the 1995 original"},
+                    {"pngtest exit 0",
+                     "libpng's own test program saying it passed"},
+                    {"libpng passes test",
+                     "and saying so in its own words"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m100b] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            if (!all_ok) {
+                klog_puts("[m100b] what the two suites wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m100b] ---- end\n");
+                panic("M100 self-test: libpng or libjpeg does not work here");
+            }
+            klog_puts("[m100b] two more libraries, graded by their own suites: "
+                       "libpng 1.6.44 and libjpeg 9f, built unmodified by this "
+                       "project's own compiler, libpng linking the zlib beside "
+                       "it in the sysroot. libjpeg's own seven comparisons pass "
+                       "BYTE FOR BYTE against reference output the IJG shipped "
+                       "in 1995 - baseline and progressive, decode and encode, "
+                       "PPM, GIF, BMP, and a transcode back to the original "
+                       "file - and libpng's own pngtest reads, writes and "
+                       "re-reads a PNG on this filesystem and says it passes "
                        "- self-test passed.\n\n");
         }
     }
@@ -11297,10 +11471,65 @@ static void boot_selftests_system(void) {
          * happened to still be cached from something else - a property of
          * the run before it, not of the scan. */
         blk_cache_drop();
+        /* M100: what the scan actually did, and not only how long it
+         * took. The row this measurement feeds was recorded as "linear
+         * in allocated bytes", and M100's second increment falsified
+         * that with 3.5 MiB: 247.5 MiB of image scanned in 904 ms and
+         * 251.0 MiB in 1,714 ms, reproducibly, on a freshly built image
+         * either way. A number that moves 90% on a 1.4% change and
+         * cannot say why is measuring something nobody has named, so
+         * the scan now reports the device reads it issued beside the
+         * microseconds it took - which is the difference between "the
+         * scan got slower" and "the scan went to the disk more". */
+        blk_stats_t scan_before, scan_after;
+        blk_stats(&scan_before);
         uint64_t s0 = tsc_read();
         int quiet_problems = vfs_check();
         uint64_t s1 = tsc_read();
         uint64_t quiet_scan_us = tsc_to_us(s1 - s0);
+        blk_stats(&scan_after);
+        uint64_t quiet_scan_reads = scan_after.reads - scan_before.reads;
+        uint64_t quiet_scan_misses = (scan_after.reads - scan_before.reads) -
+                                     (scan_after.hits - scan_before.hits);
+        uint64_t quiet_scan_dev = scan_after.device_reads - scan_before.device_reads;
+
+        /* M100: and immediately again, cold both times, because the
+         * first number turned out not to be about the disk.
+         *
+         * M100's second increment put 3.5 MiB of libpng and libjpeg on
+         * the image - 1.4% more allocated bytes - and mount_scan_us went
+         * 904 ms to 1,714 ms, reproducibly, on freshly built images
+         * either way. Ninety per cent more time for one and a half per
+         * cent more data, against a row whose recorded note says the
+         * cost is "linear in allocated bytes". So the scan grew a way of
+         * saying what it did, and the counters below say the same walk
+         * happens either way, to the block read.
+         *
+         * What they say is that this scan is **not disk-bound and never
+         * was**: 79,512 block reads, of which 311 miss the cache and
+         * 2,936 sectors reach the device. The other 79,201 are 4 KiB
+         * memcpys out of the block cache, and at the ~18 us a cached
+         * blk_read costs on this machine they are the entire
+         * measurement. map_block re-reads a whole indirect table for
+         * every logical block of every file, so the scan copies about
+         * 320 MiB to walk 251 MiB of image.
+         *
+         * This repeat exists because it falsified the obvious
+         * explanation. If the first scan of a boot were paying for the
+         * host serving the image file cold, the second would be fast; it
+         * is not - five back-to-back repeats all land within 5% of the
+         * first, and an image freshly copied to a new file on the host
+         * measures the same. It is a property of the scan, not of the
+         * run before it. */
+        blk_cache_drop();
+        uint64_t r0 = tsc_read();
+        int repeat_problems = vfs_check();
+        uint64_t r1 = tsc_read();
+        uint64_t repeat_scan_us = tsc_to_us(r1 - r0);
+        if (repeat_problems != 0) {
+            panic("M105 self-test: the second scan of an unchanged filesystem "
+                  "disagreed with the first");
+        }
         if (quiet_problems != 0) {
             klog_puts("[m105] the scan found ");
             klog_put_dec((uint32_t)quiet_problems);
@@ -11368,10 +11597,16 @@ static void boot_selftests_system(void) {
          * to two writers, or one neither of them freed, is here or
          * nowhere. */
         blk_cache_drop(); /* cold, for the reason above */
+        blk_stats(&scan_before);
         uint64_t s2 = tsc_read();
         int busy_problems = vfs_check();
         uint64_t s3 = tsc_read();
         uint64_t busy_scan_us = tsc_to_us(s3 - s2);
+        blk_stats(&scan_after);
+        uint64_t busy_scan_reads = scan_after.reads - scan_before.reads;
+        uint64_t busy_scan_misses = (scan_after.reads - scan_before.reads) -
+                                    (scan_after.hits - scan_before.hits);
+        uint64_t busy_scan_dev = scan_after.device_reads - scan_before.device_reads;
         if (busy_problems != 0) {
             klog_puts("[m105] the scan found ");
             klog_put_dec((uint32_t)busy_problems);
@@ -11423,8 +11658,27 @@ static void boot_selftests_system(void) {
         }
 
         klog_perf("mount_scan_us", quiet_scan_us, "us");
+        klog_perf("mount_scan_repeat_us", repeat_scan_us, "us");
         klog_perf("mount_scan_busy_us", busy_scan_us, "us");
         klog_perf("four_writers_us", writers_us, "us");
+        /* Not budget rows - a count that depends on how much is on the
+         * image is not a ceiling anybody can set. They are printed
+         * beside the two that ARE budgeted so that the next person to
+         * see mount_scan_us move can tell in one line whether the scan
+         * did more work or waited longer for the same work. */
+        klog_puts("[m105] the quiet scan: ");
+        klog_put_dec((uint32_t)quiet_scan_reads);
+        klog_puts(" block reads, ");
+        klog_put_dec((uint32_t)quiet_scan_misses);
+        klog_puts(" of them missed the cache, ");
+        klog_put_dec((uint32_t)quiet_scan_dev);
+        klog_puts(" sector reads issued to the device. The busy scan: ");
+        klog_put_dec((uint32_t)busy_scan_reads);
+        klog_puts(" / ");
+        klog_put_dec((uint32_t)busy_scan_misses);
+        klog_puts(" / ");
+        klog_put_dec((uint32_t)busy_scan_dev);
+        klog_putc('\n');
 
         klog_puts("[m105] the journal's two conditions, measured together: the full scan "
                    "an unclean mount runs costs ");

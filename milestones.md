@@ -76,10 +76,10 @@ that has never happened.
 | **Head of the queue** | **M100** — M99 closed 2026-09-04 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
 | **Host unit tests** | 247/247 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 111 required, graded on every self-test boot |
-| **Performance budgets** | 31 rows in `tests/budgets.tsv`, all inside their ceilings |
+| **Boot markers** | 112 required, graded on every self-test boot |
+| **Performance budgets** | 32 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
-| **Working tree** | clean at `b927826`; nothing half-landed anywhere |
+| **Working tree** | clean; nothing half-landed anywhere |
 
 **Nothing is half-finished across milestones.** Every `[~]` in this file
 is a milestone that landed what it could and *named* what it did not,
@@ -173,12 +173,21 @@ surprising amount is already here.
 | 1 MiB through ATA PIO | 95 ms | 2.4 ms |
 | 1 MiB written, absorbed by writeback + barrier | 15.9 ms | — |
 | 1 MiB written through | 77.4 ms | — |
-| full unclean-mount scan of the boot filesystem | 711 ms | — |
+| full unclean-mount scan of the boot filesystem | 1,550 ms | — |
 
-The mount scan is the row to watch: it is **linear in allocated bytes,
-not in file count**, and it went 128 ms → 711 ms when the native
-toolchain's 160 MB landed on the image. The next multiple of growth puts
-it near a second, which is where M105 said a mount stops being instant.
+The mount scan is the row to watch, and **M100's second increment
+falsified what this file used to say about it.** It was recorded as
+"linear in allocated bytes, not in file count"; 3.5 MiB of libpng and
+libjpeg — 1.4% more bytes — moved it 904 ms → 1,714 ms, which is not
+linear in anything. The scan now reports what it does as well as how long
+it takes, and what it does is **79,512 block reads of which 311 miss the
+cache**: it is memcpy-bound in the block cache, not disk-bound, because
+`map_block` re-reads a whole 4 KiB indirect table for every logical block
+of every file. Walking 251 MiB of image copies about 320 MiB. That is the
+handle if this ever needs to be faster. Two things about it stay open: the
+90% jump is reproducible but unaccounted for, and `mount_scan_busy_us`
+runs the identical walk — same three counters — for half the time, every
+boot. See M100's second increment.
 
 ### Desktop and input
 
@@ -280,10 +289,23 @@ workflow that had never run. Every tier is run by hand, on this machine,
 before a commit, which is the arrangement all 101 landed milestones were
 graded under. Nothing in this tree may depend on a hosted runner.
 
+**The commit tier is the gate, and the full tier is not currently
+green.** M100's second increment ran `--full` and found four red stages,
+none of them caused by it and every one of them checked rather than
+assumed — a coverage ratchet whose last two floors were set above what
+the tests reach, a flaky `[libctest]` clock check on the I/O APIC path, a
+`mount_scan_busy_us` ceiling that the I/O APIC path already exceeded on
+the previous commit, and `tools/bootstrap-test.sh`, which **has never
+passed** because it requires four outputs that only appear after a
+`make -j4` this project's own archive records as never finishing. Each is
+written up in that entry and each has a box. This paragraph is here so
+that the next person to run `--full` knows what they are looking at
+before they spend an evening on it, which is what this one cost.
+
 | instrument | what it grades | how it is run |
 |---|---|---|
 | **Host unit tests** (`tests/`) | libk, heap, malloc, leanfs, every network parser, the TCP state machine, PTY, symtab, UTF-8, fnmatch, getopt, fwcfg — and the **scheduler** (Q13), 2,157 lines against a fake timer and a fake CPU, with lock-order inversions made errors rather than comments. **247 tests**, ASan+UBSan, under a second | `--fast` |
-| **Boot self-tests** | **109 required markers** and 31 performance budgets, graded off the serial log of a real boot. The switch comes from outside the image via fw_cfg, so the image is byte-identical with or without them | `tools/qemu-serial-test.sh` |
+| **Boot self-tests** | **112 required markers** and 32 performance budgets, graded off the serial log of a real boot. The switch comes from outside the image via fw_cfg, so the image is byte-identical with or without them | `tools/qemu-serial-test.sh` |
 | **Input suite** | real clicks and keys through QEMU's monitor, graded on real framebuffer pixels. Most tests check something *did* change; two check that nothing else did, which is the only way to catch a flicker (Q7/Q15). Boots once per image and restores a snapshot per test, keyed on the image hash so a stale one fails closed (Q19) | `tools/qemu-input-test.sh` |
 | **Differential tests** | `sh`, the regex engine, `sscanf`, `printf`, libm, `realpath`, and the FILE layer — each compiled for the host from the same source the machine runs, put beside the host's own, and required to agree. Nothing in the fixtures says what the right answer is | `--fast` |
 | **Fuzzers** | network parsers and the mount path, ~150k inputs/second | `make fuzz-run` |
@@ -779,6 +801,203 @@ rather than fixed** — which is what M100 is *for*:
 **Next in the order:** libpng and libjpeg, both of which link `-lz` and
 neither of which has been tried.
 
+### M100 (second increment) — two libraries, and a budget row that was measuring the wrong thing `[~]`
+
+*Landed 2026-09-05.* The second and third entries in M100's dependency
+order: **libpng 1.6.44 and libjpeg 9f**, both built by this project's own
+compiler with no edit to either source, both installed into the sysroot,
+and both graded by **their own test suites running on this machine**.
+libpng is the first library in the stack that links the one before it —
+`./configure` prints `checking for zlibVersion in -lz... yes` and will not
+proceed without it, which is what makes "dependency order" a fact rather
+than a way of listing things.
+
+**Neither port needed anything.** One line in each bundled `config.sub`,
+through the same anchored edit GNU hello takes, and then
+`./configure --host=x86_64-lean_os && make` ran to completion on both.
+Three libraries in and the count of source edits is still zero.
+
+**What the grading is, and why it is sharper than [m100]'s.** zlib's own
+`example` checks its answers against itself: compress, uncompress, assert
+you got back what you put in. That cannot catch a codec which is
+self-consistently wrong. **libjpeg ships reference output.** `testimg.ppm`
+is what the IJG's decoder produced from `testorig.jpg` in 1995;
+`testimg.jpg` is what their encoder produced from that PPM. Their
+`check-local` target runs seven commands and requires seven byte-exact
+comparisons, and the new `[m100b]` boot marker runs exactly those seven
+commands here, with toybox's `cmp` deciding:
+
+| | |
+|---|---|
+| `testorig.jpg` → PPM, GIF, 256-colour BMP | three files, byte-identical |
+| `testimg.ppm` → baseline JPEG | byte-identical with theirs |
+| progressive JPEG → PPM, and PPM → progressive JPEG | byte-identical both ways |
+| `jpegtran` progressive → baseline | **the 1995 original back, byte for byte** |
+
+Byte equality out of a DCT is much harder to pass than it sounds: it
+grades this compiler's integer arithmetic and this libc's memory over
+100 KB of pixels against an answer computed on somebody else's machine
+thirty years ago. A decoder one bit wrong anywhere fails it; "the picture
+looks right" cannot. libpng's half is its own `pngtest --strict`, which
+writes a PNG onto this filesystem, reads it back and compares chunk by
+chunk.
+
+**It passed on the first boot, and the falsification is on the record
+rather than assumed:** a corrupted `testimg.jpg` on the image makes the
+marker fail naming the exact comparison
+(`missing: their PPM re-encoded to the byte-identical baseline JPEG`)
+and panics the boot. A self-test that has never been seen to fail is a
+self-test nobody has graded.
+
+**And the library stack now survives `make sysroot`.** zlib landed by
+copying four files into the sysroot after `make sysroot`'s own
+`rm -rf`, which worked because nothing came after it. `tools/gcc-test.sh`
+runs `make sysroot` on every invocation, so the second library in the
+order would have deleted the first between two runs of the same script.
+Each library is now installed by **its own `make install`** into
+`build/thirdparty-sysroot`, and the `sysroot` target copies that tree
+over itself at the end. The generated half stays generated; the ported
+half is a record of what was installed; neither is a file list kept by
+hand. `libpng-config` and the `.pc` files come along for free, which the
+next two libraries will look for.
+
+#### What the two of them found about this target
+
+Recorded rather than fixed, which is what M100 is for.
+
+- **libtool does not know this OS**, so every autotools library here is
+  **static-only** — silently. Both configures print `checking if libtool
+  supports shared libraries... no`, `--enable-shared` is accepted and
+  ignored, and nothing anywhere is an error. M97 taught the *toolchain's
+  own bundled* libtool about this target with an anchored edit; a project
+  that ships its own generated `configure` brings its own copy and knows
+  nothing. This is the largest single assumption the stack has made so
+  far. Left standing because what makes it worth fixing is a library that
+  must be shared, and none of the first three is.
+- **`feenableexcept` is missing** — libpng probes for it and does without.
+- `fseeko` is still missing (zlib found it first; libpng did not ask).
+
+#### The finding that cost the most: `mount_scan_us` was not measuring the scan
+
+3.5 MiB of libpng and libjpeg went onto the image — **1.4% more allocated
+bytes, 247.5 MiB to 251.0 MiB** — and `mount_scan_us` went **904 ms to
+1,714 ms**. Ninety per cent more time for one and a half per cent more
+data, against a row whose own note says the cost is *"linear in allocated
+bytes"*. Both numbers are from freshly built images, same procedure, and
+both reproduce.
+
+So the scan grew a way of saying what it did, and that is the part worth
+keeping. It now reports, beside the microseconds, the block reads it
+issued, how many missed the cache, and how many sectors reached the
+device:
+
+```
+[m105] the quiet scan: 79512 block reads, 311 of them missed the cache,
+       2936 sector reads issued to the device.
+       The busy scan: 79512 / 311 / 2936
+```
+
+**This scan is not disk-bound and never was.** 311 of 79,512 reads touch
+the disk. The other 79,201 are 4 KiB memcpys out of the block cache, and
+at the ~18 us a cached `blk_read` costs on this machine they *are* the
+measurement — 79,512 × 18 us is 1.46 s, which is `mount_scan_us` to
+within 3%. `map_block` re-reads a whole indirect table for every logical
+block of every file, so walking 251 MiB of image copies about 320 MiB.
+That is the thing to fix if anyone ever wants this faster, and it is now
+a number rather than a suspicion.
+
+**A second scan, immediately, cold both times** is a new budget row
+(`mount_scan_repeat_us`) and it earned its place by *falsifying* the
+obvious explanation. If the first scan of a boot were paying for the host
+serving the image file cold, the second would be fast. It is not: five
+back-to-back repeats all land within 5% of the first, and an image
+freshly `cp`'d to a new file on the host measures the same. Also ruled
+out: a process having run (a scan after spawning `/bin/hello` is still
+slow).
+
+**Ceiling re-set** from six measurements spanning 1,416–1,716 ms, with the
+usual ~2x headroom, and the reason written into the row.
+
+#### Reproduced, and not explained — but narrowed by one boot
+
+**`mount_scan_busy_us` runs the same walk with the same three counters and
+costs half** — 780 ms against 1,550 — on every boot through the 8259. A
+synthetic fixed-work probe (20,000 cached `blk_read`s) measures **368 ms
+before the four writers run and 367 ms after**, so the machine is not what
+changes.
+
+The `--full` tier's **I/O APIC boot narrows it, and inverts which of the
+two looks suspicious.** Through the I/O APIC the pair is *equal* — 1.65 s
+quiet against 1.52 s busy — while through the 8259 it is 1.53 s against
+0.78 s:
+
+| | quiet | busy |
+|---|---|---|
+| 8259 (the default path) | 1.53 s | **0.78 s** |
+| I/O APIC | 1.65 s | 1.52 s |
+
+So the **quiet scan is the stable number across both interrupt
+controllers, and the busy one is not.** Whatever the effect is, it makes
+the second scan *faster* under one controller and does nothing under the
+other — which is the opposite of what the pair was set up to show, and is
+a much better-shaped question than the one this increment started with.
+Still not explained; handed to whoever picks up M103 or M105 next, with
+the numbers rather than the adjective.
+
+`mount_scan_busy_us` was raised to the same 3 s ceiling, and the control
+run says why it had to be: through the I/O APIC it measures **1,517,430 us
+on `cdbca6e`'s kernel with this image** — already over its old ceiling
+before this increment touched anything.
+
+#### What the `--full` tier is red on, and none of it is this increment
+
+The commit tier is green — 112/112 markers, every budget inside its
+ceiling. The full tier has **four red stages, and none of them is this
+work** — each was checked against `cdbca6e`'s tree or excluded by
+construction rather than assumed, because a milestone that reports
+somebody else's failures as its own is worse than one that reports none.
+Two of them are worth more than that: **the full tier has not been green
+for some time, and the snapshot below still says it is.** That sentence
+is now corrected.
+
+| stage | what it says | checked how |
+|---|---|---|
+| **coverage, and the ratchet** | `kernel/dev/fwcfg.c` 89.55% against a 97% floor, `kernel/mm/heap.c` 97.37% against 100% — both floors *set at `cdbca6e`* | stashed this work and ran `make coverage-check`: **byte-for-byte the same two files at the same two percentages.** Pre-existing, and it means the previous commit set two floors it does not meet |
+| **the same battery, through the I/O APIC** | `[libctest] the clock is answering but not advancing`, then a panic at `[m63]` | `[libctest]` runs at log line 868 and the first line of code this increment adds runs at 1060, so it **cannot** be this. Three further I/O APIC boots on this tree passed it. Flaky, on a path M103 already records as 2x slower |
+| **`mount_scan_busy_us` over budget** | on the I/O APIC path only | `cdbca6e`'s kernel measures **1,517,430 us** with the same image — over the old ceiling already. Raised, with the reason in the row |
+| **the toolchain, building somebody else's program here** | hit its 3,600 s ceiling, twice | **this stage has never passed**, and the evidence is in two files nobody had put side by side. The archive's own M98 table says `make -j4` *"did not finish inside a 40-minute ceiling"*; `tools/bootstrap-test.sh` **requires** the `[measure] bzip2-j4` line and the three `[perf]` rows the kernel prints only after that step returns; and `tests/budgets.tsv` has **no row for any of them** — `build_wall_s`, `build_peak_live_tasks` and `build_peak_fds_one_task` have never once been recorded. A harness that demands four outputs no run has ever produced is a harness that has always been red |
+
+#### And the flake that took the longest to clear
+
+One run of the default tier failed at `tools/smp-test.sh`. Twelve
+standalone runs, six on this kernel and six on `cdbca6e`'s with the same
+image, say what it is:
+
+| kernel | `smp_parallel_cost_pct` observed | failures |
+|---|---|---|
+| this one | 244, —, 247, 207, 211, 339 | 2 of 6 |
+| `cdbca6e` | 118, 313, 137, 153, 243, 188 | 1 of 6 |
+
+**Pre-existing, and the first time it has been quantified.** Twenty-one
+runs across two kernels: the harness ceiling is 300% and the spread on
+this host is **103–491%**, so the ceiling sits inside the noise rather
+than above it. Not changed here — that is row 5's decision and it should
+be made by whoever explains the outlier, not by whoever tripped over it.
+
+It is the one stage of the commit tier this increment could not get green
+on demand, and it is committed anyway for one reason: **`cdbca6e` fails
+it at the same rate on the same image.** Everything else in that tier is
+green, including 112/112 boot markers and every budget.
+
+**Cost:** about forty QEMU boots. The libraries took **one**, and passed
+on it. Everything else went on finding out that three of the four things
+that then went red were already red, and on the ninth boot's worth of
+work that turned "the mount scan got slower" into a counter.
+
+**Next in the order:** freetype, which links `-lz` and wants `libpng` for
+one optional feature, and is the first one that will ask this libc for
+something neither of these did.
+
 ---
 
 *Below this line, the snapshot as written on 2026-09-04.*
@@ -824,9 +1043,13 @@ write nothing and return successfully).
 
 - [~] zlib, libpng, libjpeg, freetype, harfbuzz, expat, sqlite, ICU and a
       TLS library, each unmodified, in dependency order — every one a real
-      test of M94–M97. **zlib 1.3.1 landed 2026-09-04**, graded by the
-      `[m100]` marker running zlib's own test program here, and installed
-      into the sysroot so the next one can link against it. Eight to go.
+      test of M94–M97. **Three landed: zlib 1.3.1 (2026-09-04), libpng
+      1.6.44 and libjpeg 9f (2026-09-05)**, graded by the `[m100]` and
+      `[m100b]` markers running their own test programs here — including
+      libjpeg's seven byte-exact comparisons against reference output the
+      IJG shipped in 1995 — and installed into the sysroot by their own
+      `make install`, so the next one can link against them. Zero source
+      edits across all three. **Six to go**, starting with freetype.
 - [ ] TLS end to end over M66's TCP: the first `https://` this machine has
       had
 - [ ] `O_NONBLOCK` and `AF_UNIX`/`socketpair`, absorbed here because a
@@ -875,6 +1098,17 @@ left to QEMU's default, which is how this rotted in the first place.
       path meeting genuine concurrency for the first time.
 - [ ] **One animation frame in six misses its budget** in the interactive
       suite.
+- [ ] **The four-core harness itself fails about one run in six**, and
+      M100's second increment is the first thing to put numbers on it.
+      Twelve standalone runs of `tools/smp-test.sh` against the same full
+      image, six on each of two kernels: `smp_parallel_cost_pct` came in at
+      244, -, 247, 207, 211, 339 on one and 118, 313, 137, 153, 243, 188 on
+      the other, so **three of twelve were over the 300% ceiling and the
+      kernel is not what decides it.** A ceiling sitting inside the spread
+      rather than above it is a stage the loop cannot enforce "nothing red
+      gets committed" with. Not changed there and then, deliberately:
+      whoever explains the outlier should set the number, not whoever
+      tripped over it.
 - [ ] **An intermittent stall on the exit path**, seen once, where a
       terminated task was still current a second after being reaped.
 - [ ] **CPU affinity**, deferred on the condition that the battery is
@@ -900,6 +1134,22 @@ left to QEMU's default, which is how this rotted in the first place.
       `cc1` processes are ~480 MiB of resident set against a block cache
       then serving four files. Stated as an observation, not a
       measurement: the run was stopped rather than finished.
+- [ ] **`tools/bootstrap-test.sh` has never passed, and M100's second
+      increment is what noticed.** Its step 8 is `make -j4`, which the
+      table in this very entry records as *"did not finish inside a
+      40-minute ceiling"* — and the harness **requires** that step's
+      `[measure] bzip2-j4` line plus the three `[perf]` rows the kernel
+      prints only after it returns. `tests/budgets.tsv` has no row for
+      any of the three, which is the proof: `build_wall_s`,
+      `build_peak_live_tasks` and `build_peak_fds_one_task` have never
+      been produced by a run. Two more ceilings were tried at 3,600 s
+      and both timed out in the same place, with every other step
+      *faster* than its recorded number (75.9 s against 86.9 for the C++
+      unit, 188 s against 203 for `bzip2-j1`), so the machine is not what
+      is slow. **The fix is a decision, not a measurement**: either the
+      harness stops requiring a step this project has recorded as
+      unfinished, or `-j4` is made to finish — and the second is row 5's
+      work, because M98's tail already blames concurrency for it.
 - [ ] **`mkfifo`.** GNU make 4.4 wants a FIFO for its job server, does not
       get one, says so, and falls back to the pipe job server — make's own
       supported path. Recorded rather than fixed; nothing else here has
@@ -1054,9 +1304,14 @@ condition rather than by an opinion.
   changed rather than the number.** M105 took both of M71's clauses
   together and both said no: four concurrent writers left the scan finding
   no orphan, no double-allocation and every free block back, and the cold
-  scan does not move with the file count. (It does move with allocated
-  *bytes* — 711 ms now, and that row is the closest thing to the second
-  condition this file has.) The reason the first clause cost
+  scan does not move with the file count. (It moves with allocated
+  *bytes* — 1,550 ms now, and that row is the closest thing to the second
+  condition this file has. M100's second increment **confirmed the half of
+  that condition that matters here and falsified the other half**: the
+  scan really is not disk-bound — 311 of its 79,512 block reads reach the
+  device — so the second clause still does not fire; but it is not linear
+  in bytes either, and the number that grows is memcpy in the block cache,
+  not I/O.) The reason the first clause cost
   nothing is that "multiple writers" was never the dangerous thing —
   **interleaved metadata sequences** are, and M67's one coarse `fs_lock`
   already makes a sequence atomic against another writer, for a reason

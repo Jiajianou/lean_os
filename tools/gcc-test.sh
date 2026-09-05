@@ -79,10 +79,37 @@ fi
 # a dictionary, and the gz* file layer, and returns non-zero when any of
 # them is wrong. Nothing here chose what it checks - which is the same
 # argument M99 made for CPython's regression suite, applied to a library.
-for prog in gnuhello bzip2 zlibtest minigzip; do
+# M100's second increment adds pngtest, djpeg, cjpeg and jpegtran, and
+# they are the same kind of thing one step further on: pngtest is
+# libpng's own test program and the three jpeg ones are the programs
+# libjpeg's own `make test` runs. What that suite compares against is
+# reference output the IJG shipped in 1995 - so the assertion is not
+# "it decoded something", it is "byte for byte, the same picture their
+# encoder produced". That goes on the image too, below.
+for prog in gnuhello bzip2 zlibtest minigzip pngtest djpeg cjpeg jpegtran; do
   src="build/thirdparty/$prog"
   if [ -f "$IMAGE" ] && [ -x "$src" ]; then
     build/leanfs-put "$IMAGE" "$src" "/bin/$prog" >/dev/null || exit 1
     echo "gcc-test: installed /bin/$prog"
   fi
 done
+
+# ---- and the reference output their suites compare against ------------
+#
+# Under /usr/share/m100, because these are data files somebody else
+# wrote and not programs: seven from libjpeg (the JPEG it encoded, the
+# progressive one, and the PPM, GIF, BMP and two JPEGs its own `make
+# test` requires the results to equal) and one PNG from libpng.
+#
+# Put one at a time rather than with `leanfs-put -r`, which also writes
+# /.image-manifest and would overwrite the one M93's image-tree test
+# reads.
+DATA=build/thirdparty/m100-data
+if [ -f "$IMAGE" ] && [ -d "$DATA" ]; then
+  n=0
+  for f in "$DATA"/*; do
+    build/leanfs-put "$IMAGE" "$f" "/usr/share/m100/$(basename "$f")" >/dev/null || exit 1
+    n=$((n + 1))
+  done
+  echo "gcc-test: installed $n reference files under /usr/share/m100 - the [m100b] self-test compares against them"
+fi

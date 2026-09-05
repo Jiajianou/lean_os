@@ -784,6 +784,26 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crt
 	@# reachable", not "no such library".
 	@rm -f $(SYSROOT)/usr/lib/libdl.a
 	@$(AR) rcs $(SYSROOT)/usr/lib/libdl.a 2>/dev/null || true
+	@# M100: and the library stack, if it has been built.
+	@#
+	@# The `rm -rf` at the top of this rule is right and stays: a
+	@# generated directory that is patched in place is a directory
+	@# nobody can reason about. But M100's libraries are installed INTO
+	@# a sysroot by their own `make install`, and the next library in
+	@# the dependency order links against the last one - so `make
+	@# sysroot`, which tools/gcc-test.sh runs on every invocation, used
+	@# to delete zlib out from under libpng between two runs of the same
+	@# script.
+	@#
+	@# tools/build-thirdparty.sh installs each library into
+	@# $(BUILD)/thirdparty-sysroot instead, which it owns, and this
+	@# copies that tree over the generated one. The generated half is
+	@# still generated; the ported half is still a record of what was
+	@# installed; and neither one is maintained by hand.
+	@if [ -d $(BUILD)/thirdparty-sysroot ]; then \
+	  cp -R $(BUILD)/thirdparty-sysroot/. $(SYSROOT)/; \
+	  echo "sysroot: + the M100 library stack from $(BUILD)/thirdparty-sysroot"; \
+	fi
 	@echo "sysroot: $(SYSROOT) - $$(ls $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include | grep -c . ) header entries, libc.a $$(du -h $(LIBC_A) | cut -f1)"
 
 # M93 (second attempt): the same list, for a script that preseeds an image
