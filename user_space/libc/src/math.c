@@ -976,3 +976,51 @@ double fma(double x, double y, double z) {
     double r = sh + (sl + pl);
     return scale ? ldexp(r, 2 * scale) : r;
 }
+
+/* ---- M100: the six float variants harfbuzz asked for -------------------
+ *
+ * Each is the double function rounded once. That is not a shortcut: the
+ * double result is correct to well under a float ulp for every one of
+ * these, so a single rounding to float lands on the correctly rounded
+ * float almost everywhere, and tools/math-test.sh says where it does
+ * not. A separate float algorithm would be faster and would be a second
+ * implementation of the same six functions to be wrong in. */
+float fabsf(float x) {
+    return (float)fabs((double)x);
+}
+
+float floorf(float x) {
+    return (float)floor((double)x);
+}
+
+float ceilf(float x) {
+    return (float)ceil((double)x);
+}
+
+float sinf(float x) {
+    return (float)sin((double)x);
+}
+
+float cosf(float x) {
+    return (float)cos((double)x);
+}
+
+float tanf(float x) {
+    return (float)tan((double)x);
+}
+
+float hypotf(float x, float y) {
+    return (float)hypot((double)x, (double)y);
+}
+
+float sqrtf(float x) {
+    return (float)sqrt((double)x);
+}
+
+float atanf(float x) {
+    return (float)atan((double)x);
+}
+
+float roundf(float x) {
+    return (float)round((double)x);
+}

@@ -33,8 +33,35 @@ extern "C" {
 #define M_E    2.71828182845904523536
 
 #define HUGE_VAL (__builtin_huge_val())
+/* M100: C99's evaluation-width types, which the same libstdc++ probe
+ * that wants the comparison macros also names. On x86-64 every
+ * expression is evaluated at its own width (FLT_EVAL_METHOD 0), so
+ * these are exactly their namesakes. */
+typedef float float_t;
+typedef double double_t;
 #define NAN      (__builtin_nanf(""))
 #define INFINITY (__builtin_inff())
+
+/* ---- M100: the float variants harfbuzz named ---------------------------
+ *
+ * C99 has had `floorf` and its siblings since 1999; nothing ported here
+ * had used one until harfbuzz's hb-algs.hh called six of them by name
+ * and stopped (and hb-ot-font.cc a seventh, once those six let it
+ * compile that far, then three more). These ten, and only these - M63's rule - each
+ * the double function rounded once to float, which for floor, ceil and
+ * fabs is exact and for the others is within one float ulp of the
+ * correctly rounded answer. tools/math-test.sh grades them against the
+ * host's own floats like everything else in this header. */
+float fabsf(float x);
+float floorf(float x);
+float ceilf(float x);
+float sinf(float x);
+float cosf(float x);
+float tanf(float x);
+float hypotf(float x, float y); /* the seventh, from hb-ot-font.cc, once the first six let it compile that far */
+float sqrtf(float x);           /* and three more from the pass after that: */
+float atanf(float x);
+float roundf(float x);          /* named fifty times in harfbuzz, behind a fallback of its own */
 
 double fabs(double x);
 double sqrt(double x);
@@ -67,6 +94,20 @@ double pow(double x, double y);
 #define isfinite(x)   __builtin_isfinite(x)
 #define signbit(x)    __builtin_signbit(x)
 #define isnormal(x)   __builtin_isnormal(x)
+/* M100: the six comparison macros, which are the other half of C99's
+ * classification set and the half libstdc++'s configure insists on
+ * before it will believe <math.h> is C99 at all - its probe names all
+ * twelve in one test program, and without these six it concluded this
+ * libc had none, so <cmath> defined no std::isnan and harfbuzz's
+ * `std::isnan(x)` expanded to `std::__builtin_isnan(x)`. Quiet on NaN,
+ * which is the point of them: `isgreater(NAN, 1)` is false without a
+ * floating-point exception, where `NAN > 1` is allowed to raise one. */
+#define isgreater(x, y)      __builtin_isgreater(x, y)
+#define isgreaterequal(x, y) __builtin_isgreaterequal(x, y)
+#define isless(x, y)         __builtin_isless(x, y)
+#define islessequal(x, y)    __builtin_islessequal(x, y)
+#define islessgreater(x, y)  __builtin_islessgreater(x, y)
+#define isunordered(x, y)    __builtin_isunordered(x, y)
 #define fpclassify(x) __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, x)
 
 #define FP_NAN       0

@@ -38,7 +38,8 @@ HOSTCC="${HOSTCC:-cc}"
 # the shape every declaration in it has, and a declaration that stops
 # having that shape stops being renamed, so the build fails loudly with a
 # duplicate symbol rather than quietly grading the host against itself.
-NAMES=$(grep -oE '^double [a-z0-9_]+\(' "$HDR" | sed 's/^double //; s/($//; s/(//' | sort -u)
+# M100: and `float name(` - the six float variants harfbuzz asked for.
+NAMES=$(grep -oE '^(double|float) [a-z0-9_]+\(' "$HDR" | sed 's/^double //; s/^float //; s/($//; s/(//' | sort -u)
 if [ -z "$NAMES" ]; then
   echo "math-test: no declarations found in $HDR - the grep needs updating" >&2
   exit 2

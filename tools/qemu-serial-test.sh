@@ -410,6 +410,11 @@ REQUIRED_MARKERS=(
   # the kernel both exist because this transcript would not match
   # without them.
   "[m100d] sqlite against the host:"
+  # M100's sixth increment: harfbuzz, the first C++ library in the
+  # stack, graded like freetype and sqlite - the same fixture against the
+  # host's build - and through hb-ft, so the marker also says the two
+  # libraries agree with each other.
+  "[m100e] harfbuzz against the host:"
   "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m73] names, not numbers:"
   "[m74] the session remembers:"

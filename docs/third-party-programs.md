@@ -34,7 +34,7 @@ long way round:
 second one.** That is the whole reason it exists — M94's own sentence is
 *every flag invented by hand is a flag someone else's build system will
 not pass* — and it is what bzip2, GNU hello, toybox, CPython, zlib,
-libpng, libjpeg, freetype, expat and sqlite are built with. See M94 and M100 in
+libpng, libjpeg, freetype, expat, sqlite and harfbuzz are built with. See M94 and M100 in
 [milestones.md](../milestones.md), and `tools/build-thirdparty.sh` for
 seven worked examples of the second route, three of which are libraries
 that install into the sysroot so the next one can link them.
@@ -309,6 +309,7 @@ this machine now, none of it edited to suit this OS:
 | **freetype 2.13.3** (M100) | one `config.sub` line (a 2024 vintage the anchored edit had to learn); links libpng and zlib through a sysroot-aware `x86_64-lean_os-pkg-config` | **differentially**: `tests/freetype/ftrender.c` built against this freetype and against the host's build of the same source, and 570 glyph bitmaps of DejaVu Sans that must hash identically |
 | **expat 2.6.4** (M100) | one `config.sub` line, nothing else | its own `runtests`: **4,392 checks** on the machine, and `xmlwf` on a document read off this disk |
 | **sqlite 3.47.2** (M100) | one `config.sub` line and `--disable-dynamic-extensions` (a static program here has no `dlopen`). **It asked this libc for `popen`/`pclose` and this kernel for `fcntl` record locks**, and got both | **differentially**: `tests/sqlite/cases.sql` through the shell built for the machine and the shell built for the host, byte-identical transcripts |
+| **harfbuzz 8.5.0** (M100) | the first C++ library in the stack; one `config.sub` line, `--enable-static` spelled out because its default is off; links freetype through the sysroot pkg-config. **It asked this libc for ten float math functions** (`floorf`, `ceilf`, `fabsf`, `sinf`, `cosf`, `tanf`, `hypotf`, `sqrtf`, `atanf`, `roundf`) and got them, each graded against the host's own by `tools/math-test.sh` | **differentially**: `tests/harfbuzz/hbshape.c` — Latin, Greek, Cyrillic, Arabic and Hebrew shaped through harfbuzz's own font loader and through hb-ft — against the host's build of the same source, byte-identical |
 
 The pattern is the one M63 set and every port since has followed:
 **the failing build is the specification.** Run it, read the error, add

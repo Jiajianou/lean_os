@@ -331,12 +331,25 @@ def port_gcc(root, header_src):
     #
     # So this target is modelled on `*-fuchsia*`, which is the case that
     # asks for nothing except function and data sections - and asking for
-    # nothing is right here: a freestanding libsupc++ uses no libm and
-    # calls almost nothing from stdlib, and claiming otherwise would be
-    # claiming it on this project's behalf about a libc it is still
-    # filling in. The day a hosted libstdc++ is built here, this case is
-    # where the answer changes and it will be a list of things measured
-    # rather than assumed.
+    # nothing was right when M97 wrote it: a freestanding libsupc++ uses
+    # no libm and calls almost nothing from stdlib, and claiming otherwise
+    # would be claiming it on this project's behalf about a libc it was
+    # still filling in. M97 also wrote: "The day a hosted libstdc++ is
+    # built here, this case is where the answer changes and it will be a
+    # list of things measured rather than assumed."
+    #
+    # M100 is that day, and the list below is measured: every function
+    # named is in user_space/libc/src/math.c and graded against the
+    # host's own by tools/math-test.sh. What the list controls is
+    # src/c++98/math_stubs_float.cc, which DEFINES every float function
+    # libstdc++ believes the libc lacks - so a libc that grows one the
+    # case does not name links every C++ program that uses it into a
+    # duplicate symbol. That is how harfbuzz's link found this: ten
+    # float functions added for it, nine of them stubbed by libstdc++,
+    # and `multiple definition of fabsf` from libstdc++.a. roundf is not
+    # here because libstdc++ has no stub for it. Extend this list when
+    # math.c gains a float function that math_stubs_float.cc names; the
+    # link error is the reminder.
     out.append(("libstdc++-v3/configure (target)", edit(
         os.path.join(root, "libstdc++-v3/configure"),
         "  *-fuchsia*)\n"
@@ -345,6 +358,16 @@ def port_gcc(root, header_src):
         "    ;;",
         "  *-lean_os*)\n"
         "    SECTION_FLAGS='-ffunction-sections -fdata-sections'\n"
+        "\n"
+        "    $as_echo \"#define HAVE_FABSF 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_FLOORF 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_CEILF 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_SINF 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_COSF 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_TANF 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_ATANF 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_SQRTF 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_HYPOTF 1\" >>confdefs.h\n"
         "\n"
         "    ;;\n"
         "\n"

@@ -48,7 +48,8 @@
 #
 # M100's first bullet is nine libraries in dependency order, each one
 # unmodified and each one a real test of M94-M97. Five of them are
-# below: zlib, libpng, libjpeg, freetype, expat, sqlite. Not programs.
+# below: zlib, libpng, libjpeg, freetype, expat, sqlite, harfbuzz. Not
+# programs.
 # A library has to be INSTALLED, because the next one links against it,
 # and a header a build cannot find is indistinguishable from a library
 # that does not exist - which is a step none of the ports above needed.
@@ -186,8 +187,18 @@ SYSROOT="$ROOT/build/sysroot"
 mkdir -p "$STAGE"
 
 stage_into_sysroot() {
-  # The staging tree is the record; the sysroot is a copy of it that
-  # `make sysroot` is free to destroy.
+  # M100 (sixth increment): no .la files. libtool writes one beside every
+  # library it installs, and in it records the library's dependencies by
+  # their FINAL paths - `/usr/lib/libpng16.la` inside libfreetype.la -
+  # which, installed under DESTDIR on a host that is not this machine,
+  # name files that do not exist. harfbuzz's link of libharfbuzz.a was
+  # the first to follow one and stop: "'/usr/lib/libpng16.la' is not a
+  # valid libtool archive". Every distribution that stages a sysroot
+  # deletes them for this reason; the same facts are in the .pc files,
+  # which pkg-config resolves relative to the sysroot. The staging tree
+  # is the record; the sysroot is a copy of it that `make sysroot` is
+  # free to destroy.
+  find "$STAGE" -name '*.la' -delete
   cp -R "$STAGE/." "$SYSROOT/"
 }
 
@@ -310,6 +321,13 @@ echo "build-thirdparty: libjpeg $JPEG_VER -> $OUT/djpeg, $OUT/cjpeg, $OUT/jpegtr
 # build-toolchain.sh because it belongs to the library stack, and
 # rewritten on every run because it embeds a path.
 #
+# `--static` always, because every link on this target is static unless
+# it says -pie (gcc/config/lean_os.h): a .pc file's Requires.private and
+# Libs.private are exactly the libraries a static link of it needs, and
+# without the flag `--libs freetype2` says `-lfreetype` and the link ends
+# in every png and zlib symbol freetype uses. The .la files that used to
+# carry that list are deleted from the sysroot - see stage_into_sysroot.
+#
 # pkgconf itself is a host tool, listed in docs/toolchain.md beside gsed
 # and for the same reason: somebody else's build asked for it.
 if ! command -v pkgconf >/dev/null 2>&1; then
@@ -324,7 +342,7 @@ cat > "$PREFIX/bin/x86_64-lean_os-pkg-config" <<EOF
 SYSROOT="$SYSROOT"
 PKG_CONFIG_LIBDIR="\$SYSROOT/usr/lib/pkgconfig:\$SYSROOT/usr/share/pkgconfig" \\
 PKG_CONFIG_SYSROOT_DIR="\$SYSROOT" \\
-exec pkgconf "\$@"
+exec pkgconf --static "\$@"
 EOF
 chmod +x "$PREFIX/bin/x86_64-lean_os-pkg-config"
 
@@ -568,6 +586,99 @@ rm -f "$OUT/sqlite-host.db"
 rm -f "$OUT/sqlite-host.db"
 echo "build-thirdparty: sqlite's oracle -> $(wc -l < "$OUT/sqlite.expected" | tr -d ' ') lines of transcript"
 
+# ---- 7/9 harfbuzz -----------------------------------------------------
+#
+# The first C++ library in the stack: ~120,000 lines of templates over
+# OpenType tables, compiled by this project's g++ against the libstdc++
+# M100's fifth increment rebuilt, and linking the freetype beside it
+# through the pkg-config above. Every optional dependency is off by name
+# - glib, gobject, cairo, icu, graphite2, chafa - because none is in the
+# sysroot and each would be a port of its own; what is left is the
+# shaper and its own font loader, which is the library.
+#
+# `--enable-static`, spelled out: harfbuzz's configure defaults static
+# libraries OFF, and with libtool unable to build shared ones here (see
+# the header) the default would build nothing at all and say so only in
+# the install step.
+#
+# ---- what harfbuzz found ---------------------------------------------
+#
+# Ten functions this libc's <math.h> did not declare: floorf, ceilf,
+# fabsf, sinf, cosf, tanf from the first compile; hypotf from the second,
+# once those six let it get that far; sqrtf and atanf from the third; and
+# roundf, which harfbuzz names fifty times behind a fallback of its own -
+# the float variants, which C99 has had since 1999 and nothing ported
+# here had named before. Three compiles to learn ten names is the cost
+# of reading errors one translation unit at a time; the grep that lists
+# them all at once is in M100's sixth entry. Added to the libc, and
+# tools/math-test.sh learned to grade `float f(float)` and `float
+# f(float, float)` declarations the way it grades the doubles, against
+# the host's own; see tests/math/cases.tsv for the rows, and for the
+# one-ulp claim its first run corrected.
+#
+# `checking for the pthreads library -lpthread... no`, again - the same
+# note as freetype's. harfbuzz then uses its own atomics for reference
+# counts and needs no threads, so nothing is lost; but the pattern is
+# now two libraries long.
+#
+# Graded like freetype and sqlite: tests/harfbuzz/hbshape.c against
+# this harfbuzz and against the host's build of the same tarball - six
+# strings in five scripts, shaped through harfbuzz's own font loader and
+# again through hb-ft - and the two must agree byte for byte.
+HB_VER=8.5.0
+fetch https://github.com/harfbuzz/harfbuzz/releases/download/$HB_VER/harfbuzz-$HB_VER.tar.xz \
+      harfbuzz-$HB_VER.tar.xz
+rm -rf "harfbuzz-$HB_VER"
+tar xf "harfbuzz-$HB_VER.tar.xz"
+python3 "$ROOT/tools/toolchain-port/apply.py" --config-sub \
+        "harfbuzz-$HB_VER/config.sub" || exit 1
+HB_OPTS="--enable-static --disable-shared --with-freetype=yes --with-glib=no \
+         --with-gobject=no --with-cairo=no --with-icu=no --with-graphite2=no \
+         --with-chafa=no"
+(
+  cd "harfbuzz-$HB_VER"
+  # shellcheck disable=SC2086
+  ./configure --host=x86_64-lean_os --prefix=/usr $HB_OPTS > configure.log 2>&1 &&
+  grep -q 'FreeType:.*true' configure.log &&
+  make -C src > make.log 2>&1 &&
+  make -C src install DESTDIR="$STAGE" > install.log 2>&1
+) || {
+  echo "build-thirdparty: harfbuzz did not build:" >&2
+  grep -h 'error' "$SRC/harfbuzz-$HB_VER/make.log" 2>/dev/null | sort | uniq -c | sort -rn | head -10 >&2
+  exit 1
+}
+stage_into_sysroot
+echo "build-thirdparty: harfbuzz $HB_VER -> libharfbuzz in the sysroot"
+
+# The oracle, against the host freetype built for freetype's own oracle
+# above - so the hb-ft half of the fixture has the same freetype under
+# it on both sides.
+if [ ! -f "$HOST/hb-install/lib/libharfbuzz.a" ]; then
+  echo "build-thirdparty: building harfbuzz $HB_VER for the host, as the oracle"
+  (
+    cd "$HOST" && rm -rf "harfbuzz-$HB_VER" && tar xf "$SRC/harfbuzz-$HB_VER.tar.xz" &&
+    cd "harfbuzz-$HB_VER" &&
+    # shellcheck disable=SC2086
+    PKG_CONFIG_PATH="$HOST/ft-install/lib/pkgconfig" \
+      ./configure --prefix="$HOST/hb-install" $HB_OPTS --with-coretext=no > configure.log 2>&1 &&
+    make -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" -C src > make.log 2>&1 &&
+    make -C src install > install.log 2>&1
+  ) || { echo "build-thirdparty: the host harfbuzz did not build" >&2; exit 1; }
+fi
+c++ -O2 -Wall -Wextra -o "$OUT/hbshape-host" "$ROOT/tests/harfbuzz/hbshape.c" \
+   -I"$HOST/hb-install/include/harfbuzz" -I"$HOST/ft-install/include/freetype2" \
+   "$HOST/hb-install/lib/libharfbuzz.a" "$HOST/ft-install/lib/libfreetype.a" || exit 1
+x86_64-lean_os-g++ -O2 -Wall -Wextra -o "$OUT/hbshape" "$ROOT/tests/harfbuzz/hbshape.c" \
+   $(x86_64-lean_os-pkg-config --cflags --libs harfbuzz freetype2) || {
+  echo "build-thirdparty: tests/harfbuzz/hbshape.c did not build against the sysroot's harfbuzz" >&2
+  exit 1
+}
+"$OUT/hbshape-host" "$FONT" > "$OUT/hbshape.expected" || {
+  echo "build-thirdparty: the host harfbuzz could not shape the fixture's text" >&2
+  exit 1
+}
+echo "build-thirdparty: harfbuzz's oracle -> $(wc -l < "$OUT/hbshape.expected" | tr -d ' ') lines of reference output, $(tail -1 "$OUT/hbshape.expected")"
+
 # ---- and the data their own test suites compare against ---------------
 #
 # Copied out of the two source trees rather than vendored, for the same
@@ -593,4 +704,6 @@ cp "$OUT/ftrender.expected" "$DATA/ftrender.expected"
 # And sqlite's: the script, and what the host's sqlite made of it.
 cp "$ROOT/tests/sqlite/cases.sql" "$DATA/cases.sql"
 cp "$OUT/sqlite.expected" "$DATA/sqlite.expected"
+# And harfbuzz's, shaped from the same font freetype's oracle rendered.
+cp "$OUT/hbshape.expected" "$DATA/hbshape.expected"
 echo "build-thirdparty: the reference output their own suites compare against -> $DATA"

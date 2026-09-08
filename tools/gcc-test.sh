@@ -94,8 +94,9 @@ fi
 # 4,392 checks, and xmlwf is its well-formedness checker.
 # The fifth increment adds sqlite3, graded like ftrender: the transcript
 # of tests/sqlite/cases.sql against the host's build of the same source.
+# The sixth increment adds hbshape, graded the same way as ftrender.
 for prog in gnuhello bzip2 zlibtest minigzip pngtest djpeg cjpeg jpegtran \
-            ftrender expattest xmlwf sqlite3; do
+            ftrender expattest xmlwf sqlite3 hbshape; do
   src="build/thirdparty/$prog"
   if [ -f "$IMAGE" ] && [ -x "$src" ]; then
     build/leanfs-put "$IMAGE" "$src" "/bin/$prog" >/dev/null || exit 1

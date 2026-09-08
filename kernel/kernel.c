@@ -10090,6 +10090,105 @@ static void boot_selftests_system(void) {
         }
     }
 
+    /* ---- M100 self-test: harfbuzz, against the host --------------------
+     *
+     * The seventh library of the stack and the first that is C++: a
+     * text shaper, 8.5.0, linking the freetype beside it in the sysroot
+     * and graded the way freetype and sqlite are. /bin/hbshape is
+     * tests/harfbuzz/hbshape.c against the harfbuzz this project's
+     * compiler built; the reference is the same fixture against the
+     * host's build of the same tarball. Six strings - Latin with
+     * ligatures, Greek, Cyrillic, Arabic (right to left, every letter
+     * substituted for its joining form), Hebrew with combining marks
+     * positioned by GPOS, and a line of digits and superscripts - each
+     * shaped twice: through harfbuzz's own font loader in font units,
+     * and through hb-ft with freetype answering for the advances at
+     * 24 px. Every glyph id, cluster, advance and offset must match.
+     *
+     * What that grades that nothing before it did: a large C++ program
+     * (harfbuzz is ~120,000 lines of templates over OpenType tables)
+     * compiled by this project's g++ and linked against the libstdc++
+     * M100 rebuilt - and the two libraries agreeing with each other, not
+     * only with the host.
+     *
+     * Skipped when absent, for the reason [m94], [m95] and [m100] skip.
+     */
+    {
+        os_stat_t hst;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/hbshape", (uint64_t)&hst, 0) != 0) {
+            klog_puts("[m100e] /bin/hbshape is not on this image - skipped. "
+                       "tools/build-thirdparty.sh builds harfbuzz.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m100e.sh";
+            const char *result = PATH_TMP_DIR "m100e.out";
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "cd " PATH_TMP_DIR "\n"
+                "D=/usr/share/m100\n"
+                "O=" PATH_TMP_DIR "m100e.out\n"
+                "/bin/hbshape $D/DejaVuSans.ttf > " PATH_TMP_DIR "m100e.txt 2>&1\n"
+                "echo \"hbshape exit $?\" >> $O\n"
+                "toybox cmp $D/hbshape.expected " PATH_TMP_DIR "m100e.txt"
+                " && echo 'harfbuzz agrees with the host' >> $O\n"
+                "toybox tail -n 1 " PATH_TMP_DIR "m100e.txt >> $O\n"
+                "echo \"host: $(toybox tail -n 1 $D/hbshape.expected)\" >> $O\n"
+                "toybox rm -f " PATH_TMP_DIR "m100e.txt\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M100e self-test: could not write the harfbuzz fixture");
+            }
+            uint64_t started = pit_get_ticks();
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m100e] the harfbuzz fixture could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            uint64_t shape_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
+            static char produced[1024];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m100e] the harfbuzz fixture produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"hbshape exit 0",
+                     "every string shaped, through both font loaders"},
+                    {"harfbuzz agrees with the host",
+                     "every glyph, cluster, advance and offset byte-identical with the "
+                     "host's build of the same harfbuzz"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m100e] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            if (!all_ok) {
+                klog_puts("[m100e] what the harfbuzz fixture wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m100e] ---- end\n");
+                panic("M100 self-test: harfbuzz does not agree with the host here");
+            }
+            klog_perf("harfbuzz_shape_ms", shape_ms, "ms");
+            klog_puts("[m100e] harfbuzz against the host: harfbuzz 8.5.0, C++ built "
+                       "unmodified by this project's g++ and linking the freetype beside "
+                       "it, shapes Latin, Greek, Cyrillic, Arabic and Hebrew through its "
+                       "OpenType tables and again through hb-ft, every glyph and position "
+                       "BYTE-IDENTICAL with the host's build of the same source "
+                       "- self-test passed.\n\n");
+        }
+    }
+
     /* ---- M99 self-test: the loader past M95's ceiling ------------------
      *
      * [m95] proves a program can open *a* library. This one proves the

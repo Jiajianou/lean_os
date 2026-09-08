@@ -227,10 +227,15 @@ echo "build-toolchain: building the C++ runtime (libsupc++)"
 # moves - the same stamp tools/build-python.sh keeps, for the same reason.
 ABI_STAMP=$(cat "$ROOT"/user_space/libc/include/*.h "$ROOT"/user_space/libc/include/*/*.h \
                 "$ROOT"/system_api/include/*.h 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+#
+# Thrown away rather than `make clean`ed, because libstdc++'s CONFIGURE
+# answers depend on these headers too - "is <math.h> C99" is a test
+# program that names twelve macros - and a clean keeps config.cache. The
+# directory gone, the top-level make reconfigures it.
 if [ -d "$TARGET/libstdc++-v3" ] && \
    [ "$(cat "$TARGET/libstdc++-v3/.lean_os-abi-stamp" 2>/dev/null)" != "$ABI_STAMP" ]; then
-  echo "build-toolchain: the libc headers changed since libstdc++ was built - cleaning it"
-  make -C "$TARGET/libstdc++-v3" clean > clean-cxx.log 2>&1 || true
+  echo "build-toolchain: the libc headers changed since libstdc++ was built - reconfiguring it"
+  rm -rf "$TARGET/libstdc++-v3"
 fi
 make -j"$JOBS" MAKEINFO=true all-target-libstdc++-v3 > build-cxx.log 2>&1 \
   || { tail -40 build-cxx.log >&2; exit 1; }

@@ -18,6 +18,16 @@
 #
 # name	kind	lo	hi	points	rel_tol	note
 fabs	1	-1e6	1e6	401	0	exact - it clears a sign bit
+fabsf	f	-1e6	1e6	401	0	M100: exact, like fabs
+floorf	f	-1e9	1e9	401	0	M100: exact - floor of a float, rounded once, is that float's floor
+ceilf	f	-1e9	1e9	401	0	M100: exact
+sinf	f	-30	30	1201	1.2e-7	M100: sin in double rounded once to float. One float ulp, which is 2^-24 relative at the top of a binade and 2^-23 = 1.19e-7 at the bottom - the first claim of 1e-7 was one ulp at the wrong end, and the three misses it found were all exactly one ulp
+cosf	f	-30	30	1201	1.2e-7	M100: same - one float ulp, 1.19e-7 relative at worst
+tanf	f	-1.5	1.5	1201	1.2e-7	M100: same, and swept inside one period where tan is bounded - near the poles a double rounded once and a correctly rounded float legitimately differ by an ulp of a huge number
+hypotf	F	-1e4	1e4	201	1.2e-7	M100: hypot in double rounded once; one float ulp, like the others. The seventh float harfbuzz named, from hb-ot-font.cc, which the first six had to compile before it could
+sqrtf	f	0	1e6	401	1.2e-7	M100: sqrt in double rounded once - which is in fact correctly rounded, since sqrt is; the claim is one ulp like its siblings rather than a tighter one nothing measured
+atanf	f	-30	30	1201	1.2e-7	M100: one float ulp
+roundf	f	-1e9	1e9	401	0	M100: exact
 sqrt	1	0	1e6	401	1e-15	SSE2's own instruction - but see math.c: on a non-x86 host this row grades the host against itself
 floor	1	-1e18	1e18	401	0	exact - and swept past 2^52, where a long long cast stops being one
 ceil	1	-1e18	1e18	401	0	exact - same sweep as floor

@@ -38,59 +38,78 @@ double lean_pow(double, double), lean_atan2(double, double);
 double lean_fmod(double, double), lean_hypot(double, double);
 double lean_copysign(double, double), lean_nextafter(double, double);
 double lean_fmax(double, double), lean_fmin(double, double);
+/* M100: the float variants. */
+float lean_fabsf(float), lean_floorf(float), lean_ceilf(float);
+float lean_sinf(float), lean_cosf(float), lean_tanf(float);
+float lean_hypotf(float, float);
+float lean_sqrtf(float), lean_atanf(float), lean_roundf(float);
 
 typedef double (*fn1)(double);
 typedef double (*fn2)(double, double);
 typedef double (*fn3)(double, double, double);
+typedef float (*fn1f)(float); /* M100: one float argument, kind "f" */
+typedef float (*fn2f)(float, float); /* and two, kind "F" */
 
 struct entry {
     const char *name;
     fn1 ours1, theirs1;
     fn2 ours2, theirs2;
     fn3 ours3, theirs3;
+    fn1f oursf, theirsf;
+    fn2f oursF, theirsF;
 };
 
 /* The host's are taken by address rather than called through a macro, so
  * that what runs is the C library's function and not something the
  * compiler folded at -O2 into a constant of its own opinion. */
 static const struct entry TABLE[] = {
-    {"fabs", lean_fabs, fabs, 0, 0, 0, 0},
-    {"sqrt", lean_sqrt, sqrt, 0, 0, 0, 0},
-    {"floor", lean_floor, floor, 0, 0, 0, 0},
-    {"ceil", lean_ceil, ceil, 0, 0, 0, 0},
-    {"trunc", lean_trunc, trunc, 0, 0, 0, 0},
-    {"round", lean_round, round, 0, 0, 0, 0},
-    {"sin", lean_sin, sin, 0, 0, 0, 0},
-    {"cos", lean_cos, cos, 0, 0, 0, 0},
-    {"tan", lean_tan, tan, 0, 0, 0, 0},
-    {"atan", lean_atan, atan, 0, 0, 0, 0},
-    {"asin", lean_asin, asin, 0, 0, 0, 0},
-    {"acos", lean_acos, acos, 0, 0, 0, 0},
-    {"exp", lean_exp, exp, 0, 0, 0, 0},
-    {"log", lean_log, log, 0, 0, 0, 0},
-    {"log10", lean_log10, log10, 0, 0, 0, 0},
-    {"log2", lean_log2, log2, 0, 0, 0, 0},
-    {"sinh", lean_sinh, sinh, 0, 0, 0, 0},
-    {"cosh", lean_cosh, cosh, 0, 0, 0, 0},
-    {"tanh", lean_tanh, tanh, 0, 0, 0, 0},
-    {"expm1", lean_expm1, expm1, 0, 0, 0, 0},
-    {"log1p", lean_log1p, log1p, 0, 0, 0, 0},
-    {"asinh", lean_asinh, asinh, 0, 0, 0, 0},
-    {"acosh", lean_acosh, acosh, 0, 0, 0, 0},
-    {"atanh", lean_atanh, atanh, 0, 0, 0, 0},
-    {"erf", lean_erf, erf, 0, 0, 0, 0},
-    {"erfc", lean_erfc, erfc, 0, 0, 0, 0},
-    {"pow", 0, 0, lean_pow, pow, 0, 0},
-    {"atan2", 0, 0, lean_atan2, atan2, 0, 0},
-    {"fmod", 0, 0, lean_fmod, fmod, 0, 0},
-    {"hypot", 0, 0, lean_hypot, hypot, 0, 0},
-    {"copysign", 0, 0, lean_copysign, copysign, 0, 0},
-    {"nextafter", 0, 0, lean_nextafter, nextafter, 0, 0},
-    {"fmax", 0, 0, lean_fmax, fmax, 0, 0},
-    {"fmin", 0, 0, lean_fmin, fmin, 0, 0},
-    {"cbrt", lean_cbrt, cbrt, 0, 0, 0, 0},
-    {"exp2", lean_exp2, exp2, 0, 0, 0, 0},
-    {"fma", 0, 0, 0, 0, lean_fma, fma},
+    {"fabsf", 0, 0, 0, 0, 0, 0, lean_fabsf, fabsf, 0, 0},
+    {"floorf", 0, 0, 0, 0, 0, 0, lean_floorf, floorf, 0, 0},
+    {"ceilf", 0, 0, 0, 0, 0, 0, lean_ceilf, ceilf, 0, 0},
+    {"sinf", 0, 0, 0, 0, 0, 0, lean_sinf, sinf, 0, 0},
+    {"cosf", 0, 0, 0, 0, 0, 0, lean_cosf, cosf, 0, 0},
+    {"tanf", 0, 0, 0, 0, 0, 0, lean_tanf, tanf, 0, 0},
+    {"hypotf", 0, 0, 0, 0, 0, 0, 0, 0, lean_hypotf, hypotf},
+    {"sqrtf", 0, 0, 0, 0, 0, 0, lean_sqrtf, sqrtf, 0, 0},
+    {"atanf", 0, 0, 0, 0, 0, 0, lean_atanf, atanf, 0, 0},
+    {"roundf", 0, 0, 0, 0, 0, 0, lean_roundf, roundf, 0, 0},
+    {"fabs", lean_fabs, fabs, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"sqrt", lean_sqrt, sqrt, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"floor", lean_floor, floor, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"ceil", lean_ceil, ceil, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"trunc", lean_trunc, trunc, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"round", lean_round, round, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"sin", lean_sin, sin, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"cos", lean_cos, cos, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"tan", lean_tan, tan, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"atan", lean_atan, atan, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"asin", lean_asin, asin, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"acos", lean_acos, acos, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"exp", lean_exp, exp, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"log", lean_log, log, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"log10", lean_log10, log10, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"log2", lean_log2, log2, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"sinh", lean_sinh, sinh, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"cosh", lean_cosh, cosh, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"tanh", lean_tanh, tanh, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"expm1", lean_expm1, expm1, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"log1p", lean_log1p, log1p, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"asinh", lean_asinh, asinh, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"acosh", lean_acosh, acosh, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"atanh", lean_atanh, atanh, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"erf", lean_erf, erf, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"erfc", lean_erfc, erfc, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"pow", 0, 0, lean_pow, pow, 0, 0, 0, 0, 0, 0},
+    {"atan2", 0, 0, lean_atan2, atan2, 0, 0, 0, 0, 0, 0},
+    {"fmod", 0, 0, lean_fmod, fmod, 0, 0, 0, 0, 0, 0},
+    {"hypot", 0, 0, lean_hypot, hypot, 0, 0, 0, 0, 0, 0},
+    {"copysign", 0, 0, lean_copysign, copysign, 0, 0, 0, 0, 0, 0},
+    {"nextafter", 0, 0, lean_nextafter, nextafter, 0, 0, 0, 0, 0, 0},
+    {"fmax", 0, 0, lean_fmax, fmax, 0, 0, 0, 0, 0, 0},
+    {"fmin", 0, 0, lean_fmin, fmin, 0, 0, 0, 0, 0, 0},
+    {"cbrt", lean_cbrt, cbrt, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"exp2", lean_exp2, exp2, 0, 0, 0, 0, 0, 0, 0, 0},
+    {"fma", 0, 0, 0, 0, lean_fma, fma, 0, 0, 0, 0},
 };
 
 /* Relative where the answer is not near zero, absolute where it is -
@@ -174,16 +193,33 @@ int main(int argc, char **argv) {
             {"cos", "huge", "same"},
             {"tan", "huge", "same"},
         };
+        /* No float function is on that list: (float)1.8e308 is infinity,
+         * and sinf(inf) is NaN on both sides for the ordinary reason. */
 
         int special_failures = 0;
         for (size_t i = 0; i < sizeof(TABLE) / sizeof(TABLE[0]); i++) {
-            if (!TABLE[i].ours1) {
+            if (!TABLE[i].ours1 && !TABLE[i].oursf) {
                 continue; /* one-argument functions only */
             }
             for (size_t v = 0; v < sizeof(values) / sizeof(values[0]); v++) {
-                double got = TABLE[i].ours1(values[v]);
-                double want = TABLE[i].theirs1(values[v]);
-                if (err_of(got, want) <= 1e-12) {
+                double got, want;
+                if (TABLE[i].ours1) {
+                    got = TABLE[i].ours1(values[v]);
+                    want = TABLE[i].theirs1(values[v]);
+                } else {
+                    /* M100: a float function is asked the same nine
+                     * questions in float - where "huge" is infinity and
+                     * "tiny" is zero, which is the point. */
+                    got = (double)TABLE[i].oursf((float)values[v]);
+                    want = (double)TABLE[i].theirsf((float)values[v]);
+                }
+                /* A float function is judged at float precision here:
+                 * one ulp, 2^-23 relative. atanf(+inf) is the case that
+                 * asked - the host's is the float just BELOW pi/2 and
+                 * ours the one just above, which is the correctly
+                 * rounded one; an ulp apart, and an ulp is the claim. */
+                double special_tol = TABLE[i].ours1 ? 1e-12 : 1.2e-7;
+                if (err_of(got, want) <= special_tol) {
                     continue;
                 }
                 const char *why = 0;
@@ -272,7 +308,34 @@ int main(int argc, char **argv) {
         double worst_got = 0.0, worst_want = 0.0;
         int n = points > 1 ? points : 2;
         double step = (hi - lo) / (double)(n - 1);
-        if (kind[0] == '1') {
+        if (kind[0] == 'f') {
+            /* M100: one float argument. The grid point is rounded to
+             * float BEFORE either side sees it, so both are asked about
+             * the same number; the comparison is in double, where a
+             * float ulp is about 6e-8 relative. */
+            for (int i = 0; i < n; i++) {
+                float x = (float)(lo + step * (double)i);
+                double got = (double)e->oursf(x), want = (double)e->theirsf(x);
+                double err = err_of(got, want);
+                if (err > worst) {
+                    worst = err; worst_x = (double)x; worst_got = got; worst_want = want;
+                }
+            }
+        } else if (kind[0] == 'F') {
+            /* M100: two float arguments, the same grid pairwise. */
+            for (int i = 0; i < n; i++) {
+                float x = (float)(lo + step * (double)i);
+                for (int j = 0; j < n; j++) {
+                    float y = (float)(lo + step * (double)j);
+                    double got = (double)e->oursF(x, y), want = (double)e->theirsF(x, y);
+                    double err = err_of(got, want);
+                    if (err > worst) {
+                        worst = err; worst_x = (double)x; worst_y = (double)y;
+                        worst_got = got; worst_want = want;
+                    }
+                }
+            }
+        } else if (kind[0] == '1') {
             for (int i = 0; i < n; i++) {
                 double x = lo + step * (double)i;
                 double got = e->ours1(x), want = e->theirs1(x);
@@ -318,7 +381,7 @@ int main(int argc, char **argv) {
         graded++;
         if (worst > tol) {
             failures++;
-            if (kind[0] == '1') {
+            if (kind[0] == '1' || kind[0] == 'f') {
                 printf("FAIL %-10s worst %.3g > %.3g at x=%.17g: "
                        "ours %.17g, the host's %.17g\n",
                        name, worst, tol, worst_x, worst_got, worst_want);

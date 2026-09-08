@@ -1201,6 +1201,23 @@ int main(void) {
         }
     }
 
+    /* ---- M100: the C99 comparison macros -------------------------------
+     *
+     * harfbuzz found these by way of libstdc++: its configure names all
+     * twelve classification and comparison macros in one probe, and
+     * without the six comparisons concluded <math.h> was not C99. What
+     * is checked is the property that makes them different from the
+     * operators: a NaN compares false to everything, quietly. */
+    {
+        volatile double nan_v = NAN, one = 1.0, two = 2.0;
+        if (!isgreater(two, one) || isgreater(one, two) || isgreater(nan_v, one) ||
+            !isgreaterequal(one, one) || !isless(one, two) || isless(nan_v, two) ||
+            !islessequal(two, two) || !islessgreater(one, two) || islessgreater(nan_v, one) ||
+            !isunordered(nan_v, one) || isunordered(one, two)) {
+            fail("a C99 comparison macro answered wrongly, or a NaN compared true");
+        }
+    }
+
     /* ---- M100: recursive and errorcheck mutexes ----------------------
      *
      * sqlite found these: its database mutex is PTHREAD_MUTEX_RECURSIVE

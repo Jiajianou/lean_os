@@ -76,8 +76,8 @@ that has never happened.
 | **Head of the queue** | **M100** — M99 closed 2026-09-04 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
 | **Host unit tests** | 259/259 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 114 required, graded on every self-test boot |
-| **Performance budgets** | 35 rows in `tests/budgets.tsv`, all inside their ceilings |
+| **Boot markers** | 115 required, graded on every self-test boot |
+| **Performance budgets** | 36 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
 
@@ -317,9 +317,9 @@ increment cost.
 | instrument | what it grades | how it is run |
 |---|---|---|
 | **Host unit tests** (`tests/`) | libk, heap, malloc, leanfs, every network parser, the TCP state machine, PTY, symtab, UTF-8, fnmatch, getopt, fwcfg — and the **scheduler** (Q13), 2,157 lines against a fake timer and a fake CPU, with lock-order inversions made errors rather than comments. and, since M100, the **record-lock table** (`kernel/fs/flock.c`, mutation score 91.5%). **259 tests**, ASan+UBSan, under a second | `--fast` |
-| **Boot self-tests** | **114 required markers** and 35 performance budgets, graded off the serial log of a real boot. The switch comes from outside the image via fw_cfg, so the image is byte-identical with or without them | `tools/qemu-serial-test.sh` |
+| **Boot self-tests** | **115 required markers** and 36 performance budgets, graded off the serial log of a real boot. The switch comes from outside the image via fw_cfg, so the image is byte-identical with or without them | `tools/qemu-serial-test.sh` |
 | **Input suite** | real clicks and keys through QEMU's monitor, graded on real framebuffer pixels. Most tests check something *did* change; two check that nothing else did, which is the only way to catch a flicker (Q7/Q15). Boots once per image and restores a snapshot per test, keyed on the image hash so a stale one fails closed (Q19) | `tools/qemu-input-test.sh` |
-| **Differential tests** | `sh`, the regex engine, `sscanf`, `printf`, libm, `realpath`, and the FILE layer — each compiled for the host from the same source the machine runs, put beside the host's own, and required to agree. Nothing in the fixtures says what the right answer is. **Since M100 the same shape grades two ported libraries**: freetype's rasterizer and sqlite's shell, each built for the host from the same tarball and required to produce byte-identical output on the machine (`[m100c]`, `[m100d]`) | `--fast`; the library halves on the graded boot |
+| **Differential tests** | `sh`, the regex engine, `sscanf`, `printf`, libm, `realpath`, and the FILE layer — each compiled for the host from the same source the machine runs, put beside the host's own, and required to agree. Nothing in the fixtures says what the right answer is. **Since M100 the same shape grades three ported libraries**: freetype's rasterizer, sqlite's shell and harfbuzz's shaper, each built for the host from the same tarball and required to produce byte-identical output on the machine (`[m100c]`, `[m100d]`, `[m100e]`) | `--fast`; the library halves on the graded boot |
 | **Fuzzers** | network parsers and the mount path, ~150k inputs/second | `make fuzz-run` |
 | **Mutation harness** | breaks the kernel on purpose and reports whether the tests noticed. The only instrument that grades the *tests* | `make mutate` |
 | **Crash test** | SIGKILL mid-write, reboot, verify with an independent reader. 16 cuts | `tools/crash-test.sh` |
@@ -401,7 +401,7 @@ unbuilt is the drift *Deferred* exists to catch.
 | # | milestone | state | why here |
 |---|---|---|---|
 | ~~**1**~~ | ~~**M99 (2nd)**~~ | **done 2026-09-04** | all five boxes closed across three increments — see *Landed since this snapshot*. Neither open box was about what its own entry predicted: the loader box was mostly a target-description box, and the build box was a shell box |
-| **2** | **M100** — the browser gap, measured | in progress: six of nine libraries landed | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
+| **2** | **M100** — the browser gap, measured | in progress: seven of nine libraries landed | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
 | **3** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not |
 | **4** | **Q14** — the compositor, off the machine | not started | the move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded in milliseconds rather than only through a screendump |
 | **5** | **M106 (tail)** — the battery green on four cores | 3 known failures | not a new milestone: the three failures M106 named and left. It gates CPU affinity, and M98's bootstrap profiler already reproduces one of them on demand — the first reproduction this project has that is not "about one boot in ten hangs" |
@@ -1534,6 +1534,153 @@ entropy note above becomes a kernel item, and ICU.
 
 ---
 
+### M100 (sixth increment) — harfbuzz, the first C++ library in the stack `[~]`
+
+*Landed 2026-09-08.* The seventh library: **harfbuzz 8.5.0**, ~120,000
+lines of C++ templates over OpenType tables, `./configure
+--host=x86_64-lean_os && make` with one `config.sub` line, linking the
+freetype beside it in the sysroot through the `pkg-config` wrapper the
+fourth increment wrote, and compiled by this project's `g++` against the
+libstdc++ the fifth increment rebuilt. Graded by the new `[m100e]`
+marker, differentially, like freetype and sqlite: `tests/harfbuzz/hbshape.c`
+shapes six strings in five scripts — Latin with ligatures, Greek,
+Cyrillic, Arabic right-to-left with every letter substituted for its
+joining form, Hebrew with combining marks positioned by GPOS, and a line
+of digits and superscripts — first through harfbuzz's own font loader in
+font units and again through `hb-ft` with freetype answering for the
+advances at 24 px, and prints every glyph id, cluster, advance and
+offset. The host's build of the same tarball produces the reference, and
+the machine's output must be byte-identical. **It was, on the first
+boot.** Seven of nine, and still zero source edits.
+
+**What it asked for was ten functions this libc's `<math.h>` did not
+declare** — the float variants C99 has had since 1999, which nothing
+ported here had named before. The build named them the way a build
+does, one translation unit at a time: `floorf`, `ceilf`, `fabsf`,
+`sinf`, `cosf`, `tanf` from the first compile (thirteen errors from one
+header, all the same shape); `hypotf` from the second, once those six
+let it get that far; `sqrtf` and `atanf` from the third. Three compiles
+to learn nine names is the honest cost of M63's method, and the
+correction is the one-line grep over harfbuzz's sources that lists every
+`*f(` it calls — which is how the tenth, `roundf`, was found: named
+fifty times, behind a fallback macro of harfbuzz's own, so no compile
+would ever have said it. Added, and only those ten (M63's rule), each
+the double function rounded once to float;
+`tools/math-test.sh` learned to grade `float f(float)` and `float
+f(float, float)` declarations the way it grades the doubles, against the
+host's own floats, with the nine special values asked in float too —
+where "huge" is infinity and "tiny" is zero, which is the point. Its
+first run found what a claim written before the measurement usually
+finds: the three trigonometric ones differ from the host by **exactly
+one float ulp** at some points — the ordinary consequence of rounding a
+correct double once — and the claimed tolerance of `1e-7` was one ulp at
+the wrong end of a binade (2^-24 at the top, 2^-23 = 1.19e-7 at the
+bottom). The claim was corrected to one ulp with the arithmetic in the
+row; nothing was widened to hide anything. And then `atanf(+inf)`: the
+host's answer is the float just *below* π/2 and this libc's the one
+just above — which is the correctly rounded one, as it happens — and
+the special-value check was judging floats at double precision. It
+judges them at one float ulp now, which is what the rows claim.
+
+**And then `std::isnan`, which did not exist here, and had never
+existed.** With the floats in place the next error was `'__builtin_isnan'
+is not a member of 'std'`: harfbuzz writes `std::isnan(x)`, this libc's
+`<math.h>` defines `isnan` as a macro over the builtin, and `<cmath>` is
+supposed to `#undef` that macro and provide the function — *if*
+libstdc++ was configured believing `<math.h>` is C99. It was not. Its
+configure compiles one probe naming all twelve classification and
+comparison macros plus `double_t` and `float_t`; this header had the
+six classifications and none of the six comparisons (`isgreater`
+through `isunordered`) and neither typedef, so `_GLIBCXX_USE_C99_MATH`
+came out 0 on 2026-09-03 and every `std::isnan` in every C++ program
+compiled here since has been a compile error waiting for somebody to
+write one. Six macros and two typedefs added (`libctest` checks the
+property that makes the macros different from the operators — a NaN
+compares false to everything, quietly), and libstdc++ **reconfigured**,
+not just rebuilt: the answer lives in its `config.cache`, and the
+fifth increment's ABI stamp, which `make clean`ed on a header change,
+now throws the directory away so the top-level make configures it
+again. That is the third time in two increments that "rebuilt" turned
+out to mean less than it said.
+
+**Then libstdc++ objected to the floats it had been providing itself.**
+Every C++ program that used one of the new functions ended in `multiple
+definition of 'fabsf'` from `libstdc++.a(math_stubs_float.o)`: libstdc++
+*defines* every float function its configure believes the libc lacks,
+and for a cross target that belief is not a link test but the port's
+own case in the generated `configure` — the one M97 wrote "modelled on
+fuchsia, which asks for nothing", with a note that a hosted libstdc++
+would one day turn it into "a list of things measured rather than
+assumed". That day: the arm now declares the nine of the ten this libc
+has that libstdc++ would otherwise stub (`roundf` has no stub), each of
+them a function `tools/math-test.sh` grades, and libstdc++ was
+reconfigured a second time. The port changed, so the toolchain was
+rebuilt from the tarballs by `tools/build-toolchain.sh` before this
+landed — the stamp mechanism's own rule, and the only proof that the
+recipe in `apply.py` is the toolchain on disk.
+
+**And the last stop was libtool's.** With everything compiling, the
+link of `libharfbuzz.a` ended with `'/usr/lib/libpng16.la' is not a
+valid libtool archive`. libtool writes a `.la` beside every library it
+installs and records that library's dependencies in it by their
+*final* paths — `/usr/lib/libpng16.la` inside `libfreetype.la` — so a
+sysroot staged under `DESTDIR` on a host that is not this machine is
+full of files naming files that do not exist, and the first library to
+link another through one stops. Every distribution that stages a
+sysroot deletes `.la` files for exactly this reason, and
+`build-thirdparty.sh` does now; the same facts live in the `.pc`
+files, which pkg-config resolves relative to the sysroot. That moved
+the dependency question to pkg-config, and the answer there is
+`--static`, always: every link on this target is static unless it says
+`-pie`, and a `.pc` file's `Requires.private` is exactly the list a
+static link needs — without the flag, `--libs freetype2` says
+`-lfreetype` and the link ends in every png and zlib symbol freetype
+uses.
+
+Two things recorded rather than fixed:
+
+- **`--enable-static` has to be spelled out.** harfbuzz's configure
+  defaults static libraries *off*, and libtool cannot build shared ones
+  on this target (the second increment's note), so the default would
+  build nothing and say so only at install time. Every autotools library
+  in this stack so far had `--enable-static` on by default; this is the
+  first that does not, and it is worth knowing for the two that follow.
+- **No `-lpthread`, for the second library in a row.** harfbuzz then
+  uses its own atomics and needs nothing, so nothing is lost; but the
+  pattern is now two libraries long and an empty `libpthread.a`, on
+  `libm.a`'s argument in the Makefile, is looking less like a
+  speculation and more like a scheduled question.
+
+#### The numbers
+
+| | |
+|---|---|
+| `harfbuzz_shape_ms` | **1900 ms** — twelve shaping runs across five scripts, both font loaders |
+| `libharfbuzz.a` | 115.6 MB, with debug information; the shaping fixture statically linked against it is 45 MB |
+
+**Cost:** one graded boot, which passed; the rest was the four
+compiles it took to get there — floats, `std::isnan`, the `.la` files —
+none of which was harfbuzz's fault and every one of which the next C++
+library would have hit instead — plus a toolchain rebuilt from scratch,
+because the port changed. ICU is that library, and it is a
+hundred times the size.
+
+**Next in the order:** a TLS library (mbedtls 3.6.2, which ships plain
+Makefiles beside its CMake), where `/dev/urandom`'s xorshift stops being
+enough and `getrandom` becomes a kernel item — and then `https://` end
+to end, which is the bullet the whole arc has been pointed at.
+
+**One process note, recorded rather than hidden.** The default tier's
+boot stage failed once on the way to this commit, on `[wm] animation
+missed its frame budget: 1 of 4 frames` — every marker present, every
+budget row inside its ceiling, and the one failure the item M106's tail
+already names (*"one animation frame in six misses its budget"*). The
+boot re-run alone passed. It is not this increment's, and it is not
+new; it is written here because a tier that went red on the way to a
+commit should say so in the commit's own entry.
+
+---
+
 *Below this line, the snapshot as written on 2026-09-04.*
 
 **This is where new entries go**, in full and in the archive's own form: a
@@ -1577,20 +1724,22 @@ write nothing and return successfully).
 
 - [~] zlib, libpng, libjpeg, freetype, harfbuzz, expat, sqlite, ICU and a
       TLS library, each unmodified, in dependency order — every one a real
-      test of M94–M97. **Six landed: zlib 1.3.1 (2026-09-04), libpng
-      1.6.44 and libjpeg 9f (2026-09-05), freetype 2.13.3, expat 2.6.4 and
-      sqlite 3.47.2 (2026-09-08)**, graded by the `[m100]`, `[m100b]`,
-      `[m100c]` and `[m100d]` markers — their own test suites where they
-      ship one (zlib, libpng, libjpeg's byte-exact 1995 references,
-      expat's 4,392 checks) and a differential fixture against the host's
-      build of the same source where they do not (freetype's rasterizer,
-      sqlite's shell) — and installed into the sysroot by their own `make
-      install`. Zero source edits across all six. What they asked this OS
-      for and got: a sysroot-aware `pkg-config`, `popen`/`pclose`/`system`,
-      **fcntl record locks** (`kernel/fs/flock.c`), and **recursive
-      mutexes** — see the fourth and fifth increments. **Three to go**:
-      harfbuzz (C++, links freetype), then the two that decide the arc —
-      a TLS library, where the entropy note becomes a kernel item, and ICU.
+      test of M94–M97. **Seven landed: zlib 1.3.1 (2026-09-04), libpng
+      1.6.44 and libjpeg 9f (2026-09-05), freetype 2.13.3, expat 2.6.4,
+      sqlite 3.47.2 and harfbuzz 8.5.0 (2026-09-08)**, graded by the
+      `[m100]`, `[m100b]`, `[m100c]`, `[m100d]` and `[m100e]` markers —
+      their own test suites where they ship one (zlib, libpng, libjpeg's
+      byte-exact 1995 references, expat's 4,392 checks) and a differential
+      fixture against the host's build of the same source where they do
+      not (freetype's rasterizer, sqlite's shell, harfbuzz's shaper) — and
+      installed into the sysroot by their own `make install`. Zero source
+      edits across all seven. What they asked this OS for and got: a
+      sysroot-aware `pkg-config`, `popen`/`pclose`/`system`, **fcntl
+      record locks** (`kernel/fs/flock.c`), **recursive mutexes**, ten
+      float math functions, and a `<math.h>` libstdc++ finally believes
+      is C99 — see the fourth, fifth and sixth increments. **Two to go**,
+      and they decide the arc: a TLS library, where the entropy note
+      becomes a kernel item, and ICU.
 - [ ] TLS end to end over M66's TCP: the first `https://` this machine has
       had
 - [ ] `O_NONBLOCK` and `AF_UNIX`/`socketpair`, absorbed here because a
@@ -2002,6 +2151,13 @@ of them recurred in a form nobody recognised the second time.
   sqlite does not check what `settype` returns, and got the deadlock
   anyway — as its eighth syscall. A refused capability that a real
   program assumes is a capability that has to be built (M100).
+- **A cross configure does not measure the libc; it is told.** libstdc++'s
+  port case said "asks for nothing" for three milestones, so libstdc++
+  defined its own `sinf` (and every C++ program that used the real one,
+  once it existed, hit a duplicate symbol), and concluded `<math.h>` was
+  not C99 (so `std::isnan` never existed here). Both were answers the
+  port gave, not facts the configure found. When the libc grows, the
+  port's case is a second place that has to be told (M100).
 - **A rule about compile flags is only as current as the last artefact
   built under it.** M99 made `-fPIC` mean the small code model; the
   installed libstdc++ was a day older than that rule, and the M97 test
