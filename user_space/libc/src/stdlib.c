@@ -532,12 +532,6 @@ lldiv_t lldiv(long long num, long long den) {
     return r;
 }
 
-/* M97: declared, and it refuses. See <stdlib.h> for the argument - the
- * short version is that a system() nothing calls is a system() nothing
- * checks, and this project has refused to ship those since M65. */
-int system(const char *command) {
-    if (!command) {
-        return 0; /* "is there a command processor" - no, not through this */
-    }
-    return -1;
-}
+/* M97 declared system() here and made it refuse, for want of a caller to
+ * check it against. M100 found the caller (sqlite's shell) and it lives
+ * in popen.c now, beside the two functions it shares a mechanism with. */

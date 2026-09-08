@@ -38,6 +38,7 @@
 #include <sys/times.h>
 #include <utime.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <wchar.h>
@@ -1197,6 +1198,165 @@ int main(void) {
             if (unlink(path) != 0) {
                 fail("could not remove the stamped file");
             }
+        }
+    }
+
+    /* ---- M100: recursive and errorcheck mutexes ----------------------
+     *
+     * sqlite found these: its database mutex is PTHREAD_MUTEX_RECURSIVE
+     * and it takes it inside itself on every API call. What is checked
+     * is the observable contract from one thread - a recursive mutex
+     * taken three times needs three unlocks before a trylock from the
+     * same thread sees it... still held, since trylock by the owner
+     * recurses too; so what says "released" is that pthread_mutex_unlock
+     * by the owner of a NORMAL-free mutex is then EPERM - and an
+     * ERRORCHECK one refuses its holder with EDEADLK rather than
+     * hanging, which is the whole difference between the two. The
+     * cross-thread half (a recursive mutex under contention) is in
+     * threadtest, where there are threads. */
+    {
+        pthread_mutexattr_t at;
+        pthread_mutex_t rm, em;
+        if (pthread_mutexattr_init(&at) != 0 ||
+            pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE) != 0) {
+            fail("a recursive mutex attribute was refused");
+        }
+        int t = -1;
+        if (pthread_mutexattr_gettype(&at, &t) != 0 || t != PTHREAD_MUTEX_RECURSIVE) {
+            fail("mutexattr_gettype did not return the type that was set");
+        }
+        if (pthread_mutex_init(&rm, &at) != 0) {
+            fail("pthread_mutex_init with a recursive attribute failed");
+        }
+        if (pthread_mutex_lock(&rm) != 0 || pthread_mutex_lock(&rm) != 0 ||
+            pthread_mutex_trylock(&rm) != 0) {
+            fail("a recursive mutex refused its own holder");
+        }
+        if (pthread_mutex_unlock(&rm) != 0 || pthread_mutex_unlock(&rm) != 0) {
+            fail("a recursive mutex refused an unlock by its holder");
+        }
+        /* Two of three holds released: still held, so a NEW lock attempt
+         * from the owner is a fourth recursion, not a wait - and after
+         * the matching unlocks the mutex is free, which is observable
+         * because an unlock of a free typed mutex is EPERM. */
+        if (pthread_mutex_lock(&rm) != 0) {
+            fail("a recursive mutex with one hold left refused its holder");
+        }
+        if (pthread_mutex_unlock(&rm) != 0 || pthread_mutex_unlock(&rm) != 0) {
+            fail("the last two unlocks of a recursive mutex failed");
+        }
+        if (pthread_mutex_unlock(&rm) != EPERM) {
+            fail("unlocking a recursive mutex nobody holds was not EPERM");
+        }
+        if (pthread_mutex_lock(&rm) != 0 || pthread_mutex_unlock(&rm) != 0) {
+            fail("a recursive mutex did not work again after being fully released");
+        }
+        pthread_mutex_destroy(&rm);
+
+        if (pthread_mutexattr_settype(&at, PTHREAD_MUTEX_ERRORCHECK) != 0 ||
+            pthread_mutex_init(&em, &at) != 0) {
+            fail("an errorcheck mutex could not be made");
+        }
+        if (pthread_mutex_lock(&em) != 0) {
+            fail("an errorcheck mutex refused its first lock");
+        }
+        if (pthread_mutex_lock(&em) != EDEADLK) {
+            fail("an errorcheck mutex did not answer EDEADLK to its holder");
+        }
+        if (pthread_mutex_trylock(&em) != EBUSY) {
+            fail("trylock of a held errorcheck mutex was not EBUSY");
+        }
+        if (pthread_mutex_unlock(&em) != 0 || pthread_mutex_unlock(&em) != EPERM) {
+            fail("an errorcheck mutex's unlock contract is wrong");
+        }
+        pthread_mutex_destroy(&em);
+        pthread_mutexattr_destroy(&at);
+
+        /* And the type nothing asked for is still refused. */
+        if (pthread_mutexattr_settype(&at, 7) != EINVAL) {
+            fail("a mutex type that does not exist was accepted");
+        }
+        /* A NORMAL mutex is what it always was: one word's worth of
+         * behaviour, and no owner check on unlock. */
+        pthread_mutex_t nm = PTHREAD_MUTEX_INITIALIZER;
+        if (pthread_mutex_lock(&nm) != 0 || pthread_mutex_trylock(&nm) != EBUSY ||
+            pthread_mutex_unlock(&nm) != 0 || pthread_mutex_trylock(&nm) != 0 ||
+            pthread_mutex_unlock(&nm) != 0) {
+            fail("a normal mutex changed behaviour");
+        }
+    }
+
+    /* ---- M100: popen, pclose and system ------------------------------
+     *
+     * Three functions over one mechanism (/bin/sh -c, a fork and an
+     * exec), asked for by sqlite's shell. What is checked is the part a
+     * caller depends on and a lazy version gets wrong: the command's
+     * OUTPUT arrives through the "r" stream, its INPUT arrives through
+     * the "w" one (which means the child saw EOF - a leaked pipe end
+     * would hang here rather than fail), and the EXIT STATUS comes back
+     * through pclose and system, including the 127 a shell answers for
+     * a command it cannot run. */
+    {
+        char line[64];
+        FILE *p = popen("echo popen-read", "r");
+        if (!p) {
+            fail("popen(\"r\") returned NULL");
+        } else {
+            memset(line, 0, sizeof(line));
+            if (!fgets(line, sizeof(line), p) || strcmp(line, "popen-read\n") != 0) {
+                printf("[libctest] popen read %s\n", line);
+                fail("popen(\"r\") did not deliver the command's output");
+            }
+            int st = pclose(p);
+            if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+                fail("pclose did not report a clean exit for a command that made one");
+            }
+        }
+        p = popen("exit 7", "r");
+        if (!p) {
+            fail("popen of a command that exits non-zero returned NULL");
+        } else {
+            int st = pclose(p);
+            if (!WIFEXITED(st) || WEXITSTATUS(st) != 7) {
+                printf("[libctest] pclose status %d\n", st);
+                fail("pclose lost the command's exit status");
+            }
+        }
+        const char *path = "/tmp_popen_test";
+        p = popen("cat > /tmp_popen_test", "w");
+        if (!p) {
+            fail("popen(\"w\") returned NULL");
+        } else {
+            fputs("through the pipe\n", p);
+            if (pclose(p) != 0) {
+                fail("pclose of a \"w\" stream did not report the command finishing");
+            }
+            FILE *f = fopen(path, "r");
+            memset(line, 0, sizeof(line));
+            if (!f || !fgets(line, sizeof(line), f) || strcmp(line, "through the pipe\n") != 0) {
+                printf("[libctest] the child wrote %s\n", line);
+                fail("what was written to a popen(\"w\") stream did not reach the command");
+            }
+            if (f) {
+                fclose(f);
+            }
+            unlink(path);
+        }
+        if (pclose(stdin) != -1) {
+            fail("pclose accepted a stream popen did not open");
+        }
+        int st = system("exit 3");
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 3) {
+            printf("[libctest] system status %d\n", st);
+            fail("system did not return the command's exit status");
+        }
+        if (system((const char *)0) == 0) {
+            fail("system(NULL) denied there is a command processor");
+        }
+        st = system("/no/such/program");
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 127) {
+            printf("[libctest] system status %d for a program that is not there\n", st);
+            fail("system did not answer 127 for a command that cannot run");
         }
     }
 

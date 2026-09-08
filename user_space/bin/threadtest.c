@@ -37,6 +37,7 @@
  *   6  the two threads report the same tid, or different pids
  *   7  floating-point state did not survive being interleaved
  */
+#include <errno.h>  /* M100: EPERM, from a thread that unlocks what it does not hold */
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -105,6 +106,43 @@ static void *worker_b(void *arg) {
     }
     fp_b = fp_work(1.0);
     return (void *)0xB;
+}
+
+/* ---- M100: the recursive mutex, from two threads ------------------------
+ *
+ * Three holds per iteration, and inside the innermost a read-modify-
+ * write of a plain counter. The mutex is statically initialised as
+ * recursive rather than through an attribute, so both spellings are
+ * exercised between here and libctest. */
+#define RECURSIVE_ITERATIONS 200000
+static long recursive_counter;
+static pthread_mutex_t recursive_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+
+static void *recursive_worker(void *arg) {
+    (void)arg;
+    for (long i = 0; i < RECURSIVE_ITERATIONS; i++) {
+        if (pthread_mutex_lock(&recursive_lock) != 0 ||
+            pthread_mutex_lock(&recursive_lock) != 0 ||
+            pthread_mutex_lock(&recursive_lock) != 0) {
+            return (void *)1;
+        }
+        long v = recursive_counter;
+        /* A window the other thread must not enter: the value read above
+         * has to be the one written below. */
+        recursive_counter = v + 1;
+        if (pthread_mutex_unlock(&recursive_lock) != 0 ||
+            pthread_mutex_unlock(&recursive_lock) != 0 ||
+            pthread_mutex_unlock(&recursive_lock) != 0) {
+            return (void *)1;
+        }
+    }
+    return (void *)0;
+}
+
+/* Runs while main holds recursive_lock: the unlock must be refused. */
+static void *foreign_unlocker(void *arg) {
+    (void)arg;
+    return (void *)(long)(pthread_mutex_unlock(&recursive_lock) == EPERM);
 }
 
 /* ---- M99: the stack a thread is entered on ---------------------------
@@ -190,6 +228,45 @@ int main(void) {
         printf("threadtest: a thread could not store an XMM register to a "
                 "16-byte-aligned local - its stack was entered misaligned\n");
         return 9;
+    }
+
+    /* ---- M100: a recursive mutex, under contention ----------------------
+     *
+     * libctest checks the type contract from one thread. This is the
+     * half that needs two: each worker takes the SAME recursive mutex
+     * three deep per iteration and bumps a counter inside, so a mutex
+     * whose recursion let the other thread in - an owner check against
+     * the wrong id, a count that released the word one unlock early -
+     * shows as a lost update. And the cross-thread rule: an unlock by a
+     * thread that does not hold it is EPERM, not a release. */
+    pthread_t d, e;
+    if (pthread_create(&d, 0, recursive_worker, 0) != 0 ||
+        pthread_create(&e, 0, recursive_worker, 0) != 0) {
+        return 10;
+    }
+    void *rd = 0, *re = 0;
+    if (pthread_join(d, &rd) != 0 || pthread_join(e, &re) != 0 ||
+        rd != (void *)0 || re != (void *)0) {
+        printf("threadtest: a recursive worker saw a hold it should not have\n");
+        return 11;
+    }
+    if (recursive_counter != 2 * (long)RECURSIVE_ITERATIONS) {
+        printf("threadtest: recursive-mutex total is %ld, wanted %ld\n",
+               recursive_counter, 2 * (long)RECURSIVE_ITERATIONS);
+        return 12;
+    }
+    if (pthread_mutex_lock(&recursive_lock) != 0) {
+        return 13;
+    }
+    pthread_t f;
+    void *rf = 0;
+    if (pthread_create(&f, 0, foreign_unlocker, 0) != 0 ||
+        pthread_join(f, &rf) != 0 || rf != (void *)1) {
+        printf("threadtest: a thread unlocked a recursive mutex another thread holds\n");
+        return 14;
+    }
+    if (pthread_mutex_unlock(&recursive_lock) != 0) {
+        return 15;
     }
 
     /* Reported, not asserted - see the header comment. A race is allowed

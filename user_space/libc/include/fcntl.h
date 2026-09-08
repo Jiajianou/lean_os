@@ -114,20 +114,25 @@ int open(const char *path, int flags, ...);
 #define F_SETFL  4
 #define FD_CLOEXEC 1
 
-/* ---- M89: record locks, declared and refused -------------------------
+/* ---- M89: record locks, declared and refused; M100: real ---------------
  *
- * `struct flock` and the three lock commands exist because a program
- * that updates a shared file writes one on the stack and cannot compile
- * without the type. They are not implemented, and fcntl returns -1 with
- * EOPNOTSUPP for all three.
+ * M89 declared `struct flock` and the three lock commands so a program
+ * that updates a shared file could compile, and refused all three with
+ * EOPNOTSUPP - on M65's rule, because an advisory lock that always
+ * succeeds is a lock that protects nothing while telling every caller
+ * it did, and two processes both believing they hold one is a corrupted
+ * file. That refusal held until something needed the real thing.
  *
- * That refusal is the whole point rather than a gap. An advisory lock
- * that always succeeds is a lock that protects nothing while telling
- * every caller it did - which is precisely the shape M65 refused for
- * file permissions, and it fails in a worse way here because two
- * processes both believing they hold the lock is a corrupted file rather
- * than a wrong `ls -l` column. A program that needs mutual exclusion on
- * this machine has O_EXCL, which M87 made a real guarantee.
+ * sqlite did. Its unix VFS takes an F_SETLK before every transaction
+ * and reports any answer but "granted" or "held by somebody else" as a
+ * disk I/O error, so on this machine every INSERT failed. The locks are
+ * real as of M100 (kernel/fs/flock.c): per process, per inode, byte
+ * ranges with an open end, shared or exclusive, released when the
+ * process closes ANY descriptor for the file or exits - POSIX's rule,
+ * kept exactly because sqlite's own source depends on it. F_SETLKW
+ * waits. What is NOT here is deadlock detection: nothing has asked.
+ * A held lock is EAGAIN, a full table is ENOLCK, a descriptor that is
+ * not a disk file is EINVAL.
  */
 #define F_GETLK  5
 #define F_SETLK  6

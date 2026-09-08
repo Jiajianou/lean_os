@@ -86,6 +86,15 @@ def edit(path, anchor, replacement, why, count=1):
 CONFIG_SUB_ANCHOR = "\t     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx*"
 CONFIG_SUB_EDIT = ("\t     | lean_os* \\\n"
                    "\t     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx*")
+# M100: and the 2024-05 vintage, which freetype 2.13.3 ships. config.sub
+# rewrote its OS list as one name per line, alphabetically, so the
+# six-names-on-a-line anchor above is not in it at all. Same edit, second
+# attachment point: the `nsk*` line, which every vintage has. A shell
+# `case` pattern list is unordered, so where the name lands in the list
+# is cosmetic; it goes before nsk* so both edits read the same.
+CONFIG_SUB_ANCHOR_2024 = "\t| nsk* \\\n"
+CONFIG_SUB_EDIT_2024 = ("\t| lean_os* \\\n"
+                        "\t| nsk* \\\n")
 
 
 def port_binutils(root):
@@ -431,8 +440,13 @@ def port_config_sub(path):
     third-party is vendored into this repository as a result, which is
     the reason it is an edit rather than a file.
     """
-    return edit(path, CONFIG_SUB_ANCHOR, CONFIG_SUB_EDIT,
-                "the list of operating system names config.sub accepts")
+    why = "the list of operating system names config.sub accepts"
+    try:
+        return edit(path, CONFIG_SUB_ANCHOR, CONFIG_SUB_EDIT, why)
+    except MissingAnchor:
+        # Not the six-per-line vintage; try the one-per-line one. If
+        # that anchor is missing too, its error is the one reported.
+        return edit(path, CONFIG_SUB_ANCHOR_2024, CONFIG_SUB_EDIT_2024, why)
 
 
 def main():

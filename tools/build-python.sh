@@ -137,6 +137,26 @@ fi
 python3 "$ROOT/tools/python-port/apply.py" "$SRC/Python-$PY_VER" || exit 1
 echo "$PORT_STAMP" > "$SRC/Python-$PY_VER/.lean_os-port-stamp"
 
+# ---- M100: and the ABI this build was compiled against --------------------
+#
+# CPython's Makefile tracks its own headers and not the sysroot's, so a
+# change to this libc's <pthread.h> - M100 grew pthread_mutex_t from four
+# bytes to sixteen - left every object in an existing build tree with the
+# old layout, and `make` rebuilt nothing. libpython then handed the new
+# libc.so four-byte mutexes to unlock, and the first thing python said on
+# the machine was "PyMUTEX_UNLOCK(gil->mutex) failed". The port stamp
+# above catches a changed PORT; this catches a changed LIBC: a hash of
+# every header the sysroot hands a program, and a build tree made under a
+# different one is thrown away rather than trusted.
+ABI_STAMP=$(cat "$ROOT"/user_space/libc/include/*.h "$ROOT"/user_space/libc/include/*/*.h \
+                "$ROOT"/system_api/include/*.h 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+for d in "$OUT"/build-shared "$OUT"/build-static; do
+  if [ -d "$d" ] && [ "$(cat "$d/.lean_os-abi-stamp" 2>/dev/null)" != "$ABI_STAMP" ]; then
+    echo "build-python: the libc headers changed since $d was built - starting clean"
+    rm -rf "$d"
+  fi
+done
+
 # The sysroot is regenerated first for the reason build-native-toolchain.sh
 # gives: this build grades the libc as much as it grades anything, and it
 # should grade the libc in the tree.
@@ -146,6 +166,7 @@ export PATH="$PREFIX/bin:$PATH"
 
 BUILDDIR="$OUT/build-$LINK"
 mkdir -p "$BUILDDIR"
+echo "$ABI_STAMP" > "$BUILDDIR/.lean_os-abi-stamp"
 # The name the rest of the tree looks for. install-python.sh reads
 # $OUT/build, and which build that is is this script's decision rather
 # than the installer's.

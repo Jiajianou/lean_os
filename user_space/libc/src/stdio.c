@@ -1126,6 +1126,12 @@ FILE *fdopen(int fd, const char *mode) {
             open_files[i].eof = 0;
             open_files[i].err = 0;
             open_files[i].unget = -1;
+            /* M100: the same two fields fopen sets. A slot last used by
+             * a line-buffered stream kept its mode here, and popen("w")
+             * - the first fdopen of a pipe a program then writes a
+             * file's worth of rows down - is where it showed. */
+            open_files[i].wlen = 0;
+            open_files[i].mode = _IOFBF;
             open_files[i].used = 1;
             return &open_files[i];
         }

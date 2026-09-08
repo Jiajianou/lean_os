@@ -15,6 +15,7 @@
 #include "drivers/rtc.h"
 #include "lib/libk.h"
 #include "fs/leanfs.h"
+#include "fs/flock.h"    /* M100: record locks - see the F_*LK_CMD cases in sys_fcntl */
 #include "fs/openfile.h"
 #include "fs/vfs.h"
 #include "ipc/clipboard.h"
@@ -2693,6 +2694,36 @@ static long sys_uptime_ms(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, ui
  * refcounting: this project has no SYS_close to release whatever newfd
  * used to hold, the same "hasn't been needed yet" simplicity pipe.h's
  * header comment already notes for pipe ownership generally. */
+/* ---- M100: record locks, and the close rule ---------------------------
+ *
+ * POSIX's least-loved clause: every lock a process holds on a file is
+ * released when the process closes ANY descriptor for that file - not
+ * the one it locked through, any of them. sqlite's os_unix.c has a
+ * two-page comment about the trouble this causes and then works around
+ * it, so it is honoured here exactly rather than approximately: this is
+ * called from close, from dup2 (which closes newfd), and from exec's
+ * FD_CLOEXEC sweep. Exit releases by pid in sched_release_fds.
+ *
+ * The inode is asked for only when some lock exists anywhere, so a
+ * machine that has never locked a file pays nothing per close. */
+static uint32_t slot_inode(const fd_slot_t *slot) {
+    leanfs_stat_t st;
+    if (slot->type != FD_FILE || vfs_handle_stat(slot->file->handle, &st) != 0) {
+        return 0;
+    }
+    return st.inode;
+}
+
+static void drop_record_locks(task_t *self, const fd_slot_t *slot) {
+    if (slot->type != FD_FILE || flock_count() == 0) {
+        return;
+    }
+    uint32_t ino = slot_inode(slot);
+    if (ino && flock_release_file(ino, self->id) > 0) {
+        sched_wake_all(FLOCK_CHAN); /* an F_SETLKW may be waiting for exactly this */
+    }
+}
+
 static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
@@ -2714,6 +2745,7 @@ static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, u
      * refcounted and "closing" meant blanking a slot. With a refcount it
      * would be a leak: the shell's `> out.txt` points fd 1 at a file, and
      * whatever fd 1 was would never be given back. */
+    drop_record_locks(self, &self->fds[newfd]); /* M100: dup2 closes newfd, and closing releases */
     fd_release(&self->fds[newfd]);
     self->fds[newfd] = self->fds[oldfd];
     fd_retain(&self->fds[newfd]);
@@ -2756,6 +2788,7 @@ static long sys_close(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64
     if (self->fds[fd].type == FD_NONE) {
         return -1; /* closing something already closed is a caller bug worth reporting, not a no-op */
     }
+    drop_record_locks(self, &self->fds[fd]);
     fd_release(&self->fds[fd]);
     return 0;
 }
@@ -4891,6 +4924,65 @@ static long sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
         case FD_SOCKET:     return OPEN_READ | OPEN_WRITE;
         default:            return -1;
         }
+    /* M100: record locks. See kernel/fs/flock.h for the model and for
+     * who asked; the table itself is pure and the only scheduler
+     * involvement is here - F_SETLKW parks on FLOCK_CHAN, which every
+     * release wakes, and re-asks from the top. The seq form of the park
+     * is what closes the window between "the answer was CONFLICT" and
+     * "I am asleep": a release in that gap moves the event counter and
+     * the park returns at once. */
+    case F_GETLK_CMD:
+    case F_SETLK_CMD:
+    case F_SETLKW_CMD: {
+        os_flock_t req;
+        if (self->fds[fd].type != FD_FILE ||
+            copy_from_user(&req, arg, sizeof(req)) != 0) {
+            return -1;
+        }
+        uint32_t ino = slot_inode(&self->fds[fd]);
+        if (ino == 0) {
+            return -1; /* a device or a /proc entry: nothing on a disk to lock */
+        }
+        /* The range, made absolute. Only this table knows the offset
+         * SEEK_CUR is relative to, and only the filesystem knows the
+         * size SEEK_END is. A negative len is the bytes BEFORE start. */
+        int64_t start = req.start;
+        int64_t len = req.len;
+        if (req.whence == 1) {
+            start += (int64_t)self->fds[fd].file->offset;
+        } else if (req.whence == 2) {
+            start += (int64_t)vfs_handle_size(self->fds[fd].file->handle);
+        } else if (req.whence != 0) {
+            return -1;
+        }
+        if (len < 0) {
+            start += len;
+            len = -len;
+        }
+        if (start < 0 || (req.type != OS_FLOCK_RD && req.type != OS_FLOCK_WR &&
+                          req.type != OS_FLOCK_UNLCK)) {
+            return -1;
+        }
+        if (cmd == F_GETLK_CMD) {
+            os_flock_t ans;
+            flock_test(ino, self->id, req.type, (uint64_t)start, (uint64_t)len, &ans);
+            return copy_to_user(arg, &ans, sizeof(ans)) == 0 ? 0 : -1;
+        }
+        for (;;) {
+            uint64_t seq = sched_event_seq();
+            int r = flock_set(ino, self->id, req.type, (uint64_t)start, (uint64_t)len);
+            if (r == 0) {
+                if (req.type == OS_FLOCK_UNLCK) {
+                    sched_wake_all(FLOCK_CHAN);
+                }
+                return 0;
+            }
+            if (r != FLOCK_CONFLICT || cmd == F_SETLK_CMD) {
+                return r; /* -2 (EAGAIN) or -3 (ENOLCK), as syscall.h says */
+            }
+            sched_block_on_seq(FLOCK_CHAN, 0, seq);
+        }
+    }
     default:
         return -1;
     }
@@ -5240,6 +5332,7 @@ static long sys_execve(isr_regs_t *regs) {
     /* M84: the descriptors that said they should not survive this. */
     for (int i = 0; i < MAX_FDS; i++) {
         if (self->fds[i].cloexec) {
+            drop_record_locks(self, &self->fds[i]); /* M100: a close is a close */
             fd_release(&self->fds[i]);
             self->fds[i].type = FD_NONE;
         }

@@ -218,8 +218,23 @@ make MAKEINFO=true install-target-libgcc > install-libgcc.log 2>&1 || { tail -20
 # machinery from the one code path that runs when the program has already
 # lost control of itself.
 echo "build-toolchain: building the C++ runtime (libsupc++)"
+# M100: libstdc++ is compiled against this libc's headers and automake's
+# dependency files do not name them, so a header change leaves its
+# objects stale and `make` content. That is how libstdc++.a stayed a day
+# older than M99's "-fPIC means small-model" rule for five milestones,
+# and how M100's sixteen-byte pthread_mutex_t was first "rebuilt" into an
+# archive of Sep 3 objects. A hash of the headers, and a clean when it
+# moves - the same stamp tools/build-python.sh keeps, for the same reason.
+ABI_STAMP=$(cat "$ROOT"/user_space/libc/include/*.h "$ROOT"/user_space/libc/include/*/*.h \
+                "$ROOT"/system_api/include/*.h 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+if [ -d "$TARGET/libstdc++-v3" ] && \
+   [ "$(cat "$TARGET/libstdc++-v3/.lean_os-abi-stamp" 2>/dev/null)" != "$ABI_STAMP" ]; then
+  echo "build-toolchain: the libc headers changed since libstdc++ was built - cleaning it"
+  make -C "$TARGET/libstdc++-v3" clean > clean-cxx.log 2>&1 || true
+fi
 make -j"$JOBS" MAKEINFO=true all-target-libstdc++-v3 > build-cxx.log 2>&1 \
   || { tail -40 build-cxx.log >&2; exit 1; }
+echo "$ABI_STAMP" > "$TARGET/libstdc++-v3/.lean_os-abi-stamp"
 make MAKEINFO=true install-target-libstdc++-v3 > install-cxx.log 2>&1 \
   || { tail -20 install-cxx.log >&2; exit 1; }
 

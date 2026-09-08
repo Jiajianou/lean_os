@@ -34,7 +34,7 @@ long way round:
 second one.** That is the whole reason it exists — M94's own sentence is
 *every flag invented by hand is a flag someone else's build system will
 not pass* — and it is what bzip2, GNU hello, toybox, CPython, zlib,
-libpng and libjpeg are built with. See M94 and M100 in
+libpng, libjpeg, freetype, expat and sqlite are built with. See M94 and M100 in
 [milestones.md](../milestones.md), and `tools/build-thirdparty.sh` for
 seven worked examples of the second route, three of which are libraries
 that install into the sysroot so the next one can link them.
@@ -306,6 +306,9 @@ this machine now, none of it edited to suit this OS:
 | **CPython 3.12.7** (M99) | a three-edit port, stdlib on disk as `.py`, 58 extension modules `dlopen`ed | `python3 -m test` runs **CPython's own regression suite** here and reports its own counts — the only instrument in this project that neither wrote its assertions nor chose what to assert. It found nineteen bugs in this OS |
 | **zlib 1.3.1** (M100) | no edit at all, `config.sub` included | zlib's own `example` program |
 | **libpng 1.6.44, libjpeg 9f** (M100) | one `config.sub` line each; libpng links the zlib beside it in the sysroot | libjpeg's own `make test`: seven **byte-exact** comparisons against output the IJG's encoder and decoder produced in 1995 |
+| **freetype 2.13.3** (M100) | one `config.sub` line (a 2024 vintage the anchored edit had to learn); links libpng and zlib through a sysroot-aware `x86_64-lean_os-pkg-config` | **differentially**: `tests/freetype/ftrender.c` built against this freetype and against the host's build of the same source, and 570 glyph bitmaps of DejaVu Sans that must hash identically |
+| **expat 2.6.4** (M100) | one `config.sub` line, nothing else | its own `runtests`: **4,392 checks** on the machine, and `xmlwf` on a document read off this disk |
+| **sqlite 3.47.2** (M100) | one `config.sub` line and `--disable-dynamic-extensions` (a static program here has no `dlopen`). **It asked this libc for `popen`/`pclose` and this kernel for `fcntl` record locks**, and got both | **differentially**: `tests/sqlite/cases.sql` through the shell built for the machine and the shell built for the host, byte-identical transcripts |
 
 The pattern is the one M63 set and every port since has followed:
 **the failing build is the specification.** Run it, read the error, add

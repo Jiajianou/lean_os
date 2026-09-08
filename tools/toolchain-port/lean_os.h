@@ -124,10 +124,34 @@
  * Not applied to -pie or -fPIE: an executable's own thread-locals are
  * local-exec, which is what GCC already picks and is strictly better -
  * one fewer indirection through the GOT. */
+/* ---- M100: and -fno-plt, wherever the small model is chosen -----------
+ *
+ * A small-model object calls an external function through the PLT with
+ * a 32-bit PC-relative relocation (R_X86_64_PLT32). In a shared object
+ * that is right. In a STATIC link at 512 GiB it is right for every
+ * function that exists and wrong for the one kind that does not: a weak
+ * undefined symbol, which ld resolves to address 0, and 0 is not within
+ * 2 GiB of anything here. libstdc++ is built PIC throughout (libtool's
+ * -prefer-pic, for the .a as much as the .so) and cow-stdexcept.o calls
+ * the transactional-memory hooks `_ITM_RU1` and friends weakly - so
+ * every static C++ program that reaches std::stoi or std::runtime_error
+ * ended at "relocation truncated to fit". It had not, before M100,
+ * because libstdc++.a had not been rebuilt since M99 made -fPIC mean
+ * small-model: the archive was a day older than the rule and nobody
+ * knew. M100's sqlite increment rebuilt it (a mutex grew) and found out.
+ *
+ * -fno-plt turns those calls into GOT loads (R_X86_64_GOTPCRELX), and a
+ * GOT slot can hold 0 wherever the program sits. It costs nothing on
+ * this target that the PLT was buying: there is no lazy binding in
+ * ld-lean.so, so a GOT entry filled at load is exactly what a PLT stub
+ * would have reached on the first call anyway. Applied only where the
+ * small model is - the large model never emits PLT32 - and only when
+ * the caller has not said -fplt or -fno-plt itself. */
 #undef DRIVER_SELF_SPECS
 #define DRIVER_SELF_SPECS                                               \
   "%{!mcmodel=*:"                                                       \
   "%{shared|pie|fpic|fPIC|fpie|fPIE:-mcmodel=small;:-mcmodel=large}} "  \
+  "%{!fplt:%{!fno-plt:%{shared|pie|fpic|fPIC|fpie|fPIE:-fno-plt}}} "    \
   "%{!mred-zone:-mno-red-zone} "                                        \
   "%{!ftls-model=*:%{shared|fpic|fPIC:-ftls-model=initial-exec}} "      \
   "%{!fpic:%{!fPIC:%{!fpie:%{!fPIE:"                                    \

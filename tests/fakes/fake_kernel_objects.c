@@ -46,6 +46,11 @@ void pipe_unref_write(struct pipe *p) { (void)p; refs_pipe_write--; }
 
 void openfile_ref(struct openfile *f) { (void)f; refs_file++; }
 void openfile_unref(struct openfile *f) { (void)f; refs_file--; }
+/* M100: the record-lock table (kernel/fs/flock.c) is NOT faked. It is
+ * pure logic with no scheduler in it, it is a real unit in this tier
+ * (test_flock.c), and the scheduler's one call into it - releasing a
+ * dead task's locks - is best graded against the real table: a test can
+ * take a lock as a task and assert flock_count() after the task exits. */
 
 void socket_ref(struct socket *s) { (void)s; refs_socket++; }
 void socket_unref(struct socket *s) { (void)s; refs_socket--; }

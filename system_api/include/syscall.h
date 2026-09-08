@@ -448,6 +448,19 @@ extern "C" {
 #define F_SETFD_CMD 2
 #define F_GETFL_CMD 3
 #define FD_CLOEXEC_BIT 1
+/* M100: record locks. `arg` is an os_flock_t * (system_api/include/
+ * os_fs.h). F_GETLK_CMD fills it in and returns 0. F_SETLK_CMD returns 0
+ * once the lock is recorded, -2 if another process holds one in the
+ * way (EAGAIN - the table is untouched), -3 if the table is full
+ * (ENOLCK), -1 for a descriptor that is not a disk file or a range that
+ * does not exist. F_SETLKW_CMD is F_SETLK_CMD that sleeps through -2:
+ * it parks until a release somewhere wakes it and tries again. Locks
+ * belong to the process and the inode, not the descriptor - closing ANY
+ * descriptor for the file drops every lock the process has on it, and
+ * exiting drops them all. sqlite is why; see kernel/fs/flock.h. */
+#define F_GETLK_CMD  4
+#define F_SETLK_CMD  5
+#define F_SETLKW_CMD 6
 #define SYS_fcntl      85
 
 /* M85: process groups and sessions - see sys_setpgid in

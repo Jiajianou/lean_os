@@ -168,7 +168,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_wctype.o \
                 $(UOBJ)/libc_fcntl.o $(UOBJ)/libc_scanf.o $(UOBJ)/libc_mntent.o \
                 $(UOBJ)/libc_xattr.o $(UOBJ)/libc_klog.o $(UOBJ)/libc_getopt.o $(UOBJ)/libc_reboot.o $(UOBJ)/libc_tls.o \
-                $(UOBJ)/libc_pty.o $(UOBJ)/libc_select.o $(UOBJ)/libc_realpath.o \
+                $(UOBJ)/libc_pty.o $(UOBJ)/libc_select.o $(UOBJ)/libc_realpath.o $(UOBJ)/libc_popen.o \
                 $(UOBJ)/setjmp.o $(UOBJ)/symtab.o $(UOBJ)/crtn.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
@@ -886,7 +886,7 @@ TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
                     kernel/net/arp.c kernel/net/ip.c kernel/net/icmp.c \
                     kernel/net/udp.c kernel/net/ethernet.c kernel/net/tcp.c \
                     kernel/dev/fwcfg.c kernel/dev/tty.c kernel/dev/pty.c \
-                    kernel/sched/sched.c
+                    kernel/sched/sched.c kernel/fs/flock.c
 
 # M101: the first user-space source in this tier, and it earns its place
 # by the same argument the kernel units do. user_space/lib/symtab.c is a

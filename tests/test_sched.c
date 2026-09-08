@@ -39,6 +39,7 @@
 
 #include "arch/x86_64/cpu.h" /* MAX_CPUS, MSR_FS_BASE - the two the switch touches */
 #include "lib/spinlock.h"
+#include "fs/flock.h"    /* M100: the record locks a dying task gives back */
 #include "sched/sched.h"
 #include "signal.h" /* system_api/include/signal.h */
 
@@ -753,6 +754,44 @@ TEST(sched, a_dying_task_gives_back_every_descriptor_it_held) {
     CHECK_EQ(fake_objects_socket_refs(), -1);
 
     q13_kill(t);
+}
+
+/* M100: and every record lock it held. Against the real table rather
+ * than a fake, because the table is pure logic already in this tier and
+ * the scheduler's whole contribution is one call at the right moment:
+ * the dying task's locks go, the other task's stay, and a second release
+ * of the same task changes nothing. */
+TEST(sched, a_dying_task_gives_back_every_record_lock_it_held) {
+    q13_boot();
+    task_t *t = q13_spawn("locker");
+    task_t *u = q13_spawn("bystander");
+    REQUIRE(t != NULL);
+    REQUIRE(u != NULL);
+    flock_release_pid(t->id);
+    flock_release_pid(u->id);
+    int before = flock_count();
+
+    CHECK_EQ(flock_set(11, t->id, OS_FLOCK_WR, 0, 10), 0);
+    CHECK_EQ(flock_set(12, t->id, OS_FLOCK_RD, 0, 0), 0);
+    CHECK_EQ(flock_set(11, u->id, OS_FLOCK_WR, 50, 10), 0);
+    CHECK_EQ(flock_count(), before + 3);
+
+    sched_release_fds(t);
+    CHECK_EQ(flock_count(), before + 1);
+    /* What is left is the bystander's, and the dead task's range is
+     * free for anybody now. */
+    os_flock_t who;
+    CHECK_EQ(flock_test(11, 0, OS_FLOCK_WR, 0, 10, &who), 0);
+    CHECK_EQ(flock_test(11, 0, OS_FLOCK_WR, 50, 10, &who), 1);
+    CHECK_EQ(who.pid, u->id);
+
+    sched_release_fds(t);
+    CHECK_EQ(flock_count(), before + 1);
+
+    flock_release_pid(u->id);
+    CHECK_EQ(flock_count(), before);
+    q13_kill(t);
+    q13_kill(u);
 }
 
 /* ---- fork, which is where M85's second attempt found a real bug -------- */

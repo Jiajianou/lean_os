@@ -75,9 +75,9 @@ that has never happened.
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
 | **Head of the queue** | **M100** — M99 closed 2026-09-04 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
-| **Host unit tests** | 247/247 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 112 required, graded on every self-test boot |
-| **Performance budgets** | 32 rows in `tests/budgets.tsv`, all inside their ceilings |
+| **Host unit tests** | 259/259 passing, 3 slow ones skipped in `--fast` |
+| **Boot markers** | 114 required, graded on every self-test boot |
+| **Performance budgets** | 35 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
 
@@ -316,10 +316,10 @@ increment cost.
 
 | instrument | what it grades | how it is run |
 |---|---|---|
-| **Host unit tests** (`tests/`) | libk, heap, malloc, leanfs, every network parser, the TCP state machine, PTY, symtab, UTF-8, fnmatch, getopt, fwcfg — and the **scheduler** (Q13), 2,157 lines against a fake timer and a fake CPU, with lock-order inversions made errors rather than comments. **249 tests**, ASan+UBSan, under a second | `--fast` |
-| **Boot self-tests** | **112 required markers** and 32 performance budgets, graded off the serial log of a real boot. The switch comes from outside the image via fw_cfg, so the image is byte-identical with or without them | `tools/qemu-serial-test.sh` |
+| **Host unit tests** (`tests/`) | libk, heap, malloc, leanfs, every network parser, the TCP state machine, PTY, symtab, UTF-8, fnmatch, getopt, fwcfg — and the **scheduler** (Q13), 2,157 lines against a fake timer and a fake CPU, with lock-order inversions made errors rather than comments. and, since M100, the **record-lock table** (`kernel/fs/flock.c`, mutation score 91.5%). **259 tests**, ASan+UBSan, under a second | `--fast` |
+| **Boot self-tests** | **114 required markers** and 35 performance budgets, graded off the serial log of a real boot. The switch comes from outside the image via fw_cfg, so the image is byte-identical with or without them | `tools/qemu-serial-test.sh` |
 | **Input suite** | real clicks and keys through QEMU's monitor, graded on real framebuffer pixels. Most tests check something *did* change; two check that nothing else did, which is the only way to catch a flicker (Q7/Q15). Boots once per image and restores a snapshot per test, keyed on the image hash so a stale one fails closed (Q19) | `tools/qemu-input-test.sh` |
-| **Differential tests** | `sh`, the regex engine, `sscanf`, `printf`, libm, `realpath`, and the FILE layer — each compiled for the host from the same source the machine runs, put beside the host's own, and required to agree. Nothing in the fixtures says what the right answer is | `--fast` |
+| **Differential tests** | `sh`, the regex engine, `sscanf`, `printf`, libm, `realpath`, and the FILE layer — each compiled for the host from the same source the machine runs, put beside the host's own, and required to agree. Nothing in the fixtures says what the right answer is. **Since M100 the same shape grades two ported libraries**: freetype's rasterizer and sqlite's shell, each built for the host from the same tarball and required to produce byte-identical output on the machine (`[m100c]`, `[m100d]`) | `--fast`; the library halves on the graded boot |
 | **Fuzzers** | network parsers and the mount path, ~150k inputs/second | `make fuzz-run` |
 | **Mutation harness** | breaks the kernel on purpose and reports whether the tests noticed. The only instrument that grades the *tests* | `make mutate` |
 | **Crash test** | SIGKILL mid-write, reboot, verify with an independent reader. 16 cuts | `tools/crash-test.sh` |
@@ -329,7 +329,7 @@ increment cost.
 | **SMP test** | four cores boot, each recognises itself, four equal tasks share them | default tier |
 | **Bootstrap test** | this machine's own gcc/as/ar/ld building bzip2, and bzip2's own test suite on the result | `--full`, own fw_cfg switch |
 | **Python test** | CPython's own regression suite, on the machine, reporting **its own** counts. The only instrument here that neither wrote its own assertions nor chose what to assert | `tools/python-test.sh` |
-| **Coverage ratchet** | **19 rows** in `tests/coverage-floor.tsv`; coverage may not go **down**. There is no coverage *target* and there will not be one. Since M100 the floors are the measured number rather than a round number under it, and a file in the report with **no row is an error** — both because fifteen lines of standing advice on every run are what hid two floors that had actually fallen | `make coverage-check` |
+| **Coverage ratchet** | **20 rows** in `tests/coverage-floor.tsv`; coverage may not go **down**. There is no coverage *target* and there will not be one. Since M100 the floors are the measured number rather than a round number under it, and a file in the report with **no row is an error** — both because fifteen lines of standing advice on every run are what hid two floors that had actually fallen | `make coverage-check` |
 
 **100% line coverage is not a passing grade.** The mutation harness exists
 because the first file it examined (`net/ethernet.c`) had full line
@@ -401,7 +401,7 @@ unbuilt is the drift *Deferred* exists to catch.
 | # | milestone | state | why here |
 |---|---|---|---|
 | ~~**1**~~ | ~~**M99 (2nd)**~~ | **done 2026-09-04** | all five boxes closed across three increments — see *Landed since this snapshot*. Neither open box was about what its own entry predicted: the loader box was mostly a target-description box, and the build box was a shell box |
-| **2** | **M100** — the browser gap, measured | not started | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
+| **2** | **M100** — the browser gap, measured | in progress: six of nine libraries landed | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
 | **3** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not |
 | **4** | **Q14** — the compositor, off the machine | not started | the move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded in milliseconds rather than only through a screendump |
 | **5** | **M106 (tail)** — the battery green on four cores | 3 known failures | not a new milestone: the three failures M106 named and left. It gates CPU affinity, and M98's bootstrap profiler already reproduces one of them on demand — the first reproduction this project has that is not "about one boot in ten hangs" |
@@ -1224,6 +1224,316 @@ against a file in this tree does not belong on it.
 
 ---
 
+### M100 (fourth increment) — freetype and expat, and the first library graded against itself `[~]`
+
+*Landed 2026-09-08.* The fourth and fifth entries in M100's dependency
+order: **freetype 2.13.3 and expat 2.6.4**, both built by this project's
+own compiler with no edit to either source, both installed into the
+sysroot by their own `make install`, and both graded on the machine by
+the new `[m100c]` marker. Five of nine, and the count of source edits is
+still zero.
+
+**freetype is the first library in the stack that links two of the ones
+before it** — `-lz` for compressed tables and `-lpng16` for colour
+bitmap fonts — and its configure would not proceed with `--with-png=yes`
+until it found libpng. It looked for it the way every modern autotools
+project does, through `pkg-config`, which this host did not have and
+which knows nothing about a sysroot when it does. The cross convention
+is a `$host-pkg-config` on PATH, so `tools/build-thirdparty.sh` now
+writes `x86_64-lean_os-pkg-config`: `pkgconf` pointed at the `.pc` files
+the earlier libraries installed, with `PKG_CONFIG_SYSROOT_DIR` so that a
+`-I/usr/include/libpng16` in a `.pc` file becomes a path into the sysroot
+rather than into the host's `/usr`. `pkgconf` joins `gsed` in
+`docs/toolchain.md` as a host tool somebody else's build asked for.
+
+**And it is the first library with no test suite this machine can run**,
+which forced the question of what grades it. The answer is the shape
+`tools/sh-test.sh` and `tools/math-test.sh` already have — a differential
+test — applied one layer down: `tests/freetype/ftrender.c` is compiled
+twice from the same source, once for the host against a host build of the
+same freetype tarball, once for the machine against the one the cross
+compiler built, and the two outputs must be **byte-identical**. It renders
+every printable ASCII glyph of DejaVu Sans at four sizes through the
+TrueType bytecode interpreter, the smooth rasterizer, the monochrome one
+and the autohinter, hashes every bitmap row by row, and prints the
+kerning of six pairs — 580 lines, and nothing in the fixture says what a
+glyph looks like. What that grades is tens of thousands of lines of
+somebody else's fixed-point integer arithmetic, compiled by this
+project's compiler, against clang's compilation of the same code on
+another machine: one wrong shift or signed division anywhere in the
+rasterizer changes a hash. **It agreed on the first boot.**
+
+expat is the opposite case: it ships 4,392 checks of its own
+(`tests/runtests`), cross-built here and run on the machine, and the
+sentence the host prints — `100%: Checks: 4392, Failed: 0` — is the one
+the machine has to print. It does. `xmlwf`, the well-formedness checker,
+reads a document off this disk and names the line and column of a tag
+that does not match, which is the same library as a program.
+
+#### What the two of them found about this target
+
+- **`checking for working mmap... no`**, from freetype. `AC_FUNC_MMAP` is
+  a *run* test and autoconf answers it "no" for every cross build, so
+  freetype uses its ANSI stdio stream rather than the mmap one. This OS
+  has had file-backed mmap since M91; what it does not have is a way for
+  a configure script to run a program on it. A fact about
+  cross-compiling, not about the kernel — and the stdio path is a better
+  test of this libc anyway, since a 750 KB font read through
+  `fseek`/`ftell`/`fread` is exactly where M98's `ungetc` bug lived.
+- **No `-lpthread`.** `ax_pthread.m4` tries `-pthread`, `-lpthread` and
+  friends and finds none, because this libc's threads live in `libc.a`.
+  A warning only (`FT_DEBUG_LOGGING`), and the same shape as `libm.a`'s
+  argument in the Makefile: an empty `libpthread.a` would answer it, and
+  nothing has needed the answer.
+- **No entropy source.** expat's configure asks for `arc4random_buf`,
+  `arc4random`, `getrandom` and the raw `SYS_getrandom` in turn, finds
+  none, and settles for `/dev/urandom` — which devfs provides and which
+  its own header says is a xorshift over the TSC. For expat's hash salt
+  that is enough. **For a TLS key it is not**, and 9/9 is where this
+  stops being a note.
+- **config.sub moved.** freetype's bundled copy is the 2024-05 vintage,
+  which lists one OS per line, and the six-names-on-a-line anchor
+  `tools/toolchain-port/apply.py` has used since M94 is not in it.
+  It learned the second form; the edit is the same one line.
+
+#### The numbers
+
+| | |
+|---|---|
+| `freetype_render_ms` | **1,300 ms** for 570 glyphs, the font read through stdio |
+| `expat_suite_ms` | **50,240 ms** for 4,392 checks — about 100x the host, the usual TCG ratio, and now the single most expensive self-test in the boot |
+
+Both are budget rows at ~2x. The expat row's note says out loud that it
+is why the battery's ceiling will be raised if it ever is.
+
+**Cost:** one graded boot, which passed. The port itself was two
+`./configure` runs and the pkg-config wrapper; the fixture and its
+oracle build were the work.
+
+---
+
+### M100 (fifth increment) — sqlite, and the two things it would not run without `[~]`
+
+*Landed 2026-09-08.* The sixth library: **sqlite 3.47.2**, the
+amalgamation, `./configure --host=x86_64-lean_os && make` with one
+`config.sub` line and one of sqlite's own switches
+(`--disable-dynamic-extensions`), graded by the new `[m100d]` marker
+differentially, like freetype: `tests/sqlite/cases.sql` through the
+`sqlite3` shell built for the machine and through the same shell built
+for the host from the same tarball, and the two transcripts must be
+byte-identical. 5,000 rows through a B-tree and an index, a transaction
+rolled back and one committed through a journal file on this
+filesystem, joins, window functions, a recursive CTE, `EXPLAIN QUERY
+PLAN`, `VACUUM`, `integrity_check` twice, and a page of arithmetic and
+string functions where a miscompile would show first. Sixty-seven lines
+of transcript, and the host decides every one.
+
+**It is the library that cost the most, and none of the cost was in
+sqlite.** Four things this target did not have, each named by the
+build or the run rather than by a checklist — M63's rule, and it held
+for the fourth port in a row:
+
+- **`dlopen` in a static program.** The first link ended in four
+  undefined symbols — `dlopen`, `dlsym`, `dlclose`, `dlerror` — because
+  on this target `dlopen` lives in `/lib/ld-lean.so` and reaches a `-pie`
+  program through it, and `libdl.a` is empty on purpose (the Makefile's
+  sysroot rule says why). sqlite's own documented answer for a system
+  without `dlopen` is `--disable-dynamic-extensions`, and that is what
+  was used. Recorded rather than changed: a static default is what a
+  machine whose kernel loads `ET_EXEC` directly should have, and this is
+  the second port to say so with a link error.
+- **`popen` and `pclose`**, which this libc did not have and sqlite's
+  shell uses for `.import '|command'` and `.output |command`. Written
+  in `user_space/libc/src/popen.c` over M83's fork and M84's exec, with
+  the one decision worth writing down: the child puts its pipe end on
+  fd 0 or 1 with `dup2`, which on this kernel *releases* the slot it
+  overwrites (M59), so the child holds exactly one reference and the
+  parent's read sees EOF when it exits. **`system()` came with them.**
+  M97 declared it and made it refuse — *"the version that would get
+  written without a caller to check it against would be wrong in some
+  way nobody would find"* — and sqlite's `.shell` is the caller. All
+  three share one mechanism and are graded twice: `libctest` checks the
+  output arrives, the input arrives (which means the child saw EOF), and
+  the exit status comes back including the shell's 127; and the sqlite
+  transcript runs `.system` and a piped `.import` where the host's
+  `/bin/sh` is the oracle.
+- **fcntl record locks.** sqlite's unix VFS takes an `F_SETLK` before
+  every read transaction and another before every write, and treats any
+  answer other than "granted" or "held by somebody else" as a **disk I/O
+  error**. This libc had declared the three lock commands and refused
+  them with `EOPNOTSUPP` since M89, on M65's rule — an advisory lock that
+  always succeeds protects nothing while telling every caller it did —
+  so every `INSERT` on this machine would have failed. That rule is why
+  the answer is a real lock table rather than a stub.
+
+- **Recursive mutexes**, and this is the one worth the most space.
+  With `popen` and the locks in place, sqlite linked, was put on the
+  image, and **hung** — no output, no error, no exit, for 600 seconds.
+  The transcript went to a file so the log showed nothing; a temporary
+  per-syscall trace on the task named `sqlite3` showed everything: its
+  **eighth syscall of its life** was `futex(WAIT)` on a mutex at a
+  static address, and it never returned. A single-threaded program
+  blocking on a futex is a program waiting for itself. sqlite is built
+  `THREADSAFE=1`, its database mutex is `PTHREAD_MUTEX_RECURSIVE` by
+  design, and it takes that mutex inside itself on every API call. This
+  libc's `pthread_mutexattr_settype` **refused** `RECURSIVE` — on M65's
+  rule, deliberately, and its own header said why: *"a recursive mutex
+  this library treated as normal deadlocks the first time a program
+  relies on the recursion, somewhere far from here."* Right about the
+  deadlock; wrong that refusing prevented it. **sqlite does not check
+  what `settype` returns.** Nor does libstdc++'s `std::recursive_mutex`,
+  which was one program away from the same hang. A refusal only refuses
+  when the caller looks, and the honest thing left was to make the type
+  real: `pthread_mutex_t` grew an owner and a count (four bytes to
+  sixteen; glibc's is forty), RECURSIVE and ERRORCHECK do what POSIX
+  says, NORMAL's fast paths are untouched, and the two static
+  initialisers every port spells (`PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP`
+  and its ERRORCHECK twin) exist. **That is an ABI change**, and the
+  bill was paid where it fell: libstdc++ rebuilt from the GCC build tree
+  against the new header (and it had to be a *clean* rebuild — the first
+  attempt re-archived Sep 3 objects because automake's dependency files
+  do not name the sysroot's `pthread.h`), and CPython rebuilt because
+  `libpython3.12.so` embeds a `pthread_mutex_t` in every lock it
+  allocates and is dynamically linked against this libc. Every static
+  binary carries its own libc and was untouched. `libctest` checks the
+  type contract from one thread — three holds need three unlocks, an
+  ERRORCHECK holder gets `EDEADLK` rather than a hang, an unlock by a
+  non-holder is `EPERM`, a type that does not exist is still `EINVAL`,
+  and a NORMAL mutex behaves exactly as before — and `threadtest` checks
+  the half that needs two threads: the same recursive mutex taken three
+  deep by both with a counter inside, and a foreign unlock refused.
+
+#### The record locks
+
+`kernel/fs/flock.c`, and it is POSIX's model kept to what it says:
+locks belong to a **process** on an **inode**, cover a byte range with an
+open end for "to EOF", are shared or exclusive, never conflict with the
+holder's own, and are released when the process closes **any**
+descriptor for the file — the clause everybody finds surprising, which
+sqlite's own source comments on for two pages before working around it,
+and which is honoured exactly: from `close`, from `dup2` (which closes
+`newfd`), from exec's `FD_CLOEXEC` sweep, and by pid at exit. The
+kernel resolves `l_whence`, because only the fd table knows the offset
+`SEEK_CUR` is relative to. `F_SETLKW` parks on a channel every release
+wakes, using the seq form of `sched_block_on` so a release between "the
+answer was CONFLICT" and "I am asleep" is not lost. `F_GETLK` reports
+the holder. A held lock is `EAGAIN`, a full table is `ENOLCK`.
+
+**The table is pure logic with no scheduler in it, and that is a test
+decision.** The blocking lives in `syscall.c`; `flock.c` answers
+"conflict" and the caller decides whether to wait. So the range
+arithmetic — where a lock table's bugs actually are — is graded on the
+host in `tests/test_flock.c`: two readers coexist and a writer excludes;
+a process upgrading its own read lock to a write lock over the middle
+leaves three entries; unlocking the middle splits, unlocking an edge
+trims, unlocking what is not locked is not an error (sqlite's unlock
+path relies on that); `len 0` reaches every later byte, including
+sqlite's own one-byte-shared-lock-then-write-lock-to-EOF pattern at
+offset 2^30; a refused request leaves the table unchanged down to the
+byte; touching locks of one type merge and of two types do not; the
+close rule releases one process's locks on one file and nothing else;
+and a full table refuses a split that would need an entry while still
+allowing a trim that does not. Eight tests, mutation score **91.5%**.
+The boot marker adds the half the host cannot: `flock_count()` must be
+zero after sqlite exits, so a lock the close rule missed is a failure
+and not a leak.
+
+What is **not** there: deadlock detection (`EDEADLK`). Two processes
+each waiting for the other's lock will wait. sqlite never calls
+`F_SETLKW`, nothing else here does either, and a detector nothing
+exercises is the thing M65 forbids.
+
+#### The numbers
+
+| | |
+|---|---|
+| `sqlite_fixture_ms` | **2680 ms** — the whole transcript, journal and VACUUM included |
+| `kernel/fs/flock.c` | 99.30% line coverage, first floor; mutation score 91.5% |
+| `libc.a` | 528 KB, up from 524 |
+
+#### What the ABI change dug up, in order
+
+Growing a struct every port embeds is the kind of change that finds out
+what else was quietly wrong, and it found two things.
+
+- **libstdc++ had been stale since M99, and the rule it was stale
+  against broke static C++.** The first "rebuild" of libstdc++ against
+  the new header re-archived its Sep 3 objects: automake's dependency
+  files do not name the sysroot's headers, so `make` saw nothing to do.
+  A clean rebuild then failed to link `tests/cxx/library.cpp` — the
+  M97 fixture the tier had passed on every run — with `relocation
+  truncated to fit: R_X86_64_PLT32 against undefined symbol _ITM_RU1`.
+  libstdc++ is compiled PIC throughout (libtool's `-prefer-pic`, for
+  the `.a` as much as the `.so`), M99's second increment made `-fPIC`
+  mean the small code model, and a small-model object calls an
+  external function through the PLT with a 32-bit PC-relative
+  relocation: fine for every function that exists, and impossible for
+  a **weak undefined** one, which ld resolves to address 0 — not within
+  2 GiB of a program at 512 GiB. `cow-stdexcept.o` calls the
+  transactional-memory hooks weakly, so every static C++ program that
+  reached `std::stoi` or `std::runtime_error` stopped linking, and had
+  in truth been unable to link against a *current* libstdc++ since
+  2026-09-04. Nobody knew because the archive predated the rule. The
+  fix is in the target description, where every flag of this kind
+  lives: **`-fno-plt` wherever the small model is chosen**. The call
+  becomes a GOT load (`R_X86_64_GOTPCRELX`), a GOT slot can hold 0
+  anywhere, and it costs nothing the PLT was buying here — `ld-lean.so`
+  binds eagerly, so a GOT entry filled at load is what the PLT stub
+  would have reached on the first call anyway. Ten-line experiment
+  first, then the spec, then GCC's driver rebuilt (58,000 lines of
+  make log) and libstdc++ rebuilt behind it. `library.cpp`, a
+  `std::recursive_mutex` program and a `<stdexcept>` program all link.
+- **CPython's "rebuild" was the same non-event.** `tools/build-python.sh`
+  starts clean only when its *port* changes; its Makefile does not track
+  the sysroot's headers either, so the rebuild produced a `libpython`
+  whose objects were dated Sep 4, and the first graded boot after it
+  panicked at `[m99]`: `Fatal Python error: take_gil:
+  PyMUTEX_UNLOCK(gil->mutex) failed` — a four-byte mutex handed to a
+  libc that reads sixteen, the `type` field being whatever lay beside
+  it. **Both build scripts now keep an ABI stamp** — a hash of every
+  header the sysroot hands a program — and throw a build tree away when
+  it was made under a different one. The port stamp catches a changed
+  port; this catches a changed libc, which is the more common event and
+  the one neither script had a word for.
+
+#### Two instruments that misbehaved, recorded rather than hidden
+
+- **The mutation harness left its timed-out mutants running.** A
+  `killed-timeout` verdict came from `subprocess.run(timeout=)`, which
+  kills the `make` it started and nothing underneath it — and a mutant
+  that inverts a loop condition is by definition one that never
+  finishes. Seven orphaned `leanos-tests` processes spun at full CPU for
+  forty minutes, unnoticed, while the graded boot ran beside them: that
+  boot's every disk number came in **3–10x** its recorded value
+  (`disk_1mib_write_through_us` 413 ms against 77) and it hit the
+  capture ceiling with thirty markers to go. An instrument that quietly
+  degrades the instrument next to it is exactly the kind this project
+  is supposed to see. `tools/mutate.py` now runs each mutant in its own
+  session and `SIGKILL`s the whole group on timeout, and
+  `tests/test_flock.c`'s fill loops are bounded at one past the table,
+  so a mutant that never refuses is an assertion naming a line rather
+  than a ninety-second timeout that counts as a kill.
+- **The boot capture ceiling was already spent.** `SECONDS_TO_RUN` was
+  400; the battery measured 360 s with freetype and expat in it, and
+  the first boot with sqlite hit 400 exactly. Raised to 600 (and the
+  I/O APIC pass to 900), with the history written where the last three
+  raises are.
+
+**Cost:** six graded boots. One that timed out under the orphaned
+mutants, one that found the hang, one diagnostic boot whose transcript
+went to a pipe and so showed nothing (a lesson about `tee` and stdio
+buffering, learned in six minutes), one with the syscall trace that
+found it in fifteen lines, one that panicked at `[m99]` on the stale
+CPython, and the one that passed — after two libstdc++ rebuilds, a GCC
+driver rebuild and two CPython rebuilds. Most of the increment was the lock table and the
+mutex; most of both was the tests.
+
+**Next in the order:** harfbuzz, which is C++ and links freetype, and
+then the two that decide the arc — a TLS library, which is where the
+entropy note above becomes a kernel item, and ICU.
+
+---
+
 *Below this line, the snapshot as written on 2026-09-04.*
 
 **This is where new entries go**, in full and in the archive's own form: a
@@ -1267,13 +1577,20 @@ write nothing and return successfully).
 
 - [~] zlib, libpng, libjpeg, freetype, harfbuzz, expat, sqlite, ICU and a
       TLS library, each unmodified, in dependency order — every one a real
-      test of M94–M97. **Three landed: zlib 1.3.1 (2026-09-04), libpng
-      1.6.44 and libjpeg 9f (2026-09-05)**, graded by the `[m100]` and
-      `[m100b]` markers running their own test programs here — including
-      libjpeg's seven byte-exact comparisons against reference output the
-      IJG shipped in 1995 — and installed into the sysroot by their own
-      `make install`, so the next one can link against them. Zero source
-      edits across all three. **Six to go**, starting with freetype.
+      test of M94–M97. **Six landed: zlib 1.3.1 (2026-09-04), libpng
+      1.6.44 and libjpeg 9f (2026-09-05), freetype 2.13.3, expat 2.6.4 and
+      sqlite 3.47.2 (2026-09-08)**, graded by the `[m100]`, `[m100b]`,
+      `[m100c]` and `[m100d]` markers — their own test suites where they
+      ship one (zlib, libpng, libjpeg's byte-exact 1995 references,
+      expat's 4,392 checks) and a differential fixture against the host's
+      build of the same source where they do not (freetype's rasterizer,
+      sqlite's shell) — and installed into the sysroot by their own `make
+      install`. Zero source edits across all six. What they asked this OS
+      for and got: a sysroot-aware `pkg-config`, `popen`/`pclose`/`system`,
+      **fcntl record locks** (`kernel/fs/flock.c`), and **recursive
+      mutexes** — see the fourth and fifth increments. **Three to go**:
+      harfbuzz (C++, links freetype), then the two that decide the arc —
+      a TLS library, where the entropy note becomes a kernel item, and ICU.
 - [ ] TLS end to end over M66's TCP: the first `https://` this machine has
       had
 - [ ] `O_NONBLOCK` and `AF_UNIX`/`socketpair`, absorbed here because a
@@ -1546,6 +1863,12 @@ says whether it is a bug or a decision.
 - **`PTHREAD_KEYS_MAX` is 32**, and CPython's `test_threading` runs out
   past it (`gilstate_tss_set: failed to set current tstate`).
 - **`AF_UNIX` does not exist.** Scheduled: M100's third bullet.
+- **`/dev/urandom` is a xorshift over the TSC, and there is no `getrandom`.**
+  Every library in M100's stack that asked for entropy (expat, and the
+  TLS library will) was told so by its configure. Fine for a hash salt;
+  not for a key. Becomes a kernel item — RDRAND/RDSEED where the CPU has
+  them, interrupt timing where it does not, and a `getrandom` — at M100's
+  TLS increment, which is the first thing here that needs it to be true.
 - **At least one more libc call fails without setting `errno`** — CPython's
   `test_json` reports `OSError: [Errno 0] Error`. Five were found and
   fixed in M99; the suite says there is a sixth.
@@ -1673,6 +1996,24 @@ of them recurred in a form nobody recognised the second time.
 - **A comment that justifies a constraint by naming a thing outside the
   tree goes stale the day that thing leaves.** Several justified
   themselves by a CI runner that had never once run.
+- **A refusal only refuses when the caller looks.** This libc refused
+  `PTHREAD_MUTEX_RECURSIVE` for two milestones, on M65's rule and with a
+  comment predicting the exact deadlock a silent acceptance would cause.
+  sqlite does not check what `settype` returns, and got the deadlock
+  anyway — as its eighth syscall. A refused capability that a real
+  program assumes is a capability that has to be built (M100).
+- **A rule about compile flags is only as current as the last artefact
+  built under it.** M99 made `-fPIC` mean the small code model; the
+  installed libstdc++ was a day older than that rule, and the M97 test
+  kept passing against stale objects until a mutex grew and forced a
+  rebuild — at which point every static C++ program that reached
+  `std::runtime_error` stopped linking. The fix (`-fno-plt` in the
+  target description) took an hour; the finding out took the rebuild.
+- **An instrument can degrade the instrument beside it.** The mutation
+  harness's timed-out mutants were orphaned processes, seven of them at
+  full CPU for forty minutes, and the graded boot running alongside
+  reported every disk number 3–10x its recorded value and timed out.
+  Look at `uptime` before believing a slow boot (M100).
 - **The four instruments each reach something the others cannot**, and the
   proof is on the record: three bugs in M98's second increment were found
   only by the boot marker, one only by the host tier, one only by a boot

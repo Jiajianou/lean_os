@@ -56,6 +56,12 @@ FILE *fopen(const char *path, const char *mode);
  * implementation does and what a caller has to know. */
 FILE *fdopen(int fd, const char *mode);
 int fclose(FILE *f);
+/* M100: `/bin/sh -c command` with its stdout ("r") or stdin ("w") on a
+ * pipe this stream is the other end of. pclose closes the stream, waits
+ * for the command, and returns its wait status - or -1 for a stream
+ * popen did not open. See popen.c for who asked. */
+FILE *popen(const char *command, const char *mode);
+int pclose(FILE *f);
 size_t fread(void *buf, size_t size, size_t count, FILE *f);
 size_t fwrite(const void *buf, size_t size, size_t count, FILE *f);
 int fseek(FILE *f, long offset, int whence);

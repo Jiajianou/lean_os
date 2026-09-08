@@ -298,6 +298,34 @@ def drop_test_binary():
         pass
 
 
+def run_bounded(cmd):
+    """subprocess.run with a timeout that kills the whole process group.
+
+    M100: `subprocess.run(timeout=...)` kills the child it started - here
+    `make` - and nothing else. The test binary make had spawned kept
+    running, and a mutant that inverts a loop condition is by definition
+    one that never finishes, so every 'killed-timeout' in a campaign left
+    a leanos-tests process spinning at full CPU. Seven of them, for
+    forty minutes, was enough host load to make a graded boot running at
+    the same time miss its capture ceiling with thirty markers to go -
+    and every disk number in that boot was 3-10x its recorded value. An
+    instrument that quietly degrades the instrument next to it is the
+    kind this project is supposed to be able to see, so: a new session
+    per run, and SIGKILL to the whole group on timeout."""
+    p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        _, err = p.communicate(timeout=TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, p.returncode, None, err)
+
+
 def run_suite(extra=()):
     """(verdict, seconds). 'killed' means the suite noticed. `extra` is
     the mutated file's own instruments from INSTRUMENTS, run after the
@@ -307,8 +335,7 @@ def run_suite(extra=()):
     drop_test_binary()
     started = time.time()
     try:
-        p = subprocess.run(TEST_CMD, cwd=ROOT, timeout=TIMEOUT_S,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        p = run_bounded(TEST_CMD)
     except subprocess.TimeoutExpired:
         # A hang is a detected fault. An inverted loop condition is the
         # usual cause and a person would notice it immediately.
@@ -325,9 +352,7 @@ def run_suite(extra=()):
         return "killed", time.time() - started
     for cmd in extra:
         try:
-            q = subprocess.run(cmd, cwd=ROOT, timeout=TIMEOUT_S,
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.PIPE)
+            q = run_bounded(cmd)
         except subprocess.TimeoutExpired:
             return "killed-timeout", time.time() - started
         if q.returncode != 0:

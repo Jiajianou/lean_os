@@ -13,6 +13,7 @@ ground rules in [milestones.md](../milestones.md)).
 | `mtools` | any recent | formats the UEFI boot path's FAT ESP directly inside the disk image | `brew install mtools` |
 | `llvm` (full keg) + `acpica` | any recent | only for `tools/build-ovmf.sh` (builds OVMF firmware from source) | `brew install llvm acpica` |
 | `gsed` (GNU sed) | 4.10 | only for `tools/build-toybox.sh` (M89) — toybox's own build scripts need GNU sed | `brew install gnu-sed` |
+| `pkgconf` | any recent | only for `tools/build-thirdparty.sh` (M100) — freetype's configure asks pkg-config where libpng is, and the script wraps it as `x86_64-lean_os-pkg-config` so the answer points into the sysroot | `brew install pkgconf` |
 
 ## M89: GNU sed, and why a host tool for somebody else's build is listed here
 

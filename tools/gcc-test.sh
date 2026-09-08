@@ -86,7 +86,16 @@ fi
 # reference output the IJG shipped in 1995 - so the assertion is not
 # "it decoded something", it is "byte for byte, the same picture their
 # encoder produced". That goes on the image too, below.
-for prog in gnuhello bzip2 zlibtest minigzip pngtest djpeg cjpeg jpegtran; do
+# M100's fourth increment adds three more. ftrender is this project's
+# own fixture (tests/freetype/ftrender.c) linked against the freetype the
+# cross compiler built; what it is graded against is the same fixture
+# linked against the host's build of the same source, whose output is
+# one of the reference files below. expattest is expat's own test suite,
+# 4,392 checks, and xmlwf is its well-formedness checker.
+# The fifth increment adds sqlite3, graded like ftrender: the transcript
+# of tests/sqlite/cases.sql against the host's build of the same source.
+for prog in gnuhello bzip2 zlibtest minigzip pngtest djpeg cjpeg jpegtran \
+            ftrender expattest xmlwf sqlite3; do
   src="build/thirdparty/$prog"
   if [ -f "$IMAGE" ] && [ -x "$src" ]; then
     build/leanfs-put "$IMAGE" "$src" "/bin/$prog" >/dev/null || exit 1
@@ -99,7 +108,10 @@ done
 # Under /usr/share/m100, because these are data files somebody else
 # wrote and not programs: seven from libjpeg (the JPEG it encoded, the
 # progressive one, and the PPM, GIF, BMP and two JPEGs its own `make
-# test` requires the results to equal) and one PNG from libpng.
+# test` requires the results to equal), one PNG from libpng, and - since
+# M100's fourth increment - DejaVu Sans and what the host's freetype
+# rendered from it, which is what [m100c] requires this machine's
+# freetype to reproduce byte for byte.
 #
 # Put one at a time rather than with `leanfs-put -r`, which also writes
 # /.image-manifest and would overwrite the one M93's image-tree test
@@ -111,5 +123,5 @@ if [ -f "$IMAGE" ] && [ -d "$DATA" ]; then
     build/leanfs-put "$IMAGE" "$f" "/usr/share/m100/$(basename "$f")" >/dev/null || exit 1
     n=$((n + 1))
   done
-  echo "gcc-test: installed $n reference files under /usr/share/m100 - the [m100b] self-test compares against them"
+  echo "gcc-test: installed $n reference files under /usr/share/m100 - the [m100b] and [m100c] self-tests compare against them"
 fi

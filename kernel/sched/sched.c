@@ -16,6 +16,7 @@
 #include "fs/openfile.h"
 #include "net/socket.h"
 #include "ipc/pipe.h"
+#include "fs/flock.h" /* M100: flock_release_pid - see sched_release_fds */
 #include "ipc/shm.h" /* shm_free_by_owner - see task_exit_with_code */
 #include "lib/spinlock.h"
 #include "mm/heap.h"
@@ -3024,6 +3025,13 @@ void fd_retain(const fd_slot_t *slot) {
 void sched_release_fds(task_t *t) {
     for (int i = 0; i < MAX_FDS; i++) {
         fd_release(&t->fds[i]);
+    }
+    /* M100: a process that is gone holds no record locks. By pid rather
+     * than per descriptor, because the descriptors are already released
+     * above and because this is the one place every lock the process
+     * ever took is reachable at once. */
+    if (flock_release_pid(t->id) > 0) {
+        sched_wake_all(FLOCK_CHAN);
     }
 }
 

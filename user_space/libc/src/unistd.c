@@ -14,7 +14,9 @@
 #include <stdlib.h>   /* M84: getenv, for execvp's PATH search */
 #include <sys/wait.h> /* M84: waitpid */
 #include "paths.h"    /* system_api/include/paths.h - PATH_MAX_LEN */
-#include <errno.h>    /* M89: fcntl's lock commands refuse with EOPNOTSUPP */
+#include <errno.h>    /* M89: fcntl's lock commands refused with EOPNOTSUPP; M100: real, and EAGAIN/ENOLCK */
+#include <stdint.h>
+#include "os_fs.h"    /* system_api/include/os_fs.h - os_flock_t, M100 */
 #include <limits.h>   /* M89: OPEN_MAX, the range dup() searches */
 #include "proc.h"     /* system_api/include/proc.h - os_meminfo_t, M89 */
 #include <dirent.h>   /* M89: NAME_MAX, which pathconf reports */
@@ -346,14 +348,48 @@ int fcntl(int fd, int cmd, ...) {
         __builtin_va_end(ap);
         return arg == 0 ? 0 : -1;
     }
-    /* M89: record locks, declared so a program compiles and refused so
-     * that one never believes it holds a lock nothing is keeping. See
-     * <fcntl.h> for the argument, which is M65's applied to a file. */
+    /* M100: record locks, real now. <fcntl.h>'s struct flock and the
+     * kernel's os_flock_t use the same three type values on purpose, so
+     * this copies fields rather than translating them; what the kernel
+     * adds is the resolution of l_whence, which needs the descriptor's
+     * offset and the file's size. sqlite is the caller - see
+     * kernel/fs/flock.h. */
     case F_GETLK:
     case F_SETLK:
-    case F_SETLKW:
-        errno = EOPNOTSUPP;
+    case F_SETLKW: {
+        __builtin_va_list ap;
+        __builtin_va_start(ap, cmd);
+        struct flock *fl = __builtin_va_arg(ap, struct flock *);
+        __builtin_va_end(ap);
+        if (!fl) {
+            errno = EINVAL;
+            return -1;
+        }
+        os_flock_t k;
+        k.type = fl->l_type;
+        k.whence = fl->l_whence;
+        k.pid = 0;
+        k.start = (int64_t)fl->l_start;
+        k.len = (int64_t)fl->l_len;
+        int kcmd = cmd == F_GETLK ? F_GETLK_CMD : cmd == F_SETLK ? F_SETLK_CMD : F_SETLKW_CMD;
+        long r = sys_fcntl(fd, kcmd, (long)(uintptr_t)&k);
+        if (r == 0) {
+            if (cmd == F_GETLK) {
+                fl->l_type = k.type;
+                fl->l_whence = k.whence;
+                fl->l_start = (off_t)k.start;
+                fl->l_len = (off_t)k.len;
+                fl->l_pid = (pid_t)k.pid;
+            }
+            return 0;
+        }
+        /* The three refusals, each with the errno POSIX names for it.
+         * EAGAIN rather than EACCES for a held lock: both are allowed,
+         * every program checks for both, and EAGAIN is the one Linux
+         * and sqlite's own source expect. */
+        errno = r == -2 ? EAGAIN : r == -3 ? ENOLCK : EINVAL;
         return -1;
+    }
     default:
         return -1;
     }

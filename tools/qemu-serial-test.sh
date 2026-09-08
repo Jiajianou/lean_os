@@ -134,7 +134,15 @@ set -euo pipefail
 # M77 spawns a tree walker. 240 was measured *failing* mid-M76 at exactly
 # the point the boot printed its last line, which is the "one slow boot
 # from a false failure" case this number is always chosen to avoid.
-SECONDS_TO_RUN="${1:-400}"
+#
+# M100 (fourth and fifth increments): 400 -> 600. The battery measured
+# 360 s with freetype and expat in it - expat's own 4,392 checks are
+# 50 s of that, the single most expensive self-test on the machine and
+# budgeted as such in tests/budgets.tsv - and the first boot with sqlite
+# added hit 400 exactly, with thirty markers still to come. 600 is the
+# same not-one-slow-boot margin over a ~400 s battery; the boot prints
+# boot_to_desktop_s, so the next failure here says which side moved.
+SECONDS_TO_RUN="${1:-600}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -390,6 +398,18 @@ REQUIRED_MARKERS=(
   # and it is the first library in the stack that links the one before
   # it - `-lz`, out of the sysroot.
   "[m100b] two more libraries, graded by their own suites:"
+  # M100's fourth increment. freetype has no suite of its own this
+  # machine can run, so it is graded differentially like sh and libm:
+  # the same fixture built for the host against the same freetype source,
+  # and 570 glyph bitmaps that have to hash identically. expat brings its
+  # own 4,392 checks. One marker for both, because they landed together
+  # and the sentence names both.
+  "[m100c] freetype against the host, and expat by its own suite:"
+  # M100's fifth increment: sqlite, and it is the marker behind the most
+  # kernel work in the stack - popen in libc and fcntl record locks in
+  # the kernel both exist because this transcript would not match
+  # without them.
+  "[m100d] sqlite against the host:"
   "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m73] names, not numbers:"
   "[m74] the session remembers:"

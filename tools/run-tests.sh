@@ -227,12 +227,13 @@ else
 
   # M103: and the same battery again with every legacy line routed
   # through the I/O APIC instead of the 8259. In `--full` only, because
-  # it is a second ~250-second boot and because the default path is the
+  # it is a second ~400-second boot (M100 raised the default ceiling to
+  # 600 and this one, on the path that costs 2x, to 900) and because the default path is the
   # one this machine actually runs on - see kernel/dev/fwcfg.h for the
   # measurement that decided which is which.
   if [ "$TIER" = "full" ]; then
     run_stage "the same battery, through the I/O APIC" \
-      bash -c 'LEANOS_IOAPIC=1 ./tools/qemu-serial-test.sh 500'
+      bash -c 'LEANOS_IOAPIC=1 ./tools/qemu-serial-test.sh 900'
   fi
 
   # ---- Stage 3: real clicks on real pixels ----------------------------

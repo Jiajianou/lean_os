@@ -27,6 +27,7 @@
 #include "drivers/rtc.h"
 #include "fs/leanfs.h"
 #include "fs/leanfs_format.h" /* M93 (second attempt): leanfs_fnv1a, shared with tools/leanfs-put.c so the image manifest's hash has one definition */
+#include "fs/flock.h"    /* M100: flock_count, for [m100d] */
 #include "fs/openfile.h"
 #include "dev/tty.h"
 #include "dev/fwcfg.h" /* Q1 */
@@ -9788,6 +9789,304 @@ static void boot_selftests_system(void) {
                        "file - and libpng's own pngtest reads, writes and "
                        "re-reads a PNG on this filesystem and says it passes "
                        "- self-test passed.\n\n");
+        }
+    }
+
+    /* ---- M100 self-test: freetype against the host, expat by its own suite
+     *
+     * The fourth and fifth entries in M100's dependency order: freetype
+     * 2.13.3, which links both libpng and zlib out of the sysroot, and
+     * expat 2.6.4. Two different kinds of grading, because the two
+     * libraries offer two different kinds of evidence.
+     *
+     * freetype ships no test suite this machine can run, so it is graded
+     * the way sh, printf and libm are - differentially. /bin/ftrender is
+     * tests/freetype/ftrender.c linked against the freetype this
+     * project's compiler built; /usr/share/m100/ftrender.expected is the
+     * same fixture linked against the host's build of the same source,
+     * run on the host against the same font. Every printable ASCII glyph
+     * through the TrueType bytecode interpreter, the smooth rasterizer,
+     * the monochrome one and the autohinter, hashed row by row, and the
+     * two outputs have to be byte-identical. Nobody here decided what a
+     * glyph looks like; what is asserted is that this compiler's integer
+     * arithmetic over tens of thousands of lines of somebody else's
+     * fixed-point code agrees with clang's on another machine.
+     *
+     * expat ships 4,392 checks of its own (tests/runtests), cross-built
+     * and run here, and the sentence it prints on the host is the one it
+     * has to print on this machine. xmlwf is the same library as a
+     * program: a document read off this filesystem, and the line and
+     * column of the tag that does not match.
+     *
+     * Both are timed. freetype's is 570 glyph renders of integer
+     * arithmetic and expat's is 4,392 checks that allocate freely, so
+     * both are honest measures of things nothing else here measures -
+     * the compiler's output on a rasterizer, and malloc under a test
+     * suite's churn.
+     *
+     * Skipped when absent, for the reason [m94], [m95] and [m100] skip.
+     */
+    {
+        os_stat_t fst;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/ftrender", (uint64_t)&fst, 0) != 0) {
+            klog_puts("[m100c] /bin/ftrender is not on this image - skipped. "
+                       "tools/build-thirdparty.sh builds freetype and expat.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m100c.sh";
+            const char *result = PATH_TMP_DIR "m100c.out";
+            /* The font and the reference output both live under
+             * /usr/share/m100. The machine's rendering goes to a file so
+             * that cmp - toybox's, not this project's - can decide, and
+             * its last line (the total hash) is copied out so that a
+             * failure in the log shows both hashes rather than "differ". */
+            static const char FT_SCRIPT[] =
+                "#!/bin/sh\n"
+                "cd " PATH_TMP_DIR "\n"
+                "D=/usr/share/m100\n"
+                "O=" PATH_TMP_DIR "m100c.out\n"
+                "/bin/ftrender $D/DejaVuSans.ttf > " PATH_TMP_DIR "m100c.ft.txt 2>&1\n"
+                "echo \"ftrender exit $?\" >> $O\n"
+                "toybox cmp $D/ftrender.expected " PATH_TMP_DIR "m100c.ft.txt"
+                " && echo 'freetype agrees with the host' >> $O\n"
+                "toybox tail -n 1 " PATH_TMP_DIR "m100c.ft.txt >> $O\n"
+                "echo \"host: $(toybox tail -n 1 $D/ftrender.expected)\" >> $O\n"
+                "toybox rm -f " PATH_TMP_DIR "m100c.ft.txt\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)FT_SCRIPT,
+                            sizeof(FT_SCRIPT) - 1) != 0) {
+                panic("M100c self-test: could not write the freetype fixture");
+            }
+            uint64_t started = pit_get_ticks();
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m100c] the freetype fixture could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            uint64_t freetype_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
+            static char produced[1024];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m100c] the freetype fixture produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"ftrender exit 0",
+                     "every glyph loaded and rendered"},
+                    {"freetype agrees with the host",
+                     "570 rendered glyphs, their metrics and their kerning, byte-identical "
+                     "with the host's build of the same freetype"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m100c] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            if (!all_ok) {
+                klog_puts("[m100c] what the freetype fixture wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m100c] ---- end\n");
+                panic("M100 self-test: freetype does not agree with the host here");
+            }
+
+            /* expat's own suite, then xmlwf on two documents this
+             * filesystem holds. The well-formed one makes xmlwf print
+             * nothing and exit 0; the other has to name line 1, column 8. */
+            static const char XML_SCRIPT[] =
+                "#!/bin/sh\n"
+                "cd " PATH_TMP_DIR "\n"
+                "O=" PATH_TMP_DIR "m100c.out\n"
+                "/bin/expattest > " PATH_TMP_DIR "m100c.expat.txt 2>&1\n"
+                "echo \"expattest exit $?\" >> $O\n"
+                "toybox grep -h 'Checks:' " PATH_TMP_DIR "m100c.expat.txt >> $O\n"
+                "echo '<a><b x=\"1\">hi</b></a>' > " PATH_TMP_DIR "m100c.xml\n"
+                "/bin/xmlwf " PATH_TMP_DIR "m100c.xml && echo 'xmlwf well-formed' >> $O\n"
+                "echo '<a><b></a>' > " PATH_TMP_DIR "m100c.bad.xml\n"
+                "/bin/xmlwf " PATH_TMP_DIR "m100c.bad.xml >> $O 2>&1\n"
+                "toybox rm -f " PATH_TMP_DIR "m100c.expat.txt " PATH_TMP_DIR
+                "m100c.xml " PATH_TMP_DIR "m100c.bad.xml\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)XML_SCRIPT,
+                            sizeof(XML_SCRIPT) - 1) != 0) {
+                panic("M100c self-test: could not write the expat fixture");
+            }
+            started = pit_get_ticks();
+            pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m100c] the expat fixture could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            uint64_t expat_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
+            k_memset(produced, 0, sizeof(produced));
+            n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m100c] expat's own suite produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"expattest exit 0",
+                     "expat's own test program saying it passed"},
+                    {"100%: Checks: 4392, Failed: 0",
+                     "all 4,392 of its checks, in its own words - the sentence the host prints"},
+                    {"xmlwf well-formed",
+                     "xmlwf accepting a well-formed document read off this filesystem"},
+                    {"m100c.bad.xml:1:8: mismatched tag",
+                     "and naming the line and column of a tag that does not match"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m100c] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            if (!all_ok) {
+                klog_puts("[m100c] what expat wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m100c] ---- end\n");
+                panic("M100 self-test: expat does not work here");
+            }
+            klog_perf("freetype_render_ms", freetype_ms, "ms");
+            klog_perf("expat_suite_ms", expat_ms, "ms");
+            klog_puts("[m100c] freetype against the host, and expat by its own suite: "
+                       "freetype 2.13.3, linking the libpng and zlib beside it, "
+                       "renders 570 glyphs of DejaVu Sans through its bytecode "
+                       "interpreter, both rasterizers and its autohinter BYTE-IDENTICAL "
+                       "with the host's build of the same source; expat 2.6.4 passes "
+                       "all 4,392 of its own checks here, and xmlwf reads a document "
+                       "off this disk and says where the tag is wrong "
+                       "- self-test passed.\n\n");
+        }
+    }
+
+    /* ---- M100 self-test: sqlite, against the host ------------------------
+     *
+     * The sixth library of the stack, and the one that cost the most:
+     * sqlite 3.47.2's shell links popen and pclose, which this libc did
+     * not have, and its VFS takes fcntl record locks, which this kernel
+     * refused - every INSERT here was a "disk I/O error" until
+     * kernel/fs/flock.c existed. So what this proves is three things at
+     * once: a 244,000-line library compiled by this project's compiler
+     * agrees with clang's build of it; a transaction's journal file is
+     * created, written, synced and unlinked on this filesystem; and the
+     * record locks sqlite takes around every one of them are granted,
+     * released at close, and never in the way of the process that holds
+     * them.
+     *
+     * Graded like [m100c]'s freetype half: tests/sqlite/cases.sql through
+     * /bin/sqlite3, and the transcript cmp'd against the host build's.
+     * Every line of that script is deterministic on purpose. Timed,
+     * because 5,000 rows through a B-tree with an index and a VACUUM is
+     * the first real database workload this disk has carried.
+     *
+     * Skipped when absent, for the reason [m94], [m95] and [m100] skip.
+     */
+    {
+        os_stat_t sst;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/sqlite3", (uint64_t)&sst, 0) != 0) {
+            klog_puts("[m100d] /bin/sqlite3 is not on this image - skipped. "
+                       "tools/build-thirdparty.sh builds sqlite.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m100d.sh";
+            const char *result = PATH_TMP_DIR "m100d.out";
+            /* -bail stops at the first error, so a transcript that
+             * diverges is short and names the statement; -batch keeps
+             * the shell from thinking it has a terminal. The database
+             * and its journal live in /tmp and are removed after, for
+             * the reason [m100b] gives. */
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "cd " PATH_TMP_DIR "\n"
+                "D=/usr/share/m100\n"
+                "O=" PATH_TMP_DIR "m100d.out\n"
+                "toybox rm -f " PATH_TMP_DIR "m100d.db " PATH_TMP_DIR "m100d.db-journal\n"
+                "/bin/sqlite3 -batch -bail " PATH_TMP_DIR "m100d.db < $D/cases.sql > "
+                PATH_TMP_DIR "m100d.txt 2>&1\n"
+                "echo \"sqlite3 exit $?\" >> $O\n"
+                "toybox cmp $D/sqlite.expected " PATH_TMP_DIR "m100d.txt"
+                " && echo 'sqlite agrees with the host' >> $O\n"
+                "toybox tail -n 3 " PATH_TMP_DIR "m100d.txt >> $O\n"
+                "toybox rm -f " PATH_TMP_DIR "m100d.txt " PATH_TMP_DIR "m100d.db "
+                PATH_TMP_DIR "m100d.db-journal\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M100d self-test: could not write the sqlite fixture");
+            }
+            uint64_t started = pit_get_ticks();
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m100d] the sqlite fixture could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            uint64_t sqlite_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
+            static char produced[1024];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m100d] the sqlite fixture produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"sqlite3 exit 0",
+                     "every statement in tests/sqlite/cases.sql ran without error"},
+                    {"sqlite agrees with the host",
+                     "the transcript byte-identical with the host's build of the same sqlite"},
+                    {"sqlite: done",
+                     "and the script reached its own last line"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m100d] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            /* And the locks: every one sqlite took is released, because
+             * the process that took them is gone. A table with an entry
+             * left in it is a leak that would refuse the next database. */
+            if (flock_count() != 0) {
+                klog_puts("[m100d] record locks left in the table after sqlite exited: ");
+                klog_put_dec((uint32_t)flock_count());
+                klog_putc('\n');
+                all_ok = 0;
+            }
+            if (!all_ok) {
+                klog_puts("[m100d] what sqlite wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m100d] ---- end\n");
+                panic("M100 self-test: sqlite does not agree with the host here");
+            }
+            klog_perf("sqlite_fixture_ms", sqlite_ms, "ms");
+            klog_puts("[m100d] sqlite against the host: sqlite 3.47.2, built unmodified, "
+                       "runs tests/sqlite/cases.sql - 5,000 rows through a B-tree and an "
+                       "index, a transaction rolled back and one committed through a "
+                       "journal on this filesystem, joins, window functions, a VACUUM, "
+                       "and the shell's popen and system - with a transcript BYTE-IDENTICAL "
+                       "to the host's build of the same source, every fcntl record lock it "
+                       "took granted and given back - self-test passed.\n\n");
         }
     }
 

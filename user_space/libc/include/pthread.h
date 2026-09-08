@@ -84,12 +84,35 @@ typedef struct {
  * The 2 is sticky - an unlock that sees it wakes somebody even if that
  * somebody has since given up - and that is deliberate. Clearing it
  * accurately needs a count of waiters, and an unnecessary wake costs one
- * syscall while a missed one costs a hang. */
+ * syscall while a missed one costs a hang.
+ *
+ * ---- M100: and an owner and a count, for the two other types ---------
+ *
+ * The word above is the whole of a NORMAL mutex and its fast paths are
+ * unchanged. RECURSIVE and ERRORCHECK need to know who holds the lock -
+ * the first so the holder can take it again, the second so the holder
+ * is told rather than deadlocked - and that is the `owner` (a thread id,
+ * since a thread here is a task with its own id) and, for RECURSIVE,
+ * how many times. Sixteen bytes rather than four; glibc's is forty.
+ *
+ * Until M100 this header REFUSED the two types in settype, on M65's
+ * rule, and said why: "a recursive mutex this library treated as normal
+ * deadlocks the first time a program relies on the recursion, somewhere
+ * far from here". sqlite is that program - its database mutex is
+ * recursive by design - and it does not check settype's return value,
+ * so the refusal was invisible and the deadlock arrived anyway: the
+ * eighth syscall of its life was a futex wait on a mutex it held. A
+ * refusal only refuses when the caller looks. */
 typedef struct {
     volatile unsigned int state;
+    unsigned int type;     /* PTHREAD_MUTEX_NORMAL / RECURSIVE / ERRORCHECK */
+    volatile int owner;    /* the thread id holding it, for the two typed kinds; 0 when free */
+    unsigned int count;    /* recursion depth, RECURSIVE only */
 } pthread_mutex_t;
 
-#define PTHREAD_MUTEX_INITIALIZER {0}
+#define PTHREAD_MUTEX_INITIALIZER {0, 0, 0, 0}
+#define PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP {0, 1, 0, 0}
+#define PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP {0, 2, 0, 0}
 
 typedef struct {
     volatile int done;
@@ -131,7 +154,7 @@ typedef struct {
  * accepted and does nothing, which is the truthful implementation rather
  * than a stub. */
 typedef struct { int unused; } pthread_condattr_t;
-typedef struct { int unused; } pthread_mutexattr_t;
+typedef struct { int type; } pthread_mutexattr_t; /* M100: the one thing there is to configure */
 
 #define PTHREAD_ONCE_INIT {0, PTHREAD_MUTEX_INITIALIZER}
 
@@ -198,11 +221,11 @@ int pthread_barrier_wait(pthread_barrier_t *b);
  * where threads share one pid this would be the hard one; here it is the
  * easy one.
  *
- * The mutex TYPES are a truthful refusal. PTHREAD_MUTEX_RECURSIVE and
- * _ERRORCHECK need a mutex that records its owner and a count, and this
- * one is a word - so `settype` accepts NORMAL/DEFAULT and refuses the
- * other two, rather than accepting them and behaving like NORMAL, which
- * would deadlock a program that relied on recursion.
+ * The mutex TYPES were a truthful refusal until M100 - `settype`
+ * accepted NORMAL/DEFAULT and refused the other two rather than behaving
+ * like NORMAL, which would deadlock a program that relied on recursion.
+ * It did anyway, because sqlite does not check what settype returns.
+ * All three are real now; see the mutex's own note above.
  */
 #define PTHREAD_MUTEX_NORMAL     0
 #define PTHREAD_MUTEX_DEFAULT    0

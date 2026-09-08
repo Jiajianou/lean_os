@@ -47,21 +47,19 @@ div_t div(int num, int den);
 ldiv_t ldiv(long num, long den);
 lldiv_t lldiv(long long num, long long den);
 
-/* M97: `system` is declared and always fails.
+/* M97 declared `system` and made it always fail, on M65's rule and its
+ * mirror image - do not build a thing that pretends to DO something -
+ * because nothing ported here had needed one, and "the version that
+ * would get written without a caller to check it against would be wrong
+ * in some way nobody would find".
  *
- * This is M65's rule applied to a libc function rather than to a
- * syscall: "don't build a thing that pretends to enforce something", and
- * its mirror image - do not build a thing that pretends to DO
- * something. There is a shell here and a spawn, so a real system() is
- * writable; what there is not is a reason, because nothing ported here
- * has needed one and the version that would get written without a caller
- * to check it against would be wrong in some way nobody would find.
- *
- * It returns 0 for the `system(NULL)` probe - which asks "is there a
- * command processor", and the honest answer for a function that will
- * refuse every command is no - and -1 for everything else. A program
- * that checks gets told; a program that does not check gets a failure
- * rather than silence. */
+ * M100 found the caller: sqlite's own shell, whose `.shell` is system()
+ * and whose `.import '|cmd'` is popen(). So it is real now - `/bin/sh -c
+ * command` over fork and exec, in popen.c beside the other two - and
+ * what checks it is the sqlite transcript that has to match the host's.
+ * Returns the wait status (WEXITSTATUS gives the command's exit code,
+ * 127 when the shell could not run it), -1 if no child could be made,
+ * and 1 for the `system(NULL)` probe, because there is a shell here. */
 int system(const char *command);
 
 int atexit(void (*fn)(void));

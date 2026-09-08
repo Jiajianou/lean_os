@@ -103,12 +103,44 @@ static void futex_wake(volatile unsigned int *p, int count) {
 }
 
 int pthread_mutex_init(pthread_mutex_t *m, const void *attr) {
-    (void)attr;
     if (!m) {
         return 22;
     }
     m->state = 0;
+    m->type = attr ? (unsigned int)((const pthread_mutexattr_t *)attr)->type
+                   : PTHREAD_MUTEX_NORMAL;
+    m->owner = 0;
+    m->count = 0;
     return 0;
+}
+
+/* M100: the typed kinds check the owner before touching the word. The
+ * owner is read without a lock, and that is sound: the only thread for
+ * which "owner == me" can be true is the one that wrote it, and it
+ * cannot be racing itself. */
+static int mutex_lock_word(pthread_mutex_t *m);
+
+static int typed_lock_prologue(pthread_mutex_t *m, int *done) {
+    *done = 0;
+    if (m->type == PTHREAD_MUTEX_NORMAL) {
+        return 0;
+    }
+    if (m->owner == (int)pthread_self()) {
+        *done = 1;
+        if (m->type == PTHREAD_MUTEX_RECURSIVE) {
+            m->count++;
+            return 0;
+        }
+        return 35; /* EDEADLK: ERRORCHECK, and the holder asked again */
+    }
+    return 0;
+}
+
+static void typed_lock_epilogue(pthread_mutex_t *m) {
+    if (m->type != PTHREAD_MUTEX_NORMAL) {
+        m->owner = (int)pthread_self();
+        m->count = 1;
+    }
 }
 
 int pthread_mutex_destroy(pthread_mutex_t *m) {
@@ -120,6 +152,17 @@ int pthread_mutex_lock(pthread_mutex_t *m) {
     if (!m) {
         return 22;
     }
+    int done;
+    int r = typed_lock_prologue(m, &done);
+    if (done) {
+        return r;
+    }
+    r = mutex_lock_word(m);
+    typed_lock_epilogue(m);
+    return r;
+}
+
+static int mutex_lock_word(pthread_mutex_t *m) {
     /* ---- M96: the three-state lock - see <pthread.h> for the states ---
      *
      * The uncontended acquire is the CAS below and nothing else: one
@@ -159,12 +202,34 @@ int pthread_mutex_trylock(pthread_mutex_t *m) {
     if (!m) {
         return 22;
     }
-    return atomic_cas(&m->state, 0, 1) == 0 ? 0 : 16 /* EBUSY */;
+    if (m->type == PTHREAD_MUTEX_RECURSIVE && m->owner == (int)pthread_self()) {
+        m->count++;
+        return 0;
+    }
+    if (atomic_cas(&m->state, 0, 1) != 0) {
+        return 16; /* EBUSY - for ERRORCHECK too: trylock by the holder is busy, not deadlock */
+    }
+    typed_lock_epilogue(m);
+    return 0;
 }
 
 int pthread_mutex_unlock(pthread_mutex_t *m) {
     if (!m) {
         return 22;
+    }
+    /* M100: the typed kinds are unlocked by their owner or not at all,
+     * and a RECURSIVE one only when the last of its holds goes. The
+     * owner is cleared BEFORE the word is released: a thread that takes
+     * the word the instant it is free must not read a stale owner. */
+    if (m->type != PTHREAD_MUTEX_NORMAL) {
+        if (m->owner != (int)pthread_self()) {
+            return 1; /* EPERM */
+        }
+        if (m->type == PTHREAD_MUTEX_RECURSIVE && --m->count > 0) {
+            return 0;
+        }
+        m->owner = 0;
+        m->count = 0;
     }
     /* M96: an exchange rather than a plain store, so that unlocking is a
      * barrier too - every write the critical section made is visible
@@ -820,7 +885,7 @@ int pthread_mutexattr_init(pthread_mutexattr_t *attr) {
     if (!attr) {
         return 22;
     }
-    attr->unused = PTHREAD_MUTEX_DEFAULT;
+    attr->type = PTHREAD_MUTEX_DEFAULT;
     return 0;
 }
 
@@ -833,13 +898,14 @@ int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
     if (!attr) {
         return 22;
     }
-    if (type != PTHREAD_MUTEX_NORMAL && type != PTHREAD_MUTEX_DEFAULT) {
-        /* Refused rather than accepted-and-ignored. A recursive mutex
-         * this library treated as normal deadlocks the first time a
-         * program relies on the recursion, somewhere far from here. */
+    /* M100: all three are real. The refusal that stood here was right
+     * about the deadlock and wrong that refusing prevented it - sqlite
+     * never reads this return value. See <pthread.h>. */
+    if (type != PTHREAD_MUTEX_NORMAL && type != PTHREAD_MUTEX_RECURSIVE &&
+        type != PTHREAD_MUTEX_ERRORCHECK) {
         return 22;
     }
-    attr->unused = type;
+    attr->type = type;
     return 0;
 }
 
@@ -847,7 +913,7 @@ int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *out) {
     if (!attr || !out) {
         return 22;
     }
-    *out = attr->unused;
+    *out = attr->type;
     return 0;
 }
 
