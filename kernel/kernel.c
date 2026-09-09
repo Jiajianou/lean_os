@@ -131,7 +131,8 @@
     X(faulttest)                   \
     X(measure)                     \
     X(os)                         \
-    X(pkgtest)
+    X(pkgtest)                    \
+    X(dirtest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -11773,6 +11774,58 @@ static void boot_selftests_system(void) {
             klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
             klog_puts(" ms).\n\n");
         }
+    }
+
+    /* ---- M112 self-test: the tree walks behind the Files app ------------
+     *
+     * The Files app can create a folder now, and therefore has to be
+     * able to remove one with things in it. SYS_rmdir deliberately will
+     * not - "recursive delete is one keystroke away from losing
+     * everything under a path, and this OS has no trash to take it back
+     * out of" - so the recursion lives in user space, in
+     * user_space/lib/fsutil.c, behind a confirm that counted the tree
+     * first and names the number.
+     *
+     * tests/test_fsutil.c grades that walk in microseconds against the
+     * host's own filesystem, and grades it harder: the depth ceiling,
+     * the batch boundary, the empty cases. What it cannot ask is whether
+     * SYS_getdents on leanfs marks a directory the way the walk expects,
+     * whether a cookie survives the entries under it being unlinked, or
+     * whether a path assembled one component at a time is one this
+     * resolver still accepts. Those are questions about this machine.
+     *
+     * /bin/dirtest is the program that asks them - it builds a tree,
+     * counts it, requires SYS_rmdir to refuse the full one, removes it
+     * with the walk, and then asks SYS_stat whether each level is gone
+     * and whether the directory *beside* it is untouched. See its own
+     * header for the exit codes.
+     */
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        size_t dt_bytes = 0;
+        uint8_t *dt_img = read_program(PATH_BIN_DIR "dirtest", &dt_bytes);
+        if (!dt_img) {
+            panic("M112 self-test: /bin/dirtest is not on this disk");
+        }
+        const char *dt_argv[] = {PATH_BIN_DIR "dirtest", 0};
+        task_t *dt = process_spawnv("dirtest", dt_img, dt_bytes, dt_argv);
+        long rc = dt ? do_syscall(SYS_wait, (uint64_t)dt->id, 0, 0) : -1;
+        kfree(dt_img);
+        if (rc != 0) {
+            klog_puts("[m112] dirtest exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_puts(" - see user_space/bin/dirtest.c for what each code "
+                      "means\n");
+            panic("M112 self-test: the recursive tree walk behind the Files "
+                  "app does not do what it says on this filesystem");
+        }
+        klog_puts("[m112] the Files app's tree walks, on leanfs: a three-level "
+                  "tree counted to the byte, SYS_rmdir refusing the full "
+                  "directory it is supposed to refuse, the whole tree removed "
+                  "by the user-space walk, and the directory beside it "
+                  "untouched - self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
     }
 
     /* ---- Q16 self-test: a disk that fails, and a machine that does not --

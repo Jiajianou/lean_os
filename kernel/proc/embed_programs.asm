@@ -422,3 +422,9 @@ global pkgtest_elf_end
 pkgtest_elf_start:
     incbin "build/pkgtest.elf"
 pkgtest_elf_end:
+
+global dirtest_elf_start
+global dirtest_elf_end
+dirtest_elf_start:
+    incbin "build/dirtest.elf"
+dirtest_elf_end:

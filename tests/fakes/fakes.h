@@ -136,3 +136,17 @@ uint64_t fake_vmm_cow_breaks(void);
 uint64_t fake_vmm_unmaps_in(void);
 /* M98: what vmm_rss_peak_pages answers for every address space here. */
 void fake_vmm_set_rss_peak(uint64_t pages);
+
+/* ---- fake_user_fs, M112 ------------------------------------------------
+ *
+ * The five filesystem calls user_space/lib/fsutil.c makes, backed by a
+ * real directory tree under a per-reset mkdtemp. The point of backing
+ * them with the host's own filesystem rather than a model is that "the
+ * folder is gone" is then answered by the host's `stat` and not by the
+ * code that deleted it - see the file's own header. */
+void fake_user_fs_reset(void);
+/* Building a tree to walk. Guest paths ("/a/b"), rewritten under the
+ * temp root before they touch anything. */
+int fake_user_fs_mkdir(const char *guest);
+int fake_user_fs_write(const char *guest, size_t bytes);
+int fake_user_fs_exists(const char *guest);

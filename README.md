@@ -23,7 +23,9 @@ UEFI firmware
   drag and drop, four virtual desktops, and keyboard chords.
 - **Applications.** A terminal with a real shell (arguments, quoting,
   `>`/`>>`, a pipe, tab completion, `cd`), a text editor (undo, redo,
-  find, paste), a file manager (columns, sorting, rename/copy/delete), a
+  find, paste), a file manager (columns, sorting, exact sizes, free
+  space, new file, new folder, rename, copy, and a delete that takes a
+  folder with things in it - behind a confirm that counted them), a
   task manager, a settings panel, a paint toy and a clock.
 - **A system underneath.** Pre-emptive multitasking across multiple
   cores, a per-process address space, a custom filesystem with
@@ -191,9 +193,9 @@ Four instruments, and none of them subsumes another:
   fake timer and a fake CPU, so a tick is a function call and a
   fairness property can be checked at every task count, and it learns
   the order locks are taken in so an inversion is an error rather than
-  a comment (Q9). 247 tests.
+  a comment (Q9). 338 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 112 markers and 32 performance
+  image and grade the serial log against 123 markers and 39 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It

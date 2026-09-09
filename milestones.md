@@ -71,12 +71,12 @@ that has never happened.
 
 | | state |
 |---|---|
-| **Milestones** | M0–M111 numbered: 102 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
+| **Milestones** | M0–M112 numbered: 103 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
-| **Head of the queue** | **M100** — eight of nine libraries landed; M111 was taken out of order at the user's request and closed 2026-09-09 |
+| **Head of the queue** | **M100** — eight of nine libraries landed; M111 and M112 were both taken out of order at the user's request and closed 2026-09-09 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
-| **Host unit tests** | 311/311 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 122 required, graded on every self-test boot |
+| **Host unit tests** | 341/341 passing, 3 slow ones skipped in `--fast` |
+| **Boot markers** | 123 required, graded on every self-test boot |
 | **Performance budgets** | 39 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
@@ -366,7 +366,7 @@ increment cost.
 
 | instrument | what it grades | how it is run |
 |---|---|---|
-| **Host unit tests** (`tests/`) | libk, heap, malloc, leanfs, every network parser, the TCP state machine, PTY, symtab, UTF-8, fnmatch, getopt, fwcfg — and the **scheduler** (Q13), 2,157 lines against a fake timer and a fake CPU, with lock-order inversions made errors rather than comments. and, since M100, the **record-lock table** (`kernel/fs/flock.c`, mutation score 91.5%). **268 tests**, ASan+UBSan, under a second | `--fast` |
+| **Host unit tests** (`tests/`) | libk, heap, malloc, leanfs, every network parser, the TCP state machine, PTY, symtab, UTF-8, fnmatch, getopt, fwcfg — and the **scheduler** (Q13), 2,157 lines against a fake timer and a fake CPU, with lock-order inversions made errors rather than comments. and, since M100, the **record-lock table** (`kernel/fs/flock.c`, mutation score 91.5%). and, since M112, `user_space/lib/fsutil.c` — the Files app's size formatting, name rule and recursive tree walks, the last of those against a real directory tree through the host's own filesystem. **338 tests**, ASan+UBSan, under a second | `--fast` |
 | **Boot self-tests** | **115 required markers** and 36 performance budgets, graded off the serial log of a real boot. The switch comes from outside the image via fw_cfg, so the image is byte-identical with or without them | `tools/qemu-serial-test.sh` |
 | **Input suite** | real clicks and keys through QEMU's monitor, graded on real framebuffer pixels. Most tests check something *did* change; two check that nothing else did, which is the only way to catch a flicker (Q7/Q15). Boots once per image and restores a snapshot per test, keyed on the image hash so a stale one fails closed (Q19) | `tools/qemu-input-test.sh` |
 | **Differential tests** | `sh`, the regex engine, `sscanf`, `printf`, libm, `realpath`, and the FILE layer — each compiled for the host from the same source the machine runs, put beside the host's own, and required to agree. Nothing in the fixtures says what the right answer is. **Since M100 the same shape grades three ported libraries**: freetype's rasterizer, sqlite's shell and harfbuzz's shaper, each built for the host from the same tarball and required to produce byte-identical output on the machine (`[m100c]`, `[m100d]`, `[m100e]`) | `--fast`; the library halves on the graded boot |
@@ -454,12 +454,23 @@ unbuilt is the drift *Deferred* exists to catch.
 | **2** | **M100** — the browser gap, measured | in progress: eight of nine libraries landed; TLS done | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
 | **3** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not |
 | **4** | **Q14** — the compositor, off the machine | not started | the move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded in milliseconds rather than only through a screendump |
-| **5** | **M106 (tail)** — the battery green on four cores | 3 known failures, **plus `smp-test.sh` itself failing 2 runs in 3** (measured 2026-09-09 at HEAD — see *The machine as it stands*) | not a new milestone: the three failures M106 named and left. It gates CPU affinity, and there are now two reproductions on demand — M98's bootstrap profiler, and a 21-second `tools/smp-test.sh` that panics with "this CPU is not on the stack of the task it thinks it is running" about two attempts in three. **Start with the second one** |
+| **5** | **M106 (tail)** — the battery green on four cores | 3 known failures, **plus `smp-test.sh` itself failing 2 runs in 3** (measured 2026-09-09 at HEAD — see *The machine as it stands*) | not a new milestone: the three failures M106 named and left. It gates CPU affinity, and there are now two reproductions on demand — M98's bootstrap profiler, and a 21-second `tools/smp-test.sh` that panics with "this CPU is not on the stack of the task it thinks it is running" about two attempts in three. **Start with the second one**. M112 adds a third, and it needs no second CPU: two graded boots in three stalled inside a `spawn`-then-`SYS_wait` self-test (`[m100d]` once, `[m100f]` once) on a single-CPU battery, eight to nine minutes with no serial output, while a third run of the same image was 123/123 in 410 s |
 | **6** | **M103 (2nd)** — MSI/MSI-X | condition fires at row 7 | its own condition is *"a driver for a part that has no other way to interrupt"*, and M107's NVMe bullet answers it by name. The LAPIC-timer and interrupt-driven-virtio boxes are **not** collected here — they wait for hardware |
 | **7** | **M107** — AHCI, NVMe, xHCI + USB HID | not started | all three gradeable under QEMU at this desk, which is what makes M110 a boot rather than a bring-up. Collects M92's last open box on the way |
 | **8** | **M108 (driver half)** — a real NIC | not started | the `e1000e` driver is QEMU-gradeable and belongs here. The link half is held — see below |
 | **9** | **M109** — lean_os built on lean_os | not started | needs nothing from rows 7–8 and stays after them anyway: the tree it rebuilds should be the whole tree, drivers included, or the generational test grades a subset of the machine it runs on |
 | **10** | **M110** — the boot that has never happened | **held** | see the hold |
+
+**M112 is not in this table either, and for the same reason.** The
+Files app was asked for directly on 2026-09-09 — *"complete features to
+create files, sort files, view file sizes, delete files and such"* —
+and closed the same day. Three of those four already existed (M56, M59);
+the missing one was that this window could not create anything at all.
+It jumped nothing, and it changed nothing for any row below. What it
+*did* change is worth one line: the recursive delete it needed lives in
+`user_space/lib/fsutil.c` rather than in `SYS_rmdir`, so the kernel's
+"empty directories only" rule is intact and now has a boot self-test
+asserting that it stays that way.
 
 **M111 is not in this table and that is recorded rather than hidden.**
 `os`, the package manager, was asked for directly on 2026-09-09 and built
@@ -2266,6 +2277,211 @@ Repository: grep 3.11 (1.2 MB), bzip2 1.0.8, and `impostor` — a fixture
 that installs binaries called `compositor` and `shutdown` and must get
 nothing, because a boundary with no adversary in the image is a boundary
 nothing checks.
+
+---
+
+### M112 — the Files app, finished: making things, and unmaking them `[x]`
+
+**Landed 2026-09-09.** Asked for directly rather than taken off the
+queue, the same way M111 was: *"I want you to work on the Files app on
+the Desktop, I want it to have complete features to create files, sort
+files, view file sizes, delete files and such."*
+
+Three of those four already existed. Sorting has been in this window
+since M59 (click a column heading, click it again to reverse), the size
+and date columns landed in the same milestone, and rename, copy and
+delete arrived in M56. What was missing was the first verb in the
+sentence, and it was missing completely: **this window could not create
+anything.** A file arrived on this disk from a text editor's Save box,
+from a shell redirect, or from the boot self-tests; a folder arrived
+from `mkdir` typed into a terminal. The Files app was a viewer with an
+edit menu, and the first thing anyone tries in a file manager was the
+one thing it refused.
+
+- [x] **New File and New Folder** — `N` and `F`, or the menu. `OPEN_EXCL`
+      rather than a stat-then-create, which is M87's own argument for why
+      that flag exists.
+- [x] **A right-click context menu** with all six operations and the key
+      each one answers to. Three of them used to be reachable only by
+      knowing that `R`, `C` and Backspace did something.
+- [x] **Exact sizes.** The status strip describes the selected row —
+      name, exact byte count, modified time — and `Get Info` shows the
+      same for a folder as a recursive count of what is under it. The
+      size *column* still rounds, by design; two files that both read
+      "8.4K" are not the same file, and until now nothing in this window
+      could tell you which.
+- [x] **How much is left.** With nothing selected the strip reports the
+      folder's item count and size, and both of this filesystem's
+      ceilings from `SYS_statvfs` — free bytes *and* free inodes,
+      because `os_fs.h` says in as many words that a tree of small files
+      exhausts the second with most of the first still available.
+- [x] **A delete that takes a folder with things in it**, behind a
+      confirm that counted the tree first and names the number.
+- [x] **Left and Right arrows** navigate. Leaving a directory used to
+      take selecting row 0 and pressing Enter.
+- [x] Graded three ways: **27 host tests** (`tests/test_fsutil.c`,
+      against a real directory tree through
+      `tests/fakes/fake_user_fs.c`), a **`[m112]` boot marker** driven by
+      `user_space/bin/dirtest.c`, and **two input tests** that drive the
+      whole create-fill-delete chain through real clicks and keys.
+
+#### The one place this argues with an earlier decision
+
+`SYS_rmdir` takes empty directories only, and its comment in
+`system_api/include/syscall.h` says why: *"recursive delete is one
+keystroke away from losing everything under a path, and this OS has no
+trash to take it back out of."*
+
+That is still right and the syscall is unchanged. What changed is the
+other half of the sentence. A window that will **make** a folder but not
+remove one it filled is half a feature, and the half it keeps is the
+dangerous one — you can fill a disk from a GUI that offers no way to
+empty it.
+
+So the recursion lives in user space (`user_space/lib/fsutil.c`), and
+what makes it acceptable is the thing the kernel could never have: a
+confirm that ran `fsutil_count_tree` first and asks **"Delete folder and
+41 items inside?"** rather than "Delete this folder?". The second
+question is a button somebody presses. The first is one they can answer.
+
+`/bin/dirtest` checks that `SYS_rmdir` still refuses a full directory,
+so if the kernel ever relaxes that rule the dialog stops being wrong
+quietly.
+
+#### The bug that was already there, found by writing the tests
+
+`selected` was an **index into a list that is rebuilt every second**.
+
+The window re-lists on a timer so that a file saved from another window
+shows up. Each rebuild overwrote `names[]` in place and then clamped
+`selected` to the new count — so a file appearing or vanishing anywhere
+*above* the selection silently moved it onto a different file. A second
+Files window copying something, an editor saving, the sort order
+changing: any of them. The next Delete then showed its confirm about the
+row you were looking at and removed the one the index had drifted onto.
+Nothing on screen said the moment it happened, which is the whole shape
+of it.
+
+The fix is four lines — carry the *name* across the rebuild and find it
+again — and it is what makes "create a folder and it is already
+selected" work at all, which is how it was found. A milestone about
+creating files found a bug about deleting them.
+
+Two smaller ones beside it:
+
+- **A prompt owned the keyboard and not the mouse.** The comment has
+  said "an open prompt owns every keystroke" since M56. Clicking another
+  row while a Rename box was open moved the selection, and Enter then
+  renamed the row that had been clicked using the name prefilled from
+  the row that had not. Prompts now swallow mouse events too.
+- **`Copy to:` truncated.** It opened with the source's own name
+  prefilled, and `OPEN_TRUNCATE` on Enter — one keystroke from a
+  whole-file truncation of whatever already had that name. `OPEN_EXCL`
+  now, like the create path.
+- **The hint line named a key that does not exist.** It said "Del
+  delete" for fifty-six milestones; `kernel/drivers/keyboard.c` decodes
+  `0x0E` to `'\b'` and has no entry for the Delete scancode at all. The
+  menu says `Bksp`.
+
+#### The instrument, and why it is a fake filesystem made of real files
+
+`tests/fakes/fake_user_fs.c` backs `SYS_getdents`, `stat`, `unlink`,
+`rmdir` and `mkdir` with the **host's own filesystem** under a per-test
+`mkdtemp`. It follows `fake_user_syscalls.c` (M98), and the reason for
+the shape is the assertion: the only useful thing to say about a
+recursive delete is *"is it gone"*, asked of something that is not the
+code that deleted it. A model filesystem written for this test would
+answer with the same assumptions the walk was written under — which is
+exactly the failure `make mutate` exists to catch. The host's `stat` has
+no such assumptions.
+
+It hands back at most three entries per call even when more would fit,
+because the batching *is* the part of the contract the walk has to
+survive: a fake that always returned a whole directory would never once
+exercise the loop that re-reads.
+
+That still leaves questions only the machine can answer — whether leanfs
+marks a directory the way the walk expects, whether a cookie survives
+the entries under it being unlinked, whether a path assembled one
+component at a time is one this resolver still accepts. `/bin/dirtest`
+asks those, on leanfs, in 70 ms.
+
+#### What was deliberately not built
+
+- **Multi-select.** Every operation here acts on one row. Bulk delete is
+  the obvious next thing and it needs a selection model, a confirm that
+  can describe a set, and three tests; nothing has asked for it.
+- **Recursive copy.** M59's note stands unchanged: a directory copy is a
+  different operation with its own failure modes.
+- **A trash.** Refused for M56's reason, which the counted confirm makes
+  less pressing rather than more.
+- **Remembering the sort order across launches.** `settings_file.c` is
+  the desktop's theme file and a per-app preference does not belong in
+  it. It would need a place for one, which is a milestone about
+  preferences and not about files.
+
+#### Cost
+
+`user_space/lib/fsutil.{c,h}` 407 lines, `user_space/bin/dirtest.c` 154,
+`tests/test_fsutil.c` 353, `tests/fakes/fake_user_fs.c` 205,
+`user_space/bin/file_manager.c` 1,035 → 1,709, plus the kernel's `[m112]`
+block and two input tests. Host tests **311 → 338**; boot markers
+**122 → 123**, `[m112]` costing **70 ms** of the battery. The graded boot
+is **123/123 with no panic**, every one of the 39 budgets inside its
+ceiling, at 396 s to desktop (ceiling 600). The two new interactive tests
+pass in 15 s and 18 s, and one of them is in the pre-commit `--quick`
+subset, where it runs **10/10** beside the nine tests that were already
+there — including `file_manager_navigates_directories`, which is the one
+this milestone's change to how the selection is tracked could have
+broken. The **whole input suite is 52/52** in 344 s, and the host tier
+with the slow tests in is **341/341**.
+
+Hand-mutated rather than left to `make mutate`, which does not target
+`user_space/lib`: dropping the `'/'` from the name rule, making
+`remove_at` not recurse, moving the decimal threshold from 10 to 100, and
+making `count_at` not descend. All four are killed, three of them by
+exactly one test each.
+
+#### Two graded boots in three stalled, and it is row 5 again
+
+Worth recording precisely, because the first reading was wrong and the
+correction is the useful part.
+
+Three graded boots were run on a fully populated image. **Two stalled**:
+the serial log stopped dead for eight and nine minutes with QEMU pinned
+at 100%, once inside `[m100d]` and once inside `[m100f]`, and both were
+killed by `qemu-serial-test.sh`'s 900-second ceiling with thirty-five
+markers still to come. The **third is 123/123 with no panic**, every one
+of the 39 budgets inside its ceiling, and it took **410 seconds of wall
+clock** — 396 s of that to the desktop.
+
+The tempting explanation was that 900 s had simply stopped being enough
+for an image carrying toybox, the toolchain, Python and nine libraries.
+It is wrong, and the third run is what disproves it: 410 s is less than
+half the ceiling. The two that stalled were not slow. They stopped.
+
+**The second and third runs used the same image and the same kernel.**
+Nothing was rebuilt between them. So this is intermittent, and where it
+stops says which class it is: both `[m100d]` and `[m100f]` spawn a child
+and `SYS_wait` on it, which is the shape of queue row 5 — Q13's "about
+one boot in ten hangs", the reason the scheduler was moved off the
+machine in the first place.
+
+**It is not this milestone's.** The stalls are in stages M112 does not
+touch, the same kernel completed a full battery earlier the same day on
+an image without the third-party programs, and the third run is green.
+But two in three is a much worse rate than the one in ten row 5 was
+written about, so it is recorded here rather than dismissed: **whoever
+takes row 5 now has a second reproduction beside `tools/smp-test.sh`,
+and this one needs no second CPU.** Both stalls followed a period of
+heavy host load, which is the variable to try first.
+
+**The harness was right and was not believed.** Its own failure line
+says "log capture ended too early, or a real regression - try a longer
+SECONDS first". Read it as the first suggestion rather than as a
+diagnosis: a stall and a slow boot produce the identical message, and
+telling them apart costs one more run and a look at whether
+`boot_to_desktop_s` ever printed at all.
 
 ---
 

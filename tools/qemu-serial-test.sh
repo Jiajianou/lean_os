@@ -491,6 +491,11 @@ REQUIRED_MARKERS=(
   "[m111] a package binary named \`compositor\` gets 0x0, not"
   "[m111] the kernel's package registry:"
   "[m111] a package manager: GNU grep 3.11, built here by"
+  # M112: the Files app can create a folder, so it has to be able to
+  # remove one with things in it. The recursion is user-space
+  # (user_space/lib/fsutil.c) and this is the marker saying it does what
+  # it says on leanfs rather than only against the host tier's fake.
+  "[m112] the Files app's tree walks, on leanfs:"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

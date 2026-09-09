@@ -1932,6 +1932,201 @@ def test_file_manager_navigates_directories(m):
              "double-clicking .. did not leave /bin")
 
 
+# M112: file_manager.c's own right-click menu and its prompt box, which
+# share their colours with desktop_icons.c's menu (CTX_MENU_BG above) and
+# text_editor.c's dialog. Named here rather than reused by accident: they
+# are the same numbers today and two different files' decisions.
+FM_CTX_ITEM_W = 124
+FM_CTX_ITEM_H = 20          # UI_FONT_UI_HEIGHT + 4
+FM_CTX_COUNT = 6
+FM_PROMPT_W, FM_PROMPT_H = 260, 72
+FM_PROMPT_BG = 0x243040
+
+
+def fm_prompt_is_open(shot, x, y):
+    """Whether file_manager.c's centred prompt box is on screen. Read as
+    a fill count rather than one pixel, because the box has a rounded
+    border and a text field inside it - a single probe could land on
+    either and say the wrong thing."""
+    px = x + (FM_W - FM_PROMPT_W) // 2
+    py = y + (FM_H - FM_PROMPT_H) // 2
+    return shot.count_color(FM_PROMPT_BG, px, py, FM_PROMPT_W, FM_PROMPT_H) > 3000
+
+
+def test_file_manager_creates_a_folder_and_deletes_it_full(m):
+    """M112, and the whole milestone in one gesture chain: right-click,
+    New Folder, put something in it, and delete the folder with the
+    something still inside.
+
+    Every step here was impossible before this milestone. The window had
+    no right-click menu, no way to create anything at all, and a delete
+    that refused a folder with contents - SYS_rmdir takes empty ones
+    only, which is the kernel rule the user-space walk in
+    user_space/lib/fsutil.c exists to work with rather than around.
+
+    Asserted by row counts rather than by reading names, the same way
+    test_file_manager_navigates_directories is, so it does not depend on
+    a font's shape or on what else happens to be in /home. The one thing
+    it does depend on is that the folder it makes sorts to row 1:
+    directories sort ahead of files whatever the key is (file_manager.c's
+    sort_before), row 0 is "..", and /home ships no other directory. That
+    is asserted rather than assumed - entering row 1 has to change the
+    listing to a two-row one, which only a directory this test just made
+    can do.
+
+    It cleans up after itself, and the cleanup *is* the assertion: the
+    row count has to come back to where it started."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[2][2])  # Files
+    wait_for_windows(m, 1)
+    x, y = app_origin(FIRST_APP_IDX)
+
+    before = fm_rows_with_text(m.screenshot(), x, y)
+    check(before > 0, "the Files window listed nothing")
+
+    # Right-click on empty space below the last row, so nothing is
+    # selected and the menu is unambiguously about the folder.
+    #
+    # file_manager.c clamps the menu into the window rather than drawing
+    # it off the edge, so where it lands is not where the click was -
+    # and near the bottom of the list it never is. Both the pixel check
+    # and the item click are measured from the clamped origin, derived
+    # here the same way the app derives it: to the list's right edge and
+    # to the strip above the status bar.
+    press_x = x + 60
+    press_y = y + FM_LIST_Y + (FM_ROWS_VISIBLE - 1) * FM_ROW_H
+    mx = min(press_x, x + FM_LIST_W - FM_CTX_ITEM_W)
+    my = min(press_y, y + (FM_H - FM_STATUS_H) - FM_CTX_ITEM_H * FM_CTX_COUNT)
+
+    m.right_click(press_x, press_y)
+    wait_for(m, lambda s: s.count_color(CTX_MENU_BG, mx, my, FM_CTX_ITEM_W,
+                                        FM_CTX_ITEM_H * FM_CTX_COUNT) > 500,
+             "right-clicking the file list did not open a context menu")
+
+    # "New Folder" is the second item.
+    m.click(mx + FM_CTX_ITEM_W // 2, my + FM_CTX_ITEM_H + FM_CTX_ITEM_H // 2)
+    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
+             "the New Folder menu item did not open a prompt")
+
+    m.type_text("m112dir")
+    m.sendkey("ret")
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before + 1,
+             "the new folder did not appear in the list", timeout=15.0)
+
+    # Into it - a directory sorts ahead of every file, and row 0 is "..".
+    m.double_click(*fm_row_point(x, y, FM_FIRST_FILE_ROW))
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == 1,
+             "row 1 was not the empty folder that was just created")
+
+    # And put a file in it, with the keyboard this time: N is New File.
+    m.sendkey("n")
+    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
+             "N did not open the New File prompt")
+    m.type_text("inside")
+    m.sendkey("ret")
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == 2,
+             "the new file did not appear inside the new folder", timeout=15.0)
+
+    # Left leaves the directory - the other gesture this milestone added.
+    m.sendkey("left")
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before + 1,
+             "the Left arrow did not leave the folder")
+
+    # Now delete the folder with a file still in it, which is the thing
+    # SYS_rmdir refuses and the walk does.
+    m.click(*fm_row_point(x, y, FM_FIRST_FILE_ROW))
+    time.sleep(0.4)
+    # Backspace, not Delete: kernel/drivers/keyboard.c decodes 0x0E to
+    # '\b' and has no entry for the Delete scancode at all, which is why
+    # M112 relabelled that menu item.
+    m.sendkey("backspace")
+    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
+             "Backspace did not open a delete confirm")
+    m.sendkey("y")
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before,
+             "the folder and the file inside it were not deleted", timeout=15.0)
+
+
+def test_file_manager_refuses_a_new_name_that_escapes_the_folder(m):
+    """M112's name rule, through the box a person types into.
+
+    Every path this window builds is cwd + '/' + name, so a New File box
+    that accepted a name with a separator in it would create a file
+    somewhere else - from a dialog that says "New file named" about the
+    folder you are looking at. fsutil_name_ok refuses it, and
+    tests/test_fsutil.c grades the rule itself; this checks that the
+    refusal is actually wired to the box.
+
+    The name is "<folder>/inside" and not "../inside", deliberately.
+    leanfs's own resolve() refuses ".." in a path outright, so a ".."
+    escape would be stopped by the filesystem whether this rule existed
+    or not - the test would pass with the check deleted. A forward slash
+    into a real subdirectory is a path this resolver accepts, which
+    makes it the one that actually asks the question.
+
+    So the assertion is that the subdirectory stays empty, and it is made
+    from inside it. Cleans up after itself."""
+    boot(m)
+    m.double_click(ICON_X, ICONS[2][2])  # Files
+    wait_for_windows(m, 1)
+    x, y = app_origin(FIRST_APP_IDX)
+
+    before = fm_rows_with_text(m.screenshot(), x, y)
+    check(before > 0, "the Files window listed nothing")
+
+    # A folder to try to escape into. F is New Folder.
+    m.sendkey("f")
+    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
+             "F did not open the New Folder prompt")
+    m.type_text("m112esc")
+    m.sendkey("ret")
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before + 1,
+             "the folder to escape into was not created", timeout=15.0)
+
+    # Now ask for a file whose name reaches into it.
+    m.sendkey("n")
+    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
+             "N did not open the New File prompt")
+    m.type_text("m112esc/inside")
+    m.sendkey("ret")
+
+    # Nothing new here, which is the weaker half - a refusal and a
+    # successful escape both leave this listing alone. A fixed wait
+    # rather than a poll: the claim is that nothing happened, and there
+    # is no state to poll toward. Two of file_manager.c's own REFRESH_MS
+    # periods is long enough for a row to have appeared if one was
+    # going to.
+    time.sleep(3.0)
+    check(fm_rows_with_text(m.screenshot(), x, y) == before + 1,
+          "a name with a path separator in it created something here")
+
+    # And the half that decides it: the folder it named is still empty.
+    # A directory sorts ahead of every file, and row 0 is "..", so the
+    # folder just made is row 1 - which the double-click confirms by
+    # entering it.
+    m.double_click(*fm_row_point(x, y, FM_FIRST_FILE_ROW))
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) >= 1,
+             "double-clicking the new folder did not enter it")
+    time.sleep(1.5)
+    rows = fm_rows_with_text(m.screenshot(), x, y)
+    check(rows == 1,
+          "a name with a path separator in it escaped into the subfolder "
+          "(%d rows inside it, expected just \"..\")" % rows)
+
+    # Clean up: back out and delete the folder.
+    m.sendkey("left")
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before + 1,
+             "the Left arrow did not leave the folder")
+    m.click(*fm_row_point(x, y, FM_FIRST_FILE_ROW))
+    time.sleep(0.4)
+    m.sendkey("backspace")
+    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
+             "Backspace did not open a delete confirm")
+    m.sendkey("y")
+    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before,
+             "the folder this test made was not cleaned up", timeout=15.0)
+
+
 def test_desktop_survives_losing_the_compositor(m):
     """M55, and the claim the whole milestone rests on: the desktop is no
     longer the thing that has to be alive for anything else to be.
@@ -2734,6 +2929,10 @@ TESTS = [
     ("alt_tab_visits_windows_in_use_order", test_alt_tab_visits_windows_in_use_order),
     ("a_crashing_program_only_takes_itself_down", test_a_crashing_program_only_takes_itself_down),
     ("file_manager_navigates_directories", test_file_manager_navigates_directories),
+    ("file_manager_creates_a_folder_and_deletes_it_full",
+     test_file_manager_creates_a_folder_and_deletes_it_full),
+    ("file_manager_refuses_a_new_name_that_escapes_the_folder",
+     test_file_manager_refuses_a_new_name_that_escapes_the_folder),
     ("desktop_survives_losing_the_compositor", test_desktop_survives_losing_the_compositor),
     ("editor_undo_restores_the_buffer", test_editor_undo_restores_the_buffer),
     ("terminal_scrollback_scrolls_with_the_wheel", test_terminal_scrollback_scrolls_with_the_wheel),
@@ -2786,6 +2985,11 @@ QUICK_TESTS = [
     "editor_undo_restores_the_buffer",
     "terminal_scrollback_scrolls_with_the_wheel",
     "file_manager_navigates_directories",
+    # M112: the create/delete chain, in the pre-commit subset because it
+    # is the only test anywhere that writes *and removes* a directory
+    # tree through the UI - the path that turns a bug in the walk into a
+    # folder somebody cannot get rid of.
+    "file_manager_creates_a_folder_and_deletes_it_full",
     "settings_persist_across_a_reboot",
     "a_crashing_program_only_takes_itself_down",
     # Q7: in the pre-commit subset despite costing 25s, because the bug
