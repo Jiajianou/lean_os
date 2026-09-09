@@ -20,6 +20,7 @@
 
 #include "arch/x86_64/tsc.h"
 #include "dev/pty.h"
+#include "dev/random.h" /* M100 */
 #include "dev/tty.h"
 #include "drivers/klog.h"
 #include "lib/libk.h"
@@ -80,23 +81,15 @@ static const char *const DEV_NAMES[DEV_COUNT] = {
  * device, which is what they are: there is no entropy pool to block on,
  * so a blocking variant would be a lie of a different shape.
  */
-static uint64_t rng_state;
-
-static uint64_t next_random(void) {
-    /* Re-mixed with the TSC on every call, so two reads separated by any
-     * real work do not continue one predictable sequence. Not entropy -
-     * a counter an attacker can also read - but it costs one instruction
-     * and makes the common "seed something at startup" case depend on
-     * when the program ran rather than only on the boot. */
-    rng_state ^= tsc_read();
-    rng_state ^= rng_state >> 12;
-    rng_state ^= rng_state << 25;
-    rng_state ^= rng_state >> 27;
-    return rng_state * 2685821657736338717ULL;
-}
-
+/* M100: the xorshift that stood here for ten milestones is gone, and
+ * the paragraph above it is kept because it was true and is the reason
+ * kernel/dev/random.c exists: a TLS library asked /dev/urandom for a
+ * key. Both names now read the generator described there - a ChaCha20
+ * stream under a key every interrupt of the boot has been mixed into
+ * and that is replaced the moment it produces output - and they are
+ * still one device, because there is still no entropy estimate to
+ * block on and inventing one would be the lie of the other shape. */
 void devfs_init(void) {
-    rng_state = tsc_read() | 1u; /* never zero - xorshift is stuck there */
 }
 
 /* "/null" -> DEV_NULL. "/" is the directory. -1 for anything else. */
@@ -245,16 +238,9 @@ static int64_t dev_read(int handle, void *buf, size_t len, uint32_t off) {
         k_memset(b, 0, len);
         return (int64_t)len;
     case DEV_RANDOM:
-    case DEV_URANDOM: {
-        size_t n = 0;
-        while (n < len) {
-            uint64_t r = next_random();
-            for (int i = 0; i < 8 && n < len; i++) {
-                b[n++] = (uint8_t)(r >> (i * 8));
-            }
-        }
+    case DEV_URANDOM:
+        random_bytes(b, len); /* M100 - see kernel/dev/random.h */
         return (int64_t)len;
-    }
     case DEV_TTY: {
         uint32_t n = tty_read(tty_console(), (char *)b, (uint32_t)len);
         return (int64_t)n;
@@ -292,12 +278,11 @@ static int64_t dev_write(int handle, const void *buf, size_t len, uint32_t off) 
         return -1;
     case DEV_RANDOM:
     case DEV_URANDOM:
-        /* Writing to /dev/random adds entropy on a real system. There is
-         * no pool here, so the bytes are mixed into the generator and
-         * that is honestly all that happens. */
-        for (size_t i = 0; i < len; i++) {
-            rng_state ^= (uint64_t)(uint8_t)b[i] << ((i % 8) * 8);
-        }
+        /* Writing to /dev/random adds entropy on a real system, and
+         * M100 made that true here: the bytes are fed to the pool the
+         * way an interrupt's timestamp is, and nothing is credited for
+         * them, because nothing is credited for anything (random.h). */
+        random_feed(b, len);
         return (int64_t)len;
     case DEV_TTY:
     case DEV_CONSOLE:

@@ -80,7 +80,8 @@ struct msghdr {
  * closed socket here returns an error rather than raising SIGPIPE, so
  * asking for that behaviour asks for what already happens. The rest are
  * accepted and ignored, and each is ignorable: there is no out-of-band
- * data, no peek buffer and no non-blocking bit yet (M100). */
+ * data and no peek buffer. MSG_DONTWAIT is real as of M100: it is the one
+ * flag that asks for the non-blocking calls this ABI always had. */
 #define MSG_OOB       0x01
 #define MSG_PEEK      0x02
 #define MSG_DONTROUTE 0x04

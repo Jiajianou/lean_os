@@ -142,7 +142,12 @@ set -euo pipefail
 # added hit 400 exactly, with thirty markers still to come. 600 is the
 # same not-one-slow-boot margin over a ~400 s battery; the boot prints
 # boot_to_desktop_s, so the next failure here says which side moved.
-SECONDS_TO_RUN="${1:-600}"
+#
+# M100 (eighth increment): 600 -> 900. TLS ([m100f], 11 s), the mbedtls
+# suites ([m100g], 27 s) and the POSIX socket section of tcptest joined the
+# battery, and boot_to_desktop_s measured 393 s on a quiet host and more
+# on a busy one - 900 is ~2.3x that, the usual margin.
+SECONDS_TO_RUN="${1:-900}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -389,6 +394,10 @@ REQUIRED_MARKERS=(
   # the first entry that is a LIBRARY rather than a program, and the
   # marker says so - what it grades is somebody else's test program
   # passing here, not this project's opinion of somebody else's library.
+  # M100's eighth increment: the random device, fed by the interrupt path.
+  # The host tier grades the cipher against the RFC; this grades that the
+  # pool is fed and both paths to it are live.
+  "[rng] a random device that is not a counter:"
   "[m100] the first library of the stack:"
   # M100's second increment, and a separate marker because it is a
   # sharper claim than [m100] is. zlib's own test checks its answers
@@ -415,6 +424,13 @@ REQUIRED_MARKERS=(
   # host's build - and through hb-ft, so the marker also says the two
   # libraries agree with each other.
   "[m100e] harfbuzz against the host:"
+  # M100's eighth increment: TLS. mbedtls's own server and client, a
+  # program written here doing an https GET through the same library
+  # with the chain verified, and a refusal under the wrong name.
+  "[m100f] TLS end to end over M66's TCP:"
+  # And mbedtls's own eighteen suites, run on the machine - the
+  # instrument that neither wrote its assertions nor chose them.
+  "[m100g] mbedtls's own suites:"
   "[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore)"
   "[m73] names, not numbers:"
   "[m74] the session remembers:"

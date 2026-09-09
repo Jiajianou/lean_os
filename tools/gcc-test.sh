@@ -94,9 +94,12 @@ fi
 # 4,392 checks, and xmlwf is its well-formedness checker.
 # The fifth increment adds sqlite3, graded like ftrender: the transcript
 # of tests/sqlite/cases.sql against the host's build of the same source.
-# The sixth increment adds hbshape, graded the same way as ftrender.
+# The sixth increment adds hbshape, graded the same way as ftrender. The
+# eighth adds mbedtls's own ssl_server2 and ssl_client2, and httpsget,
+# tests/tls/httpsget.c against the sysroot's mbedtls - the first https://
+# this machine has had.
 for prog in gnuhello bzip2 zlibtest minigzip pngtest djpeg cjpeg jpegtran \
-            ftrender expattest xmlwf sqlite3 hbshape; do
+            ftrender expattest xmlwf sqlite3 hbshape ssl_server2 ssl_client2 httpsget; do
   src="build/thirdparty/$prog"
   if [ -f "$IMAGE" ] && [ -x "$src" ]; then
     build/leanfs-put "$IMAGE" "$src" "/bin/$prog" >/dev/null || exit 1
@@ -125,4 +128,20 @@ if [ -f "$IMAGE" ] && [ -d "$DATA" ]; then
     n=$((n + 1))
   done
   echo "gcc-test: installed $n reference files under /usr/share/m100 - the [m100b] and [m100c] self-tests compare against them"
+fi
+
+# ---- and mbedtls's own test suites ----------------------------------------
+#
+# Eighteen of them, each a static binary plus the .datax file of vectors
+# it reads, under /usr/share/m100/mbedtls. The [m100g] self-test runs
+# every one and requires its own PASSED line. Same one-at-a-time put as
+# above, for the same manifest reason.
+SUITES=build/thirdparty/mbedtls-suites
+if [ -f "$IMAGE" ] && [ -d "$SUITES" ]; then
+  n=0
+  for f in "$SUITES"/*; do
+    build/leanfs-put "$IMAGE" "$f" "/usr/share/m100/mbedtls/$(basename "$f")" >/dev/null || exit 1
+    n=$((n + 1))
+  done
+  echo "gcc-test: installed $n files of mbedtls's own test suites under /usr/share/m100/mbedtls - the [m100g] self-test runs them"
 fi

@@ -82,7 +82,14 @@ uint32_t net_subnet_mask(void) { return subnet; }
 uint32_t net_dns_ip(void) { return dns_ip; }
 int net_have_nic(void) { return 1; }
 int net_config_is_leased(void) { return 0; }
-int net_is_local_ip(uint32_t ip) { return ip == local_ip; }
+/* M100: the loopback clause the real one has (kernel/net/net.c). Without
+ * it a connection to 127.0.0.1 left through the fake NIC, and the first
+ * two-ended TCP test on the host could not complete a handshake - a
+ * fake that is narrower than the definition it stands in for grades a
+ * machine that does not exist. */
+int net_is_local_ip(uint32_t ip) {
+    return ip == local_ip || (ip & NET_LOOPBACK_MASK) == NET_LOOPBACK_NET;
+}
 
 void net_set_config(uint32_t ip, uint32_t mask, uint32_t gateway, uint32_t dns) {
     local_ip = ip;

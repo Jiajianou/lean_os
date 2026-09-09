@@ -22,6 +22,13 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <arpa/inet.h>  /* M100: the POSIX section below */
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include "os_net.h"
 #include "syscall_wrappers.h"
@@ -56,6 +63,57 @@ static int wait_until(int (*ready)(int), int fd, uint32_t ms) {
 
 static int connected(int fd)    { return sys_connstat(fd) != 0; }
 static int has_pending(int fd)  { return sys_sockpoll(fd) > 0; }
+
+/* M100: the other end of the POSIX section, on its own thread. Writes a
+ * late message so the main thread's read has to block for it, reads 64
+ * KiB checking every byte against the pattern the writer used, answers,
+ * and closes - which is what turns the main thread's last read into 0. */
+/* 16 KiB, the size the native section above already streams fast and
+ * reliably: enough to block the writer several times over a 4 KiB send
+ * buffer and to exercise the reentrant-try_send path M100 fixed, without
+ * the loop-queue-overflowing burst a 64 KiB transfer sets off on the
+ * synchronous loopback path (LOOP_QUEUE_DEPTH is 32, and RTO recovery
+ * from a dropped burst is minutes on TCG). */
+#define POSIX_BIG 16384
+static void *posix_peer(void *arg) {
+    int fd = *(int *)arg;
+    usleep(200000);
+    if (write(fd, "late", 4) != 4) {
+        return (void *)1;
+    }
+    long got = 0;
+    while (got < POSIX_BIG) {
+        char chunk[2048];
+        long n = read(fd, chunk, sizeof(chunk));
+        if (n <= 0) {
+            /* A read that ends early is a different fault from a byte
+             * that is wrong, and the main thread's assertion cannot tell
+             * them apart - so the peer says which, with how far it got. */
+            printf("tcptest: posix peer: read returned %ld after %ld of %d bytes\n",
+                   n, got, POSIX_BIG);
+            return (void *)1;
+        }
+        for (long i = 0; i < n; i++) {
+            long pos = got + i;
+            if (chunk[i] != (char)('A' + (pos * 13 + pos / 97) % 26)) {
+                printf("tcptest: posix peer: byte %ld arrived as 0x%02x, wanted 0x%02x\n",
+                       pos, (unsigned char)chunk[i], (unsigned char)('A' + (pos * 13 + pos / 97) % 26));
+                return (void *)1;
+            }
+        }
+        got += n;
+    }
+    if (write(fd, "done", 4) != 4) {
+        return (void *)1;
+    }
+    /* Deliberately does NOT close: a thread here gets a COPY of the fd
+     * table (the divergence <pthread.h> documents), so this close would
+     * drop only the peer's reference and the server socket would stay
+     * open on the main thread - no FIN, and main's read-for-EOF below
+     * would block forever. Main owns the close, after the join drops
+     * this copy. The first version closed here and hung exactly so. */
+    return (void *)0;
+}
 
 int main(void) {
     /* ---- a connection, both ends of it ------------------------------- */
@@ -168,6 +226,92 @@ int main(void) {
     check(sys_uptime_ms() - refuse_start < 2000,
           "a refused connection took a timeout instead of an RST");
     sys_close(refused);
+
+    /* ---- M100: the POSIX calls, and they block ------------------------
+     *
+     * Everything above is this ABI's own calls, none of which ever
+     * blocks. A program written against POSIX calls read() and expects
+     * to wait, calls write() with 64 KiB and expects 64 KiB back, sets
+     * O_NONBLOCK and expects EAGAIN. mbedtls's socket layer is exactly
+     * that program. The peer is a thread, because a blocking read needs
+     * somebody else to do the writing, and the checks are on the clock
+     * as well as the bytes: a read that "blocked" for zero milliseconds
+     * before returning what arrived 200 ms later did not block. */
+    {
+        int lis = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(PORT + 1);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        check(lis >= 0 && bind(lis, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
+              listen(lis, 1) == 0, "POSIX socket/bind/listen failed");
+        int cli = socket(AF_INET, SOCK_STREAM, 0);
+        check(cli >= 0 && connect(cli, (struct sockaddr *)&addr, sizeof(addr)) == 0,
+              "POSIX connect failed");
+        check(wait_until(has_pending, lis, 2000), "the POSIX listener never saw the connection");
+        int srv = accept(lis, 0, 0);
+        check(srv >= 0, "POSIX accept returned nothing after the handshake");
+
+        pthread_t peer;
+        check(pthread_create(&peer, 0, posix_peer, &srv) == 0, "could not start the peer thread");
+        /* Progress lines, printed as the section goes: a hang here is a
+         * hang in a blocking call, and the line before it is the one
+         * that names the call. */
+        printf("tcptest: posix: connected, waiting on a blocking read\n");
+
+        /* 1. A blocking read waits for the peer's late message. */
+        char buf[64];
+        memset(buf, 0, sizeof(buf));
+        long t0 = sys_uptime_ms();
+        long n = read(cli, buf, sizeof(buf));
+        long waited = sys_uptime_ms() - t0;
+        check(n == 4 && memcmp(buf, "late", 4) == 0, "a blocking read did not return the peer's message");
+        check(waited >= 100, "a blocking read returned before the peer had written");
+        printf("tcptest: posix: the blocking read returned after %ld ms\n", waited);
+
+        /* 2. O_NONBLOCK: nothing pending is EAGAIN, not a wait and not 0. */
+        check(fcntl(cli, F_SETFL, O_NONBLOCK) == 0 && (fcntl(cli, F_GETFL) & O_NONBLOCK),
+              "O_NONBLOCK could not be set on a socket");
+        errno = 0;
+        check(read(cli, buf, sizeof(buf)) == -1 && errno == EAGAIN,
+              "a non-blocking read with nothing pending was not EAGAIN");
+        errno = 0;
+        check(recv(cli, buf, sizeof(buf), MSG_DONTWAIT) == -1 && errno == EAGAIN,
+              "recv(MSG_DONTWAIT) with nothing pending was not EAGAIN");
+        check(fcntl(cli, F_SETFL, 0) == 0, "O_NONBLOCK could not be cleared");
+
+        /* 3. One write of 64 KiB - forty-five segments through a 4 KiB
+         *    send buffer - returns 64 KiB, because the call parks while
+         *    the peer drains. The peer checks every byte. */
+        static char big[POSIX_BIG];
+        for (int i = 0; i < POSIX_BIG; i++) {
+            big[i] = (char)('A' + (i * 13 + i / 97) % 26);
+        }
+        printf("tcptest: posix: O_NONBLOCK answered EAGAIN, writing 16 KiB\n");
+        long put = write(cli, big, POSIX_BIG);
+        check(put == POSIX_BIG, "one write() did not return every byte it was given");
+        printf("tcptest: posix: write returned %ld, waiting for the peer's confirmation\n", put);
+        memset(buf, 0, sizeof(buf));
+        n = read(cli, buf, sizeof(buf));
+        check(n == 4 && memcmp(buf, "done", 4) == 0, "the peer did not confirm the transfer arrived intact");
+
+        /* 4. Join first, so the peer's COPY of the server fd is released
+         *    (a thread's fd table is copied, not shared), then close the
+         *    main thread's own reference - now the last one, so the FIN
+         *    goes out - and the client's read sees the end of the
+         *    stream. Getting this order wrong is a hang, not a wrong
+         *    answer, which is why it is spelled out. */
+        void *peer_result = (void *)1;
+        check(pthread_join(peer, &peer_result) == 0 && peer_result == (void *)0,
+              "the peer thread saw a byte out of place");
+        close(srv);
+        n = read(cli, buf, sizeof(buf));
+        check(n == 0, "read() after the server closed was not 0");
+        printf("tcptest: posix: end of stream seen\n");
+        close(cli);
+        close(lis);
+    }
 
     /* ---- the ways the API is supposed to fail --------------------------- */
     int dgram = (int)sys_socket(OS_SOCK_DGRAM);

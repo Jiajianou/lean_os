@@ -284,7 +284,7 @@ pipe_t *pipe_named(const char *name) {
     return p;
 }
 
-long pipe_write(pipe_t *p, const void *buf, size_t len) {
+long pipe_write(pipe_t *p, const void *buf, size_t len, int nonblock) {
     const uint8_t *src = (const uint8_t *)buf;
     size_t written = 0;
     uint64_t f = spin_lock_irqsave(&pipe_lock);
@@ -324,6 +324,12 @@ long pipe_write(pipe_t *p, const void *buf, size_t len) {
              * before M68 neither could. */
             sched_wake_all(PIPE_DATA_CHAN(p));
             sched_wake_all(SCHED_POLL_CHAN);
+            if (nonblock) {
+                /* M100: O_NONBLOCK. What was written is written and is
+                 * reported; the rest is the caller's to retry. */
+                spin_unlock_irqrestore(&pipe_lock, f);
+                return written ? (long)written : -OS_ERR_AGAIN;
+            }
             sched_block_on(PIPE_SPACE_CHAN(p), 0, &pipe_lock, &f);
             continue;
         }
@@ -340,7 +346,7 @@ long pipe_write(pipe_t *p, const void *buf, size_t len) {
     return (long)written;
 }
 
-long pipe_read(pipe_t *p, void *buf, size_t maxlen) {
+long pipe_read(pipe_t *p, void *buf, size_t maxlen, int nonblock) {
     uint8_t *dst = (uint8_t *)buf;
     size_t n = 0;
     uint64_t f = spin_lock_irqsave(&pipe_lock);
@@ -349,6 +355,12 @@ long pipe_read(pipe_t *p, void *buf, size_t maxlen) {
             if (p->write_closed) {
                 spin_unlock_irqrestore(&pipe_lock, f);
                 return (long)n;
+            }
+            if (nonblock) {
+                /* M100: O_NONBLOCK - and only when nothing has been read:
+                 * a short count is a count, not an error. */
+                spin_unlock_irqrestore(&pipe_lock, f);
+                return n ? (long)n : -OS_ERR_AGAIN;
             }
             sched_block_on(PIPE_DATA_CHAN(p), 0, &pipe_lock, &f); /* see pipe_write's note above */
             /* M76: a caught signal ends the wait as well as an arriving

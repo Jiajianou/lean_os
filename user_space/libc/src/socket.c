@@ -18,9 +18,11 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>  /* M100: O_NONBLOCK for a blocking accept */
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <string.h>
+#include <unistd.h>  /* M100: read and write, which recv and send are now */
 #include <sys/un.h>
 
 #include "os_net.h" /* system_api/include/os_net.h - OS_SOCK_*, os_sockaddr_t */
@@ -139,36 +141,87 @@ int connect(int fd, const struct sockaddr *addr, socklen_t len) {
 }
 
 int accept(int fd, struct sockaddr *addr, socklen_t *len) {
-    os_sockaddr_t from;
-    memset(&from, 0, sizeof(from));
-    long nfd = sys_accept(fd, &from);
-    if (nfd < 0) {
-        errno = EAGAIN; /* nothing pending - SYS_accept never blocks */
-        return -1;
+    /* ---- M100: accept blocks, like every other libc's ----------------
+     *
+     * SYS_accept never blocks - it returns -1 when the listener has no
+     * completed connection waiting - which is right for the poll-driven
+     * servers this project wrote (httpd loops on SYS_sockpoll) and wrong
+     * for a program written against POSIX, which calls accept() and
+     * expects to wait. mbedtls's server is that program: its
+     * net_accept() calls accept() once and treats -1 as fatal. So this
+     * waits, on the same poll channel a socket read waits on - a
+     * listener is "readable" exactly when an accept would succeed
+     * (kernel socket_pending) - unless the descriptor is non-blocking,
+     * in which case it is EAGAIN as before. */
+    int nonblock = (sys_fcntl(fd, F_GETFL_CMD, 0) & O_NONBLOCK) != 0;
+    for (;;) {
+        os_sockaddr_t from;
+        memset(&from, 0, sizeof(from));
+        long nfd = sys_accept(fd, &from);
+        if (nfd >= 0) {
+            if (addr && len) {
+                to_sockaddr(addr, len, from.ip, from.port);
+            }
+            return (int)nfd;
+        }
+        if (nonblock) {
+            errno = EAGAIN;
+            return -1;
+        }
+        /* Block until the listener is readable. A wake for something
+         * else costs one more sys_accept that finds nothing; a spurious
+         * wake or a lost race just loops. */
+        int wf = fd;
+        sys_waitfds(&wf, 1, 1000);
     }
-    if (addr && len) {
-        to_sockaddr(addr, len, from.ip, from.port);
-    }
-    return (int)nfd;
 }
 
+/* ---- M100: send and recv block, like every other libc's ----------------
+ *
+ * Until M100 these were SYS_send and SYS_recv with the names changed,
+ * and SYS_recv's "0 if nothing is waiting right now" reached programs
+ * as recv()'s 0 - which every program written against POSIX reads as
+ * the end of the stream. Nothing here noticed because nothing here
+ * called recv() without polling first. mbedtls did.
+ *
+ * So the ordinary path is now write(2) and read(2), which block in the
+ * kernel (or say EAGAIN under O_NONBLOCK), and the one flag that asks
+ * for the old behaviour - MSG_DONTWAIT - is answered by the old calls,
+ * with their 0 turned into the EAGAIN it always meant. */
 ssize_t send(int fd, const void *buf, size_t len, int flags) {
-    (void)flags; /* see <sys/socket.h> - each ignorable flag is ignorable for a stated reason */
-    long n = sys_send(fd, buf, (uint32_t)len);
-    if (n < 0) {
-        errno = EPIPE;
-        return -1;
+    if (flags & MSG_DONTWAIT) {
+        long n = sys_send(fd, buf, (uint32_t)len);
+        if (n < 0) {
+            errno = EPIPE;
+            return -1;
+        }
+        if (n == 0 && len > 0) {
+            errno = EAGAIN;
+            return -1;
+        }
+        return (ssize_t)n;
+    }
+    errno = 0;
+    long n = write(fd, buf, len);
+    if (n < 0 && errno == 0) {
+        errno = EPIPE; /* the connection is gone, and this ABI carries no finer reason */
     }
     return (ssize_t)n;
 }
 
 ssize_t recv(int fd, void *buf, size_t len, int flags) {
-    (void)flags;
-    long n = sys_recv(fd, buf, (uint32_t)len);
-    if (n < 0) {
-        return 0; /* SYS_recv's -1 is end of stream, which recv() reports as 0 */
+    if (flags & MSG_DONTWAIT) {
+        long n = sys_recv(fd, buf, (uint32_t)len);
+        if (n < 0) {
+            return 0; /* SYS_recv's -1 is end of stream, which recv() reports as 0 */
+        }
+        if (n == 0 && len > 0) {
+            errno = EAGAIN;
+            return -1;
+        }
+        return (ssize_t)n;
     }
-    return (ssize_t)n;
+    return (ssize_t)read(fd, buf, len);
 }
 
 ssize_t sendto(int fd, const void *buf, size_t len, int flags,
@@ -276,6 +329,20 @@ int getsockopt(int fd, int level, int option, void *value, socklen_t *len) {
          * call, because connect() above does not return until the
          * handshake either completed or failed. */
         *(int *)value = 0;
+        *len = (socklen_t)sizeof(int);
+        return 0;
+    }
+    if (level == SOL_SOCKET && option == SO_TYPE && value && len &&
+        *len >= (socklen_t)sizeof(int)) {
+        /* M100: mbedtls's net_accept asks this to tell a TCP listener
+         * from a UDP one. Every socket that reaches accept() on this
+         * machine is SOCK_STREAM - the TLS server binds TCP, and DTLS
+         * (the one caller that accepts on a datagram socket) is not
+         * ported here - so that is the honest answer for this code path.
+         * A datagram socket that somehow reached here would be
+         * mislabelled; nothing does, and this note is the record that
+         * the day one might, this is where it is made real. */
+        *(int *)value = SOCK_STREAM;
         *len = (socklen_t)sizeof(int);
         return 0;
     }

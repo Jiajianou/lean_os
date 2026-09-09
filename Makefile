@@ -858,7 +858,7 @@ syms: $(IMAGE) $(KERNEL_SYMS) $(LEANFS_PUT)
 # is x86 inline assembly. Every other seam is a fake .c file linked in
 # place of the real one, so the code under test is the code that ships.
 TEST_BUILD  := $(BUILD)/tests
-TEST_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Werror \
+TEST_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Werror -DLEANOS_HOST_TEST \
                -fno-omit-frame-pointer \
                -Itests -Itests/fakes -Ikernel -Isystem_api/include
 
@@ -886,7 +886,7 @@ TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
                     kernel/net/arp.c kernel/net/ip.c kernel/net/icmp.c \
                     kernel/net/udp.c kernel/net/ethernet.c kernel/net/tcp.c \
                     kernel/dev/fwcfg.c kernel/dev/tty.c kernel/dev/pty.c \
-                    kernel/sched/sched.c kernel/fs/flock.c
+                    kernel/sched/sched.c kernel/fs/flock.c kernel/dev/random.c
 
 # M101: the first user-space source in this tier, and it earns its place
 # by the same argument the kernel units do. user_space/lib/symtab.c is a

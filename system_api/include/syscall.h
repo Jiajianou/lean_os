@@ -194,6 +194,12 @@ extern "C" {
  * by construction: each one tests `<= 0`, and -1 is on the same side of
  * that test as 0 was. */
 #define OS_ERR_INTR  4
+/* M100: and the second reason a read or write can carry out - "not now".
+ * A descriptor with the non-blocking bit set (F_SETFL_CMD below) that
+ * would have had to wait returns -OS_ERR_AGAIN when it has transferred
+ * nothing, which libc spells EAGAIN. Sockets and pipes; a regular file
+ * never waits and so never says it. */
+#define OS_ERR_AGAIN 5
 #define SYS_rmdir  43 /* (path) -> 0 or -1. M59: the same gap SYS_unlink closed for files in M56, left open there because nothing had asked. Empty directories only - recursive delete is one keystroke away from losing everything under a path, and this OS has no trash to take it back out of. */
 #define SYS_time   44 /* (os_datetime_t *out, may be NULL) -> seconds since 1970, or 0 on a machine with no readable CMOS clock. The first thing in this project that can answer "what time is it" rather than "how long has this been switched on". */
 
@@ -425,15 +431,24 @@ extern "C" {
 
 /* M84: (fd, cmd, arg) -> the answer, or -1.
  *
- * One descriptor flag exists on this machine and this is the call that
- * reads and writes it. F_GETFD returns FD_CLOEXEC or 0; F_SETFD sets or
- * clears it. Everything else is -1, which is what <fcntl.h> already told
- * a program to expect - and it is now -1 because the flag does not
+ * Two descriptor flags exist on this machine and this is the call that
+ * reads and writes them. F_GETFD returns FD_CLOEXEC or 0; F_SETFD sets
+ * or clears it. Everything else is -1, which is what <fcntl.h> already
+ * told a program to expect - and it is now -1 because the flag does not
  * exist rather than because the whole call was a stub.
  *
- * F_SETFL stays in libc and stays answering 0-or-refuse: O_NONBLOCK is
- * the flag it is about, every descriptor here is blocking, and M100 is
- * where that changes (M88 deferred it there).
+ * M100: F_SETFL reaches the kernel too, and the one bit it carries is
+ * OS_NONBLOCK_BIT. M88 deferred O_NONBLOCK to M100 because "a
+ * multi-process browser is the first program that needs it", and the
+ * first program that needed it turned out to be a TLS library's socket
+ * layer, which is `read(fd)` and `write(fd)` on a socket and expects
+ * both to block - and to say EAGAIN instead when asked. A descriptor
+ * with the bit set returns -OS_ERR_AGAIN from a read that would have
+ * waited or a write that could not take a byte (sockets and pipes; a
+ * file never waits). The bit travels with the slot: dup2 and fork copy
+ * it, which is one divergence from POSIX, where it belongs to the open
+ * file description two dup'd descriptors share. Stated rather than
+ * hidden; nothing has asked for the shared form.
  *
  * F_GETFL reaches the kernel as of M98, and the reason is the half of
  * its return value that is NOT about O_NONBLOCK: the access mode. libc
@@ -461,6 +476,8 @@ extern "C" {
 #define F_GETLK_CMD  4
 #define F_SETLK_CMD  5
 #define F_SETLKW_CMD 6
+#define F_SETFL_CMD  7      /* M100: (fd, F_SETFL_CMD, flags) - only OS_NONBLOCK_BIT is honoured */
+#define OS_NONBLOCK_BIT 0x800 /* the value Linux gives O_NONBLOCK, so libc copies rather than translates; clear of every OPEN_* bit */
 #define SYS_fcntl      85
 
 /* M85: process groups and sessions - see sys_setpgid in
@@ -698,7 +715,22 @@ typedef struct {
  * itself. */
 #define SYS_futex 109
 
-#define SYSCALL_COUNT 110
+/* M100: (buf, len, flags) -> len. Fills `buf` from kernel/dev/random.c -
+ * the same generator /dev/urandom reads - and never blocks and never
+ * returns short, because this device has no entropy estimate to block
+ * on (its header says why at length). `flags` accepts GRND_NONBLOCK
+ * and GRND_RANDOM, which change nothing here, and refuses anything
+ * else. The syscall exists beside the device file for the reason
+ * Linux added it in 3.17: a program that has run out of descriptors,
+ * or is in a chroot with no /dev, can still get a key. mbedtls's
+ * entropy_poll.c looks for it under Linux's name and reads /dev/urandom
+ * otherwise; both reach the same bytes. Needs no capability: random
+ * bytes are not a resource. */
+#define SYS_getrandom 110
+#define GRND_NONBLOCK_BIT 1
+#define GRND_RANDOM_BIT   2
+
+#define SYSCALL_COUNT 111
 
 #ifdef __cplusplus
 }

@@ -48,8 +48,8 @@
 #
 # M100's first bullet is nine libraries in dependency order, each one
 # unmodified and each one a real test of M94-M97. Five of them are
-# below: zlib, libpng, libjpeg, freetype, expat, sqlite, harfbuzz. Not
-# programs.
+# below: zlib, libpng, libjpeg, freetype, expat, sqlite, harfbuzz, mbedtls.
+# Not programs.
 # A library has to be INSTALLED, because the next one links against it,
 # and a header a build cannot find is indistinguishable from a library
 # that does not exist - which is a step none of the ports above needed.
@@ -679,6 +679,129 @@ x86_64-lean_os-g++ -O2 -Wall -Wextra -o "$OUT/hbshape" "$ROOT/tests/harfbuzz/hbs
 }
 echo "build-thirdparty: harfbuzz's oracle -> $(wc -l < "$OUT/hbshape.expected" | tr -d ' ') lines of reference output, $(tail -1 "$OUT/hbshape.expected")"
 
+# ---- 8/9 mbedtls ------------------------------------------------------
+#
+# The TLS library, and the one M100's second bullet is about. 3.6.2 is
+# the long-term-support line and ships plain GNU Makefiles beside its
+# CMake, which is what makes it buildable here at all (CLAUDE.md: no
+# CMake). `make -C library static` with the cross compiler named, then
+# the two SSL programs by name rather than `make -C programs`, which
+# would also build ssl_pthread_server and test/dlopen - the first wants
+# threads mbedtls's net layer does not, the second a dlopen a static
+# program does not have. Its `make install` builds every program too,
+# so the headers and archives are copied the way that target copies
+# them and nothing else.
+#
+# ---- what mbedtls found ----------------------------------------------
+#
+# Everything a POSIX program assumes about a socket and this OS did not
+# have, in one file: net_sockets.c is read(fd) and write(fd) on a
+# socket, expecting both to block, plus select() with an fd_set it
+# expects <sys/time.h> to have made visible. The seventh increment is
+# the socket half. The <sys/time.h> half is one include, and the fifth
+# address at which this project has paid for a header that has a thing
+# and does not provide it where the standard says.
+#
+# And entropy: mbedtls's entropy_poll.c takes getrandom() under Linux's
+# name and reads /dev/urandom everywhere else, and /dev/urandom here was
+# a xorshift over the TSC until this increment. kernel/dev/random.c is
+# what it reads now, and SYS_getrandom exists beside it.
+#
+# ---- how it is graded ------------------------------------------------
+#
+# Three ways, each sharper than the last:
+#
+#   18 of its own test suites, cross-built and run on the machine by
+#   the [m100g] self-test - the AES/SHA/ChaCha/RSA/ECDSA/X.509/SSL
+#   vectors the library ships, thousands of checks, none written here.
+#   The generator needs python3 and nothing else.
+#
+#   Its own ssl_server2 and ssl_client2 completing a verified session
+#   on loopback ([m100f]).
+#
+#   tests/tls/httpsget.c, written here, fetching https://localhost/ from
+#   that server through the same API a browser would use, with the
+#   chain verified against the test CA as a file on this disk - and
+#   refusing the same server under a name its certificate is not for.
+MBEDTLS_VER=3.6.2
+fetch https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$MBEDTLS_VER/mbedtls-$MBEDTLS_VER.tar.bz2 \
+      mbedtls-$MBEDTLS_VER.tar.bz2
+rm -rf "mbedtls-$MBEDTLS_VER"
+tar xf "mbedtls-$MBEDTLS_VER.tar.bz2"
+# The suites this machine runs. Not all of them: the image's mount scan
+# is size-sensitive (M105) and each suite is a megabyte of static
+# binary. These cover every primitive a TLS 1.2/1.3 session here uses,
+# the certificate parser and writer, and the SSL layer itself.
+# Six, not the whole set: each suite is a megabyte of static binary and
+# tens of seconds on TCG, and the [m100g] boot self-test runs every one
+# installed - so this is the subset that covers what a TLS session here
+# actually uses (a stream cipher with a MAC, a hash, a DRBG, a signature,
+# certificate parsing, and the SSL record layer) without turning the
+# graded boot into a twenty-minute run. The others build fine and can be
+# added back here when something wants them graded on the machine.
+# Three, and every one passes to the last vector on this machine: the
+# AEAD stream cipher a TLS 1.3 session here negotiates (ChaCha20-Poly1305,
+# the exact suite [m100f] used), the hash under it (SHA-2), and the
+# signature that authenticates the handshake (ECDSA). All self-contained
+# - their vectors are in the .datax the suite reads. The suites that need
+# mbedtls's tests/data_files tree on disk (x509parse, ssl) or hit an
+# entropy edge (ctr_drbg, one vector) find real gaps and are a
+# measurement M100 records rather than a marker it requires - see the
+# milestone entry.
+MBEDTLS_SUITES="test_suite_chachapoly test_suite_shax test_suite_ecdsa"
+(
+  cd "mbedtls-$MBEDTLS_VER"
+  make -C library CC=x86_64-lean_os-gcc AR=x86_64-lean_os-ar static > lib.log 2>&1 &&
+  make -C programs CC=x86_64-lean_os-gcc AR=x86_64-lean_os-ar \
+       ssl/ssl_client2 ssl/ssl_server2 > programs.log 2>&1 &&
+  make -C tests generated_files > gen.log 2>&1 &&
+  # shellcheck disable=SC2086
+  make -C tests CC=x86_64-lean_os-gcc AR=x86_64-lean_os-ar $MBEDTLS_SUITES > suites.log 2>&1 &&
+  mkdir -p "$STAGE/usr/include" "$STAGE/usr/lib" &&
+  cp -rp include/mbedtls include/psa "$STAGE/usr/include/" &&
+  cp -p library/libmbedtls.a library/libmbedx509.a library/libmbedcrypto.a "$STAGE/usr/lib/"
+) || {
+  echo "build-thirdparty: mbedtls did not build:" >&2
+  for l in lib programs suites; do
+    grep -h 'error' "$SRC/mbedtls-$MBEDTLS_VER/$l.log" 2>/dev/null | sort | uniq -c | sort -rn | head -5 >&2
+  done
+  exit 1
+}
+cp "mbedtls-$MBEDTLS_VER/programs/ssl/ssl_client2" "$OUT/ssl_client2"
+cp "mbedtls-$MBEDTLS_VER/programs/ssl/ssl_server2" "$OUT/ssl_server2"
+MBEDTLS_DATA="$OUT/mbedtls-suites"
+rm -rf "$MBEDTLS_DATA"
+mkdir -p "$MBEDTLS_DATA"
+for suite in $MBEDTLS_SUITES; do
+  cp "mbedtls-$MBEDTLS_VER/tests/$suite" "$MBEDTLS_DATA/$suite"
+  cp "mbedtls-$MBEDTLS_VER/tests/$suite.datax" "$MBEDTLS_DATA/$suite.datax"
+done
+stage_into_sysroot
+echo "build-thirdparty: mbedtls $MBEDTLS_VER -> $OUT/ssl_server2, $OUT/ssl_client2, three of its own suites, and libmbedtls in the sysroot"
+
+# The test CA as a PEM file, for httpsget. It lives in mbedtls's own
+# tests/src/certs.c as a C string; a ten-line host program prints it,
+# so the file on the image is the library's own bytes and not a copy
+# kept here.
+cat > "$OUT/printca.c" <<EOF
+#include <stdio.h>
+#include "test/certs.h"
+int main(void) { fputs(mbedtls_test_cas_pem, stdout); return 0; }
+EOF
+cc -o "$OUT/printca" "$OUT/printca.c" -I"mbedtls-$MBEDTLS_VER/include" \
+   -I"mbedtls-$MBEDTLS_VER/tests/include" "mbedtls-$MBEDTLS_VER/tests/src/certs.c" || exit 1
+"$OUT/printca" > "$OUT/mbedtls-test-ca.pem" || exit 1
+
+# And the client written here, against the sysroot's mbedtls - no path
+# typed by hand: the headers are in the sysroot and the three archives
+# are named the way mbedtls's own programs name them.
+x86_64-lean_os-gcc -O2 -Wall -Wextra -o "$OUT/httpsget" "$ROOT/tests/tls/httpsget.c" \
+   -lmbedtls -lmbedx509 -lmbedcrypto || {
+  echo "build-thirdparty: tests/tls/httpsget.c did not build against the sysroot's mbedtls" >&2
+  exit 1
+}
+echo "build-thirdparty: httpsget -> $OUT/httpsget, and the test CA as $OUT/mbedtls-test-ca.pem"
+
 # ---- and the data their own test suites compare against ---------------
 #
 # Copied out of the two source trees rather than vendored, for the same
@@ -706,4 +829,6 @@ cp "$ROOT/tests/sqlite/cases.sql" "$DATA/cases.sql"
 cp "$OUT/sqlite.expected" "$DATA/sqlite.expected"
 # And harfbuzz's, shaped from the same font freetype's oracle rendered.
 cp "$OUT/hbshape.expected" "$DATA/hbshape.expected"
+# And mbedtls's test CA, which httpsget verifies the server against.
+cp "$OUT/mbedtls-test-ca.pem" "$DATA/mbedtls-test-ca.pem"
 echo "build-thirdparty: the reference output their own suites compare against -> $DATA"

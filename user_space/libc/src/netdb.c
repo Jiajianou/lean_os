@@ -171,6 +171,15 @@ int getaddrinfo(const char *node, const char *service,
         struct in_addr a;
         if (inet_aton(node, &a)) {
             ip = ntohl(a.s_addr);
+        } else if (!strcmp(node, "localhost") || !strcmp(node, "localhost.localdomain")) {
+            /* M100: localhost resolves to the loopback address without a
+             * query, which is what every resolver does and what an
+             * /etc/hosts would say if this machine kept one. mbedtls's
+             * https client (tests/tls/httpsget.c) uses the same string
+             * for the connection and for the certificate name check, so
+             * it has to resolve here, and the first program to hand
+             * getaddrinfo a name rather than a numeric address was it. */
+            ip = INADDR_LOOPBACK;
         } else if (flags & AI_NUMERICHOST) {
             return EAI_NONAME; /* the caller said not to resolve, and it is not numeric */
         } else if (dns_resolve(node, &ip) != 0) {

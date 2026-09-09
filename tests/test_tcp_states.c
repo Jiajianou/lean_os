@@ -117,6 +117,24 @@ static void from_peer(uint16_t dst_port, uint16_t src_port, uint32_t seq,
     tcp_handle_packet(PEER_IP, LOCAL_IP, seg, total);
 }
 
+/* M100: the same, with the window the peer advertises chosen by the
+ * test - because a duplicate ACK and a window update differ in exactly
+ * that field. */
+static void from_peer_window(uint16_t dst_port, uint16_t src_port, uint32_t seq,
+                             uint32_t ack, uint8_t flags, uint16_t window) {
+    uint8_t seg[20];
+    memset(seg, 0, sizeof(seg));
+    be16_put(seg + 0, src_port);
+    be16_put(seg + 2, dst_port);
+    be32_put(seg + 4, seq);
+    be32_put(seg + 8, ack);
+    seg[12] = 5 << 4;
+    seg[13] = flags;
+    be16_put(seg + 14, window);
+    be16_put(seg + 16, tcp_checksum(PEER_IP, LOCAL_IP, seg, 20));
+    tcp_handle_packet(PEER_IP, LOCAL_IP, seg, 20);
+}
+
 /* The last segment this stack transmitted, unwrapped from its Ethernet
  * and IP headers. Returns 0 if nothing was sent. */
 typedef struct {
@@ -340,6 +358,41 @@ TEST(tcp_state, a_segment_out_of_order_is_not_delivered_as_if_it_were_in_order) 
     uint8_t out[16] = {0};
     CHECK_EQ(tcp_recv(c, out, sizeof(out)), 5);
     CHECK_MEMEQ(out, "FIRST", 5);
+    tcp_release(c);
+    tcp_release(l);
+}
+
+/* M100: RFC 5681's four tests for a duplicate ACK include "the advertised
+ * window is unchanged". A receiver that reads its buffer in pieces sends
+ * one ACK per read at the same number with a growing window - window
+ * updates, not duplicates - and a sender that counted them retransmitted
+ * on the third. Three window updates must retransmit nothing; three true
+ * duplicates must retransmit once. */
+TEST(tcp_state, a_window_update_is_not_a_duplicate_ack) {
+    tcp_fixture();
+    struct tcpcb *l = NULL;
+    uint32_t pseq = 0, oseq = 0;
+    struct tcpcb *c = established(&l, &pseq, &oseq);
+    REQUIRE(c != NULL);
+    /* The peer's window is what from_peer advertised: 4096. Queue less
+     * than that, so it all goes out and is all in flight. */
+    static uint8_t data[3000];
+    memset(data, 'w', sizeof(data));
+    CHECK_EQ(tcp_send(c, data, sizeof(data)), 3000);
+    int rtx_before = tcp_debug_retransmits();
+    /* Three acknowledgements of nothing new, each with a larger window:
+     * three reads under a zero window, seen from the sender. */
+    from_peer_window(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK, 1000);
+    from_peer_window(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK, 2000);
+    from_peer_window(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK, 3000);
+    CHECK_EQ(tcp_debug_retransmits() - rtx_before, 0);
+    /* And three true duplicates - same number, same window - are what
+     * fast retransmit exists for. */
+    rtx_before = tcp_debug_retransmits();
+    from_peer_window(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK, 3000);
+    from_peer_window(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK, 3000);
+    from_peer_window(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK, 3000);
+    CHECK_EQ(tcp_debug_retransmits() - rtx_before, 1);
     tcp_release(c);
     tcp_release(l);
 }

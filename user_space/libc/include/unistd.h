@@ -114,6 +114,7 @@ int close(int fd);
  * stdio that flushes, and a shell that had spelled it `exit` would then
  * quietly flush its parent's buffers once per forked command. */
 void _exit(int status) __attribute__((noreturn));
+int getentropy(void *buf, size_t len); /* M100: also in <sys/random.h>, where it is explained */
 /* M80 groundwork. `isatty` answers from what this system actually knows:
  * fd 0 and 1 are the implicit stdin/stdout every task starts with
  * (kernel/sched/sched.h's fd table), and everything else is a pipe, a

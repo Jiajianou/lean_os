@@ -281,6 +281,15 @@ static const cap_grant_t CAP_GRANTS[] = {
     {"nslookup",      CAP_APP_DEFAULT | CAP_NETWORK},
     {"fetch",         CAP_APP_DEFAULT | CAP_NETWORK},
     {"httpd",         CAP_APP_DEFAULT | CAP_NETWORK},
+    /* M100: TLS. mbedtls's own client and server and the httpsget
+     * written here all open sockets - the [m100f] self-test's three
+     * programs - so all three hold CAP_NETWORK, and httpsget writes
+     * nothing so it gets only the default besides. The manifest is the
+     * one place that says an https client talks to the network, which
+     * is exactly the authority M65 built this to make visible. */
+    {"ssl_client2",   CAP_APP_DEFAULT | CAP_NETWORK},
+    {"ssl_server2",   CAP_APP_DEFAULT | CAP_NETWORK},
+    {"httpsget",      CAP_APP_DEFAULT | CAP_NETWORK},
     /* Claims the sound devices directly - the one program that does,
      * and the one that demonstrates the claim being refused. */
     {"audiograb",     CAP_APP_DEFAULT | CAP_AUDIO},

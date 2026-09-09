@@ -95,11 +95,14 @@ int pipe_write_closed(pipe_t *p);
 
 /* Blocks while the buffer is full, unless the read end has already
  * closed (returns -1 immediately, or however many bytes got written
- * before that happened). */
-long pipe_write(pipe_t *p, const void *buf, size_t len);
+ * before that happened). M100: with `nonblock` set it does not block -
+ * a full buffer is -OS_ERR_AGAIN when nothing was written, or the short
+ * count when something was. */
+long pipe_write(pipe_t *p, const void *buf, size_t len, int nonblock);
 
 /* Blocks until at least one byte is available, then drains whatever's
  * immediately ready (up to maxlen) without blocking further - mirrors
  * SYS_read's fd=0 semantics exactly. Returns 0 (EOF) once the write end
- * has closed and the buffer is empty. */
-long pipe_read(pipe_t *p, void *buf, size_t maxlen);
+ * has closed and the buffer is empty. M100: with `nonblock` set, an
+ * empty buffer whose writer is still there is -OS_ERR_AGAIN. */
+long pipe_read(pipe_t *p, void *buf, size_t maxlen, int nonblock);

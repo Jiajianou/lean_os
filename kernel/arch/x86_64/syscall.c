@@ -15,6 +15,7 @@
 #include "drivers/rtc.h"
 #include "lib/libk.h"
 #include "fs/leanfs.h"
+#include "dev/random.h"  /* M100: sys_getrandom */
 #include "fs/flock.h"    /* M100: record locks - see the F_*LK_CMD cases in sys_fcntl */
 #include "fs/openfile.h"
 #include "fs/vfs.h"
@@ -425,7 +426,53 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
         return (long)len;
     }
     if (slot->type == FD_PIPE_WRITE) {
-        return pipe_write(slot->pipe, s, (size_t)len);
+        return pipe_write(slot->pipe, s, (size_t)len, slot->nonblock);
+    }
+    if (slot->type == FD_SOCKET) {
+        /* ---- M100: write(2) on a stream socket, and it takes it ALL --
+         *
+         * SYS_send takes at most one segment and may take none, and says
+         * so; that is a fine contract for a caller that loops, and every
+         * caller written here does. A program written against POSIX
+         * calls write(fd, buf, 65536) and expects 65536 back, or a real
+         * error - so this loops: one segment at a time through the
+         * stack, parking when the send buffer is full. There is no
+         * write-readiness wake anywhere in this kernel (see <poll.h>),
+         * so the park has a deadline of one tick, which makes it a
+         * bounded wait re-asked at the tick rate rather than a spin.
+         * The non-blocking bit turns a full buffer into EAGAIN, or into
+         * the short count if something already went. */
+        struct tcpcb *tcb = socket_tcb(slot->sock);
+        if (!tcb) {
+            return -1; /* a datagram socket writes with sendto */
+        }
+        uint64_t sent = 0;
+        while (sent < len) {
+            uint16_t chunk = (len - sent) > TCP_MAX_MSS ? TCP_MAX_MSS : (uint16_t)(len - sent);
+            uint8_t staging[TCP_MAX_MSS];
+            if (copy_from_user(staging, buf + sent, chunk) != 0) {
+                return sent ? (long)sent : -1;
+            }
+            uint64_t seq = sched_event_seq();
+            net_lock_acquire();
+            int m = tcp_send(tcb, staging, chunk);
+            net_lock_release();
+            if (m < 0) {
+                return sent ? (long)sent : -1; /* the connection is gone: EPIPE in libc */
+            }
+            if (m == 0) {
+                if (slot->nonblock) {
+                    return sent ? (long)sent : -OS_ERR_AGAIN;
+                }
+                if (sched_signal_pending()) {
+                    return sent ? (long)sent : -OS_ERR_INTR;
+                }
+                sched_block_on_seq(SCHED_POLL_CHAN, pit_get_ticks() * (1000 / PIT_HZ) + 10, seq);
+                continue;
+            }
+            sent += (uint64_t)m;
+        }
+        return (long)sent;
     }
     if (slot->type == FD_FILE) {
         if (!slot->file->writable) {
@@ -513,7 +560,55 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
         return (long)n;
     }
     if (slot->type == FD_PIPE_READ) {
-        return pipe_read(slot->pipe, dst, (size_t)len);
+        return pipe_read(slot->pipe, dst, (size_t)len, slot->nonblock);
+    }
+    if (slot->type == FD_SOCKET) {
+        /* ---- M100: read(2) on a stream socket, and it BLOCKS ---------
+         *
+         * SYS_recv never did and never will: its contract is "0 if none
+         * are waiting right now", every in-tree caller polls it, and a
+         * call whose meaning changed under them would be the worst kind
+         * of ABI change. This is the other call, with POSIX's contract:
+         * wait for a byte, or for the end of the stream (which is 0
+         * here, as read(2) has it, and not SYS_recv's -1), or - with the
+         * non-blocking bit - say EAGAIN. mbedtls's socket layer is
+         * `read(fd)` and `write(fd)` and nothing else, and it is the
+         * first program here that needed either to block.
+         *
+         * Parked on the poll channel, which the scheduler's tick wakes
+         * (kernel/sched/sched.c) as well as every arrival; the loop
+         * re-asks the connection each time, so a wake for somebody else
+         * costs one tcp_recv that finds nothing. The staging buffer is
+         * on the stack rather than static like SYS_recv's, because this
+         * call parks and a second task on a second core may be in it at
+         * the same time. The net lock is held around tcp_recv and not
+         * across the park: SYS_read is not in syscall_touches_net, so
+         * the lock is this function's to take. */
+        struct tcpcb *tcb = socket_tcb(slot->sock);
+        if (!tcb) {
+            return -1; /* a datagram socket reads with recvfrom */
+        }
+        uint16_t want = len > TCP_MAX_MSS ? TCP_MAX_MSS : (uint16_t)len;
+        uint8_t staging[TCP_MAX_MSS];
+        for (;;) {
+            uint64_t seq = sched_event_seq();
+            net_lock_acquire();
+            int n = tcp_recv(tcb, staging, want);
+            net_lock_release();
+            if (n > 0) {
+                return copy_to_user(buf, staging, (size_t)n) == 0 ? n : -1;
+            }
+            if (n < 0) {
+                return 0; /* end of stream */
+            }
+            if (slot->nonblock) {
+                return -OS_ERR_AGAIN;
+            }
+            if (sched_signal_pending()) {
+                return -OS_ERR_INTR;
+            }
+            sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+        }
     }
     /* M59: and a file, which is the whole point of the fd table having
      * existed since M14 without one. The offset lives in the shared
@@ -4912,18 +5007,33 @@ static long sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
      * and nothing else because SYS_read has never refused one - so the
      * answer for FD_FILE says so rather than inventing a distinction
      * the kernel does not enforce. */
-    case F_GETFL_CMD:
+    case F_GETFL_CMD: {
+        long access;
         switch (self->fds[fd].type) {
-        case FD_STDIN:      return OPEN_READ;
-        case FD_STDOUT:     return OPEN_WRITE;
-        case FD_PIPE_READ:  return OPEN_READ;
-        case FD_PIPE_WRITE: return OPEN_WRITE;
+        case FD_STDIN:      access = OPEN_READ; break;
+        case FD_STDOUT:     access = OPEN_WRITE; break;
+        case FD_PIPE_READ:  access = OPEN_READ; break;
+        case FD_PIPE_WRITE: access = OPEN_WRITE; break;
         case FD_FILE:
-            return OPEN_READ |
-                   (self->fds[fd].file->writable ? OPEN_WRITE : 0);
-        case FD_SOCKET:     return OPEN_READ | OPEN_WRITE;
+            access = OPEN_READ | (self->fds[fd].file->writable ? OPEN_WRITE : 0);
+            break;
+        case FD_SOCKET:     access = OPEN_READ | OPEN_WRITE; break;
         default:            return -1;
         }
+        /* M100: and the one status flag, which is the half of this
+         * answer the M98 note above says did not exist yet. */
+        return access | (self->fds[fd].nonblock ? OS_NONBLOCK_BIT : 0);
+    }
+    case F_SETFL_CMD:
+        /* M100: the non-blocking bit and nothing else. POSIX lets a
+         * program pass the whole F_GETFL answer back with one bit
+         * changed, so the access mode is ignored rather than refused;
+         * a bit this kernel has no flag for is ignored too, which is
+         * what every other kernel does with the ones it does not
+         * implement. Accepted for a file as well: a file never waits,
+         * so the bit is true of it already. */
+        self->fds[fd].nonblock = (arg & OS_NONBLOCK_BIT) ? 1 : 0;
+        return 0;
     /* M100: record locks. See kernel/fs/flock.h for the model and for
      * who asked; the table itself is pure and the only scheduler
      * involvement is here - F_SETLKW parks on FLOCK_CHAN, which every
@@ -5419,6 +5529,35 @@ static long sys_execve(isr_regs_t *regs) {
     return 0;
 }
 
+/* M100: see SYS_getrandom in system_api/include/syscall.h. The copy goes
+ * through a bounded stack buffer rather than random_bytes straight into
+ * user memory, so a user pointer is checked the way every other one is
+ * and the generator never sees an address it did not own. */
+static long sys_getrandom(uint64_t buf, uint64_t len, uint64_t flags,
+                          uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (flags & ~(uint64_t)(GRND_NONBLOCK_BIT | GRND_RANDOM_BIT)) {
+        return -1;
+    }
+    if (!user_range_ok(buf, len, 1)) {
+        return -1;
+    }
+    uint8_t chunk[256];
+    uint64_t done = 0;
+    while (done < len) {
+        size_t n = len - done > sizeof(chunk) ? sizeof(chunk) : (size_t)(len - done);
+        random_bytes(chunk, n);
+        if (copy_to_user(buf + done, chunk, n) != 0) {
+            return -1;
+        }
+        done += n;
+    }
+    k_memset(chunk, 0, sizeof(chunk));
+    return (long)done;
+}
+
 static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
@@ -5528,6 +5667,7 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_msync] = sys_msync,
     [SYS_arch_prctl] = sys_arch_prctl,
     [SYS_futex] = sys_futex,
+    [SYS_getrandom] = sys_getrandom, /* M100 */
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

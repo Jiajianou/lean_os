@@ -1,4 +1,5 @@
 #include "isr.h"
+#include "dev/random.h" /* M100: random_feed */
 
 #include "drivers/klog.h"
 #include "panic.h"
@@ -383,6 +384,14 @@ void irq_handler(isr_regs_t *r) {
      * arriving is otherwise indistinguishable from a device that has
      * nothing to say. Read out through /proc/interrupts. */
     ioapic_count_irq(r->vector, smp_current_cpu());
+    /* M100: every interrupt is a sample of when the world outside the
+     * CPU did something, and the TSC at that moment is the primary
+     * entropy source on a machine with no hardware generator - which
+     * under QEMU's default CPU is this one. random_feed reads the TSC
+     * itself; the vector goes in so that a keystroke and a disk
+     * completion at the same instant are two inputs. Two ChaCha20
+     * blocks per interrupt, about a microsecond. */
+    random_feed(&r->vector, 1);
     if (irq_handlers[irq]) {
         irq_handlers[irq](r);
     } else {

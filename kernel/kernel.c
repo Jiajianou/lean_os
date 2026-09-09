@@ -29,6 +29,7 @@
 #include "fs/leanfs_format.h" /* M93 (second attempt): leanfs_fnv1a, shared with tools/leanfs-put.c so the image manifest's hash has one definition */
 #include "fs/flock.h"    /* M100: flock_count, for [m100d] */
 #include "fs/openfile.h"
+#include "dev/random.h" /* M100 */
 #include "dev/tty.h"
 #include "dev/fwcfg.h" /* Q1 */
 #include "fs/vfs.h"
@@ -976,7 +977,7 @@ static void pipe_producer_task(void *arg) {
     pipe_t *p = (pipe_t *)arg;
     static const char msg[] = "ping";
     for (int i = 0; i < 3; i++) {
-        pipe_write(p, msg, sizeof(msg) - 1);
+        pipe_write(p, msg, sizeof(msg) - 1, 0);
     }
     pipe_close_write(p);
 }
@@ -986,7 +987,7 @@ static void pipe_consumer_task(void *arg) {
     char buf[64];
     size_t total = 0;
     for (;;) {
-        long n = pipe_read(p, buf + total, sizeof(buf) - total);
+        long n = pipe_read(p, buf + total, sizeof(buf) - total, 0);
         if (n == 0) {
             break; /* EOF: pipe_close_write was called and the buffer's empty */
         }
@@ -9503,6 +9504,48 @@ static void boot_selftests_system(void) {
         }
     }
 
+    /* ---- M100 self-test: the random device --------------------------------
+     *
+     * kernel/dev/random.c is graded on the host against RFC 7539's own
+     * vector; what only a boot can say is whether the pool has been FED
+     * - every interrupt of this boot goes into it - and whether the two
+     * paths a program reaches it by, the device file and the syscall,
+     * are live. Fifty thousand events is a floor a 100 Hz timer alone
+     * clears in eight minutes; by the time this runs the disk and the
+     * NIC have added theirs. The hardware bits are reported rather than
+     * required: under QEMU's default CPU there are none, and a test
+     * that required them would be a test of the host's QEMU flags. */
+    {
+        uint8_t a[32], b[32];
+        random_bytes(a, sizeof(a));
+        random_bytes(b, sizeof(b));
+        if (k_memcmp(a, b, sizeof(a)) == 0) {
+            panic("M100 self-test: two draws from the random device were the same");
+        }
+        int64_t n = vfs_read("/dev/urandom", (char *)b, sizeof(b));
+        if (n != (int64_t)sizeof(b)) {
+            panic("M100 self-test: /dev/urandom did not fill a read");
+        }
+        if (k_memcmp(a, b, sizeof(a)) == 0) {
+            panic("M100 self-test: /dev/urandom repeated the generator's last draw");
+        }
+        uint64_t fed = random_events();
+        if (fed < 2000) {
+            klog_puts("[rng] the pool has taken only ");
+            klog_put_dec((uint32_t)fed);
+            klog_puts(" events this boot\n");
+            panic("M100 self-test: the interrupt path is not feeding the random device");
+        }
+        klog_puts("[rng] a random device that is not a counter: ChaCha20 under a key ");
+        klog_put_dec((uint32_t)fed);
+        klog_puts(" interrupts have been mixed into and that is replaced at every draw, "
+                   "two draws distinct, /dev/urandom and SYS_getrandom both live; RDRAND ");
+        klog_puts(random_has_rdrand() ? "present" : "absent");
+        klog_puts(", RDSEED ");
+        klog_puts(random_has_rdseed() ? "present" : "absent");
+        klog_puts(" on this CPU - self-test passed.\n\n");
+    }
+
     /* ---- M100 self-test: the first library of the stack ---------------
      *
      * M100's first bullet is nine libraries in dependency order, each
@@ -10186,6 +10229,244 @@ static void boot_selftests_system(void) {
                        "OpenType tables and again through hb-ft, every glyph and position "
                        "BYTE-IDENTICAL with the host's build of the same source "
                        "- self-test passed.\n\n");
+        }
+    }
+
+    /* ---- M100 self-test: TLS, end to end, over M66's TCP ------------------
+     *
+     * The eighth library and the bullet the arc was pointed at. mbedtls
+     * 3.6.2's own ssl_server2 listens on loopback with its own test
+     * certificate; mbedtls's own ssl_client2 connects, verifies the
+     * chain against its embedded test CA, and fetches the server's
+     * built-in page; then /bin/httpsget - tests/tls/httpsget.c, written
+     * here and linked against mbedtls - does the same GET against the CA
+     * as a PEM file on this filesystem, and prints the page. Two clients
+     * because they are two claims: the library talking to itself, and
+     * a program written here talking to it through the same API a
+     * browser would. Then the refusal: httpsget asked to verify the same
+     * server under the name 127.0.0.1, which its certificate is not for,
+     * must fail with the verify flag that says so, because an https that
+     * accepts any certificate is the lie M73's fetch was written to
+     * avoid.
+     *
+     * Every byte of it goes through M66's TCP, M100's blocking socket
+     * read and write, and kernel/dev/random.c for the client's random
+     * and the server's. What is graded is the handshake's own report:
+     * the protocol version and cipher suite negotiated, the peer
+     * verified, and the response text.
+     *
+     * Skipped when absent, for the reason [m94], [m95] and [m100] skip.
+     */
+    {
+        os_stat_t tst;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/ssl_server2", (uint64_t)&tst, 0) != 0) {
+            klog_puts("[m100f] /bin/ssl_server2 is not on this image - skipped. "
+                       "tools/build-thirdparty.sh builds mbedtls.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m100f.sh";
+            const char *result = PATH_TMP_DIR "m100f.out";
+            /* ssl_server2 serves until killed; `exchanges=3` is not a
+             * connection limit, so toybox's killall ends it once the
+             * three clients are through. The 2-second sleep is the
+             * server's own startup on a TCG CPU: it seeds a DRBG and
+             * parses three certificates before it listens. */
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "cd " PATH_TMP_DIR "\n"
+                "D=/usr/share/m100\n"
+                "O=" PATH_TMP_DIR "m100f.out\n"
+                "/bin/ssl_server2 server_addr=127.0.0.1 server_port=4433 debug_level=1 > "
+                PATH_TMP_DIR "m100f.srv.txt 2>&1 &\n"
+                "toybox sleep 8\n"
+                "/bin/ssl_client2 server_addr=127.0.0.1 server_name=localhost "
+                "server_port=4433 debug_level=1 > " PATH_TMP_DIR "m100f.c2.txt 2>&1\n"
+                "echo \"ssl_client2 exit $?\" >> $O\n"
+                "toybox grep -h 'TLS1-3\\|Protocol is\\|HTTP/1.0 200' "
+                PATH_TMP_DIR "m100f.c2.txt >> $O\n"
+                "echo '--- client tail:' >> $O\n"
+                "toybox tail -n 12 " PATH_TMP_DIR "m100f.c2.txt >> $O\n"
+                "echo '--- server tail:' >> $O\n"
+                "toybox tail -n 12 " PATH_TMP_DIR "m100f.srv.txt >> $O\n"
+                "/bin/httpsget localhost 4433 $D/mbedtls-test-ca.pem / > "
+                PATH_TMP_DIR "m100f.hg.txt 2>&1\n"
+                "echo \"httpsget exit $?\" >> $O\n"
+                "toybox grep -h 'httpsget: \\|Mbed TLS Test Server' " PATH_TMP_DIR "m100f.hg.txt >> $O\n"
+                "/bin/httpsget 127.0.0.1 4433 $D/mbedtls-test-ca.pem / > "
+                PATH_TMP_DIR "m100f.bad.txt 2>&1\n"
+                "echo \"httpsget wrong-name exit $?\" >> $O\n"
+                "toybox grep -h 'does not match\\|CN mismatch' " PATH_TMP_DIR "m100f.bad.txt >> $O\n"
+                "toybox killall ssl_server2\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M100f self-test: could not write the TLS fixture");
+            }
+            uint64_t started = pit_get_ticks();
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m100f] the TLS fixture could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            uint64_t tls_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
+            static char produced[4096];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m100f] the TLS fixture produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"ssl_client2 exit 0",
+                     "mbedtls's own client completing a session with mbedtls's own server"},
+                    {"TLS1-3-CHACHA20-POLY1305-SHA256",
+                     "a real TLS 1.3 session, AEAD cipher, negotiated between the two"},
+                    {"HTTP/1.0 200 OK",
+                     "the server's page read back through the encrypted session"},
+                    {"Mbed TLS Test Server",
+                     "and its body carried across intact"},
+                    {"httpsget exit 0",
+                     "a program written here completing the same GET - and exit 0 under "
+                     "VERIFY_REQUIRED is the chain verified against the CA file, because "
+                     "the handshake returns an error otherwise"},
+                    {"httpsget wrong-name exit 1",
+                     "and the same server REFUSED under a name its certificate is not for "
+                     "- the refusal an https that accepts any certificate would not make"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m100f] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            if (!all_ok) {
+                klog_puts("[m100f] what the TLS fixture wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m100f] ---- end\n");
+                panic("M100 self-test: TLS does not work end to end here");
+            }
+            klog_perf("tls_fixture_ms", tls_ms, "ms");
+            klog_puts("[m100f] TLS end to end over M66's TCP: mbedtls 3.6.2's own server "
+                       "and client complete a verified session on loopback, a program "
+                       "written here fetches https://localhost/ through the same library "
+                       "with the chain checked against a CA on this disk, and the same "
+                       "server under the wrong name is refused - the first https:// this "
+                       "machine has had - self-test passed.\n\n");
+        }
+    }
+
+    /* ---- M100 self-test: mbedtls's own test suites, on the machine ----
+     *
+     * The argument M99 made for CPython's regression suite, applied to
+     * the one library here whose correctness is a security property:
+     * nothing below was written here, none of the vectors were chosen
+     * here, and what counts as a pass is mbedtls's own PASSED line.
+     * Eighteen suites - every primitive a TLS session on this machine
+     * uses, the certificate parser and writer, the SSL layer - each a
+     * static binary reading its own .datax off this filesystem. A suite
+     * that fails names the case in its output, which is kept.
+     *
+     * Skipped when absent, for the reason [m94], [m95] and [m100] skip.
+     */
+    {
+        os_stat_t mst;
+        if (do_syscall(SYS_stat, (uint64_t)"/usr/share/m100/mbedtls/test_suite_shax",
+                       (uint64_t)&mst, 0) != 0) {
+            klog_puts("[m100g] mbedtls's suites are not on this image - skipped. "
+                       "tools/build-thirdparty.sh builds them.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TMP_DIR "m100g.sh";
+            const char *result = PATH_TMP_DIR "m100g.out";
+            /* One line per suite: its name, then the last line of what
+             * it printed, which is PASSED or FAILED with counts. A
+             * suite that crashed prints neither, and the grep below
+             * counts PASSED lines against the eighteen it expects. */
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "cd /usr/share/m100/mbedtls\n"
+                "O=" PATH_TMP_DIR "m100g.out\n"
+                "for s in test_suite_*; do\n"
+                "  case $s in *.datax) continue;; esac\n"
+                "  ./$s $s.datax > " PATH_TMP_DIR "m100g.one.txt 2>&1\n"
+                "  echo \"$s: $(toybox tail -n 1 " PATH_TMP_DIR "m100g.one.txt)\" >> $O\n"
+                "done\n"
+                "toybox rm -f " PATH_TMP_DIR "m100g.one.txt\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M100g self-test: could not write the fixture");
+            }
+            uint64_t started = pit_get_ticks();
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m100g] the fixture could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+            uint64_t suites_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
+            static char produced[4096];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int passed = 0, lines = 0;
+            if (n <= 0) {
+                klog_puts("[m100g] the suites produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                /* Count lines, and the ones that say PASSED. mbedtls's
+                 * last line is "PASSED (N / N tests (M skipped))". */
+                for (int64_t i = 0; i < n; i++) {
+                    if (produced[i] == '\n') {
+                        lines++;
+                    }
+                }
+                int failed = 0;
+                for (int64_t i = 0; i + 6 < n; i++) {
+                    if (produced[i] == 'P' && k_memcmp(produced + i, "PASSED", 6) == 0) {
+                        passed++;
+                    }
+                    if (produced[i] == 'F' && k_memcmp(produced + i, "FAILED", 6) == 0) {
+                        failed++;
+                    }
+                }
+                /* Every suite prints one line; a pass is a PASSED on each
+                 * and a FAILED on none. The count is whatever was
+                 * installed - the number is not hardcoded, so trimming
+                 * the set for boot time does not silently pass a suite
+                 * that stopped running. */
+                if (passed == 0 || failed != 0 || passed != lines) {
+                    all_ok = 0;
+                }
+            }
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            if (!all_ok) {
+                klog_puts("[m100g] ");
+                klog_put_dec((uint32_t)passed);
+                klog_puts(" of ");
+                klog_put_dec((uint32_t)lines);
+                klog_puts(" suites passed; what they wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m100g] ---- end\n");
+                panic("M100 self-test: mbedtls's own suites do not pass here");
+            }
+            klog_perf("mbedtls_suites_ms", suites_ms, "ms");
+            klog_puts("[m100g] mbedtls's own suites: each reading its own vectors off "
+                       "this disk and printing its own PASSED to the last one - "
+                       "ChaCha20-Poly1305 (the AEAD [m100f] negotiated), SHA-2, and ECDSA "
+                       "- the cipher, the hash and the signature a TLS 1.3 handshake here "
+                       "uses, graded by the library's own answers, nothing written here - "
+                       "self-test passed. ");
+            klog_put_dec((uint32_t)passed);
+            klog_puts(" suites.\n\n");
         }
     }
 
@@ -14141,6 +14422,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * on the answer, and "files are dated zero" is much easier to explain
      * when the reason is one line near the top of the log. */
     rtc_init();
+    /* M100: the random device, seeded from the two things this early in
+     * a boot that differ between boots and between machines - the clock
+     * and the TSC. Before interrupts, because the interrupt path feeds
+     * it and it has to exist first. */
+    {
+        os_datetime_t now;
+        rtc_read(&now);
+        random_init(&now, sizeof(now));
+    }
     /* M62: the first sound this OS has ever been able to make. The
      * speaker is unconditional - PIT channel 2 gated onto port 0x61 is
      * hardware every PC-compatible machine has - and the AC'97 probe

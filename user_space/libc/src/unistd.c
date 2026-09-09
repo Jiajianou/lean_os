@@ -17,6 +17,7 @@
 #include <errno.h>    /* M89: fcntl's lock commands refused with EOPNOTSUPP; M100: real, and EAGAIN/ENOLCK */
 #include <stdint.h>
 #include "os_fs.h"    /* system_api/include/os_fs.h - os_flock_t, M100 */
+#include <sys/random.h> /* M100: getrandom */
 #include <limits.h>   /* M89: OPEN_MAX, the range dup() searches */
 #include "proc.h"     /* system_api/include/proc.h - os_meminfo_t, M89 */
 #include <dirent.h>   /* M89: NAME_MAX, which pathconf reports */
@@ -156,6 +157,10 @@ long read(int fd, void *buf, size_t count) {
         errno = EINTR;
         return -1;
     }
+    if (r == -OS_ERR_AGAIN) {
+        errno = EAGAIN; /* M100: O_NONBLOCK, and nothing was there */
+        return -1;
+    }
     if (r < 0) {
         errno = __lean_fd_errno(fd);
     }
@@ -164,6 +169,14 @@ long read(int fd, void *buf, size_t count) {
 
 long write(int fd, const void *buf, size_t count) {
     long r = sys_write(fd, buf, count);
+    if (r == -OS_ERR_INTR) {
+        errno = EINTR; /* M100: a socket write can park now, and a signal can end it */
+        return -1;
+    }
+    if (r == -OS_ERR_AGAIN) {
+        errno = EAGAIN;
+        return -1;
+    }
     if (r < 0) {
         errno = __lean_fd_errno(fd);
     }
@@ -335,10 +348,12 @@ int fcntl(int fd, int cmd, ...) {
      * access mode - is something only the fd table knows, and because 0
      * is not a valid access mode in this ABI's encoding (O_RDONLY is
      * OPEN_READ, which is not 0). BFD aborts on an impossible access
-     * mode, and the machine's own `strip` proved it will. O_NONBLOCK is
-     * still never set, which is still the truth. F_SETFL is unchanged
-     * and still honest: accepting O_NONBLOCK without honouring it would
-     * be a program believing otherwise. M100 is where that changes. */
+     * mode, and the machine's own `strip` proved it will.
+     *
+     * M100: and the other half. O_NONBLOCK is OS_NONBLOCK_BIT, the same
+     * value, so the kernel's answer is this call's answer; F_SETFL hands
+     * the kernel the bit, which is the only status flag it has, and the
+     * kernel ignores the rest as every other kernel does. */
     case F_GETFL:
         return (int)sys_fcntl(fd, F_GETFL_CMD, 0);
     case F_SETFL: {
@@ -346,7 +361,11 @@ int fcntl(int fd, int cmd, ...) {
         __builtin_va_start(ap, cmd);
         int arg = __builtin_va_arg(ap, int);
         __builtin_va_end(ap);
-        return arg == 0 ? 0 : -1;
+        if (sys_fcntl(fd, F_SETFL_CMD, arg & O_NONBLOCK) < 0) {
+            errno = EBADF;
+            return -1;
+        }
+        return 0;
     }
     /* M100: record locks, real now. <fcntl.h>'s struct flock and the
      * kernel's os_flock_t use the same three type values on purpose, so
@@ -1135,4 +1154,26 @@ int ttyname_r(int fd, char *buf, size_t len) {
 char *ttyname(int fd) {
     static char shared[16];
     return ttyname_r(fd, shared, sizeof(shared)) == 0 ? shared : (char *)0;
+}
+
+/* M100: see <sys/random.h>. */
+ssize_t getrandom(void *buf, size_t len, unsigned int flags) {
+    if (flags & ~(unsigned int)(GRND_NONBLOCK | GRND_RANDOM)) {
+        errno = EINVAL;
+        return -1;
+    }
+    long r = sys_getrandom(buf, len, flags);
+    if (r < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    return (ssize_t)r;
+}
+
+int getentropy(void *buf, size_t len) {
+    if (len > 256) {
+        errno = EIO; /* what the BSDs and glibc answer for more than 256 */
+        return -1;
+    }
+    return sys_getrandom(buf, len, 0) == (long)len ? 0 : -1;
 }

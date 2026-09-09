@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/random.h> /* M100 */
 #include <pwd.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -649,8 +650,8 @@ int main(void) {
              * fd was opened O_WRONLY, and on this kernel a disk file is
              * always readable too - openfile_t records only `writable`
              * - so the honest expectation is O_RDWR, exactly. Not
-             * "& O_ACCMODE": O_NONBLOCK is 0 in this encoding, so any
-             * stray bit in the answer would be a bit that means
+             * "& O_ACCMODE": a fresh descriptor has no status flag set,
+             * so any stray bit in the answer would be a bit that means
              * nothing, and equality is what catches one. */
             if (fcntl(fd, F_GETFL) != O_RDWR) {
                 fail("fcntl: F_GETFL should report the access mode (M98)");
@@ -662,8 +663,21 @@ int main(void) {
             if (fcntl(fd, F_SETFD, 0) != 0 || fcntl(fd, F_GETFD) != 0) {
                 fail("fcntl: FD_CLOEXEC did not clear again");
             }
-            if (fcntl(fd, F_SETFL, 1) == 0) {
-                fail("fcntl accepted a status flag it cannot honour");
+            /* M100: F_SETFL is real. O_NONBLOCK sets, reads back beside
+             * the access mode, and clears; a bit that names no flag
+             * here (this is O_RDONLY's bit, which POSIX says F_SETFL
+             * ignores) is accepted and changes nothing - which is what
+             * the check that stood here, "accepted a status flag it
+             * cannot honour", encoded backwards: it required refusal,
+             * and what a program needs is that the answer stays true. */
+            if (fcntl(fd, F_SETFL, O_NONBLOCK) != 0 || fcntl(fd, F_GETFL) != (O_RDWR | O_NONBLOCK)) {
+                fail("fcntl: O_NONBLOCK did not set and read back beside the access mode");
+            }
+            if (fcntl(fd, F_SETFL, 0) != 0 || fcntl(fd, F_GETFL) != O_RDWR) {
+                fail("fcntl: O_NONBLOCK did not clear");
+            }
+            if (fcntl(fd, F_SETFL, 1) != 0 || fcntl(fd, F_GETFL) != O_RDWR) {
+                fail("fcntl: a flag this kernel has no notion of changed the answer");
             }
             close(fd);
             unlink("/tmp/libctest.tmp");
@@ -1198,6 +1212,105 @@ int main(void) {
             if (unlink(path) != 0) {
                 fail("could not remove the stamped file");
             }
+        }
+    }
+
+    /* ---- M100: getrandom, and /dev/urandom --------------------------------
+     *
+     * What a program can check about a random source from outside: the
+     * call fills what it was asked for, two calls differ, the device
+     * file agrees with the syscall in kind (both fill, neither repeats),
+     * and a flag that does not exist is EINVAL. Whether the bytes are
+     * random is tests/test_random.c's question, on the host, against
+     * the RFC. */
+    {
+        unsigned char a[64], b[64], c[64];
+        memset(a, 0, sizeof(a));
+        memset(b, 0, sizeof(b));
+        if (getrandom(a, sizeof(a), 0) != (ssize_t)sizeof(a) ||
+            getrandom(b, sizeof(b), GRND_NONBLOCK) != (ssize_t)sizeof(b)) {
+            fail("getrandom did not fill the buffer");
+        }
+        if (memcmp(a, b, sizeof(a)) == 0) {
+            fail("two getrandom calls returned the same bytes");
+        }
+        int zeros = 0;
+        for (size_t i = 0; i < sizeof(a); i++) {
+            zeros += a[i] == 0;
+        }
+        if (zeros > 16) {
+            fail("getrandom's bytes are mostly zero");
+        }
+        errno = 0;
+        if (getrandom(c, sizeof(c), 0x100) != -1 || errno != EINVAL) {
+            fail("getrandom accepted a flag that does not exist");
+        }
+        int rfd = open("/dev/urandom", O_RDONLY);
+        if (rfd < 0 || read(rfd, c, sizeof(c)) != (long)sizeof(c)) {
+            fail("/dev/urandom could not be read");
+        } else if (memcmp(c, a, sizeof(c)) == 0 || memcmp(c, b, sizeof(c)) == 0) {
+            fail("/dev/urandom repeated getrandom's bytes");
+        }
+        if (rfd >= 0) {
+            close(rfd);
+        }
+    }
+
+    /* ---- M100: O_NONBLOCK on a pipe ------------------------------------
+     *
+     * The flag was 0 until M100. What is checked is the whole contract
+     * from one thread, which a pipe allows and a socket does not: the
+     * bit reads back, an empty non-blocking read is EAGAIN rather than
+     * a wait or a 0, a non-blocking write fills the pipe and then says
+     * EAGAIN with the count it did take, the reader drains exactly that
+     * count, and clearing the bit clears it. */
+    {
+        int p[2];
+        char buf[4096];
+        if (pipe(p) != 0) {
+            fail("pipe() failed");
+        } else {
+            if (fcntl(p[0], F_GETFL) & O_NONBLOCK) {
+                fail("a fresh pipe reported O_NONBLOCK");
+            }
+            if (fcntl(p[0], F_SETFL, O_NONBLOCK) != 0 || !(fcntl(p[0], F_GETFL) & O_NONBLOCK)) {
+                fail("O_NONBLOCK could not be set on a pipe's read end, or did not read back");
+            }
+            errno = 0;
+            if (read(p[0], buf, 1) != -1 || errno != EAGAIN) {
+                fail("a non-blocking read of an empty pipe was not EAGAIN");
+            }
+            if (write(p[1], "x", 1) != 1 || read(p[0], buf, 1) != 1 || buf[0] != 'x') {
+                fail("a byte did not cross a non-blocking pipe");
+            }
+            if (fcntl(p[1], F_SETFL, O_NONBLOCK) != 0) {
+                fail("O_NONBLOCK could not be set on the write end");
+            }
+            memset(buf, 'y', sizeof(buf));
+            long total = 0, n;
+            int rounds = 0;
+            errno = 0;
+            while ((n = write(p[1], buf, sizeof(buf))) > 0 && rounds++ < 1000) {
+                total += n;
+            }
+            if (n != -1 || errno != EAGAIN || total <= 0) {
+                printf("[libctest] non-blocking write stopped with %ld after %ld bytes, errno %d\n",
+                       n, total, errno);
+                fail("a non-blocking write did not fill the pipe and then say EAGAIN");
+            }
+            long drained = 0;
+            while ((n = read(p[0], buf, sizeof(buf))) > 0) {
+                drained += n;
+            }
+            if (drained != total || n != -1 || errno != EAGAIN) {
+                printf("[libctest] drained %ld of %ld\n", drained, total);
+                fail("the reader did not drain exactly what the non-blocking writes took");
+            }
+            if (fcntl(p[0], F_SETFL, 0) != 0 || (fcntl(p[0], F_GETFL) & O_NONBLOCK)) {
+                fail("clearing O_NONBLOCK did not clear it");
+            }
+            close(p[0]);
+            close(p[1]);
         }
     }
 

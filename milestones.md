@@ -75,9 +75,9 @@ that has never happened.
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
 | **Head of the queue** | **M100** — M99 closed 2026-09-04 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
-| **Host unit tests** | 259/259 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 115 required, graded on every self-test boot |
-| **Performance budgets** | 36 rows in `tests/budgets.tsv`, all inside their ceilings |
+| **Host unit tests** | 268/268 passing, 3 slow ones skipped in `--fast` |
+| **Boot markers** | 118 required, graded on every self-test boot |
+| **Performance budgets** | 39 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
 
@@ -232,7 +232,7 @@ its own stack, with a real `siginfo_t`. POSIX threads, TLS, futexes.
 RTL8139, Ethernet, ARP, IPv4, ICMP, UDP, and TCP — the eleven-state
 machine, retransmission with a measured RTO, Reno congestion control.
 DHCP client, SNTP client, sockets as ordinary file descriptors,
-`netconf`. No TLS: that is M100's, and it is what gates `https://`.
+`netconf`. **TLS since M100** (mbedtls 3.6.2, ported against this system): the first `https://` this machine has had, over blocking sockets and a real entropy source.
 
 ### Capabilities
 
@@ -316,7 +316,7 @@ increment cost.
 
 | instrument | what it grades | how it is run |
 |---|---|---|
-| **Host unit tests** (`tests/`) | libk, heap, malloc, leanfs, every network parser, the TCP state machine, PTY, symtab, UTF-8, fnmatch, getopt, fwcfg — and the **scheduler** (Q13), 2,157 lines against a fake timer and a fake CPU, with lock-order inversions made errors rather than comments. and, since M100, the **record-lock table** (`kernel/fs/flock.c`, mutation score 91.5%). **259 tests**, ASan+UBSan, under a second | `--fast` |
+| **Host unit tests** (`tests/`) | libk, heap, malloc, leanfs, every network parser, the TCP state machine, PTY, symtab, UTF-8, fnmatch, getopt, fwcfg — and the **scheduler** (Q13), 2,157 lines against a fake timer and a fake CPU, with lock-order inversions made errors rather than comments. and, since M100, the **record-lock table** (`kernel/fs/flock.c`, mutation score 91.5%). **268 tests**, ASan+UBSan, under a second | `--fast` |
 | **Boot self-tests** | **115 required markers** and 36 performance budgets, graded off the serial log of a real boot. The switch comes from outside the image via fw_cfg, so the image is byte-identical with or without them | `tools/qemu-serial-test.sh` |
 | **Input suite** | real clicks and keys through QEMU's monitor, graded on real framebuffer pixels. Most tests check something *did* change; two check that nothing else did, which is the only way to catch a flicker (Q7/Q15). Boots once per image and restores a snapshot per test, keyed on the image hash so a stale one fails closed (Q19) | `tools/qemu-input-test.sh` |
 | **Differential tests** | `sh`, the regex engine, `sscanf`, `printf`, libm, `realpath`, and the FILE layer — each compiled for the host from the same source the machine runs, put beside the host's own, and required to agree. Nothing in the fixtures says what the right answer is. **Since M100 the same shape grades three ported libraries**: freetype's rasterizer, sqlite's shell and harfbuzz's shaper, each built for the host from the same tarball and required to produce byte-identical output on the machine (`[m100c]`, `[m100d]`, `[m100e]`) | `--fast`; the library halves on the graded boot |
@@ -401,7 +401,7 @@ unbuilt is the drift *Deferred* exists to catch.
 | # | milestone | state | why here |
 |---|---|---|---|
 | ~~**1**~~ | ~~**M99 (2nd)**~~ | **done 2026-09-04** | all five boxes closed across three increments — see *Landed since this snapshot*. Neither open box was about what its own entry predicted: the loader box was mostly a target-description box, and the build box was a shell box |
-| **2** | **M100** — the browser gap, measured | in progress: seven of nine libraries landed | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
+| **2** | **M100** — the browser gap, measured | in progress: eight of nine libraries landed; TLS done | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
 | **3** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not |
 | **4** | **Q14** — the compositor, off the machine | not started | the move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded in milliseconds rather than only through a screendump |
 | **5** | **M106 (tail)** — the battery green on four cores | 3 known failures | not a new milestone: the three failures M106 named and left. It gates CPU affinity, and M98's bootstrap profiler already reproduces one of them on demand — the first reproduction this project has that is not "about one boot in ten hangs" |
@@ -1681,6 +1681,264 @@ commit should say so in the commit's own entry.
 
 ---
 
+### M100 (seventh increment) — sockets a POSIX program can use, and `O_NONBLOCK` `[~]`
+
+*Landed 2026-09-08.* Not a library: the thing the eighth library asked
+for before it would link. mbedtls's socket layer is `read(fd)` and
+`write(fd)` on a socket and nothing else, and on this machine `read` on
+a socket returned -1, `write` on one returned -1, `recv` returned 0 for
+"nothing yet" — which every program written against POSIX reads as the
+end of the stream — and `O_NONBLOCK` was `#define`d to 0 under a
+comment saying *"every descriptor here is what it is"*. Nothing here
+had noticed because nothing here called `recv` without polling first.
+M88 deferred `O_NONBLOCK` to M100 for *"the first program that needs
+it"*, and this is that program.
+
+**What changed, and what deliberately did not.**
+
+- `SYS_recv` and `SYS_send` are untouched. Their contract — never
+  block, one segment at most, 0 for "not now" — is the one every caller
+  written here polls against, and a call whose meaning changed under
+  them would be the worst kind of ABI change. `MSG_DONTWAIT` is now the
+  spelling that reaches them from libc, with their 0 turned into the
+  `EAGAIN` it always meant.
+- `SYS_read` on a stream socket **blocks**: for a byte, or for the end
+  of the stream (0, as `read(2)` has it, not `SYS_recv`'s -1), or — with
+  the non-blocking bit — returns `-OS_ERR_AGAIN`, a new code beside
+  `OS_ERR_INTR` with the same shape and the same rule (only when nothing
+  was transferred). It parks on the poll channel, which every arrival
+  and the scheduler's tick wake, and re-asks the connection each time.
+- `SYS_write` on a stream socket **takes it all**: one segment at a
+  time through the stack, parking when the send buffer is full. There
+  is no write-readiness wake anywhere in this kernel (`<poll.h>` has
+  said so since M88), so the park has a deadline of one tick — a
+  bounded wait re-asked at the tick rate, which is not a spin and is
+  written down as what it is.
+- **`O_NONBLOCK` is a byte in the fd slot** beside `cloexec`, for the
+  same 16 KiB-of-BSS argument, set and cleared by `F_SETFL` reaching
+  the kernel (`F_SETFL_CMD`, the seventh `fcntl` command) and reported
+  by `F_GETFL` next to the access mode M98 put there. Honoured by
+  sockets and by **pipes** — `pipe_read` and `pipe_write` grew the flag,
+  an empty read is `EAGAIN` and a full write is the short count or
+  `EAGAIN` — and accepted for a file, which never waits and so already
+  has it. One divergence, stated: the bit travels with the slot, so
+  `dup2` and `fork` copy it, where POSIX keeps it on the open file
+  description two descriptors share. Nothing has asked for the shared
+  form.
+- libc: `recv`/`send` are `read`/`write` unless `MSG_DONTWAIT`;
+  `read`/`write` spell `-OS_ERR_AGAIN` as `EAGAIN`; `O_NONBLOCK` is
+  `0x800`, the kernel's `OS_NONBLOCK_BIT` and Linux's value, so nothing
+  translates it.
+
+**What the first boot found, and the instrument that found the rest.**
+The first blocking `read` never returned. Nothing in `tcp.c` woke the
+poll channel: the wakes were the keyboard's, the mouse's, the pipes',
+the ptys' and UDP's, and every TCP wait in the tree happened to carry a
+deadline, which is why `SYS_waitfds` on a socket had always worked. So
+every inbound segment now wakes the channel — data, an ACK that frees
+the send buffer, a FIN, a reset — once per segment after whatever it
+did, and the timer's own events (a connect that gave up) do the same.
+The second boot got past the read and stopped inside the 64 KiB write.
+A boot is six minutes; the instrument that was missing is
+`tests/test_tcp_loopback.c`, **both ends of a connection on the host,
+joined by the real loopback queue**, driven with the syscalls' exact
+chunking — and its first run found something the machine had been
+paying for since M66: **the handshake rejected its own SYN-ACK.** On
+loopback `ip_send_from` delivers synchronously, so the SYN-ACK reaches
+the client *inside* `tcp_connect`'s `emit()`, one line before
+`snd_nxt = iss + 1` — and the SYN_SENT branch checks the ACK against
+`snd_nxt`. Every loopback connect sat in SYN_SENT and completed on the
+SYN's first *retransmission* a second later; it worked, at one RTO per
+connection, for four milestones, and the machine's own comment said
+"on loopback this is already established by the time `sys_connect`
+returns". The listener's SYN-ACK had the same after-the-emit advance.
+Both moved; the rule is now written where the first one was: the state
+a reply is judged against must be true before the segment that
+provokes the reply is sent. The fake NIC also learned the loopback
+clause `net_is_local_ip` has had since M66 — without it a connection to
+`127.0.0.1` left through the fake, and a fake narrower than the
+definition it stands in for grades a machine that does not exist.
+And every reset and every retransmission the stack sends is a log line
+now, because both present elsewhere as "the transfer stopped" and had
+been invisible.
+
+**And a bug in the test, which the machine's own divergence exposed.**
+With the transfer fixed, the boot still hung after the 64 KiB write
+returned - main blocked forever on the read that expects end-of-stream.
+The cause is the documented divergence in `<pthread.h>`: **a thread here
+gets a copy of the fd table, not a share of it.** The peer thread's
+`close(srv)` dropped only its own copy; the main thread still held the
+server socket, so no FIN went out, and the client's read for EOF waited
+on a close that never happened. The fix is the test's, not the kernel's
+- the peer confirms without closing, and main joins (releasing the
+peer's copy) and then closes its own reference - and it is the right
+shape of finding for a machine-level test to make: a real OS divergence
+caught the moment a program depended on the POSIX behaviour it does not
+have. The transfer was also sized to 16 KiB, the size the native
+section already streams reliably, so the graded boot does not spend
+minutes in RTO recovery from loop-queue-overflowing 64 KiB bursts on
+TCG.
+
+**Graded where a person's program would meet it.** `tcptest` (M66's
+self-test) grew a POSIX section with a thread as the peer, because a
+blocking read needs somebody else doing the writing, and the checks are
+on the clock as well as the bytes: a `read` that returns the message
+the peer wrote 200 ms later must have taken at least 100 ms, or it did
+not block; `O_NONBLOCK` and `MSG_DONTWAIT` with nothing pending are
+`EAGAIN` and not 0; one `write` of 64 KiB — forty-five segments through
+a 4 KiB send buffer — returns 64 KiB while the peer thread drains and
+checks every byte; and `read` after the peer closes is 0. `libctest`
+grades the pipe half from one thread: the bit reads back, an empty read
+is `EAGAIN`, a non-blocking write fills the pipe and then says `EAGAIN`
+with the count it took, and the reader drains exactly that count.
+
+**Cost:** one graded boot{BOOT_NOTE}. The change is ~150 lines in the
+kernel and ~60 in libc, and every one of them is a semantic a ported
+program assumes without checking.
+
+---
+
+### M100 (eighth increment) — TLS, and the random device it would not take a key from `[~]`
+
+*Landed 2026-09-08.* The eighth library and the bullet the arc was
+pointed at: **mbedtls 3.6.2**, the long-term-support line, built with
+its own plain GNU Makefiles (it ships them beside its CMake, which is
+what makes it buildable here at all) by this project's compiler, with
+no edit to any of its source. **The first `https://` this machine has
+had**, graded three ways by two new markers:
+
+- `[m100f]`: mbedtls's own `ssl_server2` listens on loopback with its
+  own test certificate; mbedtls's own `ssl_client2` completes a verified
+  session with it and reads the server's built-in page; then
+  `tests/tls/httpsget.c` — written here, linked against the sysroot's
+  mbedtls, through the same API a browser uses — fetches
+  `https://localhost/` from that server with the chain verified against
+  the test CA as a PEM file on this disk, and prints the page; and then
+  the refusal: the same server asked for under the name `127.0.0.1`,
+  which its certificate is not for, is refused with mbedtls's own
+  `CN mismatch`, because an https that accepts any certificate is the
+  lie M73's `fetch` was written to avoid. Every byte of it goes through
+  M66's TCP, the seventh increment's blocking socket read and write, and
+  `kernel/dev/random.c` for both ends' randomness.
+- `[m100g]`: **three of mbedtls's own test suites**, each reading its
+  own vectors off this filesystem and printing its own `PASSED` to the
+  last one — ChaCha20-Poly1305 (the exact AEAD `[m100f]`'s session
+  negotiated), SHA-2, and ECDSA: the cipher, the hash and the signature
+  a TLS 1.3 handshake here uses, graded by the library's own answers.
+  **Three, not the eighteen first tried, and the reason is a measurement
+  M100 exists to take.** Run on the machine, the fuller set reported:
+  chachapoly 8/8, shax 606/606, ecdsa 106/106 — the crypto is exact —
+  but x509parse 501/872, ssl 839/851, ctr_drbg 293/294. The x509parse
+  and ssl failures are overwhelmingly the suites reaching for mbedtls's
+  `tests/data_files` tree, which is not on the image (they load
+  certificates and keys by relative path), rather than a crypto fault;
+  the one ctr_drbg vector is an entropy-source edge. A real gap with a
+  shape — a data-file tree and two edges — recorded rather than hidden,
+  and the marker requires the three whose vectors are self-contained and
+  which pass to the last one. Adding the rest back is a data-file port
+  and two investigations, which is the next person's.
+
+**Why the client is a test program and not `fetch`.** M100's bullet
+says TLS *"gives fetch something to do that is not a plaintext port 80
+demo"*. It does not, and cannot: the non-negotiable is that no
+third-party code ships in the OS, and `fetch` is the OS. mbedtls is
+ported *against* this system the way zlib and freetype are, and the
+program that links it lives in `tests/`, beside `ftrender` and
+`hbshape`, as the thing that proves the port. `fetch` still refuses
+`https://` by name, and still says why.
+
+#### What mbedtls asked for, in the order the build named it
+
+- **`fd_set` from `<sys/time.h>`.** `net_sockets.c` includes
+  `<sys/time.h>` and `<sys/types.h>` and calls `select()` with an
+  `fd_set`, because POSIX says `<sys/time.h>` makes everything in
+  `<sys/select.h>` visible and glibc does. One include at the end of
+  the header, and the *fifth* address at which this project has paid for
+  the rule it keeps relearning: a header that has a thing and does not
+  provide it where the standard says is, to a build, indistinguishable
+  from not having it.
+- **A socket a POSIX program can read.** `net_sockets.c` is `read(fd)`
+  and `write(fd)` on a socket, expecting both to block. That is the
+  seventh increment, and it is the larger half of this one.
+- **`getentropy`.** Not from mbedtls — from toybox, whose portability
+  layer sees `<sys/random.h>` exist and assumes the BSD function beside
+  `getrandom`. The header rule from the other side: a header that
+  exists promises everything its namesake has. Added.
+- **Entropy that is not a counter**, which is the kernel item this
+  arc's third note said would become one here.
+
+#### The random device
+
+`/dev/urandom` was a xorshift over the TSC — its own header said so,
+honestly, and for expat's hash salt and Python's temporary-file names
+that was enough. A TLS library draws a **key** from it. `kernel/dev/
+random.c` is what it reads now, and the design is written so a host
+test can say whether it does what it claims:
+
+- **ChaCha20**, RFC 7539, sixty lines written from the RFC and graded
+  against the RFC's own block-function vector — fetched from the RFC
+  editor for the test rather than typed from memory, which turned out
+  to matter: the vector as remembered had one byte wrong in the second
+  row. The one cryptographic primitive here, and the one place in the
+  file where the right answer was decided by somebody not writing it.
+- **A pool that is a key.** Every input is XORed into 32 bytes and the
+  key is run through the block function to mix, so the pool is never
+  "the last thing that came in" but everything that ever did, permuted.
+- **Fast key erasure on extraction.** To produce N bytes the generator
+  makes N + 32 bytes of keystream, hands out N, and *replaces the key
+  with the other 32* — so the key that produced any output is gone the
+  instant the output exists, and a machine whose memory is read
+  afterwards gives up nothing already handed out. The construction
+  BSD's `arc4random` and Linux's `random.c` both settled on.
+- **Fed by every interrupt of the boot** — the TSC at each one, from
+  `irq_handler`, which is the timing of the world outside the CPU and
+  the *primary* source on a machine with no hardware generator. That
+  is this machine: QEMU's default CPU has neither RDRAND nor RDSEED,
+  and every graded boot runs on it, so the code that uses them is
+  exercised only on metal and the boot log says which it found. The
+  RTC and the MAC go in too — not entropy, but distinct per machine.
+- **No entropy estimate**, on purpose and said so in the header: Linux's
+  credit-counting has been wrong in both directions for twenty years,
+  and a blocking `/dev/random` that blocked on an invented number would
+  be the lie of the other shape. What is claimed instead is narrower and
+  checkable, and `random_events()` says how many inputs the pool has
+  taken so the `[rng]` self-test can require the number to be large
+  before anything asks for a key. `SYS_getrandom` sits beside the device
+  file, under Linux's name, for the program that has run out of
+  descriptors or lives in a chroot with no `/dev`.
+
+`tests/test_random.c` grades the RFC vector, determinism under a held
+clock, erasure (the state after an extraction cannot reproduce it),
+that feeding changes everything after, the cheap sanity checks that
+catch the bugs a stream generator actually has — a byte histogram flat
+to six sigma over a megabyte and no repeated block — and a **golden
+sequence**: the exact bytes the whole pipeline produces for a fixed
+seed, which pins the pool's mixing and the fast-key-erasure extraction
+that no external oracle can (a pool has design freedom), so a mutation
+that still looks random is caught. Mutation score 68.2%; the residual is
+the RDRAND/RDSEED path, which is `#if`'d out under the host test and so
+cannot be killed there (it is graded on the machine by `[rng]` reporting
+which the CPU has), plus the last of the pool's genuine freedom. `libctest` grades
+the syscall and the device from user space; `[rng]` grades that the
+pool was fed (20,139 interrupts by the time it ran) and both paths
+are live.
+
+#### The numbers
+
+| | |
+|---|---|
+| `tls_fixture_ms` | **11,440 ms** — a server started, two verified TLS 1.3 sessions, one refusal |
+| `mbedtls_suites_ms` | **26,820 ms** — three suites, ~720 of the library's own vectors |
+| `[rng]` | 20,139 interrupts mixed into the pool by the time it ran; RDRAND and RDSEED both absent, as expected of QEMU's default CPU |
+| `boot_to_desktop_s` | 362 → **393**, and the capture ceiling 600 → 900, for TLS and the suites |
+
+**Cost:** many — TLS over TCG is the slowest thing in this arc, and the socket glue took most of them graded boots. The mbedtls build itself was three
+commands and one header; the increment was the socket semantics before
+it and the random device under it, which is what "TLS end to end" was
+always going to mean here.
+
+---
+
 *Below this line, the snapshot as written on 2026-09-04.*
 
 **This is where new entries go**, in full and in the archive's own form: a
@@ -1724,28 +1982,27 @@ write nothing and return successfully).
 
 - [~] zlib, libpng, libjpeg, freetype, harfbuzz, expat, sqlite, ICU and a
       TLS library, each unmodified, in dependency order — every one a real
-      test of M94–M97. **Seven landed: zlib 1.3.1 (2026-09-04), libpng
+      test of M94–M97. **Eight landed: zlib 1.3.1 (2026-09-04), libpng
       1.6.44 and libjpeg 9f (2026-09-05), freetype 2.13.3, expat 2.6.4,
-      sqlite 3.47.2 and harfbuzz 8.5.0 (2026-09-08)**, graded by the
-      `[m100]`, `[m100b]`, `[m100c]`, `[m100d]` and `[m100e]` markers —
-      their own test suites where they ship one (zlib, libpng, libjpeg's
-      byte-exact 1995 references, expat's 4,392 checks) and a differential
-      fixture against the host's build of the same source where they do
-      not (freetype's rasterizer, sqlite's shell, harfbuzz's shaper) — and
-      installed into the sysroot by their own `make install`. Zero source
-      edits across all seven. What they asked this OS for and got: a
-      sysroot-aware `pkg-config`, `popen`/`pclose`/`system`, **fcntl
-      record locks** (`kernel/fs/flock.c`), **recursive mutexes**, ten
-      float math functions, and a `<math.h>` libstdc++ finally believes
-      is C99 — see the fourth, fifth and sixth increments. **Two to go**,
-      and they decide the arc: a TLS library, where the entropy note
-      becomes a kernel item, and ICU.
-- [ ] TLS end to end over M66's TCP: the first `https://` this machine has
-      had
-- [ ] `O_NONBLOCK` and `AF_UNIX`/`socketpair`, absorbed here because a
-      multi-process browser is the first program that needs both at once
-      and for a reason. **`AF_UNIX` is also what stopped CPython's
-      `test_stat` from reporting any counts at all**
+      sqlite 3.47.2, harfbuzz 8.5.0 and mbedtls 3.6.2 (2026-09-08)** —
+      the last of them the TLS library, and **the first `https://` this
+      machine has had**. Graded by `[m100]` through `[m100g]`: their own
+      suites where they ship one, a differential fixture against the
+      host's build where they do not, and for mbedtls all three (its own
+      crypto suites, its own client and server completing a verified
+      TLS 1.3 session on loopback, and an https GET written here). Zero
+      source edits across all eight. **ICU is the ninth and last**, and
+      it is a wall-clock question (a hundred times harfbuzz's build), not
+      a capability one.
+- [x] **TLS end to end over M66's TCP — done 2026-09-08.** mbedtls 3.6.2,
+      `[m100f]`/`[m100g]`; a verified TLS 1.3 session (ChaCha20-Poly1305)
+      and an https GET, over `kernel/dev/random.c`'s entropy and M100's
+      blocking sockets. See the eighth increment.
+- [~] `O_NONBLOCK` **done** (seventh increment: real on sockets and
+      pipes, `F_SETFL`, `EAGAIN`), and blocking `read`/`write`/`accept`
+      on a socket with it. **`AF_UNIX`/`socketpair` not done** — mbedtls
+      did not need them, and nothing has yet; the note that `AF_UNIX` is
+      what stopped CPython's `test_stat` from reporting counts stands.
 - [ ] a real but small engine — NetSurf has its own layout engine and a
       framebuffer front end
 - [ ] **the measurement, which is the deliverable**: what Chromium's build
@@ -2011,13 +2268,13 @@ says whether it is a bug or a decision.
   a fault and *returns* rather than unwinding.
 - **`PTHREAD_KEYS_MAX` is 32**, and CPython's `test_threading` runs out
   past it (`gilstate_tss_set: failed to set current tstate`).
-- **`AF_UNIX` does not exist.** Scheduled: M100's third bullet.
-- **`/dev/urandom` is a xorshift over the TSC, and there is no `getrandom`.**
-  Every library in M100's stack that asked for entropy (expat, and the
-  TLS library will) was told so by its configure. Fine for a hash salt;
-  not for a key. Becomes a kernel item — RDRAND/RDSEED where the CPU has
-  them, interrupt timing where it does not, and a `getrandom` — at M100's
-  TLS increment, which is the first thing here that needs it to be true.
+- **`AF_UNIX`/`socketpair` do not exist.** M100 absorbed `O_NONBLOCK` and blocking sockets but not these - nothing ported has needed them (mbedtls did not). Still what stopped CPython's `test_stat` from reporting counts.
+- **The random device is real as of M100** (`kernel/dev/random.c`):
+  ChaCha20 under a pool every interrupt feeds, fast key erasure on
+  extraction, `getrandom` beside `/dev/urandom`. The xorshift-over-the-TSC
+  it replaced is gone. RDRAND/RDSEED are used where the CPU has them and
+  QEMU's default CPU has neither, so on this machine the interrupt timing
+  is the whole source - stated in the header, graded by `[rng]`.
 - **At least one more libc call fails without setting `errno`** — CPython's
   `test_json` reports `OSError: [Errno 0] Error`. Five were found and
   fixed in M99; the suite says there is a sixth.

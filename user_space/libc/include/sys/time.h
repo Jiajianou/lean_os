@@ -62,3 +62,16 @@ int utimes(const char *path, const struct timeval tv[2]);
 #ifdef __cplusplus
 }
 #endif
+
+/* M100: POSIX says <sys/time.h> makes everything in <sys/select.h>
+ * visible - fd_set, FD_SETSIZE, the FD_* macros and select() - and a
+ * program written against glibc relies on it without knowing: mbedtls's
+ * net_sockets.c includes <sys/time.h> and <sys/types.h> and calls
+ * select() with an fd_set, and stopped here with "unknown type name
+ * 'fd_set'". The rule this project keeps relearning, at a fifth address:
+ * a header that has a thing and does not provide it where the standard
+ * says is, to a build, indistinguishable from not having it. At the end
+ * rather than the top, because <sys/select.h> needs struct timeval from
+ * above, and both files are #pragma once so either inclusion order
+ * resolves. */
+#include <sys/select.h>

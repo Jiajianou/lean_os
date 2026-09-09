@@ -292,6 +292,12 @@ static const entry_t table[] = {
      * which is not the shape of the check this call makes. */
     {SYS_arch_prctl,    CLASS_PLAIN, 0, NULL},
     {SYS_futex,         CLASS_PLAIN, 0, NULL},
+    /* M100: getrandom(buf, len, flags). The buffer is arg 1 and is
+     * range-checked for `len` bytes before a byte is written; a hostile
+     * pointer with a plausible length is refused, which is the CLASS_PTR
+     * claim. (The sweep's out-of-range flag value is refused first, and
+     * that too is a refusal - either way the call says no.) */
+    {SYS_getrandom,     CLASS_PTR, 1, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 

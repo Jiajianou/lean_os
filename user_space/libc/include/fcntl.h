@@ -42,8 +42,14 @@ extern "C" {
  * processes that both ask, exactly one gets the file. That is what makes
  * a lock file a lock. */
 #define O_EXCL     OPEN_EXCL
-#define O_NONBLOCK 0 /* every descriptor here is what it is - see SYS_read/SYS_recv */
-#define O_NDELAY   O_NONBLOCK /* the older spelling of the same flag, and the same 0 */
+/* M100: real, on sockets and pipes. It was 0 - "every descriptor here is
+ * what it is" - from M88 until a TLS library's socket layer turned out
+ * to be read(fd) and write(fd) on a socket, expecting both to block and
+ * to say EAGAIN when told not to. The value is the kernel's
+ * OS_NONBLOCK_BIT and Linux's O_NONBLOCK, so nothing translates it. A
+ * file accepts the bit and never waits anyway; see SYS_fcntl. */
+#define O_NONBLOCK 0x800
+#define O_NDELAY   O_NONBLOCK /* the older spelling of the same flag */
 /* M84: a real bit. There is an exec now, so this finally has something to
  * mean - and SYS_spawn honours it too, because a spawn is a fork and an
  * exec in one call and this flag is about the exec half.

@@ -2981,6 +2981,7 @@ int sched_set_env(task_t *t, const char *block, uint32_t len, uint32_t count) {
  * through here or the count is a lie. */
 void fd_release(fd_slot_t *slot) {
     slot->cloexec = 0; /* M84: a slot that holds nothing holds no flag either */
+    slot->nonblock = 0; /* M100: and no status flag */
     switch (slot->type) {
     case FD_PIPE_READ:
         pipe_unref_read(slot->pipe);

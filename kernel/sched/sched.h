@@ -284,6 +284,12 @@ typedef struct {
      * `type` a masked read and every write a read-modify-write, for
      * sixteen kilobytes on a machine with a hundred and twenty-eight. */
     uint8_t cloexec;
+    /* M100: O_NONBLOCK, for a socket or a pipe. The same byte-for-a-bit
+     * trade as cloexec above and for the same reason. Read by SYS_read
+     * and SYS_write (which return -OS_ERR_AGAIN rather than parking) and
+     * by nothing else - SYS_recv and SYS_send never blocked to begin
+     * with, and SYS_waitfds is a wait by definition. */
+    uint8_t nonblock;
 } fd_slot_t;
 
 /* ---- M69: two scheduling classes, third attempt and the one that works --

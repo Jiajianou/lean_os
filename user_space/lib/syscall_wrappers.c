@@ -282,6 +282,10 @@ long sys_futex(volatile unsigned int *addr, int op, unsigned int val,
     return do_syscall6(SYS_futex, (long)addr, op, (long)val, (long)timeout_ms, 0, 0);
 }
 
+long sys_getrandom(void *buf, unsigned long len, unsigned int flags) {
+    return do_syscall(SYS_getrandom, (uint64_t)buf, len, flags);
+}
+
 long sys_utime(const char *path, unsigned int mtime) {
     return do_syscall(SYS_utime, (long)path, (long)mtime, 0);
 }

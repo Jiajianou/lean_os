@@ -1,4 +1,5 @@
 #include "rtl8139.h"
+#include "dev/random.h" /* M100 */
 
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/isr.h"
@@ -185,6 +186,10 @@ int rtl8139_init(void) {
     irq_register_handler(dev.irq_line, rtl8139_irq);
     irq_enable_line(dev.irq_line);
 
+    /* M100: the MAC is not entropy, but it is different on every machine
+     * that is not this QEMU, and a seed that is at least distinct
+     * everywhere is better than one that is the same. */
+    random_feed(mac, sizeof(mac));
     klog_puts("[net] rtl8139 found at PCI ");
     klog_put_hex32(dev.bus);
     klog_puts(":");

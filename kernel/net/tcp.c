@@ -1,9 +1,11 @@
 #include "tcp.h"
 
 #include "ip.h"
+#include "drivers/klog.h" /* M100: the reset log lines */
 #include "lib/libk.h"
 #include "net.h"
 #include "wire.h"
+#include "sched/sched.h" /* M100: sched_wake_all - see the note at the end of tcp_handle_packet */
 
 /* ---- wire helpers ----------------------------------------------------
  *
@@ -84,6 +86,7 @@ struct tcpcb {
     int peer_fin;        /* the peer's FIN has been received and acknowledged */
     int connect_failed;
     int reset;           /* the connection was reset - recv() reports end of stream */
+    int sending;         /* M100: try_send is on the stack for this tcb - see its head */
 
     /* M66: ownership. A control block outlives the socket that owns it -
      * TIME_WAIT is the whole point of the state - and it also has to
@@ -213,6 +216,17 @@ static void send_reset(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uin
     if (seg[13] & TCP_RST) {
         return; /* never reset a reset - that is how two machines shout at each other forever */
     }
+    /* M100: a reset is rare and is the kind of event that presents
+     * elsewhere as "the transfer stopped", so it is logged with the
+     * ports - a line in a boot log is what turned a five-boot mystery
+     * into a one-boot answer. */
+    klog_puts("[tcp] rst: no connection for a segment to port ");
+    klog_put_dec(net_read_be16(seg + 2));
+    klog_puts(" from port ");
+    klog_put_dec(net_read_be16(seg + 0));
+    klog_puts(" flags ");
+    klog_put_hex32(seg[13]);
+    klog_putc('\n');
     uint8_t out[TCP_HEADER_LEN];
     uint16_t data_off = (uint16_t)((seg[12] >> 4) * 4);
     uint32_t their_seq = net_read_be32(seg + 4);
@@ -298,6 +312,30 @@ static void try_send(struct tcpcb *t) {
         return;
     }
 
+    /* ---- M100: not reentrant on this tcb, and it must not be ----------
+     *
+     * On loopback ip_send_from delivers synchronously, so an emit() here
+     * runs the whole round trip inside itself: the segment reaches the
+     * peer, the peer's ACK reaches this tcb, process_ack() compacts this
+     * send buffer and calls try_send() AGAIN - nested, on the same
+     * stack, on the same tcb. The nested call sends everything the newly
+     * opened window allows and returns; the OUTER loop then resumes with
+     * an in_flight and a send_buf offset computed before the buffer
+     * moved under it, and emits from the wrong place - a gap in the
+     * stream that go-back-N then retransmits forever. A 16 KiB transfer
+     * survived it (the receive buffer absorbed the mess); the first
+     * 64 KiB write did not, and it was the POSIX blocking write in
+     * M100's seventh increment that first kept the pipe full enough to
+     * expose it. tests/test_tcp_loopback.c reproduces it in a
+     * millisecond. The guard makes the nested call a no-op: the outer
+     * loop re-reads the window each iteration and picks up exactly what
+     * the ACK opened. Per-tcb, not global, so a loopback peer's own
+     * try_send on the same stack still runs. */
+    if (t->sending) {
+        return;
+    }
+    t->sending = 1;
+
     for (;;) {
         uint32_t in_flight = t->snd_nxt - t->snd_una;
         /* The sender's window is the smaller of what the peer will take
@@ -345,6 +383,7 @@ static void try_send(struct tcpcb *t) {
             arm_rtx(t);
         }
     }
+    t->sending = 0;
 }
 
 /* ---- lookup and allocation -------------------------------------------- */
@@ -533,9 +572,21 @@ int tcp_connect(struct tcpcb *t, uint32_t ip, uint16_t port) {
     t->state = TCP_SYN_SENT;
     t->connect_deadline = tick_count + 100; /* ten seconds */
 
-    emit(t, t->iss, TCP_SYN, (const uint8_t *)0, 0, 1);
+    /* M100: snd_nxt is advanced BEFORE the SYN goes out, not after.
+     * On loopback ip_send_from delivers synchronously - the SYN reaches
+     * the listener and its SYN-ACK reaches this control block inside
+     * emit() - and the SYN_SENT branch checks the ACK against snd_nxt.
+     * With the advance after the emit, every loopback connect rejected
+     * its own SYN-ACK, sat in SYN_SENT, and completed on the SYN's
+     * first RETRANSMISSION a second later. It worked, at one RTO per
+     * connection, for four milestones; the first two-ended test on the
+     * host, where nothing retransmits unless asked, found it in a
+     * millisecond. The same rule for every emit: the state a reply is
+     * judged against must be true before the segment that provokes the
+     * reply is sent. */
     t->snd_nxt = t->iss + 1;
     arm_rtx(t);
+    emit(t, t->iss, TCP_SYN, (const uint8_t *)0, 0, 1);
     return 0;
 }
 
@@ -700,6 +751,13 @@ void tcp_abort(struct tcpcb *t) {
         return;
     }
     if (t->state != TCP_LISTEN && t->state != TCP_CLOSED && t->remote_port) {
+        klog_puts("[tcp] rst: aborting local port ");
+        klog_put_dec(t->local_port);
+        klog_puts(" to port ");
+        klog_put_dec(t->remote_port);
+        klog_puts(" in state ");
+        klog_put_dec((uint32_t)t->state);
+        klog_putc('\n');
         emit(t, t->snd_nxt, TCP_RST, (const uint8_t *)0, 0, 0);
     }
     /* Q11: abort is the caller saying it is finished with this block -
@@ -737,6 +795,17 @@ static void parse_mss(struct tcpcb *t, const uint8_t *seg, uint16_t data_off) {
  * congestion-control response to the ACK. Returns 1 if anything new was
  * acknowledged. */
 static int process_ack(struct tcpcb *t, uint32_t ack, uint32_t window) {
+    /* M100: "window unchanged" is one of RFC 5681's four tests for a
+     * duplicate ACK, and the comment below had it right while the code
+     * did not check it. A receiver draining its buffer in three reads
+     * under a zero window sends three ACKs at the same number with three
+     * growing windows - window updates - and the sender counted them,
+     * fast-retransmitted on the third, and on loopback that retransmit
+     * met a receiver whose buffer the same ACKs had just reported full.
+     * Found by the first program to read a socket in one thread while
+     * another wrote it (tcptest's POSIX section), and reproduced in
+     * tests/test_tcp_states.c. */
+    int window_moved = window != t->snd_wnd;
     t->snd_wnd = window;
 
     if (seq_leq(ack, t->snd_una)) {
@@ -745,7 +814,7 @@ static int process_ack(struct tcpcb *t, uint32_t ack, uint32_t window) {
          * after it arrived - fast retransmit, RFC 5681 section 3.2, and
          * the reason a single loss costs one round trip instead of a
          * whole retransmission timeout. */
-        if (ack == t->snd_una && t->send_len > 0) {
+        if (ack == t->snd_una && t->send_len > 0 && !window_moved) {
             t->dup_acks++;
             if (t->dup_acks == 3) {
                 t->ssthresh = (t->snd_nxt - t->snd_una) / 2;
@@ -816,9 +885,24 @@ static void deliver(struct tcpcb *t, const uint8_t *data, uint16_t len) {
         t->recv_len += n;
         t->rcv_nxt += n;
     }
+    if (n < len) {
+        /* M100: a segment that did not fit is a peer that sent more
+         * than the window it was told, or a window this side told
+         * wrongly; either is worth a line, because what it presents as
+         * later is a retransmission storm and then a dead connection. */
+        klog_puts("[tcp] window: port ");
+        klog_put_dec(t->local_port);
+        klog_puts(" refused ");
+        klog_put_dec(len - n);
+        klog_puts(" of ");
+        klog_put_dec(len);
+        klog_puts(" bytes, buffer ");
+        klog_put_dec(t->recv_len);
+        klog_putc('\n');
+    }
 }
 
-void tcp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uint16_t len) {
+static void tcp_handle_packet_locked(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uint16_t len) {
     if (len < TCP_HEADER_LEN) {
         return;
     }
@@ -869,8 +953,11 @@ void tcp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uin
         c->pending_accept = 1;
         c->state = TCP_SYN_RECEIVED;
         parse_mss(c, seg, data_off);
-        emit(c, c->iss, TCP_SYN | TCP_ACK, (const uint8_t *)0, 0, 1);
+        /* M100: advanced before the emit, for the reason tcp_connect
+         * gives - on loopback the third segment of the handshake arrives
+         * inside this call. */
         c->snd_nxt = c->iss + 1;
+        emit(c, c->iss, TCP_SYN | TCP_ACK, (const uint8_t *)0, 0, 1);
         arm_rtx(c);
         return;
     }
@@ -1028,6 +1115,27 @@ void tcp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uin
     try_send(t);
 }
 
+/* ---- M100: an inbound segment is an event somebody may be parked on --
+ *
+ * SYS_read on a socket blocks (M100's seventh increment) by parking on
+ * the scheduler's poll channel, and so does SYS_write when the send
+ * buffer is full, and SYS_waitfds always has. Until M100 nothing in
+ * this file woke that channel: the wakes were the keyboard's, the
+ * mouse's, the pipes', the ptys' and UDP's, and every TCP wait in the
+ * tree happened to carry a deadline, which is why nobody noticed. Every
+ * segment that reaches a connection is one of the events a parked
+ * reader or writer is waiting for - data, an ACK that frees the send
+ * buffer, a FIN, a reset - so the wake is here, once per segment, after
+ * whatever the segment did. sched_wake_all takes only sched_lock and
+ * never blocks, which is what makes it safe from the NIC's interrupt
+ * (socket.c says the same for UDP). A wake for a segment nobody was
+ * waiting on costs one lock; a missing wake costs a task forever. */
+void tcp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uint16_t len) {
+    tcp_handle_packet_locked(src_ip, dst_ip, seg, len);
+    sched_wake_all(SCHED_POLL_CHAN);
+
+}
+
 /* ---- the clock --------------------------------------------------------- */
 
 void tcp_tick(void) {
@@ -1099,6 +1207,22 @@ void tcp_tick(void) {
             t->rtt_timing = 0; /* Karn: do not measure a retransmitted segment */
 
             debug_retransmits++;
+            /* M100: every retransmission is logged with the numbers the
+             * next person needs - which side, how far behind, and how
+             * many times so far. On loopback there should be almost
+             * none, and the one that killed a 64 KiB transfer had never
+             * been seen because nothing wrote it down. */
+            klog_puts("[tcp] rto: port ");
+            klog_put_dec(t->local_port);
+            klog_puts(" backoff ");
+            klog_put_dec(t->backoff);
+            klog_puts(" in flight ");
+            klog_put_dec(t->snd_nxt - t->snd_una);
+            klog_puts(" buffered ");
+            klog_put_dec(t->send_len);
+            klog_puts(" snd_wnd ");
+            klog_put_dec(t->snd_wnd);
+            klog_putc('\n');
 
             /* Resend from snd_una - go-back-N, which is what a stack
              * without SACK can do and is why the receiver dropping
@@ -1117,4 +1241,9 @@ void tcp_tick(void) {
         }
     }
     net_lock_release();
+    /* M100: and the timer's own events - a connect that gave up, a
+     * retransmission that ran out - reach a parked reader the same way
+     * an inbound segment does. Once per tick; a tick with nothing to
+     * report costs one lock. */
+    sched_wake_all(SCHED_POLL_CHAN);
 }
