@@ -114,7 +114,83 @@ extern "C" {
  * not a fact about the machine, so unlike SYS_fb_info and SYS_netconf it
  * gets a gate. */
 #define CAP_SYSLOG        (1u << 10)
-#define CAP_ALL           0x7FFu
+
+/* ---- M111: write anywhere under /pkg ---------------------------------
+ *
+ * The one capability on this machine that is about a PLACE rather than
+ * about a device or a call, and it is the reason the package manager can
+ * make a claim about installed software at all.
+ *
+ * Every process here holds CAP_FS_WRITE - it is the default, because
+ * this OS has no file owners and pretending otherwise would be the fake
+ * check M65 exists to refuse. So "the package database is a file only
+ * `os` may write" would have been decoration: any program could rewrite
+ * it and grant itself whatever it liked. This bit is what makes that
+ * sentence true instead. The kernel refuses every create, write,
+ * truncate, rename, link, unlink, mkdir and rmdir whose path resolves
+ * under /pkg to a process that does not hold it, and /bin/os is the only
+ * shipped program granted it.
+ *
+ * What that buys, exactly: installed package files, the registry that
+ * says what each package may do, and the record of what is installed
+ * cannot be modified by anything on this machine except the package
+ * manager. What it does not buy is anything about the disk when this OS
+ * is not running - see docs/packages.md, which says so in the same
+ * words. */
+#define CAP_PKG_ADMIN     (1u << 11)
+
+#define CAP_ALL           0xFFFu
+
+/* ---- M111: the ceiling on what an installed package may hold ----------
+ *
+ * A package declares the capabilities it wants in its manifest, `os`
+ * records them, and the kernel grants them at spawn - but never more
+ * than this, and the intersection happens in the KERNEL rather than in
+ * `os`. That placement is the whole point: if the ceiling were enforced
+ * by the installer, then a registry file written by anything else would
+ * be a way past it, and CAP_PKG_ADMIN would be the only thing standing
+ * between a package and the framebuffer. Two independent checks, and the
+ * second one does not depend on the first having happened.
+ *
+ * What is deliberately NOT in here, and why - because the list of things
+ * refused is more informative than the list allowed:
+ *
+ *   framebuffer    the compositor owns the screen. A program that
+ *                  arrived from somewhere else painting over the taskbar
+ *                  is precisely M65's photograph.
+ *   power          nothing downloaded switches this machine off.
+ *   kill-any       nor ends other people's processes.
+ *   process-list   nor enumerates them. (A `ps` from a package would be
+ *                  useful and is refused anyway: the shipped task
+ *                  manager is how a person asks that question.)
+ *   clipboard      "a clipboard a program can read at will is a
+ *                  keylogger with a delay" - caps.h, M65.
+ *   display-mode   reconfigures the hardware under everyone else.
+ *   set-time       one clock, and a package is not what sets it.
+ *   syslog         the log names every other process's failures.
+ *   pkg-admin      a package cannot install packages. Nothing about
+ *                  this system needs it and it is the one grant that
+ *                  would make the boundary self-dismantling.
+ *
+ * What is left is fs-write, network and audio. fs-write because a
+ * program that cannot write a file is not a program (and because it is
+ * the default every shipped program already has); network because
+ * fetching is the whole reason some software exists; audio because a
+ * player that cannot make a sound is a refusal, not a package. Both of
+ * the last two must be asked for by name in the manifest, and `os`
+ * prints them at install time. */
+#define CAP_PKG_MAX       (CAP_FS_WRITE | CAP_NETWORK | CAP_AUDIO)
+
+/* What a program under /pkg gets when the registry does not mention it:
+ * nothing. Not CAP_APP_DEFAULT - nothing.
+ *
+ * An executable under /pkg that `os` did not install is a file that got
+ * there some other way, and the honest response to "I do not know what
+ * this is" is not "then here is the usual set". It can still run, read
+ * files and write to descriptors its launcher handed it; it cannot
+ * create a file. Every capability model that starts with a permissive
+ * unknown case ends up with the unknown case being the common one. */
+#define CAP_PKG_UNLISTED  0u
 
 /* What an ordinary desktop application gets: it can read and write
  * files, and that is nearly all. No screen, no other processes' lives,
@@ -314,6 +390,23 @@ static const cap_grant_t CAP_GRANTS[] = {
      * here with CAP_SYSLOG, and why the capability exists at all. */
     {"console",       CAP_APP_DEFAULT | CAP_SYSLOG},
     {"captest",       CAP_APP_DEFAULT},
+    /* M111: the package manager, and the only holder of CAP_PKG_ADMIN on
+     * this machine. Notably it is granted nothing else - `os` does not
+     * need the network to install from the repository on the disk, and
+     * the day it fetches over https it will need CAP_NETWORK added here,
+     * in this table, where a person can see it. */
+    {"os",            CAP_APP_DEFAULT | CAP_PKG_ADMIN},
+    /* M111: the package manager's own self-test. It has to hold
+     * CAP_PKG_ADMIN to *launch* `os` with it - a spawn intersects, so a
+     * launcher cannot hand a child a capability it does not have itself,
+     * and an `os` started from a process without this bit is an `os`
+     * that cannot install anything.
+     *
+     * Which would make the half of that test that checks the boundary
+     * meaningless, so it drops the bit with sys_dropcaps() before
+     * checking - see user_space/bin/pkgtest.c. That is M65's
+     * monotonicity used for something rather than demonstrated. */
+    {"pkgtest",       CAP_APP_DEFAULT | CAP_PKG_ADMIN},
 };
 
 #define CAP_GRANT_COUNT ((int)(sizeof(CAP_GRANTS) / sizeof(CAP_GRANTS[0])))
@@ -338,6 +431,51 @@ static inline uint32_t caps_for_program(const char *path) {
         }
     }
     return CAP_APP_DEFAULT;
+}
+
+/* ---- M111: /pkg, and the hole that opened the moment it existed -------
+ *
+ * caps_for_program() above matches on the BASENAME, and the comment
+ * explaining why says "'/bin/settings' and 'settings' are the same
+ * program". That was true for every program on this machine for
+ * forty-six milestones, because every program on this machine came out
+ * of this repository.
+ *
+ * A package manager ends it. `os install` writes an executable somebody
+ * else built, and if that executable is named `compositor` then
+ * caps_for_program() hands it CAP_ALL - not through a bug, but by doing
+ * exactly what it was written to do, to a file the table was never
+ * written about. The impersonation costs nothing and needs no exploit:
+ * it is a filename.
+ *
+ * So the rule below, and it is a rule about a PLACE rather than a name:
+ * **the grant table applies to /bin and not to /pkg.** A program under
+ * /pkg never matches CAP_GRANTS, whatever it is called; what it gets is
+ * whatever the package registry records for its path, capped by
+ * CAP_PKG_MAX, and CAP_PKG_UNLISTED if the registry does not name it.
+ * The kernel does that lookup (kernel/proc/pkgcaps.c) because it is the
+ * only party that both reads the registry and assigns the mask.
+ *
+ * `path` must already be absolute and normalized - which, at the two
+ * call sites in this kernel, it is, because copy_path_from_user() is the
+ * one door a user path comes through and normalizing is what it does.
+ * A relative path here would be a way past this check, so the predicate
+ * requires the leading '/' rather than assuming it. */
+#define PKG_ROOT     "/pkg"
+#define PKG_ROOT_LEN 4
+
+static inline int path_is_under_pkg(const char *path) {
+    if (!path || path[0] != '/') {
+        return 0;
+    }
+    for (int i = 0; i < PKG_ROOT_LEN; i++) {
+        if (path[i] != PKG_ROOT[i]) {
+            return 0;
+        }
+    }
+    /* "/pkg" itself and everything below it. "/pkgfoo" is not under it,
+     * which is the case a plain prefix comparison gets wrong. */
+    return path[PKG_ROOT_LEN] == '\0' || path[PKG_ROOT_LEN] == '/';
 }
 
 #ifdef __cplusplus

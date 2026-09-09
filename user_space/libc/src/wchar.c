@@ -331,6 +331,36 @@ static size_t utf8_encode(char *dst, wchar_t c) {
  * threads at once passes its own. */
 static mbstate_t internal_state;
 
+/* ---- M111: mbsinit, and why its absence broke a build far from here ---
+ *
+ * Three lines, and it was missing for twenty-three milestones with
+ * nothing noticing - because nothing in this tree calls it. GNU grep
+ * does not call it either. What it does is *probe* for it, and gnulib's
+ * rule when the probe fails is not "do without": it is
+ *
+ *     no mbsinit  =>  this platform's mbstate_t cannot be trusted
+ *                 =>  typedef int rpl_mbstate_t; #define mbstate_t rpl_mbstate_t
+ *
+ * and then it substitutes its own mbrtowc to go with it - but NOT
+ * wcrtomb, because this libc has a wcrtomb and gnulib saw no reason to
+ * replace it. So dfa.c ended up passing a `rpl_mbstate_t *` (an `int *`)
+ * to a `wcrtomb` declared here as taking this file's real 8-byte
+ * mbstate_t, and the build stopped on a type error in a function nobody
+ * here wrote, about a state object nobody here asked for.
+ *
+ * That is the second time M94's lesson has arrived in this exact shape:
+ * a missing symbol is not a missing feature, it is a *configure answer*,
+ * and the substitution it triggers lands somewhere with no relation to
+ * the thing that was absent. Worth the three lines.
+ *
+ * UTF-8 is stateless between characters, so "is this the initial state"
+ * is exactly "is there a partial sequence in flight". A NULL `ps` is the
+ * initial state by definition, which is what the standard says and what
+ * every caller that passes NULL is relying on. */
+int mbsinit(const mbstate_t *ps) {
+    return !ps || ps->owed == 0;
+}
+
 size_t mbrtowc(wchar_t *dst, const char *src, size_t n, mbstate_t *ps) {
     mbstate_t *st = ps ? ps : &internal_state;
     if (!src) {

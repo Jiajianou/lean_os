@@ -31,6 +31,7 @@
 #include "os_fs.h"   /* system_api/include/os_fs.h - os_statvfs_t, M88 */
 #include "proc.h"      /* system_api/include/proc.h - task_info_t, M45. Resolves to the system_api one, not kernel/proc/proc.h below: a quoted include searches the *including* file's own directory first (kernel/arch/x86_64/, which has no proc.h), then -Ikernel (no kernel/proc.h either), then -Isystem_api/include. */
 #include "proc/proc.h"
+#include "proc/pkgcaps.h" /* M111 - caps_for_spawn_path, and the /pkg write gate */
 #include "proc/elf.h"   /* M48 - elf_validate, to tell "not a program" apart from "no such file" */
 #include "profile/sampler.h" /* M101 - SYS_profile's control and readout */
 #include "profile/syscount.h" /* M101 - the per-syscall accounting bracket below */
@@ -408,6 +409,59 @@ static int has_cap(uint32_t cap) {
         klog_puts("' - see system_api/include/caps.h\n");
     }
     return 0;
+}
+
+/* ---- M111: the second gate, and the only one that is about a place ----
+ *
+ * Every write syscall below used to ask one question - does this process
+ * hold CAP_FS_WRITE - and every process on this machine holds it, because
+ * it is the default. That is the right answer for a system whose files
+ * all came out of one repository, and the wrong one the moment `os
+ * install` puts somebody else's program on the disk: the record of what
+ * is installed, and the registry saying what each package may do, would
+ * then be files any program could rewrite. A capability model whose
+ * database is world-writable is decoration.
+ *
+ * So: a path that resolves under /pkg needs CAP_PKG_ADMIN as well, and
+ * /bin/os is the only shipped program that has it. The check is here, at
+ * the same door CAP_FS_WRITE is checked, and it is applied to the
+ * NORMALIZED path - which matters, because "/pkg/../pkg/db/caps" and
+ * "/tmp/../pkg/db/caps" are both /pkg/db/caps and neither of them looks
+ * like it. copy_path_from_user() has already done that normalization by
+ * the time this is called, which is why this takes a char* and not a
+ * user pointer.
+ *
+ * Descriptor-based writes (write, ftruncate, msync on a shared mapping)
+ * are NOT checked again here, and do not need to be: the only way to get
+ * a writable descriptor is sys_open, which is checked. The gate is on
+ * obtaining the authority, not on each use of it - which is the same
+ * shape as every other capability in this file. */
+static int may_write_path(const char *path) {
+    if (!has_cap(CAP_FS_WRITE)) {
+        return 0;
+    }
+    if (path_is_under_pkg(path) && !has_cap(CAP_PKG_ADMIN)) {
+        return 0;
+    }
+    return 1;
+}
+
+/* Copy, normalize and gate, in that order, for the write syscalls that
+ * take a path. Returns 0, or -1 with the refusal already logged. */
+static int copy_write_path_from_user(char *out, uint64_t src) {
+    if (copy_path_from_user(out, src) != 0) {
+        return -1;
+    }
+    return may_write_path(out) ? 0 : -1;
+}
+
+/* Any successful write under /pkg means the registry the kernel caches
+ * may have changed. Called on the success path rather than before the
+ * attempt, so a refused write does not cost a reload. */
+static void pkg_note_write(const char *path, long result) {
+    if (result >= 0 && path_is_under_pkg(path)) {
+        pkg_registry_invalidate();
+    }
 }
 
 static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -1168,7 +1222,54 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
                 iname = c + 1;
             }
         }
-        task_t *it = process_spawnve(iname, iimage, (size_t)isize, shifted, envp);
+        /* ---- M111: what a `#!` spawn is allowed to do ------------------
+         *
+         * A script's capabilities used to be its INTERPRETER's, full
+         * stop. That was harmless while every script on this machine
+         * came out of this repository, and stops being harmless the
+         * moment `os install` can put one on the disk: a package
+         * shipping a single line beginning `#!/bin/sh` would be launched
+         * with the shell's grant, which is CAP_ALL - including
+         * CAP_PKG_ADMIN, which is authority over every installed
+         * package. It costs an attacker one line.
+         *
+         * So a script under /pkg is intersected with what its package
+         * asked for, and **that is the same rule this milestone already
+         * applies to binaries**: nothing about a file under /pkg may
+         * raise its capabilities above what its package declared. A
+         * package's `#!` line is not a way around its own manifest.
+         *
+         * ---- and what this deliberately does NOT do -------------------
+         *
+         * The first version intersected EVERY script with the grant
+         * table, on the argument that a script is the program a person
+         * meant to run and the interpreter is only machinery. That
+         * argument is sound and the change was wrong anyway, which is
+         * worth writing down: scripts are not in CAP_GRANTS, so it took
+         * every script on the machine to CAP_APP_DEFAULT - and this
+         * kernel's own self-tests write twenty `#!/bin/sh` fixtures into
+         * /tmp, several of which exist to launch programs that need the
+         * network. M100's TLS test failed with `mbedtls_net_connect
+         * returned -0x42`, which is `socket()` refused, four hundred
+         * lines and one subsystem away from the edit. Making it work
+         * would have meant listing twenty temporary filenames in a table
+         * caps.h says should stay one screen long.
+         *
+         * What is left open, named rather than implied: **a script
+         * OUTSIDE /pkg still runs with its interpreter's grant**, so a
+         * downloaded `.sh` launched from the terminal - whose parent is
+         * gui_terminal, which holds CAP_ALL - gets more than a
+         * downloaded binary in the same directory would. That asymmetry
+         * predates this milestone and is not closed by it. It closes
+         * when scripts have somewhere to be declared, which is the same
+         * condition a manifest for anything not installed by `os` names.
+         */
+        uint32_t icaps = caps_for_spawn_path(interp);
+        if (path_is_under_pkg(path)) {
+            icaps &= caps_for_spawn_path(path);
+        }
+        task_t *it = process_spawnve_capped(iname, iimage, (size_t)isize, shifted,
+                                            envp, icaps);
         kfree(iimage);
         kfree(arg);
         kfree(envbuf);
@@ -1213,7 +1314,13 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
             name = c + 1;
         }
     }
-    task_t *t = process_spawnve(name, image, (size_t)size, argv, envp);
+    /* M111: the grant is chosen from the PATH, not from the basename.
+     * process_spawnve() would call caps_for_program(name) on the
+     * basename alone, which is the impersonation hole the moment
+     * anything outside this repository can put a file on the disk - see
+     * caps.h's note on /pkg. */
+    task_t *t = process_spawnve_capped(name, image, (size_t)size, argv, envp,
+                                       caps_for_spawn_path(path));
     kfree(image);
     kfree(arg);
     kfree(envbuf);
@@ -1321,18 +1428,19 @@ static long sys_readfile(uint64_t name_ptr, uint64_t buf, uint64_t maxlen, uint6
  * comment (system_api/include/syscall.h) for why this hadn't been needed
  * until now. */
 static long sys_writefile(uint64_t name_ptr, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
-    if (!has_cap(CAP_FS_WRITE)) {
-        return -1; /* M65 */
-    }
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, name_ptr) != 0 ||
+    /* M111: CAP_FS_WRITE and the /pkg gate together, on the normalized
+     * path - see may_write_path. */
+    if (copy_write_path_from_user(path, name_ptr) != 0 ||
         !user_range_ok(buf, len, 0)) {
         return -1;
     }
-    return vfs_write(path, (const void *)buf, (size_t)len);
+    long r = vfs_write(path, (const void *)buf, (size_t)len);
+    pkg_note_write(path, r);
+    return r;
 }
 
 /* M53: takes a path now. It used to be SYS_listfiles(buf, maxlen), which
@@ -1342,38 +1450,41 @@ static long sys_writefile(uint64_t name_ptr, uint64_t buf, uint64_t len, uint64_
  * next to your text files. */
 /* M56 - see SYS_unlink's contract. */
 static long sys_unlink(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    if (!has_cap(CAP_FS_WRITE)) {
-        return -1; /* M65 */
-    }
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0) {
+    if (copy_write_path_from_user(path, path_ptr) != 0) { /* M111 */
         return -1;
     }
-    return vfs_unlink(path);
+    long r = vfs_unlink(path);
+    pkg_note_write(path, r);
+    return r;
 }
 
 /* M56 - see SYS_rename's contract. Two user strings, both copied in
  * before either is used, for the same reason every other path is. */
 static long sys_rename(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    if (!has_cap(CAP_FS_WRITE)) {
-        return -1; /* M65 */
-    }
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char old_path[LEANFS_MAX_PATH];
     char new_path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(old_path, old_ptr) != 0 ||
-        copy_path_from_user(new_path, new_ptr) != 0) {
+    /* M111: BOTH ends. A rename into /pkg would create a file there and
+     * a rename out of it would remove one, so gating the destination
+     * alone would leave `mv /pkg/grep/3.11/bin/grep /tmp/x` as a way for
+     * any program to take an installed package apart. */
+    if (copy_write_path_from_user(old_path, old_ptr) != 0 ||
+        copy_write_path_from_user(new_path, new_ptr) != 0) {
         return -1;
     }
-    return vfs_rename(old_path, new_path);
+    long r = vfs_rename(old_path, new_path);
+    pkg_note_write(old_path, r);
+    pkg_note_write(new_path, r);
+    return r;
 }
 
 static long sys_listdir(uint64_t path_ptr, uint64_t buf, uint64_t maxlen, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -1479,19 +1590,18 @@ static long sys_getdents(uint64_t path_ptr, uint64_t cookie_ptr, uint64_t buf,
 
 /* M53: one directory, whose parent must already exist. */
 static long sys_mkdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    if (!has_cap(CAP_FS_WRITE)) {
-        return -1; /* M65 */
-    }
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0) {
+    if (copy_write_path_from_user(path, path_ptr) != 0) { /* M111 */
         return -1;
     }
-    return vfs_mkdir(path);
+    long r = vfs_mkdir(path);
+    pkg_note_write(path, r);
+    return r;
 }
 
 /* Only SIGKILL/SIGTERM are recognized ("basic set", M14) and both have
@@ -1676,11 +1786,8 @@ static long sys_symlink(uint64_t target_ptr, uint64_t path_ptr, uint64_t a3,
     (void)a4;
     (void)a5;
     (void)a6;
-    if (!has_cap(CAP_FS_WRITE)) {
-        return -1;
-    }
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0) {
+    if (copy_write_path_from_user(path, path_ptr) != 0) { /* M111 */
         return -1;
     }
     /* The TARGET is copied as a plain string, not resolved as a path:
@@ -1693,7 +1800,13 @@ static long sys_symlink(uint64_t target_ptr, uint64_t path_ptr, uint64_t a3,
     if (copy_str_from_user(target, target_ptr, sizeof(target)) != 0) {
         return -1;
     }
-    return vfs_symlink(path, target);
+    /* Only the link's own location is gated, not what it points at. A
+     * link into /pkg from outside is a name for a file, and naming a
+     * file is not writing it - the write it would be used for meets
+     * may_write_path() again through the resolved path. */
+    long r = vfs_symlink(path, target);
+    pkg_note_write(path, r);
+    return r;
 }
 
 /* M93: both arguments are real paths, unlike SYS_symlink's target - a
@@ -1706,16 +1819,22 @@ static long sys_link(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
     (void)a4;
     (void)a5;
     (void)a6;
-    if (!has_cap(CAP_FS_WRITE)) {
-        return -1;
-    }
     char old_path[LEANFS_MAX_PATH];
     char new_path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(old_path, old_ptr) != 0 ||
-        copy_path_from_user(new_path, new_ptr) != 0) {
+    /* M111: both ends, and the SOURCE end is the interesting one. A hard
+     * link is a second name for the same inode, so
+     * `link("/pkg/grep/3.11/bin/grep", "/tmp/x")` followed by writing to
+     * /tmp/x would modify the installed binary through a path that is
+     * not under /pkg. Gating the destination alone would miss it
+     * entirely - which is the difference between a hard link and a
+     * symbolic one and the reason they are handled differently here. */
+    if (copy_write_path_from_user(old_path, old_ptr) != 0 ||
+        copy_write_path_from_user(new_path, new_ptr) != 0) {
         return -1;
     }
-    return vfs_link(old_path, new_path);
+    long r = vfs_link(old_path, new_path);
+    pkg_note_write(new_path, r);
+    return r;
 }
 
 /* M93: see SYS_fsync's ABI note for what this does and does not promise
@@ -2029,11 +2148,8 @@ static long sys_utime(uint64_t path_ptr, uint64_t mtime, uint64_t a3,
     (void)a4;
     (void)a5;
     (void)a6;
-    if (!has_cap(CAP_FS_WRITE)) {
-        return -1;
-    }
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0) {
+    if (copy_write_path_from_user(path, path_ptr) != 0) { /* M111 */
         return -1;
     }
     return vfs_utime(path, (uint32_t)mtime);
@@ -3209,7 +3325,11 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
      * the fake check caps.h exists to avoid - but creating, truncating
      * and writing are. Checked before vfs_open so an OPEN_CREATE that
      * will be refused does not leave the file behind. */
-    if ((flags & (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)) && !has_cap(CAP_FS_WRITE)) {
+    /* M111: and the /pkg gate, which is the same question about a place.
+     * This is the ONLY door to a writable descriptor, which is why
+     * sys_write, sys_ftruncate and a shared writable mmap do not have to
+     * ask again - the authority is obtained here and used there. */
+    if ((flags & (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)) && !may_write_path(path)) {
         return -1;
     }
     /* M87: the create flags travel together now - OPEN_EXCL means
@@ -3237,6 +3357,12 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
     int handle = vfs_open(path, create_flags);
     if (handle < 0) {
         return -1;
+    }
+    /* M111: a create or truncate under /pkg may have been the registry
+     * being rewritten, so the kernel's cached copy of it is dropped.
+     * Only `os` can reach this line with a /pkg path. */
+    if (flags & (OPEN_CREATE | OPEN_TRUNCATE | OPEN_WRITE)) {
+        pkg_note_write(path, 0);
     }
     /* M89: a directory opens read-only and for nothing else.
      *
@@ -4086,19 +4212,18 @@ static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
 }
 
 static long sys_rmdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    if (!has_cap(CAP_FS_WRITE)) {
-        return -1; /* M65 */
-    }
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0) {
+    if (copy_write_path_from_user(path, path_ptr) != 0) { /* M111 */
         return -1;
     }
-    return vfs_rmdir(path);
+    long r = vfs_rmdir(path);
+    pkg_note_write(path, r);
+    return r;
 }
 
 static long sys_time(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -4875,16 +5000,16 @@ static long sys_rename_replace(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
     (void)a4;
     (void)a5;
     (void)a6;
-    if (!has_cap(CAP_FS_WRITE)) {
-        return -1;
-    }
     char old_path[LEANFS_MAX_PATH];
     char new_path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(old_path, old_ptr) != 0 ||
-        copy_path_from_user(new_path, new_ptr) != 0) {
+    if (copy_write_path_from_user(old_path, old_ptr) != 0 || /* M111 - both ends */
+        copy_write_path_from_user(new_path, new_ptr) != 0) {
         return -1;
     }
-    return vfs_rename_replace(old_path, new_path);
+    long r = vfs_rename_replace(old_path, new_path);
+    pkg_note_write(old_path, r);
+    pkg_note_write(new_path, r);
+    return r;
 }
 
 /* ---- M83: fork ---------------------------------------------------------
@@ -5484,7 +5609,7 @@ static long sys_execve(isr_regs_t *regs) {
      * manifest allows AND what this process already held - so exec can
      * never be a way to gain a capability the caller did not have, which
      * is the property the whole model rests on. */
-    self->caps &= caps_for_program(base);
+    self->caps &= caps_for_spawn_path(path);
 
     /* The environment the new image was actually given, recorded so that
      * *its* children inherit in turn. Best-effort: a failure here leaves

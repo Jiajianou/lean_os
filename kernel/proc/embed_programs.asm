@@ -405,3 +405,20 @@ global measure_elf_end
 measure_elf_start:
     incbin "build/measure.elf"
 measure_elf_end:
+
+; M111: the package manager. Embedded like every other shipped program,
+; which matters more here than usual - `os` is what the machine uses to
+; install things, so a machine that cannot find it is a machine that
+; cannot be repaired from inside itself.
+global os_elf_start
+global os_elf_end
+os_elf_start:
+    incbin "build/os.elf"
+os_elf_end:
+
+; M111: the package manager's own self-test - see user_space/bin/pkgtest.c.
+global pkgtest_elf_start
+global pkgtest_elf_end
+pkgtest_elf_start:
+    incbin "build/pkgtest.elf"
+pkgtest_elf_end:

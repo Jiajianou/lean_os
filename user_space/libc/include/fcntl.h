@@ -88,6 +88,11 @@ extern "C" {
 
 int open(const char *path, int flags, ...);
 
+/* M111: `open` with O_WRONLY|O_CREAT|O_TRUNC, under the name code
+ * written before those flags existed still uses. Found by gnulib's
+ * creat-safer.c while building GNU grep. */
+int creat(const char *path, mode_t mode);
+
 /* ---- fcntl, and exactly how little it can honestly do ------------------
  *
  * fcntl carries commands about two per-descriptor flags. As of M84 this

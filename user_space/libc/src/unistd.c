@@ -326,6 +326,16 @@ int open(const char *path, int flags, ...) {
     return fd;
 }
 
+/* M111: `creat`, which is `open` with three flags spelled as a verb.
+ *
+ * Older than `open`'s O_CREAT and kept by POSIX for exactly the code
+ * that predates it - which is where it turned up: gnulib's
+ * creat-safer.c, in GNU grep's build. Not a gap in what this system can
+ * do; a gap in what it is willing to be asked. */
+int creat(const char *path, mode_t mode) {
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+}
+
 /* See <fcntl.h> for why this answers what it answers. */
 int fcntl(int fd, int cmd, ...) {
     if (fd < 0) {

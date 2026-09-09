@@ -113,6 +113,15 @@ int    wctomb(char *dst, wchar_t c);
 size_t mbrtowc(wchar_t *dst, const char *src, size_t n, mbstate_t *ps);
 size_t wcrtomb(char *dst, wchar_t c, mbstate_t *ps);
 
+/* M111: nonzero if `ps` describes an initial conversion state, which for
+ * a stateless-between-characters encoding means "no partial sequence in
+ * flight". Nothing in this tree calls it; GNU grep's build *probes* for
+ * it, and a failed probe made gnulib redefine mbstate_t as an int under
+ * half the translation unit. See wchar.c for the whole story - it is the
+ * clearest example this project has of a missing symbol costing far more
+ * than the feature it names. */
+int mbsinit(const mbstate_t *ps);
+
 /* M88: the restartable string forms, which is what a program converting
  * a stream actually calls - `*src` is advanced to the first byte not
  * consumed, so a partial character at the end of a buffer is left for

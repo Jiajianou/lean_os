@@ -52,6 +52,7 @@
 #include "profile.h"              /* system_api - M101's ops */
 #include "profile/syscount.h"  /* M101 */
 #include "proc/proc.h"
+#include "proc/pkgcaps.h" /* M111 - pkg_registry_count, for the [m111] self-test */
 #include "sched/sched.h"
 #include "shortcuts.h" /* system_api/include/shortcuts.h - M49's one table of window-manager chords */
 #include "signal.h"  /* system_api/include/signal.h */
@@ -128,7 +129,9 @@
     X(ptytest)                     \
     X(exhausttest)                \
     X(faulttest)                   \
-    X(measure)
+    X(measure)                     \
+    X(os)                         \
+    X(pkgtest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -11691,6 +11694,85 @@ static void boot_selftests_system(void) {
                    "- self-test passed (");
         klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         klog_puts(" ms).\n\n");
+    }
+
+    /* ---- M111 self-test: the package manager ---------------------------
+     *
+     * `os install grep` puts GNU grep 3.11 on this machine, and the
+     * machine runs it. That sentence is the milestone, and running it is
+     * the only way to grade it: the host tests can check that a package
+     * PARSES and a fixture can check that a hash is right, but "somebody
+     * else's program was installed by this OS's own package manager and
+     * then executed under the capabilities its manifest asked for" is a
+     * claim about a kernel, a filesystem, a loader and a boundary at the
+     * same time.
+     *
+     * The interesting half is the boundary. /bin/pkgtest installs a
+     * package built here on purpose to try the impersonation the whole
+     * design exists to stop - a binary called `compositor`, which is a
+     * name the grant table hands CAP_ALL - and requires it to come up
+     * with nothing. Then it drops its own CAP_PKG_ADMIN and requires
+     * every write under /pkg to be refused, which is the same rule
+     * looked at from outside.
+     *
+     * Skipped, not failed, on an image with no repository. `make
+     * packages` is a separate step for the same reason `make toybox` is
+     * (see the Makefile), and a machine built without it is a machine
+     * this test has nothing to say about - saying so is better than
+     * failing a boot over a step somebody did not run.
+     */
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        if (!vfs_exists("/pkg/repo/index")) {
+            klog_puts("[m111] no package repository on this disk - skipped. "
+                      "Run tools/build-packages.sh and `make packages`.\n\n");
+        } else {
+            size_t pk_bytes = 0;
+            uint8_t *pk_img = read_program(PATH_BIN_DIR "pkgtest", &pk_bytes);
+            if (!pk_img) {
+                panic("M111 self-test: /bin/pkgtest is not on this disk");
+            }
+            const char *pk_argv[] = {PATH_BIN_DIR "pkgtest", 0};
+            task_t *pk = process_spawnv("pkgtest", pk_img, pk_bytes, pk_argv);
+            long rc = pk ? do_syscall(SYS_wait, (uint64_t)pk->id, 0, 0) : -1;
+            kfree(pk_img);
+            if (rc != 0) {
+                klog_puts("[m111] pkgtest exited ");
+                klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+                klog_puts(" - see user_space/bin/pkgtest.c for what each code "
+                          "means\n");
+                panic("M111 self-test: the package manager did not install, run "
+                      "or isolate a package the way it says it does");
+            }
+
+            /* And the registry the kernel itself reads, counted from the
+             * kernel side. pkgtest asserts what a package MAY do; this
+             * asserts that the file saying so reached the kernel at all -
+             * two different failures that would otherwise look the same,
+             * because a registry that never loaded also grants nothing. */
+            int entries = pkg_registry_count();
+            if (entries <= 0) {
+                klog_puts("[m111] the kernel's view of /pkg/db/caps has ");
+                klog_put_dec((uint32_t)(entries < 0 ? 0 : entries));
+                klog_puts(" entries after two installs - the registry did not "
+                          "reach the kernel, so every package would have been "
+                          "refused everything for the wrong reason\n");
+                panic("M111 self-test: the package capability registry is empty");
+            }
+            klog_puts("[m111] the kernel's package registry: ");
+            klog_put_dec((uint32_t)entries);
+            klog_puts(" entries, reloaded from disk because a write under /pkg "
+                      "invalidated it\n");
+
+            klog_puts("[m111] a package manager: GNU grep 3.11, built here by "
+                      "this project's own compiler, installed by /bin/os from a "
+                      "verified archive into its own prefix, run from /pkg/bin "
+                      "with the capabilities its manifest asked for - and a "
+                      "package calling its binary `compositor` got none of the "
+                      "compositor's - self-test passed (");
+            klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+            klog_puts(" ms).\n\n");
+        }
     }
 
     /* ---- Q16 self-test: a disk that fails, and a machine that does not --

@@ -484,6 +484,13 @@ REQUIRED_MARKERS=(
   "[m83] two processes from one:"
   "[m84] a program that replaces itself:"
   "[q9] a machine that runs out of things and stays up:"
+  # M111: the package manager. Three markers rather than one, because the
+  # three claims fail independently: grep ran, the impersonation was
+  # refused, and the kernel actually loaded the registry that decides.
+  "[m111] GNU grep 3.11, built here, installed by \`os\` and run"
+  "[m111] a package binary named \`compositor\` gets 0x0, not"
+  "[m111] the kernel's package registry:"
+  "[m111] a package manager: GNU grep 3.11, built here by"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

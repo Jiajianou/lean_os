@@ -165,10 +165,11 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_fnmatch.o $(UOBJ)/libc_strings.o $(UOBJ)/libc_sysinfo.o \
                 $(UOBJ)/libc_regex.o $(UOBJ)/libc_syslog.o \
                 $(UOBJ)/libc_socket.o $(UOBJ)/libc_netdb.o \
-                $(UOBJ)/libc_wctype.o \
+                $(UOBJ)/libc_wctype.o $(UOBJ)/libc_ctype.o \
                 $(UOBJ)/libc_fcntl.o $(UOBJ)/libc_scanf.o $(UOBJ)/libc_mntent.o \
                 $(UOBJ)/libc_xattr.o $(UOBJ)/libc_klog.o $(UOBJ)/libc_getopt.o $(UOBJ)/libc_reboot.o $(UOBJ)/libc_tls.o \
                 $(UOBJ)/libc_pty.o $(UOBJ)/libc_select.o $(UOBJ)/libc_realpath.o $(UOBJ)/libc_popen.o \
+                $(UOBJ)/sha256.o $(UOBJ)/ospkg.o \
                 $(UOBJ)/setjmp.o $(UOBJ)/symtab.o $(UOBJ)/crtn.o
 
 # Every user program this project ships (M13): coreutils in bin/, plus
@@ -185,7 +186,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
 # alongside its own" is only true if there is no special path for them.
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
@@ -199,7 +200,7 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run leanfs-put preseed toybox sysroot print-user-programs syms font font-check clean distclean
+.PHONY: all run leanfs-put preseed toybox packages os-pkg sysroot print-user-programs syms font font-check clean distclean
 
 all: $(IMAGE)
 
@@ -490,6 +491,26 @@ $(LEANFS_PUT): tools/leanfs-put.c | $(BUILD)
 
 leanfs-put: $(LEANFS_PUT)
 
+# ---- M111: the package builder ----------------------------------------
+#
+# The host half of `os`. It shares user_space/lib/ospkg.c and sha256.c
+# with the machine's own /bin/os, compiled here for this desk - so a
+# package built by this tool and one read by that program are the same
+# reader, which is the property that makes the format one format.
+#
+# -Iuser_space/lib and -Isystem_api/include because ospkg.c includes
+# caps.h for the capability names: a package manifest says "network" and
+# the kernel wants a bit, and there is one table that maps between them.
+OS_PKG      := $(BUILD)/os-pkg
+OS_PKG_SRCS := tools/os-pkg.c user_space/lib/ospkg.c user_space/lib/sha256.c
+
+$(OS_PKG): $(OS_PKG_SRCS) user_space/lib/ospkg.h user_space/lib/sha256.h \
+           system_api/include/caps.h | $(BUILD)
+	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -Iuser_space/lib \
+	          -Isystem_api/include -o $@ $(OS_PKG_SRCS)
+
+os-pkg: $(OS_PKG)
+
 $(GEN_FONT): tools/gen-font.c | $(BUILD)
 	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -o $@ $<
 
@@ -602,6 +623,35 @@ toybox: $(TOYBOX_BIN) $(IMAGE) $(LEANFS_PUT) preseed
 		n=$$((n+1)); \
 	done; \
 	echo "toybox: /bin/toybox plus $$n command names ($$k kept lean_os's own)"
+
+# ---- M111: the package repository, on the disk ------------------------
+#
+# `os install grep` reads /pkg/repo. This is what puts it there: the
+# archives tools/build-packages.sh produced, plus the index, written into
+# the image's leanfs host-side the same way `toybox` is.
+#
+# Not part of `all`, and for the same reason `preseed` and `toybox` are
+# not: writing into a fresh image claims inodes that kernel.c's M22
+# self-test has opinions about. Depends on preseed so the ordering is the
+# build's problem rather than a person's.
+#
+# The repository directory is created here rather than by `os`, because
+# an image with /pkg/repo and no packages in it and an image with no
+# repository at all are different machines, and the first one is the one
+# a person can put a package into.
+PKG_REPO_DIR := $(BUILD)/repo
+
+packages: $(IMAGE) $(LEANFS_PUT) preseed
+	@if [ ! -f $(PKG_REPO_DIR)/index ]; then \
+		echo "packages: no repository - run tools/build-packages.sh first" >&2; \
+		exit 1; \
+	fi
+	@n=0; \
+	for f in $(PKG_REPO_DIR)/*.osp $(PKG_REPO_DIR)/index; do \
+		$(LEANFS_PUT) $(IMAGE) $$f /pkg/repo/$$(basename $$f) >/dev/null || exit 1; \
+		n=$$((n+1)); \
+	done; \
+	echo "packages: $$n files into /pkg/repo in $(IMAGE)"
 
 # ---- M94: the sysroot ---------------------------------------------------
 #
@@ -860,7 +910,8 @@ syms: $(IMAGE) $(KERNEL_SYMS) $(LEANFS_PUT)
 TEST_BUILD  := $(BUILD)/tests
 TEST_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Werror -DLEANOS_HOST_TEST \
                -fno-omit-frame-pointer \
-               -Itests -Itests/fakes -Ikernel -Isystem_api/include
+               -Itests -Itests/fakes -Ikernel -Isystem_api/include \
+               -Iuser_space/lib
 
 # Sanitizers are on by default and that is a decision, not an oversight.
 # The whole reason to run kernel code on a host is to get instruments the
@@ -899,6 +950,7 @@ TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
 # list that stopped saying so would be the first step to compiling kernel
 # code with user flags.
 TEST_USER_SRCS := user_space/lib/symtab.c \
+                  user_space/lib/sha256.c user_space/lib/ospkg.c \
                   user_space/libc/src/wchar.c user_space/libc/src/errno.c \
                   user_space/libc/src/fnmatch.c user_space/libc/src/libgen.c \
                   user_space/libc/src/getopt.c

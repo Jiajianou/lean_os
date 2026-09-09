@@ -71,12 +71,12 @@ that has never happened.
 
 | | state |
 |---|---|
-| **Milestones** | M0–M110 numbered: 101 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 5 not started (M100, M107–M110) |
+| **Milestones** | M0–M111 numbered: 102 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
-| **Head of the queue** | **M100** — M99 closed 2026-09-04 |
+| **Head of the queue** | **M100** — eight of nine libraries landed; M111 was taken out of order at the user's request and closed 2026-09-09 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
-| **Host unit tests** | 268/268 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 118 required, graded on every self-test boot |
+| **Host unit tests** | 311/311 passing, 3 slow ones skipped in `--fast` |
+| **Boot markers** | 122 required, graded on every self-test boot |
 | **Performance budgets** | 39 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
@@ -113,8 +113,37 @@ surprising amount is already here.
   measurements per round and takes the best ratio; the honest number is
   **closer to perfect scaling than this file has ever claimed.**
   `tools/smp-test.sh` grades it in the default tier and used to fail
-  about one run in six because of the old statistic; twelve runs of the
-  new one have not failed. The full battery is *not* green on four cores;
+  about one run in six because of the old statistic.
+
+  **Correction, measured 2026-09-09 during M111 and not caused by it:
+  `tools/smp-test.sh` fails about two runs in three**, at HEAD
+  (`c11d3f3`), with
+
+      *** KERNEL PANIC: sched: this CPU is not on the stack of the task
+          it thinks it is running ***
+
+  Six runs on a clean HEAD build: **two passed, four panicked**. Five
+  runs of the M111 tree: three passed, two panicked. So it is neither
+  new nor M111's, and the sentence this paragraph used to end with -
+  "twelve runs of the new one have not failed" - describes a machine
+  this one no longer is. The measurement above (92-180%) still stands;
+  it comes from the runs that reach it.
+
+  **Two symptoms, one problem.** Most failures are that panic in about
+  21 seconds; one run in the final M111 tier instead **hung** and was
+  killed at the stage's own 240-second ceiling with `[smp] self-test
+  passed` never printed. A panic and a hang from the same stage is
+  exactly Q13's description of this class - "about one boot in ten
+  hangs" - and it is why the scheduler was moved off the machine in the
+  first place.
+
+  This is the M106 tail (queue row 5) presenting from a second
+  direction, and it is now the cheapest reproduction of it this project
+  has: 21 seconds per attempt, two attempts in three. **Whoever takes
+  row 5 should start here** rather than with the full battery. It was
+  found by attributing an M111 test failure rather than by looking for
+  it, which is the third time in this file an unrelated milestone's
+  bisect has been what found a scheduler bug. The full battery is *not* green on four cores;
   see *Known divergences*.
 - I/O APIC with MADT interrupt source overrides, PIC masked rather than
   deleted; per-vector per-CPU interrupt statistics in `/proc`. The 8259
@@ -276,6 +305,27 @@ rather than this OS. What was done instead is stronger than it sounds:
 the cross compiler's**, which is the argument stage 2 == stage 3 makes,
 applied to a program small enough to finish.
 
+### Packages (M111)
+
+`os install grep` puts GNU grep 3.11 on this machine, built here from the
+published tarball with no source edit. A package is a `.osp` archive —
+manifest, file table, payload — with **no install hooks**: installing is
+verify and copy. `tools/os-pkg.c` builds them on the host,
+`/bin/os` installs them, and both are `user_space/lib/ospkg.c`.
+
+| | |
+|---|---|
+| repository | `/pkg/repo/*.osp` + an index carrying each archive's SHA-256 |
+| installed | `/pkg/<name>/<version>/`, commands linked from `/pkg/bin`, never `/bin` |
+| integrity | three SHA-256s: index→archive, header→body, record→each file |
+| capabilities | the shipped grant table **does not apply under `/pkg`**; the mask comes from `/pkg/db/caps` and is intersected with `CAP_PKG_MAX` (`fs-write \| network \| audio`) in the kernel; unlisted means **zero** |
+| the gate | `CAP_PKG_ADMIN` on nine write syscalls whose normalized path is under `/pkg`; `/bin/os` is the only holder |
+| in the repo | grep 3.11, bzip2 1.0.8, and `impostor` — a fixture that installs binaries called `compositor` and `shutdown` and must get nothing |
+
+No signatures, and the deferred list says under what condition that
+changes. Not a sandbox: a package granted `fs-write` can write anywhere
+but `/pkg`. See [docs/packages.md](docs/packages.md).
+
 ---
 
 ## The instruments
@@ -404,12 +454,22 @@ unbuilt is the drift *Deferred* exists to catch.
 | **2** | **M100** — the browser gap, measured | in progress: eight of nine libraries landed; TLS done | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
 | **3** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not |
 | **4** | **Q14** — the compositor, off the machine | not started | the move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded in milliseconds rather than only through a screendump |
-| **5** | **M106 (tail)** — the battery green on four cores | 3 known failures | not a new milestone: the three failures M106 named and left. It gates CPU affinity, and M98's bootstrap profiler already reproduces one of them on demand — the first reproduction this project has that is not "about one boot in ten hangs" |
+| **5** | **M106 (tail)** — the battery green on four cores | 3 known failures, **plus `smp-test.sh` itself failing 2 runs in 3** (measured 2026-09-09 at HEAD — see *The machine as it stands*) | not a new milestone: the three failures M106 named and left. It gates CPU affinity, and there are now two reproductions on demand — M98's bootstrap profiler, and a 21-second `tools/smp-test.sh` that panics with "this CPU is not on the stack of the task it thinks it is running" about two attempts in three. **Start with the second one** |
 | **6** | **M103 (2nd)** — MSI/MSI-X | condition fires at row 7 | its own condition is *"a driver for a part that has no other way to interrupt"*, and M107's NVMe bullet answers it by name. The LAPIC-timer and interrupt-driven-virtio boxes are **not** collected here — they wait for hardware |
 | **7** | **M107** — AHCI, NVMe, xHCI + USB HID | not started | all three gradeable under QEMU at this desk, which is what makes M110 a boot rather than a bring-up. Collects M92's last open box on the way |
 | **8** | **M108 (driver half)** — a real NIC | not started | the `e1000e` driver is QEMU-gradeable and belongs here. The link half is held — see below |
 | **9** | **M109** — lean_os built on lean_os | not started | needs nothing from rows 7–8 and stays after them anyway: the tree it rebuilds should be the whole tree, drivers included, or the generational test grades a subset of the machine it runs on |
 | **10** | **M110** — the boot that has never happened | **held** | see the hold |
+
+**M111 is not in this table and that is recorded rather than hidden.**
+`os`, the package manager, was asked for directly on 2026-09-09 and built
+to completion in one pass — an instruction outranks the queue, the same
+way the hardware hold does. It jumped nothing: no row above was started
+and abandoned, and every row below is where it was. What it changed for
+the rows that remain is one thing worth knowing: **M100's TLS now has a
+second customer waiting**, because `os install` fetching from a machine
+this one did not build is the milestone that makes package signing a real
+check rather than decoration — see the deferred list.
 
 **Rows 3 and 4 are the one ordering decision this table makes**; the rest
 is dependency or standing arc order. The argument: M107's grading bar is
@@ -1937,6 +1997,278 @@ commands and one header; the increment was the socket semantics before
 it and the random device under it, which is what "TLS end to end" was
 always going to mean here.
 
+### M111 — `os`, a package manager, and the boundary a package lives behind `[x]`
+
+**Landed 2026-09-09.** Asked for directly rather than taken off the
+queue: "a package manager for the whole os, called `os` ... it will
+install packages via `os install grep` ... and it will port linux
+software and install it onto the os securely in an isolated fashion."
+
+- [x] **`os install grep` installs GNU grep 3.11**, built for this
+      machine by this project's own `x86_64-lean_os-gcc` from the
+      published tarball with **no edit to its source** — the one change
+      is a line added to its bundled `config.sub`, which is what every
+      distribution does and what M94 already writes down as
+      upstream-shaped. 1.2 MB binary, `provides: grep egrep fgrep`.
+- [x] **A package format with no install hooks.** `user_space/lib/ospkg.c`
+      — header, manifest, file table, payload. Installing is verify and
+      copy; nothing runs. Built by `tools/os-pkg.c` on the host and read
+      by `/bin/os` on the machine from the same source file.
+- [x] **SHA-256 written here** (`user_space/lib/sha256.c`), three hashes
+      per package for three different questions: the index's over the
+      archive (did the right one arrive), the header's over the body (is
+      it intact), each record's over one file (is what is on disk still
+      what was installed — the one `os verify` asks months later).
+- [x] **The kernel decides what a package may do.** `CAP_PKG_ADMIN`,
+      `CAP_PKG_MAX`, `CAP_PKG_UNLISTED`, `kernel/proc/pkgcaps.c`, and a
+      write gate on `/pkg` at nine syscalls.
+- [x] Graded three ways: 30 host tests (`tests/test_ospkg.c`,
+      `tests/test_sha256.c`), a differential script (`tools/pkg-test.sh`,
+      in `--fast`), and four `[m111]` boot markers driven by
+      `user_space/bin/pkgtest.c`.
+
+#### The hole a package manager opens, which is the whole of the design
+
+`caps_for_program()` has matched on the **basename** since M65, and its
+own comment says why: `/bin/settings` and `settings` are the same
+program, and a table keyed on the spelling would be a table with a way
+around it. That reasoning was correct for forty-six milestones because
+every executable on the disk came out of this repository.
+
+`os install` ends it. If an installed program is *called* `compositor`,
+that table hands it `CAP_ALL` — not through a bug, but by doing exactly
+what it was written to do, to a file it was never written about. The
+impersonation needs no exploit. It is a filename.
+
+So the rule became one about a **place**:
+
+- A program under `/pkg` never matches the shipped grant table.
+- What it gets is what `/pkg/db/caps` records for its path, intersected
+  with `CAP_PKG_MAX` **in the kernel** — `fs-write | network | audio`,
+  and nothing else, ever.
+- A program under `/pkg` the registry does not name gets **zero**. Not
+  the default. Nothing.
+
+And the registry is only worth reading because **`CAP_PKG_ADMIN` gates
+every write whose normalized path resolves under `/pkg`** — create,
+truncate, mkdir, rmdir, unlink, rename (both ends), symlink, and hard
+link (both ends). `/bin/os` is the only shipped program that holds it.
+
+**Both ends of `link`, and the source end is the one that matters.**
+`link("/pkg/grep/3.11/bin/grep", "/tmp/x")` makes a second name for an
+installed binary's inode, and a write through `/tmp/x` is a write to the
+package. A gate on the destination alone misses it completely. That was
+found by writing the test before the ninth gate, which is the argument
+for `pkgtest.c` checking all nine separately rather than checking "can I
+write under /pkg".
+
+#### The `#!` over-grant, and the fix that was too big
+
+Until this milestone a script's capabilities came from its
+**interpreter**, full stop. Nothing had noticed, because every script on
+the machine was this project's. A package shipping one line beginning
+`#!/bin/sh` would have been launched with the shell's `CAP_ALL` —
+`CAP_PKG_ADMIN` included, which is authority over every installed
+package on the machine, for one line of attacker effort.
+
+**The first fix was `caps_for_spawn_path(interp) &
+caps_for_spawn_path(script)`, unconditionally, and it was wrong — for a
+reason worth more than the fix.** The argument for it is sound: the
+script is the program a person meant to run and the interpreter is
+machinery, so machinery should not raise the ceiling. But scripts are
+not in `CAP_GRANTS`, so intersecting with the table took *every* script
+on the machine to `CAP_APP_DEFAULT` — and this kernel's own self-tests
+write **twenty** `#!/bin/sh` fixtures into `/tmp`, several of which exist
+to launch programs that need the network.
+
+The boot failed with `mbedtls_net_connect returned -0x42` — `socket()`
+refused — inside M100's TLS self-test, four hundred lines and one
+subsystem away from the edit. Making the sound argument work would have
+meant listing twenty temporary filenames in a table caps.h says should
+stay one screen long, which is the tell that the argument was being
+applied at the wrong scope.
+
+**What landed is the rule M111 already applies to binaries, applied to
+scripts:** a script **under `/pkg`** is intersected with what its package
+asked for; a script anywhere else keeps the interpreter's grant. One
+sentence covers both halves of the milestone — *nothing about a file
+under `/pkg` may raise its capabilities above what its package
+declared*. The impostor package ships a `#!/bin/sh` script whose only
+line tries to write into the package database, and `[m111]` requires the
+file not to exist afterwards.
+
+**Left open, named rather than implied:** a script *outside* `/pkg` still
+runs with its interpreter's grant, so a downloaded `.sh` launched from
+the terminal — whose parent is `gui_terminal`, which holds `CAP_ALL` —
+gets more than a downloaded *binary* in the same directory would. That
+asymmetry predates this milestone and is not closed by it. **Condition:**
+it closes when a script has somewhere to be declared, which is the same
+condition a manifest for anything not installed by `os` names.
+
+#### What GNU grep cost — four C library fixes, none of them predictable
+
+Every one was named by grep's build rather than by a checklist, and not
+one of them is the bug the error message describes.
+
+1. **`<assert.h>` had `#pragma once`.** C11 7.2: that header is designed
+   to be included more than once, re-reading `NDEBUG` each time. gnulib's
+   `config.h` does `#include <assert.h>` then `#undef assert`, taking for
+   granted that the next include puts it back. With the guard, nothing
+   did, and `dfa.c` stopped **3,200 lines later** on "implicit
+   declaration of function 'assert'" — naming a header it includes twice.
+2. **`mbsinit` was missing.** Nothing here calls it and *grep does not
+   either* — it probes for it. gnulib's rule on a failed probe is not "do
+   without": it decides this platform's `mbstate_t` cannot be trusted,
+   typedefs its own as an `int`, substitutes its own `mbrtowc` and **not**
+   its own `wcrtomb`. The error was a type mismatch in a file nobody here
+   wrote, about a state object nobody here asked for. Three lines to fix.
+3. **`creat` was missing** — `open` with three flags, under the name code
+   older than those flags still uses (gnulib's `creat-safer.c`).
+4. **Every function in `<ctype.h>` was `static inline`,** and therefore
+   in no object file at all. A configure script does not include a
+   header — it *links*. `checking for isblank... no`, and then gnulib
+   compiled its own `isblank`, which collided with the one in the header
+   it could not see. The same trap was set for fifteen other names.
+
+All four are **M94's lesson, arriving four more times**: a missing symbol
+is not a missing feature, it is a *configure answer*, and the
+substitution it triggers lands somewhere with no relation to the thing
+that was absent.
+
+**And the fix for (4) that did not work, which cost the most time.** The
+obvious answer is C99's `extern inline` idiom — plain `inline` in the
+header, one `extern inline int isblank(int);` in a `.c` file to emit the
+out-of-line copy. It produced "multiple definition of `isascii'" from
+every pair of objects. The reason is that GCC knows these names as
+**built-in library functions**, so every translation unit already carries
+an implicit `extern` declaration of them — and C99 says an inline
+definition plus an external declaration in one unit is an *external*
+definition. The identical header with a name GCC does not know behaves
+perfectly, which is what makes it so hard to look at. The answer was an
+X-macro: one list of sixteen expressions, expanded `static inline` in the
+header and plain in `ctype.c`, so the fast path and the symbol are the
+same arithmetic and there is one source of truth.
+
+#### What the tests found, and what they are
+
+- **UBSan, on the first run of the first test.** The reader used the file
+  records where they lay, and the manifest between them is
+  variable-length, so the table was landing unaligned: *"member access
+  within misaligned address ... requires 8 byte alignment"*. x86-64 would
+  have executed it forever. The fix is in the **format** — the manifest
+  is padded with newlines to a multiple of 8, so with a 96-byte header
+  and a 280-byte record the table is always 8-aligned, and the reader
+  refuses a package or a buffer that is not. A reader that must not
+  allocate and records that must not be copied leave alignment as the
+  thing to fix, and a format is the right place to fix it.
+- **`tools/pkg-test.sh` is the sixth differential instrument** and the
+  same argument as the other five: this project's SHA-256 against the
+  host's `shasum -a 256` over 250 real files from this tree, a package
+  round trip decided by `cmp` and `diff -r`, determinism (the same tree
+  twice is the same archive byte for byte), and one flipped byte in a
+  real archive refused. Nothing in it says what the right answer is.
+- **`tests/test_ospkg.c` builds every archive byte by byte** rather than
+  by calling the writer — a reader tested only against its own writer
+  agrees with the writer's mistakes.
+- **`make mutate FILE=user_space/lib/ospkg.c` graded the tests**, which
+  is what that harness is for, and it earned its keep on a file whose
+  every line was already executed. Six of its survivors were real gaps:
+  `ospkg_file_data` was never asked for an index it does not have (so
+  its bounds check could be off by one, which is a read past the file
+  table); no path in any test contained a **space**, so the control-byte
+  comparison could have been widened to refuse every filename with one;
+  `requires:` was parsed and never read back, which would have made `os`
+  install a package and quietly not install what it needs; and
+  `ospkg_caps_to_names` was never given a buffer too small for what it
+  had to say — which is exactly the message about a package asking for
+  too much. Eleven tests killed them, and every one of the six is a behaviour worth having a test for on its own.
+- **And the harness found a design hole, not just a test gap.** The
+  header's `reserved` field could be broken with nothing noticing,
+  because nothing checked it — which is what a reserved field looks like
+  from the outside. It is now refused unless zero, because a field that
+  is ignored is a field a later format version can never use: packages
+  would already be in the world with rubbish in it.
+
+#### What it does not claim, written down rather than implied
+
+- **No signatures.** Integrity, yes; authenticity, no. A signature needs
+  a key, a key needs distribution, and distribution needs somebody other
+  than the machine you are standing at. A key shipped in the same image
+  as the thing it signs is a check that cannot fail, which is the exact
+  fake check M65 refused to build. **Condition:** when a package can
+  arrive from a machine this one did not build — `os install` fetching
+  over M100's TLS. That milestone is the one that has somebody to trust,
+  and it is the one that should pay for a trust root.
+- **Not a defence against editing the disk.** `CAP_PKG_ADMIN` is a rule
+  this kernel enforces while it is running.
+- **Not a sandbox.** A package granted `fs-write` can write anywhere
+  except `/pkg`. There are no file owners here, so "may write only its
+  own directory" is not a sentence this OS can currently make true, and
+  a check for it would be decoration.
+
+#### Three failures the tests found that reading did not
+
+- **The stale-archive index, which failed in the worst possible way.**
+  Padding the manifest for alignment changed the format, so every archive
+  built before it stopped verifying — correctly. `os-pkg index` opened
+  the real index file, wrote its header, and died on the first bad
+  archive, leaving a valid-looking index that listed nothing. The machine
+  then reported `os: no package called 'grep'`, which is a true sentence
+  about a broken repository and sends you to entirely the wrong place.
+  Two fixes, both about honesty rather than about indexing: the index is
+  written to a temporary and renamed, so a half-true summary never
+  reaches the disk; and `os` now distinguishes *"the index lists no
+  packages at all"* from *"the index does not have that one"*.
+- **A static buffer in a recursive function.** `os`'s `remove_tree`
+  collected a directory's names into a `static` array and then recursed,
+  which overwrites the list the caller is still walking. A package one
+  directory deep would have removed cleanly and one two deep would have
+  left files behind, silently. It is a stack array now, and a directory
+  with more than 64 entries is a loud refusal rather than a partial
+  removal.
+- **A registry that truncated instead of failing.** `rewrite_registry`
+  dropped lines that did not fit its buffer. A missing line means a
+  program launched with nothing when its manifest asked for something,
+  and that symptom appears nowhere near the cause — so it is now an
+  error, and an install whose registry cannot be written is undone.
+
+#### One thing this milestone found that is not this milestone's
+
+The default tier's four-core stage failed on the M111 tree. Attributing
+it rather than assuming it — `git stash`, rebuild HEAD, run it six times
+— gave **two passes and four panics at HEAD**, against three passes and
+two failures with M111 applied (one of those a hang rather than a panic
+- see *The machine as it stands* for why that is the same problem). So `tools/smp-test.sh` fails about two
+runs in three and has nothing to do with packages; the panic is
+`sched: this CPU is not on the stack of the task it thinks it is
+running`.
+
+That is recorded in *The machine as it stands* as a correction, because
+this file said "twelve runs of the new one have not failed" and that is
+no longer what this machine does. It also hands queue row 5 the cheapest
+reproduction it has ever had: 21 seconds, two failures in three.
+
+**The lesson, which this project keeps paying for and this time did
+not:** the twenty minutes spent on `git stash` was the whole
+investigation. A red stage in a tier run is not evidence about the
+change in front of you until you have run the same stage without it.
+
+#### Cost
+
+`user_space/lib/{sha256,ospkg}.{c,h}` 730 lines, `user_space/bin/os.c`
+900, `tools/os-pkg.c` 560, `kernel/proc/pkgcaps.{c,h}` 250, nine gated
+syscalls in `syscall.c`, `user_space/bin/pkgtest.c` 300,
+`tests/test_{ospkg,sha256}.c` 830, `tools/{build-packages,pkg-test}.sh`
+420, `docs/packages.md`. Host tests 268 → 311, and `make mutate FILE=user_space/lib/ospkg.c` kills 22 of 36 buildable mutants. Boot markers 118 → 122;
+`[m111]` costs **1.26 s** of the battery, and the graded boot is
+122/122 with no panic at 393 s to desktop (ceiling 600).
+Repository: grep 3.11 (1.2 MB), bzip2 1.0.8, and `impostor` — a fixture
+that installs binaries called `compositor` and `shutdown` and must get
+nothing, because a boundary with no adversary in the image is a boundary
+nothing checks.
+
+---
+
 ---
 
 *Below this line, the snapshot as written on 2026-09-04.*
@@ -2354,6 +2686,23 @@ condition rather than by an opinion.
   failing case by hand is the bottleneck, which it is not.
 - **A coverage target.** Refused in Q8 and still refused. The ratchet
   constrains direction only.
+- **Package signing (M111).** Refused now for the reason M65 refuses every
+  check with nothing behind it: a signature needs a key, a key needs
+  distribution, and distribution needs somebody other than the machine
+  you are standing at. A key shipped in the same image as the thing it
+  signs verifies nothing. The three SHA-256s a package already carries
+  are an *integrity* claim and are stated as one. **Condition: `os
+  install` fetching a package over the network** — the first moment a
+  package can come from a machine this one did not build, and therefore
+  the first moment there is anybody to trust. M100's TLS client is
+  already here, so this is a near thing; the milestone that adds the
+  fetch is the one that pays for the trust root.
+- **A sandbox for an installed package (M111).** A package granted
+  `fs-write` can write anywhere except `/pkg`. "May write only its own
+  data directory" needs a per-file notion of ownership this OS does not
+  have, and a check for it would be decoration. **Condition: the same one
+  multi-user names** — a second principal, or a program on this machine
+  that holds something another program must not read.
 
 ---
 

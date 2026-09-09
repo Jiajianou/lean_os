@@ -136,6 +136,24 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
   # message when tools/build-python.sh has not run, and the [m99] boot
   # marker downstream is what grades it.
   run_stage "python and its library, onto the image" ./tools/install-python.sh
+
+  # M111: and the package repository, so that `os install grep` has
+  # something to install. Same shape and the same reason as every stage
+  # above: `make packages` is not part of `all` (the Makefile says why),
+  # the [m111] boot marker downstream grades it, and a tier that skipped
+  # it would grade an image with no repository on it - which the
+  # self-test correctly reports as a skip rather than a failure, and a
+  # skip nobody notices is how a milestone stops being tested.
+  #
+  # The build is separate from the install for one reason worth stating:
+  # tools/build-packages.sh cross-compiles GNU grep, which takes minutes
+  # and needs the network the first time, so it is not run from here. If
+  # build/repo is empty this stage says so and the boot skips [m111].
+  if [ -f build/repo/index ]; then
+    run_stage "the package repository, onto the image" make packages
+  else
+    echo "  (no build/repo - run tools/build-packages.sh for [m111])"
+  fi
 fi
 
 # ---- Stage 1: the host tier ------------------------------------------
@@ -188,6 +206,13 @@ run_stage "printf, against the host's" ./tools/printf-test.sh
 # instead. That failure cost a five-minute graded boot to see; this
 # reproduces it in milliseconds. See tools/stdio-test.sh.
 run_stage "the FILE layer, off the machine" ./tools/stdio-test.sh
+# M111: the package format, against something that is not this project -
+# the host's own sha256 over 250 real files, a round trip decided by
+# `cmp` and `diff -r`, and a corrupted archive refused. In the fast tier
+# for the same reason as the five above: about a second, and it grades
+# the one thing tests/test_ospkg.c cannot, which is whether the hash a
+# package's every claim rests on is actually SHA-256.
+run_stage "packages, against the host's sha256 and cmp" ./tools/pkg-test.sh
 # M98: the fifth differential test. realpath is pure logic over
 # lstat/readlink/getcwd, so the host's own filesystem and the host's
 # own realpath grade all of it - see tools/realpath-test.sh for the

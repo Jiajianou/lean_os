@@ -118,6 +118,27 @@ UEFI firmware
   original file byte for byte. See M100 in
   [milestones.md](milestones.md).
 
+- **A package manager.** `os install grep` puts **GNU grep 3.11** on
+  this machine — built here by this project's own compiler from the
+  published tarball with no edit to its source — and the machine runs
+  it. A package is a manifest, a file table and a payload with **no
+  install hooks at all**: installing is verify and copy, so what
+  installing can do to your machine is a sentence rather than an audit.
+  Three SHA-256s, written here, answer three different questions; every
+  path is refused before anything is created; commands land in
+  `/pkg/bin` and never in `/bin`, so a package cannot take over the name
+  of a program this OS ships.
+
+  And the kernel decides what an installed package may do. A program
+  under `/pkg` never matches the shipped capability table whatever it is
+  *called* — a package shipping a binary named `compositor` gets `0x0`,
+  not `CAP_ALL` — and every write under `/pkg` needs a capability only
+  `/bin/os` holds, so the registry that records those grants is not a
+  file anything else can edit. See M111 in
+  [milestones.md](milestones.md) and [docs/packages.md](docs/packages.md),
+  which is also where the four C library bugs GNU grep's build found are
+  written down.
+
 ## Build and run
 
 Needs an `x86_64-elf` cross-toolchain, `nasm`, `clang`+`lld` (for the
@@ -127,6 +148,16 @@ EFI app), `mtools` and `qemu-system-x86_64`. See
 ```sh
 ./tools/run-qemu.sh          # builds everything, fetches OVMF the first time, boots
 ./tools/run-qemu.sh --selftests   # ...and runs the boot self-test battery on the way
+```
+
+Three optional steps put ported software into the image, each once per
+image and none of them part of `all` — see the Makefile for why writing
+into a fresh image is ordered rather than automatic:
+
+```sh
+make toybox                  # /bin/toybox and 143 command names
+tools/build-packages.sh      # cross-build grep and bzip2 into .osp archives
+make packages                # ...and write them into the image as /pkg/repo
 ```
 
 The disk image is 2 GiB and sparse - a few megabytes on disk until
@@ -181,12 +212,14 @@ Four instruments, and none of them subsumes another:
   is the only instrument here that grades the *tests* rather than the
   machine, and the first thing it found was a file at 100% line coverage
   whose mutation score was zero.
-- **Five differential tests** (`tools/sh-test.sh`,
-  `tools/regex-test.sh`, `tools/scanf-test.sh`, `tools/printf-test.sh`
-  and `tools/math-test.sh`) compile this project's own shell,
-  regular-expression engine, `sscanf`, `printf` and libm from the same
-  source the machine runs, for the machine you are sitting at, and
-  require every fixture to agree with the host's own. Nothing in those
+- **Six differential tests** (`tools/sh-test.sh`,
+  `tools/regex-test.sh`, `tools/scanf-test.sh`, `tools/printf-test.sh`,
+  `tools/math-test.sh` and `tools/pkg-test.sh`) compile this project's
+  own shell, regular-expression engine, `sscanf`, `printf`, libm and
+  SHA-256 from the same source the machine runs, for the machine you are
+  sitting at, and require every fixture to agree with the host's own —
+  the last of them over 250 real files from this tree, with a package
+  round trip decided by `cmp` and `diff -r`. Nothing in those
   fixtures says what the right answer is - a program nobody here wrote
   decides, which is the only useful standard for code whose whole job is
   to agree with every other implementation of itself. Every one of them
