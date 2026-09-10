@@ -137,6 +137,22 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
   # marker downstream is what grades it.
   run_stage "python and its library, onto the image" ./tools/install-python.sh
 
+  # M113: and the browser, onto the image. Same shape and the same
+  # reason as every stage above - `make browser` is not part of `all`
+  # (the Makefile says why), and this is the install half only, so a tier
+  # that has never cross-built NetSurf reports that rather than starting
+  # a twenty-minute build inside a test run.
+  #
+  # This stage is why M113 exists. The input suite's
+  # `browser_renders_a_page` grades real framebuffer pixels from a real
+  # NetSurf, and it is the only instrument in this project that can grade
+  # a layout engine at all - but nothing between `make all` and that test
+  # ever put the browser on the image it runs against. It passed because
+  # a developer had installed one by hand at some point and the image had
+  # not been recreated since. The first kernel edit would have taken it
+  # away, and the failure would have looked like a rendering bug.
+  run_stage "the browser, onto the image" make browser-if-built
+
   # M111: and the package repository, so that `os install grep` has
   # something to install. Same shape and the same reason as every stage
   # above: `make packages` is not part of `all` (the Makefile says why),

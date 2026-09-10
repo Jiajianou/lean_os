@@ -501,6 +501,18 @@ REQUIRED_MARKERS=(
   # against the host that graded the tables. See
   # user_space/bin/browsertest.c.
   "[m100h] what porting a browser added:"
+  # M113: and that the browser is on the image at all. Required on
+  # [m98]'s and [m99]'s reasoning - run-tests.sh installs it before this
+  # runs, so an image reaching here without /bin/netsurf is a broken
+  # build step, unless the port was never cross-built, which
+  # install-netsurf.sh says out loud.
+  #
+  # It is a separate marker from [m100h] and not a longer version of it
+  # because the two fail for unrelated reasons: [m100h] is about the
+  # syscalls and libc functions porting a browser added, which are in the
+  # kernel and the image whether or not a browser is, and this one is
+  # about whether `make` left a browser behind after recreating the disk.
+  "[m113] the browser is installed:"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

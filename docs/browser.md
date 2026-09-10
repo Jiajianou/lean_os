@@ -147,6 +147,59 @@ self-test. The browser is graded where a browser has to be — in
 framebuffer pixels, by `tools/qemu-input-test.sh`'s
 `browser_renders_a_page`.
 
+### Installing it, and the reason that is its own milestone (M113)
+
+```sh
+make browser          # cross-build NetSurf if it has never been built,
+                      # then install it into the image
+```
+
+That one command replaces `tools/build-netsurf.sh` followed by
+`tools/install-netsurf.sh`, and it is not sugar. **M100 left the browser
+installed on exactly one image: whichever one happened to be sitting in
+`build/` at the time.** `$(IMAGE)`'s recipe recreates the disk from
+scratch — `cat mbr kernel > image`, then `truncate` — every time the
+kernel changes, which wipes leanfs entirely. So the browser M100 built
+was gone again after the next kernel edit, and nothing put it back.
+
+What made that more than an inconvenience is what it did to the
+instrument. `browser_renders_a_page` is the only thing in this project
+that can grade a layout engine at all, and nothing between `make all`
+and that test ever put a browser on the image it runs against. It passed
+because a browser had been installed by hand and the kernel had not been
+touched since. The first person to edit the kernel and run the suite
+would have got a browser that painted nothing — and that failure reads
+exactly like a rendering bug in `nsfb_leanos.c`.
+
+Three things close it, and the shape is the one `make toybox` and
+`make packages` already had:
+
+- **`make browser`** builds and installs; **`make browser-if-built`**
+  installs only, and says so and succeeds when the port has never been
+  cross-built. Both depend on `preseed`, which is what keeps a
+  third-party file out of the inode M22's launcher self-test has
+  opinions about. Neither is part of `all`, for that same reason.
+- **`tools/run-qemu.sh` and `tools/run-tests.sh` both go through
+  `browser-if-built`** after `make all`. That is what makes the browser
+  survive a kernel rebuild: the reinstall costs about a tenth of a
+  second, against the twenty minutes a rebuild of the port would.
+- **The `[m113]` boot self-test** asks the machine itself whether it has
+  a browser: `/bin/netsurf` at a plausible size, `default.css` where the
+  compiled-in `NETSURF_FB_RESPATH` looks, `DejaVuSans.ttf` where
+  `NETSURF_FB_FONTPATH` looks, and the capability grant still
+  `CAP_FS_WRITE | CAP_NETWORK` with `CAP_FRAMEBUFFER` absent. The last
+  one is there because a browser that had quietly acquired authority
+  over the screen would render perfectly and the pixel test would still
+  pass.
+
+  It **skips** rather than fails when `/bin/netsurf` is absent, naming
+  `make browser` in the skip line — an image without a browser is a
+  valid image, and a battery that panicked on one would make the default
+  build depend on an optional twenty-minute cross-compile. Both branches
+  were run rather than reasoned about: the skip on a fresh image, and
+  the panic on an image where `/bin/netsurf` had been replaced with a
+  21 KiB program.
+
 ---
 
 ## Part 2: the measurement — Chromium, in numbers

@@ -71,12 +71,12 @@ that has never happened.
 
 | | state |
 |---|---|
-| **Milestones** | M0–M112 numbered: 103 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
+| **Milestones** | M0–M113 numbered: 104 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
 | **Head of the queue** | **M100** — eight of nine libraries landed; M111 and M112 were both taken out of order at the user's request and closed 2026-09-09 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
 | **Host unit tests** | 341/341 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 123 required, graded on every self-test boot |
+| **Boot markers** | 125 required, graded on every self-test boot |
 | **Performance budgets** | 39 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
@@ -471,6 +471,17 @@ It jumped nothing, and it changed nothing for any row below. What it
 `user_space/lib/fsutil.c` rather than in `SYS_rmdir`, so the kernel's
 "empty directories only" rule is intact and now has a boot self-test
 asserting that it stays that way.
+
+**M113 is not in this table either.** *"Pre-install an open source
+browser"* was asked for directly on 2026-09-10, and what it turned out
+to need was not a browser — M100 had already built one — but the
+discovery that nothing in this build put that browser on the image the
+tests grade. It jumped nothing and changed nothing for any row below.
+What it changed for the rows that remain is one sentence: **the input
+suite was grading whatever image happened to be lying around**, and any
+milestone that adds a payload to the disk now has a worked example of
+how that goes wrong and one open box saying which four payloads still
+do.
 
 **M111 is not in this table and that is recorded rather than hidden.**
 `os`, the package manager, was asked for directly on 2026-09-09 and built
@@ -2737,6 +2748,134 @@ had `AF_UNIX` open for a *different* reason (CPython's `test_stat`), and
 **it is what the next milestone in this arc should be.** That is a
 condition, which is what this project means by a deferral, and it is the
 first time the browser row has had one.
+
+### M113 — the browser, actually installed `[x]`
+
+*Landed 2026-09-10.* **Asked for directly** — *"I previously ask you to
+pre install google chrome, you told me it was impossible, now I want you
+to pre-install an open source browser instead"* — the day after M100's
+ninth increment answered the first half of that sentence. It jumped
+nothing: no row of the queue was started and abandoned, and every row
+below is where it was. An instruction outranks the table, the same way
+M111 and M112 did.
+
+**The browser already existed. It was not installed.** That distinction
+is the entire milestone, and the first thing this milestone did was
+measure it rather than assume it: an independent reader
+(`tools/leanfs-fsck.py`) walked `build/os-image.bin` as it stood at
+HEAD and reported `/bin/netsurf` **missing**, along with `/bin/toybox`,
+`/bin/python3` and `/pkg`. The image a person would have booted that
+morning had no browser on it.
+
+**Why it had none, which is a fact about the build rather than about
+NetSurf.** `$(IMAGE)`'s recipe is `cat $(MBR_BIN) $(KERNEL_BIN) >
+$(IMAGE)` followed by `truncate`. It runs whenever the kernel changes,
+and it **wipes leanfs completely** — every ported payload with it. M100
+installed the browser onto whichever image happened to be sitting in
+`build/` at the time, and nothing put it back afterwards. The
+demonstration arrived unprompted during this milestone's own work:
+editing the `Makefile` rebuilt the kernel, recreated the image, and the
+very next `leanfs-put` printed `created directory /bin` — a filesystem
+with nothing in it.
+
+**What that did to the instrument, which is worse than what it did to
+the desktop.** `browser_renders_a_page` in the input suite is the only
+thing in this project that can grade a layout engine at all — M100's own
+entry says so, and it is right: a browser that started, fetched, parsed,
+laid out and then painted nothing would exit 0. **Nothing between
+`make all` and that test ever put a browser on the image it runs
+against.** `tools/run-tests.sh` has a careful, commented population
+sequence — toybox, the cross-compiled fixture, the dynamic loader, C++,
+the native binutils, CPython, the package repository, each one a stage
+of its own with a paragraph saying why — and NetSurf was not in it. The
+test passed because a browser had been installed by hand and the kernel
+had not been touched since. **The first person to edit the kernel and
+run the suite would have got a browser that painted nothing, and that
+failure reads exactly like a rendering bug in `nsfb_leanos.c`.** A
+milestone-long debugging session was sitting in the tree waiting for
+somebody to start it.
+
+**What landed.**
+
+- **`make browser`** — build the port if it has never been built, and
+  install it either way. One command, because two script names nobody
+  remembers is operationally the same thing as no browser.
+- **`make browser-if-built`** — the install half alone, which says so
+  and *succeeds* when the port has never been cross-built. This is the
+  one the harnesses call, so a test run never starts a twenty-minute
+  cross-compile inside itself.
+- Both depend on **`preseed`**, which is the same answer `toybox` and
+  `packages` already give to the inode question CLAUDE.md names: writing
+  a third-party file into a never-booted image claims the first free
+  inode, and if that is slot 0 it shifts `hello` out of the launcher and
+  fails M22's pixel self-test. Neither is part of `all`, for that reason.
+- **`tools/run-qemu.sh` and `tools/run-tests.sh` both run
+  `browser-if-built` after `make all`**, which is what makes the browser
+  survive a kernel rebuild. The reinstall is **0.13 s** measured, against
+  the twenty minutes a rebuild of the port costs — so doing it on every
+  boot is cheaper than deciding whether to.
+- **The `[m113]` boot self-test**, and it is a *presence* check on
+  purpose. Two instruments already grade what NetSurf does; none graded
+  whether it was there. It asks the machine four questions:
+  `/bin/netsurf` at a plausible size, `default.css` where the compiled-in
+  `NETSURF_FB_RESPATH` looks, `DejaVuSans.ttf` where
+  `NETSURF_FB_FONTPATH` looks, and `caps_for_program("netsurf")` still
+  `CAP_FS_WRITE | CAP_NETWORK` with `CAP_FRAMEBUFFER` **absent**.
+- Docs: `docs/browser.md` gains the install section, and CLAUDE.md and
+  README.md now say `make browser` instead of naming two scripts.
+
+**The capability line in that self-test is the one worth defending.** A
+browser that had quietly acquired `CAP_FRAMEBUFFER` would render
+perfectly, and `browser_renders_a_page` would still pass — pixels cannot
+tell you *whose* authority drew them. docs/browser.md's claim is that
+twenty megabytes of somebody else's C and C++ running a JavaScript
+engine holds one bit more than the text editor does. That sentence now
+has a test under it.
+
+**Both branches were run rather than reasoned about**, which is the only
+reason this entry can claim either.
+
+- **The skip.** A fresh image, no payloads: `[m113] /bin/netsurf is not
+  on this image - skipped. \`make browser\` builds and installs it` —
+  and no panic. This matters more than it looks: the marker is
+  *required* by `tools/qemu-serial-test.sh` on `[m98]`'s and `[m99]`'s
+  reasoning (run-tests.sh installs it before the boot), so the skip line
+  and the pass line must never be confusable, and they are not.
+- **The catch.** `/bin/netsurf` replaced with a 21 KiB `hello`, which is
+  what a truncated `leanfs-put` or a strip that ate the file looks like
+  to `stat()`: `[m113] /bin/netsurf is there but is not a plausible
+  browser: kind 0, 21 KiB`, then the panic. The test is not vacuous, and
+  it says the number it found rather than only that it was unhappy.
+
+**What this cost:** one Makefile target pair, two harness call sites, one
+kernel self-test, and four boots — one to prove the marker, one to prove
+the skip, one to prove the catch, and the graded battery. No new
+subsystem, no third-party source touched, and not one line of NetSurf.
+
+**And what it is really about.** M100's entry says *the thing worth
+taking from this milestone is the seam, not the browser*. M113's is
+smaller and duller and has probably cost this project more time in
+aggregate than any seam: **a build artifact that is not reproduced by
+the build is not part of the system, however carefully it was made.**
+The browser was the case that made it visible because it had a test that
+could quietly grade the wrong image. Toybox, the native toolchain,
+CPython and the package repository are all reinstalled by
+`run-tests.sh` and *none of them* is reinstalled by `tools/run-qemu.sh`
+— so the machine a person boots to *use* still has only a browser put
+back. That is now the open box below, and it is one line of the same
+shape repeated four times, deliberately left for a milestone that can
+measure what it costs a boot rather than folded in here on the
+assumption that it is free.
+
+- [ ] **The other four payloads, on the same terms.**
+      `tools/run-qemu.sh` reinstalls the browser and nothing else, so a
+      `make run` after a kernel edit still boots a desktop with no
+      toybox, no `python3`, no native toolchain and no `/pkg/repo`.
+      **The condition**: a measurement of what each reinstall costs a
+      boot. The browser's is 0.13 s and that is why it went in without
+      one; CPython's is 596 files and the native toolchain's is 105 MB,
+      and neither should be added to every `make run` on the assumption
+      that it is as cheap.
 
 ---
 

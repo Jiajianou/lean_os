@@ -195,9 +195,17 @@ into a fresh image is ordered rather than automatic:
 make toybox                  # /bin/toybox and 143 command names
 tools/build-packages.sh      # cross-build grep and bzip2 into .osp archives
 make packages                # ...and write them into the image as /pkg/repo
-tools/build-netsurf.sh       # cross-build NetSurf 3.11, libcurl and 14 libraries
-tools/install-netsurf.sh     # ...and write the browser into the image
+make browser                 # cross-build NetSurf 3.11, libcurl and 14
+                             #   libraries, and write the browser in
 ```
+
+`make browser` builds the port only if it has never been built, and
+installs it either way. It is a step of its own for the same reason the
+two above it are — but unlike them, `tools/run-qemu.sh` reinstalls it on
+every boot (`make browser-if-built`, about a tenth of a second), because
+rebuilding the kernel recreates the disk image from scratch and a
+browser you have to reinstall by hand after every kernel edit is not
+installed. See M113 in [milestones.md](milestones.md).
 
 `tools/build-netsurf.sh` needs `bison` 3.x and the host's `libpng` on
 top of the toolchain above — macOS ships bison 2.3, which cannot parse
@@ -236,7 +244,7 @@ Four instruments, and none of them subsumes another:
   the order locks are taken in so an inversion is an error rather than
   a comment (Q9). 338 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 123 markers and 39 performance
+  image and grade the serial log against 125 markers and 39 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It

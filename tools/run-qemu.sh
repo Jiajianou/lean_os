@@ -40,6 +40,16 @@ done
 
 make all
 
+# M113: and the browser back onto the image `make all` may have just
+# recreated. $(IMAGE)'s recipe rebuilds the disk from scratch whenever
+# the kernel changes, which wipes leanfs - so before M113 the browser
+# M100 built was gone again after the next kernel edit, and "installed"
+# meant "installed until you touch the kernel". This target reinstalls
+# it in a tenth of a second and says so, or says the port has not been
+# built and carries on: an image without a browser is a valid image, and
+# `make browser` is what builds one.
+make browser-if-built
+
 IMAGE="build/os-image.bin"
 OVMF_CODE="build/ovmf/OVMF_CODE.fd"
 OVMF_VARS_TEMPLATE="build/ovmf/OVMF_VARS.fd"

@@ -201,7 +201,7 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run leanfs-put preseed toybox packages os-pkg sysroot print-user-programs syms font font-check clean distclean
+.PHONY: all run leanfs-put preseed toybox packages browser browser-if-built os-pkg sysroot print-user-programs syms font font-check clean distclean
 
 all: $(IMAGE)
 
@@ -624,6 +624,51 @@ toybox: $(TOYBOX_BIN) $(IMAGE) $(LEANFS_PUT) preseed
 		n=$$((n+1)); \
 	done; \
 	echo "toybox: /bin/toybox plus $$n command names ($$k kept lean_os's own)"
+
+# ---- M113: the browser, on the disk ------------------------------------
+#
+# M100 built NetSurf for this machine and left it in build/netsurf. What
+# it did not do is put it on any image but the one that happened to be
+# sitting there at the time - and `$(IMAGE)`'s recipe recreates the disk
+# from scratch every time the kernel changes, so the browser was gone
+# again after the next edit. That is the whole of M113: a browser you
+# have to reinstall by hand after every kernel build is not installed.
+#
+# One command, because two script names nobody remembers is the same
+# thing as no browser. This builds the port if it has never been built
+# (twenty minutes, and it needs bison 3.x and the host's libpng - see
+# tools/build-netsurf.sh) and installs it either way.
+#
+# Not part of `all`, for the same reason `preseed`, `toybox` and
+# `packages` are not: writing into a fresh image claims inodes that
+# kernel.c's M22 self-test has opinions about. Depends on preseed so the
+# ordering is the build's problem rather than a person's.
+#
+# /bin/netsurf and not /pkg: this is a program the OS ships, so it is in
+# the shipped capability table (system_api/include/caps.h) holding
+# CAP_FS_WRITE | CAP_NETWORK. M111 made every binary under /pkg get zero
+# capabilities whatever it is called, so a browser installed there could
+# not open a socket. See docs/browser.md.
+NETSURF_BIN := $(BUILD)/netsurf/netsurf
+
+$(NETSURF_BIN): tools/build-netsurf.sh user_space/bin/nsfb_leanos.c
+	@./tools/build-netsurf.sh
+
+browser: $(NETSURF_BIN) $(IMAGE) $(LEANFS_PUT) preseed
+	@./tools/install-netsurf.sh
+
+# The same install without the build, for the callers that must not
+# trigger a twenty-minute cross-compile: it puts the browser back on an
+# image that has just been recreated, and says so and succeeds when the
+# port has never been built. tools/run-qemu.sh and tools/run-tests.sh
+# both go through this, which is what makes the browser survive a `make`.
+browser-if-built: $(IMAGE) $(LEANFS_PUT)
+	@if [ ! -f $(NETSURF_BIN) ]; then \
+		echo "browser: not built - \`make browser\` builds and installs it (an image without a browser is a valid image)."; \
+	else \
+		$(MAKE) --no-print-directory preseed >/dev/null || exit 1; \
+		./tools/install-netsurf.sh || exit 1; \
+	fi
 
 # ---- M111: the package repository, on the disk ------------------------
 #

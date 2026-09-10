@@ -11879,6 +11879,139 @@ static void boot_selftests_system(void) {
         klog_puts(" ms).\n\n");
     }
 
+    /* ---- M113 self-test: the browser is actually ON this machine ------
+     *
+     * M100 built NetSurf and graded what it *runs* like: [m100h] above
+     * grades the four things porting it added, and the input suite's
+     * `browser_renders_a_page` grades real framebuffer pixels, which is
+     * the only instrument here that can grade a layout engine at all.
+     *
+     * Nothing graded whether the browser was on the disk. That sounds
+     * like a tautology - the pixel test opens it, so obviously it is
+     * there - and it is exactly backwards: the pixel test ran against
+     * whatever image was lying around, `$(IMAGE)`'s recipe recreates
+     * that image from scratch on every kernel change, and no stage
+     * between the two ever put the browser back. It passed because
+     * somebody had installed one by hand and then not touched the
+     * kernel. The first person to edit the kernel and run the suite
+     * would have got a browser that painted nothing, and the failure
+     * would have read as a rendering bug in libnsfb.
+     *
+     * So this is a presence check, and a presence check is the right
+     * shape for it: the question is not "does NetSurf work" (two
+     * instruments already answer that) but "did this image get built
+     * with a browser in it", which is a question about the build and
+     * has to be asked from inside the machine to be worth anything.
+     *
+     * Four things, because a browser is not one file:
+     *
+     *   /bin/netsurf                         the program
+     *   /usr/share/netsurf/default.css       the resources - without the
+     *                                        default stylesheet there is
+     *                                        no cascade and every page
+     *                                        renders as a wall of serif
+     *   .../truetype/dejavu/DejaVuSans.ttf   the font freetype opens by
+     *                                        bare name along
+     *                                        NETSURF_FB_FONTPATH
+     *   caps_for_program("netsurf")          and the grant it launches
+     *                                        with, checked here because
+     *                                        a browser that had acquired
+     *                                        CAP_FRAMEBUFFER would still
+     *                                        render perfectly
+     *
+     * It SKIPS rather than fails when /bin/netsurf is absent, for the
+     * same reason [m89] skips on a missing /bin/toybox: `make browser`
+     * is not part of `all` (the Makefile has the inode ordering that
+     * keeps it out), an image without a browser is a valid image, and a
+     * battery that panicked on one would make the default build depend
+     * on an optional twenty-minute cross-compile. The skip names the
+     * command that fixes it, so "it passed" and "it was not there" are
+     * never the same line in this log.
+     */
+    {
+        os_stat_t nst;
+        if (do_syscall(SYS_stat, (uint64_t)(PATH_BIN_DIR "netsurf"),
+                        (uint64_t)&nst, 0) != 0) {
+            klog_puts("[m113] /bin/netsurf is not on this image - skipped. "
+                       "`make browser` builds and installs it; see "
+                       "docs/browser.md.\n\n");
+        } else {
+            int all_ok = 1;
+
+            /* A browser is not a small program and this is not a size
+             * assertion for its own sake: leanfs-put writing a truncated
+             * file, or a strip that ate the whole thing, both leave a
+             * /bin/netsurf that stat() is perfectly happy with. Stripped
+             * it is ~7 MB; a megabyte is a floor nothing plausible
+             * lands above by accident. */
+            if (nst.kind != OS_STAT_FILE || nst.size < 1024u * 1024u) {
+                klog_puts("[m113] /bin/netsurf is there but is not a "
+                           "plausible browser: kind ");
+                klog_put_dec((uint32_t)nst.kind);
+                klog_puts(", ");
+                klog_put_dec((uint32_t)(nst.size / 1024u));
+                klog_puts(" KiB\n");
+                all_ok = 0;
+            }
+
+            /* The resources, at the path the build compiled in. NetSurf
+             * takes NETSURF_FB_RESPATH from PREFIX at build time, so a
+             * mismatch here is an install that put the files somewhere
+             * the program will not look - which produces a browser that
+             * starts, fetches, and renders every page unstyled. */
+            os_stat_t cst;
+            if (do_syscall(SYS_stat, (uint64_t)"/usr/share/netsurf/default.css",
+                            (uint64_t)&cst, 0) != 0 || cst.size == 0) {
+                klog_puts("[m113] /usr/share/netsurf/default.css is missing or "
+                           "empty - the cascade has no default stylesheet\n");
+                all_ok = 0;
+            }
+
+            /* And the font, by the bare filename freetype looks it up
+             * under along NETSURF_FB_FONTPATH. The directory matters and
+             * so does the name. */
+            os_stat_t fst;
+            if (do_syscall(SYS_stat,
+                            (uint64_t)"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                            (uint64_t)&fst, 0) != 0 || fst.size == 0) {
+                klog_puts("[m113] DejaVuSans.ttf is not where freetype looks "
+                           "for it - a browser with no glyphs\n");
+                all_ok = 0;
+            }
+
+            /* The grant. docs/browser.md's claim is that twenty megabytes
+             * of somebody else's C and C++ running a JavaScript engine
+             * holds one bit more than the text editor does, and this is
+             * the line that keeps that sentence true: a browser that had
+             * quietly acquired CAP_FRAMEBUFFER would render exactly as
+             * well and the pixel test would still pass. */
+            uint32_t ncaps = caps_for_program(PATH_BIN_DIR "netsurf");
+            if (ncaps != (CAP_APP_DEFAULT | CAP_NETWORK)) {
+                klog_puts("[m113] netsurf's capability grant is 0x");
+                klog_put_hex32(ncaps);
+                klog_puts(", not CAP_APP_DEFAULT | CAP_NETWORK\n");
+                all_ok = 0;
+            }
+            if (ncaps & CAP_FRAMEBUFFER) {
+                klog_puts("[m113] netsurf holds CAP_FRAMEBUFFER - it paints "
+                           "its window's shared segment and must not have "
+                           "authority over the screen\n");
+                all_ok = 0;
+            }
+
+            if (!all_ok) {
+                panic("M113 self-test: the browser on this image is not "
+                      "installed the way a shipped program is");
+            }
+            klog_puts("[m113] the browser is installed: /bin/netsurf (");
+            klog_put_dec((uint32_t)(nst.size / 1024u));
+            klog_puts(" KiB), its default stylesheet and DejaVuSans.ttf "
+                       "where the compiled-in paths look for them, holding "
+                       "CAP_FS_WRITE and CAP_NETWORK and NOT CAP_FRAMEBUFFER "
+                       "- self-test passed.\n\n");
+        }
+    }
+
     /* ---- Q16 self-test: a disk that fails, and a machine that does not --
      *
      * Six halts in two block drivers and three in the NIC were device
