@@ -366,6 +366,30 @@ static const cap_grant_t CAP_GRANTS[] = {
     {"ssl_client2",   CAP_APP_DEFAULT | CAP_NETWORK},
     {"ssl_server2",   CAP_APP_DEFAULT | CAP_NETWORK},
     {"httpsget",      CAP_APP_DEFAULT | CAP_NETWORK},
+    /* ---- M100: the browser, and what it does NOT hold -----------------
+     *
+     * NetSurf fetches over http and https, so CAP_NETWORK. That is the
+     * whole grant, and the interesting part of this entry is the list
+     * of things a browser on this machine is not given:
+     *
+     *   NOT CAP_FRAMEBUFFER. It renders a page by drawing into the
+     *   shared segment the compositor gave its window, the same way
+     *   gui_paint does - see user_space/bin/nsfb_leanos.c. The largest
+     *   program on this machine paints the screen with no more
+     *   authority over the screen than the clock has.
+     *
+     *   NOT CAP_CLIPBOARD. NetSurf's framebuffer front end has its own
+     *   internal clipboard (frontends/framebuffer/clipboard.c) and never
+     *   asks the system for one. Granting a bit it does not use would
+     *   make this table a worse description of the machine.
+     *
+     *   NOT CAP_PROCESS_LIST, CAP_POWER, CAP_AUDIO, CAP_DISPLAY_MODE.
+     *
+     * That is the model doing its job on the hardest case it has had:
+     * twenty megabytes of somebody else's C and C++, running a
+     * JavaScript engine on bytes fetched from a machine nobody here
+     * controls, holding one bit more than a text editor. */
+    {"netsurf",       CAP_APP_DEFAULT | CAP_NETWORK},
     /* Claims the sound devices directly - the one program that does,
      * and the one that demonstrates the claim being refused. */
     {"audiograb",     CAP_APP_DEFAULT | CAP_AUDIO},

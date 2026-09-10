@@ -161,6 +161,15 @@ static const icon_def_t ICONS[] = {
      * column because the first one is full at this height, which is
      * layout_icons doing exactly what it was written to do. */
     {"README",   PATH_BIN_DIR "text_editor",  PATH_HOME_DIR "readme.txt", ICON_EDITOR},
+    /* M100: the browser, LAST rather than in any of the places it would
+     * more naturally go. Every icon before it keeps the index and the
+     * screen position it already had, which matters because
+     * tools/qemu_input_suite.py names several of them by coordinate -
+     * inserting this beside Terminal would have moved README into a
+     * different column and failed a handful of tests for a reason that
+     * has nothing to do with what they check. It lands second in the
+     * second column, which is layout_icons doing what M74 described. */
+    {"Browser",  PATH_BIN_DIR "netsurf",      "", ICON_BROWSER},
 };
 #define ICON_COUNT ((int)(sizeof(ICONS) / sizeof(ICONS[0])))
 

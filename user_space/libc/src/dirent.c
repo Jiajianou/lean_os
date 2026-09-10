@@ -200,3 +200,103 @@ int dirfd(DIR *d) {
     }
     return d->fd;
 }
+
+/* ---- M100: scandir and alphasort ------------------------------------
+ *
+ * NetSurf's file: fetcher is what named these - it is how a browser
+ * turns a directory into a page you can click through. See <dirent.h>
+ * for the ownership contract, which is the part of this interface worth
+ * being careful about.
+ *
+ * Two things here are deliberate and neither is obvious:
+ *
+ * 1. **The failure path frees everything.** POSIX says the caller owns
+ *    the array only on success, so an allocation that fails halfway
+ *    through a large directory has to unwind what it already took. A
+ *    scandir that returned -1 with entries still on the heap would leak
+ *    exactly when memory is short, which is the worst time to leak.
+ *
+ * 2. **The sort is not a bare qsort.** POSIX's comparison function takes
+ *    `const struct dirent **` and qsort's takes `const void *`. They are
+ *    compatible in practice on this ABI and calling one through the
+ *    other is still undefined behaviour, so this sorts through a
+ *    trampoline that does the conversion honestly. The trampoline needs
+ *    the caller's function, and qsort has no context argument (qsort_r
+ *    is not in this libc), so it comes through a file-scope pointer -
+ *    which is why the sort is NOT reentrant and says so here rather than
+ *    leaving somebody to find out. Nothing on this machine sorts two
+ *    directories at once; if something ever does, this needs an
+ *    insertion sort of its own rather than a lock.
+ */
+static int (*scandir_cmp)(const struct dirent **, const struct dirent **);
+
+static int scandir_trampoline(const void *a, const void *b) {
+    const struct dirent *const *pa = a;
+    const struct dirent *const *pb = b;
+    return scandir_cmp((const struct dirent **)pa, (const struct dirent **)pb);
+}
+
+int scandir(const char *path, struct dirent ***namelist,
+            int (*filter)(const struct dirent *),
+            int (*compar)(const struct dirent **, const struct dirent **)) {
+    if (!path || !namelist) {
+        errno = EINVAL;
+        return -1;
+    }
+    DIR *d = opendir(path);
+    if (!d) {
+        return -1; /* opendir has already said why */
+    }
+
+    struct dirent **list = 0;
+    size_t used = 0, cap = 0;
+    struct dirent *ent;
+
+    while ((ent = readdir(d)) != 0) {
+        if (filter && !filter(ent)) {
+            continue;
+        }
+        if (used == cap) {
+            size_t next = cap ? cap * 2 : 32;
+            struct dirent **grown = realloc(list, next * sizeof(*list));
+            if (!grown) {
+                goto nomem;
+            }
+            list = grown;
+            cap = next;
+        }
+        /* A copy, because readdir's pointer belongs to the DIR and is
+         * overwritten on the next call - which is the contract this
+         * file's own comment states thirty lines up. */
+        struct dirent *copy = malloc(sizeof(*copy));
+        if (!copy) {
+            goto nomem;
+        }
+        *copy = *ent;
+        list[used++] = copy;
+    }
+
+    closedir(d);
+
+    if (compar && used > 1) {
+        scandir_cmp = compar;
+        qsort(list, used, sizeof(*list), scandir_trampoline);
+        scandir_cmp = 0;
+    }
+
+    *namelist = list;
+    return (int)used;
+
+nomem:
+    for (size_t i = 0; i < used; i++) {
+        free(list[i]);
+    }
+    free(list);
+    closedir(d);
+    errno = ENOMEM;
+    return -1;
+}
+
+int alphasort(const struct dirent **a, const struct dirent **b) {
+    return strcoll((*a)->d_name, (*b)->d_name);
+}

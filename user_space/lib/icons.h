@@ -30,3 +30,4 @@ extern const uint8_t ICON_SETTINGS[];
 extern const uint8_t ICON_CLOCK[];
 extern const uint8_t ICON_PAINT[];
 extern const uint8_t ICON_TASKS[];
+extern const uint8_t ICON_BROWSER[]; /* M100 */

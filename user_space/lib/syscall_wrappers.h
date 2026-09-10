@@ -146,6 +146,8 @@ long sys_arch_prctl(int code, unsigned long addr);
 long sys_futex(volatile unsigned int *addr, int op, unsigned int val,
                unsigned int timeout_ms);
 long sys_getrandom(void *buf, unsigned long len, unsigned int flags); /* M100 */
+long sys_pread(int fd, void *buf, unsigned long len, long offset);   /* M100 */
+long sys_pwrite(int fd, const void *buf, unsigned long len, long offset); /* M100 */
 
 /* M53: creates one directory whose parent already exists. */
 long sys_mkdir(const char *path);

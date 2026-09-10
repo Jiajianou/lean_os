@@ -5,6 +5,7 @@
  * each of these is written out; and this OS now has SSE2, so `sqrt` is
  * one instruction rather than a Newton iteration - which matters because
  * everything else leans on it. */
+#include <limits.h> /* M100: LONG_MIN/LLONG_MAX, for the lround family */
 #include <math.h>
 
 double fabs(double x) {
@@ -530,6 +531,59 @@ double round(double x) {
         return t - 1.0;
     }
     return t;
+}
+
+/* ---- M100: the lround family, named by libsvgtiny -------------------
+ *
+ * round() has been here since M99 and these four had not, which is the
+ * usual shape of a libm gap: the hard part was written and the four
+ * one-line spellings of it were not, so a build that asks for the easy
+ * one fails against a library that already knows the answer.
+ *
+ * They are NOT round() plus a cast, and the difference is the whole
+ * reason they are functions in C rather than an idiom. round() returns
+ * a double; converting a double whose value is outside long's range is
+ * undefined behaviour in C, and on x86-64 it produces the "integer
+ * indefinite" value 0x8000000000000000 for every such input - so
+ * (long)round(1e300) and (long)round(-1e300) are the SAME number, and
+ * that number is LONG_MIN, which is a plausible-looking answer. C
+ * leaves the out-of-range result unspecified, so returning LONG_MIN
+ * here is conforming; what is not acceptable is reaching it through
+ * undefined behaviour, because UBSan is in this project's fast tier
+ * (tools/math-test.sh) and a build that traps is a build that stops.
+ *
+ * So the range is tested before the conversion, and NaN with it - NaN
+ * compares false against every bound, which is why the test is written
+ * as "is it inside" rather than "is it outside". */
+long lround(double x) {
+    double r = round(x);
+    /* The upper bound is STRICT and the lower one is not, and that
+     * asymmetry is the bug this would otherwise have. LONG_MIN is
+     * -2^63, which a double holds exactly, so `>=` is the exact test.
+     * LONG_MAX is 2^63-1, which a double CANNOT hold - the conversion
+     * rounds it up to 2^63 - so `r <= (double)LONG_MAX` reads as
+     * `r <= 2^63` and lets through the one value that still overflows.
+     * Written `<` against the same expression it is exact again. */
+    if (r >= (double)LONG_MIN && r < (double)LONG_MAX) {
+        return (long)r;
+    }
+    return LONG_MIN;
+}
+
+long lroundf(float x) {
+    return lround((double)x);
+}
+
+long long llround(double x) {
+    double r = round(x);
+    if (r >= (double)LLONG_MIN && r < (double)LLONG_MAX) { /* see lround */
+        return (long long)r;
+    }
+    return LLONG_MIN;
+}
+
+long long llroundf(float x) {
+    return llround((double)x);
 }
 
 double copysign(double x, double y) {

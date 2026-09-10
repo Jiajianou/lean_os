@@ -1,0 +1,294 @@
+# A browser on lean_os, and the one that will not come
+
+M100's fifth and sixth bullets, together: *a real but small engine*, and
+*the measurement, which is the deliverable*. This file is both — what
+runs here, and what Chromium's build actually asks of this machine, in
+numbers produced by trying rather than by estimating.
+
+---
+
+## Part 1: what runs
+
+**NetSurf 3.11**, built for `x86_64-lean_os` by this project's own
+compiler, installed as `/bin/netsurf` and on the desktop as **Browser**.
+
+```
+NetSurf 3.11            layout, painting, the browser itself
+  libhubbub  0.3.8      HTML5 parsing
+  libdom     0.4.2      the DOM
+  libcss     0.9.2      CSS: cascade, selectors, computed style
+  Duktape               JavaScript, with the bindings generated from WebIDL
+  libnsfb    0.2.2      the framebuffer surface layer
+  libcurl    8.11.1     http and https
+    mbedtls  3.6.2      TLS 1.3                          (M100, 8th increment)
+  freetype   2.13.3     glyph rasterisation              (M100, 4th increment)
+  libpng / libjpeg / libnsgif / libnsbmp / libsvgtiny    images
+  zlib       1.3.1                                       (M100, 1st increment)
+  ---------------------------------------------------------------------
+  this OS               sockets, TCP, the rtl8139 driver, leanfs, the
+                        compositor, the capability model, and the libc
+                        every line above is linked against
+```
+
+Fifteen of those are somebody else's source, and **not one of them was
+edited**. The two edits the port needed are in
+`tools/netsurf-port/apply.py`, they are both in NetSurf's *build system*
+rather than its code, and neither is about lean_os:
+
+- `/bin/which`, which does not exist on macOS
+- `echo -n`, which this desk's `/bin/sh` prints instead of honouring
+
+Both would be needed to cross-compile NetSurf to *any* target from this
+machine.
+
+### The seam: a surface, not a front end
+
+The obvious way to put a framebuffer browser on a new OS is to write a
+front end for it. That is a permanent fork of somebody else's program,
+and this project's rule (CLAUDE.md) is that third-party source is ported
+*against* rather than merged into.
+
+`user_space/bin/nsfb_leanos.c` is the whole display port — one file,
+compiled here and added to `libnsfb.a`. It works because of three
+decisions upstream made for its own reasons:
+
+1. libnsfb's surfaces register **at runtime**, through the non-static
+   `_nsfb_register_surface`.
+2. NetSurf's framebuffer front end picks its surface **by name at
+   runtime** (`nsfb_type_from_name`).
+3. That front end links libnsfb with `-Wl,--whole-archive`, so an object
+   added to the archive keeps its constructor.
+
+So a surface called `leanos` registers itself at startup and NetSurf
+finds it exactly as it would find SDL.
+
+The pixels are **zero copy**. The compositor hands a client a shared
+segment of tightly packed `0x00RRGGBB` words (`user_space/lib/gfx.h`),
+and libnsfb's `NSFB_FMT_XRGB8888` plotters produce precisely that —
+`colour_to_pixel` in `32bpp-xrgb8888.c` swaps R and B out of NetSurf's
+own ABGR colour and writes `0x00RRGGBB`. `nsfb->ptr` points straight at
+the segment. There is no blit in the port and there does not need to be
+one.
+
+### What it holds
+
+`CAP_FS_WRITE | CAP_NETWORK`. That is the entire grant
+(`system_api/include/caps.h`), and the list of what it does **not** hold
+is the more interesting half:
+
+- **not `CAP_FRAMEBUFFER`** — it paints a page by drawing into its own
+  window's shared segment, with no more authority over the screen than
+  the clock has
+- **not `CAP_CLIPBOARD`** — NetSurf's framebuffer front end has its own
+  internal clipboard and never asks the system for one
+- not `CAP_PROCESS_LIST`, `CAP_POWER`, `CAP_AUDIO`, `CAP_DISPLAY_MODE`
+
+Twenty megabytes of somebody else's C and C++, running a JavaScript
+engine on bytes fetched from a machine nobody here controls, holding one
+bit more than a text editor. That is the model doing its job on the
+hardest case it has had.
+
+### https, and why no certificate authorities ship with it
+
+TLS works: NetSurf → libcurl → mbedtls → this project's TCP. It is
+graded against a server whose CA is on the machine's own disk.
+
+What is **not** here is a bundle of public certificate authorities.
+`Choices` points `ca_bundle` at `/etc/ssl/certs/ca-bundle.pem` and
+`tools/install-netsurf.sh` does not create that file, so `https://` to
+the public web fails certificate verification until somebody puts one
+there.
+
+That is a decision, on M65's rule — *don't build a thing that pretends
+to enforce something*. A machine that trusts a hundred and fifty
+authorities it has never looked at, shipped by a project whose whole
+claim is that you can read everything on the disk, would be decoration.
+
+**The condition for reopening it**: a way to update the bundle without
+rebuilding the image. M111 built that — `os install` — and a
+`ca-certificates` package is the shape this takes when somebody wants
+it. Signing (also M111's open box) is what makes that worth having.
+
+### What porting it found
+
+Five gaps in this system, each named by a build rather than by a
+checklist. This is M63's rule at M100's scale, and the reason the
+milestone is worth more than the browser:
+
+| gap | what named it |
+|---|---|
+| `pread`/`pwrite` did not exist | libnsutils wraps them for NetSurf's disc cache |
+| the `lround` family did not exist | libsvgtiny calls `lroundf` |
+| `scandir`/`alphasort` did not exist | NetSurf's `file:` fetcher, building a directory index |
+| `STDIN_FILENO` did not exist | curl's `terminal.c`, asking whether it is a tty |
+| **`<iconv.h>` did not exist at all** | NetSurf includes it unconditionally |
+
+And a sixth that is not a missing function but a fact about this
+project's own sysroot, and the sharpest of them:
+
+> `system_api/include/signal.h` and `user_space/libc/include/signal.h`
+> **have the same name**. The libc one is found first and reaches the
+> other with `#include_next`, which works only because
+> `usr/local/include` precedes `usr/include` in the default search
+> order. curl's `configure` adds `-isystem <sysroot>/usr/include` when
+> told where mbedtls is — putting the kernel ABI's `signal.h` in front —
+> and then `sigset_t` vanished and `<setjmp.h>` stopped compiling.
+>
+> **Any third-party build that names the sysroot's include directory
+> hits this.** It is worked around in `tools/build-netsurf.sh` by
+> pinning `usr/local/include` ahead of it on the compiler line. It is
+> not fixed. The fix is to stop having two headers with one name.
+
+Each of the five is now built and graded: `iconv` against the host's own
+over 2.58 million conversions (`tools/iconv-test.sh`), the `lround`
+family against the host's libm (`tools/math-test.sh`), and all four of
+the new interfaces on the machine itself by the `[m100h]` boot
+self-test. The browser is graded where a browser has to be — in
+framebuffer pixels, by `tools/qemu-input-test.sh`'s
+`browser_renders_a_page`.
+
+---
+
+## Part 2: the measurement — Chromium, in numbers
+
+M100's sixth bullet asks for *a list produced by trying and reading the
+errors*, not an estimate. Here is what was actually run, and what it
+said. Where a number is quoted from Chromium's own source or docs rather
+than measured here, it says so.
+
+### The machine it asks for, in its own words
+
+From `docs/linux/build_instructions.md`, fetched from
+`chromium.googlesource.com` on 2026-09-10:
+
+| Chromium requires | lean_os has |
+|---|---|
+| ≥ 8 GB RAM, "more than 16GB is highly recommended" | boots and passes its battery on **128 MiB** |
+| ≥ 32 GB of **swap** on an 8 GB machine | **no swap at all** — refused on a number (M102) |
+| ≥ 100 GB free disk | a **2 GiB** image, 361 MB of it used |
+| a 64-bit host, or the link runs out of memory | yes |
+
+The largest single translation unit this machine has ever compiled peaks
+at **217 MiB** (`build_cxx_tu_peak_rss_kib`, M98). Chromium's *minimum*
+is thirty-seven times the whole disk image.
+
+### The checkout
+
+`DEPS`, fetched the same day: **5,197 lines**, naming **535
+sub-repositories**. `gclient sync` fetches all of them. For scale, the
+entire NetSurf stack that runs on this machine is **fifteen**
+repositories and 731,107 lines; lean_os itself is 147,389.
+
+### The compiler
+
+Also from its own docs, and this one is decisive rather than merely
+large:
+
+> `libc++` is currently the only supported STL. `clang` is the only
+> supported compiler.
+
+This project's toolchain is **GCC 14.2 with libstdc++** (M97, M98),
+built by `tools/build-toolchain.sh` from a nine-edit port that taught
+binutils and GCC the `x86_64-lean_os` triple. Chromium would need that
+work done again for clang and libc++, before anything else on this list.
+
+Its build system is `gn` (C++) plus `ninja` (C++) plus `depot_tools`
+(Python). Two more ports, both plausible — this machine already builds
+C++ and runs CPython 3.12.
+
+### The syscalls — the number that actually decides it
+
+Chromium's own seccomp-bpf sandbox enumerates the syscalls it is
+prepared to permit. Counting the distinct `__NR_*` names in
+`sandbox/linux/seccomp-bpf-helpers/syscall_sets.cc` and
+`baseline_policy.cc`:
+
+```
+syscalls Chromium's sandbox names          427
+this kernel has                            113
+  of which Chromium also names              61   by the same name
+  plus                                      18   under a different spelling
+                                           ---
+  overlap                                   79
+  absent                                   348
+```
+
+The 18 are real: this kernel spells `wait4` as `SYS_waitpid`,
+`rt_sigaction` as `SYS_sigaction`, `getrusage` as `SYS_rusage`,
+`getdents64` as `SYS_getdents`, `exit_group` as `SYS_exit`, and so on.
+A name-only comparison would have overstated the gap by that much, which
+is why it is corrected here.
+
+348 is a large number and it is not the point. **These are:**
+
+| absent | what depends on it |
+|---|---|
+| `clone` with `CLONE_NEWUSER`/`NEWPID`/`NEWNET` | the sandbox. This kernel has `fork` and **no namespaces of any kind** |
+| `seccomp`, `prctl(PR_SET_SECCOMP)` | the sandbox, again — it *is* seccomp-bpf |
+| `socketpair`, `sendmsg`/`recvmsg` with `SCM_RIGHTS` | **Mojo**, Chromium's entire IPC layer, which passes file descriptors between processes over an `AF_UNIX` socket. This kernel has **no `AF_UNIX` at all** |
+| `epoll_create1`, `epoll_ctl`, `epoll_wait` | `base`'s message pump. This kernel has `poll` and `select` and not this |
+| `eventfd2`, `timerfd_create`, `signalfd4` | the same message pump — how a Chromium thread is woken |
+| `memfd_create` | shared memory between renderer and GPU process |
+
+By family, the 348 break down as 22 `clock_*`/`timer*`, 14 `sched_*`,
+7 `epoll*`, 6 signal-related, 5 namespace-related, 5 socket message
+calls, 4 capability/seccomp, 3 `memfd`/`userfaultfd`/`process_vm`, and
+3 `mount`/`chroot`/`pivot_root`.
+
+### What its GPU and sandbox layers assume
+
+- **A sandbox built on Linux kernel features this kernel does not have**
+  — user namespaces for the layer-1 sandbox, seccomp-bpf for layer 2.
+  Neither has an analogue here. lean_os's capability model
+  (`docs/capabilities.md`) is a *different* mechanism aimed at the same
+  thing, and it is the one NetSurf runs under; it is not a drop-in for
+  what Chromium's code calls.
+- **GPU compositing.** Chromium's software path exists but its
+  architecture assumes a GPU process talking to a driver.
+  `docs/capabilities.md`'s deferred list has refused a GPU driver on its
+  own terms — *"a driver per vendor per generation"* — and M100 does not
+  change that. Software rasterisation into this compositor's framebuffer
+  is the answer here, and it is a slow answer rather than a missing one.
+
+### The conclusion, stated as a condition rather than a mood
+
+**A browser is not next, and this measurement is why.** The deferred
+list in `milestones.md` said *"HTML, CSS, layout, a JS runtime, TLS, GPU
+compositing, codecs, a sandbox, and a Linux-scale syscall surface"*.
+M100 has now delivered the first five of those nine, and it delivered
+them by porting somebody else's engine rather than by writing one.
+
+What would have to become true for Chromium specifically:
+
+1. **`AF_UNIX` with `SCM_RIGHTS`.** Without descriptor passing there is
+   no Mojo, and without Mojo there is no Chromium — not a slow one, not
+   a limited one, none. This is the single smallest change with the
+   largest effect on the list, it is a few hundred lines, and M100's own
+   entry already had `AF_UNIX` as an open box for a different reason
+   (CPython's `test_stat`). **It should be the next thing.**
+2. **An epoll-shaped readiness interface**, plus `eventfd`/`timerfd`.
+   The message pump is not optional and `poll` is not what it calls.
+3. **clang and libc++ for `x86_64-lean_os`.** A second toolchain port,
+   with M94's nine edits as the template for how much that costs.
+4. **A machine with 16 GB of RAM and 100 GB of disk**, which is a
+   statement about M110's hardware rather than about this code.
+5. Then a sandbox story, which is a design question rather than a port:
+   Chromium's code calls seccomp and namespaces, and this OS's answer to
+   "what may this process do" is a capability set assigned at spawn.
+   Those are not the same shape, and pretending otherwise would produce
+   exactly the kind of thing M65 refused.
+
+Items 1 and 2 are ordinary work with conditions attached, which is what
+this project means by a deferral. Items 3 to 5 are an arc.
+
+### And Google Chrome, which is a different question
+
+Chrome is not Chromium. It is **proprietary**: there is no source to
+hand to `x86_64-lean_os-gcc`, and the only artifacts Google ships are
+ELF binaries dynamically linked against glibc, GTK, X11, dbus and
+PulseAudio. Running one would mean shipping somebody else's binary in
+the image, which the first non-negotiable in CLAUDE.md forbids outright,
+and it would need a glibc ABI this project has deliberately not built.
+
+Chromium is a hundred-gigabyte checkout and five conditions. Chrome is
+not a porting problem at all.

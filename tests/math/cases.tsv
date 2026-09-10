@@ -6,6 +6,7 @@
 #
 # kind  1  one double argument, swept over [lo, hi]
 #       2  two double arguments, swept over the same grid pairwise
+#       i  returns an integer type; compared EXACTLY, no tolerance
 #       -  not graded by this harness; the note says why, and a note is
 #          required, because "not graded" without a reason is the same
 #          thing as forgotten
@@ -67,3 +68,7 @@ fmin	2	-10	10	61	0	exact
 frexp	-	-	-	-	-	takes an int* - graded by the boot self-test with modf
 ldexp	-	-	-	-	-	takes an int
 modf	-	-	-	-	-	takes a double*
+lround	i	-1e18	1e18	401	0	M100: exact, and swept inside +/-1e18 - well under 2^63, so every point has a representable answer and neither libm is being asked what it does on overflow
+lroundf	i	-1e9	1e9	401	0	M100: exact. A float grid, like roundf's
+llround	i	-1e18	1e18	401	0	M100: exact
+llroundf	i	-1e9	1e9	401	0	M100: exact

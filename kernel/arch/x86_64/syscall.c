@@ -718,6 +718,79 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
     return -1;
 }
 
+/* ---- M100: pread/pwrite - the same transfer, from a stated place ----
+ *
+ * See SYS_pread in system_api/include/syscall.h for why NetSurf needed
+ * these and why they are honest rather than an lseek sandwich. The
+ * short version is that vfs_handle_read/vfs_handle_write already take
+ * the offset; the descriptor's `offset` field was always bookkeeping on
+ * top of them. So each of these is its sibling's FD_FILE arm with the
+ * two lines that touch that field removed.
+ *
+ * The two share their argument checking because getting it different
+ * between a read and a write is exactly the asymmetry that turns into a
+ * bug nobody looks for. `out_slot` is the only output.
+ */
+static long pfile_slot(uint64_t fd, uint64_t buf, uint64_t len,
+                       int64_t offset, int write, fd_slot_t **out_slot) {
+    if (fd >= MAX_FDS || !user_range_ok(buf, len, write ? 0 : 1)) {
+        return -1;
+    }
+    if (offset < 0) {
+        /* Refused rather than wrapped. A negative here would become a
+         * very large unsigned offset in a filesystem whose offsets are
+         * 32-bit, and read the wrong end of a large file instead of
+         * failing. */
+        return -1;
+    }
+    fd_slot_t *slot = &sched_current()->fds[fd];
+    if (slot->type != FD_FILE) {
+        /* A pipe, a socket, a terminal, or nothing at all. The first
+         * three have no position; the fourth is a bad descriptor, and
+         * -1 is what every other call here says for it. */
+        return slot->type == FD_NONE ? -1 : -OS_ERR_SPIPE;
+    }
+    if (slot->file->is_dir) {
+        return -1; /* SYS_read's own answer, for SYS_read's own reason */
+    }
+    *out_slot = slot;
+    return 0;
+}
+
+static long sys_pread(uint64_t fd, uint64_t buf, uint64_t len, uint64_t offset,
+                      uint64_t a5, uint64_t a6) {
+    (void)a5;
+    (void)a6;
+    fd_slot_t *slot = NULL;
+    long err = pfile_slot(fd, buf, len, (int64_t)offset, 0, &slot);
+    if (err != 0) {
+        return err;
+    }
+    /* No readability wait, unlike SYS_read: the thing that can be empty
+     * and later not is a pty, and a pty is not FD_FILE-with-a-position -
+     * it is refused above. A regular file is ready by definition. */
+    int64_t n = vfs_handle_read(slot->file->handle, (char *)buf, (size_t)len,
+                                (uint32_t)offset);
+    return n < 0 ? -1 : (long)n;
+}
+
+static long sys_pwrite(uint64_t fd, uint64_t buf, uint64_t len, uint64_t offset,
+                       uint64_t a5, uint64_t a6) {
+    (void)a5;
+    (void)a6;
+    fd_slot_t *slot = NULL;
+    long err = pfile_slot(fd, buf, len, (int64_t)offset, 1, &slot);
+    if (err != 0) {
+        return err;
+    }
+    if (!slot->file->writable) {
+        return -1;
+    }
+    int64_t n = vfs_handle_write(slot->file->handle, (const char *)buf,
+                                 (size_t)len, (uint32_t)offset);
+    return n < 0 ? -1 : (long)n;
+}
+
 static long sys_exit(uint64_t code, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -5793,6 +5866,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_arch_prctl] = sys_arch_prctl,
     [SYS_futex] = sys_futex,
     [SYS_getrandom] = sys_getrandom, /* M100 */
+    [SYS_pread] = sys_pread,   /* M100 */
+    [SYS_pwrite] = sys_pwrite, /* M100 */
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

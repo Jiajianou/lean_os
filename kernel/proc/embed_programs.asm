@@ -428,3 +428,11 @@ global dirtest_elf_end
 dirtest_elf_start:
     incbin "build/dirtest.elf"
 dirtest_elf_end:
+
+; M100: the four things the browser port added to this system - see
+; user_space/bin/browsertest.c.
+global browsertest_elf_start
+global browsertest_elf_end
+browsertest_elf_start:
+    incbin "build/browsertest.elf"
+browsertest_elf_end:

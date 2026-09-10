@@ -39,7 +39,12 @@ HOSTCC="${HOSTCC:-cc}"
 # having that shape stops being renamed, so the build fails loudly with a
 # duplicate symbol rather than quietly grading the host against itself.
 # M100: and `float name(` - the six float variants harfbuzz asked for.
-NAMES=$(grep -oE '^(double|float) [a-z0-9_]+\(' "$HDR" | sed 's/^double //; s/^float //; s/($//; s/(//' | sort -u)
+# M100 again: and `long`/`long long` - the lround family libsvgtiny asked
+# for, which are the first functions in this header that do not return a
+# floating-point type. "long long" is stripped before "long" because the
+# other order leaves a stray "long " on the front of the name and the
+# lookup then silently finds nothing.
+NAMES=$(grep -oE '^(double|float|long long|long) [a-z0-9_]+\(' "$HDR" | sed 's/^long long //; s/^long //; s/^double //; s/^float //; s/($//; s/(//' | sort -u)
 if [ -z "$NAMES" ]; then
   echo "math-test: no declarations found in $HDR - the grep needs updating" >&2
   exit 2

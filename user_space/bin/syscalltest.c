@@ -298,6 +298,23 @@ static const entry_t table[] = {
      * claim. (The sweep's out-of-range flag value is refused first, and
      * that too is a refusal - either way the call says no.) */
     {SYS_getrandom,     CLASS_PTR, 1, NULL},
+    /* M100: pread/pwrite(fd, buf, len, offset). The buffer is arg 2.
+     *
+     * CLASS_PTR rather than CLASS_BLOCK, unlike SYS_read and SYS_write
+     * just above: neither of these can ever wait. They are refused for
+     * anything that is not a regular file (-OS_ERR_SPIPE), and a
+     * regular file is ready by definition - which is also why the fd
+     * this check uses, stdout, is safe here where it would not be for
+     * SYS_close.
+     *
+     * And the claim is not vacuous, which is worth checking rather than
+     * assuming: pfile_slot tests `user_range_ok` BEFORE it looks at the
+     * descriptor's type, so a hostile pointer with a plausible length is
+     * refused for being a hostile pointer, not for stdout not being a
+     * file. If that order is ever swapped, these two rows quietly stop
+     * testing anything. */
+    {SYS_pread,         CLASS_PTR, 2, NULL},
+    {SYS_pwrite,        CLASS_PTR, 2, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 

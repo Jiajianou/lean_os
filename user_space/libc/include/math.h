@@ -121,6 +121,14 @@ double ldexp(double x, int exp);
 double modf(double x, double *ipart);
 double trunc(double x);
 double round(double x);
+/* M100: named by libsvgtiny, which called lroundf and found a <math.h>
+ * that had round() and none of its four integer spellings. Out of range
+ * gives LONG_MIN/LLONG_MIN rather than undefined behaviour - see the
+ * implementation for why that distinction is load-bearing here. */
+long lround(double x);
+long lroundf(float x);
+long long llround(double x);
+long long llroundf(float x);
 double copysign(double x, double y);
 double hypot(double x, double y);
 double log2(double x);

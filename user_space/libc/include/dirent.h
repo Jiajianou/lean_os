@@ -97,6 +97,33 @@ int closedir(DIR *d);
 DIR *fdopendir(int fd);
 int dirfd(DIR *d);
 
+/* ---- M100: scandir, named by NetSurf's file: fetcher -----------------
+ *
+ * The whole directory, filtered and sorted, in one call, with each entry
+ * in its own allocation. NetSurf builds the HTML index page for a
+ * `file:///` directory out of it (content/fetchers/file/file.c), which
+ * is how a browser shows you a folder.
+ *
+ * The awkward part of the interface is the ownership and it is worth
+ * stating rather than discovering: on success the caller owns `*namelist`
+ * AND every pointer in it, and frees all of them. On failure it owns
+ * nothing - which is the clause that makes the implementation's error
+ * path the interesting half of the function.
+ *
+ * The comparison function is `int (*)(const struct dirent **, const
+ * struct dirent **)`. That is POSIX's signature since 2008 and it is
+ * NOT what qsort takes, so the sort here cannot be a bare qsort call
+ * without a cast that lies about the argument types. See dirent.c. */
+int scandir(const char *path, struct dirent ***namelist,
+            int (*filter)(const struct dirent *),
+            int (*compar)(const struct dirent **, const struct dirent **));
+
+/* Name order, via strcoll - which in this one-locale libc is strcmp.
+ * `versionsort` is its usual companion and is NOT here: nothing has
+ * asked for it, and the rule this project keeps is that the port which
+ * needs a thing is the one that pays for it. */
+int alphasort(const struct dirent **a, const struct dirent **b);
+
 #ifdef __cplusplus
 }
 #endif

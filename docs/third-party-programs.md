@@ -198,6 +198,20 @@ truncation semantics, `pow`, `atan2`) are there because the *next*
 program will want them and because leaving out half of a header is worse
 than having one.
 
+### And, four years of milestones later, a browser (M100)
+
+Whetstone is 1,600 lines and needed five headers. **NetSurf 3.11 and the
+fourteen libraries under it, plus libcurl and mbedtls, are 731,107 lines
+across fifteen separate projects — and the number of edits to any of
+their source is still zero.** The claim is the same claim; only the
+scale moved.
+
+What it needed is the same kind of table as Whetstone's, and it is in
+[browser.md](browser.md): `pread`/`pwrite`, the `lround` family,
+`scandir`, `STDIN_FILENO`, and a whole `<iconv.h>` this libc did not
+have. Its link and compile errors were the specification, exactly as
+M63 planned and exactly as this page has said since M63.
+
 ## The libc subset is ours
 
 The ground rules say no external library is linked into anything this OS

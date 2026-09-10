@@ -132,7 +132,8 @@
     X(measure)                     \
     X(os)                         \
     X(pkgtest)                    \
-    X(dirtest)
+    X(dirtest)                  \
+    X(browsertest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -11824,6 +11825,56 @@ static void boot_selftests_system(void) {
                   "directory it is supposed to refuse, the whole tree removed "
                   "by the user-space walk, and the directory beside it "
                   "untouched - self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
+    }
+
+    /* ---- M100 self-test: what porting a browser added to this system --
+     *
+     * NetSurf named five gaps in this OS by failing to build against it
+     * (tools/build-netsurf.sh lists them and what named each). Four are
+     * new kernel or libc surface, and this is where the machine that
+     * has them says so: SYS_pread/SYS_pwrite, scandir/alphasort, iconv,
+     * and the lround family.
+     *
+     * Two of the four are already graded far harder than this, on the
+     * host, against implementations nobody here wrote -
+     * tools/iconv-test.sh over 2.58 million conversions and
+     * tools/math-test.sh over every declared function. Neither of those
+     * can say whether the same source, compiled for THIS target and
+     * linked against THIS libc, still agrees. That is the split
+     * CLAUDE.md writes down and it is why both exist.
+     *
+     * The other two are the reverse: the host tier cannot reach pread
+     * or scandir at all, because what they are for is a real file and a
+     * real directory on a real filesystem with a real shared offset
+     * behind them.
+     */
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        size_t bt_bytes = 0;
+        uint8_t *bt_img = read_program(PATH_BIN_DIR "browsertest", &bt_bytes);
+        if (!bt_img) {
+            panic("M100 self-test: /bin/browsertest is not on this disk");
+        }
+        const char *bt_argv[] = {PATH_BIN_DIR "browsertest", 0};
+        task_t *bt = process_spawnv("browsertest", bt_img, bt_bytes, bt_argv);
+        long rc = bt ? do_syscall(SYS_wait, (uint64_t)bt->id, 0, 0) : -1;
+        kfree(bt_img);
+        if (rc != 0) {
+            klog_puts("[m100h] browsertest exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_puts(" - see user_space/bin/browsertest.c for what each "
+                      "code means\n");
+            panic("M100 self-test: what the browser port added to this "
+                  "system does not work on this machine");
+        }
+        klog_puts("[m100h] what porting a browser added: pread and pwrite "
+                  "leaving the descriptor's own offset where it was, "
+                  "scandir filtering and sorting a directory, iconv turning "
+                  "windows-1252 curly quotes into UTF-8 and REFUSING a "
+                  "character ISO-8859-1 does not have, and lround rounding "
+                  "2.5 to 3 - self-test passed (");
         klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         klog_puts(" ms).\n\n");
     }

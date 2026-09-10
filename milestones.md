@@ -451,7 +451,7 @@ unbuilt is the drift *Deferred* exists to catch.
 | # | milestone | state | why here |
 |---|---|---|---|
 | ~~**1**~~ | ~~**M99 (2nd)**~~ | **done 2026-09-04** | all five boxes closed across three increments — see *Landed since this snapshot*. Neither open box was about what its own entry predicted: the loader box was mostly a target-description box, and the build box was a shell box |
-| **2** | **M100** — the browser gap, measured | in progress: eight of nine libraries landed; TLS done | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on, and `AF_UNIX`/`socketpair`/`O_NONBLOCK` are absorbed here |
+| ~~**2**~~ | ~~**M100** — the browser gap, measured~~ | **engine and measurement done 2026-09-10** (ninth increment); ICU is the one library still open, and it is a wall-clock question rather than a capability one. The measurement's own conclusion opens the next row of this arc: `AF_UNIX` | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on |
 | **3** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not |
 | **4** | **Q14** — the compositor, off the machine | not started | the move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded in milliseconds rather than only through a screendump |
 | **5** | **M106 (tail)** — the battery green on four cores | 3 known failures, **plus `smp-test.sh` itself failing 2 runs in 3** (measured 2026-09-09 at HEAD — see *The machine as it stands*) | not a new milestone: the three failures M106 named and left. It gates CPU affinity, and there are now two reproductions on demand — M98's bootstrap profiler, and a 21-second `tools/smp-test.sh` that panics with "this CPU is not on the stack of the task it thinks it is running" about two attempts in three. **Start with the second one**. M112 adds a third, and it needs no second CPU: two graded boots in three stalled inside a `spawn`-then-`SYS_wait` self-test (`[m100d]` once, `[m100f]` once) on a single-CPU battery, eight to nine minutes with no serial output, while a third run of the same image was 123/123 in 410 s |
@@ -2499,6 +2499,247 @@ rewrite this file as a fresh snapshot.
 
 ---
 
+### M100 (ninth increment) — a browser, and the gap the rest of one leaves `[x]`
+
+*Landed 2026-09-10.* M100's fifth and sixth bullets together, which are
+the last two that were not about a library: **a real but small engine**,
+and **the measurement, which is the deliverable**. Both are written up
+in [docs/browser.md](docs/browser.md); this entry is what it cost and
+what went wrong.
+
+**Asked for directly** — *"I want include a google chrome web browser
+with this OS pre-installed"* — on 2026-09-10, which is why it jumped the
+queue's row 3 and 4. It jumped nothing else: no row below was started
+and abandoned. Chrome itself is not a porting problem (it is
+proprietary, ships only glibc/GTK/X11 binaries, and shipping somebody
+else's binary is what CLAUDE.md's first non-negotiable forbids), so what
+was built is what M100 already had scheduled for exactly this request.
+
+**What runs.** NetSurf 3.11 as `/bin/netsurf` and as the **Browser**
+icon on the desktop: libhubbub parsing HTML5, libdom, libcss doing the
+cascade, Duktape running JavaScript with bindings generated from WebIDL,
+freetype rasterising, libpng/libjpeg/libnsgif/libnsbmp/libsvgtiny
+decoding, and **libcurl 8.11.1 over mbedtls 3.6.2 over M66's TCP** for
+http and https. Fifteen third-party projects, **zero edits to any of
+their source**. Graded by `browser_renders_a_page` in the input suite —
+real clicks, real framebuffer pixels — because a layout engine's output
+*is* pixels and a browser that painted nothing would still exit 0.
+
+**The thing worth taking from this milestone is the seam, not the
+browser.** The port needed no NetSurf front end, which would have been a
+permanent fork. libnsfb registers surfaces *at runtime*, NetSurf selects
+one *by name* at runtime, and it links libnsfb with `--whole-archive` -
+three decisions upstream made for its own reasons, which together mean
+one file compiled here (`user_space/bin/nsfb_leanos.c`) and added to
+`libnsfb.a` is the entire display port. And the pixels are zero copy:
+libnsfb's `NSFB_FMT_XRGB8888` is byte-for-byte this compositor's own
+`0x00RRGGBB`, so the layout engine renders straight into the shared
+segment.
+
+**Five gaps in this system, each named by a build rather than a
+checklist** — M63's rule at M100's scale, and worth more than the
+browser:
+
+- **`pread`/`pwrite` did not exist** (libnsutils, for NetSurf's disc
+  cache). Now `SYS_pread`/`SYS_pwrite`, 111 and 112, and *honest* rather
+  than an lseek sandwich - which matters because the program that asked
+  has two threads behind one descriptor. It cost two dispatch entries
+  and no new machinery, because `vfs_handle_read` had always taken the
+  offset as an argument: the open-file entry's `offset` field was the
+  only thing in the way.
+- **The `lround` family did not exist** (libsvgtiny calls `lroundf`).
+  The usual shape of a libm gap: `round()` had been here since M99 and
+  its four integer spellings had not. Grading them needed a **new kind
+  of row** in `tests/math/cases.tsv` - the first functions in
+  `<math.h>` that do not return a floating-point type - and the whole
+  table in `tests/math/main.c` converted to designated initialisers,
+  because `-Wmissing-field-initializers` is right to refuse the shorter
+  lie.
+- **`scandir`/`alphasort` did not exist** (NetSurf's `file:` fetcher —
+  it is how a browser shows you a folder).
+- **`STDIN_FILENO` did not exist** (curl's `terminal.c`). fd 0 has been
+  stdin since M14; the three names POSIX gives them had never been
+  written down. Same shape as M94's `wcwidth`.
+- **`<iconv.h>` did not exist at all**, and NetSurf includes it
+  unconditionally. So this libc has an iconv now: 26 single-byte
+  charsets from a generated table plus the UTF family, 3,328 entries.
+
+**And a sixth, which is not a missing function and is the sharpest thing
+this milestone found.** `system_api/include/signal.h` and
+`user_space/libc/include/signal.h` **have the same name**; the libc one
+is found first and reaches the other with `#include_next`, which works
+only because `usr/local/include` precedes `usr/include` in the default
+search order. curl's `configure` adds `-isystem <sysroot>/usr/include`
+when told where mbedtls is, the kernel ABI's `signal.h` moves in front,
+`sigset_t` vanishes, and `<setjmp.h>` stops compiling - in a file that
+mentions neither signals nor mbedtls. **Any third-party build that names
+the sysroot's include directory hits this.** It is worked around in
+`tools/build-netsurf.sh` and it is *not fixed*; the fix is to stop
+having two headers with one name, and it is now an open box below.
+
+**What the iconv test found, which is a fact about differential testing
+rather than about iconv.** `tools/iconv-test.sh` compares this project's
+iconv against the host's over every byte of every charset and every code
+point in the BMP. Its first run reported **144,589 disagreements** and
+almost none of them were bugs: **macOS's iconv transliterates by
+default**, so asked for U+0100 in ISO-8859-1 it returns `A` where GNU
+libiconv returns EILSEQ - and returns 0 rather than POSIX's count of
+non-reversible conversions, so a caller cannot even detect it. The host
+is not one oracle. Rebuilt to derive each charset's true repertoire from
+the host's *decode* direction (which is exact and non-transliterating)
+and then require this libc to encode every character in it and refuse
+every character outside it, the count went to **13** - and all thirteen
+were one real bug: **U+FFFF shared a value with the table's "unassigned"
+sentinel**, so encoding it produced the first hole in each charset, in
+thirteen charsets at once. Fixed, and the fast tier now runs 2,580,532
+conversions with zero disagreements.
+
+**Three bugs this milestone's own code had, and how each was found -
+which is more useful than the list of what worked.**
+
+- **The mouse buttons were numbered wrong, and no test would have said
+  so.** lean_os reports bit0 left, bit1 right, bit2 middle; libnsfb
+  inherited X11's numbering, where 2 is MIDDLE and 3 is RIGHT - and
+  NetSurf acts on MOUSE_1 and MOUSE_3 and ignores MOUSE_2 entirely. The
+  obvious `NSFB_KEY_MOUSE_1 + bit` therefore dropped every right-click
+  and turned middle-click into a right-click. Both symptoms read as "a
+  new port doesn't do right-click yet", which is exactly the kind of
+  thing nobody goes looking for a numbering bug about. Found by reading
+  NetSurf's own switch statement rather than by any instrument.
+
+- **The BOM handling was wrong and untested.** `iconv_open("UTF-8",
+  "UTF-32")` on a big-endian stream: the leading BOM read with the wrong
+  endianness is the bytes `00 00 FE FF`, which decodes to 0xFFFE0000 -
+  larger than U+10FFFF, so the decoder correctly refused it and the
+  stream failed with EILSEQ instead of simply being the other byte
+  order. **Deciding endianness is not a question a Unicode decoder can
+  answer, because the bytes are not Unicode yet**; it now happens on raw
+  bytes before decode() sees them. The reset path was wrong too - it
+  could not put the endianness back, because nothing recorded what it
+  had been. Found by re-reading the code, then given eight test rows so
+  it stays found.
+
+- **Two of the three assertions in the new input test were vacuous.**
+  The first version counted "blue pixels" and "dark pixels beside white
+  ones" over the whole screen. This desktop's icons are *already* blue -
+  3,950 such pixels on a bare desktop, against a threshold of 500 - and
+  its icon labels are *already* white text with dark around them (254,
+  against 200). **Two of three assertions passed with no browser
+  running at all.** Found by measuring a bare desktop and an open
+  Editor against the test's own thresholds, which is the only way that
+  hole is ever found and is the same thing Q12's mutation harness
+  exists to do for the tests that grade the kernel. Rebuilt to anchor on
+  the columns where white is *dense* - a region that does not exist
+  unless a page is on the screen - the three numbers became 1,618 /
+  1,618 / 292,519 white, and 0 / 0 / 111,754 blue.
+
+  And the rebuilt version bought something the first one could not: it
+  compares **blue against red inside the page** (111,754 to 465). A
+  surface with red and blue swapped is the single most likely way
+  `nsfb_leanos.c` could be wrong *and still look plausible* - a browser
+  full of orange lays out and scrolls perfectly - and now those two
+  numbers trading places is a failure.
+
+**The self-test was mutation-checked rather than assumed, because its
+whole subject is a property that is easy to test vacuously.** Two
+deliberate breaks of `sys_pread`, each rebuilt and booted:
+
+- *reads from the descriptor's own position instead of the offset* →
+  `[m100h] browsertest exited 5`, kernel panic
+- *reads from the right place but ALSO advances the descriptor* →
+  `[m100h] browsertest exited 7`, kernel panic
+
+The second is the one that matters: it is the exact behaviour an
+`lseek`/`read`/`lseek` implementation would have, it produces the right
+bytes every time, and it is wrong. Each was caught by the specific
+assertion written for it rather than by something incidental.
+
+**And one thing the ninth icon found about this desktop, which is not a
+bug.** `test_double_click_launches_every_icon` failed at 8 of 9 windows
+and the browser was **on the screen, fully rendered, at the front** in
+the failure screendump. The taskbar lays its running-app buttons out
+left to right and stops when the next one would reach the tray - at
+1024x768 that is **eight** - so `count_app_windows`, which reads taskbar
+slots, saturates. The Browser icon is the first thing on this desktop to
+reach that ceiling, and it took a screenshot of the failure to see that
+the assertion was wrong rather than the machine. The test now knows the
+capacity (computed from desktop_shell.c's own geometry rather than
+typed) and, past it, asserts that the screen changed instead.
+
+**Two host-portability edits to NetSurf, neither about lean_os**
+(`tools/netsurf-port/apply.py`): `/bin/which`, which macOS does not
+have, and `echo -n`, which this desk's `/bin/sh` prints instead of
+honouring. The second bites only on a *rebuild* - the first build writes
+a malformed `link.d` and links fine, the second reads it and stops at
+`missing separator` - which is why it is an anchored edit rather than a
+note.
+
+**An upstream bug this build now watches rather than patches.** NetSurf
+picks its default surface with `if (type < fetype)` where `fetype` is
+never assigned, so the *last* surface to register wins - meaning link
+order decides, silently. On the wrong side of that the browser comes up
+on the `ram` surface, renders a whole page into memory nobody displays,
+and shows an empty window with **no error anywhere**.
+`tools/build-netsurf.sh` now reads `.init_array` out of the linked
+binary and fails the build if this project's surface is not last. Its
+first version failed for a reason worth recording: `readelf -x` dumps
+**raw bytes** grouped in fours, not 32-bit words, so reconstructing the
+pointers the obvious way produced plausible 64-bit numbers that matched
+no symbol - and the check reported "no surface constructors found"
+rather than a parse error. A check that cannot fail correctly is worse
+than the thing it checks.
+
+**Where the tiers stand at this commit.** `--fast` 10/10 (the new
+`iconv` stage included), the graded boot **124/124 markers with no
+panic** and every budget row inside its ceiling, and the **full
+interactive suite 53/53** including the new `browser_renders_a_page`.
+The four-core stage is red, and it is red for the reason row 5 of the
+queue already says it is: three runs here were **fail, fail, pass**, at
+exactly the 240 s ceiling-timeout signature with `[m106]` never
+appearing, which is the rate and the signature recorded at HEAD on
+2026-09-09. Not this milestone's, and recorded here because a tier that
+went red on the way to a commit should say so in the commit's own entry.
+
+**What it cost.** Two host tools this project had not needed
+(`bison` 3.x - macOS ships 2.3, from 2006, which cannot parse
+libnslog's grammar - and the host's libpng, for NetSurf's own
+PNG-to-C-array build tool). Both dev-time only. `/bin/netsurf` is
+**7.0 MB stripped** (20.1 MB unstripped) and the resources another 19
+files; the whole image went from 361 MB with room to spare.
+
+**And the measurement, which is the deliverable.** Numbers rather than
+an estimate, all of them produced on 2026-09-10 by fetching Chromium's
+own source and docs and comparing against this machine. The full write-up
+is in [docs/browser.md](docs/browser.md); the four that decide it:
+
+- **≥ 8 GB RAM, ≥ 32 GB swap, ≥ 100 GB disk**, from Chromium's own
+  `build_instructions.md`. This machine passes its battery on 128 MiB,
+  has **no swap at all** (M102 refused it on a number), and its whole
+  disk image is **2 GiB**. The minimum is thirty-seven times the image.
+- **535 sub-repositories** in `DEPS` (5,197 lines). The entire NetSurf
+  stack that runs here is fifteen, and lean_os itself is 147,389 lines.
+- **`clang` and `libc++` are the only supported compiler and STL**, in
+  its own documentation. This project's toolchain is GCC 14.2 with
+  libstdc++, so M94's nine-edit port would have to be done again.
+- **Chromium's seccomp sandbox names 427 syscalls. This kernel has
+  113.** 61 match by name and 18 more under a different spelling
+  (`wait4`/`SYS_waitpid`, `rt_sigaction`/`SYS_sigaction`,
+  `getrusage`/`SYS_rusage`, …), so the honest overlap is **79** and the
+  gap is **348**.
+
+348 is a large number and it is not the point. **`AF_UNIX` with
+`SCM_RIGHTS` is.** Chromium's entire IPC layer is Mojo over a UNIX
+socket passing file descriptors between processes, and this kernel has
+no `AF_UNIX` at all - so without a few hundred lines there is no
+Chromium, not a slow one and not a limited one. It is the smallest
+change on that list with the largest effect, M100's own entry already
+had `AF_UNIX` open for a *different* reason (CPython's `test_stat`), and
+**it is what the next milestone in this arc should be.** That is a
+condition, which is what this project means by a deferral, and it is the
+first time the browser row has had one.
+
+---
+
 ## Every open box, in one place
 
 The queue says what order. This says exactly what is unfinished, in the
@@ -2551,12 +2792,36 @@ write nothing and return successfully).
       on a socket with it. **`AF_UNIX`/`socketpair` not done** — mbedtls
       did not need them, and nothing has yet; the note that `AF_UNIX` is
       what stopped CPython's `test_stat` from reporting counts stands.
-- [ ] a real but small engine — NetSurf has its own layout engine and a
-      framebuffer front end
-- [ ] **the measurement, which is the deliverable**: what Chromium's build
-      actually asks of this machine, in numbers — disk, RAM, syscalls this
-      kernel does not have, what its GPU and sandbox layers assume. Not an
-      estimate; a list produced by trying and reading the errors
+- [x] **a real but small engine — done 2026-09-10.** NetSurf 3.11, with
+      libcss, libdom, libhubbub and Duktape, over libcurl/mbedtls and
+      M66's TCP. `/bin/netsurf` and the **Browser** icon; graded by the
+      input suite's `browser_renders_a_page` and by `[m100h]`. Zero
+      edits to any of the fifteen third-party projects; the display port
+      is one file, because libnsfb registers surfaces at runtime. Five
+      gaps in this libc named by the build - pread/pwrite, the lround
+      family, scandir, STDIN_FILENO and **iconv, which did not exist at
+      all**. See the ninth increment and [docs/browser.md](docs/browser.md).
+- [x] **the measurement — done 2026-09-10.** Numbers, not an estimate,
+      in [docs/browser.md](docs/browser.md): Chromium's own docs ask for
+      8 GB of RAM, 32 GB of swap and 100 GB of disk against this
+      machine's 128 MiB, no swap and 2 GiB; its `DEPS` names **535
+      sub-repositories**; clang and libc++ are its only supported
+      toolchain against this project's GCC 14.2; and its seccomp
+      sandbox names **427 syscalls of which this kernel has 79**. The
+      one that decides it is not the count: **`AF_UNIX` with
+      `SCM_RIGHTS`**, without which there is no Mojo and therefore no
+      Chromium at all.
+- [ ] **`AF_UNIX`/`socketpair`, and it now has two customers.** Opened
+      by CPython's `test_stat` and now named by the measurement above as
+      the smallest change with the largest effect on the browser gap.
+      **This is where this arc goes next.**
+- [ ] **Two headers named `signal.h`.** Not a missing feature - a
+      fragility in this project's own sysroot that the curl port found
+      (see the ninth increment). Any third-party build that puts
+      `<sysroot>/usr/include` on the compiler line shadows this libc's
+      headers with system_api's and breaks `<setjmp.h>`. Worked around
+      in `tools/build-netsurf.sh`, not fixed. The fix is to stop having
+      two headers with one name.
 
 ### M103 — interrupts a real machine delivers `[~]`
 
@@ -2850,10 +3115,20 @@ condition rather than by an opinion.
   one — and unchanged by M107, which is worth saying because it looks
   closer: AHCI, NVMe and xHCI are published specifications with one
   implementation each, a category a GPU has never been in.
-- **A browser.** A named goal, not a next step, and the estimate has not
-  moved: HTML, CSS, layout, a JS runtime, TLS, GPU compositing, codecs, a
-  sandbox, and a Linux-scale syscall surface. **M100 measures the gap
-  rather than porting one**, which is the opposite of the request.
+- **A browser — half of this is no longer deferred, and the other half
+  now has a condition instead of an estimate.** The list said "HTML,
+  CSS, layout, a JS runtime, TLS, GPU compositing, codecs, a sandbox,
+  and a Linux-scale syscall surface". **M100's ninth increment
+  delivered the first five** by porting NetSurf rather than writing an
+  engine - it is `/bin/netsurf` and it renders pages, runs JavaScript
+  and fetches over https. What is still deferred is a browser of
+  *Chromium's* kind, and [docs/browser.md](docs/browser.md) replaces the
+  estimate with measurements: 100 GB of checkout, 535 repositories,
+  clang-and-libc++ only, and 427 sandbox syscalls against this kernel's
+  79. **The condition is `AF_UNIX` with `SCM_RIGHTS`** - no descriptor
+  passing, no Mojo, no Chromium - and it is now an open box in M100
+  rather than a line here. GPU compositing stays refused on its own
+  terms above.
 - **Multi-user, logins, uids.** Becomes real if and when two people share
   a machine, and not before. Unchanged by a machine that compiles its own
   kernel — which is exactly where the temptation shows up, and why it is

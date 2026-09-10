@@ -43,12 +43,25 @@ float lean_fabsf(float), lean_floorf(float), lean_ceilf(float);
 float lean_sinf(float), lean_cosf(float), lean_tanf(float);
 float lean_hypotf(float, float);
 float lean_sqrtf(float), lean_atanf(float), lean_roundf(float);
+/* M100: the lround family - the first entries here that do not return a
+ * floating-point type, which is why kind "i" compares exactly rather
+ * than through err_of. */
+long lean_lround(double), lean_lroundf(float);
+long long lean_llround(double), lean_llroundf(float);
 
 typedef double (*fn1)(double);
 typedef double (*fn2)(double, double);
 typedef double (*fn3)(double, double, double);
 typedef float (*fn1f)(float); /* M100: one float argument, kind "f" */
 typedef float (*fn2f)(float, float); /* and two, kind "F" */
+/* M100: integer-returning, kind "i". Four pointers rather than one
+ * because the four differ in BOTH the argument type and the return
+ * type, and a cast that flattened them would be the harness agreeing
+ * with itself about a conversion instead of grading one. */
+typedef long (*fnl)(double);
+typedef long (*fnlf)(float);
+typedef long long (*fnll)(double);
+typedef long long (*fnllf)(float);
 
 struct entry {
     const char *name;
@@ -57,59 +70,72 @@ struct entry {
     fn3 ours3, theirs3;
     fn1f oursf, theirsf;
     fn2f oursF, theirsF;
+    fnl oursl, theirsl;       /* M100: kind "i" */
+    fnlf ourslf, theirslf;
+    fnll oursll, theirsll;
+    fnllf oursllf, theirsllf;
 };
 
 /* The host's are taken by address rather than called through a macro, so
  * that what runs is the C library's function and not something the
  * compiler folded at -O2 into a constant of its own opinion. */
 static const struct entry TABLE[] = {
-    {"fabsf", 0, 0, 0, 0, 0, 0, lean_fabsf, fabsf, 0, 0},
-    {"floorf", 0, 0, 0, 0, 0, 0, lean_floorf, floorf, 0, 0},
-    {"ceilf", 0, 0, 0, 0, 0, 0, lean_ceilf, ceilf, 0, 0},
-    {"sinf", 0, 0, 0, 0, 0, 0, lean_sinf, sinf, 0, 0},
-    {"cosf", 0, 0, 0, 0, 0, 0, lean_cosf, cosf, 0, 0},
-    {"tanf", 0, 0, 0, 0, 0, 0, lean_tanf, tanf, 0, 0},
-    {"hypotf", 0, 0, 0, 0, 0, 0, 0, 0, lean_hypotf, hypotf},
-    {"sqrtf", 0, 0, 0, 0, 0, 0, lean_sqrtf, sqrtf, 0, 0},
-    {"atanf", 0, 0, 0, 0, 0, 0, lean_atanf, atanf, 0, 0},
-    {"roundf", 0, 0, 0, 0, 0, 0, lean_roundf, roundf, 0, 0},
-    {"fabs", lean_fabs, fabs, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"sqrt", lean_sqrt, sqrt, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"floor", lean_floor, floor, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"ceil", lean_ceil, ceil, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"trunc", lean_trunc, trunc, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"round", lean_round, round, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"sin", lean_sin, sin, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"cos", lean_cos, cos, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"tan", lean_tan, tan, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"atan", lean_atan, atan, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"asin", lean_asin, asin, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"acos", lean_acos, acos, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"exp", lean_exp, exp, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"log", lean_log, log, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"log10", lean_log10, log10, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"log2", lean_log2, log2, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"sinh", lean_sinh, sinh, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"cosh", lean_cosh, cosh, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"tanh", lean_tanh, tanh, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"expm1", lean_expm1, expm1, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"log1p", lean_log1p, log1p, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"asinh", lean_asinh, asinh, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"acosh", lean_acosh, acosh, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"atanh", lean_atanh, atanh, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"erf", lean_erf, erf, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"erfc", lean_erfc, erfc, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"pow", 0, 0, lean_pow, pow, 0, 0, 0, 0, 0, 0},
-    {"atan2", 0, 0, lean_atan2, atan2, 0, 0, 0, 0, 0, 0},
-    {"fmod", 0, 0, lean_fmod, fmod, 0, 0, 0, 0, 0, 0},
-    {"hypot", 0, 0, lean_hypot, hypot, 0, 0, 0, 0, 0, 0},
-    {"copysign", 0, 0, lean_copysign, copysign, 0, 0, 0, 0, 0, 0},
-    {"nextafter", 0, 0, lean_nextafter, nextafter, 0, 0, 0, 0, 0, 0},
-    {"fmax", 0, 0, lean_fmax, fmax, 0, 0, 0, 0, 0, 0},
-    {"fmin", 0, 0, lean_fmin, fmin, 0, 0, 0, 0, 0, 0},
-    {"cbrt", lean_cbrt, cbrt, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"exp2", lean_exp2, exp2, 0, 0, 0, 0, 0, 0, 0, 0},
-    {"fma", 0, 0, 0, 0, lean_fma, fma, 0, 0, 0, 0},
+    {.name = "fabsf", .oursf = lean_fabsf, .theirsf = fabsf},
+    {.name = "floorf", .oursf = lean_floorf, .theirsf = floorf},
+    {.name = "ceilf", .oursf = lean_ceilf, .theirsf = ceilf},
+    {.name = "sinf", .oursf = lean_sinf, .theirsf = sinf},
+    {.name = "cosf", .oursf = lean_cosf, .theirsf = cosf},
+    {.name = "tanf", .oursf = lean_tanf, .theirsf = tanf},
+    {.name = "hypotf", .oursF = lean_hypotf, .theirsF = hypotf},
+    {.name = "sqrtf", .oursf = lean_sqrtf, .theirsf = sqrtf},
+    {.name = "atanf", .oursf = lean_atanf, .theirsf = atanf},
+    {.name = "roundf", .oursf = lean_roundf, .theirsf = roundf},
+    {.name = "fabs", .ours1 = lean_fabs, .theirs1 = fabs},
+    {.name = "sqrt", .ours1 = lean_sqrt, .theirs1 = sqrt},
+    {.name = "floor", .ours1 = lean_floor, .theirs1 = floor},
+    {.name = "ceil", .ours1 = lean_ceil, .theirs1 = ceil},
+    {.name = "trunc", .ours1 = lean_trunc, .theirs1 = trunc},
+    {.name = "round", .ours1 = lean_round, .theirs1 = round},
+    {.name = "sin", .ours1 = lean_sin, .theirs1 = sin},
+    {.name = "cos", .ours1 = lean_cos, .theirs1 = cos},
+    {.name = "tan", .ours1 = lean_tan, .theirs1 = tan},
+    {.name = "atan", .ours1 = lean_atan, .theirs1 = atan},
+    {.name = "asin", .ours1 = lean_asin, .theirs1 = asin},
+    {.name = "acos", .ours1 = lean_acos, .theirs1 = acos},
+    {.name = "exp", .ours1 = lean_exp, .theirs1 = exp},
+    {.name = "log", .ours1 = lean_log, .theirs1 = log},
+    {.name = "log10", .ours1 = lean_log10, .theirs1 = log10},
+    {.name = "log2", .ours1 = lean_log2, .theirs1 = log2},
+    {.name = "sinh", .ours1 = lean_sinh, .theirs1 = sinh},
+    {.name = "cosh", .ours1 = lean_cosh, .theirs1 = cosh},
+    {.name = "tanh", .ours1 = lean_tanh, .theirs1 = tanh},
+    {.name = "expm1", .ours1 = lean_expm1, .theirs1 = expm1},
+    {.name = "log1p", .ours1 = lean_log1p, .theirs1 = log1p},
+    {.name = "asinh", .ours1 = lean_asinh, .theirs1 = asinh},
+    {.name = "acosh", .ours1 = lean_acosh, .theirs1 = acosh},
+    {.name = "atanh", .ours1 = lean_atanh, .theirs1 = atanh},
+    {.name = "erf", .ours1 = lean_erf, .theirs1 = erf},
+    {.name = "erfc", .ours1 = lean_erfc, .theirs1 = erfc},
+    {.name = "pow", .ours2 = lean_pow, .theirs2 = pow},
+    {.name = "atan2", .ours2 = lean_atan2, .theirs2 = atan2},
+    {.name = "fmod", .ours2 = lean_fmod, .theirs2 = fmod},
+    {.name = "hypot", .ours2 = lean_hypot, .theirs2 = hypot},
+    {.name = "copysign", .ours2 = lean_copysign, .theirs2 = copysign},
+    {.name = "nextafter", .ours2 = lean_nextafter, .theirs2 = nextafter},
+    {.name = "fmax", .ours2 = lean_fmax, .theirs2 = fmax},
+    {.name = "fmin", .ours2 = lean_fmin, .theirs2 = fmin},
+    {.name = "cbrt", .ours1 = lean_cbrt, .theirs1 = cbrt},
+    {.name = "exp2", .ours1 = lean_exp2, .theirs1 = exp2},
+    {.name = "fma", .ours3 = lean_fma, .theirs3 = fma},
+    /* M100: the lround family. The whole table is written this way
+     * since the four kind-"i" pointers were added - positional rows
+     * would have carried eighteen zeros to reach the two that matter,
+     * and -Wmissing-field-initializers is right to refuse the shorter
+     * lie. */
+    {.name = "lround",   .oursl = lean_lround,     .theirsl = lround},
+    {.name = "lroundf",  .ourslf = lean_lroundf,   .theirslf = lroundf},
+    {.name = "llround",  .oursll = lean_llround,   .theirsll = llround},
+    {.name = "llroundf", .oursllf = lean_llroundf, .theirsllf = llroundf},
 };
 
 /* Relative where the answer is not near zero, absolute where it is -
@@ -335,6 +361,35 @@ int main(int argc, char **argv) {
                     }
                 }
             }
+        } else if (kind[0] == 'i') {
+            /* M100: an integer-returning function. Compared as long long
+             * and not through err_of, because there is no tolerance to
+             * have: lround(x) is one number, the host names it, and
+             * "within 1e-12 of the right integer" is not a claim anyone
+             * should be allowed to make. worst is 0 or 1, and the tol
+             * column for these rows is 0.
+             *
+             * The float grid point is rounded to float before either
+             * side sees it, for the same reason kind "f" does it. */
+            for (int i = 0; i < n; i++) {
+                double x = lo + step * (double)i;
+                long long got, want;
+                if (e->oursl) {
+                    got = e->oursl(x); want = e->theirsl(x);
+                } else if (e->ourslf) {
+                    float xf = (float)x; x = (double)xf;
+                    got = e->ourslf(xf); want = e->theirslf(xf);
+                } else if (e->oursll) {
+                    got = e->oursll(x); want = e->theirsll(x);
+                } else {
+                    float xf = (float)x; x = (double)xf;
+                    got = e->oursllf(xf); want = e->theirsllf(xf);
+                }
+                if (got != want) {
+                    worst = 1.0; worst_x = x;
+                    worst_got = (double)got; worst_want = (double)want;
+                }
+            }
         } else if (kind[0] == '1') {
             for (int i = 0; i < n; i++) {
                 double x = lo + step * (double)i;
@@ -381,7 +436,7 @@ int main(int argc, char **argv) {
         graded++;
         if (worst > tol) {
             failures++;
-            if (kind[0] == '1' || kind[0] == 'f') {
+            if (kind[0] == '1' || kind[0] == 'f' || kind[0] == 'i') {
                 printf("FAIL %-10s worst %.3g > %.3g at x=%.17g: "
                        "ours %.17g, the host's %.17g\n",
                        name, worst, tol, worst_x, worst_got, worst_want);

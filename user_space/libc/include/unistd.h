@@ -99,8 +99,24 @@ int access(const char *path, int mode);
 int rmdir(const char *path);
 int unlink(const char *path);
 
+/* M100: the three names POSIX gives the descriptors every process starts
+ * with. curl's src/terminal.c is what named them - it asks whether
+ * STDIN_FILENO is a terminal - and they had never been here, which is
+ * the same shape of gap M94 found with wcwidth: the thing exists (fd 0
+ * is stdin on this machine and always has been), and the spelling every
+ * portable program uses for it did not. */
+#define STDIN_FILENO  0
+#define STDOUT_FILENO 1
+#define STDERR_FILENO 2
+
 long read(int fd, void *buf, size_t count);
 long write(int fd, const void *buf, size_t count);
+
+/* M100: the same two transfers from a stated place, leaving the
+ * descriptor's own position alone. NetSurf's disc cache asked; see
+ * SYS_pread for why this is a syscall and not an lseek sandwich. */
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 int close(int fd);
 
 /* M86: exit without running anything on the way out.

@@ -120,6 +120,41 @@ UEFI firmware
   original file byte for byte. See M100 in
   [milestones.md](milestones.md).
 
+- **A web browser.** **NetSurf 3.11**, built for this machine by this
+  project's own compiler, on the desktop as **Browser** — libhubbub
+  parsing HTML5, libdom, **libcss** doing the cascade, **Duktape**
+  running JavaScript, freetype rasterising the text, and **libcurl over
+  mbedtls over this project's own TCP** for `http` and `https`. Fifteen
+  third-party projects and **no edit to any of their source**: the
+  display port is *one file*, because libnsfb registers its surfaces at
+  runtime and NetSurf picks one by name, and the pixels are zero copy —
+  libnsfb's XRGB8888 is byte-for-byte this compositor's own word
+  layout, so the layout engine renders straight into the window's
+  shared segment.
+
+  It holds `CAP_FS_WRITE | CAP_NETWORK` and nothing else. **Not**
+  `CAP_FRAMEBUFFER`: twenty megabytes of somebody else's C and C++,
+  running a JavaScript engine on bytes from a machine nobody here
+  controls, with no more authority over the screen than the clock has.
+
+  Porting it named five gaps in this system — `pread`/`pwrite`, the
+  `lround` family, `scandir`, `STDIN_FILENO`, and **`<iconv.h>`, which
+  did not exist at all** — and each one is now built and graded. See
+  [docs/browser.md](docs/browser.md).
+
+- **And the browser that will not come, measured rather than guessed.**
+  The same milestone asked what Chromium's build actually demands, and
+  answered with numbers instead of an estimate: 8 GB of RAM, 32 GB of
+  swap and 100 GB of disk in its own documentation, against this
+  machine's 128 MiB, no swap and a 2 GiB image; **535 sub-repositories**
+  in its `DEPS`; clang and libc++ as its only supported toolchain; and a
+  seccomp sandbox naming **427 syscalls of which this kernel has 79**.
+  The number that decides it is none of those — it is `AF_UNIX` with
+  `SCM_RIGHTS`, without which there is no Mojo and therefore no Chromium
+  at all. Google Chrome is a different question again: it is
+  proprietary, so there is no source to build. See
+  [docs/browser.md](docs/browser.md).
+
 - **A package manager.** `os install grep` puts **GNU grep 3.11** on
   this machine — built here by this project's own compiler from the
   published tarball with no edit to its source — and the machine runs
@@ -160,7 +195,13 @@ into a fresh image is ordered rather than automatic:
 make toybox                  # /bin/toybox and 143 command names
 tools/build-packages.sh      # cross-build grep and bzip2 into .osp archives
 make packages                # ...and write them into the image as /pkg/repo
+tools/build-netsurf.sh       # cross-build NetSurf 3.11, libcurl and 14 libraries
+tools/install-netsurf.sh     # ...and write the browser into the image
 ```
+
+`tools/build-netsurf.sh` needs `bison` 3.x and the host's `libpng` on
+top of the toolchain above — macOS ships bison 2.3, which cannot parse
+one of NetSurf's grammars. Both are dev-time only.
 
 The disk image is 2 GiB and sparse - a few megabytes on disk until
 something fills it. `QEMU_MEM=128` boots the same kernel on a small
@@ -214,9 +255,10 @@ Four instruments, and none of them subsumes another:
   is the only instrument here that grades the *tests* rather than the
   machine, and the first thing it found was a file at 100% line coverage
   whose mutation score was zero.
-- **Six differential tests** (`tools/sh-test.sh`,
+- **Seven differential tests** (`tools/sh-test.sh`,
   `tools/regex-test.sh`, `tools/scanf-test.sh`, `tools/printf-test.sh`,
-  `tools/math-test.sh` and `tools/pkg-test.sh`) compile this project's
+  `tools/math-test.sh`, `tools/pkg-test.sh` and
+  `tools/iconv-test.sh`) compile this project's
   own shell, regular-expression engine, `sscanf`, `printf`, libm and
   SHA-256 from the same source the machine runs, for the machine you are
   sitting at, and require every fixture to agree with the host's own —
@@ -225,7 +267,11 @@ Four instruments, and none of them subsumes another:
   fixtures says what the right answer is - a program nobody here wrote
   decides, which is the only useful standard for code whose whole job is
   to agree with every other implementation of itself. Every one of them
-  found real bugs on its first run; the libm one (M99) found `fmod`
+  found real bugs on its first run; the iconv one (M100) found a
+  sentinel that shared a value with real data, in thirteen charsets at
+  once - and, before that, taught this project that **the host is not
+  always one oracle**: macOS's iconv transliterates by default, which
+  made 144,589 of its first run's "disagreements" nothing of the kind; the libm one (M99) found `fmod`
   returning the wrong sign and a result larger than its own modulus, and
   then, once it learned to ask about infinity, a `log` that did not
   return at all.

@@ -730,7 +730,49 @@ typedef struct {
 #define GRND_NONBLOCK_BIT 1
 #define GRND_RANDOM_BIT   2
 
-#define SYSCALL_COUNT 111
+/* ---- M100: a read that does not move the file position --------------
+ *
+ * (fd, buf, len, offset) -> bytes transferred, or negative. The offset
+ * is where to start; the descriptor's own position is neither consulted
+ * nor advanced, which is the entire content of the call and the only
+ * reason it exists as a call rather than as three.
+ *
+ * NetSurf is what asked. libnsutils wraps pread/pwrite for the disc
+ * cache, and the wrapper's whole job is to be the atomic form: the
+ * lseek/read/lseek spelling is a lie the moment two threads share a
+ * descriptor, and this browser has a fetcher thread and a cache writer
+ * behind the same fd. Writing that lie into this libc would have made
+ * the build succeed and the cache corrupt under load, which is the
+ * worst of the available outcomes.
+ *
+ * It is honest here for a reason that is worth writing down, because it
+ * is why this cost two dispatch entries and no new machinery:
+ * vfs_handle_read and vfs_handle_write have ALWAYS taken the offset as
+ * an argument (see the FD_FILE arm of sys_read). The shared open-file
+ * entry's `offset` field was only ever the caller's bookkeeping on top
+ * of them. So pread is sys_read's own file path with the two lines that
+ * touch that field deleted - genuinely positional, not simulated.
+ *
+ * **Regular files only.** A pipe, a socket and a terminal have no
+ * position to read from, and -OS_ERR_SPIPE says which of the two
+ * possible failures it was - the same answer SYS_lseek gives them, with
+ * a reason attached. A directory is refused exactly as SYS_read refuses
+ * it. A negative offset is refused rather than wrapped, which is the
+ * one case where a 32-bit offset field would have quietly read the
+ * wrong end of a 4 GiB file.
+ *
+ * No new capability. An fd this process may read is an fd this process
+ * may read from a stated place; the position is not the boundary. */
+#define SYS_pread  111
+#define SYS_pwrite 112
+
+/* Neither call has a position, and now the failure says so rather than
+ * joining the -1 pile. Matches Linux's ESPIPE, which <errno.h> already
+ * promised (see OS_ERR_NOENT's note - OS_ERR_AGAIN is the exception
+ * there, not the rule). */
+#define OS_ERR_SPIPE 29
+
+#define SYSCALL_COUNT 113
 
 #ifdef __cplusplus
 }

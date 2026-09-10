@@ -79,6 +79,10 @@ ICONS = [
     # produces an editor window like the Editor icon does - which is why
     # the window-count tests below still add up.
     ("README", "text_editor", 56, ICON_X + 90),
+    # M100: the browser, second in the second column. Appended rather
+    # than inserted, so every index above keeps the coordinate it had -
+    # see the matching note in user_space/bin/desktop_icons.c.
+    ("Browser", "netsurf", 146, ICON_X + 90),
 ]
 
 ICON_BOX = 0x4C99E6          # desktop_icons.c ICON_BOX_COLOR
@@ -736,6 +740,31 @@ def focused_slot(shot):
 # Tests
 # ---------------------------------------------------------------------
 
+# How many running-app buttons the taskbar can show at this resolution.
+# desktop_shell.c lays them out left to right and stops when the next one
+# would reach the tray: SLOTS_X + n*(SLOT_W + SLOT_GAP) + SLOT_W must fit
+# inside `width - tray_w()`. At 1024 wide that is eight, and M100's
+# Browser icon is the ninth thing on this desktop - so `count_app_windows`
+# saturates rather than being wrong, and a test that reads it as a window
+# count has to know where it stops.
+TASKBAR_MAX_SLOTS = 0
+while (SLOTS_X + (TASKBAR_MAX_SLOTS + 1) * (SLOT_W + SLOT_GAP) - SLOT_GAP
+       <= 1024 - TRAY_W):
+    TASKBAR_MAX_SLOTS += 1
+
+
+def _screens_differ(a, b, at_least):
+    """How many sampled pixels changed between two screendumps, tested
+    against a threshold. Sampled on a 4x4 grid: this asks "did a window
+    appear", not "which pixels"."""
+    n = 0
+    for y in range(0, min(a.height, b.height), 4):
+        for x in range(0, min(a.width, b.width), 4):
+            if a.px(x, y) != b.px(x, y):
+                n += 1
+    return n * 16 >= at_least
+
+
 def test_double_click_launches_every_icon(m):
     """M40's proving ground: double-click every desktop icon and require
     that many real windows. Before M40 this stopped at two - the third
@@ -747,11 +776,39 @@ def test_double_click_launches_every_icon(m):
 
     M74 added an eighth (README, in a second column), so this now spans
     both columns - which is also the only test that would notice if
-    layout_icons ever stopped wrapping."""
+    layout_icons ever stopped wrapping.
+
+    M100 added a ninth (Browser), which is the first icon that does not
+    fit in the taskbar - see TASKBAR_MAX_SLOTS below. That is not a
+    failure and the assertion had to learn the difference."""
     boot(m)
     for i, (name, _program, y, x) in enumerate(ICONS):
         m.double_click(x, y)
-        wait_for_windows(m, i + 1)
+        # M100: the browser is 7 MB demand-paged off the disk before it
+        # creates its window, where every other icon here is a few tens
+        # of kilobytes, and this suite runs four guests at once. The
+        # default 12 s is comfortable for the rest and is not for this
+        # one.
+        timeout = 45.0 if name == "Browser" else 12.0
+        want = min(i + 1, TASKBAR_MAX_SLOTS)
+        beyond_taskbar = i >= TASKBAR_MAX_SLOTS
+        before = m.screenshot() if beyond_taskbar else None
+        wait_for_windows(m, want, timeout=timeout)
+        if beyond_taskbar:
+            # Past the taskbar's capacity, count_app_windows cannot tell
+            # this icon's window from the last one's - so the assertion
+            # becomes "the screen changed", which is what a new window
+            # appearing on a desktop already full of them looks like.
+            # Weaker than a slot count and much better than dropping the
+            # icon from this test, which would have left the newest thing
+            # on the desktop as the only one nothing launches.
+            after = wait_for(m, lambda s: _screens_differ(before, s, 20000),
+                             "%s opened no window that changed the screen "
+                             "(the taskbar is full at %d slots, so this is "
+                             "what proves it launched)"
+                             % (name, TASKBAR_MAX_SLOTS),
+                             timeout=timeout)
+            del after
 
     refused = refusals(m)
     check(not refused,
@@ -2889,6 +2946,170 @@ def test_a_window_redrawing_itself_leaves_its_neighbours_alone(m):
                           "a window repainting itself disturbed the desktop around it")
 
 
+def _page_columns(shot):
+    """The horizontal extent of a rendered page, or None.
+
+    Columns in which pure white is DENSE. A browser showing an ordinary
+    document has hundreds of white pixels per column; the rest of this
+    desktop has almost none - the wallpaper is a dark gradient, the
+    editor's page is off-white, the terminal is near black - and what
+    little white there is (icon labels, the taskbar's text) is a handful
+    per column.
+
+    Anchoring on this rather than on the window's cascade position is
+    what keeps the checks below independent of where the window happens
+    to land, and it doubles as the first assertion: on a desktop with no
+    page on it, there is no such region at all.
+    """
+    cols = [x for x in range(0, shot.width)
+            if sum(1 for y in range(0, shot.height, 2)
+                   if shot.px(x, y) == 0xFFFFFF) > 25]
+    return (min(cols), max(cols)) if cols else None
+
+
+def _blue_in_page(shot):
+    """Blue pixels inside the page region, or 0 if there is no page.
+    Sampled on a 4-pixel grid - this is a readiness predicate polled in
+    a loop, not the measurement the assertions are made on."""
+    region = _page_columns(shot)
+    if region is None:
+        return 0
+    x0, x1 = region
+    n = 0
+    for y in range(0, shot.height, 4):
+        for x in range(x0, x1 + 1, 4):
+            c = shot.px(x, y)
+            if (c & 0xFF) > 150 and (c & 0xFF) - ((c >> 16) & 0xFF) > 50:
+                n += 1
+    return n * 4  # the 4x4 grid samples one pixel in four of the full scan
+
+
+def test_browser_renders_a_page(m):
+    """M100: the browser, opened the way a person opens it, drawing a
+    real page into real framebuffer pixels.
+
+    This is the only instrument in this project that can grade NetSurf at
+    all. The boot self-tests can run a program and read its exit code,
+    which is how [m100h] grades the four libc and kernel additions the
+    port needed - but a layout engine's output IS pixels, and a browser
+    that started, fetched, parsed, laid out and then painted nothing
+    would exit 0.
+
+    ---- what each check is for, and what it was worth before -----------
+
+    The first version of this test also counted "blue pixels" and "dark
+    pixels beside white ones" over the WHOLE screen, and both were
+    worthless: this desktop's icons are already blue (3,950 such pixels
+    on a bare desktop, against a threshold of 500) and its icon labels
+    are already white text with dark around them (254, against 200). Two
+    of three assertions passed with no browser running at all. They were
+    found by measuring a bare desktop and an open Editor against them,
+    which is the only way that kind of hole is ever found.
+
+    Measured on this machine, bare desktop / Editor open / browser:
+
+        white pixels        1,618  /  1,618  /  292,519
+        page columns         none  /   none  /  220..1001
+        blue in that region      0  /      0  /  111,754
+        red in that region       0  /      0  /      465
+        dark between white       0  /      0  /      143
+
+    (the last three are counted on the 2x2 grid the loop below samples;
+    an earlier probe walked every pixel and reported 590 for the last of
+    them, which is where this test's first threshold came from and why
+    it then failed by seven)
+
+    1. **A page rendered.** 292,519 pure-white pixels against 1,618. No
+       other program here paints a field of #FFFFFF; white means an HTML
+       body with the default stylesheet under it, which means libcss
+       ran.
+
+    2. **The bytes are in the right order.** 111,754 blue pixels against
+       465 red ones, in the region the page occupies. This is the check
+       that matters most for `user_space/bin/nsfb_leanos.c`, because a
+       surface with red and blue swapped is the single most likely way
+       that file could be wrong *and still look plausible* - a browser
+       full of orange would render, lay out and scroll perfectly. If the
+       swap happened, these two numbers trade places.
+
+    3. **Text was rasterised.** Dark pixels with white three pixels to
+       either side - the signature of a glyph stroke on a page, and the
+       inverse of this desktop's own white-on-dark labels.
+    """
+    boot(m)
+    check(count_app_windows(m.screenshot()) == 0, "the desktop did not start empty")
+
+    browser = ICONS[-1]
+    check(browser[0] == "Browser", "the last icon is %s, not the browser" % browser[0])
+    m.double_click(browser[3], browser[2])
+
+    # 7 MB demand-paged off the disk before its first frame, then a parse
+    # and a layout. Slower than any other icon on this desktop, and the
+    # timeout says so rather than being a round number.
+    wait_for_windows(m, 1, timeout=45.0)
+
+    shot = wait_for(m,
+                    lambda s: s.count_color(0xFFFFFF, 0, 0, s.width, s.height) > 40000,
+                    "the browser window never filled with a rendered page - it "
+                    "started and painted no white at all, which is what a "
+                    "browser drawing into a buffer nothing displays looks like",
+                    timeout=45.0)
+
+    # ---- and then wait for the page to FINISH ------------------------
+    #
+    # White arrives first: the body's background is painted as soon as
+    # the document has a box tree, and the banner image is decoded and
+    # drawn after. Measuring at the first white found 3,810 blue pixels
+    # where a finished page has 111,754, and reported it as "the banner
+    # did not decode" - which is a test racing the thing it grades, and
+    # the most expensive kind of wrong answer a suite like this can give.
+    shot = wait_for(m, lambda s: _blue_in_page(s) > 5000,
+                    "the page painted its background but NetSurf's own banner "
+                    "image never appeared on it - libpng did not decode it, or "
+                    "the plotters did not draw it",
+                    timeout=45.0)
+
+    region = _page_columns(shot)
+    check(region is not None,
+          "no column of this screen has a dense run of white in it, so there "
+          "is no page on it - even though something painted white somewhere")
+    x0, x1 = region
+    check(x1 - x0 > 400,
+          "the page is only %d columns wide; a browser window here is ~780"
+          % (x1 - x0))
+
+    blue = red = text = 0
+    for y in range(0, shot.height, 2):
+        for x in range(x0, x1 + 1, 2):
+            c = shot.px(x, y)
+            r, g, b = (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF
+            if b > 150 and b - r > 50:
+                blue += 1
+            if r > 150 and r - b > 50:
+                red += 1
+            if (r < 96 and g < 96 and b < 96 and x0 + 3 < x < x1 - 3 and
+                    shot.px(x - 3, y) == 0xFFFFFF and
+                    shot.px(x + 3, y) == 0xFFFFFF):
+                text += 1
+
+    check(blue > 5000,
+          "only %d blue pixels on the page - NetSurf's own banner image did "
+          "not decode, or did not draw" % blue)
+    check(blue > 20 * (red + 1),
+          "%d blue against %d red on a page whose banner is blue. If those "
+          "are the wrong way round, this surface has red and blue swapped - "
+          "see user_space/bin/nsfb_leanos.c, where the pixel format is "
+          "claimed to match the compositor's exactly" % (blue, red))
+    # 50, against a bare desktop's 0 and this page's ~143 on the 2x2 grid
+    # this loop samples. The first threshold here was 150, taken from a
+    # probe that sampled every pixel - four times as many - and it failed
+    # by seven. A number carried over from a different stride is a number
+    # that means nothing.
+    check(text > 50,
+          "only %d dark pixels between white ones - freetype rasterised no "
+          "text onto the page" % text)
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -2949,6 +3170,7 @@ TESTS = [
      test_typing_into_a_window_changes_only_that_window),
     ("a_window_redrawing_itself_leaves_its_neighbours_alone",
      test_a_window_redrawing_itself_leaves_its_neighbours_alone),
+    ("browser_renders_a_page", test_browser_renders_a_page),
 ]
 
 

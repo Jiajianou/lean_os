@@ -167,6 +167,43 @@ long read(int fd, void *buf, size_t count) {
     return r;
 }
 
+/* ---- M100: pread/pwrite ---------------------------------------------
+ *
+ * The positional pair, and the reason they are a syscall rather than
+ * three lines here is in system_api/include/syscall.h: an lseek/read/
+ * lseek spelling is not atomic, and the program that asked for these -
+ * NetSurf's disc cache - has two threads behind one descriptor.
+ *
+ * ESPIPE is the failure worth naming. POSIX requires it for a pipe, a
+ * socket or a terminal, and libnsutils' own fallback path tests for it
+ * by name, so a bare -1 here would have been a different bug in a
+ * program that was already handling this correctly. */
+ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
+    long r = sys_pread(fd, buf, count, (long)offset);
+    if (r == -OS_ERR_SPIPE) {
+        errno = ESPIPE;
+        return -1;
+    }
+    if (r < 0) {
+        errno = __lean_fd_errno(fd);
+        return -1;
+    }
+    return r;
+}
+
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
+    long r = sys_pwrite(fd, buf, count, (long)offset);
+    if (r == -OS_ERR_SPIPE) {
+        errno = ESPIPE;
+        return -1;
+    }
+    if (r < 0) {
+        errno = __lean_fd_errno(fd);
+        return -1;
+    }
+    return r;
+}
+
 long write(int fd, const void *buf, size_t count) {
     long r = sys_write(fd, buf, count);
     if (r == -OS_ERR_INTR) {

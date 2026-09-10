@@ -213,6 +213,16 @@ run_stage "the FILE layer, off the machine" ./tools/stdio-test.sh
 # the one thing tests/test_ospkg.c cannot, which is whether the hash a
 # package's every claim rests on is actually SHA-256.
 run_stage "packages, against the host's sha256 and cmp" ./tools/pkg-test.sh
+# M100: and the seventh, iconv - added when NetSurf turned out to include
+# <iconv.h> unconditionally, so a browser on this machine needed one.
+# It grades 3,328 generated table entries that no amount of reading
+# finds a typo in: a wrong entry renders a plausible letter in a script
+# nobody here reads. Its first run found 144,589 disagreements and
+# almost none of them were bugs - macOS's iconv transliterates by
+# default - and the restructured version found the one that was: U+FFFF
+# shared a value with the table's "unassigned" sentinel, in thirteen
+# charsets at once. See tools/iconv-test.sh.
+run_stage "iconv, against the host's" ./tools/iconv-test.sh
 # M98: the fifth differential test. realpath is pure logic over
 # lstat/readlink/getcwd, so the host's own filesystem and the host's
 # own realpath grade all of it - see tools/realpath-test.sh for the

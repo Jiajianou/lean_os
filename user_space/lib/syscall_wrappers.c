@@ -286,6 +286,16 @@ long sys_getrandom(void *buf, unsigned long len, unsigned int flags) {
     return do_syscall(SYS_getrandom, (uint64_t)buf, len, flags);
 }
 
+/* M100: NetSurf's disc cache. The offset is the fourth argument and the
+ * descriptor's own position is untouched - see SYS_pread. */
+long sys_pread(int fd, void *buf, unsigned long len, long offset) {
+    return do_syscall6(SYS_pread, (long)fd, (long)buf, (long)len, offset, 0, 0);
+}
+
+long sys_pwrite(int fd, const void *buf, unsigned long len, long offset) {
+    return do_syscall6(SYS_pwrite, (long)fd, (long)buf, (long)len, offset, 0, 0);
+}
+
 long sys_utime(const char *path, unsigned int mtime) {
     return do_syscall(SYS_utime, (long)path, (long)mtime, 0);
 }

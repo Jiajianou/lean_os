@@ -496,6 +496,11 @@ REQUIRED_MARKERS=(
   # (user_space/lib/fsutil.c) and this is the marker saying it does what
   # it says on leanfs rather than only against the host tier's fake.
   "[m112] the Files app's tree walks, on leanfs:"
+  # M100: what porting a browser added to this system - pread/pwrite,
+  # scandir, iconv and the lround family, on the machine rather than
+  # against the host that graded the tables. See
+  # user_space/bin/browsertest.c.
+  "[m100h] what porting a browser added:"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"
