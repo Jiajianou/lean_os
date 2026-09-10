@@ -64,6 +64,16 @@ UEFI firmware
   programs open as ordinary file descriptors. `netconf` and an SNTP
   client (`nettime`) use them. See
   [docs/networking.md](docs/networking.md).
+
+  **And a resolver that does not trust one server.** `/etc/resolv.conf`
+  is read, every nameserver in it is asked at once alongside the one
+  DHCP handed over, and the first correct answer wins — because a
+  nameserver that accepts queries and answers none is a common failure,
+  and a resolver with one server cannot tell that apart from a network
+  that is down. It could not, here: a dead router made every name on
+  this machine unresolvable while UDP to the public internet was working
+  in the next window. See M114 in [milestones.md](milestones.md) for the
+  packet capture that settled it.
 - **Settings that stick.** Wallpaper, colours, **screen resolution**
   (changed live, with a countdown that puts it back if you do not
   confirm), motion, and volume.
@@ -211,6 +221,12 @@ installed. See M113 in [milestones.md](milestones.md).
 top of the toolchain above — macOS ships bison 2.3, which cannot parse
 one of NetSurf's grammars. Both are dev-time only.
 
+`QEMU_RES=1440x900 ./tools/run-qemu.sh` boots with a bigger screen. The
+size lives in `/etc/settings.conf`, which a kernel rebuild deletes along
+with the rest of the filesystem, so it is re-applied from outside the
+image on every run — the compiled-in default stays 1024x768 because
+every coordinate in the interactive suite is measured against it.
+
 The disk image is 2 GiB and sparse - a few megabytes on disk until
 something fills it. `QEMU_MEM=128` boots the same kernel on a small
 machine and `QEMU_DISK=ide` runs it through the ATA driver instead of
@@ -244,7 +260,7 @@ Four instruments, and none of them subsumes another:
   the order locks are taken in so an inversion is an error rather than
   a comment (Q9). 338 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 125 markers and 39 performance
+  image and grade the serial log against 126 markers and 39 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It

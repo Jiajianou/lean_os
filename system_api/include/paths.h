@@ -69,6 +69,14 @@ extern "C" {
 
 #define PATH_SETTINGS PATH_ETC_DIR "settings.conf"
 
+/* M114: the nameservers to ask, in the file every Unix keeps them in.
+ * Optional - a machine with no resolv.conf asks whatever DHCP handed it,
+ * which is what this OS did for forty milestones. What the file adds is
+ * the ability to ask more than one, which matters because the failure it
+ * was written for is a *first* nameserver that answers nothing. See
+ * user_space/lib/dns.c and docs/networking.md. */
+#define PATH_RESOLV_CONF PATH_ETC_DIR "resolv.conf"
+
 /* Longest absolute path anything here will build or resolve, NUL
  * included - the same number kernel/fs/leanfs.h's LEANFS_MAX_PATH uses,
  * repeated here because user space has no business including a kernel

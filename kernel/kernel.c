@@ -12012,6 +12012,64 @@ static void boot_selftests_system(void) {
         }
     }
 
+    /* ---- M114 self-test: the machine knows more than one nameserver ---
+     *
+     * The resolver's own logic is graded on the host (tests/test_dns.c,
+     * against a fake nameserver that can be made to answer nothing,
+     * which no real server can be asked to do). What that tier cannot
+     * see is whether this IMAGE actually has the file, and the file is
+     * the half that goes missing: it is seeded on first boot, and a
+     * first boot is exactly what happens every time `make` recreates
+     * the disk.
+     *
+     * So this checks the seeding and nothing else - that /etc/resolv.conf
+     * is here and has a nameserver line in it. A machine with no file
+     * still resolves, using whatever DHCP handed over; what it loses is
+     * the ability to survive that server being broken, which is the
+     * whole of M114 and would otherwise vanish silently.
+     */
+    {
+        /* 2048 and not 512, and this is the second time in one milestone
+         * that this exact number has been wrong. The seeded file is 675
+         * bytes of which the LAST line is the only one that matters, so
+         * a short buffer does not read a bit less of the answer - it
+         * reads none of it, and this check panicked on a machine whose
+         * configuration was perfectly correct. dns.c's own reader had
+         * the same bug against the same file an hour earlier. A file
+         * whose payload is at the end punishes every truncation
+         * equally. */
+        char rc[2048];
+        int64_t n = vfs_read(PATH_RESOLV_CONF, rc, sizeof(rc) - 1);
+        if (n <= 0) {
+            klog_puts("[m114] " PATH_RESOLV_CONF " is missing - the first-boot "
+                       "seeding in this file did not run\n");
+            panic("M114 self-test: this machine has no resolver configuration");
+        }
+        rc[n] = '\0';
+        int found = 0;
+        for (int64_t i = 0; i + 10 <= n && !found; i++) {
+            /* At the start of a line, so a commented-out example does
+             * not read as a configured server - the seeded file is
+             * mostly comment and every one of them contains the word. */
+            if ((i == 0 || rc[i - 1] == '\n') &&
+                k_memcmp(&rc[i], "nameserver", 10) == 0) {
+                found = 1;
+            }
+        }
+        if (!found) {
+            klog_puts("[m114] " PATH_RESOLV_CONF " has no nameserver line - "
+                       "this machine can only ask whatever DHCP handed it\n");
+            panic("M114 self-test: the resolver configuration names no server");
+        }
+        klog_puts("[m114] more than one nameserver: " PATH_RESOLV_CONF " is on "
+                   "this disk with a server in it, so a DHCP nameserver that "
+                   "answers nothing is no longer the end of every lookup "
+                   "- self-test passed (");
+        klog_put_dec((uint32_t)n);
+        klog_puts(" bytes).\n\n");
+    }
+
+
     /* ---- Q16 self-test: a disk that fails, and a machine that does not --
      *
      * Six halts in two block drivers and three in the NIC were device
@@ -15624,6 +15682,49 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
              "pwd\n"
              "echo \"there are these programs:\"\n"
              "ls /bin\n"},
+            /* M114: the nameservers, in the file Unix keeps them in.
+             *
+             * Seeded here rather than written into the image by the
+             * build for the reason M113 had just finished learning:
+             * anything the build writes into leanfs is destroyed the
+             * next time the kernel changes, because that recreates the
+             * disk. A first-boot file comes back on its own.
+             *
+             * **Why a public resolver is listed at all**, which is a
+             * decision rather than a default: this file exists because
+             * of a machine whose DHCP-supplied nameserver accepted
+             * every query and answered none - a dead router in front of
+             * a working link. Every name on that machine was
+             * unresolvable while UDP to the public internet worked
+             * perfectly, and the browser said "Could not resolve
+             * hostname" about a network that was fine. A resolver with
+             * one server cannot tell those apart and cannot recover
+             * from the first one; a second address in a plain text file
+             * can, and dns.c asks both at once.
+             *
+             * It is written down here, in the file itself, and in
+             * docs/networking.md, because "this machine sends every DNS
+             * query to Cloudflare as well as to your own server" is
+             * exactly the kind of thing an OS must not do quietly.
+             * Delete the line and the machine goes back to asking only
+             * what DHCP handed it. */
+            {PATH_RESOLV_CONF,
+             "# /etc/resolv.conf - which nameservers this machine asks.\n"
+             "#\n"
+             "# Every `nameserver` line here is asked, and so is whatever\n"
+             "# DHCP handed over - all of them at once, first correct\n"
+             "# answer wins. That is on purpose: a nameserver that\n"
+             "# accepts queries and never answers is a common failure,\n"
+             "# and asking one server at a time means paying its whole\n"
+             "# timeout before trying the next.\n"
+             "#\n"
+             "# The line below is a public resolver, listed so that a\n"
+             "# machine whose own DNS server is broken still works. If\n"
+             "# you would rather this machine only ever talked to the\n"
+             "# server your network gave it, delete the line.\n"
+             "#\n"
+             "# `nslookup <name>` prints the servers it actually asked.\n"
+             "nameserver 1.1.1.1\n"},
         };
         for (size_t i = 0; i < sizeof(FIRST_BOOT) / sizeof(FIRST_BOOT[0]); i++) {
             if (vfs_exists(FIRST_BOOT[i].path)) {

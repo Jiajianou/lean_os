@@ -47,3 +47,40 @@ int dns_parse_response(const uint8_t *msg, int len, uint16_t expect_id,
 
 /* Build a query for `name` into `buf`; returns its length or -1. */
 int dns_build_query(const char *name, uint16_t id, uint8_t *buf, int cap);
+
+/* ---- M114: more than one server ---------------------------------------
+ *
+ * Until M114 this resolver asked exactly one server - whatever DHCP
+ * handed over - and reported "timed out" when it said nothing. That is
+ * correct behaviour for a machine whose network is broken and the wrong
+ * behaviour for a machine whose *first* nameserver is broken, which is
+ * a different and much more common thing. See the milestone entry: a
+ * dead router in front of a working link made every name on this
+ * machine unresolvable, and the browser reported "Could not resolve
+ * hostname" for a network that was carrying UDP to the public internet
+ * perfectly at the same moment.
+ */
+#define DNS_MAX_SERVERS 4
+
+/* The nameservers this machine will ask, in the order they were found:
+ * every `nameserver <dotted-quad>` line of /etc/resolv.conf first, then
+ * the DHCP-supplied server if it is not already among them. Addresses
+ * are host order. Returns how many were written (0 if there are none).
+ *
+ * Exposed rather than private because it is the half of this file a
+ * person can be wrong about - "which servers is it actually asking" is
+ * the first question when a name will not resolve, and `nslookup`
+ * prints the answer. */
+int dns_servers(uint32_t *out, int max);
+
+/* Parse resolv.conf's text into addresses. Separated from the file so
+ * the host tier can grade it without one; `text` need not be
+ * NUL-terminated within `len`. Returns how many were written. */
+int dns_parse_resolv_conf(const char *text, int len, uint32_t *out, int max);
+
+/* Forget every cached name. A lookup is answered from a small cache
+ * until the TTL the server gave runs out, which is why editing
+ * /etc/resolv.conf does not change what a long-running program resolves
+ * until then - and why the host tests, which share one process and one
+ * cache across every case, call this between them. */
+void dns_cache_clear(void);

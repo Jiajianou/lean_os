@@ -50,6 +50,13 @@ make all
 # `make browser` is what builds one.
 make browser-if-built
 
+# M114: and the screen size, if one was asked for. Same shape and the
+# same reason as the line above - the setting lives in /etc/settings.conf
+# and `make all` may have just deleted the filesystem it lived in.
+if [ -n "${QEMU_RES:-}" ]; then
+  ./tools/set-resolution.sh "$QEMU_RES" || exit 1
+fi
+
 IMAGE="build/os-image.bin"
 OVMF_CODE="build/ovmf/OVMF_CODE.fd"
 OVMF_VARS_TEMPLATE="build/ovmf/OVMF_VARS.fd"

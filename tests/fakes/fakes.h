@@ -150,3 +150,31 @@ void fake_user_fs_reset(void);
 int fake_user_fs_mkdir(const char *guest);
 int fake_user_fs_write(const char *guest, size_t bytes);
 int fake_user_fs_exists(const char *guest);
+
+/* ---- fake_user_net, M114 ------------------------------------------------
+ *
+ * A network for user_space/lib/dns.c with no network in it. Servers are
+ * addressed by IP and behave the way the milestone needed to reproduce -
+ * above all FAKE_DNS_SILENT, the nameserver that accepts a query and
+ * never answers, which is the failure M114 exists for and the one that
+ * cannot be arranged against a real server. See the file's own header.
+ *
+ * Time is a counter this fake advances on every poll, so a three-second
+ * timeout costs no seconds. */
+#define FAKE_DNS_SILENT   0
+#define FAKE_DNS_ANSWER   1
+#define FAKE_DNS_NXDOMAIN 2
+#define FAKE_DNS_GARBAGE  3
+
+void fake_user_net_reset(void);
+void fake_user_net_add_server(uint32_t ip, int behaviour, uint32_t answer);
+void fake_user_net_set_dhcp_dns(uint32_t ip);
+void fake_user_net_set_netconf_fails(int fails);
+void fake_user_net_set_resolv_conf(const char *text, long len);
+void fake_user_net_no_resolv_conf(void);
+void fake_user_net_set_socket_fails(int fails);
+void fake_user_net_set_bind_fails(int fails);
+/* How many queries that address was actually sent - which is how "it
+ * asked every server" and "it stopped asking after a definite no" are
+ * told apart. Returns -1 for an address that was never registered. */
+int fake_user_net_queries_seen(uint32_t ip);

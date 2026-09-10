@@ -109,6 +109,41 @@ rebuilding the image. M111 built that — `os install` — and a
 `ca-certificates` package is the shape this takes when somebody wants
 it. Signing (also M111's open box) is what makes that worth having.
 
+**M114 made this the browser's last blocker rather than a footnote.**
+Until then `https://` failed before it got near a certificate, because
+this machine could not resolve a hostname at all — see M114 in
+`milestones.md` for the packet capture. With that fixed, `http://` pages
+load off the public internet and `https://` fails with exactly one
+message:
+
+```
+Problem with the SSL CA cert (path? access rights?)
+```
+
+which is mbedtls refusing to verify against a bundle that is not there.
+Most of the web is https-only, so this is now the difference between a
+browser that renders and a browser somebody can use. The condition
+above is met; the work is a package.
+
+### What it can and cannot render, measured
+
+`http://example.com/` loads and renders with its stylesheet — verified
+on the machine, M114. What NetSurf 3.11 *cannot* do is not a porting
+problem and will not be fixed by anything in this tree:
+
+| | here | the modern web assumes |
+|---|---|---|
+| CSS | libcss: CSS 2.1 plus parts of CSS 3 | flexbox, grid, custom properties |
+| JavaScript | Duktape, ES5 | ES2020+, modules |
+| layout | NetSurf's own | the same, plus a compositor |
+
+A site built on any of the right-hand column will render, and will
+render wrongly. That is the honest description of what is on this
+machine, and it is why the next two things this browser needs are
+certificate authorities and ICU rather than a different engine — see
+*the browser that will not come*, below, for why there is no
+smaller-effort modern one.
+
 ### What porting it found
 
 Five gaps in this system, each named by a build rather than by a

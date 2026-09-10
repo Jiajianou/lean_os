@@ -147,6 +147,69 @@ interesting one - a segment arriving ahead of a gap is dropped rather
 than held, which RFC 793 permits, costs a round trip when it happens,
 and halves the size of the receive path.
 
+## Names, and the server that answers nothing (M114)
+
+`dns_resolve()` in `user_space/lib/dns.c` turns a name into an address,
+and until M114 it asked **one** nameserver: whichever one DHCP handed
+over. That is correct for a machine whose network is down and wrong for
+a machine whose *first* nameserver is broken, which is a different and
+much more common thing.
+
+The failure that produced this milestone, in the order it was found:
+
+| what was checked | what it said |
+|---|---|
+| `netconf` | `10.0.2.15/24 via 10.0.2.2, DNS 10.0.2.3 (DHCP lease)` |
+| `nslookup example.com` | `no reply from the server (timed out)` |
+| the guest's packets (`filter-dump`) | a well-formed `A? example.com.` left the machine twice, one second apart, and nothing came back |
+| `nettime 216.239.35.0` | `says 2026-09-10 23:07:38 UTC` — **UDP to the public internet worked** |
+| the host's own first nameserver | answered nothing; the second one answered instantly |
+
+So: the link was fine, ARP was fine, UDP in and out of the guest was
+fine, the query was well-formed, and every name on the machine was
+unresolvable — because the one server it was allowed to ask was a router
+that accepted queries and dropped them. **A resolver with one server
+cannot tell "the network is down" from "this server is broken", and
+cannot recover from the second.**
+
+### What it does now
+
+`/etc/resolv.conf`, seeded on first boot and editable, is read first;
+the DHCP-supplied server is appended if it is not already listed. Only
+`nameserver` is understood — `search`, `domain` and `options` are a
+feature each, and a parser that silently ignored a directive it did not
+implement would be lying about what the machine will do.
+
+Every server on that list is asked **at once**, and the first correct
+answer wins. That is the part worth arguing about, so here is the
+argument: a resolver that walks its list in order pays a dead server's
+whole timeout before reaching a live one, which on the machine above was
+three seconds and then a failure, where the second server would have
+answered in milliseconds. The cost is one extra datagram per second to a
+handful of servers a person listed themselves.
+
+Two consequences, both deliberate:
+
+- **A name one server has and another does not resolves to the address.**
+  Right for a server that is wrong about the world; wrong for
+  split-horizon DNS, where the local server is authoritative for a name
+  the public one has never heard of. Which one wins is decided by order,
+  and `/etc/resolv.conf` is asked before DHCP.
+- **Queries go to every configured server.** The seeded file lists a
+  public resolver so that a machine with a broken DNS server still
+  works, and says so in its own text. Delete the line and the machine
+  asks only what DHCP gave it.
+
+`nslookup <name>` prints the servers it actually asked, which is the
+cheapest possible answer to "why will this name not resolve" — and its
+absence is why the bug above took a packet capture to find.
+
+Graded by `tests/test_dns.c` (21 cases, against
+`tests/fakes/fake_user_net.c`, where a nameserver can be told to accept
+every query and answer none — which no real server can be asked to do)
+and by the `[m114]` boot marker, which checks that the file survived
+onto this image.
+
 ## What is not here
 
 - **DNS.** Which is why `nettime` takes an address rather than a name.

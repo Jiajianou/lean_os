@@ -14,6 +14,7 @@
 
 #include "dns.h"
 #include "os_net.h"
+#include "paths.h"
 #include "syscall_wrappers.h"
 
 static void print_ip(uint32_t ip) {
@@ -144,8 +145,26 @@ int main(int argc, char **argv) {
         printf("nslookup: no network on this machine\n");
         return 1;
     }
-    printf("server: ");
-    print_ip(conf.dns);
+    /* M114: the servers it will actually ask, not the one DHCP handed
+     * over. Those were the same thing until this milestone, and the
+     * milestone exists because a person could not tell from any output
+     * on this machine that the only server being asked was one that
+     * never answered. `nslookup` printing the list is the cheapest
+     * possible answer to "why will this name not resolve". */
+    uint32_t servers[DNS_MAX_SERVERS];
+    int nservers = dns_servers(servers, DNS_MAX_SERVERS);
+    if (nservers == 0) {
+        printf("nslookup: no nameserver configured - DHCP handed none over "
+               "and " PATH_RESOLV_CONF " lists none\n");
+        return 1;
+    }
+    printf(nservers == 1 ? "server:  " : "servers: ");
+    for (int i = 0; i < nservers; i++) {
+        if (i) {
+            printf(", ");
+        }
+        print_ip(servers[i]);
+    }
     printf("\n");
 
     uint32_t ip = 0;

@@ -203,6 +203,24 @@ KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
 
 .PHONY: all run leanfs-put preseed toybox packages browser browser-if-built os-pkg sysroot print-user-programs syms font font-check clean distclean
 
+# M114: $(LIBC_A) is in `all` rather than only in `sysroot`.
+#
+# It used to be built only as a prerequisite of `make sysroot`, which
+# means `make all` after a libc change left build/libc.a - and the copy
+# of it in the sysroot that every ported program links against - older
+# than the source. Nothing said so. The browser linked a resolver from
+# before the fix and reported the bug the fix had removed.
+#
+# `sysroot` itself is still a separate target and still not in `all`:
+# its recipe begins `rm -rf $(SYSROOT)`, which would delete the fifteen
+# third-party libraries installed there by their own `make install`.
+#
+# The prerequisite is added further down, next to $(LIBC_A)'s own rule,
+# and that is not style: LIBC_A is a `:=` variable defined at line ~756,
+# so `$(LIBC_A)` written HERE expands to nothing at all and this line
+# would silently say `all: $(IMAGE)`. It did, for one build - which is
+# the same class of quiet mistake as the stale archive it is meant to
+# prevent.
 all: $(IMAGE)
 
 $(BUILD) $(KOBJ):
@@ -651,7 +669,14 @@ toybox: $(TOYBOX_BIN) $(IMAGE) $(LEANFS_PUT) preseed
 # not open a socket. See docs/browser.md.
 NETSURF_BIN := $(BUILD)/netsurf/netsurf
 
-$(NETSURF_BIN): tools/build-netsurf.sh user_space/bin/nsfb_leanos.c
+# $(LIBC_A) is a prerequisite and it is the one that matters. NetSurf is
+# a 20 MB STATIC binary: the C library is inside it, so a fix to this
+# project's libc does not reach the browser until the browser is linked
+# again. M114 lost an hour to exactly that - the resolver was fixed, the
+# machine's own programs picked it up through `make all`, and the browser
+# kept reporting "Could not resolve hostname" because its copy of dns.o
+# was three hours old. It looked like the fix had not worked.
+$(NETSURF_BIN): tools/build-netsurf.sh user_space/bin/nsfb_leanos.c $(LIBC_A)
 	@./tools/build-netsurf.sh
 
 browser: $(NETSURF_BIN) $(IMAGE) $(LEANFS_PUT) preseed
@@ -745,6 +770,10 @@ LIBC_A_OBJS := $(filter-out $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o,$(USER_
 $(LIBC_A): $(LIBC_A_OBJS)
 	@rm -f $@
 	$(AR) rcs $@ $(LIBC_A_OBJS)
+
+# M114: and `all` builds it. See the comment on `all` above for why the
+# prerequisite is written here rather than there.
+all: $(LIBC_A)
 
 # ---- M97: the same library, as a shared object -----------------------
 #
@@ -976,7 +1005,8 @@ TEST_FAKES := tests/fakes/fake_panic.c tests/fakes/fake_klog.c \
               tests/fakes/fake_pit.c tests/fakes/fake_socket.c \
               tests/fakes/fake_fwcfg.c \
               tests/fakes/fake_arch.c tests/fakes/fake_kernel_objects.c \
-              tests/fakes/fake_user_syscalls.c tests/fakes/fake_user_fs.c
+              tests/fakes/fake_user_syscalls.c tests/fakes/fake_user_fs.c \
+              tests/fakes/fake_user_net.c
 
 # The kernel sources under test, compiled unmodified.
 TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
@@ -997,7 +1027,7 @@ TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
 # code with user flags.
 TEST_USER_SRCS := user_space/lib/symtab.c \
                   user_space/lib/sha256.c user_space/lib/ospkg.c \
-                  user_space/lib/fsutil.c \
+                  user_space/lib/fsutil.c user_space/lib/dns.c \
                   user_space/libc/src/wchar.c user_space/libc/src/errno.c \
                   user_space/libc/src/fnmatch.c user_space/libc/src/libgen.c \
                   user_space/libc/src/getopt.c

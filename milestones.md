@@ -71,12 +71,12 @@ that has never happened.
 
 | | state |
 |---|---|
-| **Milestones** | M0–M113 numbered: 104 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
+| **Milestones** | M0–M114 numbered: 105 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
 | **Head of the queue** | **M100** — eight of nine libraries landed; M111 and M112 were both taken out of order at the user's request and closed 2026-09-09 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
-| **Host unit tests** | 341/341 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 125 required, graded on every self-test boot |
+| **Host unit tests** | 359/359 passing, 3 slow ones skipped in `--fast` |
+| **Boot markers** | 126 required, graded on every self-test boot |
 | **Performance budgets** | 39 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
@@ -114,6 +114,14 @@ surprising amount is already here.
   **closer to perfect scaling than this file has ever claimed.**
   `tools/smp-test.sh` grades it in the default tier and used to fail
   about one run in six because of the old statistic.
+
+  **Re-measured 2026-09-10 during M114, and the rate is not stable:**
+  one failure in five attempts at `632a4a8`+M114 — a timeout after
+  `[smp] 00000004 CPU(s) online.` with the self-test never reaching its
+  measurement, then three consecutive passes at 108%, 80% and 98%. So
+  the failure is the same one and "two runs in three" is not a constant;
+  whatever it depends on is not in this tree. It is still row 5's
+  problem and it is still a reproduction on demand.
 
   **Correction, measured 2026-09-09 during M111 and not caused by it:
   `tools/smp-test.sh` fails about two runs in three**, at HEAD
@@ -2876,6 +2884,158 @@ assumption that it is free.
       one; CPython's is 596 files and the native toolchain's is 105 MB,
       and neither should be added to every `make run` on the assumption
       that it is as cheap.
+
+### M114 — a resolver that does not depend on one server `[x]`
+
+*Landed 2026-09-10.* **Asked for directly**, the same day M113 landed —
+*"the qemu screen are very small now. and the browser doesn't work, and
+it looks like it's from 1990s. can't we port a working open source
+browser somewhere?"* Three complaints. Two were the same bug wearing
+different clothes, one was a bug in this OS that had nothing to do with
+browsers, and the third is answered at the end of this entry with
+numbers rather than an opinion.
+
+**"The browser doesn't work" was not about the browser.** It was
+diagnosed by measurement rather than by reading code, and the sequence is
+the useful part of this milestone:
+
+| what was asked | what it said |
+|---|---|
+| open Browser, load `file:///usr/share/netsurf/welcome.html` | rendered perfectly — CSS, PNG, freetype text |
+| load `http://example.com/` | status bar stuck on `Loading`, forever |
+| load `https://example.com/` | **`Could not resolve hostname`** |
+| `netconf` on the machine | `10.0.2.15/24 via 10.0.2.2, DNS 10.0.2.3 (DHCP lease)` |
+| `nslookup example.com` | `no reply from the server (timed out)` |
+| the guest's own packets, through QEMU's `filter-dump` | ARP resolved 10.0.2.3, then a **well-formed** `A? example.com.` left twice, one second apart, and nothing came back |
+| `nettime 216.239.35.0` | `says 2026-09-10 23:07:38 UTC` — **UDP to the public internet was working** |
+| the host's first nameserver, from the host | answered nothing. Its second one answered instantly |
+
+So the link worked, ARP worked, UDP in and out of the guest worked, the
+query was well-formed — and every name on the machine was unresolvable,
+because **the one server it was allowed to ask was a router that accepted
+queries and dropped them.** The browser was reporting, accurately, a
+failure that belonged to this OS's resolver: `dns_resolve` asked
+`conf.dns` and nothing else.
+
+**A resolver with one server cannot tell "the network is down" from
+"this server is broken", and cannot recover from the second.** That
+sentence is the milestone.
+
+**What landed.**
+
+- **`/etc/resolv.conf`**, parsed for `nameserver` lines and nothing else
+  — `search`, `domain` and `options` are a feature each, and a parser
+  that silently ignored a directive it did not implement would be lying
+  about what the machine will do.
+- **Every configured server asked at once**, first correct answer wins,
+  file before DHCP. Parallel rather than in turn because a sequential
+  resolver pays a dead server's *whole* timeout before reaching a live
+  one — three seconds and then a failure, on this machine, where the
+  other server would have answered in milliseconds.
+- **The file is seeded by the kernel on first boot**, not written by the
+  build. That is M113's lesson applied one milestone later: anything the
+  build writes into leanfs is destroyed the next time the kernel changes.
+  A first-boot file comes back on its own.
+- **`nslookup` prints the servers it actually asked.** It printed one
+  address before this milestone and that address was the problem, which
+  is why the bug needed a packet capture to find.
+- **`tests/test_dns.c`** — 21 cases against
+  `tests/fakes/fake_user_net.c`, a network with no network in it whose
+  servers can be told to *accept every query and answer none*. That
+  behaviour cannot be arranged against a real server, and pointing at an
+  address nothing listens on grades ICMP-unreachable instead of silence.
+  `user_space/lib/dns.c` had no host tests at all before this.
+
+**Three bugs this milestone's own code had, all found by running it.**
+
+- **An out-of-bounds read, in the fix.** `sys_readfile` returns the
+  *file's* size and copies at most `maxlen`; the first version handed
+  that number straight to the parser over a 512-byte buffer, and the
+  seeded resolv.conf is 675 bytes. The parse ran off the end, found no
+  nameserver, and the machine silently went back to asking the one
+  server this milestone exists to stop trusting — *the symptom of the
+  fix failing was identical to the symptom of the bug.* There is now a
+  test with an 8 KB resolv.conf whose only job is to be larger than the
+  buffer, and ASan is what makes it a failure rather than a plausible
+  answer.
+- **The tests were grading the cache.** Four of them passed while
+  reporting "queries seen: expected 1, got 0" — a resolver that had not
+  sent a packet and still returned the right address, because
+  `dns_resolve`'s cache is one static array shared by every case in the
+  process. `dns_cache_clear()` exists because of this.
+- **One test's premise was wrong.** It expected a DHCP server's
+  NXDOMAIN to beat another server's address; resolv.conf is asked
+  *first*, so the address arrived first and won. That is a real semantic
+  choice rather than an accident, so it is now two tests — the negative
+  answer, and the mixed case with the ordering written down.
+
+**And a fourth, which is the most useful thing here and is not about
+DNS.** The fix worked on the machine's own programs and the browser kept
+reporting `Could not resolve hostname`. **NetSurf is a 20 MB static
+binary: this project's libc is inside it.** `build/libc.a` was built
+only as a prerequisite of `make sysroot` — never by `make all` — so it
+was three hours stale, and every ported program was linking a C library
+from before the fix. Nothing said so; it looked exactly like the fix not
+working. Now `all` builds `$(LIBC_A)` and `$(NETSURF_BIN)` depends on
+it, so a libc change relinks the browser.
+
+Writing that prerequisite also produced a small, perfect example of the
+same class of mistake: `all: $(IMAGE) $(LIBC_A)` at line 217 expands
+`$(LIBC_A)` to **nothing**, because it is a `:=` variable defined at
+line 756. The line silently said `all: $(IMAGE)` and the archive stayed
+stale for one more build. The prerequisite now lives next to the rule.
+
+**`make sysroot` is not the way to refresh it, and that is worth
+knowing before somebody tries:** its recipe begins `rm -rf $(SYSROOT)`,
+which would delete the fifteen third-party libraries installed there by
+their own `make install` and cost a twenty-minute rebuild of the whole
+browser stack.
+
+**The screen, which was the same wipe again.** *"The qemu screen are very
+small now"* — 1024x768, the firmware's mode. The desktop has changed
+resolution live since M58 and remembers it in `/etc/settings.conf`, and
+`make` had deleted the filesystem that file lived in. `QEMU_RES=1440x900
+./tools/run-qemu.sh` now re-applies it from outside the image on every
+run (`tools/set-resolution.sh`), which is the same answer M113 gave for
+the browser. **The compiled-in default stays 1024x768 on purpose**:
+every coordinate in `tools/qemu_input_suite.py` is measured against that
+framebuffer, so raising the default would silently invalidate fifty
+interactive tests.
+
+**What "it looks like it's from the 1990s" is actually measuring**, and
+the honest answer to *"can't we port a working open source browser"*:
+
+- NetSurf now **loads real pages off the public internet** — verified,
+  `http://example.com/` rendered with its stylesheet. What it still
+  cannot do is `https`, and that is not a bug: no certificate
+  authorities ship here (M65's rule, `docs/browser.md`), so mbedtls
+  refuses. **The recorded condition for reopening that was "a way to
+  update the bundle without rebuilding the image", and M111 built it** —
+  a `ca-certificates` package is the shape it takes. That is the next
+  thing this browser needs and it is an open box below.
+- The *look* is NetSurf's framebuffer front end and its engine's age:
+  libcss is CSS 2.1 with pieces of CSS 3, and Duktape is ES5. A site
+  built on flexbox, grid and modern JavaScript will render, and will
+  render wrongly.
+- **There is no smaller-effort modern engine.** Chromium is measured in
+  `docs/browser.md` and blocked on `AF_UNIX` + `SCM_RIGHTS` before any
+  of the disk or toolchain numbers matter. Firefox needs a Rust target
+  for `x86_64-lean_os` that does not exist, on top of a full Gecko port.
+  WebKit's embeddable port needs EGL/GLES and a compositor protocol this
+  machine has no driver for. Ladybird needs C++23 (which this toolchain
+  has), and also Skia, ICU and Qt. **NetSurf is not the compromise
+  choice here — it is the only engine whose dependency set this machine
+  can actually satisfy**, and the honest next steps are CAs, then ICU,
+  then measuring what libcss actually fails at on real pages rather than
+  guessing.
+
+- [ ] **`ca-certificates`, as a package.** Without it `https://` fails
+      with `Problem with the SSL CA cert`, which is most of the web.
+      **The condition is already met** — `docs/browser.md` named "a way
+      to update the bundle without rebuilding the image" and M111's
+      `os install` is that. Packages live under `/pkg`, so NetSurf's
+      `Choices` has to point `ca_bundle` there, and *shipping no CAs
+      until somebody installs them* stays true.
 
 ---
 

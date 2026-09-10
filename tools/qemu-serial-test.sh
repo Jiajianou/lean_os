@@ -513,6 +513,12 @@ REQUIRED_MARKERS=(
   # kernel and the image whether or not a browser is, and this one is
   # about whether `make` left a browser behind after recreating the disk.
   "[m113] the browser is installed:"
+  # M114: and that the machine knows where to send a DNS query. Required
+  # rather than optional because the file is seeded by the kernel on
+  # first boot rather than installed by a script - so unlike [m113],
+  # there is no configuration in which a correct image legitimately
+  # lacks it, and its absence is the seeding having stopped working.
+  "[m114] more than one nameserver:"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"
