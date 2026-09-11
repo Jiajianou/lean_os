@@ -120,7 +120,48 @@ if [ "$SELFTESTS" -eq 1 ]; then
   echo "Booting WITH boot self-tests (expect ~140s to the desktop)." >&2
 fi
 
-qemu-system-x86_64 \
+# ---- M116: a window the size it used to be ------------------------------
+#
+# QEMU's cocoa display now sizes its window as the guest's pixels divided
+# by the Retina backing scale (ui/cocoa.m, resizeWindow) - one guest pixel
+# per PHYSICAL pixel. On a Retina Mac that halves the window: the same
+# 1024x768 desktop that opened at 1024x768 points opened at 512x384 after
+# Homebrew upgraded QEMU to 11.1 on 2026-09-10 (as a side effect of
+# installing libpng for the browser build, which is why it looked like
+# the browser work had shrunk the screen). Measured with CGWindowList:
+# 512x412 points, title bar included.
+#
+# `zoom-to-fit=on` is not the answer - it opens at 267x228 and waits for
+# a drag. What restores the old size is telling macOS this process is not
+# high-resolution capable, which makes the window server scale it 2x:
+# a bundle whose Info.plist says NSHighResolutionCapable=false, whose
+# executable is a symbolic link to the real QEMU. Built under build/ on
+# every run, pointing at whatever `qemu-system-x86_64` is on the PATH, so
+# a QEMU upgrade needs nothing here. QEMU_HIDPI=1 opts out, for anybody
+# who wants one guest pixel per physical pixel. tools/window-test.sh
+# measures the window a person gets, because nothing else in the tree
+# looks at the host side of the screen at all - which is how this went
+# unnoticed through a whole milestone.
+QEMU_BIN=$(command -v qemu-system-x86_64)
+if [ "$(uname)" = "Darwin" ] && [ "${QEMU_HIDPI:-0}" != "1" ] && [ -n "$QEMU_BIN" ]; then
+  APP="build/qemu-app/lean_os.app"
+  mkdir -p "$APP/Contents/MacOS"
+  cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>qemu-system-x86_64</string>
+  <key>CFBundleIdentifier</key><string>org.leanos.run-qemu</string>
+  <key>CFBundleName</key><string>lean_os</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>NSHighResolutionCapable</key><false/>
+</dict></plist>
+PLIST
+  ln -sfn "$QEMU_BIN" "$APP/Contents/MacOS/qemu-system-x86_64"
+  QEMU_BIN="$APP/Contents/MacOS/qemu-system-x86_64"
+fi
+
+"$QEMU_BIN" \
   -m "$QEMU_MEM" -smp "$QEMU_CPUS" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \

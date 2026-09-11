@@ -64,6 +64,20 @@ int main(int argc, char **argv) {
     setenv("LEANOS_SESSION", "1", 1);
     chdir(PATH_HOME);
 
+    /* ---- M116: what this image was built to have installed -------------
+     *
+     * Before the desktop, so a browser opened in the first second already
+     * has what it needs. /bin/os decides everything - which packages, and
+     * that each is installed once rather than every boot (see its
+     * cmd_preinstall) - and holds the one capability that can write
+     * under /pkg, which is why this is a spawn and not code here. On an
+     * image with no preinstall list it reads one missing file and exits.
+     * A failure is os's to report; the desktop comes up either way. */
+    long os_pid = sys_spawn(PATH_BIN_DIR "os", "preinstall");
+    if (os_pid >= 0) {
+        sys_wait(os_pid);
+    }
+
     /* M93: the first compositor restores the session; every one after it
      * only remembers where the windows go.
      *

@@ -71,13 +71,13 @@ that has never happened.
 
 | | state |
 |---|---|
-| **Milestones** | M0–M115 numbered: 106 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
+| **Milestones** | M0–M116 numbered: 107 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
 | **Head of the queue** | **M100** — eight of nine libraries landed; M111 and M112 were both taken out of order at the user's request and closed 2026-09-09 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
-| **Host unit tests** | 362/362 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 126 required, graded on every self-test boot |
-| **Performance budgets** | 39 rows in `tests/budgets.tsv`, all inside their ceilings |
+| **Host unit tests** | 383/383 passing, 3 slow ones skipped in `--fast` |
+| **Boot markers** | 127 required, graded on every self-test boot - M116's `[m116]` is the first to put a full-sized segment through the NIC |
+| **Performance budgets** | 41 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
 
@@ -490,6 +490,16 @@ suite was grading whatever image happened to be lying around**, and any
 milestone that adds a payload to the disk now has a worked example of
 how that goes wrong and one open box saying which four payloads still
 do.
+
+**M114, M115 and M116 are not in this table either.** All three were
+asked for directly on 2026-09-10, about the same browser, and M116 is
+the one worth a line here: the complaints had come back after two
+milestones "fixed" them, because every instrument in the tree graded the
+guest and none graded the path to the person - the NIC's receive ring
+under a real stream, the host window, and the terminal a test run leaves
+behind. It jumped nothing. What it changes for the rows that remain is
+the rule for the next one: **a fix is not finished until something that
+looks where the person looks can fail on it.**
 
 **M111 is not in this table and that is recorded rather than hidden.**
 `os`, the package manager, was asked for directly on 2026-09-09 and built
@@ -3153,7 +3163,7 @@ existed. It exists now, and it is an open box rather than a claim,
 because "slow" without a breakdown between TCP, TLS, layout and the
 1024x768 framebuffer is not a diagnosis.
 
-- [ ] **Where the minutes go.** `https://en.wikipedia.org/wiki/Unix`
+- [x] **Where the minutes go.** `https://en.wikipedia.org/wiki/Unix`
       fetches 82.72 KiB and is still working at 300 s. **The condition**:
       a breakdown that attributes the time — bytes/second on the socket,
       time in mbedtls, time in layout — before touching any of it. M69's
@@ -3161,6 +3171,287 @@ because "slow" without a breakdown between TCP, TLS, layout and the
       done, and this is measured only at the outermost level. The three
       deferred TCP items (window scaling, SACK, Nagle) are the obvious
       suspects and must not be started on that basis alone.
+      **Closed by M116**, and the suspects were none of those three: the
+      minutes were a corrupting NIC ring, an ignored FIN and a clock that
+      ran backwards. See M116, which also opens the box this page now
+      needs instead.
+
+### M116 — three complaints, ten bugs, and the instruments that missed them `[x]`
+
+*Landed 2026-09-10.* **Asked for directly**, the evening M115 landed —
+*"when I run run-qemu.sh, there seems to be lots and lots of repeating
+logs... the web browser can't connect to google.com... the qemu screen
+seems to be very small in comparison to just before the browser work.
+Your tests are not good enough because these issues keep coming up. Fix
+it thoroughly."* It jumped nothing and changed nothing for any row of
+the queue. **The last sentence is the milestone**: M114 had already
+"fixed" the small screen and M115 had already "fixed" the browser, and
+both came back, because neither fix was graded by anything that looks at
+what the person was looking at.
+
+Every one of the three was diagnosed by measurement, and not one of them
+was what reading the code suggested.
+
+#### 1. "Lots and lots of repeating logs" was the test suite editing the tree
+
+Not the guest. Booted headless, with cocoa, and through
+`tools/run-qemu.sh` itself, QEMU printed nothing to the terminal and the
+serial log had no repetition in it. What the terminal showed was the
+**build**: `build/*.elf` and `kernel.bin` had been relinked at 20:05,
+after the last commit, by the person's own `run-qemu.sh` — and a
+relink here prints one `x86_64-elf-ld` line per program, each carrying
+every object in `USER_LIBOBJS`. **135 KB**, sixty-six near-identical
+2 KB lines, which a terminal wraps into hundreds of screens.
+
+Why it relinked: `tools/iconv-test.sh` — in **every** tier, including
+`--fast` — checked the generated charset table by *regenerating it in
+place*. Same bytes, new mtime. `git status` stays clean, because git
+compares contents; `make` rebuilds, because make compares mtimes. So
+after every test run since M100, the next `make all` rebuilt the table,
+relinked every program, relinked the kernel that embeds them, and
+**recreated the disk image** — wiping `/etc/settings.conf`, the session,
+and everything else on the machine the person was about to use.
+`tools/mutate.py` had the same habit with the kernel's sources: it put
+their contents back and not their timestamps.
+
+- `gen-iconv-tables.py` takes an output path; `iconv-test.sh` generates
+  beside the file and compares. `mutate.py` restores mtimes (safe: it
+  builds no kernel or user object from a mutant — the unit binary is
+  deleted before every run, the differential engines always recompile).
+- **`tools/tree-stamps.py`**, run around **every stage** of
+  `run-tests.sh`: any stage that changes a tracked file's mtime or size
+  fails, by name, listing the files. `git status` cannot see this class
+  of bug by construction; this is the instrument that can.
+- **"a second build does nothing"**: after the build stage, `make all`
+  again must print nothing. A rule that always rebuilds is the same flood
+  from the other direction.
+- The two link rules and the `ar` print `  LD      build/x.elf` unless
+  `V=1`. A full relink is now 86 lines and 5 KB. The flood was a symptom,
+  but a legitimate libc change relinks everything too, and the object
+  list said nothing a person reading it needed.
+
+#### 2. "Can't connect to google.com" was four bugs below the browser, and a missing trust store
+
+The page did load — at **0.4 KiB/s**: 12 KiB after 30 s, `Fetching,
+Processing` at 90 s. A packet capture (QEMU `filter-dump`) of a 60 KB
+download from a host `http.server` found the first two:
+
+| bug | what the capture showed | cost |
+|---|---|---|
+| **The RTL8139 ring.** `rtl8139.c` sets `RCR_WRAP`, which makes the card write a packet that runs past the end of the 8 KiB ring *contiguously into the pad*. The driver reassembled such a frame from the ring's **start** — the `RCR_WRAP`-clear layout. QEMU's `rtl8139_write_buffer` says so in one line ("non-wrapping path or overwrapping enabled"). | a 1440-byte segment at exactly `rcv_nxt`, inside the window, answered `ack 5949` as if it had not arrived; 1.5 s later the peer resent it | one full-sized frame in five (1504-byte stride on an 8192-byte ring), **since M27** |
+| **The FIN.** `tcp.c` judged a FIN against `seq`, the segment's first byte, *after* the data had moved `rcv_nxt` past it. A FIN riding on the last data segment — how nearly every server closes — never matched. | `[FP.] seq 59229:60189` answered `ack 60189`, not `60190`; the FIN came back alone 1.44 s later | 1.4 s per server-closed connection |
+
+Why a corrupt frame cost seconds rather than a log line: **TCP's checksum
+discarded it without a word** — "a corrupt segment is one that never
+arrived". Correct, and the reason the symptom anywhere was only
+"slow". It now counts (`tcp_checksum_failures()`) and logs, rate-limited.
+
+With both fixed, the 60 KB download went from **never finishing** (fetch
+gave up at 8 s with 30 KB) to **35 ms**. google.com then took 22.6 s, and
+the third bug needed a different instrument — the guest's instruction
+pointer sampled through the monitor, beside the capture:
+
+| bug | what the capture showed | cost |
+|---|---|---|
+| **`gettimeofday` ran backwards.** It was RTC seconds plus `uptime_ms % 1000` — two counters not in phase — so it stepped back by up to a second whenever the millisecond wrapped first. M98 found that once and told interval-measurers to use `CLOCK_MONOTONIC`; NetSurf's framebuffer scheduler did not get the message. It sets every timer by `gettimeofday`, and its fetch poller reschedules itself every 10 ms. | a 301 that arrived at 0.135 s was read at 4.033 s — with the CPU **~70% idle** in between | up to 1 s per 10 ms timer |
+
+`user_space/libc/src/wallclock.c`: a process's time of day is uptime
+plus one offset that only moves forward, to the RTC's second edges — so
+it is monotonic, its milliseconds are the monotonic clock's, and it
+follows `SYS_settime` backwards when the RTC is more than 1.25 s behind.
+NetSurf relinked (it is static; `make browser` does it in 12 s).
+
+| | before | after |
+|---|---|---|
+| `http://www.google.com/` | never finished | **4.2 s**, rendered |
+| `https://www.google.com/` | certificate failure | **5.9 s**, verified and rendered |
+| 256 KiB host stream through the NIC (`[m116]`) | ~36 corrupted frames, about a minute | 40 ms of transfer |
+
+**And https** was failing for a reason M115 had already recorded and not
+reached: `os install ca-certificates` needs `/pkg/repo`, and
+`tools/run-qemu.sh` never put one on the image. So the image a person
+booted had no way to trust anybody, and google.com worked for exactly one
+page. The browser's install now puts the repository on the image and
+names `ca-certificates` in `/pkg/repo/preinstall`; **init runs `os
+preinstall`** before the desktop, which installs it through the same
+three hashes and registry `os install` uses, once — `/pkg/db/preinstalled`
+records it, so `os remove ca-certificates` **sticks**. It is still a
+package: removable, verifiable, replaceable without rebuilding the image.
+**The assumption, recorded:** an image with the browser on it trusts the
+build host's authorities by default, the way every browser anyone uses
+ships a root store; an image without the browser — `make all` alone —
+still trusts nobody. That reverses the default M115 wrote down, on the
+person's instruction, and keeps every property the reasoning behind it
+cared about.
+
+**What still does not work, measured rather than guessed: Google
+search.** The results page is served only to a browser that runs modern
+JavaScript; to anything else it is a `<noscript>` meta-refresh to an
+"enable JavaScript" notice (fetched on the host with NetSurf's user
+agent to be sure). Duktape is ES5, so NetSurf runs the script, it fails,
+and the page is blank. That is docs/browser.md's right-hand column, not
+the network.
+
+#### 3. "The screen is very small" was a Homebrew upgrade
+
+The guest was 1024x768 before and after — every screendump said so,
+which is exactly why no test could see it. The window was not:
+**CGWindowList measured it at 512x412 points**, title bar included, on a
+Retina display. `/opt/homebrew/Cellar/qemu/11.1.1` was installed at
+11:17 on 2026-09-10, alongside `libpng` — the host library
+`tools/build-netsurf.sh` needs — so installing the browser's build
+dependency upgraded QEMU, and QEMU 11's cocoa sizes its window as guest
+pixels divided by the backing scale (`ui/cocoa.m`, `resizeWindow`): one
+guest pixel per *physical* pixel. "Small since the browser work" was
+literally true, and nothing to do with the browser.
+
+`zoom-to-fit=on` is not the fix — measured, it opens at 267x228 and
+waits for a drag. What restores the old window is telling macOS the
+process is not high-resolution capable: `run-qemu.sh` now launches QEMU
+through `build/qemu-app/lean_os.app`, a bundle whose Info.plist says
+`NSHighResolutionCapable=false` and whose executable is a symlink to
+whatever `qemu-system-x86_64` is on the PATH. Measured: **1024x796
+points**. `QEMU_HIDPI=1` opts out.
+
+M114's `QEMU_RES` stays as the way to get a *bigger* guest; the complaint
+was about the window, and the window is back.
+
+#### The instruments, which is the part the person asked for
+
+Each bug above got the instrument that would have caught it, and each
+instrument was run against the bug to prove it is not vacuous:
+
+| instrument | what it grades | against the bug |
+|---|---|---|
+| `tests/test_rtl8139_ring.c` (5 tests) | the driver's ring reader against a model of the card transcribed from QEMU's `rtl8139_write_buffer`, every frame length, the deepest straddle, ring allocated at exactly its size under ASan | the old reassembly: fails at byte 668 of the first straddling frame |
+| `tcp_state` `a_FIN_carried_with_data_is_taken_with_it` (+ the not-fitting half) | FIN-with-data | `expected 1006, got 1005` — the capture, reproduced |
+| `tcp_state` `a_corrupt_segment_is_dropped_counted_and_reported` | the checksum drop is counted and logged | — |
+| `tests/test_wallclock.c` (4 tests) | monotonic, never ahead, <1 s behind and locked after one edge, at all 1000 phases; `SYS_settime` both ways; a PIT that loses ticks | the old formula: 11,280 failed assertions |
+| `libctest` | the real `gettimeofday` on the machine across an RTC edge, against `CLOCK_MONOTONIC` | — |
+| **`[m116]`** boot self-test + `/bin/netrecv` | 256 KiB from the **host** (a QEMU `guestfwd` running `cat`) through SLIRP, the ring and TCP, over the POSIX sockets libcurl uses: every byte against a pattern, zero checksum failures, and a `nic_stream_recv_ms` budget. **The first test in this tree to put a full-sized segment through the NIC** | — |
+| **`browser_loads_a_page_from_another_machine`** (input suite, `--quick`) | a 120 KiB page from a one-request server behind a `guestfwd`, typed into the address bar; a block that comes *last* in the source must be on screen within 10 s | the ring bug put back: FAIL; fixed: 2.1-2.9 s |
+| `tests/test_poll.c` (6 tests) | `poll()` over a scripted `SYS_waitfds`: readable and writable are independent | the old code: 2 tests fail, "expected 1, got 0" |
+| `net_arp` (3 tests) | the first packet to an unresolved neighbour is held and sent on the answer; newest wins; unreachable by the third unanswered send | all three failed against the drop |
+| **`tools/window-test.sh`** (default tier) | boots through `run-qemu.sh` with its real display and measures the window with CGWindowList: one guest pixel is at least one point | with the wrapper off: `512x412 points`, FAIL, "Half the width" |
+| **`tools/tree-stamps.py`** around every stage | no stage changes a tracked file | `touch` on the table: fails naming it |
+| "a second build does nothing" | `make all` twice prints nothing | — |
+| `set-resolution.sh --check` | its mode list is the driver's — the check its header claimed `run-tests.sh` ran, and it did not | — |
+
+#### What else the new test found, and fixed
+
+- **The first packet to a neighbour was dropped.** `[m116]`'s first run
+  measured **980 ms to connect** to a host one hop away. `ip.c` sent the
+  ARP request and dropped the packet — "what BSD has always done", its
+  comment said. BSD holds it (`la_hold`). Every first contact with a
+  machine on the local link waited out TCP's 1 s RTO on a SYN that never
+  left. `arp_hold` now keeps one packet per unresolved neighbour, newest
+  wins, sent when the address is learned from any packet; a neighbour
+  asked three times without answering is reported unreachable (Linux's
+  three probes, counted rather than timed so the host test can hold it to
+  the number). `nettest`'s "unreachable" check changed with it, from the
+  first send to the third: its point was always *no hang, no panic, and
+  the program is told*.
+
+- **`poll()` hid a writable socket that was also readable.** The new
+  interactive test's first fixture was `cat page.http`, a server that
+  speaks before it is spoken to. The browser connected, received the
+  first 2.9 KB, and **never sent its request**: `poll.c` reported only
+  the POLLIN half of what a readable descriptor was asked, so a socket
+  asked for POLLOUT alone - which is how libcurl waits for a non-blocking
+  connect - reported nothing while data sat on it. A fast server, or any
+  protocol whose server speaks first (SMTP, FTP, SSH), left the browser
+  on "Loading" with its window at zero. `tests/test_poll.c` includes
+  `poll.c` with a scripted `SYS_waitfds`; two of its six tests failed
+  against the old code.
+
+#### What went wrong in this milestone's own work
+
+- **The first google.com drive discarded QEMU's stderr** (the input
+  harness sends it to `/dev/null`), so it could not have seen host-side
+  log spam. The terminal half of complaint 1 was only answered by
+  re-running inside `run-qemu.sh` itself.
+- **The first capture analysis filtered out the ACKs** and read as SLIRP
+  ignoring the window by 78 KB. It was not; the ACKs were interleaved
+  and the window respected. The real stall was ten seconds later.
+- **A counter reset**: the checksum test failed its log assertion because
+  the counter was process-wide and the rate limit had already been
+  reached by earlier tests. `tcp_init` resets it — "since boot" is what
+  the number means.
+- **The interactive test's fixture was wrong twice.** `cat` never read
+  the request, and a socket closed with unread data in it is RESET, so
+  the forward threw away everything past 58 KB - every time. And the
+  closing block was first `position:absolute`, which NetSurf does not
+  paint when empty; that failed on a page that had loaded in 0.3 s. The
+  fixture is now a four-line server that reads the request first, and an
+  ordinary block. Both mistakes were found the same way the bugs were:
+  a capture and a screendump rather than a guess. The test was then run
+  against the ring bug put back: it fails; with the fix, it passes in
+  2.1-2.9 s, of which the network is 0.57 s.
+- **One negative check proved nothing**: a `sed` idiom that is GNU-only
+  left the iconv table unedited, and the test "passed". Redone in Python
+  and it fails as it should. A mutation that did not apply is
+  indistinguishable from a sharp test unless the diff is checked.
+
+#### Cost
+
+Seven bugs fixed in the machine (the ring, the FIN, the clock, `poll`,
+the dropped first packet, a trust store no image could reach, the window
+scale) and three in the instruments (a test editing the tree, a harness
+restoring contents without timestamps, a claimed check that did not
+exist). 22 new host tests (383 total), one boot marker and program, one
+interactive test, four harness stages, one budget row. No third-party
+source touched; NetSurf relinked twice, not edited.
+
+**Graded**: 383/383 host tests; every `--fast` stage; the commit tier
+twice - the first green except the new interactive test (its fixture,
+above), the second red on two stages that are **not this milestone's**
+and are recorded rather than hidden:
+
+- the graded boot **stalled silently for 900 s** inside `[m89]`'s toybox
+  pipeline, a spawn-then-wait - the symptom M112 recorded for `[m100d]`
+  and `[m100f]`. `build/test-history.tsv` has the same 900 s stall twice
+  on each of 686f7b2 and c11d3f3, before any of this work; toybox links
+  the sysroot's libc, so `poll.c` does not reach it. The same image
+  re-run: **127/127 markers**, `nic_stream_recv_ms` 213 ms.
+- `smp-test.sh` panicked with "this CPU is not on the stack of the task
+  it thinks it is running" - row 5's reproduction, word for word. Re-run
+  three times on the same image: 3/3 pass.
+
+Then the whole interactive suite, **54/54**, and `window-test.sh` in
+both tier runs: 1024x796 points.
+
+- [x] **Where the minutes go** (M115's box). Attributed, with a
+      capture of `http://google.com/` after every fix here: **each of
+      Google's responses arrives 50-70 ms after its request, and all the
+      remaining time is the browser not having asked yet** - 0.6 s between
+      the 301 arriving and the redirect's DNS lookup, 0.9 s parsing the
+      30 KB page before fetching its images and scripts, and 3.4 s between
+      receiving Google's JavaScript and the next request, which is Duktape
+      running it on TCG. The page is done at 5.7 s. None of that is TCP,
+      so the three TCP deferrals (window scaling, SACK, Nagle) stay
+      deferred: the measurement their condition asked for exists now and
+      does not point at them. What it points at is NetSurf's own work,
+      which is the engine and is third-party code this tree does not edit.
+- [ ] **Wikipedia now aborts the browser instead of stalling it.**
+      `https://en.wikipedia.org/wiki/Unix` - the page M115 recorded as
+      "still laying out at 300 s" - now arrives in full in 4.6 s (150 KB
+      of TCP, first byte at 0.33 s), and NetSurf then stops on its own
+      assertion: `layout_flex.c:246 layout_flex_item: box ... layout
+      failed`, followed by `assertion failed: containing_block->width !=
+      UNKNOWN_WIDTH at content/handlers/html/layout.c:4504`. The network
+      fixes did not cause this; they are what let the layout engine reach
+      a path the old 0.4 KiB/s never got it to. NetSurf's own build never
+      defines NDEBUG, so an upstream 3.11 build asserts too if the flex
+      failure happens there. **The condition**: find out whose failure it
+      is before touching anything - the same NetSurf 3.11, built for the
+      host (its `monkey` front end needs no display), against a saved
+      copy of the page. If it fails there, it is upstream's, and the
+      answer is a newer NetSurf rather than an edit; if it does not, it
+      is this port - most likely an allocation or a font call that fails
+      here and nowhere else - and it is this project's bug to find.
+      Building with -DNDEBUG to make the assertion go away is not on the
+      list: it would turn a stop into a layout computed with a width of
+      INT_MAX.
 
 ---
 
@@ -3246,6 +3537,18 @@ write nothing and return successfully).
       headers with system_api's and breaks `<setjmp.h>`. Worked around
       in `tools/build-netsurf.sh`, not fixed. The fix is to stop having
       two headers with one name.
+
+### M116 — the browser on the real web, graded where the person looks `[x]` (one box open)
+
+- [ ] **Wikipedia aborts the browser.** It used to stall at 0.4 KiB/s;
+      with the network fixed, `https://en.wikipedia.org/wiki/Unix`
+      arrives in 4.6 s and NetSurf stops on its own assertion
+      (`layout.c:4504`, after a flex item's layout fails). **The
+      condition**: the same NetSurf 3.11 built for the host (the `monkey`
+      front end) against a saved copy of the page decides whose failure
+      it is - upstream's, answered by a newer NetSurf, or this port's,
+      most likely an allocation or font call that fails only here. Not
+      -DNDEBUG. See the M116 entry.
 
 ### M103 — interrupts a real machine delivers `[~]`
 

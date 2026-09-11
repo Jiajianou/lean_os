@@ -43,28 +43,35 @@ clock_t clock(void) {
  * and cannot say. */
 #include <sys/time.h>
 
+#include "wallclock.h"
+
+/* M116: the time of day, and it no longer runs backwards.
+ *
+ * This was RTC seconds plus uptime-modulo-1000 for the fraction - two
+ * counters not in phase, so a pair of calls either side of the uptime's
+ * millisecond wrapping could go back by most of a second. M98 found that
+ * once (/bin/measure reported an assembler finishing 530 ms before it
+ * started) and answered it by telling interval-measurers to use
+ * CLOCK_MONOTONIC. That was right for this project's own programs and no
+ * help at all to somebody else's: NetSurf's scheduler times everything
+ * with gettimeofday, and a 10 ms timer that meets a 900 ms step back
+ * fires 910 ms late. See wallclock.h for what that did to page loads,
+ * and for the rule that replaced it. One clock per process. */
+static wallclock_t realtime_clock;
+
+static long long realtime_ms(void) {
+    return wallclock_ms(&realtime_clock, (long long)sys_time((os_datetime_t *)0),
+                        (long long)sys_uptime_ms());
+}
+
 int gettimeofday(struct timeval *tv, void *tz) {
     (void)tz;
     if (!tv) {
         return -1;
     }
-    tv->tv_sec = (time_t)sys_time((os_datetime_t *)0);
-    /* The sub-second part comes from the uptime clock, which is the only
-     * thing here that ticks faster than a second. It is not phase-locked
-     * to the wall clock - the two are different counters - so this is
-     * "some number of milliseconds within the current second" rather
-     * than "the fraction of this second that has elapsed".
-     *
-     * M98 sharpened what that costs, because the sentence that used to
-     * stand here - "enough for a program measuring intervals" - is
-     * false. The two counters drift against each other, so a pair taken
-     * either side of a wall-clock second can be SMALLER than the one
-     * before it: /bin/measure's first version subtracted two of these
-     * and reported an assembler that finished 530 ms before it started.
-     * A program measuring an interval wants CLOCK_MONOTONIC below,
-     * which is SYS_uptime_ms and cannot go backwards. This call is for
-     * asking what time it is. */
-    tv->tv_usec = (long)(sys_uptime_ms() % 1000) * 1000;
+    long long ms = realtime_ms();
+    tv->tv_sec = (time_t)(ms / 1000);
+    tv->tv_usec = (long)(ms % 1000) * 1000;
     return 0;
 }
 
@@ -81,8 +88,9 @@ int clock_gettime(clockid_t clk, struct timespec *ts) {
         return 0;
     }
     if (clk == CLOCK_REALTIME) {
-        ts->tv_sec = (time_t)sys_time((os_datetime_t *)0);
-        ts->tv_nsec = (long)(sys_uptime_ms() % 1000) * 1000000L; /* see gettimeofday */
+        long long ms = realtime_ms(); /* M116: see gettimeofday */
+        ts->tv_sec = (time_t)(ms / 1000);
+        ts->tv_nsec = (long)(ms % 1000) * 1000000L;
         return 0;
     }
     return -1;

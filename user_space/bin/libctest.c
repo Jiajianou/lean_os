@@ -512,6 +512,52 @@ int main(void) {
         if (gettimeofday(&tv, 0) != 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000) {
             fail("gettimeofday");
         }
+
+        /* M116: and the time of day may not go backwards either - which it
+         * did, by up to a second, for as long as it was RTC seconds plus
+         * uptime modulo 1000. NetSurf's scheduler times everything with
+         * gettimeofday, and a 10 ms timer that met one of those steps
+         * fired most of a second late: google.com took 22 s to load with
+         * the CPU half idle. The host tier grades the arithmetic at every
+         * phase (tests/test_wallclock.c); this grades the real clocks,
+         * for long enough that the RTC's second has to change at least
+         * once, and requires the time of day to advance exactly as the
+         * monotonic clock does across it, give or take a tick. */
+        struct timespec m0, m1;
+        struct timeval w0, w1;
+        clock_gettime(CLOCK_MONOTONIC, &m0);
+        gettimeofday(&w0, 0);
+        long long prev = (long long)w0.tv_sec * 1000000 + w0.tv_usec;
+        long long step_back = 0;
+        for (;;) {
+            gettimeofday(&w1, 0);
+            long long now = (long long)w1.tv_sec * 1000000 + w1.tv_usec;
+            if (now < prev && prev - now > step_back) {
+                step_back = prev - now;
+            }
+            prev = now;
+            clock_gettime(CLOCK_MONOTONIC, &m1);
+            long long mono_ms = ((long long)m1.tv_sec - m0.tv_sec) * 1000 +
+                                (m1.tv_nsec - m0.tv_nsec) / 1000000;
+            if (mono_ms >= 1200) {
+                break;
+            }
+        }
+        if (step_back) {
+            printf("libctest: gettimeofday went back %lld us\n", step_back);
+            fail("gettimeofday went backwards");
+        }
+        long long mono_ms = ((long long)m1.tv_sec - m0.tv_sec) * 1000 +
+                            (m1.tv_nsec - m0.tv_nsec) / 1000000;
+        long long wall_ms = ((long long)w1.tv_sec - w0.tv_sec) * 1000 +
+                            (w1.tv_usec - w0.tv_usec) / 1000;
+        /* The time of day may be pulled forward to an RTC edge it had not
+         * reached yet, never back, and never by more than a second. */
+        if (wall_ms < mono_ms - 20 || wall_ms > mono_ms + 1000) {
+            printf("libctest: %lld ms of the monotonic clock was %lld ms of the time of day\n",
+                   mono_ms, wall_ms);
+            fail("gettimeofday does not advance with the monotonic clock");
+        }
     }
 
     /* mmap through <sys/mman.h>, which is M78 reached by its POSIX name

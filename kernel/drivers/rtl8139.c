@@ -1,4 +1,5 @@
 #include "rtl8139.h"
+#include "rtl8139_ring.h" /* M116 */
 #include "dev/random.h" /* M100 */
 
 #include "arch/x86_64/io.h"
@@ -43,11 +44,11 @@
 
 #define TSD_OWN (1u << 13) /* clear = NIC owns the buffer (still sending); set by hardware once done */
 
-/* RX ring: 8 KiB ring + 16-byte header slack + 1.5 KiB overflow pad the
- * RCR_WRAP bit above permits a trailing packet to spill into, all
- * physically contiguous (the NIC DMAs into it by physical base address
- * alone, no scatter list) and rounded up to whole 4 KiB frames. */
-#define RX_BUFFER_SIZE (8192 + 16 + 1500)
+/* RX ring: 8 KiB ring + the overflow pad the RCR_WRAP bit above makes a
+ * trailing packet spill into, all physically contiguous (the NIC DMAs
+ * into it by physical base address alone, no scatter list) and rounded
+ * up to whole 4 KiB frames. The layout is rtl8139_ring.h's business. */
+#define RX_BUFFER_SIZE (RTL8139_RING_LEN + RTL8139_RING_PAD)
 #define RX_BUFFER_FRAMES ((RX_BUFFER_SIZE + 4095) / 4096)
 
 /* One fixed physical buffer per TX descriptor (4 total), each large
@@ -73,40 +74,17 @@ static void rtl8139_irq(isr_regs_t *regs) {
 
     if (status & ISR_ROK) {
         while (!(inb(io_base + REG_CMD) & CMD_BUFE)) {
-            uint8_t *header = rx_buffer + rx_read_offset;
-            /* RX packet header layout: 2-byte status, 2-byte length
-             * (little-endian, length includes the trailing 4-byte CRC). */
-            uint16_t packet_status = (uint16_t)(header[0] | (header[1] << 8));
-            uint16_t packet_len = (uint16_t)(header[2] | (header[3] << 8));
-            (void)packet_status;
-
-            uint8_t *frame = header + 4;
-            uint16_t frame_len = (uint16_t)(packet_len >= 4 ? packet_len - 4 : 0);
-
-            if (frame_len > 0 && frame_len <= RTL8139_MAX_FRAME) {
-                if (rx_read_offset + 4 + frame_len <= 8192) {
-                    eth_receive(frame, frame_len);
-                } else {
-                    /* Frame wraps past the end of the 8K ring into the
-                     * overflow pad - reassemble into a scratch buffer
-                     * rather than teach every protocol handler about a
-                     * split buffer for a case RCR_WRAP only makes
-                     * possible, never likely (needs the ring cursor to
-                     * land in its last ~1.5K, exactly where the pad
-                     * exists to absorb this). */
-                    static uint8_t wrap_scratch[RTL8139_MAX_FRAME];
-                    uint32_t first_part = 8192 - rx_read_offset - 4;
-                    k_memcpy(wrap_scratch, frame, first_part);
-                    k_memcpy(wrap_scratch + first_part, rx_buffer, frame_len - first_part);
-                    eth_receive(wrap_scratch, frame_len);
-                }
+            /* M116: the frame is contiguous even when it runs past the
+             * end of the ring - RCR_WRAP puts the tail in the pad rather
+             * than at the start. This used to reassemble it from the
+             * start of the ring, which is the layout with RCR_WRAP clear,
+             * and every frame that straddled the end reached TCP with a
+             * stale tail and was discarded by its checksum. */
+            rtl8139_rx_t rx;
+            rx_read_offset = rtl8139_ring_take(rx_buffer, rx_read_offset, &rx);
+            if (rx.len) {
+                eth_receive(rx.frame, rx.len);
             }
-
-            /* Advance past this packet's 4-byte header + data + CRC,
-             * rounded up to a 4-byte boundary (hardware requirement),
-             * wrapping around the 8K ring. */
-            rx_read_offset = (rx_read_offset + 4 + packet_len + 3) & ~3u;
-            rx_read_offset %= 8192;
 
             /* CAPR quirk: the NIC keeps a 16-byte read-ahead margin, so
              * the value written back is the new offset minus 16 (wrapping

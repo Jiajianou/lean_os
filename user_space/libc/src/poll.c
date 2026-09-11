@@ -105,11 +105,20 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
              * woken by it would hang at exactly the moment it should
              * stop. A caller finds out which it was by reading and
              * getting zero bytes, which is what it would have done
-             * anyway. */
-            fds[map[i]].revents |= (short)(fds[map[i]].events & POLLIN);
+             * anyway.
+             *
+             * M116: and writable, if asked - a descriptor does not stop
+             * being writable because there is also something to read.
+             * This reported only the POLLIN half, so a socket asked for
+             * POLLOUT alone with data already waiting reported nothing.
+             * That is how libcurl waits for a non-blocking connect, and
+             * a server that speaks first left the browser waiting for a
+             * connect that had finished, on "Loading", for ever. See
+             * tests/test_poll.c. */
+            fds[map[i]].revents |= (short)(fds[map[i]].events & (POLLIN | POLLOUT));
             if (fds[map[i]].revents == 0) {
-                /* Readable but the caller did not ask for POLLIN. Nothing
-                 * to report, and reporting POLLERR would be wrong - there
+                /* Readable but the caller asked for neither. Nothing to
+                 * report, and reporting POLLERR would be wrong - there
                  * is no error, only news the caller did not want. */
                 continue;
             }

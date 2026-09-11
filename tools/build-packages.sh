@@ -251,6 +251,10 @@ EOF
 #   - Installing it is a decision somebody makes, by name, once. An
 #     image that has never had `os install ca-certificates` run on it
 #     trusts nobody, which is the state M100 chose deliberately.
+#     (M116: the browser's install now makes that decision for an image
+#     it puts a browser on, by naming this package in
+#     /pkg/repo/preinstall - see tools/install-netsurf.sh. Still through
+#     `os`, still removable, and `os remove` sticks.)
 #   - It can be replaced without rebuilding the OS. A CA bundle is the
 #     one piece of a system that MUST be updatable on its own: an
 #     authority is removed from it when it has done something wrong,

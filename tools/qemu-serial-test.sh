@@ -170,6 +170,30 @@ if [ "${LEANOS_IOAPIC:-0}" = "1" ]; then
   IOAPIC_FWCFG="-fw_cfg name=opt/leanos/ioapic,string=1"
 fi
 
+# ---- M116: a stream from the host, for the [m116] self-test ------------
+#
+# QEMU's guestfwd runs a host command for each connection the guest makes
+# to 10.0.2.100:7777 and joins its stdout to the connection - so the
+# guest reads a file this script wrote, through SLIRP, the RTL8139's
+# receive ring and the whole of kernel/net, exactly as it reads a web
+# page. /bin/netrecv checks every byte against the same pattern
+# (user_space/bin/netrecv.c: byte i is (i*7 + (i>>9)) & 0xFF). 256 KiB is
+# about 180 full-sized segments and some 36 laps of the ring: before
+# M116 that was 36 corrupted frames and close to a minute of
+# retransmission, and now it is a fraction of a second.
+#
+# The path has no comma in it on purpose: QEMU's option parser would
+# split the guestfwd there.
+NIC_STREAM_BYTES=262144
+NIC_STREAM="$(mktemp -t leanos-nicstream-XXXXXX)"
+python3 -c "
+import sys
+n = int(sys.argv[2])
+sys.stdout = open(sys.argv[1], 'wb')
+sys.stdout.write(bytes(((i * 7 + (i >> 9)) & 0xFF) for i in range(n)))
+" "$NIC_STREAM" "$NIC_STREAM_BYTES"
+NETDEV="user,id=net0,guestfwd=tcp:10.0.2.100:7777-cmd:cat $NIC_STREAM"
+
 LOG="${LEANOS_SERIAL_LOG:-$(mktemp -t qemu-serial-XXXXXX.log)}"
 # Emptied before QEMU is started, and this is not tidiness. The wait loop
 # below decides the boot is over by grepping this file for a panic or for
@@ -243,9 +267,10 @@ qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
   "${DISK_ARGS[@]}" -display none \
-  -netdev user,id=net0 -device rtl8139,netdev=net0 \
+  -netdev "$NETDEV" -device rtl8139,netdev=net0 \
   -audiodev none,id=snd0 -device AC97,audiodev=snd0 \
   -fw_cfg name=opt/leanos/selftest,string=1 \
+  -fw_cfg "name=opt/leanos/nicstream,string=$NIC_STREAM_BYTES" \
   $IOAPIC_FWCFG \
   -serial file:"$LOG" -monitor none ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} &
 QEMU_PID=$!
@@ -519,6 +544,11 @@ REQUIRED_MARKERS=(
   # there is no configuration in which a correct image legitimately
   # lacks it, and its absence is the seeding having stopped working.
   "[m114] more than one nameserver:"
+  # M116: a stream from the host through the NIC, byte for byte, with no
+  # corrupt segment on the way - see NIC_STREAM above. Required, because
+  # this harness is what provides the stream: an image that prints the
+  # skip line here has lost the fw_cfg switch, not the network.
+  "[m116] a stream from the host:"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

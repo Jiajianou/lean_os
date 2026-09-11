@@ -63,6 +63,16 @@ STAGE_VERDICTS=()
 STAGE_SECONDS=()
 OVERALL=0
 
+# M116: and every stage must leave the tracked tree exactly as it found
+# it - contents AND timestamps. iconv-test.sh regenerated a checked-in
+# file in place, which left `git status` clean and made the next `make`
+# relink every program and recreate the disk image; the person who ran
+# tools/run-qemu.sh afterwards got 135 KB of link lines and an empty
+# filesystem, after every test run since M100. tools/tree-stamps.py says
+# which stage and which files.
+STAMPS=$(mktemp -t leanos-stamps-XXXXXX)
+trap 'rm -f "$STAMPS"' EXIT
+
 run_stage() {
   local name="$1"; shift
   local started finished verdict
@@ -71,9 +81,14 @@ run_stage() {
   echo "  $name"
   echo "=============================================================="
   started=$(date +%s)
+  python3 tools/tree-stamps.py snapshot "$STAMPS"
   if "$@"; then
     verdict="pass"
   else
+    verdict="FAIL"
+    OVERALL=1
+  fi
+  if ! python3 tools/tree-stamps.py compare "$STAMPS"; then
     verdict="FAIL"
     OVERALL=1
   fi
@@ -90,6 +105,13 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
     echo "build failed - nothing below would mean anything" >&2
     exit 1
   fi
+  # M116: and the build has to know it is finished. A second `make all`
+  # straight after the first must do nothing and say nothing; a rule that
+  # always rebuilds relinks the kernel, which recreates the disk image -
+  # the flood of output and the wiped filesystem tools/run-qemu.sh
+  # produced after every test run, from the other direction.
+  run_stage "a second build does nothing" \
+    bash -c 'out=$(make all 2>&1); [ -z "$out" ] || { echo "make all ran again:"; echo "$out" | head -20; exit 1; }'
   # M89: and the ported userland, onto that image.
   #
   # `make toybox` is not part of `all` - see the Makefile for the inode
@@ -244,6 +266,9 @@ run_stage "iconv, against the host's" ./tools/iconv-test.sh
 # own realpath grade all of it - see tools/realpath-test.sh for the
 # undefined behaviour its absence fed the gcc driver.
 run_stage "realpath, against the host's" ./tools/realpath-test.sh
+# M116: the screen sizes tools/set-resolution.sh accepts are the ones the
+# driver offers. Its header said this stage existed; it did not.
+run_stage "set-resolution's modes are the driver's" ./tools/set-resolution.sh --check
 
 # ---- Q11/Q12: the instruments that grade the tests themselves --------
 #
@@ -335,6 +360,14 @@ else
   # manufactures a stale snapshot and requires the harness to refuse it.
   run_stage "a stale snapshot is refused, not used" \
     ./tools/qemu-input-test.sh --check-stale
+
+  # M116: and the window a person sees, which nothing above looks at. A
+  # Homebrew upgrade of QEMU halved it on a Retina screen with every
+  # test here green, because every test here grades the guest and the
+  # guest had not changed. Boots through tools/run-qemu.sh with its real
+  # display, so it opens a window for about fifteen seconds; it says so
+  # and skips on a host with no cocoa display or no window server.
+  run_stage "the window run-qemu.sh opens is full size" ./tools/window-test.sh
 fi
 
 # ---- Summary ----------------------------------------------------------

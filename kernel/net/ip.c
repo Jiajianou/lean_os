@@ -47,13 +47,13 @@ static int loop_head, loop_tail, loop_count, loop_draining;
  * fire. The first `sendto` to an unresolved address stopped the machine
  * dead, and the boot log ended mid-self-test with no panic and no clue.
  *
- * So: wait only when waiting is possible, and otherwise do what BSD has
- * always done with a packet whose neighbour is unknown - send the ARP
- * request, drop this one, and let the caller send again. That is a real
- * behaviour of a real stack and not a workaround: the first packet to a
- * new neighbour is lost while ARP resolves, which is why TCP's SYN
- * retransmits and why udp_send's failure here is documented as "try
- * again" rather than "unreachable".
+ * So: wait only when waiting is possible, and otherwise send the ARP
+ * request and let the packet wait for the answer. This paragraph used to
+ * say "drop this one, and let the caller send again", and call that what
+ * BSD does. It is not - BSD holds the packet (la_hold) - and dropping it
+ * cost every first contact with a machine on the local link a whole TCP
+ * retransmission timeout, 980 ms to connect one hop away. M116 holds it:
+ * see arp_hold, and ip_send_from below.
  *
  * The alternative fix is to make vector 0x80 a trap gate so IF stays set
  * through a syscall, which is what every production kernel does and
@@ -147,14 +147,23 @@ int ip_send_from(uint32_t src_ip, uint32_t dst_ip, uint8_t protocol,
      * on the segment by definition, which is the only way DHCP can ask
      * for an address before it has one. */
     uint8_t next_hop_mac[ETH_ADDR_LEN];
+    int resolved = 1;
     if (dst_ip == NET_BROADCAST_IP) {
         k_memcpy(next_hop_mac, eth_broadcast_mac, ETH_ADDR_LEN);
     } else if (!resolve_neighbor(next_hop_ip, next_hop_mac)) {
-        return -1;
+        resolved = 0;
     }
 
     build_header(packet, src_ip, dst_ip, protocol, payload_len);
     k_memcpy(packet + IP_HEADER_LEN, payload, payload_len);
+
+    if (!resolved) {
+        /* M116: held for the answer, not dropped - see arp_hold, and the
+         * comment on resolve_neighbor above for what dropping it cost. A
+         * neighbour that never answers is reported as -1 by the third
+         * send, which is what nettest's "unreachable" check holds it to. */
+        return arp_hold(next_hop_ip, packet, (uint16_t)(IP_HEADER_LEN + payload_len));
+    }
 
     eth_send(next_hop_mac, ETH_TYPE_IPV4, packet, (uint16_t)(IP_HEADER_LEN + payload_len));
     return 0;

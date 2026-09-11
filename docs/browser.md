@@ -144,6 +144,57 @@ trusting whoever curates the machine this was built on. It is data, not
 code, and it lives under `/pkg` rather than in the OS, which is exactly
 where CLAUDE.md's first non-negotiable puts it.
 
+**M116: and it now arrives with the browser, still as a package.** M115
+left `os install ca-certificates` as a step somebody had to know to type
+into a terminal, on an image that did not even have `/pkg/repo` on it —
+`tools/run-qemu.sh` never put one there. So the machine a person booted
+failed every `https://` certificate check, and google.com worked for
+exactly one page. Now the browser's install (`tools/install-netsurf.sh`,
+which `make browser` and `browser-if-built` run) puts the repository on
+the image and names `ca-certificates` in `/pkg/repo/preinstall`, and on
+first boot init runs `os preinstall`, which installs it through the same
+three hashes and the same registry `os install` uses:
+
+```
+os: installed ca-certificates-1.0 (1 files) in /pkg/ca-certificates/1.0
+os: it may: nothing but read files and use the descriptors it is given
+```
+
+Every property that made it a package is kept. It is removable, and
+`os remove ca-certificates` **sticks** — `/pkg/db/preinstalled` records
+what was preinstalled, so the next boot does not quietly put it back.
+It is verifiable (`os verify`), and replaceable without rebuilding the
+image. What changed is the default for an image that has a browser on
+it: that image trusts the build host's authorities, the way every
+browser anyone uses ships with a root store. **An image without the
+browser still trusts nobody** — `make all` alone writes no repository
+and no preinstall list.
+
+### Fetching, measured — M116
+
+The first time anybody typed google.com into this browser it did not
+load. Three bugs in this OS, all below the browser, each found with a
+packet capture rather than by reading code:
+
+| what | symptom on the wire | cost per event |
+|---|---|---|
+| the RTL8139 driver reassembled a frame that straddled the end of its receive ring from the ring's *start* — the layout with `RCR_WRAP` clear, which it sets | a segment arrives, is ACKed as if it had not | 1.5 s retransmission, one full-sized frame in five |
+| TCP judged a FIN on the same segment as data against the data's first byte | the last segment of every reply ACKed without its FIN | 1.4 s per server-closed connection |
+| `gettimeofday` was RTC seconds plus uptime modulo 1000, and went backwards by up to a second | a reply sitting in the socket for seconds with the CPU half idle | up to 1 s per 10 ms timer in NetSurf's scheduler |
+
+| | before | after |
+|---|---|---|
+| 60 KB from a host server, `fetch` | never finished (gave up at 8 s with 30 KB) | 35 ms |
+| `http://www.google.com/` | never finished | 4.2 s, rendered |
+| `https://www.google.com/` | certificate failure | 5.9 s, verified and rendered |
+
+What still does not work is **Google search**: since 2025 a results page
+is served only to a browser that runs modern JavaScript, and to anything
+else it is a `<noscript>` meta-refresh to an "enable JavaScript" notice.
+Duktape is ES5, so NetSurf runs the script, the script fails, and the page
+stays blank. That is the right-hand column of the table below, not the
+network.
+
 ### What it can and cannot render, measured
 
 `http://example.com/` loads and renders with its stylesheet — verified

@@ -3110,6 +3110,66 @@ def test_browser_renders_a_page(m):
           "text onto the page" % text)
 
 
+def test_browser_loads_a_page_from_another_machine(m):
+    """M116: the browser, fetching a page over the network, in a time a
+    person would accept.
+
+    browser_renders_a_page above loads a file:// URL, and so it grades
+    the layout engine and nothing between the browser and the wire. Every
+    web page crosses that part, and it was broken three ways at once
+    while this suite stayed green:
+
+      - the RTL8139 driver corrupted one full-sized frame in five (the
+        ones that straddle the end of its receive ring), and TCP's
+        checksum discarded them without a word - 1.5 s per loss;
+      - TCP ignored a FIN carried on the last data segment, so every
+        server-closed connection waited 1.4 s for it to be resent;
+      - gettimeofday went backwards by up to a second, and NetSurf's
+        scheduler, which polls its fetches every 10 ms by that clock,
+        slept through most of a second at a time with the reply sitting
+        in the socket.
+
+    google.com took 22 s after the first two were fixed and 4 s after
+    the third. So: a 120 KiB page from a host-side server (a guestfwd
+    running qemu_input.net_page_server's one-request script), typed into the address bar the way a person types
+    one, and the block that closes the document must be on screen within
+    the budget. The block is the first thing on the page - everything
+    before it is display:none - but it comes LAST in the source, so
+    nothing short of every byte arriving can put it there."""
+    boot(m)
+    browser = ICONS[-1]
+    m.double_click(browser[3], browser[2])
+    wait_for_windows(m, 1, timeout=45.0)
+    wait_for(m, lambda s: _blue_in_page(s) > 5000,
+             "the browser never finished showing its own start page",
+             timeout=45.0)
+
+    # The address bar, clicked past the end of what is in it so the caret
+    # lands at the end, emptied, and a URL typed.
+    m.click(620, 151)
+    time.sleep(0.3)
+    for _ in range(60):
+        m.sendkey("backspace")
+    m.type_text(qemu_input.NET_PAGE_URL)
+    started = time.time()
+    m.sendkey("ret")
+
+    def block_on_screen(s):
+        return s.count_color(qemu_input.NET_PAGE_BLOCK, 180, 160, 820, 560) > 20000
+
+    # 10 s, against 1-2 s measured once the three bugs were fixed and a
+    # minute or more before - the three failures are each worth whole
+    # seconds on this page, so the budget sits well clear of both.
+    BUDGET_S = 10.0
+    wait_for(m, block_on_screen,
+             "the page from 10.0.2.100 was not fully on screen within %.0f s of "
+             "pressing Enter - the network, TCP or the browser's fetch loop "
+             "is losing time (see M116)" % BUDGET_S,
+             timeout=BUDGET_S)
+    print("    page from another machine on screen %.1f s after Enter"
+          % (time.time() - started))
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -3171,6 +3231,8 @@ TESTS = [
     ("a_window_redrawing_itself_leaves_its_neighbours_alone",
      test_a_window_redrawing_itself_leaves_its_neighbours_alone),
     ("browser_renders_a_page", test_browser_renders_a_page),
+    ("browser_loads_a_page_from_another_machine",
+     test_browser_loads_a_page_from_another_machine),
 ]
 
 
@@ -3219,6 +3281,11 @@ QUICK_TESTS = [
     # is invisible to every other test here and is the kind a person
     # notices before a harness does.
     "launching_an_app_does_not_disturb_the_rest_of_the_screen",
+    # M116: the one test that puts a web page through the NIC, TCP and
+    # the browser's fetch loop. In the pre-commit subset because all three
+    # were broken at once while every other test here passed, and the
+    # person using the machine found it by typing google.com.
+    "browser_loads_a_page_from_another_machine",
 ]
 
 

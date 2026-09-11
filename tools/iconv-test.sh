@@ -44,16 +44,24 @@ HOSTCC="${HOSTCC:-cc}"
 # to what is checked in means a hand edit to a generated file is a test
 # failure rather than a surprise three months later. It is also the only
 # way the "GENERATED - do not edit" banner is worth anything.
-cp user_space/libc/src/iconv_tables.c "$OUT/iconv_tables.c.orig"
-if ! python3 tools/gen-iconv-tables.py >/dev/null; then
+#
+# M116: generated beside the checked-in file and compared, never over
+# it. This used to regenerate the tracked file in place - the same bytes
+# with a new mtime - and in a Makefile a new mtime is a changed file:
+# the next `make all` recompiled it, relinked all sixty-six programs,
+# relinked the kernel that embeds them and recreated the disk image,
+# printing 135 KB of link lines on the way. Every test run did that to
+# the next `tools/run-qemu.sh`, and wiped the machine's filesystem with
+# it. run-tests.sh now fails any stage that touches a tracked file.
+if ! python3 tools/gen-iconv-tables.py "$OUT/iconv_tables.c.generated" >/dev/null; then
   echo "iconv-test: the table generator failed" >&2
   exit 1
 fi
-if ! cmp -s "$OUT/iconv_tables.c.orig" user_space/libc/src/iconv_tables.c; then
+if ! cmp -s "$OUT/iconv_tables.c.generated" user_space/libc/src/iconv_tables.c; then
   echo "iconv-test: user_space/libc/src/iconv_tables.c is not what" >&2
   echo "            tools/gen-iconv-tables.py produces. It says GENERATED" >&2
   echo "            at the top; edit the generator, not the table." >&2
-  diff "$OUT/iconv_tables.c.orig" user_space/libc/src/iconv_tables.c | head -20 >&2
+  diff user_space/libc/src/iconv_tables.c "$OUT/iconv_tables.c.generated" | head -20 >&2
   exit 1
 fi
 

@@ -362,6 +362,51 @@ TEST(tcp_state, a_segment_out_of_order_is_not_delivered_as_if_it_were_in_order) 
     tcp_release(l);
 }
 
+/* M116: a segment whose checksum is wrong is not delivered - and is not
+ * discarded in silence either. The RTL8139 driver handed this stack one
+ * corrupt full-sized segment in five for ninety milestones; the drop was
+ * correct and the silence is what made it cost a packet capture to find.
+ * Counted so a boot self-test can require zero, and logged so the serial
+ * log says so. */
+TEST(tcp_state, a_corrupt_segment_is_dropped_counted_and_reported) {
+    tcp_fixture();
+    struct tcpcb *l = NULL;
+    uint32_t pseq = 0, oseq = 0;
+    struct tcpcb *c = established(&l, &pseq, &oseq);
+    REQUIRE(c != NULL);
+
+    uint32_t before = tcp_checksum_failures();
+    klog_capture_reset();
+
+    uint8_t seg[20 + 5];
+    memset(seg, 0, sizeof(seg));
+    be16_put(seg + 0, PEER_PORT);
+    be16_put(seg + 2, OUR_PORT);
+    be32_put(seg + 4, pseq);
+    be32_put(seg + 8, oseq);
+    seg[12] = 5 << 4;
+    seg[13] = F_ACK | F_PSH;
+    be16_put(seg + 14, 4096);
+    memcpy(seg + 20, "HELLO", 5);
+    be16_put(seg + 16, tcp_checksum(PEER_IP, LOCAL_IP, seg, sizeof(seg)));
+    seg[24] ^= 0x20; /* one bit of the payload, after the sum was taken */
+    tcp_handle_packet(PEER_IP, LOCAL_IP, seg, sizeof(seg));
+
+    CHECK_EQ(tcp_bytes_available(c), 0);
+    CHECK_EQ(tcp_checksum_failures(), before + 1);
+    CHECK(klog_capture_contains("[tcp] checksum: dropped a corrupt segment"));
+
+    /* And the same bytes with the bit put back are an ordinary segment -
+     * which is what says the drop was about the checksum and nothing
+     * else about this segment. */
+    seg[24] ^= 0x20;
+    tcp_handle_packet(PEER_IP, LOCAL_IP, seg, sizeof(seg));
+    CHECK_EQ(tcp_bytes_available(c), 5);
+    CHECK_EQ(tcp_checksum_failures(), before + 1);
+    tcp_release(c);
+    tcp_release(l);
+}
+
 /* M100: RFC 5681's four tests for a duplicate ACK include "the advertised
  * window is unchanged". A receiver that reads its buffer in pieces sends
  * one ACK per read at the same number with a growing window - window
@@ -430,6 +475,67 @@ TEST(tcp_state, a_peer_FIN_moves_us_to_CLOSE_WAIT_and_recv_reports_end_of_stream
      * means "there will never be any more". */
     uint8_t out[8];
     CHECK_EQ(tcp_recv(c, out, sizeof(out)), -1);
+    tcp_release(c);
+    tcp_release(l);
+}
+
+/* M116: the FIN on the same segment as the last of the data - which is
+ * how nearly every server closes, and how QEMU's SLIRP sends an HTTP
+ * reply's last bytes. The FIN occupies the sequence number AFTER the
+ * data, so it has to be judged against rcv_nxt as the data left it. It
+ * was judged against the segment's first byte instead, which after the
+ * data had been taken never matched: the FIN was ignored, the ACK said
+ * only "I have the data", and the peer's retransmission timer brought
+ * the FIN back alone 1.4 s later. Every connection a server closed paid
+ * that, on top of whatever the transfer cost. */
+TEST(tcp_state, a_FIN_carried_with_data_is_taken_with_it) {
+    tcp_fixture();
+    struct tcpcb *l = NULL;
+    uint32_t pseq = 0, oseq = 0;
+    struct tcpcb *c = established(&l, &pseq, &oseq);
+    REQUIRE(c != NULL);
+
+    fake_net_reset();
+    const uint8_t body[] = "last";
+    from_peer(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK | F_PSH | F_FIN, body, 4);
+
+    CHECK_EQ(tcp_state(c), TCP_CLOSE_WAIT);
+    sent_t s;
+    REQUIRE(last_sent(&s));
+    CHECK(s.flags & F_ACK);
+    CHECK_EQ(s.ack, pseq + 4 + 1); /* the data, and the FIN after it */
+
+    uint8_t out[8] = {0};
+    CHECK_EQ(tcp_recv(c, out, sizeof(out)), 4);
+    CHECK_MEMEQ(out, "last", 4);
+    CHECK_EQ(tcp_recv(c, out, sizeof(out)), -1);
+    tcp_release(c);
+    tcp_release(l);
+}
+
+/* ...and the other half of the same rule: a FIN behind data that did NOT
+ * all fit is not taken, because the bytes before it were not. Taking it
+ * would report end of stream with part of the stream still missing. */
+TEST(tcp_state, a_FIN_behind_data_that_did_not_fit_is_not_taken) {
+    tcp_fixture();
+    struct tcpcb *l = NULL;
+    uint32_t pseq = 0, oseq = 0;
+    struct tcpcb *c = established(&l, &pseq, &oseq);
+    REQUIRE(c != NULL);
+
+    /* Fill the receive buffer to within two bytes of full. */
+    uint8_t chunk[100];
+    memset(chunk, 'x', sizeof(chunk));
+    uint32_t seq = pseq;
+    while (tcp_bytes_available(c) + 100 <= TCP_RECV_BUF - 2) {
+        from_peer(OUR_PORT, PEER_PORT, seq, oseq, F_ACK, chunk, 100);
+        seq += 100;
+    }
+    int room = TCP_RECV_BUF - tcp_bytes_available(c);
+    REQUIRE(room > 0 && room < 100);
+
+    from_peer(OUR_PORT, PEER_PORT, seq, oseq, F_ACK | F_FIN, chunk, 100);
+    CHECK_EQ(tcp_state(c), TCP_ESTABLISHED);
     tcp_release(c);
     tcp_release(l);
 }

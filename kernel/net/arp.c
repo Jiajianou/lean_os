@@ -1,5 +1,6 @@
 #include "arp.h"
 
+#include "ip.h" /* M116: IP_HEADER_LEN, for the held packet */
 #include "lib/libk.h"
 #include "net.h"
 #include "wire.h"
@@ -25,11 +26,84 @@ static struct {
     int valid;
 } arp_cache[ARP_CACHE_SIZE];
 
+/* ---- M116: a packet waiting for its neighbour's answer ---------------
+ *
+ * One per unresolved neighbour, newest wins - BSD's la_hold. Until M116
+ * ip.c dropped the packet instead ("send the ARP request, drop this one,
+ * and let the caller send again"), which made the first contact with any
+ * machine on the local link wait for a retransmission timer: 980 ms to
+ * connect one hop away, measured by the [m116] self-test, all of it a
+ * SYN that never left. Four slots, because this network has a gateway,
+ * a DNS server and at most a couple of peers being resolved at once; a
+ * fifth evicts slot 0, and the packet in it is lost exactly as it would
+ * have been before.
+ *
+ * And a neighbour that never answers is reported, not held for ever.
+ * Every send to it asks again (resolve_neighbor sends the request), and
+ * the third unanswered one is refused - Linux's three probes, counted in
+ * questions rather than seconds so that a host test can hold it to the
+ * number. The slot is cleared when it gives up, so a neighbour that
+ * comes back later is asked afresh. */
+#define ARP_HOLD_SLOTS   4
+#define ARP_HOLD_MAX     (IP_HEADER_LEN + 1500)
+#define ARP_HOLD_GIVE_UP 3
+static struct {
+    uint32_t ip;
+    uint16_t len;
+    int used;
+    int asks;
+    uint8_t packet[ARP_HOLD_MAX];
+} arp_hold_slots[ARP_HOLD_SLOTS];
+
 void arp_init(void) {
     k_memset(arp_cache, 0, sizeof(arp_cache));
+    k_memset(arp_hold_slots, 0, sizeof(arp_hold_slots));
 }
 
-void arp_learn(uint32_t ip, const uint8_t mac[ETH_ADDR_LEN]) {
+int arp_hold(uint32_t next_hop_ip, const uint8_t *ip_packet, uint16_t len) {
+    if (len > ARP_HOLD_MAX) {
+        return -1;
+    }
+    int slot = -1;
+    for (int i = 0; i < ARP_HOLD_SLOTS && slot < 0; i++) {
+        if (arp_hold_slots[i].used && arp_hold_slots[i].ip == next_hop_ip) {
+            slot = i; /* the newer packet replaces the older one */
+        }
+    }
+    if (slot >= 0) {
+        if (++arp_hold_slots[slot].asks >= ARP_HOLD_GIVE_UP) {
+            arp_hold_slots[slot].used = 0;
+            return -1; /* asked three times, never answered: unreachable */
+        }
+    } else {
+        for (int i = 0; i < ARP_HOLD_SLOTS && slot < 0; i++) {
+            if (!arp_hold_slots[i].used) {
+                slot = i;
+            }
+        }
+        if (slot < 0) {
+            slot = 0;
+        }
+        arp_hold_slots[slot].asks = 1;
+    }
+    arp_hold_slots[slot].ip = next_hop_ip;
+    arp_hold_slots[slot].len = len;
+    arp_hold_slots[slot].used = 1;
+    k_memcpy(arp_hold_slots[slot].packet, ip_packet, len);
+    return 0;
+}
+
+/* Sends whatever was waiting for `ip`, now that it has an address. */
+static void release_held(uint32_t ip, const uint8_t mac[ETH_ADDR_LEN]) {
+    for (int i = 0; i < ARP_HOLD_SLOTS; i++) {
+        if (arp_hold_slots[i].used && arp_hold_slots[i].ip == ip) {
+            arp_hold_slots[i].used = 0;
+            eth_send(mac, ETH_TYPE_IPV4, arp_hold_slots[i].packet, arp_hold_slots[i].len);
+        }
+    }
+}
+
+static void cache_store(uint32_t ip, const uint8_t mac[ETH_ADDR_LEN]) {
     for (int i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid && arp_cache[i].ip == ip) {
             k_memcpy(arp_cache[i].mac, mac, ETH_ADDR_LEN);
@@ -50,6 +124,13 @@ void arp_learn(uint32_t ip, const uint8_t mac[ETH_ADDR_LEN]) {
     arp_cache[0].ip = ip;
     k_memcpy(arp_cache[0].mac, mac, ETH_ADDR_LEN);
     arp_cache[0].valid = 1;
+}
+
+/* M116: learning an address - from a reply, a request, or any IP packet
+ * the neighbour sends - is also what lets its held packet go. */
+void arp_learn(uint32_t ip, const uint8_t mac[ETH_ADDR_LEN]) {
+    cache_store(ip, mac);
+    release_held(ip, mac);
 }
 
 int arp_lookup(uint32_t ip, uint8_t mac_out[ETH_ADDR_LEN]) {

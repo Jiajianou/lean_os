@@ -63,4 +63,33 @@ echo "install-netsurf: $n resource files under /usr/share/netsurf"
     >/dev/null || exit 1
 echo "install-netsurf: DejaVu under /usr/share/fonts/truetype/dejavu"
 
+# ---- M116: and the certificate authorities it needs, as a package ------
+#
+# M115 made https work with `os install ca-certificates`, typed into a
+# terminal on the machine - and then nothing a person would do on their
+# own ever typed it. The image `tools/run-qemu.sh` boots had no /pkg at
+# all, so https failed on the certificate for every site, and a browser
+# that cannot open https cannot open google.com for more than one page.
+#
+# So the browser's install brings its trust store with it, the way every
+# browser anyone uses does - and brings it as a PACKAGE, on the terms
+# docs/browser.md set: the repository goes onto the image, the package is
+# named in /pkg/repo/preinstall, and on first boot /bin/os installs it
+# through the same hashes and registry `os install` uses (init runs
+# `os preinstall`). It stays removable (`os remove ca-certificates`, and
+# that sticks), verifiable (`os verify`), and replaceable without
+# rebuilding the image. An image without the browser still trusts nobody.
+CA_PKG=$(ls build/repo/ca-certificates-*.osp 2>/dev/null | head -1)
+if [ -n "$CA_PKG" ] && [ -f build/repo/index ]; then
+  make -s packages >/dev/null || exit 1
+  LIST=$(mktemp -t leanos-preinstall-XXXXXX)
+  printf 'ca-certificates\n' > "$LIST"
+  "$PUT" "$IMAGE" "$LIST" /pkg/repo/preinstall >/dev/null || { rm -f "$LIST"; exit 1; }
+  rm -f "$LIST"
+  echo "install-netsurf: ca-certificates in /pkg/repo, installed by \`os preinstall\` on first boot"
+else
+  echo "install-netsurf: no ca-certificates package in build/repo - https will fail"
+  echo "                 certificate checks. tools/build-packages.sh ca-certificates builds it."
+fi
+
 echo "install-netsurf: done - /bin/netsurf -f leanos"

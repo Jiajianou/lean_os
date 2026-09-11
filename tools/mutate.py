@@ -416,15 +416,30 @@ def main():
     print("suite passes in %.1fs\n" % secs)
 
     originals = {}
+    # M116: and each file's timestamps, restored with its contents. Only
+    # the contents used to come back, so a campaign left the kernel's
+    # sources "newer" than every object built from them - the next `make`
+    # rebuilt the kernel and recreated the disk image, wiping whatever a
+    # person had on the machine. Safe to wind the clock back here because
+    # nothing this harness runs builds a kernel or user object from a
+    # mutant: the unit binary is deleted before every run and on restore,
+    # and the differential engines are recompiled unconditionally.
+    stamps = {}
     for path in args.files:
         full = os.path.join(ROOT, path)
         with open(full) as f:
             originals[full] = f.read()
+        st = os.stat(full)
+        stamps[full] = (st.st_atime_ns, st.st_mtime_ns)
+
+    def put_back(full):
+        with open(full, "w") as f:
+            f.write(originals[full])
+        os.utime(full, ns=stamps[full])
 
     def restore(*_a):
-        for full, src in originals.items():
-            with open(full, "w") as f:
-                f.write(src)
+        for full in originals:
+            put_back(full)
         # And the binary built from the mutant, which would otherwise
         # outlive it and be run by the next `make test-fast`.
         drop_test_binary()
@@ -450,8 +465,7 @@ def main():
             if i % 60 == 0:
                 sys.stdout.write("  %d/%d\n" % (i, len(all_mutants)))
                 sys.stdout.flush()
-            with open(mu.path, "w") as f:
-                f.write(originals[mu.path])
+            put_back(mu.path)
     finally:
         restore()
 

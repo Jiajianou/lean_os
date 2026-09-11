@@ -117,6 +117,103 @@ TEST(net_arp, a_packet_for_a_protocol_we_do_not_speak_is_dropped) {
     CHECK_EQ(fake_net_tx_count(), 0);
 }
 
+/* Builds a well-formed ARP reply from `sender_ip` at `mac`, to us. */
+static void arp_reply(uint8_t out[28], uint32_t sender_ip, const uint8_t mac[6]) {
+    arp_request(out, sender_ip, LOCAL_IP);
+    be16_put(out + 6, 2);        /* reply */
+    memcpy(out + 8, mac, 6);
+}
+
+/* M116: the first packet to a neighbour nobody has resolved yet is held
+ * and sent when the answer arrives - not dropped.
+ *
+ * It was dropped, on purpose and with a comment saying BSD does that:
+ * "send the ARP request, drop this one, and let the caller send again".
+ * BSD does not - it keeps the packet (la_hold) and sends it when the
+ * reply comes in. Dropping it meant every first contact with a machine
+ * on the local network waited out a retransmission timer: the [m116]
+ * self-test measured 980 ms to connect to a host one hop away, all of
+ * it TCP's one-second RTO on a SYN that had never left. */
+TEST(net_arp, the_first_packet_to_an_unresolved_neighbour_is_sent_when_it_answers) {
+    net_fixture();
+    arp_init();
+    const uint32_t NEIGHBOUR = 0x0A00024Du; /* 10.0.2.77 - on the link, never seen */
+    static const uint8_t neighbour_mac[6] = {0x52, 0x55, 0x0A, 0x00, 0x02, 0x4D};
+    const uint8_t payload[] = "held, not dropped";
+
+    CHECK_EQ(ip_send(NEIGHBOUR, 253, payload, sizeof(payload)), 0);
+    /* Nothing but the question has gone out. */
+    REQUIRE(fake_net_tx_count() >= 1);
+    for (int i = 0; i < fake_net_tx_count(); i++) {
+        uint32_t len = 0;
+        const uint8_t *f = fake_net_tx_frame(i, &len);
+        CHECK_EQ((f[12] << 8) | f[13], 0x0806); /* ARP */
+    }
+
+    fake_net_reset();
+    uint8_t pkt[28];
+    arp_reply(pkt, NEIGHBOUR, neighbour_mac);
+    arp_handle_packet(pkt, sizeof(pkt));
+
+    /* ...and the answer lets the packet go, to the address it named. */
+    REQUIRE(fake_net_tx_count() == 1);
+    uint32_t len = 0;
+    const uint8_t *f = fake_net_tx_frame(0, &len);
+    CHECK_MEMEQ(f, neighbour_mac, 6);
+    CHECK_EQ((f[12] << 8) | f[13], 0x0800);        /* IPv4 */
+    CHECK_EQ(f[14 + 9], 253);                        /* the protocol it was sent with */
+    CHECK_EQ(((uint32_t)f[14 + 16] << 24) | ((uint32_t)f[14 + 17] << 16) |
+             ((uint32_t)f[14 + 18] << 8) | f[14 + 19], NEIGHBOUR);
+    CHECK_MEMEQ(f + 14 + 20, payload, sizeof(payload));
+
+    /* Sent once: a second reply finds nothing held. */
+    fake_net_reset();
+    arp_handle_packet(pkt, sizeof(pkt));
+    CHECK_EQ(fake_net_tx_count(), 0);
+}
+
+/* One packet per neighbour, and the newest wins - which is BSD's rule
+ * and the right one for the only sender that matters here: TCP resends
+ * the same SYN, and the one to keep is the latest. A reply from a
+ * DIFFERENT host releases nothing of this one's. */
+TEST(net_arp, a_held_packet_is_replaced_by_a_newer_one_and_released_only_by_its_own_neighbour) {
+    net_fixture();
+    arp_init();
+    const uint32_t A = 0x0A000250u, B = 0x0A000251u; /* 10.0.2.80, .81 */
+    static const uint8_t mac_a[6] = {0x52, 0x55, 0x0A, 0x00, 0x02, 0x50};
+    static const uint8_t mac_b[6] = {0x52, 0x55, 0x0A, 0x00, 0x02, 0x51};
+
+    ip_send(A, 253, (const uint8_t *)"old", 3);
+    ip_send(A, 253, (const uint8_t *)"new", 3);
+    fake_net_reset();
+
+    uint8_t pkt[28];
+    arp_reply(pkt, B, mac_b);
+    arp_handle_packet(pkt, sizeof(pkt));
+    CHECK_EQ(fake_net_tx_count(), 0);
+
+    arp_reply(pkt, A, mac_a);
+    arp_handle_packet(pkt, sizeof(pkt));
+    REQUIRE(fake_net_tx_count() == 1);
+    uint32_t len = 0;
+    const uint8_t *f = fake_net_tx_frame(0, &len);
+    CHECK_MEMEQ(f + 14 + 20, "new", 3);
+}
+
+/* ...and a neighbour that never answers is reported rather than held
+ * for ever: the third send to it, three unanswered questions, fails -
+ * which is what user_space/bin/nettest.c's "unreachable" check asks of
+ * the syscall. And the slot is freed, so it is asked afresh next time. */
+TEST(net_arp, a_neighbour_that_never_answers_is_unreachable_by_the_third_send) {
+    net_fixture();
+    arp_init();
+    const uint32_t SILENT = 0x0A0002EEu; /* 10.0.2.238 */
+    CHECK_EQ(ip_send(SILENT, 253, (const uint8_t *)"1", 1), 0);
+    CHECK_EQ(ip_send(SILENT, 253, (const uint8_t *)"2", 1), 0);
+    CHECK_EQ(ip_send(SILENT, 253, (const uint8_t *)"3", 1), -1);
+    CHECK_EQ(ip_send(SILENT, 253, (const uint8_t *)"4", 1), 0);
+}
+
 /* ---- Ethernet --------------------------------------------------------- */
 
 TEST(net_eth, a_frame_shorter_than_a_header_is_dropped) {

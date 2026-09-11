@@ -6,6 +6,7 @@
  *   os available          what the repository has
  *   os info    <name>     one package, in detail
  *   os verify  [name]     re-hash installed files against what was installed
+ *   os preinstall         M116: what this image lists, once each - see below
  *   os help
  *
  * ---- what "securely, in an isolated fashion" is made of ---------------
@@ -1099,6 +1100,98 @@ static int cmd_verify(const char *name) {
     return rc;
 }
 
+/* ---- M116: what an image was built to have installed ------------------
+ *
+ * `os preinstall` installs the packages /pkg/repo/preinstall names, one
+ * per line, through exactly the path `os install` takes - the index hash,
+ * the archive hash, every file hash, the prefix check, the registry. It
+ * is here because a browser that cannot open https is not a browser, and
+ * M115's answer to that - `os install ca-certificates`, typed by hand
+ * into a terminal - was a step nobody who opened Browser and typed
+ * google.com was ever going to know to take. The build that puts a
+ * browser on an image also lists ca-certificates here (Makefile,
+ * `browser-if-built`), and init runs this once per boot.
+ *
+ * Once per package, not once per boot. Each name is recorded in
+ * /pkg/db/preinstalled when it is installed, and a name already recorded
+ * is not installed again - so `os remove ca-certificates` is a decision
+ * that sticks rather than one the next boot quietly undoes. The trust
+ * store is still a package: removable, verifiable, replaceable without
+ * rebuilding the image, which is the condition docs/browser.md set for
+ * shipping it at all.
+ *
+ * Silent when there is nothing to do, because it runs on every boot. */
+#define PKG_PREINSTALL      PKG_REPO_DIR "/preinstall"
+#define PKG_DB_PREINSTALLED PKG_DB_DIR "/preinstalled"
+
+/* Is `name` a whole line of `list`? */
+static int list_has_line(const char *list, const char *name) {
+    size_t n = strlen(name);
+    const char *p = list;
+    while (p && *p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        if (len == n && strncmp(p, name, n) == 0) {
+            return 1;
+        }
+        p = eol ? eol + 1 : NULL;
+    }
+    return 0;
+}
+
+static int cmd_preinstall(void) {
+    size_t len = 0;
+    char *list = (char *)read_whole(PKG_PREINSTALL, &len, 4096);
+    if (!list) {
+        return 0; /* an image built without a list - the ordinary case */
+    }
+    size_t dlen = 0;
+    char *done = (char *)read_whole(PKG_DB_PREINSTALLED, &dlen, 4096);
+    char record[4096];
+    size_t rlen = 0;
+    if (done) {
+        rlen = dlen < sizeof(record) - 1 ? dlen : sizeof(record) - 1;
+        memcpy(record, done, rlen);
+    }
+    record[rlen] = '\0';
+
+    int rc = 0, changed = 0;
+    char *p = list;
+    while (p && *p) {
+        char *eol = strchr(p, '\n');
+        if (eol) {
+            *eol = '\0';
+        }
+        char *name = p;
+        p = eol ? eol + 1 : NULL;
+        if (!name[0] || name[0] == '#' || list_has_line(record, name)) {
+            continue;
+        }
+        if (install_one(name, 0) != 0) {
+            fprintf(stderr, "os: preinstall: %s did not install - it will be tried again next boot\n", name);
+            rc = 1;
+            continue;
+        }
+        size_t n = strlen(name);
+        if (rlen + n + 1 < sizeof(record)) {
+            memcpy(record + rlen, name, n);
+            rlen += n;
+            record[rlen++] = '\n';
+            record[rlen] = '\0';
+            changed = 1;
+        }
+    }
+    if (changed && (mkdir_p(PKG_DB_DIR) != 0 ||
+                    write_whole(PKG_DB_PREINSTALLED, record, rlen, 0) != 0)) {
+        fprintf(stderr, "os: preinstall: could not record what was installed in %s\n",
+                PKG_DB_PREINSTALLED);
+        rc = 1;
+    }
+    free(done);
+    free(list);
+    return rc;
+}
+
 static void usage(void) {
     printf("os - the lean_os package manager\n\n");
     printf("  os install <name>    install a package and whatever it needs\n");
@@ -1107,7 +1200,9 @@ static void usage(void) {
     printf("  os available         what the repository has\n");
     printf("  os info    <name>    one package, in detail\n");
     printf("  os verify  [name]    re-hash installed files against the archive\n");
-    printf("  os caps              what this process may do, and what a package may\n\n");
+    printf("  os caps              what this process may do, and what a package may\n");
+    printf("  os preinstall        install what this image lists in /pkg/repo/preinstall,\n");
+    printf("                       once each (init runs it at boot)\n\n");
     printf("Packages install under /pkg/<name>/<version> and their commands\n");
     printf("appear in /pkg/bin - never in /bin, so a package cannot take over\n");
     printf("the name of a program this OS ships. Nothing runs at install time.\n");
@@ -1171,6 +1266,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(cmd, "caps") == 0) {
         return cmd_caps();
+    }
+    if (strcmp(cmd, "preinstall") == 0) {
+        return cmd_preinstall();
     }
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "-h") == 0 ||
         strcmp(cmd, "--help") == 0) {

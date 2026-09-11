@@ -169,7 +169,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_fcntl.o $(UOBJ)/libc_scanf.o $(UOBJ)/libc_mntent.o \
                 $(UOBJ)/libc_xattr.o $(UOBJ)/libc_klog.o $(UOBJ)/libc_getopt.o $(UOBJ)/libc_reboot.o $(UOBJ)/libc_tls.o \
                 $(UOBJ)/libc_pty.o $(UOBJ)/libc_select.o $(UOBJ)/libc_realpath.o $(UOBJ)/libc_popen.o \
-                $(UOBJ)/libc_iconv.o $(UOBJ)/libc_iconv_tables.o \
+                $(UOBJ)/libc_iconv.o $(UOBJ)/libc_iconv_tables.o $(UOBJ)/libc_wallclock.o \
                 $(UOBJ)/sha256.o $(UOBJ)/ospkg.o $(UOBJ)/fsutil.o \
                 $(UOBJ)/setjmp.o $(UOBJ)/symtab.o $(UOBJ)/crtn.o
 
@@ -187,7 +187,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
 # alongside its own" is only true if there is no special path for them.
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
@@ -310,8 +310,17 @@ $(UOBJ)/%.o: user_space/shell/%.c | $(UOBJ)
 # rule.
 .SECONDARY:
 
+# M116: one short line per program, and the whole command with V=1.
+# The full line is 2 KB - every object in USER_LIBOBJS, the same list
+# sixty-six times - and a relink of every program printed 135 KB of it,
+# which in a terminal is hundreds of screens of lines that look
+# identical. That is what "lots and lots of repeating logs" from
+# tools/run-qemu.sh was. The flood was the symptom of a test touching a
+# file (see tools/tree-stamps.py), but a legitimate libc change relinks
+# everything too, and the list says nothing a person reading it needs.
 $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(USER_LD)
-	$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/$*.o
+	$(if $(V),,@echo "  LD      $@")
+	$(if $(V),,@)$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/$*.o
 
 # AP_TRAMPOLINE_BIN: the standalone 16-bit SMP AP bring-up blob (see
 # kernel/arch/x86_64/ap_trampoline.asm's header comment) - built like
@@ -347,7 +356,8 @@ check-embedded-programs:
 	done
 
 $(KERNEL_ELF): $(KERNEL_OBJS) kernel/linker.ld
-	$(LD) -T kernel/linker.ld -o $@ $(KERNEL_OBJS)
+	$(if $(V),,@echo "  LD      $@")
+	$(if $(V),,@)$(LD) -T kernel/linker.ld -o $@ $(KERNEL_OBJS)
 
 # BOOTX64.EFI needs KERNEL_SECTOR_COUNT to know how many sectors to read
 # the kernel blob back from disk - only known once the kernel is actually
@@ -769,7 +779,8 @@ LIBC_A_OBJS := $(filter-out $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o,$(USER_
 
 $(LIBC_A): $(LIBC_A_OBJS)
 	@rm -f $@
-	$(AR) rcs $@ $(LIBC_A_OBJS)
+	$(if $(V),,@echo "  AR      $@")
+	$(if $(V),,@)$(AR) rcs $@ $(LIBC_A_OBJS)
 
 # M114: and `all` builds it. See the comment on `all` above for why the
 # prerequisite is written here rather than there.
@@ -1023,7 +1034,8 @@ TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
                     kernel/net/arp.c kernel/net/ip.c kernel/net/icmp.c \
                     kernel/net/udp.c kernel/net/ethernet.c kernel/net/tcp.c \
                     kernel/dev/fwcfg.c kernel/dev/tty.c kernel/dev/pty.c \
-                    kernel/sched/sched.c kernel/fs/flock.c kernel/dev/random.c
+                    kernel/sched/sched.c kernel/fs/flock.c kernel/dev/random.c \
+                    kernel/drivers/rtl8139_ring.c
 
 # M101: the first user-space source in this tier, and it earns its place
 # by the same argument the kernel units do. user_space/lib/symtab.c is a
@@ -1040,7 +1052,7 @@ TEST_USER_SRCS := user_space/lib/symtab.c \
                   user_space/lib/fsutil.c user_space/lib/dns.c \
                   user_space/libc/src/wchar.c user_space/libc/src/errno.c \
                   user_space/libc/src/fnmatch.c user_space/libc/src/libgen.c \
-                  user_space/libc/src/getopt.c
+                  user_space/libc/src/getopt.c user_space/libc/src/wallclock.c
 
 TEST_SRCS := tests/runner.c $(wildcard tests/test_*.c) $(TEST_FAKES) \
              $(TEST_KERNEL_SRCS) $(TEST_USER_SRCS)

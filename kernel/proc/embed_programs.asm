@@ -436,3 +436,11 @@ global browsertest_elf_end
 browsertest_elf_start:
     incbin "build/browsertest.elf"
 browsertest_elf_end:
+
+; M116: a stream from the host, through the NIC, byte for byte - see
+; user_space/bin/netrecv.c.
+global netrecv_elf_start
+global netrecv_elf_end
+netrecv_elf_start:
+    incbin "build/netrecv.elf"
+netrecv_elf_end:

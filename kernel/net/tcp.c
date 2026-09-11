@@ -123,6 +123,10 @@ static int debug_retransmits;
 void tcp_debug_drop_next(int segments) { debug_drop_remaining = segments; }
 int tcp_debug_retransmits(void) { return debug_retransmits; }
 
+/* M116: see the checksum test in tcp_handle_packet_locked. */
+static uint32_t checksum_failures;
+uint32_t tcp_checksum_failures(void) { return checksum_failures; }
+
 /* ---- checksum --------------------------------------------------------
  *
  * The same pseudo-header UDP uses, with TCP's protocol number and the
@@ -520,6 +524,7 @@ void tcp_init(void) {
     tick_count = 0;
     isn_counter = 0x1EA50000u;
     ephemeral = TCP_EPHEMERAL_FIRST;
+    checksum_failures = 0;
 }
 
 struct tcpcb *tcp_open(void) {
@@ -911,7 +916,27 @@ static void tcp_handle_packet_locked(uint32_t src_ip, uint32_t dst_ip, const uin
         return;
     }
     if (net_fold16(net_sum16(pseudo_sum(src_ip, dst_ip, len), seg, len)) != 0) {
-        return; /* a corrupt segment is one that never arrived */
+        /* A corrupt segment is one that never arrived - and until M116
+         * it was one that nobody ever heard about, either. The RTL8139
+         * driver corrupted one full-sized segment in five for ninety
+         * milestones, and this line discarding them without a word is
+         * why the only symptom was web pages loading at 0.4 KiB/s. On a
+         * real link Ethernet's CRC catches corruption long before this
+         * sum does, so a count above zero here is almost always a bug on
+         * this machine rather than noise on the wire. Counted always,
+         * logged the first few times and then sparingly: a line per
+         * segment would bury the log in exactly the storm it reports. */
+        checksum_failures++;
+        if (checksum_failures <= 4 || checksum_failures % 256 == 0) {
+            klog_puts("[tcp] checksum: dropped a corrupt segment to port ");
+            klog_put_dec(net_read_be16(seg + 2));
+            klog_puts(" from port ");
+            klog_put_dec(net_read_be16(seg + 0));
+            klog_puts(", ");
+            klog_put_dec(checksum_failures);
+            klog_puts(" since boot\n");
+        }
+        return;
     }
 
     uint16_t src_port = net_read_be16(seg + 0);
@@ -1059,14 +1084,27 @@ static void tcp_handle_packet_locked(uint32_t src_ip, uint32_t dst_ip, const uin
         }
     }
 
+    /* M116: a FIN occupies the sequence number AFTER the segment's data,
+     * so it is judged against rcv_nxt as the data left it - not against
+     * `seq`, which is where the data began. Comparing with `seq` meant a
+     * FIN riding on the last bytes of a reply, which is how nearly every
+     * server closes, was never taken: the ACK covered the data only and
+     * the peer's retransmission timer brought the FIN back alone, 1.4 s
+     * later on QEMU's SLIRP. If the data did not all fit, rcv_nxt stops
+     * short of the FIN and the FIN correctly waits for it. */
+    uint32_t fin_at = seq + data_len;
+    int fin_now = (flags & TCP_FIN) != 0;
+
     if (data_len && seq == t->rcv_nxt &&
         (t->state == TCP_ESTABLISHED || t->state == TCP_FIN_WAIT_1 ||
          t->state == TCP_FIN_WAIT_2)) {
         deliver(t, data, data_len);
-        send_ack(t);
+        if (!(fin_now && t->rcv_nxt == fin_at)) {
+            send_ack(t); /* when the FIN is taken, its ACK below covers both */
+        }
     }
 
-    if ((flags & TCP_FIN) && seq == t->rcv_nxt) {
+    if (fin_now && fin_at == t->rcv_nxt) {
         t->rcv_nxt++;
         t->peer_fin = 1;
         send_ack(t);

@@ -13,7 +13,9 @@ Two independent sources have to agree before a byte of this is believed:
 Python's codec tables produce it, and the host's libiconv checks it.
 
 Run it when the charset list below changes. It rewrites
-user_space/libc/src/iconv_tables.c in place.
+user_space/libc/src/iconv_tables.c in place - or writes the path given
+as its one argument instead, which is how the test compares without
+touching the tree.
 """
 import codecs
 import os
@@ -74,6 +76,13 @@ HEADER = '''/* user_space/libc/src/iconv_tables.c - GENERATED. Do not edit.
 def main():
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
     out = os.path.join(root, "user_space/libc/src/iconv_tables.c")
+    # M116: or somewhere else, which is what tools/iconv-test.sh asks
+    # for. It used to regenerate the checked-in file in place to compare
+    # it - identical bytes, new mtime - and that one timestamp made the
+    # next `make` relink every program on the machine, rebuild the
+    # kernel that embeds them and recreate the disk image. See M116.
+    if len(sys.argv) > 1:
+        out = sys.argv[1]
     body = []
     names = []
     for name, pyname in CHARSETS:

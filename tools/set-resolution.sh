@@ -30,17 +30,33 @@ PUT=build/leanfs-put
 
 [ -n "$RES" ] || { echo "usage: $0 <width>x<height>" >&2; exit 2; }
 
+# kernel/drivers/dispi.c's CANDIDATES, which is the list the driver will
+# actually offer. Kept in step by hand and checked by `--check` below,
+# because a list that drifts is a mode this script accepts and the
+# machine refuses.
+SUPPORTED="800x600 1024x768 1152x864 1280x720 1280x1024 1440x900 1600x900 1680x1050 1920x1080"
+
+# M116: `--check` is the check this header promised and nothing ran -
+# the sentence above said run-tests.sh compared the two lists, and it did
+# not. Now it does, in the fast tier.
+if [ "$RES" = "--check" ]; then
+  DRIVER=$(awk '/CANDIDATES\[\] = \{/,/\};/' kernel/drivers/dispi.c |
+           grep -o '{ *[0-9]*, *[0-9]* *}' | tr -d '{} ' | tr ',' 'x' | tr '\n' ' ' | sed 's/ $//')
+  if [ "$DRIVER" != "$SUPPORTED" ]; then
+    echo "set-resolution: this script accepts '$SUPPORTED'" >&2
+    echo "                kernel/drivers/dispi.c offers '$DRIVER'" >&2
+    exit 1
+  fi
+  echo "set-resolution: the same modes as kernel/drivers/dispi.c"
+  exit 0
+fi
+
 W="${RES%x*}"
 H="${RES#*x}"
 case "$W$H" in
   *[!0-9]*|"") echo "set-resolution: '$RES' is not <width>x<height>" >&2; exit 2 ;;
 esac
 
-# kernel/drivers/dispi.c's CANDIDATES, which is the list the driver will
-# actually offer. Kept in step by hand and checked by tools/run-tests.sh,
-# because a list that drifts is a mode this script accepts and the
-# machine refuses.
-SUPPORTED="800x600 1024x768 1152x864 1280x720 1280x1024 1440x900 1600x900 1680x1050 1920x1080"
 ok=0
 for m in $SUPPORTED; do [ "$m" = "${W}x${H}" ] && ok=1; done
 if [ "$ok" -ne 1 ]; then

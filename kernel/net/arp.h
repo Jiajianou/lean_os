@@ -39,3 +39,11 @@ void arp_learn(uint32_t ip, const uint8_t mac[ETH_ADDR_LEN]);
  * callers that need a resolution to eventually appear (ip_send) poll this
  * in a loop themselves. */
 int arp_lookup(uint32_t ip, uint8_t mac_out[ETH_ADDR_LEN]);
+
+/* M116: keeps a whole IPv4 packet for `next_hop_ip` until its MAC is
+ * learned, then sends it - one per neighbour, the newest replacing the
+ * older, BSD's la_hold. What ip_send does with a packet whose next hop
+ * has not answered yet, instead of dropping it. Returns 0 if held, -1 if
+ * the neighbour has now been asked three times without answering - it is
+ * unreachable, and the caller is told so. */
+int arp_hold(uint32_t next_hop_ip, const uint8_t *ip_packet, uint16_t len);

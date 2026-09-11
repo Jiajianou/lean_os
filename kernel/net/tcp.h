@@ -151,3 +151,10 @@ int tcp_connect_failed(const struct tcpcb *tcb);
  * for a program to have it. */
 void tcp_debug_drop_next(int data_segments);
 int tcp_debug_retransmits(void);
+
+/* M116: segments discarded since boot because their checksum was wrong.
+ * Not a debug hook - a count, readable by the boot self-test that moves a
+ * real transfer through the real NIC and requires it to stay at zero. A
+ * driver that hands the stack corrupt frames looks, from everywhere
+ * else, exactly like a slow network. */
+uint32_t tcp_checksum_failures(void);

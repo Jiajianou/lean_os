@@ -142,16 +142,27 @@ UEFI firmware
   layout, so the layout engine renders straight into the window's
   shared segment.
 
-  **It reaches the real web.** `https://example.com/` loads and
-  renders, verified against certificate authorities that arrive as a
-  *package* — `os install ca-certificates` — because a fresh image
-  still trusts nobody and a CA bundle has to be replaceable without
-  rebuilding the OS. Getting there found a bug in this project's
-  `malloc` that had been present since M19: it returned 8-byte-aligned
-  memory where x86-64 requires 16, and no program had ever noticed
-  because none had been built by a compiler that vectorised a store
-  into the heap. NetSurf was, and it died on a `movaps` to an address
-  ending in 8. See M114-M115 in [milestones.md](milestones.md).
+  **It reaches the real web.** `https://www.google.com/` loads and
+  renders in about six seconds, verified against certificate
+  authorities that arrive as a *package* — installed by `os` on the
+  first boot of an image that has the browser, removable with
+  `os remove ca-certificates`, and replaceable without rebuilding the
+  OS; an image without the browser still trusts nobody. Getting there
+  found a bug in this project's `malloc` that had been present since
+  M19: it returned 8-byte-aligned memory where x86-64 requires 16, and
+  no program had ever noticed because none had been built by a
+  compiler that vectorised a store into the heap. NetSurf was, and it
+  died on a `movaps` to an address ending in 8. See M114-M115 in
+  [milestones.md](milestones.md).
+
+  **And it is fast because three bugs below it are gone** (M116): the
+  network driver corrupted one full-sized frame in five and TCP's
+  checksum discarded each one silently, TCP ignored a FIN that arrived
+  with data, and `gettimeofday` ran backwards by up to a second, which
+  put NetSurf's 10 ms fetch poller to sleep for most of one. A 60 KB
+  download went from never finishing to 35 ms. Google *search* still
+  shows a blank page: its results are served only to a browser that
+  runs modern JavaScript, and Duktape is ES5.
 
   It holds `CAP_FS_WRITE | CAP_NETWORK` and nothing else. **Not**
   `CAP_FRAMEBUFFER`: twenty megabytes of somebody else's C and C++,
@@ -269,9 +280,9 @@ Four instruments, and none of them subsumes another:
   fake timer and a fake CPU, so a tick is a function call and a
   fairness property can be checked at every task count, and it learns
   the order locks are taken in so an inversion is an error rather than
-  a comment (Q9). 338 tests.
+  a comment (Q9). 383 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 126 markers and 39 performance
+  image and grade the serial log against 127 markers and 41 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It

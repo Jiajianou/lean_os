@@ -335,6 +335,7 @@ static const cap_grant_t CAP_GRANTS[] = {
      * looks like security and is not. */
     {"nettest",       CAP_APP_DEFAULT | CAP_NETWORK},
     {"tcptest",       CAP_APP_DEFAULT | CAP_NETWORK},
+    {"netrecv",       CAP_APP_DEFAULT | CAP_NETWORK}, /* M116: the NIC receive-path self-test */
     /* M67: needs the socket table to hammer, and nothing else beyond the
      * default - the other three subsystems it races (fs, shm, pipes) are
      * ungated, which is itself the manifest saying something true. */

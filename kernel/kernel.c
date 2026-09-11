@@ -133,7 +133,8 @@
     X(os)                         \
     X(pkgtest)                    \
     X(dirtest)                  \
-    X(browsertest)
+    X(browsertest)              \
+    X(netrecv)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -12069,6 +12070,74 @@ static void boot_selftests_system(void) {
         klog_puts(" bytes).\n\n");
     }
 
+    /* ---- M116 self-test: a stream from another machine, through the NIC --
+     *
+     * Every network test above talks over loopback, or trades a few
+     * hundred bytes with a DNS server. Not one of them ever put a
+     * full-sized segment through the RTL8139's receive ring - and the
+     * ring corrupted one such frame in five from M27 to M116, whenever
+     * the frame straddled the end of it. TCP's checksum threw each one
+     * away without a word and the peer's retransmission timer paid 1.5 s
+     * for it, so the only symptom anywhere was the browser loading pages
+     * at 0.4 KiB/s. A FIN riding on the last data segment was ignored as
+     * well, which cost every server-closed connection another 1.4 s.
+     *
+     * tools/qemu-serial-test.sh gives QEMU a guestfwd - connections to
+     * 10.0.2.100:7777 run `cat` on a file the host wrote - and says how
+     * many bytes through fw_cfg. /bin/netrecv reads it to end of stream
+     * over the POSIX sockets libcurl uses and checks every byte against
+     * the pattern the host wrote. Three things are graded, and each is
+     * the one that would have seen one of the bugs:
+     *
+     *   every byte right            - the stream, as a program reads it
+     *   zero corrupt segments       - tcp_checksum_failures(), which is
+     *                                 the ring bug even if it were fast
+     *   nic_stream_recv_ms budget   - the retransmissions and the lost
+     *                                 FIN, which were correct and slow
+     */
+    {
+        char want[16];
+        k_memset(want, 0, sizeof(want));
+        int wn = fwcfg_read_file("opt/leanos/nicstream", want, sizeof(want) - 1);
+        if (wn <= 0 || !net_have_nic()) {
+            klog_puts("[m116] no host stream on this boot - the NIC's receive "
+                       "path is untested (tools/qemu-serial-test.sh provides one)\n\n");
+        } else {
+            uint32_t checksum_before = tcp_checksum_failures();
+            size_t nr_bytes = 0;
+            uint8_t *nr_img = read_program(PATH_BIN_DIR "netrecv", &nr_bytes);
+            if (!nr_img) {
+                panic("M116 self-test: /bin/netrecv is not on this disk");
+            }
+            const char *nr_argv[] = {PATH_BIN_DIR "netrecv", "10.0.2.100", "7777", want, 0};
+            uint64_t t0 = tsc_read();
+            task_t *nr = process_spawnv("netrecv", nr_img, nr_bytes, nr_argv);
+            kfree(nr_img);
+            long rc = nr ? (long)do_syscall(SYS_wait, (uint64_t)nr->id, 0, 0) : -1;
+            uint64_t ms = tsc_to_us(tsc_read() - t0) / 1000;
+            uint32_t corrupt = tcp_checksum_failures() - checksum_before;
+            klog_perf("nic_stream_recv_ms", ms, "ms");
+            if (rc != 0) {
+                klog_puts("[m116] netrecv did not receive the host's stream intact "
+                           "(its own line above says how)\n");
+                panic("M116 self-test: a stream from the host did not arrive byte for byte");
+            }
+            if (corrupt != 0) {
+                klog_puts("[m116] the stream arrived, but ");
+                klog_put_dec(corrupt);
+                klog_puts(" segment(s) on the way failed TCP's checksum - the NIC "
+                           "is handing the stack corrupt frames and retransmission "
+                           "is hiding it\n");
+                panic("M116 self-test: corrupt segments on the receive path");
+            }
+            klog_puts("[m116] a stream from the host: ");
+            klog_puts(want);
+            klog_puts(" bytes through SLIRP, the RTL8139's ring and TCP, every one "
+                       "of them right and no segment failing its checksum, in ");
+            klog_put_dec((uint32_t)ms);
+            klog_puts(" ms - self-test passed.\n\n");
+        }
+    }
 
     /* ---- Q16 self-test: a disk that fails, and a machine that does not --
      *

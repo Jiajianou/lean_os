@@ -114,8 +114,19 @@ int main(void) {
      * both were invisible for thirty-six milestones because the only
      * caller was a self-test pinging a gateway arranged to answer. */
     uint32_t nowhere = (conf.ip & conf.mask) | 0xFE;
+    /* M116: by the THIRD send, not the first. The first two are held for
+     * ARP's answer rather than dropped (kernel/net/arp.c, arp_hold) -
+     * dropping them cost every first contact with a machine on this link
+     * a whole TCP retransmission timeout - and a neighbour that has been
+     * asked three times and never answered is unreachable, and says so.
+     * Linux behaves the same way: a first datagram to an unresolved
+     * neighbour is accepted, and EHOSTUNREACH comes once resolution has
+     * visibly failed. What this check has always been for is unchanged:
+     * no hang, no panic, and a program that is told. */
+    sys_sendto(client, nowhere, TEST_PORT, payload, 4);
+    sys_sendto(client, nowhere, TEST_PORT, payload, 4);
     check(sys_sendto(client, nowhere, TEST_PORT, payload, 4) < 0,
-          "sendto to an unreachable neighbour did not fail");
+          "sendto to a neighbour that never answered ARP did not fail by the third try");
 
     /* Oversize. UDP_MAX_PAYLOAD is 1472; this is comfortably past it and
      * must be refused rather than truncated, because a datagram is a
