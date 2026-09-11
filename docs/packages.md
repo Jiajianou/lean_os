@@ -246,9 +246,36 @@ typo or a package built for a different machine.
 | `grep` | 3.11 | GNU grep, built here with `x86_64-lean_os-gcc`, no source edits |
 | `bzip2` | 1.0.8 | a plain Makefile port, asks for `fs-write` because it creates files |
 | `impostor` | 1.0 | a fixture that installs binaries called `compositor` and `shutdown` and must get nothing |
+| `ca-certificates` | 1.0 | the certificate authorities https verifies against — one file of text and **no executable at all** (M115) |
 
 The third is shipped on purpose. A boundary with no adversary in the
 image is a boundary nothing checks.
+
+**The fourth is why this package manager was worth building.** M100
+shipped no certificate authorities, on M65's rule, and wrote down the
+condition for reopening that: *a way to update the bundle without
+rebuilding the image.* This is it. A CA bundle is the one part of a
+system that **must** be updatable on its own — an authority is removed
+from one when it has done something wrong, and "rebuild the kernel" is
+not an answer to that.
+
+It is also the smallest package the format can express, and that makes
+it a demonstration: there is no binary in it, so `os`'s report of what
+it may do —
+
+```
+os: it may: nothing but read files and use the descriptors it is given
+```
+
+— is the whole truth rather than a summary. A format with install hooks
+could not say that about a package containing one text file, which is
+property 1 with something at stake.
+
+The bundle is the **build host's** trust store, copied by
+`tools/build-packages.sh` rather than written here. Installing it means
+trusting whoever curates that machine, which is a sentence somebody can
+act on, and it is data rather than code — so it lives in a package under
+`/pkg`, not in the OS.
 
 ## What grep cost
 

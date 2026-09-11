@@ -109,21 +109,40 @@ rebuilding the image. M111 built that — `os install` — and a
 `ca-certificates` package is the shape this takes when somebody wants
 it. Signing (also M111's open box) is what makes that worth having.
 
-**M114 made this the browser's last blocker rather than a footnote.**
-Until then `https://` failed before it got near a certificate, because
-this machine could not resolve a hostname at all — see M114 in
-`milestones.md` for the packet capture. With that fixed, `http://` pages
-load off the public internet and `https://` fails with exactly one
-message:
+**M114 met that condition and built the package.** Until then `https://`
+failed before it got near a certificate, because this machine could not
+resolve a hostname at all — see M114 in `milestones.md` for the packet
+capture. With the resolver fixed, `https://` failed with exactly one
+message, `Problem with the SSL CA cert (path? access rights?)`, which is
+mbedtls refusing to verify against a bundle that is not there.
+
+So now:
 
 ```
-Problem with the SSL CA cert (path? access rights?)
+os install ca-certificates
 ```
 
-which is mbedtls refusing to verify against a bundle that is not there.
-Most of the web is https-only, so this is now the difference between a
-browser that renders and a browser somebody can use. The condition
-above is met; the work is a package.
+installs 128 authorities into `/pkg/ca-certificates/1.0/`, which is the
+path `Choices` points `ca_bundle` at, and `https://example.com/` loads
+and renders. **Nothing changed about what a fresh image trusts, which is
+nobody** — the bundle is not in the image, it is a package somebody
+installs by name, and `os` reports what it may do on the way in:
+
+```
+os: installed ca-certificates-1.0 (1 files) in /pkg/ca-certificates/1.0
+os: it may: nothing but read files and use the descriptors it is given
+```
+
+That last line is not decoration. This package contains one file of text
+and no executable at all, so "nothing" is the whole truth about it — the
+smallest possible demonstration that a package here is data plus a
+manifest rather than a program that runs.
+
+The bundle is the **build host's** trust store, copied rather than
+written here, and that is the honest description: installing it means
+trusting whoever curates the machine this was built on. It is data, not
+code, and it lives under `/pkg` rather than in the OS, which is exactly
+where CLAUDE.md's first non-negotiable puts it.
 
 ### What it can and cannot render, measured
 

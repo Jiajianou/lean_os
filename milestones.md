@@ -71,11 +71,11 @@ that has never happened.
 
 | | state |
 |---|---|
-| **Milestones** | M0–M114 numbered: 105 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
+| **Milestones** | M0–M115 numbered: 106 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
 | **Head of the queue** | **M100** — eight of nine libraries landed; M111 and M112 were both taken out of order at the user's request and closed 2026-09-09 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
-| **Host unit tests** | 359/359 passing, 3 slow ones skipped in `--fast` |
+| **Host unit tests** | 362/362 passing, 3 slow ones skipped in `--fast` |
 | **Boot markers** | 126 required, graded on every self-test boot |
 | **Performance budgets** | 39 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
@@ -3036,6 +3036,131 @@ the honest answer to *"can't we port a working open source browser"*:
       `os install` is that. Packages live under `/pkg`, so NetSurf's
       `Choices` has to point `ca_bundle` there, and *shipping no CAs
       until somebody installs them* stays true.
+
+### M115 — the browser on the real web: certificates, and a `movaps` `[x]`
+
+*Landed 2026-09-10.* The second half of the same request M114 answered.
+M114 made names resolve; this is what was still between that and a
+browser somebody can use — and it found a bug in this project's C
+library that had been there since M19 and had never once been noticed.
+
+**1. `ca-certificates`, as a package.** With the resolver fixed,
+`https://` failed with exactly one message — `Problem with the SSL CA
+cert (path? access rights?)` — because this OS ships no certificate
+authorities. That was M100's decision on M65's rule, and M100 also wrote
+down the condition for reopening it: *a way to update the bundle without
+rebuilding the image.* **M111's `os install` is that condition, so the
+work was a package rather than a decision.**
+
+```
+os install ca-certificates
+os: installed ca-certificates-1.0 (1 files) in /pkg/ca-certificates/1.0
+os: it may: nothing but read files and use the descriptors it is given
+```
+
+and `https://example.com/` loads, verified, in 8.2 s. Nothing changed
+about what a *fresh* image trusts, which is still nobody. The package
+holds one file of text and **no executable at all**, which makes it the
+smallest possible demonstration that a package here is data plus a
+manifest rather than a program that runs — `os` says so on the way in.
+`Choices` points `ca_bundle` at `/pkg/ca-certificates/1.0/...`, so the
+browser looks where a package can actually write (M111's rule) rather
+than at `/etc/ssl`.
+
+**2. The bug, which is the milestone.** With certificates in place, a
+large real page — `https://en.wikipedia.org/wiki/Unix`, 82.72 KiB of
+HTML — killed the browser partway through:
+
+```
+[isr] ring-3 fault: General protection fault in task netsurf pid 0x208
+  rip=0x00000080001FCA56   rsi=0x0000009000B5AE68
+  code@rip = 0F 29 06 ...
+```
+
+`0F 29 06` is **`movaps %xmm0,(%rsi)`**, a sixteen-byte *aligned* SSE
+store, and `rsi` ends in `68` — eight-aligned, not sixteen. That is the
+entire diagnosis, and it is a bug in `user_space/lib/malloc.c`:
+
+```c
+#define HEAP_ALIGN 8UL   /* word alignment - matches kernel/mm/heap.c */
+```
+
+**C requires `malloc` to return memory aligned for any type; on x86-64
+that is 16**, because the ABI's largest scalar alignment is SSE's and
+the compiler is entitled to act on it. It does — GCC vectorises a struct
+copy into a malloc'd buffer with `movaps`, which *faults* rather than
+running slowly on a misaligned address.
+
+**Every program on this machine had been getting 8 since M19** and not
+one of them noticed, for a reason worth keeping: none of them was built
+by a compiler that had vectorised a store into the heap. It took twenty
+megabytes of somebody else's C, on a page big enough to make the layout
+engine copy structures around, to execute the one instruction that can
+tell. This is M63's rule at its sharpest — *the bug was not in the
+ported software; the ported software was the instrument.*
+
+The kernel's part of this was already right and is why the diagnosis
+took minutes: it terminated the faulting process rather than the
+machine, and printed the bytes at `rip`.
+
+**3. Two holes in the instruments, both found by trying to make a test
+fail.**
+
+- **The alignment assertion agreed with the bug.**
+  `tests/test_malloc.c` had checked `(unsigned long)a % 8 == 0` since
+  M19. **An alignment test that asserts the wrong alignment is worse
+  than no alignment test, because it is evidence.** It now asserts 16,
+  over every size from 1 to 512 and on the mmap path as well.
+- **The test binary did not rebuild when `malloc.c` changed.**
+  `tests/test_malloc.c` `#include`s `../user_space/lib/malloc.c` after
+  renaming its functions, so malloc.c was in no prerequisite list.
+  Breaking `HEAP_ALIGN` on purpose to check the new tests could fail
+  produced a **pass** — from a binary built before the edit. Same hole
+  M93 found in the headers, in a different place, and the same lesson:
+  *a test tier that cannot notice an edit is a slower way of writing
+  PASS.* `TEST_USER_DEPS` closes it. With it closed, the deliberate
+  break fails 262 assertions across two tests.
+
+**And the first test written for it was not sharp enough either**, which
+is the third instrument lesson. "Every size comes back aligned" passed
+against `HEAP_ALIGN 8`, because malloc rounds every *request* up — the
+first block is always fine. It is the block placed immediately **after**
+a badly-rounded one that lands wrong. The test now allocates a pair at
+every size and checks the second.
+
+**4. The same `:=` trap, twice in two milestones.** M114 added
+`$(NETSURF_BIN): ... $(LIBC_A)` so a libc fix relinks the browser. It
+expanded to **nothing** — `LIBC_A` is a `:=` variable defined eighty
+lines further down — so `make browser` said nothing and the browser kept
+the C library it had been linked with hours earlier. *The prerequisite
+that prevents stale linkage was itself defeated by the same class of
+mistake, in the commit that documented it.* Both prerequisites now live
+next to `$(LIBC_A)`'s own rule.
+
+**What it is like now, measured rather than described.**
+
+| | result |
+|---|---|
+| `https://example.com/` | loads and renders, 8.2 s |
+| `https://en.wikipedia.org/wiki/Unix`, before | **GP fault**, browser gone at ~56 KiB of 83 |
+| ...after | survives; HTML fully fetched, still laying out at 300 s |
+
+So the crash is fixed and **the slowness is not**. A page of this size
+taking minutes is the first measured number this project has for its TCP
+receive path under a real workload, and `milestones.md` has deferred
+window scaling, SACK and Nagle on exactly the ground that no such number
+existed. It exists now, and it is an open box rather than a claim,
+because "slow" without a breakdown between TCP, TLS, layout and the
+1024x768 framebuffer is not a diagnosis.
+
+- [ ] **Where the minutes go.** `https://en.wikipedia.org/wiki/Unix`
+      fetches 82.72 KiB and is still working at 300 s. **The condition**:
+      a breakdown that attributes the time — bytes/second on the socket,
+      time in mbedtls, time in layout — before touching any of it. M69's
+      rule says performance work on an unmeasured path does not get
+      done, and this is measured only at the outermost level. The three
+      deferred TCP items (window scaling, SACK, Nagle) are the obvious
+      suspects and must not be started on that basis alone.
 
 ---
 

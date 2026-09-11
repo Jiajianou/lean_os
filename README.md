@@ -142,6 +142,17 @@ UEFI firmware
   layout, so the layout engine renders straight into the window's
   shared segment.
 
+  **It reaches the real web.** `https://example.com/` loads and
+  renders, verified against certificate authorities that arrive as a
+  *package* — `os install ca-certificates` — because a fresh image
+  still trusts nobody and a CA bundle has to be replaceable without
+  rebuilding the OS. Getting there found a bug in this project's
+  `malloc` that had been present since M19: it returned 8-byte-aligned
+  memory where x86-64 requires 16, and no program had ever noticed
+  because none had been built by a compiler that vectorised a store
+  into the heap. NetSurf was, and it died on a `movaps` to an address
+  ending in 8. See M114-M115 in [milestones.md](milestones.md).
+
   It holds `CAP_FS_WRITE | CAP_NETWORK` and nothing else. **Not**
   `CAP_FRAMEBUFFER`: twenty megabytes of somebody else's C and C++,
   running a JavaScript engine on bytes from a machine nobody here

@@ -236,8 +236,74 @@ EOF
   "$OS_PKG" build "$WORK/impostor.manifest" "$stage" "$REPO/impostor-1.0.osp" || return 1
 }
 
+# ---- ca-certificates 1.0: the thing https was missing ------------------
+#
+# M100 shipped no certificate authorities and said why (M65's rule: a
+# machine that trusts a hundred and fifty authorities it has never
+# looked at, shipped by a project whose claim is that you can read
+# everything on the disk, would be decoration). It also wrote down the
+# condition for reopening that: **a way to update the bundle without
+# rebuilding the image.** M111 built it, so this is that.
+#
+# Why it is a package and not a file in the image, restated because the
+# distinction is the whole point:
+#
+#   - Installing it is a decision somebody makes, by name, once. An
+#     image that has never had `os install ca-certificates` run on it
+#     trusts nobody, which is the state M100 chose deliberately.
+#   - It can be replaced without rebuilding the OS. A CA bundle is the
+#     one piece of a system that MUST be updatable on its own: an
+#     authority is removed from it when it has done something wrong,
+#     and "rebuild the kernel" is not an acceptable answer to that.
+#   - It lives under /pkg, so it is subject to M111's rule that a
+#     package cannot write outside its own prefix.
+#
+# The bundle is the HOST's, copied - not downloaded, and not written
+# here. That is the honest description: this is somebody else's trust
+# store, and a person installing it is trusting whoever curates the
+# machine this was built on. It is data rather than code, so it ships in
+# a package rather than in the OS, which is exactly the boundary
+# CLAUDE.md's first non-negotiable draws.
+build_ca_certificates() {
+  local V=1.0
+  local src=""
+  for c in /etc/ssl/cert.pem /etc/ssl/certs/ca-certificates.crt \
+           /usr/local/etc/openssl/cert.pem; do
+    [ -f "$c" ] && { src="$c"; break; }
+  done
+  if [ -z "$src" ]; then
+    echo "build-packages: no CA bundle on this host - looked at" >&2
+    echo "                /etc/ssl/cert.pem and two others" >&2
+    return 1
+  fi
+  local n
+  n=$(grep -c "BEGIN CERTIFICATE" "$src")
+  if [ "$n" -lt 20 ]; then
+    echo "build-packages: $src has only $n certificates - that is not a bundle" >&2
+    return 1
+  fi
+  local stage="$WORK/ca-certificates-stage"
+  rm -rf "$stage"
+  mkdir -p "$stage/share/ca-certificates"
+  cp "$src" "$stage/share/ca-certificates/ca-bundle.pem" || return 1
+  cat > "$WORK/ca-certificates.manifest" <<EOF
+name: ca-certificates
+version: $V
+summary: certificate authorities, so https can be verified
+provides:
+license: MPL-2.0
+source: $src ($n certificates, from this build host's trust store)
+# No caps, and there is nothing here that could use one: this package
+# contains a single file of text and not one executable. It is the
+# smallest possible demonstration that a package is data plus a manifest
+# rather than a program that runs.
+EOF
+  "$OS_PKG" build "$WORK/ca-certificates.manifest" "$stage" \
+      "$REPO/ca-certificates-$V.osp" || return 1
+}
+
 rc=0
-for p in grep bzip2 impostor; do
+for p in grep bzip2 impostor ca_certificates; do
   selected "$p" || continue
   echo "build-packages: $p"
   "build_$p" || { echo "build-packages: $p FAILED" >&2; rc=1; }

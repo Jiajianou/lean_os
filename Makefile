@@ -676,7 +676,7 @@ NETSURF_BIN := $(BUILD)/netsurf/netsurf
 # machine's own programs picked it up through `make all`, and the browser
 # kept reporting "Could not resolve hostname" because its copy of dns.o
 # was three hours old. It looked like the fix had not worked.
-$(NETSURF_BIN): tools/build-netsurf.sh user_space/bin/nsfb_leanos.c $(LIBC_A)
+$(NETSURF_BIN): tools/build-netsurf.sh user_space/bin/nsfb_leanos.c
 	@./tools/build-netsurf.sh
 
 browser: $(NETSURF_BIN) $(IMAGE) $(LEANFS_PUT) preseed
@@ -774,6 +774,16 @@ $(LIBC_A): $(LIBC_A_OBJS)
 # M114: and `all` builds it. See the comment on `all` above for why the
 # prerequisite is written here rather than there.
 all: $(LIBC_A)
+
+# And the browser is relinked when it changes. Written here for the same
+# reason, and it is the second time in this milestone that the reason
+# bit: $(LIBC_A) on $(NETSURF_BIN)'s own rule (line ~672) expanded to
+# NOTHING, because LIBC_A is a `:=` variable defined at line ~756. The
+# rule looked correct, `make browser` said nothing, and the browser kept
+# the C library it was linked with in the morning - which is the exact
+# failure the prerequisite was added to prevent, reintroduced by the
+# code that prevents it.
+$(NETSURF_BIN): $(LIBC_A)
 
 # ---- M97: the same library, as a shared object -----------------------
 #
@@ -1070,7 +1080,21 @@ $(TEST_SAN_STAMP): | $(TEST_BUILD)
 # dependency graph that is occasionally wrong.
 TEST_HDRS := $(shell find kernel system_api tests -name '*.h' 2>/dev/null)
 
-$(TEST_BIN): $(TEST_SRCS) $(TEST_HDRS) $(TEST_SAN_STAMP) | $(TEST_BUILD)
+# M114: and the user-space sources, because some of them are #included
+# by a test rather than compiled beside it.
+#
+# tests/test_malloc.c does `#include "../user_space/lib/malloc.c"` after
+# renaming its functions, so malloc.c is not in TEST_SRCS and was not a
+# prerequisite of anything. Editing it did not rebuild the tests. That
+# was found by deliberately breaking HEAP_ALIGN to check that the new
+# alignment tests could fail - and they did not, because the binary that
+# ran was the one built before the edit. It is the same hole M93 found
+# in the headers, in a different place, and it is the same lesson: a
+# test tier that cannot notice an edit is a slower way of writing PASS.
+TEST_USER_DEPS := $(shell find user_space/lib user_space/libc -name '*.c' \
+                          -o -name '*.h' 2>/dev/null)
+
+$(TEST_BIN): $(TEST_SRCS) $(TEST_HDRS) $(TEST_USER_DEPS) $(TEST_SAN_STAMP) | $(TEST_BUILD)
 	$(HOSTCC) $(TEST_CFLAGS) -o $@ $(TEST_SRCS)
 
 # The fast tier. Deliberately does not depend on `all` - the point is that

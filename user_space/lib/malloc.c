@@ -3,7 +3,37 @@
 #include "mman.h" /* system_api/include/mman.h - PROT_/MAP_, M78 */
 #include "syscall_wrappers.h"
 
-#define HEAP_ALIGN 8UL   /* word alignment - matches kernel/mm/heap.c's own choice */
+/* ---- M114: sixteen, and it has to be sixteen -------------------------
+ *
+ * This was 8 ("word alignment - matches kernel/mm/heap.c's own choice")
+ * from M19 until a browser fell over on a real web page.
+ *
+ * C requires malloc to return memory aligned for *any* type - on x86-64
+ * that is `max_align_t`, which is 16, because the ABI's largest scalar
+ * alignment is SSE's. The compiler is entitled to act on that, and it
+ * does: GCC vectorises a struct copy or a memcpy into a malloc'd buffer
+ * with `movaps`, which FAULTS rather than slows down on a misaligned
+ * address.
+ *
+ * Every program on this machine had been getting 8 for forty-five
+ * milestones and none of them noticed, because none of them was built
+ * by a compiler that had vectorised a store into the heap. NetSurf is,
+ * and the failure looked nothing like an allocator bug:
+ *
+ *   [isr] ring-3 fault: General protection fault in task netsurf
+ *     rip=0x80001FCA56  code@rip = 0F 29 06   -> movaps %xmm0,(%rsi)
+ *     rsi=0x9000B5AE68                        -> ...68, 8-aligned, not 16
+ *
+ * A browser that died partway through loading a large page, and the
+ * three bytes at `rip` are the whole diagnosis. It is also why the
+ * kernel prints them: see kernel/arch/x86_64/isr.c.
+ *
+ * The header is 32 bytes and grow_heap takes whole pages from sbrk, so
+ * rounding every request up to 16 is sufficient - a payload sits at a
+ * 16-aligned base plus 32, and a split remainder sits that many aligned
+ * bytes further on. Graded by tests/test_malloc.c, which now asserts the
+ * alignment of every pointer it gets rather than only that it got one. */
+#define HEAP_ALIGN 16UL
 #define PAGE_SIZE  4096UL /* matches proc.h's PAGE_SIZE - sys_sbrk maps in whole pages */
 
 /* ---- M78: the size-based split every real allocator makes -------------

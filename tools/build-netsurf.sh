@@ -405,13 +405,26 @@ window_height:600
 # Anti-aliased text. The compositor's window is 32bpp and freetype's
 # grey rendering is what M100's [m100c] self-test already grades.
 fb_font_monochrome:0
-# ---- https, and why this machine ships no certificate authorities ----
-# CURLOPT_CAINFO. The file is NOT installed by tools/install-netsurf.sh
-# and https therefore fails cert verification out of the box, which is a
-# decision rather than an omission - see docs/browser.md. Put a bundle
-# here and https works; this project does not put one here on your
-# behalf.
-ca_bundle:/etc/ssl/certs/ca-bundle.pem
+# ---- https, and where the certificate authorities come from ----------
+# CURLOPT_CAINFO, pointed at a PACKAGE rather than at a file in the
+# image, and that is the decision rather than an accident.
+#
+# This OS still ships no certificate authorities: a fresh image has
+# nothing at this path and https fails cert verification, which is
+# M65's rule (docs/browser.md). What M114 changed is that there is now
+# a supported way to add them that is not "rebuild the OS" -
+#
+#     os install ca-certificates
+#
+# - which was the exact condition M100 recorded for reopening this, and
+# M111's package manager is what met it. A bundle has to be updatable on
+# its own, because an authority is removed from one when it has done
+# something wrong.
+#
+# The version is in the path because /pkg/<name>/<version>/ is where an
+# installed package lives (docs/packages.md). It is pinned here and in
+# tools/build-packages.sh, and those two are the only places it appears.
+ca_bundle:/pkg/ca-certificates/1.0/share/ca-certificates/ca-bundle.pem
 CHOICES
 
 DEJAVU=$(echo "$SRC"/dejavu-fonts-ttf-*/ttf/DejaVuSans.ttf | head -1)

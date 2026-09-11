@@ -99,7 +99,11 @@ TEST(malloc, a_block_is_usable_aligned_and_its_own) {
     REQUIRE(a != NULL);
     REQUIRE(b != NULL);
     CHECK(a != b);
-    CHECK_EQ(((unsigned long)a) % 8, 0u);
+    /* 16, not 8. This assertion said 8 from M19 to M114 and that is why
+     * the allocator returned 8 - an alignment test that agrees with the
+     * bug is worse than no alignment test, because it is evidence. */
+    CHECK_EQ(((unsigned long)a) % 16, 0u);
+    CHECK_EQ(((unsigned long)b) % 16, 0u);
     memset(a, 0xAA, 64);
     memset(b, 0x55, 64);
     CHECK_EQ(((unsigned char *)a)[63], 0xAA);
@@ -253,5 +257,78 @@ TEST(malloc, a_large_allocation_comes_from_its_own_mapping_and_goes_back) {
     memset(big, 0x11, 256 * 1024);
     CHECK_EQ(fake_user_heap_used(), before);
     lean_free(big);
+    check_lists();
+}
+
+/* ---- M114: max_align_t, on every path that returns a pointer ----------
+ *
+ * C requires malloc to return memory aligned for any type; on x86-64
+ * that is 16, because the compiler will emit `movaps` against a buffer
+ * it believes is suitably aligned and `movaps` faults rather than
+ * slowing down. This is not theoretical here - it is what killed the
+ * browser partway through a real web page, and the whole diagnosis was
+ * three bytes at the faulting rip (`0F 29 06`) and an address ending in
+ * 8. See user_space/lib/malloc.c's HEAP_ALIGN comment.
+ *
+ * Every size rather than a representative few: the failure is a
+ * *remainder*, so it appears only at sizes whose rounding lands wrong,
+ * and picking sizes by hand is picking which bugs to find.
+ */
+TEST(malloc, every_size_comes_back_aligned_for_any_type) {
+    malloc_reset();
+    /* Each size is followed by a second, fixed allocation, and it is
+     * the SECOND one that catches the bug: a misaligned block is not
+     * misaligned itself - malloc rounds every request up, so the first
+     * block is fine - it is the block placed immediately *after* a
+     * badly-rounded one that lands wrong. Written first without the
+     * pair, where it passed against a deliberately broken HEAP_ALIGN of
+     * 8 and said nothing. */
+    for (size_t size = 1; size <= 512; size++) {
+        void *p = lean_malloc(size);
+        REQUIRE(p != NULL);
+        CHECK_EQ(((unsigned long)p) % 16, 0u);
+        /* Written to, so a wrong answer that happens to be aligned is
+         * still a block this test used. */
+        memset(p, 0x5A, size);
+        void *after = lean_malloc(24);
+        REQUIRE(after != NULL);
+        CHECK_EQ(((unsigned long)after) % 16, 0u);
+        memset(after, 0xA5, 24);
+        lean_free(p);
+        lean_free(after);
+    }
+    check_lists();
+}
+
+TEST(malloc, a_block_that_gets_its_own_mapping_is_aligned) {
+    /* The mmap path (>= MMAP_THRESHOLD) reaches the caller through
+     * completely different code from the sbrk path, so "the allocator is
+     * aligned" is two claims. */
+    malloc_reset();
+    for (size_t size = MMAP_THRESHOLD; size < MMAP_THRESHOLD + 64; size++) {
+        void *p = lean_malloc(size);
+        REQUIRE(p != NULL);
+        CHECK_EQ(((unsigned long)p) % 16, 0u);
+        lean_free(p);
+    }
+    check_lists();
+}
+
+TEST(malloc, a_block_reused_after_a_free_is_still_aligned) {
+    /* Splitting a free block puts the remainder's header at
+     * payload + size, so a size that is not a multiple of the alignment
+     * misaligns every block after it rather than only its own. */
+    malloc_reset();
+    void *big = lean_malloc(4000);
+    REQUIRE(big != NULL);
+    lean_free(big);
+    void *prev = NULL;
+    for (size_t size = 1; size <= 200; size += 7) {
+        void *p = lean_malloc(size);
+        REQUIRE(p != NULL);
+        CHECK_EQ(((unsigned long)p) % 16, 0u);
+        CHECK(p != prev);
+        prev = p;
+    }
     check_lists();
 }
