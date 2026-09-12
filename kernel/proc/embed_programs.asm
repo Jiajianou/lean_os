@@ -444,3 +444,11 @@ global netrecv_elf_end
 netrecv_elf_start:
     incbin "build/netrecv.elf"
 netrecv_elf_end:
+
+; M118: AF_UNIX and SCM_RIGHTS in two real processes - see
+; user_space/bin/unixtest.c.
+global unixtest_elf_start
+global unixtest_elf_end
+unixtest_elf_start:
+    incbin "build/unixtest.elf"
+unixtest_elf_end:

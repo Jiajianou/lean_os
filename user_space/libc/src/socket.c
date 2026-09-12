@@ -23,7 +23,9 @@
 #include <netinet/tcp.h>
 #include <string.h>
 #include <unistd.h>  /* M100: read and write, which recv and send are now */
+#include <sys/uio.h>
 #include <sys/un.h>
+#include <stdlib.h>
 
 #include "os_net.h" /* system_api/include/os_net.h - OS_SOCK_*, os_sockaddr_t */
 #include "syscall_wrappers.h"
@@ -58,12 +60,69 @@ static void to_sockaddr(struct sockaddr *sa, socklen_t *len,
     *len = (socklen_t)sizeof(in); /* the size it WOULD have needed - the documented contract */
 }
 
+/* ---- M118: the Unix-domain half --------------------------------------
+ *
+ * `sockaddr_un` -> the byte string the kernel's name table keys on. Two
+ * cases and they are genuinely different, which is why this is a function
+ * and not a memcpy:
+ *
+ *   - A path name is NUL-terminated, so a caller passing
+ *     sizeof(struct sockaddr_un) - which most do - means the string and
+ *     not 108 bytes of mostly zero. Trimmed at the NUL.
+ *   - An abstract name's FIRST byte is the NUL, so trimming there would
+ *     make every abstract name the empty one. Its length is exactly what
+ *     the caller's `len` says, which is the rule on Linux too.
+ */
+static int un_name(const struct sockaddr *sa, socklen_t len,
+                   const char **name_out, int *len_out) {
+    size_t base = (size_t)(((struct sockaddr_un *)0)->sun_path);
+    if (!sa || sa->sa_family != AF_UNIX || (size_t)len <= base) {
+        return -1;
+    }
+    const struct sockaddr_un *un = (const struct sockaddr_un *)(const void *)sa;
+    size_t n = (size_t)len - base;
+    if (n > sizeof(un->sun_path)) {
+        n = sizeof(un->sun_path);
+    }
+    if (un->sun_path[0] != '\0') {
+        size_t i = 0;
+        while (i < n && un->sun_path[i]) {
+            i++;
+        }
+        n = i;
+    }
+    if (n == 0) {
+        return -1;
+    }
+    *name_out = un->sun_path;
+    *len_out = (int)n;
+    return 0;
+}
+
 int socket(int domain, int type, int protocol) {
     (void)protocol; /* the type already selects TCP or UDP here */
+    if (domain == AF_UNIX) {
+        /* M118. SOCK_STREAM and SOCK_SEQPACKET share their numbers with
+         * the kernel's UNIX_SOCK_* by construction (Linux's, so that one
+         * constant means one thing across the ABI), so there is nothing
+         * to map - which is worth saying because the AF_INET path below
+         * does have to map, and the asymmetry looks like an oversight
+         * until you know it is not. */
+        if (type != SOCK_STREAM && type != SOCK_SEQPACKET) {
+            errno = ESOCKTNOSUPPORT;
+            return -1;
+        }
+        long fd = sys_socket_in(type, OS_AF_UNIX);
+        if (fd < 0) {
+            errno = EMFILE;
+            return -1;
+        }
+        return (int)fd;
+    }
     if (domain != AF_INET) {
-        /* AF_UNIX is M100's and AF_INET6 does not exist in this stack.
-         * Refused rather than quietly given an Internet socket, which
-         * would connect somewhere real and surprising. */
+        /* AF_INET6 does not exist in this stack. Refused rather than
+         * quietly given an Internet socket, which would connect somewhere
+         * real and surprising. */
         errno = EAFNOSUPPORT;
         return -1;
     }
@@ -85,6 +144,15 @@ int socket(int domain, int type, int protocol) {
 }
 
 int bind(int fd, const struct sockaddr *addr, socklen_t len) {
+    const char *name;
+    int namelen;
+    if (un_name(addr, len, &name, &namelen) == 0) { /* M118 */
+        if (sys_bindun(fd, name, namelen) != 0) {
+            errno = EADDRINUSE;
+            return -1;
+        }
+        return 0;
+    }
     uint32_t ip;
     uint16_t port;
     if (from_sockaddr(addr, len, &ip, &port) != 0) {
@@ -112,6 +180,19 @@ int listen(int fd, int backlog) {
 }
 
 int connect(int fd, const struct sockaddr *addr, socklen_t len) {
+    const char *name;
+    int namelen;
+    if (un_name(addr, len, &name, &namelen) == 0) { /* M118 */
+        /* No handshake to wait for on this family: the connection is
+         * queued on the listener by the time this returns, which is why
+         * there is no connstat loop here and why a refused connect is
+         * reported immediately rather than a poll later. */
+        if (sys_connectun(fd, name, namelen) != 0) {
+            errno = ECONNREFUSED;
+            return -1;
+        }
+        return 0;
+    }
     uint32_t ip;
     uint16_t port;
     if (from_sockaddr(addr, len, &ip, &port) != 0) {
@@ -261,15 +342,226 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
 }
 
 int shutdown(int fd, int how) {
-    /* There is no half-close in this stack: SYS_close is the only way to
-     * end a connection, and calling it here would close a descriptor the
-     * caller still holds. Refused rather than silently doing nothing,
-     * because a program that shuts down its write side and then waits
-     * for the peer's EOF would wait forever. */
-    (void)fd;
-    (void)how;
-    errno = ENOSYS;
+    /* M118: real on AF_UNIX and still refused on TCP, which is the honest
+     * split rather than a partial implementation. There is no half-close
+     * in the TCP stack - SYS_close is the only way to end a connection,
+     * and calling it here would close a descriptor the caller still holds
+     * - so a program that shut down its write side and waited for the
+     * peer's EOF would wait forever, and being told no is strictly
+     * better. On a Unix-domain socket there is no FIN to send: the
+     * half-close is a flag and a wake, and an IPC layer that cannot say
+     * "I have finished writing" without closing the descriptor cannot
+     * tell its peer apart from a crash. */
+    if (how < 0 || how > 2) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (sys_sockshut(fd, how) == 0) {
+        return 0;
+    }
+    errno = ENOSYS; /* not a Unix-domain socket - see above */
     return -1;
+}
+
+/* ---- M118: socketpair, sendmsg, recvmsg ------------------------------- */
+
+int socketpair(int domain, int type, int protocol, int fds[2]) {
+    (void)protocol;
+    if (domain != AF_UNIX) {
+        /* socketpair() on AF_INET is legal on some systems and means two
+         * connected TCP sockets with no listener, which this stack cannot
+         * produce. Refused rather than approximated. */
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+    if (type != SOCK_STREAM && type != SOCK_SEQPACKET) {
+        errno = ESOCKTNOSUPPORT;
+        return -1;
+    }
+    if (!fds) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (sys_socketpair(type, fds) != 0) {
+        errno = EMFILE;
+        return -1;
+    }
+    return 0;
+}
+
+/* The payload staging buffer. One kernel record's worth, which is the
+ * most either call can move in one step - SYS_sendmsg clamps a longer
+ * stream send and refuses a longer message, and says why. */
+#define MSG_STAGE_MAX 4096
+
+/* Collects the descriptors out of a control buffer. Returns how many, or
+ * -1 for a record this cannot honour. Only SCM_RIGHTS at SOL_SOCKET is
+ * understood; any other record is an error rather than something to skip,
+ * because skipping one silently would mean a program believing it had
+ * sent credentials it had not. */
+static int cmsg_collect_fds(const struct msghdr *msg, int *out, int max) {
+    int n = 0;
+    const struct cmsghdr *c = CMSG_FIRSTHDR((struct msghdr *)msg);
+    while (c) {
+        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) {
+            return -1;
+        }
+        size_t payload = c->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr));
+        size_t count = payload / sizeof(int);
+        const int *fds = (const int *)(const void *)CMSG_DATA((struct cmsghdr *)c);
+        for (size_t i = 0; i < count; i++) {
+            if (n >= max) {
+                return -1;
+            }
+            out[n++] = fds[i];
+        }
+        c = CMSG_NXTHDR((struct msghdr *)msg, (struct cmsghdr *)c);
+    }
+    return n;
+}
+
+ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
+    if (!msg) {
+        errno = EFAULT;
+        return -1;
+    }
+    int fds[OS_MSG_MAX_FDS];
+    int nfds = cmsg_collect_fds(msg, fds, OS_MSG_MAX_FDS);
+    if (nfds < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* The gather. One iovec is passed straight through with no copy at
+     * all, which is the case every IPC layer here actually uses; more
+     * than one is assembled, because a SOCK_SEQPACKET boundary is the
+     * whole message and cannot be sent in pieces. */
+    unsigned char stage[MSG_STAGE_MAX];
+    const void *data = (const void *)0;
+    size_t len = 0;
+    if (msg->msg_iovlen == 1 && msg->msg_iov) {
+        data = msg->msg_iov[0].iov_base;
+        len = msg->msg_iov[0].iov_len;
+    } else if (msg->msg_iovlen > 1 && msg->msg_iov) {
+        for (int i = 0; i < msg->msg_iovlen; i++) {
+            size_t n = msg->msg_iov[i].iov_len;
+            if (len + n > sizeof(stage)) {
+                n = sizeof(stage) - len;
+            }
+            memcpy(stage + len, msg->msg_iov[i].iov_base, n);
+            len += n;
+            if (len == sizeof(stage)) {
+                break; /* a stream send is allowed to be short; a message this long is refused by the kernel */
+            }
+        }
+        data = stage;
+    }
+    os_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.data = (uint64_t)(uintptr_t)data;
+    m.len = (uint32_t)len;
+    m.nfds = (uint32_t)nfds;
+    m.fds = (uint64_t)(uintptr_t)fds;
+    long n = sys_sendmsg(fd, &m, flags);
+    if (n == -OS_ERR_AGAIN) {
+        errno = EAGAIN;
+        return -1;
+    }
+    if (n == -OS_ERR_INTR) {
+        errno = EINTR;
+        return -1;
+    }
+    if (n < 0) {
+        errno = EPIPE;
+        return -1;
+    }
+    return (ssize_t)n;
+}
+
+ssize_t recvmsg(int fd, struct msghdr *msg, int flags) {
+    if (!msg) {
+        errno = EFAULT;
+        return -1;
+    }
+    /* Room for descriptors, which is whatever the control buffer can hold
+     * - capped at what one message can carry. A caller that offered none
+     * gets none, and any that arrive are closed by the kernel with
+     * MSG_CTRUNC, exactly as on Linux. */
+    int fds[OS_MSG_MAX_FDS];
+    int max_fds = 0;
+    if (msg->msg_control && (size_t)msg->msg_controllen > CMSG_LEN(0)) {
+        size_t room = ((size_t)msg->msg_controllen - CMSG_LEN(0)) / sizeof(int);
+        max_fds = room > OS_MSG_MAX_FDS ? OS_MSG_MAX_FDS : (int)room;
+    }
+    unsigned char stage[MSG_STAGE_MAX];
+    void *data = (void *)0;
+    size_t len = 0;
+    int scatter = 0;
+    if (msg->msg_iovlen == 1 && msg->msg_iov) {
+        data = msg->msg_iov[0].iov_base;
+        len = msg->msg_iov[0].iov_len;
+    } else if (msg->msg_iovlen > 1 && msg->msg_iov) {
+        for (int i = 0; i < msg->msg_iovlen; i++) {
+            len += msg->msg_iov[i].iov_len;
+        }
+        if (len > sizeof(stage)) {
+            len = sizeof(stage);
+        }
+        data = stage;
+        scatter = 1;
+    }
+    os_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.data = (uint64_t)(uintptr_t)data;
+    m.len = (uint32_t)len;
+    m.nfds = (uint32_t)max_fds;
+    m.fds = (uint64_t)(uintptr_t)fds;
+    long n = sys_recvmsg(fd, &m, flags);
+    if (n == -OS_ERR_AGAIN) {
+        errno = EAGAIN;
+        return -1;
+    }
+    if (n == -OS_ERR_INTR) {
+        errno = EINTR;
+        return -1;
+    }
+    if (n < 0) {
+        errno = ENOTSOCK;
+        return -1;
+    }
+    if (scatter) {
+        size_t off = 0;
+        for (int i = 0; i < msg->msg_iovlen && off < (size_t)n; i++) {
+            size_t take = msg->msg_iov[i].iov_len;
+            if (take > (size_t)n - off) {
+                take = (size_t)n - off;
+            }
+            memcpy(msg->msg_iov[i].iov_base, stage + off, take);
+            off += take;
+        }
+    }
+    msg->msg_flags = 0;
+    if (m.flags & OS_MSG_TRUNC) {
+        msg->msg_flags |= MSG_TRUNC;
+    }
+    if (m.flags & OS_MSG_CTRUNC) {
+        msg->msg_flags |= MSG_CTRUNC;
+    }
+    /* Build the one control record back. msg_controllen is set to what
+     * was actually used, which is what a caller reads to find out whether
+     * anything came - and is 0 when nothing did, rather than the size it
+     * offered. */
+    if (m.nfds > 0 && msg->msg_control) {
+        struct cmsghdr *c = (struct cmsghdr *)msg->msg_control;
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(m.nfds * sizeof(int));
+        memcpy(CMSG_DATA(c), fds, m.nfds * sizeof(int));
+        msg->msg_controllen = (socklen_t)c->cmsg_len;
+    } else {
+        msg->msg_controllen = 0;
+    }
+    msg->msg_namelen = 0; /* this family has no address to report - see the kernel's accept */
+    return (ssize_t)n;
 }
 
 int getsockname(int fd, struct sockaddr *addr, socklen_t *len) {

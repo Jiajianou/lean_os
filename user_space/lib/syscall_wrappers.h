@@ -255,8 +255,12 @@ long sys_dropcaps(uint32_t keep);
  * Addresses are host-order uint32_t (system_api/include/os_net.h has the
  * OS_IPV4 macro and the two string conversions); there is no htons in
  * this OS and there does not need to be one. */
-/* M66: `type` is os_net.h's OS_SOCK_DGRAM or OS_SOCK_STREAM. */
+/* M66: `type` is os_net.h's OS_SOCK_DGRAM or OS_SOCK_STREAM.
+ * M118: `domain` is OS_AF_INET or OS_AF_UNIX, and AF_INET is 0 - which is
+ * what this wrapper passed for eleven milestones before the parameter
+ * existed, so every caller still means what it meant. */
 long sys_socket(int type);
+long sys_socket_in(int type, int domain);
 
 /* M66: TCP. Every one of these is non-blocking, including connect -
  * sys_connect starts the handshake and sys_connstat says how it went.
@@ -274,6 +278,20 @@ long sys_sendto(int fd, uint32_t ip, uint16_t port, const void *data, uint32_t l
 long sys_recvfrom(int fd, void *data, uint32_t max, os_sockaddr_t *from);
 long sys_sockpoll(int fd);
 long sys_netconf(os_netconf_t *out);
+
+/* ---- M118: AF_UNIX, and descriptor passing ---------------------------
+ *
+ * The five calls kernel/ipc/unixsock.h exists for. A name is `len` bytes
+ * rather than a C string because an abstract name begins with a NUL.
+ * sys_sendmsg and sys_recvmsg exchange an os_msg_t - bytes and a list of
+ * descriptor numbers - and <sys/socket.h>'s iovec and cmsghdr walking is
+ * libc's job, at the same seam that converts byte order. */
+long sys_socketpair(int type, int fds_out[2]);
+long sys_bindun(int fd, const char *name, int len);
+long sys_connectun(int fd, const char *name, int len);
+long sys_sendmsg(int fd, const os_msg_t *msg, int flags);
+long sys_recvmsg(int fd, os_msg_t *msg, int flags);
+long sys_sockshut(int fd, int how);
 
 /* M64: corrects the clock, which is the half of "know the time" SNTP
  * needs and M59 had no reason to add. Lasts until reboot. */

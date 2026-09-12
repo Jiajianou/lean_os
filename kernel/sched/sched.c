@@ -18,6 +18,7 @@
 #include "ipc/pipe.h"
 #include "fs/flock.h" /* M100: flock_release_pid - see sched_release_fds */
 #include "ipc/shm.h" /* shm_free_by_owner - see task_exit_with_code */
+#include "ipc/unixsock.h" /* M118: unixsock_ref/unref, the fifth kind of thing a descriptor can name */
 #include "lib/spinlock.h"
 #include "mm/heap.h"
 #include "mm/pmm.h" /* M81: task stacks come from the frame allocator - see task_spawn */
@@ -2995,6 +2996,9 @@ void fd_release(fd_slot_t *slot) {
     case FD_SOCKET:
         socket_unref(slot->sock);
         break;
+    case FD_UNIX:
+        unixsock_unref(slot->un); /* M118 */
+        break;
     default:
         break;
     }
@@ -3017,6 +3021,9 @@ void fd_retain(const fd_slot_t *slot) {
         break;
     case FD_SOCKET:
         socket_ref(slot->sock);
+        break;
+    case FD_UNIX:
+        unixsock_ref(slot->un); /* M118 */
         break;
     default:
         break;

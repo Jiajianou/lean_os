@@ -389,7 +389,16 @@ long sys_dropcaps(uint32_t keep) {
 /* ---- M64: the network ------------------------------------------------ */
 
 long sys_socket(int type) {
-    return do_syscall(SYS_socket, type, 0, 0);
+    return do_syscall(SYS_socket, type, OS_AF_INET, 0);
+}
+
+/* M118: the same call with the family said out loud. The wrapper above
+ * keeps its one-argument shape rather than growing a second - forty-odd
+ * call sites across this tree pass a type and mean the internet, and a
+ * mechanical edit of all of them would have been a change with no
+ * content. */
+long sys_socket_in(int type, int domain) {
+    return do_syscall(SYS_socket, type, domain, 0);
 }
 
 long sys_listen(int fd) {
@@ -434,6 +443,32 @@ long sys_sockpoll(int fd) {
 
 long sys_netconf(os_netconf_t *out) {
     return do_syscall(SYS_netconf, (long)out, 0, 0);
+}
+
+/* ---- M118: AF_UNIX --------------------------------------------------- */
+
+long sys_socketpair(int type, int fds_out[2]) {
+    return do_syscall(SYS_socketpair, type, (long)fds_out, 0);
+}
+
+long sys_bindun(int fd, const char *name, int len) {
+    return do_syscall(SYS_bindun, fd, (long)name, len);
+}
+
+long sys_connectun(int fd, const char *name, int len) {
+    return do_syscall(SYS_connectun, fd, (long)name, len);
+}
+
+long sys_sendmsg(int fd, const os_msg_t *msg, int flags) {
+    return do_syscall(SYS_sendmsg, fd, (long)msg, flags);
+}
+
+long sys_recvmsg(int fd, os_msg_t *msg, int flags) {
+    return do_syscall(SYS_recvmsg, fd, (long)msg, flags);
+}
+
+long sys_sockshut(int fd, int how) {
+    return do_syscall(SYS_sockshut, fd, how, 0);
 }
 
 long sys_settime(uint32_t unix_seconds) {

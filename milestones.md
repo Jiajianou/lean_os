@@ -513,6 +513,21 @@ browser has a **twin** (`tools/build-netsurf-host.sh`) and a
 guess. The bug itself was sixteen milestones old and one line:
 `malloc(0)` returned NULL.
 
+**M118 is not in this table either, and it is the first of these that
+was not a complaint.** *"Systematically build the needed pieces so I can
+install chromium later"* was asked for on 2026-09-11, and unlike M112-M117
+it asked for work this file had already specified: `docs/browser.md`'s
+five conditions, in its own order, the first of which its own measurement
+called the smallest change with the largest effect. So M118 jumped
+nothing and invented nothing - it closed an open box M100 had left
+(`AF_UNIX`/`socketpair`) and took the arc that document opens one step.
+What it changed for the rows that remain: nothing, except that the
+deferred browser entry's condition has moved from `AF_UNIX` to **an
+epoll-shaped readiness interface plus `eventfd` and `timerfd`**, and that
+the measurement itself was corrected in one direction - the condition was
+never Chromium's alone. WebKit, Gecko and Ladybird all pass descriptors
+over a Unix-domain socket and none of the four has a single-process mode.
+
 **M111 is not in this table and that is recorded rather than hidden.**
 `os`, the package manager, was asked for directly on 2026-09-09 and built
 to completion in one pass — an instruction outranks the queue, the same
@@ -2779,6 +2794,20 @@ had `AF_UNIX` open for a *different* reason (CPython's `test_stat`), and
 condition, which is what this project means by a deferral, and it is the
 first time the browser row has had one.
 
+**M118 built it (2026-09-11), and corrected the paragraph above in one
+direction.** The numbers are left as they were measured - 119 syscalls
+now, with `socketpair`, `sendmsg`, `recvmsg` and `shutdown` moved into
+the overlap, so 83 and 344 - because a measurement with a date on it
+should be added to rather than edited. What was wrong was the framing:
+this was never Chromium's condition. WebKit's `IPC::Connection`, Gecko's
+IPDL and Ladybird's LibIPC pass descriptors over a Unix-domain socket
+too, and none of the four engines has a supported single-process mode any
+more, so one kernel feature stood in front of all of them. **The
+condition for this row is now the second item on that list**: an
+epoll-shaped readiness interface plus `eventfd` and `timerfd`, which is
+what `base`'s message pump calls and what `poll`, `select` and
+`SYS_waitfds` are not.
+
 ### M113 — the browser, actually installed `[x]`
 
 *Landed 2026-09-10.* **Asked for directly** — *"I previously ask you to
@@ -3896,6 +3925,143 @@ record before this one failed at 2,635 s and 7,048 s.
 
 ---
 
+### M118 — AF_UNIX with SCM_RIGHTS: the condition under every modern engine `[x]`
+
+*Landed 2026-09-11.* Asked for directly — *"systematically build the
+needed pieces so I can install chromium later"* — and what that asks for
+is already written down with numbers: `docs/browser.md`'s five conditions,
+in its own order. This is the first of them, and the only one its own
+measurement called not-a-number: **`AF_UNIX` with `SCM_RIGHTS`. Without
+descriptor passing there is no Mojo, and without Mojo there is no
+Chromium — not a slow one, not a limited one, none.**
+
+**What reading the question again added, and it is the reason this is
+worth a milestone rather than a chore.** The measurement had framed this
+as Chromium's condition. It is not. WebKit's `IPC::Connection`, Gecko's
+IPDL and Ladybird's LibIPC all pass descriptors over a Unix-domain
+socket, and **none of the four engines still has a supported
+single-process mode**. So one kernel feature stands in front of every
+multi-process browser engine that exists, and the only modern engine that
+would not need it is Servo — whose own condition is a Rust `std` port for
+`x86_64-lean_os`, which is larger. That is what made this the right thing
+to build *before* the engine is chosen: a port that picks the engine first
+finds this gap second, with a deadline attached.
+
+**What was built.** `socket(AF_UNIX, SOCK_STREAM|SOCK_SEQPACKET)`,
+`socketpair`, `bind`, `listen`, `connect`, `accept`, `read`, `write`,
+`sendmsg`, `recvmsg`, `shutdown`, the abstract namespace, `MSG_TRUNC` and
+`MSG_CTRUNC`, and `SCM_RIGHTS` — a descriptor of any kind crossing to
+another process as a reference to the same kernel object. 619 lines of
+kernel (`kernel/ipc/unixsock.c`), six syscalls, a new `FD_UNIX`
+descriptor kind, and the libc half including the `CMSG_*` macros. Six
+files are new, fifteen changed.
+[docs/unix-sockets.md](docs/unix-sockets.md) is the design note.
+
+**Four decisions, each of which could have gone the other way:**
+
+1. **It lives in `kernel/ipc`, not `kernel/net`.** A Unix-domain socket
+   shares nothing with that directory but a spelling — no address, no
+   checksum, no retransmission, no device — and shares everything with
+   `pipe.c`. Putting it in `kernel/net` would have meant `net_lock` held
+   over a channel no packet can reach, and would have answered the next
+   question wrongly by default.
+2. **It needs no capability.** `SYS_socket` checks `CAP_NETWORK`; this
+   family does not, and that is the point rather than a gap. What it
+   reaches is another process on this machine that is already listening,
+   which is what a pipe reaches. And gating it on `CAP_NETWORK` would
+   have been backwards for the thing it exists for: a renderer is the one
+   program that must hold *no* network capability and the one that cannot
+   work without this call. `/bin/unixtest`'s last section is that
+   assertion, with a control: a child calls `dropcaps(0)`, is refused an
+   `AF_INET` socket, and then talks to its parent.
+3. **Nothing in the file parks.** `kernel/net`'s arrangement, not
+   `pipe.c`'s: `syscall.c` does the blocking around a non-blocking
+   `unixsock_recv`, which is what makes the whole of `SCM_RIGHTS`'
+   bookkeeping reachable from a host test.
+4. **The kernel's message is bytes and a descriptor list, not a
+   `msghdr`.** iovec gathering and `CMSG_NXTHDR` walking are a user-space
+   calling convention; libc does them at the same seam that already
+   converts byte order for `sockaddr_in`.
+
+**The bug that was found by reading rather than by running, and the test
+that would have hung instead of failing.** The obvious shape of
+`unixsock_send` copies each passed descriptor into the record and calls
+`fd_retain` there, under the file's own lock. It deadlocks — and the case
+is exactly the one this milestone exists for: a passed descriptor may
+*itself* be a Unix-domain socket (Mojo passes channel endpoints over
+channels), and `fd_retain` on one calls `unixsock_ref`, which takes the
+same non-recursive lock. Found in the call graph before the first boot.
+The references are taken before the lock now, and the failure paths give
+back what they did not keep. The test for it is
+`a_socket_passed_over_a_socket_is_released_too`, and it is worth knowing
+that it would have *hung* rather than failed — which is why that test's
+comment says so.
+
+**What the instruments said, in the order they spoke.**
+
+- `tests/test_unixsock.c`: **30 tests**, graded against
+  `tests/fakes/fake_kernel_objects.c`, which counts the references on a
+  passed descriptor — so "the receiver got one and the sender's own is
+  untouched" is a number. Every test ends by asserting no socket, no
+  queued descriptor and no reference survived.
+- `make mutate` on the new file: **61.5% first, 87.2% after.** Nine of
+  the fifteen survivors were real missing assertions and are now nine
+  tests — a type that does not exist being refused, a name at exactly
+  `UNIX_PATH_MAX`, a SEQPACKET message that does not fit *right now*
+  waiting whole rather than partially, a stream of 64 one-byte writes not
+  exhausting a 16-record queue, `recv` clearing the out-parameters it is
+  about to report, a descriptor delivered once even when its record
+  survives the read, and a truncated message not taking the next one with
+  it. Of the five that remain, three are equivalent mutations and two are
+  one-past-the-end reads that only a sanitizer sees — and the campaign
+  runs with `TEST_SAN=0`.
+- **`/bin/syscalltest` failed the first graded boot**, and was right to:
+  its table requires every syscall number to be classified and six new
+  ones were not. Classifying them also moved a rule into this code — the
+  three name-taking calls validate their user pointer *before* looking at
+  the descriptor, because the sweep pins the descriptor to one that
+  cannot exist, and a handler that checks the fd first has a pointer
+  check that passes for the wrong reason. `SYS_pread`'s entry in that
+  file is where that rule was already written down. 288 checks before
+  this milestone, **313 after**, 0 failures.
+- `[m118]`, ten sections in two real processes, **1200 ms**: a pair both
+  ways, a SEQPACKET boundary kept, a pipe end *and an open file* passed
+  to a forked child, a socket passed over a socket, a path name and an
+  abstract name dialled from another process, a blocking read woken by
+  its peer, `shutdown` seen as end of stream, `MSG_CTRUNC` reported, and
+  a child holding no capabilities doing all of it. Plus two claims the
+  program cannot make about itself, counted by the kernel on either side
+  of it: every socket it created was given back, and no passed descriptor
+  is still sitting in a queue nobody read.
+- The sharpest section is the third, and it is sharp because of what it
+  rules out: the parent reads two bytes of a ten-byte file and passes the
+  descriptor; the child must read the remaining **eight**. An
+  implementation that re-opened the path would pass every other section
+  and fail that one.
+
+**What it cost.** One afternoon. The graded tier: 426 host tests (21→30
+new ones), 129 boot markers, the interactive quick subset, four cores —
+all green, 565 s. The new file's coverage floor is 92.52%.
+
+**What is explicitly not built, with the condition attached** (all in
+[docs/unix-sockets.md](docs/unix-sockets.md)): `SOCK_DGRAM` on this
+family — condition, a program that sends to a bound name without
+connecting; a bound path as a real filesystem node — condition, a program
+that needs `stat()` or `unlink()` on it to succeed, and the abstract
+namespace has none of that half-truth in it; and `SCM_CREDENTIALS` —
+condition, the one multi-user names, since two of its three numbers would
+be constants here.
+
+**Where this leaves the Chromium arc.** Condition 1 of five is closed and
+`docs/browser.md` says so next to the original measurement rather than
+instead of it — the syscall table there is left as it was measured, with
+the four that moved named underneath. **Condition 2 is next and is
+ordinary work: an epoll-shaped readiness interface plus `eventfd` and
+`timerfd`.** `base`'s `MessagePumpEpoll` calls `epoll_wait`; this kernel
+has `poll`, `select` and `SYS_waitfds`, and nothing here can wake a
+thread the way `eventfd` does. Conditions 3 to 5 stay an arc rather than
+a port.
+
 ## Every open box, in one place
 
 The queue says what order. This says exactly what is unfinished, in the
@@ -3967,10 +4133,16 @@ write nothing and return successfully).
       one that decides it is not the count: **`AF_UNIX` with
       `SCM_RIGHTS`**, without which there is no Mojo and therefore no
       Chromium at all.
-- [ ] **`AF_UNIX`/`socketpair`, and it now has two customers.** Opened
-      by CPython's `test_stat` and now named by the measurement above as
-      the smallest change with the largest effect on the browser gap.
-      **This is where this arc goes next.**
+- [x] **`AF_UNIX`/`socketpair` — done 2026-09-11, as M118.** Opened by
+      CPython's `test_stat` and named by the measurement above as the
+      smallest change with the largest effect on the browser gap. Built
+      whole: `socketpair`, `bind`/`connect` by path name and by abstract
+      name, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, `MSG_TRUNC` and
+      `MSG_CTRUNC`, a real `shutdown`, graded by `[m118]` and 30 host
+      tests. What reading it again added to the measurement: the
+      condition is **not Chromium's** - WebKit, Gecko and Ladybird pass
+      descriptors over a Unix-domain socket too, and none of the four has
+      a single-process mode. See [docs/unix-sockets.md](docs/unix-sockets.md).
 - [ ] **Two headers named `signal.h`.** Not a missing feature - a
       fragility in this project's own sysroot that the curl port found
       (see the ninth increment). Any third-party build that puts
@@ -4324,7 +4496,7 @@ says whether it is a bug or a decision.
   a fault and *returns* rather than unwinding.
 - **`PTHREAD_KEYS_MAX` is 32**, and CPython's `test_threading` runs out
   past it (`gilstate_tss_set: failed to set current tstate`).
-- **`AF_UNIX`/`socketpair` do not exist.** M100 absorbed `O_NONBLOCK` and blocking sockets but not these - nothing ported has needed them (mbedtls did not). Still what stopped CPython's `test_stat` from reporting counts.
+- **`AF_UNIX`/`socketpair` exist as of M118** - with `SCM_RIGHTS`, an abstract namespace and a real `shutdown`, needing no capability ([docs/unix-sockets.md](docs/unix-sockets.md)). Two divergences remain and are written down there rather than here: a bound path is a name in a kernel table and not a node in leanfs (so `stat()` on it fails and `unlink()` does not unbind), and `SCM_CREDENTIALS` does not exist because two of its three numbers would be constants on a machine with one principal. `SOCK_DGRAM` on this family is not built; its condition is a program that sends to a bound name without connecting.
 - **The random device is real as of M100** (`kernel/dev/random.c`):
   ChaCha20 under a pool every interrupt feeds, fast key erasure on
   extraction, `getrandom` beside `/dev/urandom`. The xorshift-over-the-TSC
@@ -4368,10 +4540,18 @@ condition rather than by an opinion.
   *Chromium's* kind, and [docs/browser.md](docs/browser.md) replaces the
   estimate with measurements: 100 GB of checkout, 535 repositories,
   clang-and-libc++ only, and 427 sandbox syscalls against this kernel's
-  79. **The condition is `AF_UNIX` with `SCM_RIGHTS`** - no descriptor
-  passing, no Mojo, no Chromium - and it is now an open box in M100
-  rather than a line here. GPU compositing stays refused on its own
-  terms above.
+  79. **That condition was `AF_UNIX` with `SCM_RIGHTS` - and M118 built
+  it** (2026-09-11), which also corrected the measurement: the same
+  feature is in front of WebKit, Gecko and Ladybird, none of which has a
+  single-process mode either, so it was never Chromium's condition
+  alone. **The condition is now the second one on that list: an
+  epoll-shaped readiness interface plus `eventfd` and `timerfd`**, which
+  is what Chromium's message pump calls and what `poll`, `select` and
+  `SYS_waitfds` are not. The three after it - clang and libc++ for this
+  triple, a machine with 16 GB of RAM and 100 GB of disk, and a sandbox
+  story that is not a pretence - are an arc rather than a port, and
+  Chrome itself is proprietary and so not a porting question at all. GPU
+  compositing stays refused on its own terms above.
 - **Multi-user, logins, uids.** Becomes real if and when two people share
   a machine, and not before. Unchanged by a machine that compiles its own
   kernel — which is exactly where the temptation shows up, and why it is

@@ -23,6 +23,7 @@
 #include "proc.h" /* system_api/include/proc.h - TASK_INFO_MAX, which *is* MAX_TASKS below. Resolves to the system_api header: a quoted include searches this file's own directory first (kernel/sched/, no proc.h), then -Ikernel (no kernel/proc.h), then -Isystem_api/include. */
 
 struct pipe; /* kernel/ipc/pipe.h owns the real definition - not included here so sched.h doesn't have to know pipes exist */
+struct unixsock; /* M118: kernel/ipc/unixsock.h owns it, and that header includes THIS one - so the forward declaration is load-bearing, not tidy */
 
 /* M54: TASK_FREE is 0 so a zeroed table is a table of free slots, which
  * is what makes slot recycling a property of the array rather than of a
@@ -79,6 +80,14 @@ typedef enum {
      * the other two, which is the whole reason a socket is an fd here
      * and not its own handle namespace. */
     FD_SOCKET,
+    /* M118: a Unix-domain socket (kernel/ipc/unixsock.h), which is a
+     * different kind from FD_SOCKET rather than a flag on it. They share
+     * a name in <sys/socket.h> and nothing else: one is a port on an
+     * interface, the other is a buffer between two processes on this
+     * machine. Keeping them apart is what lets AF_UNIX need no
+     * capability while AF_INET needs CAP_NETWORK - see unixsock.h for
+     * why that difference is the point rather than an inconsistency. */
+    FD_UNIX,
 } fd_type_t;
 
 /* M21: bumped from 8 - a compositor juggling several windows needs
@@ -267,6 +276,7 @@ typedef struct {
         struct pipe *pipe;
         struct openfile *file;
         struct socket *sock;
+        struct unixsock *un; /* M118 */
     };
     /* M84: FD_CLOEXEC, and it finally means something.
      *

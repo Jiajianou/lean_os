@@ -315,6 +315,30 @@ static const entry_t table[] = {
      * testing anything. */
     {SYS_pread,         CLASS_PTR, 2, NULL},
     {SYS_pwrite,        CLASS_PTR, 2, NULL},
+
+    /* ---- M118: AF_UNIX -----------------------------------------------
+     *
+     * socketpair's pointer is where two descriptor numbers come back, and
+     * it is checked before anything is created - so a hostile pointer
+     * costs nothing rather than leaving two sockets nobody can name.
+     *
+     * bindun and connectun take a name that is BYTES and a length, not a
+     * C string, so the generic sweep's "plausible length of 64" is a real
+     * 64-byte read out of the caller's address space and a real refusal.
+     *
+     * sendmsg and recvmsg are CLASS_BLOCK because both can wait - for
+     * buffer space and for a message - and the sweep pins their
+     * descriptor to one that cannot exist. All four validate the user
+     * pointer before looking at the descriptor, which is what keeps the
+     * pointer check here from passing for the wrong reason; see the
+     * SYS_pread note above for where that rule comes from. */
+    {SYS_socketpair,    CLASS_PTR, 2, NULL},
+    {SYS_bindun,        CLASS_PTR, 2, NULL},
+    {SYS_connectun,     CLASS_PTR, 2, NULL},
+    {SYS_sendmsg,       CLASS_BLOCK, 2, NULL},
+    {SYS_recvmsg,       CLASS_BLOCK, 2, NULL},
+    /* No pointer at all: an fd and a how. */
+    {SYS_sockshut,      CLASS_PLAIN, 0, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 

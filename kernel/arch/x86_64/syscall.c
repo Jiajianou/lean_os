@@ -22,6 +22,7 @@
 #include "ipc/clipboard.h"
 #include "ipc/pipe.h"
 #include "ipc/shm.h"
+#include "ipc/unixsock.h" /* M118: AF_UNIX - a fifth kind of descriptor, and the one a browser engine needs */
 #include "drivers/blk.h" /* M104: blk_flush, for fsync and sync */
 #include "mm/filemap.h" /* M91 (second attempt): shared file pages */
 #include "mm/heap.h"
@@ -482,6 +483,38 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
     if (slot->type == FD_PIPE_WRITE) {
         return pipe_write(slot->pipe, s, (size_t)len, slot->nonblock);
     }
+    if (slot->type == FD_UNIX) {
+        /* M118: write(2) on a Unix-domain socket, which takes it all for
+         * the same reason the TCP path below does - a program written
+         * against POSIX calls write(fd, buf, n) and expects n back. One
+         * record's worth per pass, parking when the peer's buffer is
+         * full, and no descriptors: write(2) has nowhere to name any. */
+        uint64_t sent = 0;
+        while (sent < len) {
+            uint32_t chunk = (len - sent) > UNIX_BUF_SIZE ? UNIX_BUF_SIZE : (uint32_t)(len - sent);
+            uint8_t staging[UNIX_BUF_SIZE];
+            if (copy_from_user(staging, buf + sent, chunk) != 0) {
+                return sent ? (long)sent : -1;
+            }
+            uint64_t seq = sched_event_seq();
+            long m = unixsock_send(slot->un, staging, chunk, (const fd_slot_t *)0, 0);
+            if (m < 0) {
+                return sent ? (long)sent : -1; /* EPIPE in libc: the peer is gone */
+            }
+            if (m == 0) {
+                if (slot->nonblock) {
+                    return sent ? (long)sent : -OS_ERR_AGAIN;
+                }
+                if (sched_signal_pending()) {
+                    return sent ? (long)sent : -OS_ERR_INTR;
+                }
+                sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+                continue;
+            }
+            sent += (uint64_t)m;
+        }
+        return (long)sent;
+    }
     if (slot->type == FD_SOCKET) {
         /* ---- M100: write(2) on a stream socket, and it takes it ALL --
          *
@@ -615,6 +648,39 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
     }
     if (slot->type == FD_PIPE_READ) {
         return pipe_read(slot->pipe, dst, (size_t)len, slot->nonblock);
+    }
+    if (slot->type == FD_UNIX) {
+        /* M118: read(2) on a Unix-domain socket. Blocks for a byte or for
+         * the end of the stream, exactly as the TCP path below does.
+         *
+         * **And it DROPS any descriptors that arrive with those bytes**,
+         * which is surprising enough to say here rather than only in
+         * unixsock.h: read(2) has no argument to put them in, so they are
+         * closed, and a program that passes descriptors has to call
+         * recvmsg. Linux does the same. The alternative - holding them in
+         * the queue until somebody calls recvmsg - would mean a stream
+         * whose bytes are gone and whose handles are not, and a receiver
+         * that never learns they were there. */
+        uint32_t want = len > UNIX_BUF_SIZE ? UNIX_BUF_SIZE : (uint32_t)len;
+        uint8_t staging[UNIX_BUF_SIZE];
+        for (;;) {
+            uint64_t seq = sched_event_seq();
+            long n = unixsock_recv(slot->un, staging, want, (fd_slot_t *)0, 0,
+                                   (int *)0, (int *)0);
+            if (n > 0) {
+                return copy_to_user(buf, staging, (size_t)n) == 0 ? n : -1;
+            }
+            if (n < 0) {
+                return 0; /* end of stream */
+            }
+            if (slot->nonblock) {
+                return -OS_ERR_AGAIN;
+            }
+            if (sched_signal_pending()) {
+                return -OS_ERR_INTR;
+            }
+            sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+        }
     }
     if (slot->type == FD_SOCKET) {
         /* ---- M100: read(2) on a stream socket, and it BLOCKS ---------
@@ -4276,6 +4342,7 @@ static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
         out.kind = OS_STAT_FIFO;
         break;
     case FD_SOCKET:
+    case FD_UNIX: /* M118: a socket is a socket to fstat, whatever family it is in */
         out.kind = OS_STAT_SOCK;
         break;
     default:
@@ -4358,11 +4425,54 @@ static long install_socket_fd(struct socket *s) {
     return fd;
 }
 
-static long sys_socket(uint64_t type, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    if (!has_cap(CAP_NETWORK)) {
-        return -1; /* M65: gated at socket() rather than at sendto(), so a program without the capability cannot even get a handle to fail with */
+/* M118: and the same for a Unix-domain socket, which is a different
+ * object in a different subsystem and needs the identical three lines. */
+static long install_unix_fd(struct unixsock *u) {
+    task_t *self = sched_current();
+    int fd = alloc_fd(self);
+    if (fd < 0) {
+        unixsock_unref(u);
+        return -1;
     }
-    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    self->fds[fd].type = FD_UNIX;
+    self->fds[fd].cloexec = 0;
+    self->fds[fd].nonblock = 0;
+    self->fds[fd].un = u;
+    return fd;
+}
+
+static struct unixsock *unix_for_fd(uint64_t fd) {
+    task_t *self = sched_current();
+    if (fd >= MAX_FDS || self->fds[fd].type != FD_UNIX) {
+        return (struct unixsock *)0;
+    }
+    return self->fds[fd].un;
+}
+
+static long sys_socket(uint64_t type, uint64_t domain, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    /* M118: the family decides which subsystem and which capability, and
+     * the two answers are not the same shape. CAP_NETWORK is checked
+     * here for AF_INET - M65's "gated at socket() rather than at
+     * sendto(), so a program without the capability cannot even get a
+     * handle to fail with" - and is NOT checked for AF_UNIX, because
+     * what that reaches is another process on this machine that is
+     * already listening for it. kernel/ipc/unixsock.h makes the whole
+     * argument; the short version is that a renderer process holding no
+     * network capability is the program this family exists for. */
+    if (domain == OS_AF_UNIX) {
+        if (type != UNIX_SOCK_STREAM && type != UNIX_SOCK_SEQPACKET) {
+            return -1;
+        }
+        struct unixsock *u = unixsock_alloc((int)type);
+        return u ? install_unix_fd(u) : -1;
+    }
+    if (domain != OS_AF_INET) {
+        return -1; /* a family this kernel does not have is refused rather than quietly given another one */
+    }
+    if (!has_cap(CAP_NETWORK)) {
+        return -1;
+    }
     if (type != SOCK_DGRAM && type != SOCK_STREAM) {
         return -1;
     }
@@ -4373,10 +4483,288 @@ static long sys_socket(uint64_t type, uint64_t a2, uint64_t a3, uint64_t a4, uin
     return install_socket_fd(s);
 }
 
+/* ---- M118: the five calls AF_UNIX adds ------------------------------- */
+
+static long sys_socketpair(uint64_t type, uint64_t fds_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    if (!user_range_ok(fds_ptr, 2 * sizeof(int), 1)) {
+        return -1;
+    }
+    struct unixsock *a = (struct unixsock *)0;
+    struct unixsock *b = (struct unixsock *)0;
+    if (unixsock_pair((int)type, &a, &b) != 0) {
+        return -1;
+    }
+    /* Both descriptors or neither, which is the whole of what makes this
+     * call different from two SYS_sockets and a connect: a pair with one
+     * end installed is a socket whose peer nothing can name. */
+    task_t *self = sched_current();
+    int fa = alloc_fd(self);
+    if (fa >= 0) {
+        self->fds[fa].type = FD_UNIX;
+        self->fds[fa].cloexec = 0;
+        self->fds[fa].nonblock = 0;
+        self->fds[fa].un = a;
+    }
+    int fb = fa >= 0 ? alloc_fd(self) : -1;
+    if (fb < 0) {
+        if (fa >= 0) {
+            fd_release(&self->fds[fa]); /* takes a's reference with it */
+        } else {
+            unixsock_unref(a);
+        }
+        unixsock_unref(b);
+        return -1;
+    }
+    self->fds[fb].type = FD_UNIX;
+    self->fds[fb].cloexec = 0;
+    self->fds[fb].nonblock = 0;
+    self->fds[fb].un = b;
+    int out[2] = {fa, fb};
+    if (copy_to_user(fds_ptr, out, sizeof(out)) != 0) {
+        fd_release(&self->fds[fa]);
+        fd_release(&self->fds[fb]);
+        return -1;
+    }
+    return 0;
+}
+
+/* A bound name is `len` bytes and not a C string - an abstract name
+ * begins with a NUL. So this cannot use copy_path_from_user, which
+ * normalizes a path, and does not want to: the name is not a path on this
+ * machine (see unixsock_bind). */
+static int copy_un_name(char *out, uint64_t src, uint64_t len) {
+    if (len == 0 || len > UNIX_PATH_MAX) {
+        return -1;
+    }
+    return copy_from_user(out, src, (size_t)len) == 0 ? 0 : -1;
+}
+
+/* The name is copied BEFORE the descriptor is looked up, in this call and
+ * the three below it, and the order is deliberate: /bin/syscalltest
+ * sweeps every syscall with hostile pointers against a descriptor that
+ * cannot exist, so a handler that checks the fd first refuses for the
+ * wrong reason and its pointer check passes vacuously. SYS_pread's entry
+ * in that program's table is where this rule is written down. */
+static long sys_bindun(uint64_t fd, uint64_t name_ptr, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4; (void)a5; (void)a6;
+    char name[UNIX_PATH_MAX];
+    if (copy_un_name(name, name_ptr, len) != 0) {
+        return -1;
+    }
+    struct unixsock *u = unix_for_fd(fd);
+    return u ? unixsock_bind(u, name, (int)len) : -1;
+}
+
+static long sys_connectun(uint64_t fd, uint64_t name_ptr, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4; (void)a5; (void)a6;
+    char name[UNIX_PATH_MAX];
+    if (copy_un_name(name, name_ptr, len) != 0) {
+        return -1;
+    }
+    struct unixsock *u = unix_for_fd(fd);
+    return u ? unixsock_connect(u, name, (int)len) : -1;
+}
+
+/* The payload staging buffer for both message calls. One record's worth,
+ * because that is the most either call can move in one step: a SEQPACKET
+ * message cannot exceed the receive buffer and a stream send is free to
+ * be short. On the stack rather than static like SYS_recv's, because
+ * these calls can be in flight on two cores at once - the same reason
+ * M100 gave for SYS_read's. */
+#define UNIX_MSG_STAGING UNIX_BUF_SIZE
+
+static long sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)flags; (void)a4; (void)a5; (void)a6;
+    task_t *self = sched_current();
+    os_msg_t msg;
+    if (copy_from_user(&msg, msg_ptr, sizeof(msg)) != 0) {
+        return -1; /* the pointer first - see sys_bindun */
+    }
+    struct unixsock *u = unix_for_fd(fd);
+    if (!u) {
+        return -1;
+    }
+    if (msg.nfds > UNIX_MAX_FDS) {
+        return -1;
+    }
+    /* A message bigger than one record, and the two families differ on
+     * what that means. A stream send may take less than it was offered -
+     * every caller loops - so this clamps. A SEQPACKET message that does
+     * not fit can never be delivered whole, and truncating it silently
+     * would be the worst answer available: it is refused (EMSGSIZE), the
+     * same refusal unixsock_send makes for the same reason. libc cannot
+     * make this decision because it does not know the socket's type, and
+     * giving it a way to ask would be a syscall to avoid a branch. */
+    uint32_t len = msg.len;
+    if (len > UNIX_MSG_STAGING) {
+        if (unixsock_type(u) == UNIX_SOCK_SEQPACKET) {
+            return -1;
+        }
+        len = UNIX_MSG_STAGING;
+    }
+    /* The descriptors, resolved against the CALLER's table here and
+     * nowhere else. What travels is the slot - a type tag and a pointer
+     * to the same kernel object - so the receiver ends up with a
+     * reference to the identical pipe, file or socket. A descriptor the
+     * caller does not actually hold is refused before anything is sent,
+     * rather than arriving as a hole. */
+    fd_slot_t slots[UNIX_MAX_FDS];
+    int nfds = (int)msg.nfds;
+    if (nfds > 0) {
+        int nums[UNIX_MAX_FDS];
+        if (copy_from_user(nums, msg.fds, (size_t)nfds * sizeof(int)) != 0) {
+            return -1;
+        }
+        for (int i = 0; i < nfds; i++) {
+            if (nums[i] < 0 || nums[i] >= MAX_FDS ||
+                self->fds[nums[i]].type == FD_NONE) {
+                return -1; /* EBADF, and before any byte has moved */
+            }
+            slots[i] = self->fds[nums[i]];
+        }
+    }
+    uint8_t staging[UNIX_MSG_STAGING];
+    if (len && copy_from_user(staging, msg.data, (size_t)len) != 0) {
+        return -1;
+    }
+    for (;;) {
+        uint64_t seq = sched_event_seq();
+        long n = unixsock_send(u, staging, len, slots, nfds);
+        if (n != 0 || (len == 0 && nfds == 0)) {
+            return n; /* sent, or -1 for a peer that is gone or a message that can never fit */
+        }
+        /* Would block. The park is here rather than in unixsock.c for
+         * kernel/net's reason - see unixsock.h - and on the channel every
+         * one of this family's transitions wakes. */
+        if (self->fds[fd].nonblock) {
+            return -OS_ERR_AGAIN;
+        }
+        if (sched_signal_pending()) {
+            return -OS_ERR_INTR;
+        }
+        sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+    }
+}
+
+static long sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)flags; (void)a4; (void)a5; (void)a6;
+    task_t *self = sched_current();
+    os_msg_t msg;
+    if (copy_from_user(&msg, msg_ptr, sizeof(msg)) != 0) {
+        return -1; /* the pointer first - see sys_bindun */
+    }
+    struct unixsock *u = unix_for_fd(fd);
+    if (!u) {
+        return -1;
+    }
+    if (msg.nfds > UNIX_MAX_FDS) {
+        return -1;
+    }
+    if (msg.len && !user_range_ok(msg.data, msg.len, 1)) {
+        return -1;
+    }
+    /* Clamped rather than refused, and losslessly: no record can be
+     * longer than the receive buffer, so a caller offering more than one
+     * is offering room nothing can fill. */
+    uint32_t want = msg.len > UNIX_MSG_STAGING ? UNIX_MSG_STAGING : msg.len;
+    uint8_t staging[UNIX_MSG_STAGING];
+    fd_slot_t slots[UNIX_MAX_FDS];
+    for (;;) {
+        uint64_t seq = sched_event_seq();
+        int nfds = 0;
+        int rflags = 0;
+        long n = unixsock_recv(u, staging, want, slots, (int)msg.nfds, &nfds, &rflags);
+        if (n < 0) {
+            /* End of stream, which recvmsg reports as 0 - read(2)'s
+             * convention and not SYS_recv's, because every program that
+             * calls recvmsg was written against POSIX. */
+            msg.nfds = 0;
+            msg.flags = 0;
+            copy_to_user(msg_ptr, &msg, sizeof(msg));
+            return 0;
+        }
+        if (n > 0 || nfds > 0) {
+            /* Install the descriptors that arrived. Each slot is already
+             * retained (unixsock.h), so this takes ownership; one that
+             * cannot be installed is released rather than leaked, and the
+             * caller is told with OS_MSG_CTRUNC that it lost something -
+             * the same report it gets when its own array was too small,
+             * because from its side the two are the same event. */
+            int nums[UNIX_MAX_FDS];
+            int installed = 0;
+            for (int i = 0; i < nfds; i++) {
+                int nfd = alloc_fd(self);
+                if (nfd < 0) {
+                    fd_release(&slots[i]);
+                    rflags |= OS_MSG_CTRUNC;
+                    continue;
+                }
+                self->fds[nfd] = slots[i];
+                self->fds[nfd].cloexec = 0;
+                self->fds[nfd].nonblock = 0;
+                nums[installed++] = nfd;
+            }
+            /* Every copy-out below can fail, and each failure has to take
+             * the installed descriptors back out of the table. A caller
+             * that got -1 does not know it was given anything, so a
+             * descriptor left behind here is one nothing will ever close -
+             * which is the same reasoning that closes the ones that did
+             * not fit, one paragraph up. The message itself is lost
+             * either way: it is off the queue by the time the copy can
+             * fail and there is nowhere to put it back, which is the
+             * trade sys_recvfrom already makes and says so. */
+            msg.nfds = (uint32_t)installed;
+            msg.flags = (uint32_t)rflags;
+            int copied =
+                (installed == 0 ||
+                 copy_to_user(msg.fds, nums, (size_t)installed * sizeof(int)) == 0) &&
+                (n == 0 || copy_to_user(msg.data, staging, (size_t)n) == 0) &&
+                copy_to_user(msg_ptr, &msg, sizeof(msg)) == 0;
+            if (!copied) {
+                for (int i = 0; i < installed; i++) {
+                    fd_release(&self->fds[nums[i]]);
+                }
+                return -1;
+            }
+            return n;
+        }
+        if (self->fds[fd].nonblock) {
+            return -OS_ERR_AGAIN;
+        }
+        if (sched_signal_pending()) {
+            return -OS_ERR_INTR;
+        }
+        sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+    }
+}
+
+static long sys_sockshut(uint64_t fd, uint64_t how, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    struct unixsock *u = unix_for_fd(fd);
+    if (!u) {
+        /* A TCP socket is refused rather than half-closed: see
+         * user_space/libc/src/socket.c, which has said so since M100 and
+         * said why - there is no half-close in that stack, and a program
+         * that shut down its write side and waited for the peer's EOF
+         * would wait forever. */
+        return -1;
+    }
+    return unixsock_shutdown(u, (int)how);
+}
+
 /* ---- M66: streams ----------------------------------------------------- */
 
 static long sys_listen(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    /* M118: a second family, and the dispatch is here rather than in a
+     * second syscall on purpose - a program calling listen(2) should not
+     * have to know which family its descriptor came from, and libc should
+     * not have to look. */
+    struct unixsock *u = unix_for_fd(fd);
+    if (u) {
+        return unixsock_listen(u);
+    }
     struct socket *s = socket_for_fd(fd);
     return s ? socket_listen(s) : -1;
 }
@@ -4409,6 +4797,27 @@ static long sys_connstat(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uin
 
 static long sys_accept(uint64_t fd, uint64_t from_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
+    /* M118: AF_UNIX first, and its address half is zeros rather than
+     * absent. A socket accepted on this family has no address to report -
+     * it is the listener's name that was dialled, and the connecting end
+     * is almost never bound to anything - which is what every Unix
+     * reports here, and why a caller that asked for one gets a
+     * zero-filled struct instead of a failure. */
+    struct unixsock *ulistener = unix_for_fd(fd);
+    if (ulistener) {
+        struct unixsock *uconn = unixsock_accept(ulistener);
+        if (!uconn) {
+            return -1;
+        }
+        if (from_ptr) {
+            os_sockaddr_t none = {0, 0, 0};
+            if (copy_to_user(from_ptr, &none, sizeof(none)) != 0) {
+                unixsock_unref(uconn);
+                return -1;
+            }
+        }
+        return install_unix_fd(uconn);
+    }
     struct socket *listener = socket_for_fd(fd);
     if (!listener) {
         return -1;
@@ -4737,6 +5146,11 @@ static int fd_is_ready(task_t *self, int fd) {
         return (pipe_buffered(slot->pipe) > 0 || pipe_write_closed(slot->pipe)) ? 1 : 0;
     case FD_SOCKET:
         return socket_pending(slot->sock) > 0 ? 1 : 0;
+    case FD_UNIX:
+        /* M118: queued bytes, a queued connection on a listener, or an
+         * end of stream - unixsock_pending folds all three, and the third
+         * is the one that stops a wait from becoming a hang. */
+        return unixsock_pending(slot->un);
     case FD_FILE:
         /* A regular file is always readable - it is never a reason to
          * wait. Saying so beats refusing the whole call because one
@@ -5216,6 +5630,7 @@ static long sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
             access = OPEN_READ | (self->fds[fd].file->writable ? OPEN_WRITE : 0);
             break;
         case FD_SOCKET:     access = OPEN_READ | OPEN_WRITE; break;
+        case FD_UNIX:       access = OPEN_READ | OPEN_WRITE; break; /* M118 */
         default:            return -1;
         }
         /* M100: and the one status flag, which is the half of this
@@ -5868,6 +6283,12 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_getrandom] = sys_getrandom, /* M100 */
     [SYS_pread] = sys_pread,   /* M100 */
     [SYS_pwrite] = sys_pwrite, /* M100 */
+    [SYS_socketpair] = sys_socketpair, /* M118 */
+    [SYS_bindun] = sys_bindun,
+    [SYS_connectun] = sys_connectun,
+    [SYS_sendmsg] = sys_sendmsg,
+    [SYS_recvmsg] = sys_recvmsg,
+    [SYS_sockshut] = sys_sockshut,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

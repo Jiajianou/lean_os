@@ -187,7 +187,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
 # alongside its own" is only true if there is no special path for them.
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv unixtest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 
@@ -1035,7 +1035,7 @@ TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
                     kernel/net/udp.c kernel/net/ethernet.c kernel/net/tcp.c \
                     kernel/dev/fwcfg.c kernel/dev/tty.c kernel/dev/pty.c \
                     kernel/sched/sched.c kernel/fs/flock.c kernel/dev/random.c \
-                    kernel/drivers/rtl8139_ring.c
+                    kernel/drivers/rtl8139_ring.c kernel/ipc/unixsock.c
 
 # M101: the first user-space source in this tier, and it earns its place
 # by the same argument the kernel units do. user_space/lib/symtab.c is a

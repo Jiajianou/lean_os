@@ -209,6 +209,26 @@ UEFI firmware
   proprietary, so there is no source to build. See
   [docs/browser.md](docs/browser.md).
 
+- **And the first of those conditions is now built** (M118).
+  **`AF_UNIX` with `SCM_RIGHTS`**: `socketpair`, names and abstract
+  names, `sendmsg`/`recvmsg`, and a descriptor — a pipe end, an open
+  file, a socket — crossing to another process as a reference to *the
+  same kernel object*, sharing its file position. It needs **no
+  capability**, and that is the point rather than an omission: a
+  renderer process is the one program on this machine that must hold no
+  `CAP_NETWORK` and the one that cannot work without this call.
+
+  Reading the question again is what made it a milestone rather than a
+  chore: this was never Chromium's condition. WebKit's
+  `IPC::Connection`, Gecko's IPDL and Ladybird's LibIPC all pass
+  descriptors over a Unix-domain socket, and **none of those four
+  engines still has a supported single-process mode** — so one kernel
+  feature stood in front of every multi-process browser engine that
+  exists, which is why it was built before the engine was chosen. The
+  next condition is an `epoll`-shaped readiness interface with
+  `eventfd` and `timerfd`. See
+  [docs/unix-sockets.md](docs/unix-sockets.md).
+
 - **A package manager.** `os install grep` puts **GNU grep 3.11** on
   this machine — built here by this project's own compiler from the
   published tarball with no edit to its source — and the machine runs
@@ -302,9 +322,9 @@ Four instruments, and none of them subsumes another:
   fake timer and a fake CPU, so a tick is a function call and a
   fairness property can be checked at every task count, and it learns
   the order locks are taken in so an inversion is an error rather than
-  a comment (Q9). 383 tests.
+  a comment (Q9). 426 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 127 markers and 41 performance
+  image and grade the serial log against 129 markers and 41 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It

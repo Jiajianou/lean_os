@@ -550,6 +550,13 @@ REQUIRED_MARKERS=(
   # skip line here has lost the fw_cfg switch, not the network.
   "[m116] a stream from the host:"
   "[m117] a desktop that sleeps and a click that shows:"
+  # M118: AF_UNIX and SCM_RIGHTS, graded in two processes. Required, and
+  # the marker rather than the program's own line because the kernel adds
+  # two claims the program cannot make about itself: every socket it
+  # created was given back, and no passed descriptor is still sitting in a
+  # queue nobody read. See user_space/bin/unixtest.c for the ten sections
+  # and kernel/ipc/unixsock.h for why this milestone exists at all.
+  "[m118] AF_UNIX: a socketpair both ways,"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

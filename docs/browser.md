@@ -435,6 +435,16 @@ this kernel has                            113
   absent                                   348
 ```
 
+**M118 moves four of those 348 and the table is left as it was
+measured**, because a number with a date on it should not be quietly
+edited later. For the record: this kernel has 119 syscalls now, and
+`socketpair`, `sendmsg`, `recvmsg` and `shutdown` have moved from the
+absent column to the overlap - 83 and 344. The four are the whole of
+Mojo's transport. What has *not* moved is any of `epoll_create1`,
+`epoll_ctl`, `epoll_wait`, `eventfd2`, `timerfd_create`, `signalfd4`,
+`memfd_create`, `seccomp`, `prctl(PR_SET_SECCOMP)` or `clone` with a
+namespace flag.
+
 The 18 are real: this kernel spells `wait4` as `SYS_waitpid`,
 `rt_sigaction` as `SYS_sigaction`, `getrusage` as `SYS_rusage`,
 `getdents64` as `SYS_getdents`, `exit_group` as `SYS_exit`, and so on.
@@ -488,8 +498,32 @@ What would have to become true for Chromium specifically:
    largest effect on the list, it is a few hundred lines, and M100's own
    entry already had `AF_UNIX` as an open box for a different reason
    (CPython's `test_stat`). **It should be the next thing.**
+
+   **Done - M118, 2026-09-11.** `socketpair`, `bind`/`connect` by name
+   and by abstract name, `sendmsg`/`recvmsg` with `SCM_RIGHTS`,
+   `MSG_TRUNC`/`MSG_CTRUNC`, and a `shutdown` that is real on this
+   family. It needs **no capability**, which is not an oversight: a
+   renderer must hold no `CAP_NETWORK` and cannot work without this
+   call. See [unix-sockets.md](unix-sockets.md).
+
+   And the measurement above understated the case for it, in the
+   direction that matters. This is **not Chromium's condition.**
+   WebKit's `IPC::Connection`, Gecko's IPDL and Ladybird's LibIPC all
+   pass descriptors over a Unix-domain socket too, and none of those
+   four engines has a supported single-process mode any more. One
+   kernel feature stands in front of every multi-process engine that
+   exists, which is why it was built before the engine was chosen
+   rather than after.
+
 2. **An epoll-shaped readiness interface**, plus `eventfd`/`timerfd`.
    The message pump is not optional and `poll` is not what it calls.
+   **This is now the next thing**, and M118 is why: condition 1 is
+   closed, and of the five this is the only other one that is ordinary
+   work with a condition attached rather than an arc. `base`'s
+   `MessagePumpEpoll` calls `epoll_wait`; this kernel has `poll`,
+   `select` and `SYS_waitfds`, and a thread here is woken by none of
+   `eventfd`, `timerfd_create` or `signalfd4`.
+
 3. **clang and libc++ for `x86_64-lean_os`.** A second toolchain port,
    with M94's nine edits as the template for how much that costs.
 4. **A machine with 16 GB of RAM and 100 GB of disk**, which is a

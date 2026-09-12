@@ -40,6 +40,63 @@ typedef struct {
 #define OS_SOCK_DGRAM  0
 #define OS_SOCK_STREAM 1
 
+/* ---- M118: which family SYS_socket should make one in -----------------
+ *
+ * AF_INET is 0 so that every call written against the one-parameter
+ * version still means what it meant, the same trick OS_SOCK_DGRAM played
+ * in M66 and for the same reason. The numbers are deliberately NOT
+ * <sys/socket.h>'s AF_INET (2) and AF_UNIX (1): that header's values are
+ * Linux's, this is a two-valued choice in an ABI of this project's own,
+ * and a constant that looks like somebody else's while meaning something
+ * else is worse than one that clearly does not. libc maps them, at the
+ * same seam that already maps byte order. */
+#define OS_AF_INET 0
+#define OS_AF_UNIX 1
+
+/* ---- M118: a message, which is bytes plus descriptors ----------------
+ *
+ * What the kernel's sendmsg/recvmsg exchange, and deliberately not
+ * <sys/socket.h>'s `struct msghdr`. That structure is an iovec array and
+ * a byte blob of cmsghdr records to be walked with CMSG_NXTHDR - a
+ * user-space calling convention, with alignment rules, whose whole
+ * content is "here are some bytes and some descriptors". Parsing it in
+ * the kernel would mean the kernel validating somebody else's
+ * convention; libc does it instead, one seam, the same file that already
+ * converts sockaddr_in's byte order (user_space/libc/src/socket.c).
+ *
+ * `fds` points at `nfds` ints: the descriptors to send, or room for the
+ * ones that arrive. On return from SYS_recvmsg, `nfds` is how many
+ * actually came and `flags` says whether anything was dropped on the way.
+ */
+typedef struct {
+    uint64_t data;  /* user pointer to the payload bytes */
+    uint32_t len;   /* how many of them */
+    uint32_t nfds;  /* descriptors: how many are at `fds`, and on receive how many arrived */
+    uint64_t fds;   /* user pointer to int[nfds] - may be 0 when nfds is 0 */
+    uint32_t flags; /* out: OS_MSG_TRUNC / OS_MSG_CTRUNC */
+    uint32_t reserved;
+} os_msg_t;
+
+/* Descriptors one message can carry, and ONE definition for both sides:
+ * kernel/ipc/unixsock.h's UNIX_MAX_FDS is this constant, because a second
+ * hand-picked number that merely happened to agree is exactly the
+ * near-duplicate cap this project has shipped bugs behind three times
+ * (M40, M41, M50).
+ *
+ * Eight. Linux's SCM_MAX_FD is 253 and Chromium's own
+ * base::UnixDomainSocket::kMaxFileDescriptors is 16; Mojo passes a
+ * handful. The cost of matching Linux would be 60 KiB of kernel memory
+ * per socket for a message nothing sends, and a caller that asks for more
+ * is refused rather than silently truncated. */
+#define OS_MSG_MAX_FDS 8
+
+/* A SEQPACKET message was longer than the buffer offered, and the rest is
+ * gone - POSIX's MSG_TRUNC, which is a report and not an error. */
+#define OS_MSG_TRUNC  1
+/* Descriptors arrived that did not fit in `nfds`, and they have been
+ * closed. MSG_CTRUNC. */
+#define OS_MSG_CTRUNC 2
+
 typedef struct {
     uint32_t ip;
     uint32_t mask;

@@ -239,7 +239,16 @@ extern "C" {
  * eleven-state machine with retransmission and congestion control is not
  * a bullet on somebody else's list.
  */
-#define SYS_socket   50 /* (type) -> an fd for a new unbound socket, or -1 if the table is full. os_net.h's OS_SOCK_DGRAM (0) or OS_SOCK_STREAM (1). M64 shipped this with no parameters at all and argued for that in writing: "three parameters that only ever take one value each are three ways to be wrong about an API that has no choices in it". That argument was right for as long as its premise held, and M66's TCP ends it - there is a real choice now, so there is one real parameter and not three. OS_SOCK_DGRAM is 0, so every call written before M66 still means what it meant. */
+#define SYS_socket   50 /* (type, domain) -> an fd for a new unbound socket, or -1 if the table is full. os_net.h's OS_SOCK_DGRAM (0) or OS_SOCK_STREAM (1). M64 shipped this with no parameters at all and argued for that in writing: "three parameters that only ever take one value each are three ways to be wrong about an API that has no choices in it". That argument was right for as long as its premise held, and M66's TCP ends it - there is a real choice now, so there is one real parameter and not three. OS_SOCK_DGRAM is 0, so every call written before M66 still means what it meant.
+ *
+ * M118: and a SECOND parameter for the same reason, eleven milestones
+ * after that note. `domain` is OS_AF_INET (0) or OS_AF_UNIX (1), and
+ * AF_INET is 0 for the identical argument: every call written before
+ * M118 reaches this kernel through user_space/lib/syscall_wrappers.c,
+ * which has always passed a literal 0 there, so every one of them still
+ * means what it meant. A Unix-domain socket is NOT a network socket here
+ * - different object, different file, different capability - and
+ * kernel/ipc/unixsock.h argues all three. */
 #define SYS_bind     51 /* (fd, port) -> the bound port, or -1 if the port is taken, the fd is not a socket, or it is already bound. Port 0 asks for an ephemeral one and returns which - so a client that only sends still gets a source port replies can come back to, without having to invent a number and hope. */
 #define SYS_sendto   52 /* (fd, ip, port, const void *data, len) -> bytes sent, or -1. `ip` is host-order (10.0.2.2 is 0x0A000202), the same convention kernel/net/net.h uses and for the same reason: this OS never byte-swaps an address into a register, so an on-wire order here would be a second representation to get wrong. Binds an ephemeral source port if the socket has none. An unreachable destination is -1, not a panic - see kernel/net/ip.h on why that had to change. -1 is also the honest answer for the very first datagram to a neighbour nobody has ARPed yet: it is dropped while the request goes out, exactly as it is on any BSD-derived stack, and a caller that cares sends again. */
 #define SYS_recvfrom 53 /* (fd, void *data, max, os_sockaddr_t *from) -> bytes copied, or -1 if nothing is queued. Never blocks. A datagram larger than `max` is truncated and the rest discarded, which is what UDP recvfrom does everywhere; `from` (may be NULL) says who sent it, which is the entire difference between this and a read. */
@@ -772,7 +781,45 @@ typedef struct {
  * there, not the rule). */
 #define OS_ERR_SPIPE 29
 
-#define SYSCALL_COUNT 113
+/* ---- M118: AF_UNIX, and the call the whole milestone is named after --
+ *
+ * docs/browser.md's measurement of Chromium ends with five conditions
+ * and says the first is not a number: "`AF_UNIX` with `SCM_RIGHTS`.
+ * Without descriptor passing there is no Mojo, and without Mojo there is
+ * no Chromium - not a slow one, not a limited one, none. This is the
+ * single smallest change with the largest effect on the list ... **It
+ * should be the next thing.**" Asking the same question of the other
+ * three modern engines said more: WebKit's IPC::Connection, Gecko's
+ * IPDL and Ladybird's LibIPC all pass descriptors over a Unix-domain
+ * socket too, and none of them still has a single-process mode. So these
+ * five numbers are not Chromium's price of admission. They are every
+ * multi-process engine's.
+ *
+ * Why five calls and not two. socketpair and the message pair are what
+ * an engine uses; bind/connect by name is what an unrelated process
+ * needs and what a ported program's configure script will find. listen
+ * and accept are NOT here - SYS_listen and SYS_accept grew a second case
+ * instead, because a listener is a listener and a program calling
+ * listen(2) should not have to know which family it got its fd from.
+ *
+ * No capability. See kernel/ipc/unixsock.h: what this reaches is another
+ * process on this machine that is already listening, which is what a
+ * pipe reaches, and pipes need none. The engines this is for depend on
+ * that exact answer - a renderer must hold no CAP_NETWORK and cannot
+ * work without this call. */
+#define SYS_socketpair 113 /* (type, int fds_out[2]) -> 0 with two connected descriptors in the caller's table, or -1. UNIX_SOCK_STREAM or UNIX_SOCK_SEQPACKET (kernel/ipc/unixsock.h). Both or neither: a pair with one end is not something a caller could use, and a table with room for one is the case that would otherwise leave a socket nobody can address. */
+#define SYS_bindun     114 /* (fd, const char *name, len) -> 0, or -1. Claims a name for an AF_UNIX socket. `name` is `len` BYTES and not a C string, because an abstract name (Linux's namespace with no filesystem in it) begins with a NUL and every string function would call them all equal. A path name is an entry in a kernel table and NOT a node in leanfs - see unixsock_bind for what that costs and the condition for changing it. */
+#define SYS_connectun  115 /* (fd, const char *name, len) -> 0, or -1 if nothing holds the name, it is not listening, it is a different type, or its backlog is full. Peers this socket with a fresh one queued on the listener, which is what connect(2) does on this family: the server's end of a connection is a different socket from the one that accepted it. Returns once the connection is queued - there is no handshake to wait for and so no SYS_connstat for this family. */
+#define SYS_sendmsg    116 /* (fd, const os_msg_t *msg, flags) -> bytes sent, -OS_ERR_AGAIN, or -1. Sends bytes AND descriptors. See os_net.h's os_msg_t for why the kernel's message is a buffer and a descriptor list rather than <sys/socket.h>'s msghdr: iovec gathering and CMSG_* walking are a user-space calling convention, and libc does them at the same seam that already converts byte order for sockaddr_in. */
+#define SYS_recvmsg    117 /* (fd, os_msg_t *msg, flags) -> bytes received, 0 at end of stream, -OS_ERR_AGAIN, or -1. Installs any descriptors that arrived into the caller's own table and writes their numbers into msg->fds; descriptors that do not fit are CLOSED and OS_MSG_CTRUNC says so, which is what Linux does and the only safe answer - one nobody was told about is a reference nothing can release. */
+
+/* Named SYS_sockshut and not SYS_shutdown because SYS_shutdown 31 is the
+ * one that turns the machine off - the collision the compiler caught
+ * before this comment existed. Two calls whose names differ by nothing
+ * but a family would be a genuinely dangerous pair to confuse. */
+#define SYS_sockshut   118 /* (fd, how) -> 0, or -1. SHUT_RD (0), SHUT_WR (1), SHUT_RDWR (2), on an AF_UNIX socket. Real here and refused on TCP, which is the honest split: there is no FIN to send on this family, so a half-close is a flag and a wake, while on TCP it would be a promise this stack cannot keep (see user_space/libc/src/socket.c's shutdown). An IPC layer that cannot say "I have finished writing" without closing the descriptor cannot tell its peer apart from a crash, which is why this is in M118 rather than deferred with the TCP half. */
+
+#define SYSCALL_COUNT 119
 
 #ifdef __cplusplus
 }

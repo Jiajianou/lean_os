@@ -68,7 +68,7 @@ written down, in a list one screen long that a person can read.
 | `kill-any` | `SYS_kill` on a non-descendant | task_manager, wm_crash |
 | `power` | `SYS_shutdown` | shutdown, reboot |
 | `clipboard` | `SYS_clipboard_get`/`_set` | text_editor, settings, gui_terminal |
-| `network` | `SYS_socket` | nettest, nettime |
+| `network` | `SYS_socket` with `OS_AF_INET` | nettest, nettime |
 | `audio` | `SYS_audio_claim` | audiograb |
 | `display-mode` | `SYS_display_set_mode` | settings |
 | `process-list` | `SYS_taskinfo` | task_manager, wm_crash |
@@ -83,6 +83,19 @@ are launchers, and a launcher can only ever hand out what it holds.)
 - **Reading a file.** This OS has no secrets on disk, and claiming a read
   boundary nothing enforces would be exactly the fake check M65 exists to
   stop making.
+- **Talking to another process on this machine** (M118). A pipe needs no
+  capability, and an `AF_UNIX` socket reaches exactly what a pipe reaches:
+  another process here that is already listening for it. `SYS_socket`
+  checks `network` for `OS_AF_INET` and nothing for `OS_AF_UNIX`, and that
+  asymmetry is the point rather than a gap — the program this family
+  exists for is a browser's renderer, which must hold **no** network
+  capability and cannot work without the call. What the model still
+  decides is what a passed descriptor carries: exactly the authority it
+  already had, because what crosses is a reference to the same kernel
+  object. A process cannot manufacture authority by sending it, and it
+  *can* hand over authority it holds, which is what `SCM_RIGHTS` is. A
+  capability set still only ever shrinks. See
+  [unix-sockets.md](unix-sockets.md).
 - **`SYS_fb_info`** - how big is the screen.
 - **`SYS_netconf`** - what is this machine's address.
 

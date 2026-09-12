@@ -35,6 +35,7 @@
 #include "fs/vfs.h"
 #include "ipc/pipe.h"
 #include "ipc/shm.h" /* M50 - shm_count_by_owner, for the kill storm's segment accounting */
+#include "ipc/unixsock.h" /* M118 */
 #include "lib/libk.h"
 #include "mm/e820.h"
 #include "mm/heap.h"
@@ -134,7 +135,8 @@
     X(pkgtest)                    \
     X(dirtest)                  \
     X(browsertest)              \
-    X(netrecv)
+    X(netrecv)                  \
+    X(unixtest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -12010,6 +12012,75 @@ static void boot_selftests_system(void) {
         klog_puts(" ms).\n\n");
     }
 
+    /* ---- M118 self-test: AF_UNIX, and a descriptor that crossed ------
+     *
+     * docs/browser.md's measurement ends with five conditions for a
+     * browser of Chromium's kind and says the first one is not a number:
+     * `AF_UNIX` with `SCM_RIGHTS`. Reading the same question for WebKit,
+     * Gecko and Ladybird said the condition is not Chromium's - all four
+     * pass descriptors over a Unix-domain socket, and none of them has a
+     * single-process mode. So this is the milestone that makes every one
+     * of them possible, and this is what grades it on the machine.
+     *
+     * tests/test_unixsock.c grades the object itself - 21 tests, every
+     * boundary, with the reference counts on a passed descriptor counted
+     * exactly. What it cannot have is a second process: a descriptor that
+     * "crossed" inside one address space is a memcpy, and the claim here
+     * is that a child writes through a pipe end it was handed and that the
+     * parent reads it. /bin/unixtest is ten sections of that, and the
+     * sharpest one is the file descriptor whose OFFSET the parent moved
+     * before passing it - an implementation that re-opened the path would
+     * pass every other section and fail that one.
+     *
+     * And two things the program cannot see about itself: that every
+     * socket it made was given back, and that no descriptor is still
+     * sitting in a queue nobody read. Those are counted here. */
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        int un_before = unixsock_in_use();
+        size_t ut_bytes = 0;
+        uint8_t *ut_img = read_program(PATH_BIN_DIR "unixtest", &ut_bytes);
+        if (!ut_img) {
+            panic("M118 self-test: /bin/unixtest is not on this disk");
+        }
+        const char *ut_argv[] = {PATH_BIN_DIR "unixtest", 0};
+        task_t *ut = process_spawnv("unixtest", ut_img, ut_bytes, ut_argv);
+        long rc = ut ? do_syscall(SYS_wait, (uint64_t)ut->id, 0, 0) : -1;
+        kfree(ut_img);
+        if (rc != 0) {
+            klog_puts("[m118] unixtest exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_puts(" - see user_space/bin/unixtest.c for what each "
+                      "code means\n");
+            panic("M118 self-test: AF_UNIX or descriptor passing does not "
+                  "work on this machine");
+        }
+        int un_after = unixsock_in_use();
+        int queued = unixsock_queued_fds();
+        if (un_after != un_before || queued != 0) {
+            klog_puts("[m118] sockets before ");
+            klog_put_dec((uint32_t)un_before);
+            klog_puts(", after ");
+            klog_put_dec((uint32_t)un_after);
+            klog_puts(", descriptors still queued ");
+            klog_put_dec((uint32_t)queued);
+            klog_puts("\n");
+            panic("M118 self-test: a process that exited left a Unix-domain "
+                  "socket or a passed descriptor behind");
+        }
+        klog_puts("[m118] AF_UNIX: a socketpair both ways, a SOCK_SEQPACKET "
+                  "boundary kept, a pipe end and an open FILE passed to a "
+                  "forked child through SCM_RIGHTS - the file still at the "
+                  "offset its parent had read to - a socket passed over a "
+                  "socket, a path name and an abstract name dialled from "
+                  "another process, a blocking read woken by its peer, "
+                  "shutdown seen as end of stream, MSG_CTRUNC reported, and "
+                  "a child holding NO capabilities doing all of it - "
+                  "self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
+    }
+
     /* ---- M113 self-test: the browser is actually ON this machine ------
      *
      * M100 built NetSurf and graded what it *runs* like: [m100h] above
@@ -14866,6 +14937,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     pmm_init(e820_map);
     vmm_init(e820_map);
     heap_init();
+
+    /* M118: AF_UNIX's tables, and the reason this call is HERE rather
+     * than in net_init beside socket_init: a Unix-domain socket is not
+     * networking, and net_init does not run on a machine with no NIC.
+     * Two processes talking to each other must not depend on a card
+     * being present. */
+    unixsock_init();
 
     /* Self-test: map, write through, read back, and unmap a throwaway
      * virtual address directly via vmm - the same "prove it, don't just

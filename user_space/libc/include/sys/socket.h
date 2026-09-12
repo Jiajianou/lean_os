@@ -9,16 +9,22 @@
  * ported program cannot find is `socket(AF_INET, SOCK_STREAM, 0)`.
  *
  * **What is honest about this header and what is not.** The families and
- * types below are the standard numbers, and the ones this machine
- * implements are AF_INET with SOCK_STREAM and SOCK_DGRAM. AF_UNIX is
- * defined and `socket()` refuses it: M88 absorbed AF_UNIX and
- * socketpair into M100, where a multi-process browser needs them for a
- * reason, and a constant a program can name but never use is better than
- * a constant that silently gives it an Internet socket instead.
+ * types below are the standard numbers. AF_INET implements SOCK_STREAM
+ * and SOCK_DGRAM; **AF_UNIX implements SOCK_STREAM and SOCK_SEQPACKET as
+ * of M118**, along with socketpair, sendmsg, recvmsg, SCM_RIGHTS and a
+ * shutdown that is real rather than refused. AF_UNIX SOCK_DGRAM is still
+ * refused, and kernel/ipc/unixsock.h states the condition for building
+ * it. AF_INET6 does not exist in this stack.
+ *
+ * M118's own reason for existing is in docs/browser.md: descriptor
+ * passing over a Unix-domain socket is what Mojo, WebKit's
+ * IPC::Connection, Gecko's IPDL and Ladybird's LibIPC are all built on,
+ * and none of those engines has a single-process mode any more.
  */
 #pragma once
 
 #include <sys/types.h>
+#include <sys/uio.h> /* M118: struct iovec, which msghdr has always pointed at and this header never defined - glibc's <sys/socket.h> pulls it in the same way, and a program that includes only this one and fills in a msghdr is every program that calls sendmsg */
 #include <stdint.h>
 
 /* M97: C++ linkage.
@@ -37,7 +43,7 @@ typedef unsigned int socklen_t;
 typedef unsigned short sa_family_t;
 
 #define AF_UNSPEC 0
-#define AF_UNIX   1   /* refused - M100. See the header note. */
+#define AF_UNIX   1   /* M118: real. SOCK_STREAM and SOCK_SEQPACKET. */
 #define AF_LOCAL  AF_UNIX
 #define AF_INET   2
 #define AF_INET6  10  /* refused: there is no IPv6 in this stack */
@@ -50,6 +56,11 @@ typedef unsigned short sa_family_t;
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
 #define SOCK_RAW    3 /* refused: nothing here hands out raw frames */
+/* M118: Linux's number, and real on AF_UNIX only. A message keeps its
+ * boundary: one send is one recv, a short recv discards the rest and says
+ * MSG_TRUNC. Chromium's sandbox IPC and Ladybird's LibIPC both use this
+ * type; Mojo and WebKit use SOCK_STREAM. */
+#define SOCK_SEQPACKET 5
 
 /* The generic address. A program casts its family-specific struct to
  * this; `sockaddr_in` in <netinet/in.h> is the only one with anything
@@ -88,6 +99,13 @@ struct msghdr {
 #define MSG_WAITALL   0x08
 #define MSG_DONTWAIT  0x40
 #define MSG_NOSIGNAL  0x4000
+/* M118: and two that are REPORTED rather than requested - recvmsg sets
+ * them in msg_flags. MSG_TRUNC: a SOCK_SEQPACKET message was longer than
+ * the buffers offered and the rest is gone. MSG_CTRUNC: descriptors came
+ * with it that there was no room for, and they have been closed. Linux's
+ * values. */
+#define MSG_TRUNC     0x20
+#define MSG_CTRUNC    0x08
 
 /* setsockopt levels and names. See socket.c: this machine has no
  * per-socket options to set, so they are accepted where accepting is
@@ -137,6 +155,55 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
 ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
                  struct sockaddr *from, socklen_t *fromlen);
 int shutdown(int fd, int how);
+
+/* ---- M118: ancillary data, which here means exactly SCM_RIGHTS -------
+ *
+ * `cmsg_len` is a size_t and not a socklen_t, which matters: this struct
+ * is a layout a program walks with the macros below, and glibc's x86-64
+ * layout is what every program that walks one was written against.
+ *
+ * SCM_CREDENTIALS is deliberately absent rather than defined-and-refused.
+ * It hands the peer a pid, a uid and a gid; this machine has one
+ * principal (docs/capabilities.md, and M65's rule about checks with
+ * nothing behind them), so two of those three numbers would be a
+ * constant. Chromium's base::UnixDomainSocket uses it to learn a peer's
+ * pid, and the condition for building it is the same one multi-user
+ * names. */
+struct cmsghdr {
+    size_t cmsg_len;
+    int    cmsg_level;
+    int    cmsg_type;
+};
+
+#define SCM_RIGHTS 1
+
+#define CMSG_ALIGN(len) (((len) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1))
+#define CMSG_SPACE(len) (CMSG_ALIGN(len) + CMSG_ALIGN(sizeof(struct cmsghdr)))
+#define CMSG_LEN(len)   (CMSG_ALIGN(sizeof(struct cmsghdr)) + (len))
+#define CMSG_DATA(cmsg) ((unsigned char *)(cmsg) + CMSG_ALIGN(sizeof(struct cmsghdr)))
+
+#define CMSG_FIRSTHDR(mhdr) \
+    ((size_t)(mhdr)->msg_controllen >= sizeof(struct cmsghdr) \
+         ? (struct cmsghdr *)(mhdr)->msg_control \
+         : (struct cmsghdr *)0)
+
+/* The walk, and the bounds check is the whole of it: a record claiming to
+ * end past the buffer ends the iteration rather than being followed,
+ * because the buffer came from a program and the length came from inside
+ * it. */
+#define CMSG_NXTHDR(mhdr, cmsg)                                                   \
+    ((cmsg) == (struct cmsghdr *)0 || (cmsg)->cmsg_len < sizeof(struct cmsghdr)   \
+         ? (struct cmsghdr *)0                                                    \
+         : ((unsigned char *)(cmsg) + CMSG_ALIGN((cmsg)->cmsg_len) +              \
+                    sizeof(struct cmsghdr) >                                      \
+                (unsigned char *)(mhdr)->msg_control + (mhdr)->msg_controllen     \
+                ? (struct cmsghdr *)0                                             \
+                : (struct cmsghdr *)((unsigned char *)(cmsg) +                    \
+                                     CMSG_ALIGN((cmsg)->cmsg_len))))
+
+int socketpair(int domain, int type, int protocol, int fds[2]);
+ssize_t sendmsg(int fd, const struct msghdr *msg, int flags);
+ssize_t recvmsg(int fd, struct msghdr *msg, int flags);
 int getsockname(int fd, struct sockaddr *addr, socklen_t *len);
 int getpeername(int fd, struct sockaddr *addr, socklen_t *len);
 int setsockopt(int fd, int level, int option, const void *value, socklen_t len);
