@@ -72,6 +72,22 @@ extern "C" {
 #define MADV_WILLNEED   3
 #define MADV_DONTNEED   4
 
+/* ---- M120: memfd_create's flags --------------------------------------
+ *
+ * Linux's values. MFD_ALLOW_SEALING is not decoration: without it a
+ * descriptor can never be sealed, which is how a program that hands over
+ * memory stops the receiver from sealing it further - see SYS_memfd_seal.
+ */
+#define OS_MFD_CLOEXEC       0x0001
+#define OS_MFD_ALLOW_SEALING 0x0002
+
+/* The seals, also Linux's values. A seal is a promise that cannot be taken
+ * back; kernel/ipc/memfd.h says what each one costs to honour here. */
+#define OS_F_SEAL_SEAL   0x0001
+#define OS_F_SEAL_SHRINK 0x0002
+#define OS_F_SEAL_GROW   0x0004
+#define OS_F_SEAL_WRITE  0x0008
+
 #ifdef __cplusplus
 }
 #endif

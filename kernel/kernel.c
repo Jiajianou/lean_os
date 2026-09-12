@@ -39,6 +39,7 @@
 #include "ipc/eventfd.h" /* M119 */
 #include "ipc/timerfd.h"
 #include "ipc/epoll.h"
+#include "ipc/memfd.h" /* M120 */
 #include "lib/libk.h"
 #include "mm/e820.h"
 #include "mm/heap.h"
@@ -140,7 +141,8 @@
     X(browsertest)              \
     X(netrecv)                  \
     X(unixtest)                 \
-    X(epolltest)
+    X(epolltest)                \
+    X(memfdtest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -12162,6 +12164,78 @@ static void boot_selftests_system(void) {
         klog_puts(" ms).\n\n");
     }
 
+    /* ---- M120 self-test: a buffer shared across a channel -------------
+     *
+     * The third of the three pieces a multi-process browser engine is
+     * built out of, and the first time this project can run the whole
+     * shape: a socketpair (M118), a child, a memfd created and sized by
+     * the parent, the descriptor sent over the channel, the child mapping
+     * it and writing through it, and the parent reading what the child
+     * wrote - with the child holding NO capabilities at all.
+     *
+     * What the kernel adds either side of the program, because the program
+     * cannot see it: the object count and the PAGE count. The second is
+     * the one that matters here - a memfd's frames are not returned by the
+     * address space going away (they belong to the object), so "every
+     * object came back" and "every frame came back" are two claims, and
+     * this is the only instrument that can make the second. */
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        int mf_before = memfd_in_use();
+        uint32_t pages_before = memfd_pages_held();
+        uint64_t frames_before = pmm_free_frame_count();
+        size_t mf_bytes = 0;
+        uint8_t *mf_img = read_program(PATH_BIN_DIR "memfdtest", &mf_bytes);
+        if (!mf_img) {
+            panic("M120 self-test: /bin/memfdtest is not on this disk");
+        }
+        const char *mf_argv[] = {PATH_BIN_DIR "memfdtest", 0};
+        task_t *mf = process_spawnv("memfdtest", mf_img, mf_bytes, mf_argv);
+        long rc = mf ? do_syscall(SYS_wait, (uint64_t)mf->id, 0, 0) : -1;
+        kfree(mf_img);
+        if (rc != 0) {
+            klog_puts("[m120] memfdtest exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_puts(" - see user_space/bin/memfdtest.c for what each "
+                      "code means\n");
+            panic("M120 self-test: shared memory by descriptor does not work "
+                  "on this machine");
+        }
+        if (memfd_in_use() != mf_before || memfd_pages_held() != pages_before) {
+            klog_puts("[m120] objects before ");
+            klog_put_dec((uint32_t)mf_before);
+            klog_puts(" after ");
+            klog_put_dec((uint32_t)memfd_in_use());
+            klog_puts(", pages before ");
+            klog_put_dec(pages_before);
+            klog_puts(" after ");
+            klog_put_dec(memfd_pages_held());
+            klog_puts(", first still alive: '");
+            klog_puts(memfd_first_live_name());
+            klog_puts("'\n");
+            panic("M120 self-test: a process that exited left shared memory "
+                  "behind");
+        }
+        uint64_t frames_after = pmm_free_frame_count();
+        if (frames_after < frames_before) {
+            klog_puts("[m120] sharing memory across a channel cost ");
+            klog_put_dec((uint32_t)(frames_before - frames_after));
+            klog_puts(" frames that never came back\n");
+            panic("M120 self-test: shared memory leaked physical frames");
+        }
+        klog_puts("[m120] a buffer shared across a channel: a memfd created, "
+                  "sized, mapped and written; its descriptor sent over a Unix "
+                  "socket to a forked child that holds no capabilities at "
+                  "all; the child's writes read back by the parent through a "
+                  "mapping it made before the child existed and kept after "
+                  "both descriptors were closed; F_SEAL_WRITE refusing a "
+                  "writable mapping; a shrink, a MAP_PRIVATE, a read and a "
+                  "map past the end all refused - self-test passed, every "
+                  "frame back (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
+    }
+
     /* ---- M113 self-test: the browser is actually ON this machine ------
      *
      * M100 built NetSurf and graded what it *runs* like: [m100h] above
@@ -15030,6 +15104,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     eventfd_init();
     timerfd_init();
     epoll_init();
+    memfd_init(); /* M120 */
 
     /* Self-test: map, write through, read back, and unmap a throwaway
      * virtual address directly via vmm - the same "prove it, don't just

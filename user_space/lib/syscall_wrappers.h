@@ -310,6 +310,11 @@ long sys_timerfd_create(int clockid, int flags);
 long sys_timerfd_settime(int fd, int flags, const os_itimer_t *value, os_itimer_t *old);
 long sys_timerfd_gettime(int fd, os_itimer_t *out);
 
+/* M120: shared memory a descriptor names. `sys_memfd_seal(fd, 0)` asks
+ * without changing anything. */
+long sys_memfd_create(const char *name, int flags);
+long sys_memfd_seal(int fd, uint32_t add);
+
 /* M64: corrects the clock, which is the half of "know the time" SNTP
  * needs and M59 had no reason to add. Lasts until reboot. */
 long sys_settime(uint32_t unix_seconds);

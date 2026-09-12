@@ -460,3 +460,11 @@ global epolltest_elf_end
 epolltest_elf_start:
     incbin "build/epolltest.elf"
 epolltest_elf_end:
+
+; M120: shared memory a descriptor names, across a channel - see
+; user_space/bin/memfdtest.c.
+global memfdtest_elf_start
+global memfdtest_elf_end
+memfdtest_elf_start:
+    incbin "build/memfdtest.elf"
+memfdtest_elf_end:

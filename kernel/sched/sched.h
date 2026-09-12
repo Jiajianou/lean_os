@@ -23,6 +23,7 @@
 #include "proc.h" /* system_api/include/proc.h - TASK_INFO_MAX, which *is* MAX_TASKS below. Resolves to the system_api header: a quoted include searches this file's own directory first (kernel/sched/, no proc.h), then -Ikernel (no kernel/proc.h), then -Isystem_api/include. */
 
 struct pipe; /* kernel/ipc/pipe.h owns the real definition - not included here so sched.h doesn't have to know pipes exist */
+struct memfd;    /* M120: kernel/ipc/memfd.h */
 struct eventfd;  /* M119: kernel/ipc/eventfd.h, timerfd.h and epoll.h - forward-declared for the same reason as the two above */
 struct timerfd;
 struct epoll;
@@ -100,6 +101,11 @@ typedef enum {
     FD_EVENT,
     FD_TIMER,
     FD_EPOLL,
+    /* M120: anonymous shared memory a descriptor names
+     * (kernel/ipc/memfd.h). Not FD_FILE with a flag: what backs it is
+     * frames rather than an inode, nothing writes it back, and the whole
+     * point is that it has no name anything else can reach. */
+    FD_MEMFD,
 } fd_type_t;
 
 /* M21: bumped from 8 - a compositor juggling several windows needs
@@ -192,6 +198,27 @@ typedef struct {
     int handle;
     uint32_t file_page;
     uint8_t shared;
+    /* ---- M120: the memfd this region is a window onto, if any ----------
+     *
+     * Anonymous shared memory named by a descriptor (kernel/ipc/memfd.h).
+     * `memfd_id` is the slot plus one, so zero means "not a memfd" and no
+     * existing region needed changing; `file_page` is reused as the page
+     * offset into the object, which is what it already means for a file.
+     *
+     * **A tag rather than a pointer, and a generation rather than trust.**
+     * A `struct memfd *` here would cost eight bytes in each of
+     * MAX_MMAP_REGIONS * MAX_TASKS slots - 128 KiB of kernel .bss - and
+     * these three bytes fit in padding this struct already had. The
+     * generation is M54's pid trick for M54's reason: a slot freed and
+     * handed out again must not let a stale region name a *different*
+     * object's memory, which is the one failure mode here that would be
+     * silent corruption rather than a fault.
+     *
+     * The region holds a reference of its own (memfd_region_ref), because
+     * a mapping outlives the descriptor that made it - that is POSIX and
+     * it is what every program that maps shared memory relies on. */
+    uint8_t memfd_id;
+    uint16_t memfd_gen;
 } mmap_region_t;
 
 /* M45: how long a per-task name may be, NUL included. A process was a
@@ -292,6 +319,7 @@ typedef struct {
         struct eventfd *event;  /* M119 */
         struct timerfd *timer;
         struct epoll *epoll;
+        struct memfd *memfd;    /* M120 */
     };
     /* M84: FD_CLOEXEC, and it finally means something.
      *
@@ -1041,6 +1069,13 @@ unsigned int sched_set_alarm(task_t *t, unsigned int seconds);
  * pages in [start, end), unmapping each as it goes. See the
  * implementation for why only mapped pages count. Returns how many. */
 int sched_release_shared_range(task_t *t, uint64_t start, uint64_t end);
+
+/* M120: a region holds a reference on the memfd it is a window onto,
+ * because a mapping outlives the descriptor that made it. These are the
+ * four places that changes hands - see the note in sched.c. */
+void sched_region_forget_memfd(mmap_region_t *r);
+void sched_regions_forget_memfds(task_t *t);
+void sched_regions_retain_memfds(task_t *t);
 
 void sched_raise_signal(task_t *t, int sig);
 

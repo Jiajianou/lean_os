@@ -541,6 +541,19 @@ off the machine) should read [docs/readiness.md](docs/readiness.md) before
 it starts: the four ways to wait on this machine are now listed in one
 place, and `SYS_waitfds` is still the right one for a window client.
 
+**M120 is not in this table either, and it closes the arc M118 opened.**
+Built 2026-09-12, third of three under one instruction. `memfd_create` was
+one of the six absent syscalls M100's measurement singled out, and with it
+the three pieces a multi-process program is made of - a channel, a wait and
+a shared buffer - are all here. It jumped nothing. What it changed for the
+rows that remain: `mmap_region_t` has a tag in it now, so **any future work
+on mmap regions has a reference to hand over** (six call sites, three
+helpers in sched.c, and a test that counts them); and there is a second way
+to share memory on this machine, which Q14 should know about before it moves
+the compositor - `kernel/ipc/shm.h` stays the right answer for a rendezvous
+by name, and a memfd is the right answer when the authority should be the
+descriptor.
+
 **M111 is not in this table and that is recorded rather than hidden.**
 `os`, the package manager, was asked for directly on 2026-09-09 and built
 to completion in one pass — an instruction outranks the queue, the same
@@ -2817,11 +2830,14 @@ supported single-process mode any more, so one kernel feature stood in
 front of all of them.
 
 **And M119 built the second (2026-09-12)** - `epoll`, `eventfd`,
-`timerfd`, which is `base`'s whole message pump. Between them this kernel
-has **126 syscalls**; eleven of the 348 have moved, leaving an overlap of
-90 and a gap of 337. What has not moved is the part that decides the rest:
-`memfd_create`, `signalfd4`, `seccomp`, `prctl(PR_SET_SECCOMP)` and
-`clone` with a namespace flag. **The condition for this row is now the
+`timerfd`, which is `base`'s whole message pump. **M120 then built
+`memfd_create`**, one of the six absent calls the table singles out, so the
+three pieces a multi-process program needs - a channel, a wait and a shared
+buffer - are all here. Between them this kernel has **128 syscalls**; twelve of the 348 have moved, leaving an overlap of
+91 and a gap of 336. What has not moved is the part that decides the rest:
+`signalfd4`, `seccomp`, `prctl(PR_SET_SECCOMP)` and `clone` with a
+namespace flag - the first a feature nothing in `base` calls, the other
+three the sandbox. **The condition for this row is now the
 third item on that list: clang and libc++ for `x86_64-lean_os`**, which is
 a compiler rather than a few hundred lines of kernel - and that is the
 honest shape of the remaining three.
@@ -4197,6 +4213,155 @@ worth more than what they bought towards it: every multi-process engine's
 IPC layer and every modern event loop's core. The next thing that could
 run here because of them is anything built on libevent, glib or Mojo.
 
+### M120 — a buffer that crosses the channel: memfd_create `[x]`
+
+*Landed 2026-09-12.* The third of the three pieces a multi-process engine is
+built out of, and the third of the six absent syscalls `docs/browser.md`'s
+measurement singled out: *"`memfd_create` — shared memory between renderer
+and GPU process"*. M118 built the channel, M119 the wait, and with both in
+place a renderer could talk and could sleep and **could not share a pixel**.
+Mojo carries anything larger than a message as a handle to memory;
+`base::WritableSharedMemoryRegion` is `memfd_create` plus `ftruncate`, and
+what crosses the channel is the descriptor.
+
+**Why this machine's existing shared memory was not it.**
+`kernel/ipc/shm.h` has had shared memory since M19 — it is how the
+compositor and every window client share a pixel buffer. Two differences,
+and only the second forced a new object: a segment is named by a **global
+id every process can guess at**, which is right for a rendezvous and wrong
+for a sandbox; and it is **not a descriptor**, so it cannot be passed over
+a channel, inherited, counted by the fd table or closed by `SYS_close`.
+M118 built descriptor passing, and a thing that is not a descriptor cannot
+use it. So this is shm's authority model turned the right way round:
+**memory nobody can name and anybody holding the descriptor can map** —
+the shape `docs/capabilities.md` argues for everywhere else, arrived at from
+the other direction.
+
+**The difficulty was not the memory. It was the lifetime.** `mmap` a memfd
+and then close the descriptor: the mapping stays valid. That is POSIX, it is
+what every program that shares memory does (Chromium's
+`SharedMemoryMapping` outlives the `Region` that made it), and it means the
+object is refcounted by **two different things** — every descriptor naming
+it, and every mmap region naming it. The second is the new one, and it is
+where the work was:
+
+- `mmap_region_t` grew a tag rather than a pointer. A `struct memfd *` there
+  would have cost 8 bytes in each of `MAX_MMAP_REGIONS * MAX_TASKS` slots —
+  **128 KiB of kernel .bss** — and the tag fits in padding the struct
+  already had.
+- The tag is (slot, **generation**), which is M54's pid trick against the
+  same hazard for the same reason: a slot freed and handed out again must
+  not let a stale region name *a different object's memory*. That is the one
+  failure in this milestone that would have been silent corruption rather
+  than a fault, and a host test rolls the generation over in four lines to
+  prove it cannot happen.
+- Four paths hand that reference over — munmap removing a slot, execve
+  clearing the table, a task slot being recycled, and fork copying the
+  table (which takes one rather than dropping one) — plus two that *split* a
+  region and so create a second holder. Six call sites, three helpers in
+  `sched.c` so each is one line, and the whole of it graded by
+  `tests/test_memfd.c` against real reference counts rather than a fake:
+  one too few frees memory two processes are reading, one too many leaks
+  16 MiB.
+
+**Seals, because read-only sharing is otherwise a comment.** `F_SEAL_WRITE`,
+`F_SEAL_GROW`, `F_SEAL_SHRINK` and `F_SEAL_SEAL`, with Linux's rule that
+`MFD_ALLOW_SEALING` is required — implemented with the mechanism that
+already existed rather than a second flag: a descriptor created without it
+gets `F_SEAL_SEAL` immediately, and since seals never come off it can never
+be sealed. A seal is what lets a sender hand over memory the receiver can
+*verify* is read-only instead of trusting that it is, which is exactly what
+`PlatformSharedMemoryRegion::ConvertToReadOnly` does.
+
+**What the instruments said.**
+
+- `tests/test_memfd.c`: **20 tests**. Mutation **82.1% first run, 89.3%
+  after**. The survivors were mostly unkillable for one reason and that
+  reason was worth acting on: two of them changed assignments in
+  `memfd_init` and **nothing could notice**, because every field they set is
+  set by `memfd_create_obj` on the way in and cleared by `memfd_unref` on
+  the way out. So `memfd_init` does one thing now instead of six. A third
+  showed the `name` field was write-only, which is now readable and is what
+  the leak check prints.
+- **The zeroing test is the one that could not be written on the machine.**
+  A frame handed to a second process must not carry what this machine last
+  used it for - and a freshly booted machine's frames are mostly zero
+  anyway, so a kernel that forgot the `memset` would pass every boot test
+  and leak on the hundredth allocation. `tests/fakes/fake_pmm.c` hands out
+  frames filled with `0xCD` on purpose, and says so in its own comment; this
+  is the first test to depend on that.
+- `/bin/memfdtest`, six sections, **100 ms**, and its second section is the
+  first time this project has run the whole engine shape: a socketpair, a
+  forked child that calls `dropcaps(0)`, a buffer created and sized by the
+  parent, the descriptor sent over the channel, the child mapping it and
+  writing, and **the parent reading what the child wrote through a mapping
+  it made before the child existed and kept after both descriptors were
+  closed**.
+- The `[m120]` marker adds the claim the program cannot make: **every frame
+  came back.** A memfd's frames belong to the object rather than to the
+  address space, so a process exiting does not return them - which is
+  precisely the leak that needed a counter either side rather than a
+  comment.
+- `/bin/syscalltest`: 344 checks before, **353** after, 0 failures. Both new
+  calls classified; `memfd_create` joins M119's three in `CLASS_SKIP`,
+  because it creates a descriptor for any plausible argument and a sweep
+  that left twenty behind would move every fd number the later checks
+  depend on.
+- **One coverage floor was lowered, deliberately and in writing.**
+  `sched.c` 51.00% -> 50.83%: M120's two fault-path branches need real page
+  tables and this tier has none. They are graded on the machine instead, and
+  sharply - the child reads bytes the parent wrote, which only works if the
+  fault maps the object's own frame.
+
+**The bug found by reading, and the two failures that were not bugs.**
+While the first tier run was booting, the asymmetry between
+`sched_regions_forget_memfds` (which walks every region slot) and
+`sched_regions_retain_memfds` (which skips empty ones) turned out to
+matter: `mmap_slot_remove` shifts the table down by one and leaves a
+**duplicate of a live region** in the vacated slot, tag and generation
+included - so the forget walk would have dropped a reference nobody took,
+freeing memory a process was still mapping. A free slot holds nothing now,
+including the tag, and `tests/test_memfd.c` has the shape of the bug
+written against the fixed code.
+
+That same tier run failed twice and **neither failure was this
+milestone's**, which is worth recording because the temptation was to
+assume otherwise. `[m55]`'s pixel check - a compositor SIGKILLed out from
+under two clients - read the wallpaper where it expected a window; and the
+four-core stage failed, which milestones.md's queue already lists as
+*"`smp-test.sh` itself failing 2 runs in 3"*. The same kernel passed
+`[m55]` on three other boots, and the archive has the whole phenomenon
+written down from M68: roughly fifty boot self-tests are written against
+fixed `pit_sleep_ms` budgets, **M55's crash recovery is one of the three
+named as wandering when anything perturbs the suite's timing**, and this
+milestone grew `task_t` by a kilobyte. A third observation from the same
+afternoon: one boot stalled with no output for fifteen minutes, which is
+M112's recorded shape, and the machine had a QEMU from a killed run at
+100% of a core - the hazard my own notes say to check for before timing
+anything. The tier was re-run on a quiet machine and passed every stage.
+
+**What is explicitly not built, each with a condition.** A **shrink** is
+refused outright, which is a divergence rather than an omission: Linux
+answers a mapping of freed pages with SIGBUS and this kernel has no such
+machinery, so it refuses the call instead - the conservative half of the
+same answer; the condition is SIGBUS itself. **MAP_PRIVATE of a memfd** -
+copy-on-write over anonymous shared memory, which nothing asks for.
+**`read`/`write` on one** - Linux allows both, nothing that shares memory
+does it, and a second path to the same bytes with different rules is worth
+less than the refusal. **16 MiB per object, 32 objects**: the small machine
+this project's harnesses must pass on has 128 MiB, so one region at the cap
+is already an eighth of it.
+
+**Where this leaves the arc.** Three of `docs/browser.md`'s conditions and
+six-of-six's worth of IPC are now answered, and all three were ordinary
+kernel work of a few hundred lines each. What remains is not: **clang and
+libc++ for `x86_64-lean_os`** (a compiler), a machine with 16 GB of RAM and
+100 GB of disk, and a sandbox story that is not a pretence. And the thing
+worth saying at the end of three milestones aimed at a browser nobody can
+build yet: what they actually bought is a machine on which *any*
+multi-process program can be written - a channel, a wait, and a buffer -
+and the first programs to use them will be this project's own.
+
 ## Every open box, in one place
 
 The queue says what order. This says exactly what is unfinished, in the
@@ -4631,6 +4796,13 @@ says whether it is a bug or a decision.
   a fault and *returns* rather than unwinding.
 - **`PTHREAD_KEYS_MAX` is 32**, and CPython's `test_threading` runs out
   past it (`gilstate_tss_set: failed to set current tstate`).
+- **Shared memory has two shapes now (M120).** `kernel/ipc/shm.h` is named
+  by a global id any process can guess at and is not a descriptor;
+  `kernel/ipc/memfd.h` is named by nothing and *is* a descriptor. The first
+  is right for a rendezvous (the compositor and its clients), the second for
+  handing a buffer to someone specific. A memfd cannot be shrunk - refused,
+  because this kernel has no SIGBUS for a mapping of freed pages - cannot be
+  mapped MAP_PRIVATE, and cannot be read or written with `read`/`write`.
 - **`AF_UNIX`/`socketpair` exist as of M118** - with `SCM_RIGHTS`, an abstract namespace and a real `shutdown`, needing no capability ([docs/unix-sockets.md](docs/unix-sockets.md)). Two divergences remain and are written down there rather than here: a bound path is a name in a kernel table and not a node in leanfs (so `stat()` on it fails and `unlink()` does not unbind), and `SCM_CREDENTIALS` does not exist because two of its three numbers would be constants on a machine with one principal. `SOCK_DGRAM` on this family is not built; its condition is a program that sends to a bound name without connecting.
 - **The random device is real as of M100** (`kernel/dev/random.c`):
   ChaCha20 under a pool every interrupt feeds, fast key erasure on
@@ -4681,7 +4853,10 @@ condition rather than by an opinion.
   single-process mode either, so it was never Chromium's condition
   alone. **M119 then closed the second** (2026-09-12): `epoll`, `eventfd`
   and `timerfd`, which is `base`'s whole message pump - and which also
-  gave this kernel write-readiness it had never had. **The condition is
+  gave this kernel write-readiness it had never had. **M120 added
+  `memfd_create`** the same day, which was not one of the five conditions
+  but was one of the six absent syscalls behind them: with it a buffer can
+  cross a channel, which is how Mojo moves anything bigger than a message. **The condition is
   now the third, and it is where this stops being ordinary work: clang
   and libc++ for `x86_64-lean_os`.** The two that are done were a few
   hundred lines of kernel each; this is a second compiler port, with

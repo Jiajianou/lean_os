@@ -564,6 +564,13 @@ REQUIRED_MARKERS=(
   # from the armed timers HANGS here - and a hang reaches this harness as
   # this marker never appearing, which is the failure being asked for.
   "[m119] a message pump:"
+  # M120: shared memory by descriptor, across a channel. Required, and the
+  # marker rather than the program's own line because the kernel adds the
+  # claim the program cannot make: every frame came back. A memfd's frames
+  # belong to the object rather than to the address space, so a process
+  # exiting does NOT return them - which is the leak this marker exists to
+  # catch.
+  "[m120] a buffer shared across a channel:"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

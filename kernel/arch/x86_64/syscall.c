@@ -26,6 +26,7 @@
 #include "ipc/eventfd.h" /* M119: the three objects a message pump is made of */
 #include "ipc/timerfd.h"
 #include "ipc/epoll.h"
+#include "ipc/memfd.h"   /* M120: shared memory a descriptor names */
 #include "os_poll.h"     /* system_api/include/os_poll.h - os_epoll_event_t, os_itimer_t */
 #include "drivers/blk.h" /* M104: blk_flush, for fsync and sync */
 #include "mm/filemap.h" /* M91 (second attempt): shared file pages */
@@ -2450,10 +2451,26 @@ static long sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a3, uint64_t a4
     (void)a4;
     (void)a5;
     (void)a6;
+    task_t *self = sched_current();
+    /* ---- M120: sizing a memfd, which is what ftruncate is FOR here ----
+     *
+     * A memfd is created empty and a program sizes it with this call -
+     * `memfd_create` then `ftruncate` then `mmap` is the whole sequence,
+     * and Chromium's `PlatformSharedMemoryRegion::Create` is exactly those
+     * three lines.
+     *
+     * **No CAP_FS_WRITE**, and the check is below rather than above for
+     * that reason: this writes no file. The authority to size anonymous
+     * memory is the descriptor, and a program that holds one already has
+     * it - which is the same argument M118 made for AF_UNIX needing no
+     * capability, and it matters for the same program: a renderer holding
+     * nothing must be able to size the buffer it was given. */
+    if (fd < MAX_FDS && self->fds[fd].type == FD_MEMFD) {
+        return memfd_truncate(self->fds[fd].memfd, length);
+    }
     if (!has_cap(CAP_FS_WRITE)) {
         return -1;
     }
-    task_t *self = sched_current();
     if (fd >= MAX_FDS || self->fds[fd].type != FD_FILE) {
         return -1;
     }
@@ -3779,8 +3796,20 @@ static int mmap_mergeable(const mmap_region_t *r, uint32_t prot, int handle,
  * So: a caller adding a mapping asks to merge, and a caller cutting one
  * up says no. The two are different operations that happened to share a
  * function. */
+/* M120: a split creates a second region naming the same shared memory, so
+ * it is a second holder of it. Called by the two surgery sites below; a
+ * stale tag is a no-op, which is the same answer sched_region_forget_memfd
+ * gives for the same reason. */
+static void region_tag_ref(uint8_t memfd_id, uint16_t memfd_gen) {
+    if (!memfd_id) {
+        return;
+    }
+    memfd_region_ref(memfd_by_tag((uint8_t)(memfd_id - 1), memfd_gen));
+}
+
 static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32_t prot,
-                                int handle, uint32_t file_page, int shared, int merge) {
+                                int handle, uint32_t file_page, int shared, int merge,
+                                uint8_t memfd_id, uint16_t memfd_gen) {
     /* Inserts, keeping the array sorted by base with free slots (pages
      * == 0) pushed to the end. Returns 0, or -1 if the table is full. */
     uint64_t end = base + (uint64_t)pages * PAGE_SIZE;
@@ -3844,10 +3873,23 @@ static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32
     t->mmaps[at].handle = handle;
     t->mmaps[at].file_page = file_page;
     t->mmaps[at].shared = (uint8_t)(shared != 0);
+    /* M120: which memfd this is a window onto, if any. The REFERENCE is
+     * the caller's to take - this function is used both to record a new
+     * mapping (whose reference was taken by sys_mmap) and to record half
+     * of one being split (which needs a fresh one) - and a function that
+     * took it itself would be right for one caller and wrong for the
+     * other. */
+    t->mmaps[at].memfd_id = memfd_id;
+    t->mmaps[at].memfd_gen = memfd_gen;
     return 0;
 }
 
 static void mmap_slot_remove(task_t *t, int index) {
+    /* M120: this slot stops describing a mapping, so whatever memfd it was
+     * a window onto loses a holder - see the note above
+     * sched_region_forget_memfd. Before the shift, or the reference would
+     * be dropped for the wrong region. */
+    sched_region_forget_memfd(&t->mmaps[index]);
     for (int i = index; i < MAX_MMAP_REGIONS - 1; i++) {
         t->mmaps[i] = t->mmaps[i + 1];
     }
@@ -3856,6 +3898,16 @@ static void mmap_slot_remove(task_t *t, int index) {
     t->mmaps[MAX_MMAP_REGIONS - 1].prot = 0;
     t->mmaps[MAX_MMAP_REGIONS - 1].handle = -1;
     t->mmaps[MAX_MMAP_REGIONS - 1].file_page = 0;
+    /* M120: and the memfd tag, which matters more than the rest of this
+     * clearing does. The shift above leaves a DUPLICATE of the last live
+     * region in this slot - same tag, same generation - and
+     * sched_regions_forget_memfds walks every slot, so a duplicate left
+     * here would drop a reference nobody ever took. Found by reading the
+     * asymmetry between that function and sched_regions_retain_memfds,
+     * which skips empty slots; a free slot holds nothing, and now that is
+     * true of the tag too. */
+    t->mmaps[MAX_MMAP_REGIONS - 1].memfd_id = 0;
+    t->mmaps[MAX_MMAP_REGIONS - 1].memfd_gen = 0;
     t->mmaps[MAX_MMAP_REGIONS - 1].shared = 0;
 }
 
@@ -3940,6 +3992,8 @@ static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
 
     int handle = -1;
     uint32_t file_page = 0;
+    uint8_t memfd_id = 0;   /* M120 */
+    uint16_t memfd_gen = 0;
     if (!anon) {
         /* A file-backed mapping. The descriptor has to be a file this
          * caller has open - not a pipe, not a socket, not a directory -
@@ -3953,6 +4007,45 @@ static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
             return -1;
         }
         task_t *cur = sched_current();
+        /* ---- M120: or a memfd, which is the other thing a descriptor can
+         * back a mapping with ------------------------------------------
+         *
+         * Anonymous shared memory (kernel/ipc/memfd.h): the frames are the
+         * object's, every mapper of it sees the same ones, and the region
+         * holds a reference so that closing the descriptor does not take
+         * the memory away - which is POSIX and is what every program that
+         * shares memory depends on.
+         *
+         * MAP_PRIVATE of a memfd is refused rather than half-built. It
+         * would mean copy-on-write over anonymous shared memory, which no
+         * caller this project is aiming at asks for - Chromium maps shared
+         * or not at all - and a private mapping that silently shared would
+         * be the worse kind of wrong. Condition for building it: a program
+         * that asks. */
+        if (cur->fds[fd].type == FD_MEMFD) {
+            struct memfd *m = cur->fds[fd].memfd;
+            if (!shared) {
+                return -1;
+            }
+            uint64_t size = memfd_size(m);
+            uint64_t want_end = offset + (uint64_t)len;
+            if (size == 0 || want_end < offset || want_end > size) {
+                /* Past the end. Linux lets the mapping exist and answers
+                 * the touch with SIGBUS; this kernel has no SIGBUS
+                 * machinery for a short file, so it refuses at the call -
+                 * which a caller finds out about immediately instead of
+                 * three functions later. */
+                return -1;
+            }
+            if ((prot & PROT_WRITE) && !memfd_may_write(m)) {
+                return -1; /* F_SEAL_WRITE, and this is the check that makes the seal mean something */
+            }
+            memfd_region_ref(m); /* the region's own hold - released when the region goes */
+            memfd_id = (uint8_t)(memfd_slot(m) + 1);
+            memfd_gen = memfd_generation(m);
+            file_page = (uint32_t)(offset / PAGE_SIZE);
+            goto have_backing;
+        }
         if (cur->fds[fd].type != FD_FILE || !cur->fds[fd].file) {
             return -1;
         }
@@ -3994,6 +4087,7 @@ static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
             return -1;
         }
     }
+have_backing:
     /* M91: PROT_NONE is now a mapping. M78 refused it because "there is
      * no way to express 'mapped but inaccessible' in a page table entry
      * this kernel sets up" - true then, and demand paging is what changed
@@ -4056,7 +4150,13 @@ static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     /* The one caller that merges: this is a new mapping, and a new
      * mapping next to an identical one is one mapping. */
     if (mmap_slot_cmp_insert(self, base, (uint32_t)pages, (uint32_t)prot,
-                             handle, file_page, shared, 1) != 0) {
+                             handle, file_page, shared, 1, memfd_id, memfd_gen) != 0) {
+        if (memfd_id) {
+            /* The reference this call took for the region it could not
+             * record. Dropped here rather than leaked, which is the whole
+             * of why the insert does not take it itself. */
+            memfd_region_unref(memfd_by_tag((uint8_t)(memfd_id - 1), memfd_gen));
+        }
         return -1; /* the table is full - see MAX_MMAP_REGIONS */
     }
 
@@ -4148,12 +4248,20 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
              * fails is the bookkeeping for the tail. Reported so the
              * caller knows the tail is no longer reachable. */
             self->mmaps[i].pages = (uint32_t)((cut_start - rstart) / PAGE_SIZE);
+            /* M120: the tail is a second window onto the same shared
+             * memory, so it is a second holder. Taken before the insert,
+             * because the insert may shift this slot out from under the
+             * pointer. */
+            region_tag_ref(self->mmaps[i].memfd_id, self->mmaps[i].memfd_gen);
             if (mmap_slot_cmp_insert(self, cut_end,
                                       (uint32_t)((rend - cut_end) / PAGE_SIZE),
                                       self->mmaps[i].prot, self->mmaps[i].handle,
                                       self->mmaps[i].file_page +
                                           (uint32_t)((cut_end - rstart) / PAGE_SIZE),
-                                      self->mmaps[i].shared, 0) != 0) {
+                                      self->mmaps[i].shared, 0,
+                                      self->mmaps[i].memfd_id,
+                                      self->mmaps[i].memfd_gen) != 0) {
+                sched_region_forget_memfd(&self->mmaps[i]); /* the reference just taken, given back */
                 return -1;
             }
             i = -1; /* the array was re-sorted underneath; rescan from the start */
@@ -4249,17 +4357,23 @@ static int mmap_split_for(task_t *t, uint64_t addr, uint64_t end) {
         int handle = t->mmaps[i].handle;
         uint32_t fp = t->mmaps[i].file_page + (uint32_t)((cut - rstart) / PAGE_SIZE);
         int shared = t->mmaps[i].shared;
+        uint8_t mid = t->mmaps[i].memfd_id; /* M120 */
+        uint16_t mgen = t->mmaps[i].memfd_gen;
         t->mmaps[i].pages = (uint32_t)((cut - rstart) / PAGE_SIZE);
+        region_tag_ref(mid, mgen); /* the half above the cut is a second holder */
         /* No merge: this call exists to CREATE the boundary at `cut`, and
          * a merge would put it straight back - see the note on the
          * parameter. */
         if (mmap_slot_cmp_insert(t, cut, (uint32_t)((rend - cut) / PAGE_SIZE), prot,
-                                 handle, fp, shared, 0) != 0) {
+                                 handle, fp, shared, 0, mid, mgen) != 0) {
             /* Put it back rather than leaving a region shorter than the
              * memory it describes - a mapping the caller can still touch
              * with nothing saying what it may become is worse than a
              * refusal. */
             t->mmaps[i].pages = (uint32_t)((rend - rstart) / PAGE_SIZE);
+            if (mid) {
+                memfd_region_unref(memfd_by_tag((uint8_t)(mid - 1), mgen));
+            }
             return -1;
         }
         i = -1; /* the array was re-sorted underneath; rescan */
@@ -4443,6 +4557,17 @@ static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
     case FD_SOCKET:
     case FD_UNIX: /* M118: a socket is a socket to fstat, whatever family it is in */
         out.kind = OS_STAT_SOCK;
+        break;
+    case FD_MEMFD:
+        /* M120: a size, which is the one thing a receiver of a passed
+         * memfd has to be able to ask - Chromium checks it before mapping,
+         * because a region smaller than the header it is about to read
+         * would be a fault inside somebody else's code. Reported as a
+         * regular file, which is what Linux reports for a memfd (it is a
+         * file on a tmpfs there) and what makes the size field mean what a
+         * caller expects. */
+        out.kind = OS_STAT_FILE;
+        out.size = (uint32_t)memfd_size(slot->memfd);
         break;
     case FD_EVENT:
     case FD_TIMER:
@@ -4846,6 +4971,65 @@ static long sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags, uint64_t 
         }
         sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
     }
+}
+
+/* ---- M120: memfd_create and its seals --------------------------------- */
+static long sys_memfd_create(uint64_t name_ptr, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    if (flags & ~(uint64_t)(OS_MFD_CLOEXEC | OS_MFD_ALLOW_SEALING)) {
+        return -1;
+    }
+    char name[MEMFD_NAME_MAX];
+    name[0] = '\0';
+    if (name_ptr) {
+        /* A short, bounded copy of a name nothing reads back. A caller
+         * that passes a bad pointer is refused rather than given an
+         * unnamed object, because the pointer is the part of this call
+         * that can be wrong. */
+        if (copy_from_user(name, name_ptr, sizeof(name)) != 0) {
+            return -1;
+        }
+        name[sizeof(name) - 1] = '\0';
+    }
+    struct memfd *m = memfd_create_obj(name_ptr ? name : (const char *)0);
+    if (!m) {
+        return -1;
+    }
+    /* MFD_ALLOW_SEALING is recorded as a seal of its own absence: without
+     * it, F_SEAL_SEAL is set now, and since seals never come off this
+     * descriptor can never be sealed. That is exactly Linux's rule,
+     * expressed with the mechanism that already exists rather than with a
+     * second flag. */
+    if (!(flags & OS_MFD_ALLOW_SEALING)) {
+        memfd_add_seals(m, MEMFD_SEAL_SEAL);
+    }
+    task_t *self = sched_current();
+    int fd = alloc_fd(self);
+    if (fd < 0) {
+        memfd_unref(m);
+        return -1;
+    }
+    self->fds[fd].type = FD_MEMFD;
+    self->fds[fd].memfd = m;
+    self->fds[fd].cloexec = (flags & OS_MFD_CLOEXEC) ? 1 : 0;
+    self->fds[fd].nonblock = 0;
+    return fd;
+}
+
+static long sys_memfd_seal(uint64_t fd, uint64_t add, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    task_t *self = sched_current();
+    if (fd >= MAX_FDS || self->fds[fd].type != FD_MEMFD) {
+        return -1;
+    }
+    struct memfd *m = self->fds[fd].memfd;
+    if (add != 0 && memfd_add_seals(m, (uint32_t)add) != 0) {
+        return -1;
+    }
+    /* The seals now in force, whether this added any or not - so one call
+     * covers F_GET_SEALS and F_ADD_SEALS, and a caller that adds always
+     * learns what it ended up with. */
+    return (long)memfd_get_seals(m);
 }
 
 static long sys_sockshut(uint64_t fd, uint64_t how, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -6084,6 +6268,7 @@ static long sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
         case FD_EVENT:      access = OPEN_READ | OPEN_WRITE; break; /* M119 */
         case FD_TIMER:      access = OPEN_READ; break;              /* armed with settime, not written */
         case FD_EPOLL:      access = OPEN_READ; break;              /* changed with epoll_ctl, not written */
+        case FD_MEMFD:      access = OPEN_READ | OPEN_WRITE; break; /* M120: what it can be MAPPED as; read(2) and write(2) are refused - see SYS_memfd_create */
         default:            return -1;
         }
         /* M100: and the one status flag, which is the half of this
@@ -6491,6 +6676,7 @@ static long sys_execve(isr_regs_t *regs) {
     self->heap_brk = USER_HEAP_START;
     self->heap_mapped_end = USER_HEAP_START;
     self->shm_next_vaddr = USER_SHM_BASE;
+    sched_regions_forget_memfds(self); /* M120: and the shared memory they named */
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         self->mmaps[i].base = 0;
         self->mmaps[i].pages = 0;
@@ -6498,6 +6684,8 @@ static long sys_execve(isr_regs_t *regs) {
         self->mmaps[i].handle = -1; /* M91 */
         self->mmaps[i].file_page = 0;
         self->mmaps[i].shared = 0;
+        self->mmaps[i].memfd_id = 0; /* M120 - the reference went in sched_regions_forget_memfds above */
+        self->mmaps[i].memfd_gen = 0;
     }
     /* M96: and the thread pointer. It points into the address space
      * that has just been replaced, so carrying it across an exec would
@@ -6749,6 +6937,8 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_timerfd_create] = sys_timerfd_create,
     [SYS_timerfd_settime] = sys_timerfd_settime,
     [SYS_timerfd_gettime] = sys_timerfd_gettime,
+    [SYS_memfd_create] = sys_memfd_create, /* M120 */
+    [SYS_memfd_seal] = sys_memfd_seal,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

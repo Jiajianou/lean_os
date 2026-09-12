@@ -57,6 +57,37 @@ int mprotect(void *addr, size_t length, int prot);
 int madvise(void *addr, size_t length, int advice);
 int posix_madvise(void *addr, size_t length, int advice);
 
+/* ---- M120: anonymous shared memory a descriptor names -----------------
+ *
+ * `memfd_create` then `ftruncate` then `mmap(MAP_SHARED)`, and the
+ * descriptor can be passed to another process over a Unix-domain socket
+ * (M118). That is how every program that shares a buffer with a separate
+ * process does it - a browser's renderer and its GPU process, a video
+ * decoder and its consumer - and it is the third of the three pieces
+ * docs/browser.md's measurement named.
+ *
+ * `read(2)` and `write(2)` on one are refused here, which Linux allows.
+ * Nothing that uses shared memory does it, and a second path to the same
+ * bytes with different rules is worth less than the refusal. `fstat`
+ * reports the size, which is what a receiver checks before mapping.
+ *
+ * Seals are in <fcntl.h> terms on Linux (F_ADD_SEALS / F_GET_SEALS through
+ * fcntl); here they are one call, because the kernel's fcntl has no
+ * argument shape for them and inventing one to imitate a spelling is not
+ * worth a syscall. `memfd_seals(fd)` asks; `memfd_add_seals(fd, s)`
+ * promises. MFD_ALLOW_SEALING is required for the second, as on Linux. */
+#define MFD_CLOEXEC       0x0001
+#define MFD_ALLOW_SEALING 0x0002
+
+#define F_SEAL_SEAL   0x0001
+#define F_SEAL_SHRINK 0x0002
+#define F_SEAL_GROW   0x0004
+#define F_SEAL_WRITE  0x0008
+
+int memfd_create(const char *name, unsigned int flags);
+int memfd_add_seals(int fd, unsigned int seals);
+int memfd_seals(int fd);
+
 #ifdef __cplusplus
 }
 #endif

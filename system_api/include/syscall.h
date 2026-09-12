@@ -850,7 +850,40 @@ typedef struct {
 #define SYS_timerfd_settime 124 /* (fd, flags, const os_itimer_t *new, os_itimer_t *old) -> 0 or -1. A `value_ns` of 0 disarms, and an interval with no value is that case too - POSIX's rule, and a trap worth naming. TFD_TIMER_ABSTIME makes `value_ns` a point on the timer's clock. **The granularity is 10 ms, which is PIT_HZ and not a choice this call makes**, and a shorter request is rounded UP to one tick, never down to zero: a timer that is readable immediately is a pump that spins. */
 #define SYS_timerfd_gettime 125 /* (fd, os_itimer_t *out) -> 0 or -1. What is left, not what was asked for. */
 
-#define SYSCALL_COUNT 126
+/* ---- M120: shared memory a descriptor names ---------------------------
+ *
+ * The third piece of a multi-process engine's IPC layer, after M118's
+ * channel and M119's wait - and the third of the six absent syscalls
+ * docs/browser.md's measurement singled out: "`memfd_create` - shared
+ * memory between renderer and GPU process". Mojo carries anything larger
+ * than a message as a handle to memory, and on Linux that handle is a
+ * memfd: `base::WritableSharedMemoryRegion` is this call plus an
+ * `ftruncate`, and what crosses the channel is the descriptor.
+ *
+ * **Why not SYS_shm_create, which has existed since M19.** Because a
+ * segment is named by a global id every process can guess at, and because
+ * it is not a descriptor - so it cannot be passed over a channel,
+ * inherited, counted by the fd table or closed by SYS_close. This is the
+ * same memory with the authority the other way round: nobody can name it
+ * and anybody holding the descriptor can map it. See
+ * kernel/ipc/memfd.h.
+ *
+ * The sequence, which is the whole API: create, SYS_ftruncate to size it
+ * (no capability - it writes no file), SYS_mmap with MAP_SHARED, and
+ * SYS_sendmsg to hand it to somebody. SYS_fstat reports the size, which a
+ * receiver checks before mapping. read(2) and write(2) on one are refused:
+ * Linux allows them and nothing that uses shared memory does it, so the
+ * honest answer is the refusal rather than a second path to the same
+ * bytes. Condition for building them: a program that reads a memfd
+ * instead of mapping it.
+ *
+ * No capability, for the reason AF_UNIX needs none: the authority is the
+ * descriptor. A renderer holding nothing at all must be able to map the
+ * buffer it was handed, and must not be able to name anybody else's. */
+#define SYS_memfd_create 126 /* (const char *name, flags) -> an fd for new, empty, anonymous shared memory, or -1. `name` may be NULL and is for diagnostics only. `flags` takes MFD_CLOEXEC and MFD_ALLOW_SEALING, and refuses anything else - a flag this kernel does not implement is a promise it would not keep. */
+#define SYS_memfd_seal   127 /* (fd, add) -> the seals now in force, or -1. `add` of 0 asks without changing anything, which is F_GET_SEALS; a non-zero `add` is F_ADD_SEALS. Seals never come off, which is what makes read-only shared memory possible at all: the sender seals writing, passes the descriptor, and the receiver can verify rather than trust. Refused if F_SEAL_SEAL is already set, or if the descriptor was not created with MFD_ALLOW_SEALING - Linux's rule, and it exists so that a sender can hand over memory that nobody can seal further. */
+
+#define SYSCALL_COUNT 128
 
 #ifdef __cplusplus
 }

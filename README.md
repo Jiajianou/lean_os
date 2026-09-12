@@ -246,6 +246,23 @@ UEFI firmware
   burns a core — which is invisible to every other instrument here. See
   [docs/readiness.md](docs/readiness.md).
 
+- **And the third** (M120): **`memfd_create`** — anonymous shared memory
+  that a *descriptor* names, sized with `ftruncate`, mapped `MAP_SHARED`,
+  and passed to another process over a Unix-domain socket. This machine
+  has had shared memory since M19, and it is named by a global id any
+  process can guess at; this is the same memory with the authority the
+  other way round — **nobody can name it and anybody holding the
+  descriptor can map it**. Sealable, so a sender can hand over memory the
+  receiver can *verify* is read-only rather than trust.
+
+  With it, the three pieces a multi-process program is built out of are
+  all here, and the boot self-test runs the whole shape: a socketpair, a
+  forked child that drops **every** capability, a buffer created and sized
+  by the parent, the descriptor sent over the channel, and the parent
+  reading what the child painted — through a mapping it made before the
+  child existed and kept after both descriptors were closed. Which is, in
+  one sentence, what a browser's renderer and its parent do all day.
+
 - **A package manager.** `os install grep` puts **GNU grep 3.11** on
   this machine — built here by this project's own compiler from the
   published tarball with no edit to its source — and the machine runs
@@ -339,9 +356,9 @@ Four instruments, and none of them subsumes another:
   fake timer and a fake CPU, so a tick is a function call and a
   fairness property can be checked at every task count, and it learns
   the order locks are taken in so an inversion is an error rather than
-  a comment (Q9). 460 tests.
+  a comment (Q9). 474 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 130 markers and 41 performance
+  image and grade the serial log against 131 markers and 41 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It

@@ -57,3 +57,44 @@ int msync(void *addr, size_t length, int flags) {
     }
     return 0;
 }
+
+/* ---- M120: memfd_create ----------------------------------------------
+ *
+ * Thin, like the rest of this file. The one thing worth a line: a failure
+ * here is EMFILE or EINVAL and not ENOMEM - the object is empty when it is
+ * created, so nothing about this call can run out of memory. The
+ * ftruncate that sizes it is where ENOMEM lives.
+ */
+int memfd_create(const char *name, unsigned int flags) {
+    long fd = sys_memfd_create(name, (int)flags);
+    if (fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return (int)fd;
+}
+
+int memfd_add_seals(int fd, unsigned int seals) {
+    if (seals == 0) {
+        return 0; /* adding nothing succeeds, and must not be read as a query */
+    }
+    long r = sys_memfd_seal(fd, seals);
+    if (r < 0) {
+        /* EPERM on Linux: the descriptor is sealed against sealing, or was
+         * not created with MFD_ALLOW_SEALING. EINVAL for a seal this kernel
+         * does not implement. One return value, and the commoner cause is
+         * the permission one. */
+        errno = EPERM;
+        return -1;
+    }
+    return 0;
+}
+
+int memfd_seals(int fd) {
+    long r = sys_memfd_seal(fd, 0);
+    if (r < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return (int)r;
+}

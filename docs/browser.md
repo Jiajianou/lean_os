@@ -444,11 +444,18 @@ Mojo's transport - and M119 moved `epoll_create1`, `epoll_ctl`,
 `timerfd_gettime`, which is the whole of `base`'s message pump. That is
 an overlap of **90** and a gap of **337**.
 
-What has *not* moved, and these are the ones that matter: `signalfd4`,
-`memfd_create`, `seccomp`, `prctl(PR_SET_SECCOMP)`, and `clone` with
-`CLONE_NEWUSER`/`NEWPID`/`NEWNET`. The first two are features; the last
-three are the sandbox, which is condition 5 and a design question rather
-than a port.
+M120 then moved a twelfth, and it is one of the six that mattered:
+**`memfd_create`**, the row whose entry in the table above reads "shared
+memory between renderer and GPU process". With it, the three pieces a
+multi-process engine is built out of are all here - a channel, a wait, and a
+buffer that crosses the channel. See
+[unix-sockets.md](unix-sockets.md#and-the-memory-that-travels-with-it-m120).
+
+What has *not* moved, and these are the ones that matter now: `signalfd4`,
+`seccomp`, `prctl(PR_SET_SECCOMP)`, and `clone` with
+`CLONE_NEWUSER`/`NEWPID`/`NEWNET`. The first is a feature nothing in `base`
+calls; the other three are the sandbox, which is condition 5 and a design
+question rather than a port.
 
 The 18 are real: this kernel spells `wait4` as `SYS_waitpid`,
 `rt_sigaction` as `SYS_sigaction`, `getrusage` as `SYS_rusage`,
@@ -465,7 +472,7 @@ is why it is corrected here.
 | `socketpair`, `sendmsg`/`recvmsg` with `SCM_RIGHTS` | **Mojo**, Chromium's entire IPC layer, which passes file descriptors between processes over an `AF_UNIX` socket. This kernel has **no `AF_UNIX` at all** |
 | `epoll_create1`, `epoll_ctl`, `epoll_wait` | `base`'s message pump. This kernel has `poll` and `select` and not this |
 | `eventfd2`, `timerfd_create`, `signalfd4` | the same message pump — how a Chromium thread is woken |
-| `memfd_create` | shared memory between renderer and GPU process |
+| ~~`memfd_create`~~ | shared memory between renderer and GPU process - **built in M120**, see [unix-sockets.md](unix-sockets.md#and-the-memory-that-travels-with-it-m120) |
 
 By family, the 348 break down as 22 `clock_*`/`timer*`, 14 `sched_*`,
 7 `epoll*`, 6 signal-related, 5 namespace-related, 5 socket message

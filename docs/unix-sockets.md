@@ -157,6 +157,31 @@ name-taking calls validate their user pointer *before* looking at the
 descriptor, so that the pointer check is not satisfied by the descriptor
 lookup failing first.
 
+## And the memory that travels with it (M120)
+
+A channel carries messages; anything larger travels as a **handle to
+memory**. `memfd_create` is that handle
+([kernel/ipc/memfd.h](../kernel/ipc/memfd.h)): anonymous shared memory with
+no name anything can guess, sized with `ftruncate`, mapped with
+`mmap(MAP_SHARED)`, and passed over one of these sockets with `SCM_RIGHTS`.
+`base::WritableSharedMemoryRegion` is exactly that sequence, and a bitmap,
+a video frame and a V8 snapshot all reach another process this way.
+
+This machine already had shared memory — `kernel/ipc/shm.h`, since M19,
+which is how the compositor and its clients share a pixel buffer. Two
+differences, and the second is why M120 exists: a segment is named by a
+**global id any process can guess at**, and it is **not a descriptor**, so
+it cannot be passed, inherited, counted by the fd table or closed. A memfd
+is the same memory with the authority the other way round — nobody can name
+it, and anybody holding the descriptor can map it.
+
+`/bin/memfdtest`'s second section is the three milestones together, which
+is the shape a multi-process engine is built out of: a socketpair, a child
+holding no capabilities, a buffer created and sized by the parent, the
+descriptor sent over the channel, and the parent reading what the child
+painted — through a mapping it made before the child existed and kept after
+both descriptors were closed.
+
 ## What this does and does not unblock
 
 It closes condition 1 of five in [browser.md](browser.md). **Condition 2

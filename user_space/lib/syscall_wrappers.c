@@ -501,6 +501,14 @@ long sys_timerfd_gettime(int fd, os_itimer_t *out) {
     return do_syscall(SYS_timerfd_gettime, fd, (long)out, 0);
 }
 
+long sys_memfd_create(const char *name, int flags) {
+    return do_syscall(SYS_memfd_create, (long)name, flags, 0);
+}
+
+long sys_memfd_seal(int fd, uint32_t add) {
+    return do_syscall(SYS_memfd_seal, fd, (long)add, 0);
+}
+
 long sys_settime(uint32_t unix_seconds) {
     return do_syscall(SYS_settime, (long)unix_seconds, 0, 0);
 }

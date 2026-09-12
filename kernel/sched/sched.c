@@ -22,6 +22,7 @@
 #include "ipc/eventfd.h" /* M119: and the sixth, seventh and eighth */
 #include "ipc/timerfd.h"
 #include "ipc/epoll.h"
+#include "ipc/memfd.h" /* M120: the ninth kind, and the first whose frames outlive the descriptor */
 #include "lib/spinlock.h"
 #include "mm/heap.h"
 #include "mm/pmm.h" /* M81: task stacks come from the frame allocator - see task_spawn */
@@ -875,6 +876,12 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         t->mmaps[i].base = 0;
         t->mmaps[i].pages = 0;
+        /* M120: and the memfd tag. A recycled task slot must not carry the
+         * previous occupant's, or the first walk of this table would drop a
+         * reference this task never took - the same hazard M96 found one
+         * field below, for the same reason. */
+        t->mmaps[i].memfd_id = 0;
+        t->mmaps[i].memfd_gen = 0;
     }
     /* M96: and the thread pointer, which is per TASK and must not be
      * inherited by whoever gets this slot next.
@@ -2086,7 +2093,11 @@ void sched_reap_slot(task_t *t) {
         t->sig_handler[i] = SIG_DFL_ADDR;
     }
     /* M78: the frames themselves went back with the address space in
-     * task_exit_with_code; this is the bookkeeping that described them. */
+     * task_exit_with_code; this is the bookkeeping that described them.
+     *
+     * M120: and a memfd's frames did NOT go back with it - they belong to
+     * the object, which this task may have been the last holder of. */
+    sched_regions_forget_memfds(t);
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         t->mmaps[i].base = 0;
         t->mmaps[i].pages = 0;
@@ -2280,11 +2291,80 @@ static const mmap_region_t *mmap_region_for(task_t *self, uint64_t page) {
  * Returns how many references were dropped, which is what the self-test
  * counts.
  */
+/* ---- M120: the reference an mmap REGION holds on a memfd --------------
+ *
+ * A mapping outlives the descriptor that made it, so the region is a
+ * holder in its own right (kernel/ipc/memfd.h). That means every path
+ * where a region slot stops describing a mapping has to let go, and there
+ * are exactly four: munmap removing a slot, execve clearing the table, a
+ * task slot being recycled, and fork copying the table (which is the one
+ * that takes a reference rather than dropping one).
+ *
+ * These three helpers exist so those four places are one line each and so
+ * that the next path to clear a region has an obvious thing to call. A
+ * region with no memfd is left alone, which is every region this kernel
+ * made before M120. */
+void sched_region_forget_memfd(mmap_region_t *r) {
+    if (!r || !r->memfd_id) {
+        return;
+    }
+    struct memfd *m = memfd_by_tag((uint8_t)(r->memfd_id - 1), r->memfd_gen);
+    r->memfd_id = 0;
+    r->memfd_gen = 0;
+    /* A NULL here is not an error: the object may already be gone, which
+     * means something else let go last and the count is already right. */
+    memfd_region_unref(m);
+}
+
+void sched_regions_forget_memfds(task_t *t) {
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        sched_region_forget_memfd(&t->mmaps[i]);
+    }
+}
+
+void sched_regions_retain_memfds(task_t *t) {
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (t->mmaps[i].pages == 0 || !t->mmaps[i].memfd_id) {
+            continue;
+        }
+        struct memfd *m = memfd_by_tag((uint8_t)(t->mmaps[i].memfd_id - 1),
+                                       t->mmaps[i].memfd_gen);
+        if (!m) {
+            /* The object went away between the parent's mapping and this
+             * copy. The child gets a region that will fault rather than a
+             * reference to something that no longer exists. */
+            t->mmaps[i].memfd_id = 0;
+            t->mmaps[i].memfd_gen = 0;
+            continue;
+        }
+        memfd_region_ref(m);
+    }
+}
+
 int sched_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
     int dropped = 0;
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         if (t->mmaps[i].pages == 0) {
             break;
+        }
+        if (t->mmaps[i].memfd_id) {
+            /* M120: a memfd's frames belong to the object, so these pages
+             * are unmapped and nothing is freed or put back - the object's
+             * own reference count is what decides when the memory goes,
+             * and that is dropped when the REGION goes rather than when
+             * its pages do (sched_region_release_memfd). */
+            uint64_t rstart = t->mmaps[i].base;
+            uint64_t rend = rstart + (uint64_t)t->mmaps[i].pages * PAGE_SIZE;
+            uint64_t from = start > rstart ? start : rstart;
+            uint64_t to = end < rend ? end : rend;
+            for (uint64_t p = from; p < to; p += PAGE_SIZE) {
+                if (!vmm_user_range_ok(t->pml4_phys, p, 1, 0)) {
+                    continue;
+                }
+                vmm_unmap_page_in(t->pml4_phys, p);
+                dropped++;
+            }
+            continue;
         }
         if (!t->mmaps[i].shared || t->mmaps[i].handle < 0) {
             continue;
@@ -2351,6 +2431,33 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
      *                        mapping shared.
      */
     const mmap_region_t *region = mmap_region_for(self, page);
+    /* ---- M120: a memfd region, which is the fourth case --------------
+     *
+     * Its frames belong to kernel/ipc/memfd.c and were allocated when the
+     * object was sized, so this maps an existing frame rather than filling
+     * a fresh one - and takes no per-page reference, because the region
+     * already holds one for the whole object (see mmap_region_t).
+     *
+     * A NULL here means the tag is stale: the object's last holder went
+     * away while this region still named it, which can only happen through
+     * the window the region reference is meant to close. Answering 0 makes
+     * that a SIGSEGV rather than a mapping of whatever took the slot,
+     * which is the direction to be wrong in. */
+    if (region && region->memfd_id) {
+        struct memfd *m = memfd_by_tag((uint8_t)(region->memfd_id - 1), region->memfd_gen);
+        if (!m) {
+            return 0;
+        }
+        uint32_t index = region->file_page +
+                         (uint32_t)((page - region->base) / PAGE_SIZE);
+        uint64_t phys = memfd_frame(m, index);
+        if (phys == 0) {
+            return 0; /* past the end of the object: not this caller's memory */
+        }
+        return vmm_try_map_page_in(self->pml4_phys, page, phys, flags) == 0
+                   ? 1
+                   : FILL_NO_MEMORY;
+    }
     if (region && region->handle >= 0 && region->shared) {
         uint32_t index = region->file_page +
                          (uint32_t)((page - region->base) / PAGE_SIZE);
@@ -2704,6 +2811,9 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         t->mmaps[i] = parent->mmaps[i];
     }
+    /* M120: the child's copy of a memfd region is a second holder of that
+     * object - the memory is shared, which is what the mapping was for. */
+    sched_regions_retain_memfds(t);
 
     /* A fork produces a process, never a thread, even when the caller was
      * one. POSIX is explicit that only the calling thread survives into
@@ -3011,6 +3121,9 @@ void fd_release(fd_slot_t *slot) {
     case FD_EPOLL:
         epoll_unref(slot->epoll);
         break;
+    case FD_MEMFD:
+        memfd_unref(slot->memfd); /* M120 - and a mapping may keep the object alive past this */
+        break;
     default:
         break;
     }
@@ -3045,6 +3158,9 @@ void fd_retain(const fd_slot_t *slot) {
         break;
     case FD_EPOLL:
         epoll_ref(slot->epoll);
+        break;
+    case FD_MEMFD:
+        memfd_ref(slot->memfd); /* M120 */
         break;
     default:
         break;

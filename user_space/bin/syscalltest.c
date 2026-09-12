@@ -377,6 +377,21 @@ static const entry_t table[] = {
      * fourth column would widen the whole file for one call. Section 7
      * again. */
     {SYS_epoll_ctl,      CLASS_SKIP, 0, "its pointer is argument 4, past this table's reach; checked by name in section 7"},
+
+    /* ---- M120 ----------------------------------------------------------
+     *
+     * memfd_create takes a pointer and creates a descriptor, so it is in
+     * the same position as M119's three and gets the same treatment -
+     * swept would leave twenty objects behind. Its pointer is checked by
+     * name in section 7, where what gets created is also closed.
+     *
+     * memfd_seal takes an fd and a bitmask and no pointer at all. The
+     * sweep's hostile values in the mask position are the interesting case
+     * and it does reach them: a seal this kernel does not implement must be
+     * refused rather than ignored, because a promise nobody keeps is worse
+     * than no promise. */
+    {SYS_memfd_create,   CLASS_SKIP, 0, "creates a descriptor and takes a pointer; checked by name in section 7"},
+    {SYS_memfd_seal,     CLASS_PLAIN, 0, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 
@@ -609,6 +624,41 @@ int main(void) {
             check(sys_epoll_ctl((int)epfd, 1, (int)tfd, &ev) == 0,
                   "epoll_ctl refused a valid registration", SYS_epoll_ctl);
         }
+        /* M120: memfd_create's name pointer, and the flags it must refuse.
+         * The name is read with a bounded copy, so a hostile pointer has to
+         * be refused rather than producing an object with a garbage name -
+         * and the flags matter for the same reason M119's do: a descriptor
+         * created without MFD_ALLOW_SEALING can never be sealed, so a
+         * kernel that ignored the flag would hand out memory that looks
+         * sealable and is not. */
+        for (int p = 0; p < N_BAD_PTRS; p++) {
+            unsigned long long bad = bad_ptrs[p];
+            if (bad == 0) {
+                continue; /* a NULL name is legal: memfd_create(NULL, 0) is unnamed */
+            }
+            long r = sys_raw(SYS_memfd_create, (long)bad, 0, 0);
+            check(r < 0, "memfd_create accepted a name at a kernel or unmapped address",
+                  SYS_memfd_create);
+            if (r >= 0) {
+                sys_raw(SYS_close, r, 0, 0);
+            }
+        }
+        check(sys_raw(SYS_memfd_create, 0, 0x4, 0) < 0,
+              "memfd_create accepted a flag this kernel does not have", SYS_memfd_create);
+        long mfd = sys_raw(SYS_memfd_create, 0, 2 /* MFD_ALLOW_SEALING */, 0);
+        check(mfd >= 0, "memfd_create refused MFD_ALLOW_SEALING", SYS_memfd_create);
+        if (mfd >= 0) {
+            check(sys_raw(SYS_memfd_seal, mfd, 0x40, 0) < 0,
+                  "memfd_seal accepted a seal this kernel does not have", SYS_memfd_seal);
+            check(sys_raw(SYS_memfd_seal, mfd, 0, 0) == 0,
+                  "memfd_seal could not report an unsealed descriptor's seals",
+                  SYS_memfd_seal);
+            sys_raw(SYS_close, mfd, 0, 0);
+        }
+        /* And on something that is not a memfd at all. */
+        check(sys_raw(SYS_memfd_seal, 1, 0, 0) < 0,
+              "memfd_seal accepted stdout", SYS_memfd_seal);
+
         if (tfd >= 0) {
             sys_raw(SYS_close, tfd, 0, 0);
         }
