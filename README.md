@@ -224,10 +224,27 @@ UEFI firmware
   descriptors over a Unix-domain socket, and **none of those four
   engines still has a supported single-process mode** — so one kernel
   feature stood in front of every multi-process browser engine that
-  exists, which is why it was built before the engine was chosen. The
-  next condition is an `epoll`-shaped readiness interface with
-  `eventfd` and `timerfd`. See
+  exists, which is why it was built before the engine was chosen. See
   [docs/unix-sockets.md](docs/unix-sockets.md).
+
+- **And the second** (M119): **`epoll`, `eventfd` and `timerfd`** — a set
+  of descriptors the kernel remembers, a counter another thread can poke
+  to be heard, and a deadline that is a descriptor like any other. That
+  is `base::MessagePumpEpoll`'s whole vocabulary, and libevent's and
+  glib's. It is not here for speed, and the file says so: with 128
+  descriptors per process, epoll's O(1) against `poll`'s O(n) is worth
+  nothing, and what it actually buys is a set the kernel remembers, a
+  cookie that comes back with each event, and edge-triggered and one-shot
+  modes that a stateless call cannot express.
+
+  It also gave this kernel something it had never had: **write-readiness**.
+  `EPOLLOUT` means a pipe with room, a socket with send-buffer space, a
+  counter below saturation — where `poll` has reported POLLOUT for
+  anything open since M88 and said why. And the self-test measures
+  `SYS_idle_ticks` across a 200 ms `epoll_wait`, because the failure this
+  work was most likely to ship is an event loop that works perfectly and
+  burns a core — which is invisible to every other instrument here. See
+  [docs/readiness.md](docs/readiness.md).
 
 - **A package manager.** `os install grep` puts **GNU grep 3.11** on
   this machine — built here by this project's own compiler from the
@@ -322,9 +339,9 @@ Four instruments, and none of them subsumes another:
   fake timer and a fake CPU, so a tick is a function call and a
   fairness property can be checked at every task count, and it learns
   the order locks are taken in so an inversion is an error rather than
-  a comment (Q9). 426 tests.
+  a comment (Q9). 460 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 129 markers and 41 performance
+  image and grade the serial log against 130 markers and 41 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It

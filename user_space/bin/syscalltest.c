@@ -339,6 +339,44 @@ static const entry_t table[] = {
     {SYS_recvmsg,       CLASS_BLOCK, 2, NULL},
     /* No pointer at all: an fd and a how. */
     {SYS_sockshut,      CLASS_PLAIN, 0, NULL},
+
+    /* ---- M119: the message pump ---------------------------------------
+     *
+     * epoll_wait and the two timerfd calls take a pointer in positions 2
+     * and 3; epoll_ctl's is in position 4, which this table cannot sweep -
+     * it has three argument positions because do_syscall has three, and a
+     * fourth column would be a widening of the whole file for one call.
+     * So epoll_ctl is CLASS_PLAIN here and its pointer is graded by the
+     * specific check at the bottom of this file instead, which is the same
+     * arrangement SYS_sigaction got for a different reason.
+     *
+     * epoll_wait is CLASS_BLOCK: it is the one call in this group that can
+     * wait, and the sweep pins its descriptor to one that cannot exist.
+     * eventfd and timerfd_create take no pointer at all and create a
+     * descriptor, which is why they are swept but not pointer-checked -
+     * and why the sweep's hostile values for their flags arguments matter:
+     * a flag this kernel does not have must be refused rather than
+     * ignored, or a program asking for EFD_SEMAPHORE on a kernel without
+     * it would get a counter that does not behave as it asked. */
+    {SYS_epoll_wait,      CLASS_BLOCK, 2, NULL},
+    {SYS_timerfd_settime, CLASS_PTR, 3, NULL},
+    {SYS_timerfd_gettime, CLASS_PTR, 2, NULL},
+    /* And three that are SKIPPED, for a reason the sweep taught rather
+     * than one that was predicted: each of them CREATES A DESCRIPTOR for
+     * any plausible argument, and the sweep's "hostile" values are
+     * perfectly plausible ones here - a kernel address read as an
+     * eventfd's initial count is just a large number. Twenty calls would
+     * leave twenty descriptors behind and move every fd number the checks
+     * below depend on. Their argument validation is graded by name in
+     * section 7 instead, where what gets created is also closed. */
+    {SYS_epoll_create,   CLASS_SKIP, 0, "creates a descriptor for any argument; checked by name in section 7"},
+    {SYS_eventfd,        CLASS_SKIP, 0, "same - and a kernel address is a perfectly good initial count"},
+    {SYS_timerfd_create, CLASS_SKIP, 0, "same"},
+    /* epoll_ctl's pointer is its FOURTH argument, which this table cannot
+     * sweep: it has three positions because do_syscall has three, and a
+     * fourth column would widen the whole file for one call. Section 7
+     * again. */
+    {SYS_epoll_ctl,      CLASS_SKIP, 0, "its pointer is argument 4, past this table's reach; checked by name in section 7"},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 
@@ -508,6 +546,76 @@ int main(void) {
      * machine. */
     check(sys_raw(SYS_sigaction, 1, 0, 0) >= 0, "SIG_DFL was refused", SYS_sigaction);
     check(sys_raw(SYS_sigaction, 1, 1, 0) >= 0, "SIG_IGN was refused", SYS_sigaction);
+
+    /* ---- 7. M119's four, by name --------------------------------------
+     *
+     * The three that create a descriptor and the one whose pointer is out
+     * of this table's reach. Every descriptor this section makes is closed
+     * before it returns, which is the reason these are here rather than in
+     * the sweep.
+     *
+     * What is being asserted is narrow and worth stating: **a flag this
+     * kernel does not implement is refused rather than ignored.** A
+     * program that asks for EFD_SEMAPHORE on a kernel that silently
+     * dropped it gets a counter that does not behave as it asked, and
+     * finds out through a hang somewhere else entirely. */
+    {
+        check(sys_raw(SYS_eventfd, 0, 0x4, 0) < 0,
+              "eventfd accepted a flag this kernel does not have", SYS_eventfd);
+        check(sys_raw(SYS_eventfd, 0, (long)0xFFFFFFFF, 0) < 0,
+              "eventfd accepted every flag at once", SYS_eventfd);
+        /* And the legal forms still work, because a check that refused
+         * everything would pass the two above and break the feature. */
+        long efd = sys_raw(SYS_eventfd, 1, 1 /* EFD_SEMAPHORE */, 0);
+        check(efd >= 0, "eventfd refused EFD_SEMAPHORE", SYS_eventfd);
+        if (efd >= 0) {
+            sys_raw(SYS_close, efd, 0, 0);
+        }
+
+        check(sys_raw(SYS_timerfd_create, 7, 0, 0) < 0,
+              "timerfd_create accepted a clock that does not exist", SYS_timerfd_create);
+        check(sys_raw(SYS_timerfd_create, 1, 0x4, 0) < 0,
+              "timerfd_create accepted a flag this kernel does not have", SYS_timerfd_create);
+        long tfd = sys_raw(SYS_timerfd_create, 1 /* CLOCK_MONOTONIC */, 0, 0);
+        check(tfd >= 0, "timerfd_create refused CLOCK_MONOTONIC", SYS_timerfd_create);
+
+        check(sys_raw(SYS_epoll_create, 0x4, 0, 0) < 0,
+              "epoll_create accepted a flag this kernel does not have", SYS_epoll_create);
+        long epfd = sys_raw(SYS_epoll_create, 0, 0, 0);
+        check(epfd >= 0, "epoll_create refused a plain set", SYS_epoll_create);
+
+        /* epoll_ctl's fourth argument, which the table cannot reach. Each
+         * bad pointer with a real epoll fd and a real target fd, so the
+         * only thing wrong with the call is the pointer - which is the
+         * whole point of checking it here rather than in the sweep. */
+        if (epfd >= 0 && tfd >= 0) {
+            for (int p = 0; p < N_BAD_PTRS; p++) {
+                unsigned long long bad = bad_ptrs[p];
+                check(sys_epoll_ctl((int)epfd, 1 /* ADD */, (int)tfd,
+                                    (const os_epoll_event_t *)(uintptr_t)bad) < 0,
+                      "epoll_ctl accepted an event structure at a kernel or unmapped address",
+                      SYS_epoll_ctl);
+            }
+            /* An epoll set watching itself is refused - nesting is not
+             * built, and a set that held itself would be a scan inside a
+             * scan. */
+            os_epoll_event_t ev = {1 /* EPOLLIN */, 0, 0};
+            check(sys_epoll_ctl((int)epfd, 1, (int)epfd, &ev) < 0,
+                  "epoll_ctl accepted an epoll set watching itself", SYS_epoll_ctl);
+            /* And a descriptor this process does not hold. */
+            check(sys_epoll_ctl((int)epfd, 1, 127, &ev) < 0,
+                  "epoll_ctl accepted a descriptor that was never opened", SYS_epoll_ctl);
+            /* The legal one works. */
+            check(sys_epoll_ctl((int)epfd, 1, (int)tfd, &ev) == 0,
+                  "epoll_ctl refused a valid registration", SYS_epoll_ctl);
+        }
+        if (tfd >= 0) {
+            sys_raw(SYS_close, tfd, 0, 0);
+        }
+        if (epfd >= 0) {
+            sys_raw(SYS_close, epfd, 0, 0);
+        }
+    }
 
     printf("syscalltest: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

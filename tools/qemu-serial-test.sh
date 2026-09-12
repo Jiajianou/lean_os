@@ -557,6 +557,13 @@ REQUIRED_MARKERS=(
   # queue nobody read. See user_space/bin/unixtest.c for the ten sections
   # and kernel/ipc/unixsock.h for why this milestone exists at all.
   "[m118] AF_UNIX: a socketpair both ways,"
+  # M119: epoll, eventfd and timerfd, graded on the machine. Required, and
+  # for a reason the other markers do not have: the section of
+  # /bin/epolltest that waits in epoll_wait(-1) over a timerfd can only
+  # end when that timer fires, so a park whose deadline is not computed
+  # from the armed timers HANGS here - and a hang reaches this harness as
+  # this marker never appearing, which is the failure being asked for.
+  "[m119] a message pump:"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

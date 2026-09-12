@@ -220,6 +220,30 @@ int pipe_write_closed(pipe_t *p) {
     return closed;
 }
 
+int pipe_read_closed(pipe_t *p) {
+    if (!p) {
+        return 1;
+    }
+    uint64_t f = spin_lock_irqsave(&pipe_lock);
+    int closed = p->read_closed;
+    spin_unlock_irqrestore(&pipe_lock, f);
+    return closed;
+}
+
+int pipe_writable(pipe_t *p) {
+    if (!p) {
+        return 0;
+    }
+    uint64_t f = spin_lock_irqsave(&pipe_lock);
+    /* A pipe with no reader is "writable" in the only sense that matters
+     * to a waiter: the write will not block, it will fail. Reporting it as
+     * not-writable would park a writer forever on a pipe that can never
+     * take another byte. */
+    int w = p->read_closed || p->count < PIPE_BUF_SIZE;
+    spin_unlock_irqrestore(&pipe_lock, f);
+    return w;
+}
+
 int pipe_buffered(pipe_t *p) {
     if (!p) {
         return -1;

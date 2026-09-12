@@ -452,3 +452,11 @@ global unixtest_elf_end
 unixtest_elf_start:
     incbin "build/unixtest.elf"
 unixtest_elf_end:
+
+; M119: epoll, eventfd and timerfd on the machine - see
+; user_space/bin/epolltest.c.
+global epolltest_elf_start
+global epolltest_elf_end
+epolltest_elf_start:
+    incbin "build/epolltest.elf"
+epolltest_elf_end:

@@ -235,6 +235,27 @@ long unixsock_recv(struct unixsock *s, uint8_t *out, uint32_t max,
  * event" rule that stops SYS_waitfds from hanging on a pipe (M68). */
 int unixsock_pending(const struct unixsock *s);
 
+/* M119: the three questions epoll asks that `unixsock_pending` folds
+ * together. It has to fold them - SYS_waitfds returns one bit and end of
+ * stream has to count as readable there, or a waiter hangs - and epoll has
+ * to tell them apart, because a pump that cannot distinguish "there are
+ * bytes" from "the peer is gone" spins on the second one forever.
+ *
+ * `unixsock_writable`: the peer's buffer has room, or there is no peer at
+ * all - a send that will fail is still a send that will not block, and
+ * reporting otherwise parks a writer on a channel that can never take
+ * another byte.
+ *
+ * `unixsock_hup`: this end will never see another byte. The peer is gone
+ * or has shut down its write side AND the queue is empty.
+ *
+ * `unixsock_rdhup`: the peer has finished writing, whether or not the
+ * bytes it already sent have been read - EPOLLRDHUP, which is how a pump
+ * learns a request is complete while it still has the request to read. */
+int unixsock_writable(const struct unixsock *s);
+int unixsock_hup(const struct unixsock *s);
+int unixsock_rdhup(const struct unixsock *s);
+
 /* shutdown(2). `how` is SHUT_RD (0), SHUT_WR (1) or SHUT_RDWR (2), and
  * unlike the TCP path this one is real: there is no FIN to send, so a
  * half-close here is a flag and a wake. It is in this milestone because

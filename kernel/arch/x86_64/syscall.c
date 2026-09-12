@@ -23,6 +23,10 @@
 #include "ipc/pipe.h"
 #include "ipc/shm.h"
 #include "ipc/unixsock.h" /* M118: AF_UNIX - a fifth kind of descriptor, and the one a browser engine needs */
+#include "ipc/eventfd.h" /* M119: the three objects a message pump is made of */
+#include "ipc/timerfd.h"
+#include "ipc/epoll.h"
+#include "os_poll.h"     /* system_api/include/os_poll.h - os_epoll_event_t, os_itimer_t */
 #include "drivers/blk.h" /* M104: blk_flush, for fsync and sync */
 #include "mm/filemap.h" /* M91 (second attempt): shared file pages */
 #include "mm/heap.h"
@@ -465,6 +469,18 @@ static void pkg_note_write(const char *path, long result) {
     }
 }
 
+/* ---- M119: the one clock the readiness calls use ----------------------
+ *
+ * Nanoseconds, from the only clock this machine has: PIT_HZ is 100, so
+ * this advances in 10 ms steps and every timer rounds up to one of them.
+ * It is a function rather than an expression repeated at each call site
+ * because the units are the easiest thing here to get wrong by a factor of
+ * a thousand, and kernel/ipc/timerfd.c takes the time as an argument
+ * precisely so that there is exactly one place that produces it. */
+static uint64_t clock_now_ns(void) {
+    return pit_get_ticks() * (1000ULL / PIT_HZ) * 1000000ULL;
+}
+
 static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
@@ -482,6 +498,39 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
     }
     if (slot->type == FD_PIPE_WRITE) {
         return pipe_write(slot->pipe, s, (size_t)len, slot->nonblock);
+    }
+    if (slot->type == FD_EVENT) {
+        /* M119: a write adds to the counter, and nothing else can be
+         * written to any of this milestone's three descriptors - a timerfd
+         * is armed with timerfd_settime and an epoll set with epoll_ctl,
+         * and both refuse a write by falling through to the -1 at the
+         * bottom of this function, which is what Linux's EINVAL means. */
+        if (len < sizeof(uint64_t)) {
+            return -1;
+        }
+        uint64_t v = 0;
+        if (copy_from_user(&v, buf, sizeof(v)) != 0) {
+            return -1;
+        }
+        for (;;) {
+            uint64_t seq = sched_event_seq();
+            int rc = eventfd_write(slot->event, v);
+            if (rc == 0) {
+                return (long)sizeof(v);
+            }
+            if (rc == -2) {
+                /* A value no write may ever carry (0, or all ones). Not a
+                 * wait: waiting for it to become legal would be a hang. */
+                return -1;
+            }
+            if (slot->nonblock) {
+                return -OS_ERR_AGAIN;
+            }
+            if (sched_signal_pending()) {
+                return -OS_ERR_INTR;
+            }
+            sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+        }
     }
     if (slot->type == FD_UNIX) {
         /* M118: write(2) on a Unix-domain socket, which takes it all for
@@ -648,6 +697,56 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
     }
     if (slot->type == FD_PIPE_READ) {
         return pipe_read(slot->pipe, dst, (size_t)len, slot->nonblock);
+    }
+    if (slot->type == FD_EVENT || slot->type == FD_TIMER) {
+        /* ---- M119: both of these read as one uint64_t ----------------
+         *
+         * An eventfd's counter and a timerfd's expiration count, each
+         * exactly eight bytes, each blocking while there is nothing and
+         * each clearing what it reported. A shorter buffer is refused
+         * rather than partially filled, which is Linux's rule and the only
+         * sane one for a value that cannot be read in pieces.
+         *
+         * The two differ in ONE way and it is the whole reason a timer is
+         * not just an eventfd somebody writes to: nothing interrupts this
+         * machine when a deadline passes, so a blocking read on a timer
+         * has to park with the deadline as its own. timerfd_next_ms is
+         * that number. */
+        if (len < sizeof(uint64_t)) {
+            return -1;
+        }
+        for (;;) {
+            uint64_t seq = sched_event_seq();
+            uint64_t value = 0;
+            int got = (slot->type == FD_EVENT)
+                          ? eventfd_read(slot->event, &value)
+                          : timerfd_read(slot->timer, clock_now_ns(), &value);
+            if (got == 0) {
+                return copy_to_user(buf, &value, sizeof(value)) == 0
+                           ? (long)sizeof(value)
+                           : -1;
+            }
+            if (slot->nonblock) {
+                return -OS_ERR_AGAIN;
+            }
+            if (sched_signal_pending()) {
+                return -OS_ERR_INTR;
+            }
+            uint64_t deadline = 0;
+            if (slot->type == FD_TIMER) {
+                long ms = timerfd_next_ms(slot->timer, clock_now_ns());
+                if (ms < 0) {
+                    /* A disarmed timer will never become readable on its
+                     * own. Parking with no deadline is right: a settime
+                     * from another thread wakes this, and so does a
+                     * signal. */
+                    deadline = 0;
+                } else {
+                    deadline = pit_get_ticks() * (1000 / PIT_HZ) + (uint64_t)ms;
+                }
+            }
+            sched_block_on_seq(SCHED_POLL_CHAN, deadline, seq);
+        }
     }
     if (slot->type == FD_UNIX) {
         /* M118: read(2) on a Unix-domain socket. Blocks for a byte or for
@@ -4345,6 +4444,16 @@ static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
     case FD_UNIX: /* M118: a socket is a socket to fstat, whatever family it is in */
         out.kind = OS_STAT_SOCK;
         break;
+    case FD_EVENT:
+    case FD_TIMER:
+    case FD_EPOLL:
+        /* M119: Linux reports an anonymous inode for all three, which has
+         * no kind of its own in any stat.h - what a program learns from
+         * fstat on one of these is that it is not a file. A character
+         * device is the closest true thing: no length, no position, and a
+         * read that waits. */
+        out.kind = OS_STAT_CHR;
+        break;
     default:
         return -1; /* FD_NONE: not an open descriptor */
     }
@@ -5151,6 +5260,21 @@ static int fd_is_ready(task_t *self, int fd) {
          * end of stream - unixsock_pending folds all three, and the third
          * is the one that stops a wait from becoming a hang. */
         return unixsock_pending(slot->un);
+    case FD_EVENT:
+        return eventfd_readable(slot->event) ? 1 : 0; /* M119 */
+    case FD_TIMER:
+        return timerfd_readable(slot->timer, clock_now_ns()) ? 1 : 0;
+    case FD_EPOLL:
+        /* An epoll set is itself a descriptor, and on Linux it is readable
+         * when it has events - which is how one set is nested inside
+         * another. Nesting is refused here rather than half-built: it
+         * would mean a scan inside a scan with two sets' locks held in an
+         * order nothing controls, and nothing this project is aiming at
+         * does it (Chromium's pump has one set per thread). A nested
+         * registration therefore never reports ready, which is a wait
+         * that does not fire rather than a wrong answer. Condition for
+         * building it: a program that puts an epoll fd in an epoll set. */
+        return 0;
     case FD_FILE:
         /* A regular file is always readable - it is never a reason to
          * wait. Saying so beats refusing the whole call because one
@@ -5162,6 +5286,332 @@ static int fd_is_ready(task_t *self, int fd) {
         return vfs_handle_readable(slot->file->handle);
     default:
         return 0;
+    }
+}
+
+/* ---- M119: the readiness question, in the shape epoll asks it ---------
+ *
+ * `fd_is_ready` above answers one bit, because SYS_waitfds returns one
+ * index and M68 argued for that. epoll answers a mask, and the difference
+ * is not cosmetic: a pump that cannot tell "there are bytes" from "the
+ * peer is gone" spins on the second one forever, and one that cannot ask
+ * about writability has to try the write to find out.
+ *
+ * **Writability is new in this kernel and this is the only call that tells
+ * the truth about it.** <poll.h> reports POLLOUT for any open descriptor
+ * and says why at length: there was no write-readiness anywhere here, and
+ * "ready" was a better answer than never reporting it. That stays as it
+ * is - M116 measured the browser's behaviour through that path and
+ * changing it on a guess is exactly what this project does not do - so for
+ * now the two calls disagree, deliberately, and the divergence is written
+ * down in docs/readiness.md. **The condition for unifying them**: a
+ * measured case of a program spinning in `poll` on a descriptor that is
+ * not in fact writable. epoll is now the instrument that can produce one.
+ */
+static uint32_t fd_epoll_mask_for(task_t *self, int fd, const void *obj) {
+    if (fd < 0 || fd >= MAX_FDS) {
+        return EPOLL_STALE;
+    }
+    fd_slot_t *slot = &self->fds[fd];
+    if (slot->type == FD_NONE) {
+        return EPOLL_STALE; /* closed since it was registered */
+    }
+    /* The object identity, which is what makes a reused descriptor number
+     * a stale registration rather than a wrong answer. The union's first
+     * member is read whatever the type is, on purpose: every member is a
+     * pointer and what is being compared is the bits, not the meaning. */
+    if (obj && slot->pipe != (struct pipe *)obj) {
+        return EPOLL_STALE;
+    }
+    uint32_t m = 0;
+    if (fd_is_ready(self, fd)) {
+        m |= EPOLLIN;
+    }
+    switch (slot->type) {
+    case FD_STDOUT:
+    case FD_FILE:
+        m |= EPOLLOUT; /* neither ever waits */
+        break;
+    case FD_STDIN:
+        break;         /* and this one is never writable */
+    case FD_PIPE_WRITE:
+        if (pipe_writable(slot->pipe)) {
+            m |= EPOLLOUT;
+        }
+        if (pipe_read_closed(slot->pipe)) {
+            m |= EPOLLERR; /* the write that follows would fail: an error, not a readiness */
+        }
+        break;
+    case FD_PIPE_READ:
+        if (pipe_write_closed(slot->pipe) && pipe_buffered(slot->pipe) <= 0) {
+            m |= EPOLLHUP;
+        }
+        break;
+    case FD_SOCKET: {
+        struct tcpcb *tcb = socket_tcb(slot->sock);
+        if (!tcb) {
+            /* A datagram socket. Writable whenever it is open - a sendto
+             * queues into the device and does not wait on a peer. */
+            m |= EPOLLOUT;
+            break;
+        }
+        if (tcp_send_space(tcb) > 0) {
+            m |= EPOLLOUT;
+        }
+        tcp_state_t st = tcp_state(tcb);
+        if (st == TCP_CLOSED || st == TCP_TIME_WAIT) {
+            m |= EPOLLHUP;
+        } else if (st == TCP_CLOSE_WAIT) {
+            m |= EPOLLRDHUP; /* the peer sent FIN; this end may still write */
+        }
+        break;
+    }
+    case FD_UNIX:
+        if (unixsock_writable(slot->un)) {
+            m |= EPOLLOUT;
+        }
+        if (unixsock_hup(slot->un)) {
+            m |= EPOLLHUP;
+        } else if (unixsock_rdhup(slot->un)) {
+            m |= EPOLLRDHUP;
+        }
+        break;
+    case FD_EVENT:
+        if (eventfd_writable(slot->event)) {
+            m |= EPOLLOUT;
+        }
+        break;
+    case FD_TIMER:
+    case FD_EPOLL:
+        break; /* neither can be written at all - see SYS_write */
+    default:
+        break;
+    }
+    return m;
+}
+
+/* The callback kernel/ipc/epoll.c scans with. `ctx` is the task, which is
+ * the only thing that can resolve a descriptor number. */
+static uint32_t epoll_mask_cb(void *ctx, int fd, const void *obj) {
+    return fd_epoll_mask_for((task_t *)ctx, fd, obj);
+}
+
+/* ---- M119: eventfd, timerfd and epoll --------------------------------
+ *
+ * Three objects, seven calls, and one shared shape: each installs a
+ * descriptor, each is refcounted by the fd table that already existed, and
+ * each parks - where it parks at all - in syscall.c rather than in its own
+ * file, for the reason kernel/ipc/unixsock.h argues.
+ *
+ * None of them is gated. A readiness question about descriptors this
+ * process already holds is a question about itself, which is why
+ * SYS_waitfds needs no capability either. */
+static long install_fd_of(fd_type_t type, void *obj, uint64_t flags) {
+    task_t *self = sched_current();
+    int fd = alloc_fd(self);
+    if (fd < 0) {
+        /* Nothing is installed, so the object's one reference has to go
+         * here or it is a leak with no descriptor naming it. */
+        switch (type) {
+        case FD_EVENT: eventfd_unref((struct eventfd *)obj); break;
+        case FD_TIMER: timerfd_unref((struct timerfd *)obj); break;
+        case FD_EPOLL: epoll_unref((struct epoll *)obj); break;
+        default: break;
+        }
+        return -1;
+    }
+    self->fds[fd].type = type;
+    self->fds[fd].event = (struct eventfd *)obj; /* one union, three pointer types - the bits are the same */
+    /* M84's flag and M100's, both of which these calls carry in their own
+     * argument rather than through fcntl - which is the whole reason
+     * Linux's *2 variants exist. */
+    self->fds[fd].cloexec = (flags & OS_FD_CLOEXEC) ? 1 : 0;
+    self->fds[fd].nonblock = (flags & OS_FD_NONBLOCK) ? 1 : 0;
+    return fd;
+}
+
+static long sys_eventfd(uint64_t initval, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    if (flags & ~(uint64_t)(OS_EFD_SEMAPHORE | OS_FD_NONBLOCK | OS_FD_CLOEXEC)) {
+        return -1; /* a flag this kernel does not have is refused, not ignored */
+    }
+    struct eventfd *e = eventfd_create(initval, (flags & OS_EFD_SEMAPHORE) != 0);
+    return e ? install_fd_of(FD_EVENT, e, flags) : -1;
+}
+
+static long sys_timerfd_create(uint64_t clockid, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    if (flags & ~(uint64_t)(OS_FD_NONBLOCK | OS_FD_CLOEXEC)) {
+        return -1;
+    }
+    struct timerfd *t = timerfd_create((int)clockid);
+    return t ? install_fd_of(FD_TIMER, t, flags) : -1;
+}
+
+/* The wall clock, in the same nanoseconds the monotonic one uses, for the
+ * one case that needs it: an absolute CLOCK_REALTIME deadline. Its
+ * resolution is one second (kernel/dev/rtc.h reads a calendar, not a
+ * counter), and a program that asks for an absolute realtime deadline gets
+ * that - which is worth knowing and is why CLOCK_MONOTONIC is what every
+ * timer in a pump should use. */
+static uint64_t realtime_now_ns(void) {
+    os_datetime_t now;
+    rtc_read(&now);
+    if (!now.valid) {
+        return 0;
+    }
+    return (uint64_t)os_unix_time(&now) * 1000000000ULL;
+}
+
+static uint64_t timer_clock_ns(struct timerfd *t, int absolute) {
+    /* A relative deadline does not care which clock it is on - "500 ms
+     * from now" is the same distance - so the monotonic one is used for
+     * both, and the wall clock is read only where it changes the answer.
+     * That matters more than tidiness: rtc_read touches the CMOS. */
+    if (absolute && timerfd_clock(t) == TIMERFD_CLOCK_REALTIME) {
+        return realtime_now_ns();
+    }
+    return clock_now_ns();
+}
+
+static long sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr, uint64_t old_ptr, uint64_t a5, uint64_t a6) {
+    (void)a5; (void)a6;
+    os_itimer_t want;
+    if (copy_from_user(&want, new_ptr, sizeof(want)) != 0) {
+        return -1; /* the pointer first - see sys_bindun */
+    }
+    task_t *self = sched_current();
+    if (fd >= MAX_FDS || self->fds[fd].type != FD_TIMER) {
+        return -1;
+    }
+    if (flags & ~(uint64_t)OS_TFD_ABSTIME) {
+        return -1;
+    }
+    struct timerfd *t = self->fds[fd].timer;
+    int absolute = (flags & OS_TFD_ABSTIME) != 0;
+    os_itimer_t had = {0, 0};
+    if (timerfd_settime(t, timer_clock_ns(t, absolute), absolute, want.value_ns,
+                        want.interval_ns, &had.value_ns, &had.interval_ns) != 0) {
+        return -1;
+    }
+    if (old_ptr && copy_to_user(old_ptr, &had, sizeof(had)) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static long sys_timerfd_gettime(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    if (!user_range_ok(out_ptr, sizeof(os_itimer_t), 1)) {
+        return -1;
+    }
+    task_t *self = sched_current();
+    if (fd >= MAX_FDS || self->fds[fd].type != FD_TIMER) {
+        return -1;
+    }
+    os_itimer_t out = {0, 0};
+    timerfd_gettime(self->fds[fd].timer, clock_now_ns(), &out.value_ns, &out.interval_ns);
+    return copy_to_user(out_ptr, &out, sizeof(out)) == 0 ? 0 : -1;
+}
+
+static long sys_epoll_create(uint64_t flags, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    if (flags & ~(uint64_t)OS_FD_CLOEXEC) {
+        return -1;
+    }
+    struct epoll *ep = epoll_create_set();
+    return ep ? install_fd_of(FD_EPOLL, ep, flags) : -1;
+}
+
+static long sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd, uint64_t ev_ptr, uint64_t a5, uint64_t a6) {
+    (void)a5; (void)a6;
+    task_t *self = sched_current();
+    os_epoll_event_t ev = {0, 0, 0};
+    if (op != EPOLL_CTL_DEL && copy_from_user(&ev, ev_ptr, sizeof(ev)) != 0) {
+        return -1; /* the pointer first, where there is one to check */
+    }
+    if (epfd >= MAX_FDS || self->fds[epfd].type != FD_EPOLL) {
+        return -1;
+    }
+    if (fd >= MAX_FDS || self->fds[fd].type == FD_NONE) {
+        return -1; /* EBADF: a descriptor this process does not hold */
+    }
+    if (self->fds[fd].type == FD_EPOLL) {
+        /* An epoll set watching an epoll set. Refused rather than
+         * half-built - see fd_is_ready's FD_EPOLL case for the whole
+         * argument and the condition for building it. */
+        return -1;
+    }
+    /* What the descriptor points at, recorded so that a later close makes
+     * the registration stale rather than a pointer at somebody else's
+     * object. See kernel/ipc/epoll.h. */
+    const void *obj = (const void *)self->fds[fd].pipe;
+    return epoll_ctl_set(self->fds[epfd].epoll, (int)op, (int)fd, obj,
+                         ev.events, ev.data);
+}
+
+static long sys_epoll_wait(uint64_t epfd, uint64_t out_ptr, uint64_t maxevents, uint64_t timeout_ms, uint64_t a5, uint64_t a6) {
+    (void)a5; (void)a6;
+    task_t *self = sched_current();
+    if (maxevents == 0 || maxevents > EPOLL_MAX_WATCH) {
+        return -1;
+    }
+    if (!user_range_ok(out_ptr, maxevents * sizeof(os_epoll_event_t), 1)) {
+        return -1;
+    }
+    if (epfd >= MAX_FDS || self->fds[epfd].type != FD_EPOLL) {
+        return -1;
+    }
+    struct epoll *ep = self->fds[epfd].epoll;
+    long timeout = (long)timeout_ms;
+    uint64_t now = pit_get_ticks() * (1000 / PIT_HZ);
+    uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
+    epoll_ev_t evs[EPOLL_MAX_WATCH];
+    for (;;) {
+        /* Sampled before the scan, so that an arrival between the scan and
+         * the park is seen as "the world moved" rather than lost - M68's
+         * rule, and the whole of the lost-wakeup problem. */
+        uint64_t seq = sched_event_seq();
+        int n = epoll_scan(ep, epoll_mask_cb, self, evs, (int)maxevents);
+        if (n > 0) {
+            /* One copy of n events rather than n copies: a partial copy
+             * would have consumed the edge-triggered state for events the
+             * caller never received. */
+            if (copy_to_user(out_ptr, evs, (size_t)n * sizeof(epoll_ev_t)) != 0) {
+                return -1;
+            }
+            return n;
+        }
+        if (timeout == 0) {
+            return 0;
+        }
+        if (sched_signal_pending()) {
+            return -OS_ERR_INTR;
+        }
+        now = pit_get_ticks() * (1000 / PIT_HZ);
+        if (timeout > 0 && now >= deadline) {
+            return 0; /* the deadline passed with nothing ready */
+        }
+        /* A timer in the set is the one thing a wake cannot be relied on
+         * for: nothing fires an interrupt when a deadline passes, so the
+         * park needs a deadline of its own. The earliest of the caller's
+         * and every armed timer's, which is what makes
+         * epoll_wait(-1) over a timerfd a sleep rather than a spin. */
+        uint64_t park_until = deadline;
+        for (int i = 0; i < MAX_FDS; i++) {
+            if (self->fds[i].type != FD_TIMER) {
+                continue;
+            }
+            long ms = timerfd_next_ms(self->fds[i].timer, clock_now_ns());
+            if (ms < 0) {
+                continue;
+            }
+            uint64_t when = now + (uint64_t)ms;
+            if (park_until == 0 || when < park_until) {
+                park_until = when;
+            }
+        }
+        sched_block_on_seq(SCHED_POLL_CHAN, park_until, seq);
     }
 }
 
@@ -5631,6 +6081,9 @@ static long sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
             break;
         case FD_SOCKET:     access = OPEN_READ | OPEN_WRITE; break;
         case FD_UNIX:       access = OPEN_READ | OPEN_WRITE; break; /* M118 */
+        case FD_EVENT:      access = OPEN_READ | OPEN_WRITE; break; /* M119 */
+        case FD_TIMER:      access = OPEN_READ; break;              /* armed with settime, not written */
+        case FD_EPOLL:      access = OPEN_READ; break;              /* changed with epoll_ctl, not written */
         default:            return -1;
         }
         /* M100: and the one status flag, which is the half of this
@@ -6289,6 +6742,13 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_sendmsg] = sys_sendmsg,
     [SYS_recvmsg] = sys_recvmsg,
     [SYS_sockshut] = sys_sockshut,
+    [SYS_epoll_create] = sys_epoll_create, /* M119 */
+    [SYS_epoll_ctl] = sys_epoll_ctl,
+    [SYS_epoll_wait] = sys_epoll_wait,
+    [SYS_eventfd] = sys_eventfd,
+    [SYS_timerfd_create] = sys_timerfd_create,
+    [SYS_timerfd_settime] = sys_timerfd_settime,
+    [SYS_timerfd_gettime] = sys_timerfd_gettime,
 };
 
 /* M67: which syscall numbers reach kernel/net. Enumerated rather than

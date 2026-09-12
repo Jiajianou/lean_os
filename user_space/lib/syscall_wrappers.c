@@ -471,6 +471,36 @@ long sys_sockshut(int fd, int how) {
     return do_syscall(SYS_sockshut, fd, how, 0);
 }
 
+/* ---- M119: the message pump ------------------------------------------- */
+
+long sys_epoll_create(int flags) {
+    return do_syscall(SYS_epoll_create, flags, 0, 0);
+}
+
+long sys_epoll_ctl(int epfd, int op, int fd, const os_epoll_event_t *ev) {
+    return do_syscall6(SYS_epoll_ctl, epfd, op, fd, (long)ev, 0, 0);
+}
+
+long sys_epoll_wait(int epfd, os_epoll_event_t *out, int maxevents, int timeout_ms) {
+    return do_syscall6(SYS_epoll_wait, epfd, (long)out, maxevents, timeout_ms, 0, 0);
+}
+
+long sys_eventfd(uint64_t initval, int flags) {
+    return do_syscall(SYS_eventfd, (long)initval, flags, 0);
+}
+
+long sys_timerfd_create(int clockid, int flags) {
+    return do_syscall(SYS_timerfd_create, clockid, flags, 0);
+}
+
+long sys_timerfd_settime(int fd, int flags, const os_itimer_t *value, os_itimer_t *old) {
+    return do_syscall6(SYS_timerfd_settime, fd, flags, (long)value, (long)old, 0, 0);
+}
+
+long sys_timerfd_gettime(int fd, os_itimer_t *out) {
+    return do_syscall(SYS_timerfd_gettime, fd, (long)out, 0);
+}
+
 long sys_settime(uint32_t unix_seconds) {
     return do_syscall(SYS_settime, (long)unix_seconds, 0, 0);
 }

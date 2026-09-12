@@ -776,3 +776,118 @@ TEST(unixsock, shutdown_refuses_a_how_it_does_not_have) {
     unixsock_unref(b);
     expect_nothing_left();
 }
+
+/* ---- M119: the three questions epoll asks -----------------------------
+ *
+ * `unixsock_pending` folds readability, a queued connection and end of
+ * stream into one bit, because SYS_waitfds returns one bit. epoll has to
+ * tell them apart - a pump that cannot distinguish "there are bytes" from
+ * "the peer is gone" spins on the second forever - so M119 added three
+ * accessors, and this is where they are graded. They are called only from
+ * syscall.c's epoll mask in the kernel, which is exactly why they need a
+ * test here: nothing else would notice if one of them answered backwards.
+ */
+TEST(unixsock, writable_is_true_until_the_buffer_is_full) {
+    clean();
+    struct unixsock *a = NULL, *b = NULL;
+    REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &a, &b) == 0);
+    CHECK_EQ(unixsock_writable(a), 1);
+    static uint8_t big[UNIX_BUF_SIZE];
+    memset(big, 'w', sizeof(big));
+    CHECK_EQ(unixsock_send(a, big, UNIX_BUF_SIZE, NULL, 0), UNIX_BUF_SIZE);
+    /* The peer's buffer is full, so a send would report "would block" - and
+     * EPOLLOUT has to agree with that, or a pump registers for writability
+     * and is woken immediately, forever. */
+    CHECK_EQ(unixsock_writable(a), 0);
+    uint8_t out[64];
+    CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 64);
+    CHECK_EQ(unixsock_writable(a), 1);
+    /* And a socket whose peer is GONE is writable in the only sense that
+     * matters to a waiter: the send will fail rather than wait. Reporting
+     * it as not-writable would park a writer on a channel that can never
+     * take another byte. */
+    unixsock_unref(b);
+    CHECK_EQ(unixsock_writable(a), 1);
+    CHECK_EQ(unixsock_send(a, big, 1, NULL, 0), -1);
+    unixsock_unref(a);
+    expect_nothing_left();
+}
+
+TEST(unixsock, a_record_queue_that_is_full_is_not_writable) {
+    clean();
+    struct unixsock *a = NULL, *b = NULL;
+    REQUIRE(unixsock_pair(UNIX_SOCK_SEQPACKET, &a, &b) == 0);
+    for (int i = 0; i < UNIX_MAX_SEGS; i++) {
+        CHECK_EQ(unixsock_send(a, (const uint8_t *)"m", 1, NULL, 0), 1);
+    }
+    /* Sixteen bytes in a 4 KiB buffer: there is room for bytes and nowhere
+     * to record them. "Writable" has to mean "a send would get somewhere",
+     * not "there are free bytes", or this is the case a pump spins on. */
+    CHECK_EQ(unixsock_writable(a), 0);
+    uint8_t out[8];
+    CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 1);
+    CHECK_EQ(unixsock_writable(a), 1);
+    unixsock_unref(a);
+    unixsock_unref(b);
+    expect_nothing_left();
+}
+
+TEST(unixsock, hup_waits_for_the_queue_to_drain_and_rdhup_does_not) {
+    clean();
+    struct unixsock *a = NULL, *b = NULL;
+    REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &a, &b) == 0);
+    CHECK_EQ(unixsock_hup(b), 0);
+    CHECK_EQ(unixsock_rdhup(b), 0);
+    CHECK_EQ(unixsock_send(a, (const uint8_t *)"request", 7, NULL, 0), 7);
+    CHECK_EQ(unixsock_shutdown(a, 1), 0); /* SHUT_WR: "that is all I am sending" */
+    /* The difference between the two, and it is the difference between a
+     * working request/response protocol and a broken one: RDHUP says the
+     * peer has finished writing - which is how a server knows the request
+     * is complete - while HUP must stay false until the bytes it already
+     * sent have been read. A pump told HUP here would close a connection
+     * with an unread request in it. */
+    CHECK_EQ(unixsock_rdhup(b), 1);
+    CHECK_EQ(unixsock_hup(b), 0);
+    uint8_t out[16];
+    CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 7);
+    CHECK_EQ(unixsock_hup(b), 1);
+    /* And the other direction still works, which is what the half-close is
+     * for - so `a` is neither hung up nor read-hung-up. */
+    CHECK_EQ(unixsock_hup(a), 0);
+    CHECK_EQ(unixsock_rdhup(a), 0);
+    CHECK_EQ(unixsock_send(b, (const uint8_t *)"reply", 5, NULL, 0), 5);
+    unixsock_unref(a);
+    /* Now the peer object is gone and this end's queue is empty, so it is
+     * hung up both ways. (The reply went into *a's* buffer, not b's -
+     * getting that backwards is how this test failed when it was first
+     * written, and the note is worth more than the correction.) */
+    CHECK_EQ(unixsock_hup(b), 1);
+    CHECK_EQ(unixsock_rdhup(b), 1);
+    unixsock_unref(b);
+
+    /* And the case that claim is really about: a peer that died with bytes
+     * still queued here. HUP must stay false until they are read, or a pump
+     * discards the last thing a crashed process said. */
+    struct unixsock *c = NULL, *d = NULL;
+    REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &c, &d) == 0);
+    CHECK_EQ(unixsock_send(c, (const uint8_t *)"last words", 10, NULL, 0), 10);
+    unixsock_unref(c);
+    CHECK_EQ(unixsock_hup(d), 0);
+    CHECK_EQ(unixsock_rdhup(d), 1);
+    uint8_t tail[16];
+    CHECK_EQ(unixsock_recv(d, tail, sizeof(tail), NULL, 0, NULL, NULL), 10);
+    CHECK_EQ(unixsock_hup(d), 1);
+    unixsock_unref(d);
+    expect_nothing_left();
+}
+
+TEST(unixsock, the_epoll_accessors_refuse_a_null_socket) {
+    clean();
+    /* Answering "not writable, hung up" for a socket that does not exist is
+     * the safe direction: a caller that somehow holds one learns the
+     * channel is dead rather than writing into nothing. */
+    CHECK_EQ(unixsock_writable(NULL), 0);
+    CHECK_EQ(unixsock_hup(NULL), 1);
+    CHECK_EQ(unixsock_rdhup(NULL), 1);
+    expect_nothing_left();
+}

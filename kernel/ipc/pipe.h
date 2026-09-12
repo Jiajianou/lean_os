@@ -93,6 +93,19 @@ int pipe_buffered(pipe_t *p);
  * "no bytes" and "no writer" the same would hang there forever. */
 int pipe_write_closed(pipe_t *p);
 
+/* M119: and the other end of the same question, which epoll needs and
+ * SYS_waitfds never did. A write end whose reader has gone is an ERROR
+ * condition rather than a readiness one - EPOLLERR, and the write that
+ * follows would return -1 - and a program waiting to write to it has to be
+ * told, or it waits for space in a pipe nobody will ever drain. */
+int pipe_read_closed(pipe_t *p);
+
+/* M119: room for at least one byte. There has never been a write-readiness
+ * question in this kernel (see <poll.h>, which reports POLLOUT for
+ * anything open and says why), and epoll is the first caller that can ask
+ * one honestly. */
+int pipe_writable(pipe_t *p);
+
 /* Blocks while the buffer is full, unless the read end has already
  * closed (returns -1 immediately, or however many bytes got written
  * before that happened). M100: with `nonblock` set it does not block -

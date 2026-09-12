@@ -15,6 +15,7 @@
 #include "display.h" /* system_api/include/display.h - display_mode_t, M58 */
 #include "os_time.h" /* system_api/include/os_time.h - os_datetime_t/os_stat_t, M59 */
 #include "os_net.h"  /* system_api/include/os_net.h - os_sockaddr_t/os_netconf_t, M64 */
+#include "os_poll.h" /* system_api/include/os_poll.h - os_epoll_event_t/os_itimer_t, M119 */
 #include "caps.h"    /* system_api/include/caps.h - CAP_*, M65 */
 #include "syscall.h" /* system_api/include/syscall.h - M59: the OPEN_ and SEEK_ flags belong to the ABI, not to this wrapper layer */
 #include "input.h" /* system_api/include/input.h - mouse_event_t */
@@ -292,6 +293,22 @@ long sys_connectun(int fd, const char *name, int len);
 long sys_sendmsg(int fd, const os_msg_t *msg, int flags);
 long sys_recvmsg(int fd, os_msg_t *msg, int flags);
 long sys_sockshut(int fd, int how);
+
+/* ---- M119: the message pump -------------------------------------------
+ *
+ * epoll, eventfd and timerfd, over system_api/include/os_poll.h's two
+ * structures. <sys/epoll.h>, <sys/eventfd.h> and <sys/timerfd.h> are thin
+ * over these - thin enough that `struct epoll_event` IS os_epoll_event_t,
+ * which is the one place this project's ABI deliberately does not copy
+ * Linux's layout (it packs that struct for 32-bit compatibility this OS
+ * does not have). */
+long sys_epoll_create(int flags);
+long sys_epoll_ctl(int epfd, int op, int fd, const os_epoll_event_t *ev);
+long sys_epoll_wait(int epfd, os_epoll_event_t *out, int maxevents, int timeout_ms);
+long sys_eventfd(uint64_t initval, int flags);
+long sys_timerfd_create(int clockid, int flags);
+long sys_timerfd_settime(int fd, int flags, const os_itimer_t *value, os_itimer_t *old);
+long sys_timerfd_gettime(int fd, os_itimer_t *out);
 
 /* M64: corrects the clock, which is the half of "know the time" SNTP
  * needs and M59 had no reason to add. Lasts until reboot. */

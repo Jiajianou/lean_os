@@ -528,6 +528,19 @@ the measurement itself was corrected in one direction - the condition was
 never Chromium's alone. WebKit, Gecko and Ladybird all pass descriptors
 over a Unix-domain socket and none of the four has a single-process mode.
 
+**M119 is not in this table either, and it is M118's own successor.**
+Built 2026-09-12 under the same instruction, and the same reasoning
+applies: `docs/browser.md` names five conditions in order, M118 closed the
+first and promoted the second, and this is the second. It jumped nothing.
+What it changed for the rows that remain is one thing worth knowing beyond
+the browser arc: **this kernel has write-readiness now**, which it has
+never had - `EPOLLOUT` means a pipe with room rather than `<poll.h>`'s
+"anything open" - and the condition for making `poll` agree is a measured
+case of a program spinning on the old answer. Row 4 (Q14, the compositor
+off the machine) should read [docs/readiness.md](docs/readiness.md) before
+it starts: the four ways to wait on this machine are now listed in one
+place, and `SYS_waitfds` is still the right one for a window client.
+
 **M111 is not in this table and that is recorded rather than hidden.**
 `os`, the package manager, was asked for directly on 2026-09-09 and built
 to completion in one pass — an instruction outranks the queue, the same
@@ -2795,18 +2808,23 @@ condition, which is what this project means by a deferral, and it is the
 first time the browser row has had one.
 
 **M118 built it (2026-09-11), and corrected the paragraph above in one
-direction.** The numbers are left as they were measured - 119 syscalls
-now, with `socketpair`, `sendmsg`, `recvmsg` and `shutdown` moved into
-the overlap, so 83 and 344 - because a measurement with a date on it
-should be added to rather than edited. What was wrong was the framing:
-this was never Chromium's condition. WebKit's `IPC::Connection`, Gecko's
-IPDL and Ladybird's LibIPC pass descriptors over a Unix-domain socket
-too, and none of the four engines has a supported single-process mode any
-more, so one kernel feature stood in front of all of them. **The
-condition for this row is now the second item on that list**: an
-epoll-shaped readiness interface plus `eventfd` and `timerfd`, which is
-what `base`'s message pump calls and what `poll`, `select` and
-`SYS_waitfds` are not.
+direction.** The numbers are left as they were measured because a
+measurement with a date on it should be added to rather than edited. What
+was wrong was the framing: this was never Chromium's condition. WebKit's
+`IPC::Connection`, Gecko's IPDL and Ladybird's LibIPC pass descriptors
+over a Unix-domain socket too, and none of the four engines has a
+supported single-process mode any more, so one kernel feature stood in
+front of all of them.
+
+**And M119 built the second (2026-09-12)** - `epoll`, `eventfd`,
+`timerfd`, which is `base`'s whole message pump. Between them this kernel
+has **126 syscalls**; eleven of the 348 have moved, leaving an overlap of
+90 and a gap of 337. What has not moved is the part that decides the rest:
+`memfd_create`, `signalfd4`, `seccomp`, `prctl(PR_SET_SECCOMP)` and
+`clone` with a namespace flag. **The condition for this row is now the
+third item on that list: clang and libc++ for `x86_64-lean_os`**, which is
+a compiler rather than a few hundred lines of kernel - and that is the
+honest shape of the remaining three.
 
 ### M113 — the browser, actually installed `[x]`
 
@@ -4062,6 +4080,123 @@ has `poll`, `select` and `SYS_waitfds`, and nothing here can wake a
 thread the way `eventfd` does. Conditions 3 to 5 stay an arc rather than
 a port.
 
+### M119 — a message pump: epoll, eventfd and timerfd `[x]`
+
+*Landed 2026-09-12.* The second of `docs/browser.md`'s five conditions,
+which M118's own entry had promoted to next: *"an epoll-shaped readiness
+interface, plus `eventfd`/`timerfd`. The message pump is not optional and
+`poll` is not what it calls."* Chromium's `base::MessagePumpEpoll` names
+`epoll_create1`, `epoll_ctl` and `epoll_wait`, owns an `eventfd` to be
+woken from another thread and a `timerfd` for its delayed work, and has no
+`poll` path left. So do libevent and glib.
+
+**What it is honestly for, stated against the usual argument.** The
+textbook case for epoll over poll is O(1) against O(n). On this machine
+that argument is worth nothing — `MAX_FDS` is 128 and a scan of a whole
+descriptor table is a few hundred cycles — and `kernel/ipc/epoll.c` scans
+its set linearly and says so. What epoll buys here is three things `poll`
+cannot express at all: **a set the kernel remembers**, **a cookie that
+comes back with the event** (the feature ported code leans on hardest),
+and **edge-triggered and one-shot modes**, which are statements about what
+changed since the last call. M69's rule, applied to a feature whose
+marketing is a performance claim.
+
+**What it added that was missing rather than renamed: write-readiness.**
+Nothing in this kernel could answer *would a write block?* `<poll.h>` has
+reported `POLLOUT` for any open descriptor since M88 and said why — there
+was no such answer, and *ready* was a better lie than never reporting it.
+`EPOLLOUT` now means a pipe with room, a socket with send-buffer space, a
+Unix-domain socket whose buffer **and** record queue have room, a counter
+below saturation; and a descriptor whose write would *fail* rather than
+block reports `EPOLLERR`. **So two calls in this kernel now answer the
+same question differently, deliberately**: `poll` keeps M88's answer
+because M116 measured the browser through that path, and the condition for
+unifying them is a measured case of a program spinning on a `POLLOUT` that
+is not true. epoll is now the instrument that can produce one.
+
+**Three decisions worth the argument:**
+
+1. **Every call in `timerfd.c` takes the time as a parameter.** `tcp.c`
+   reads the clock itself and its tests pay for that with a fake PIT whose
+   every read advances time; this file is the other choice, made after
+   seeing that bill. It is why a test can ask what a timer reports at
+   1099.999 ms and at 1100.
+2. **`epoll_scan` takes the readiness question as a function pointer.** So
+   the set management — add, modify, delete, full, stale, edge, one-shot —
+   is a pure function of the set and the answers, and is graded against a
+   scripted readiness table with no descriptors under it at all. The
+   kernel passes its one implementation (`fd_epoll_mask_for`).
+3. **A registration does not hold its descriptor open**, which is the one
+   deliberate divergence from Linux. The set records the descriptor number
+   *and what it pointed at*; a closed or reused descriptor is dropped by
+   the next wait rather than reported against whatever took the slot.
+   Holding a reference would keep a pipe alive because somebody forgot to
+   deregister it — a leak wearing an epoll set as a disguise.
+
+**The instrument this milestone is proudest of, and it is not new.** The
+failure this work was most likely to ship is a `poll`-shaped
+implementation that works perfectly and burns a core, and no unit test can
+see it. `/bin/epolltest` waits 200 ms in `epoll_wait(-1)` over a timerfd
+and measures `SYS_idle_ticks` across the wait: ten of twenty ticks idle,
+or the self-test fails. M68 built that counter for exactly this reason —
+*"a desktop that spins and one that halts look identical from the
+outside, which is precisely how this OS shipped sixty-seven milestones
+without anyone noticing"* — and this is the second milestone to need it.
+
+**And the section that hangs rather than fails.** That same wait has no
+timeout of its own, so the *only* thing that can end it is the timer. If
+the park's deadline were not computed from the armed timers, the self-test
+would hang, and a hang reaches `tools/qemu-serial-test.sh` as `[m119]`
+never appearing. That is the right way for that particular bug to be
+reported, and the marker's comment in the harness says so.
+
+**What the instruments said.**
+
+- `tests/test_readyfds.c`: **29 tests**. Mutation scores first run
+  **50.0% / 58.3% / 85.7%**, after the tests those survivors asked for
+  **87.5% / 83.3% / 95.7%**. The survivors fell into three groups and only
+  one was interesting: null guards nothing called with null, a reference
+  count nothing had taken twice (`--refs <= 0` mutated to `<= 1` frees an
+  object somebody still holds, and every test held exactly one), and the
+  clock boundaries, which is where a real defect would hide.
+- **Two coverage floors fell and were fixed rather than lowered.**
+  `unixsock.c` dropped from 92.52% because M119 added three accessors the
+  host tier never called, and `sched.c` because `fd_release`/`fd_retain`
+  grew three more cases. Both are now tested — and the second matters more
+  than the number: the descriptor union means `slot->event` and
+  `slot->timer` are the same bits, so a case that unref'd the wrong *kind*
+  would compile, run, and leak.
+- `/bin/syscalltest` again earned its keep, twice. Its census caught seven
+  unclassified numbers, and then three of them could not go in the sweep at
+  all: `eventfd`, `timerfd_create` and `epoll_create` **create a
+  descriptor for any plausible argument**, and the sweep's hostile values
+  are perfectly plausible here — a kernel address read as an eventfd's
+  initial count is just a large number. Twenty calls would have left twenty
+  descriptors behind and moved every fd number the later checks depend on.
+  They are `CLASS_SKIP` with that reason and are graded by name in a new
+  section 7, which closes what it creates. 313 checks before, **344**
+  after, 0 failures.
+- `[m119]`, eight sections, **700 ms**.
+
+**What it cost.** One session, alongside M118. The graded tier: 460 host
+tests, 130 boot markers, the interactive quick subset, four cores.
+
+**What is explicitly not built, with conditions** (all in
+[docs/readiness.md](docs/readiness.md)): nesting an epoll set inside
+another — condition, a program that does it; `signalfd` — condition, a
+program that waits for a signal through a descriptor, which `base` is not;
+`EPOLLEXCLUSIVE` and `EPOLLWAKEUP`, accepted and ignored, one waiter per
+set and nothing here suspends.
+
+**Where this leaves the arc.** Conditions 1 and 2 of five are closed, and
+they were the two that were ordinary work. **Condition 3 is clang and
+libc++ for `x86_64-lean_os`** — a compiler, not a few hundred lines of
+kernel — then a 16 GB machine with 100 GB of disk, then a sandbox story
+that is not a pretence. What these two milestones bought beyond Chromium is
+worth more than what they bought towards it: every multi-process engine's
+IPC layer and every modern event loop's core. The next thing that could
+run here because of them is anything built on libevent, glib or Mojo.
+
 ## Every open box, in one place
 
 The queue says what order. This says exactly what is unfinished, in the
@@ -4544,12 +4679,16 @@ condition rather than by an opinion.
   it** (2026-09-11), which also corrected the measurement: the same
   feature is in front of WebKit, Gecko and Ladybird, none of which has a
   single-process mode either, so it was never Chromium's condition
-  alone. **The condition is now the second one on that list: an
-  epoll-shaped readiness interface plus `eventfd` and `timerfd`**, which
-  is what Chromium's message pump calls and what `poll`, `select` and
-  `SYS_waitfds` are not. The three after it - clang and libc++ for this
-  triple, a machine with 16 GB of RAM and 100 GB of disk, and a sandbox
-  story that is not a pretence - are an arc rather than a port, and
+  alone. **M119 then closed the second** (2026-09-12): `epoll`, `eventfd`
+  and `timerfd`, which is `base`'s whole message pump - and which also
+  gave this kernel write-readiness it had never had. **The condition is
+  now the third, and it is where this stops being ordinary work: clang
+  and libc++ for `x86_64-lean_os`.** The two that are done were a few
+  hundred lines of kernel each; this is a second compiler port, with
+  M94's nine edits as the template for what that costs. After it: a
+  machine with 16 GB of RAM and 100 GB of disk, and a sandbox story that
+  is not a pretence - Chromium's code calls `seccomp` and namespaces and
+  this OS assigns a capability set at spawn, which is not the same shape.
   Chrome itself is proprietary and so not a porting question at all. GPU
   compositing stays refused on its own terms above.
 - **Multi-user, logins, uids.** Becomes real if and when two people share

@@ -52,6 +52,15 @@ struct timespec {
     long   tv_nsec;
 };
 
+/* M119: and the pair of them that arms a timer. <sys/timerfd.h> is the
+ * first thing here to take one; `it_value` of {0,0} disarms, and an
+ * interval with no value disarms too rather than repeating - POSIX's rule,
+ * and a trap worth naming where the struct is declared. */
+struct itimerspec {
+    struct timespec it_interval;
+    struct timespec it_value;
+};
+
 /* M80 groundwork. One clock, and it is the only one this machine has:
  * CLOCK_REALTIME is SYS_time and CLOCK_MONOTONIC is SYS_uptime_ms. They
  * are named separately because a program that asks for a monotonic clock

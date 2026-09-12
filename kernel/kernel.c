@@ -36,6 +36,9 @@
 #include "ipc/pipe.h"
 #include "ipc/shm.h" /* M50 - shm_count_by_owner, for the kill storm's segment accounting */
 #include "ipc/unixsock.h" /* M118 */
+#include "ipc/eventfd.h" /* M119 */
+#include "ipc/timerfd.h"
+#include "ipc/epoll.h"
 #include "lib/libk.h"
 #include "mm/e820.h"
 #include "mm/heap.h"
@@ -136,7 +139,8 @@
     X(dirtest)                  \
     X(browsertest)              \
     X(netrecv)                  \
-    X(unixtest)
+    X(unixtest)                 \
+    X(epolltest)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -12081,6 +12085,83 @@ static void boot_selftests_system(void) {
         klog_puts(" ms).\n\n");
     }
 
+    /* ---- M119 self-test: a message pump, and a machine that sleeps ----
+     *
+     * docs/browser.md's second condition, which M118 promoted to next:
+     * "an epoll-shaped readiness interface, plus `eventfd`/`timerfd`. The
+     * message pump is not optional and `poll` is not what it calls."
+     *
+     * tests/test_readyfds.c grades the three objects off the machine - 23
+     * tests, at nanosecond precision, which is the only place a question
+     * like "what does this timer report at 1099.999 ms" can be asked. Two
+     * things it cannot have are here instead: a real clock, and a real
+     * scheduler. The second is the interesting one. `epoll_wait` over a
+     * 200 ms timer with no timeout of its own can only be ended by that
+     * timer, and nothing in this kernel interrupts when a deadline passes
+     * - so if the park's deadline were not computed from the armed timers,
+     * this self-test would HANG rather than fail, which is the honest
+     * failure for that bug. And /bin/epolltest measures SYS_idle_ticks
+     * across the wait, because a spin and a sleep look identical from
+     * outside and that is exactly how this OS shipped sixty-seven
+     * milestones before M68 noticed.
+     *
+     * Three counters either side, for the claim the program cannot make
+     * about itself: every object it created was given back. */
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        int ev_before = eventfd_in_use();
+        int tf_before = timerfd_in_use();
+        int ep_before = epoll_in_use();
+        size_t et_bytes = 0;
+        uint8_t *et_img = read_program(PATH_BIN_DIR "epolltest", &et_bytes);
+        if (!et_img) {
+            panic("M119 self-test: /bin/epolltest is not on this disk");
+        }
+        const char *et_argv[] = {PATH_BIN_DIR "epolltest", 0};
+        task_t *et = process_spawnv("epolltest", et_img, et_bytes, et_argv);
+        long rc = et ? do_syscall(SYS_wait, (uint64_t)et->id, 0, 0) : -1;
+        kfree(et_img);
+        if (rc != 0) {
+            klog_puts("[m119] epolltest exited ");
+            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            klog_puts(" - see user_space/bin/epolltest.c for what each "
+                      "code means\n");
+            panic("M119 self-test: epoll, eventfd or timerfd does not work "
+                  "on this machine");
+        }
+        if (eventfd_in_use() != ev_before || timerfd_in_use() != tf_before ||
+            epoll_in_use() != ep_before) {
+            klog_puts("[m119] counters before ");
+            klog_put_dec((uint32_t)ev_before);
+            klog_puts("/");
+            klog_put_dec((uint32_t)tf_before);
+            klog_puts("/");
+            klog_put_dec((uint32_t)ep_before);
+            klog_puts(", after ");
+            klog_put_dec((uint32_t)eventfd_in_use());
+            klog_puts("/");
+            klog_put_dec((uint32_t)timerfd_in_use());
+            klog_puts("/");
+            klog_put_dec((uint32_t)epoll_in_use());
+            klog_puts("\n");
+            panic("M119 self-test: a process that exited left an eventfd, a "
+                  "timerfd or an epoll set behind");
+        }
+        klog_puts("[m119] a message pump: an eventfd counting and saturating, "
+                  "EFD_SEMAPHORE taking one, a 60 ms timer that fired at 60 "
+                  "and a 10 ms one that reported the firings nobody read, a "
+                  "set holding a pipe and a Unix socket and a counter and a "
+                  "timer at once with every cookie back, EPOLLOUT told the "
+                  "truth about a full pipe, EPOLLERR when its reader went, "
+                  "EPOLLHUP, a closed descriptor dropped, EPOLLET silent on "
+                  "an unchanged condition, EPOLLONESHOT fired once and "
+                  "re-armed, a 200 ms epoll_wait(-1) that ended when its "
+                  "timer did WITH THE CPU IDLE, and a wake from another "
+                  "process - self-test passed (");
+        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        klog_puts(" ms).\n\n");
+    }
+
     /* ---- M113 self-test: the browser is actually ON this machine ------
      *
      * M100 built NetSurf and graded what it *runs* like: [m100h] above
@@ -14944,6 +15025,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
      * Two processes talking to each other must not depend on a card
      * being present. */
     unixsock_init();
+    /* M119: and the three objects a message pump is made of, for the same
+     * reason and in the same place - none of them is networking either. */
+    eventfd_init();
+    timerfd_init();
+    epoll_init();
 
     /* Self-test: map, write through, read back, and unmap a throwaway
      * virtual address directly via vmm - the same "prove it, don't just

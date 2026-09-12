@@ -819,7 +819,38 @@ typedef struct {
  * but a family would be a genuinely dangerous pair to confuse. */
 #define SYS_sockshut   118 /* (fd, how) -> 0, or -1. SHUT_RD (0), SHUT_WR (1), SHUT_RDWR (2), on an AF_UNIX socket. Real here and refused on TCP, which is the honest split: there is no FIN to send on this family, so a half-close is a flag and a wake, while on TCP it would be a promise this stack cannot keep (see user_space/libc/src/socket.c's shutdown). An IPC layer that cannot say "I have finished writing" without closing the descriptor cannot tell its peer apart from a crash, which is why this is in M118 rather than deferred with the TCP half. */
 
-#define SYSCALL_COUNT 119
+/* ---- M119: the message pump, which is three objects and one wait -----
+ *
+ * docs/browser.md's second condition, and the one M118 promoted to next:
+ * "an epoll-shaped readiness interface, plus `eventfd`/`timerfd`. The
+ * message pump is not optional and `poll` is not what it calls."
+ * Chromium's `base::MessagePumpEpoll` names `epoll_create1`, `epoll_ctl`
+ * and `epoll_wait`, owns an `eventfd` to be woken from another thread and
+ * a `timerfd` for its delayed work, and has no `poll` path left. libevent,
+ * glib and every other event loop of the last twenty years are the same
+ * shape.
+ *
+ * **What is NOT claimed here.** Not speed: epoll's usual argument over
+ * poll is O(1) against O(n), and with MAX_FDS at 128 that argument is
+ * worth nothing on this machine - kernel/ipc/epoll.c scans its set
+ * linearly and says so, because M69's rule is that performance work on an
+ * unmeasured path does not get done. What these calls buy is three things
+ * `poll` cannot express at all: an interest set the kernel remembers, a
+ * cookie that comes back with the event, and edge-triggered and one-shot
+ * modes, which are statements about what changed since the last call.
+ *
+ * No capability. A readiness question about descriptors this process
+ * already holds is a question about itself, which is the same reason
+ * SYS_waitfds needs none. */
+#define SYS_epoll_create    119 /* (flags) -> an fd for a new empty interest set, or -1. `flags` takes EPOLL_CLOEXEC and nothing else. Linux's epoll_create1; its older epoll_create took a size hint that it has ignored since 2.6.8, and libc maps that spelling onto this one. */
+#define SYS_epoll_ctl       120 /* (epfd, op, fd, const os_epoll_event_t *ev) -> 0 or -1. EPOLL_CTL_ADD, _MOD, _DEL. ADD of a descriptor already in the set is refused rather than treated as a MOD - a caller that adds twice has lost track of its own set, and the second registration would silently replace the first one's cookie. `ev` is unread for DEL. **A registration does NOT hold the descriptor open**: it records what the fd pointed at, and a closed or reused fd is dropped by the next wait rather than reported against whatever took the slot - see kernel/ipc/epoll.h for why that is the conservative direction and where it differs from Linux. */
+#define SYS_epoll_wait      121 /* (epfd, os_epoll_event_t *out, maxevents, timeout_ms) -> how many events were written, 0 if the deadline passed with none, or -1. A negative timeout waits with no deadline; 0 polls. EPOLLERR and EPOLLHUP arrive whether or not they were asked for, as on Linux: a program that did not ask about an error still has to be told, or it waits forever on a descriptor whose peer is gone. */
+#define SYS_eventfd         122 /* (initval, flags) -> an fd for a new counter, or -1. EFD_SEMAPHORE makes a read take one instead of all of it; EFD_NONBLOCK and EFD_CLOEXEC are the descriptor's own flags. A read returns the counter as a uint64_t and zeroes it, blocking while it is zero; a write adds. It exists beside SYS_pipe because a pipe costs two descriptors and 4 KiB to carry one bit, and a wake-up written more often than it is read fills that buffer and then blocks the waker - a counter saturates instead, which is what a wake-up flag wants. */
+#define SYS_timerfd_create  123 /* (clockid, flags) -> an fd for a new disarmed timer, or -1. CLOCK_REALTIME (0) or CLOCK_MONOTONIC (1); TFD_NONBLOCK and TFD_CLOEXEC. */
+#define SYS_timerfd_settime 124 /* (fd, flags, const os_itimer_t *new, os_itimer_t *old) -> 0 or -1. A `value_ns` of 0 disarms, and an interval with no value is that case too - POSIX's rule, and a trap worth naming. TFD_TIMER_ABSTIME makes `value_ns` a point on the timer's clock. **The granularity is 10 ms, which is PIT_HZ and not a choice this call makes**, and a shorter request is rounded UP to one tick, never down to zero: a timer that is readable immediately is a pump that spins. */
+#define SYS_timerfd_gettime 125 /* (fd, os_itimer_t *out) -> 0 or -1. What is left, not what was asked for. */
+
+#define SYSCALL_COUNT 126
 
 #ifdef __cplusplus
 }

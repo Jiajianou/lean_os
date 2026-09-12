@@ -435,15 +435,20 @@ this kernel has                            113
   absent                                   348
 ```
 
-**M118 moves four of those 348 and the table is left as it was
+**M118 and M119 move eleven of those 348 and the table is left as it was
 measured**, because a number with a date on it should not be quietly
-edited later. For the record: this kernel has 119 syscalls now, and
-`socketpair`, `sendmsg`, `recvmsg` and `shutdown` have moved from the
-absent column to the overlap - 83 and 344. The four are the whole of
-Mojo's transport. What has *not* moved is any of `epoll_create1`,
-`epoll_ctl`, `epoll_wait`, `eventfd2`, `timerfd_create`, `signalfd4`,
-`memfd_create`, `seccomp`, `prctl(PR_SET_SECCOMP)` or `clone` with a
-namespace flag.
+edited later. For the record: this kernel has 126 syscalls now. M118
+moved `socketpair`, `sendmsg`, `recvmsg` and `shutdown` - the whole of
+Mojo's transport - and M119 moved `epoll_create1`, `epoll_ctl`,
+`epoll_wait`, `eventfd2`, `timerfd_create`, `timerfd_settime` and
+`timerfd_gettime`, which is the whole of `base`'s message pump. That is
+an overlap of **90** and a gap of **337**.
+
+What has *not* moved, and these are the ones that matter: `signalfd4`,
+`memfd_create`, `seccomp`, `prctl(PR_SET_SECCOMP)`, and `clone` with
+`CLONE_NEWUSER`/`NEWPID`/`NEWNET`. The first two are features; the last
+three are the sandbox, which is condition 5 and a design question rather
+than a port.
 
 The 18 are real: this kernel spells `wait4` as `SYS_waitpid`,
 `rt_sigaction` as `SYS_sigaction`, `getrusage` as `SYS_rusage`,
@@ -524,8 +529,23 @@ What would have to become true for Chromium specifically:
    `select` and `SYS_waitfds`, and a thread here is woken by none of
    `eventfd`, `timerfd_create` or `signalfd4`.
 
+   **Done - M119, 2026-09-12.** `epoll_create1`, `epoll_ctl`,
+   `epoll_wait` with level, edge and one-shot modes; `eventfd` with
+   `EFD_SEMAPHORE`; `timerfd` on both clocks at the 10 ms granularity
+   this machine's PIT actually has. It also gave this kernel
+   **write-readiness**, which it had never had: `EPOLLOUT` means a pipe
+   with room rather than `<poll.h>`'s "anything open". `signalfd` is not
+   built and `base` does not call it. See
+   [readiness.md](readiness.md). **The instrument worth naming**: the
+   self-test measures `SYS_idle_ticks` across a 200 ms `epoll_wait`, so
+   "it sleeps rather than spinning" is a number - which is the failure
+   this work was most likely to ship and the one no unit test can see.
+
 3. **clang and libc++ for `x86_64-lean_os`.** A second toolchain port,
    with M94's nine edits as the template for how much that costs.
+   **With conditions 1 and 2 closed, this is where the arc stops being
+   ordinary work.** The two that are done were a few hundred lines each
+   of kernel; this is a compiler.
 4. **A machine with 16 GB of RAM and 100 GB of disk**, which is a
    statement about M110's hardware rather than about this code.
 5. Then a sandbox story, which is a design question rather than a port:

@@ -23,6 +23,9 @@
 #include "proc.h" /* system_api/include/proc.h - TASK_INFO_MAX, which *is* MAX_TASKS below. Resolves to the system_api header: a quoted include searches this file's own directory first (kernel/sched/, no proc.h), then -Ikernel (no kernel/proc.h), then -Isystem_api/include. */
 
 struct pipe; /* kernel/ipc/pipe.h owns the real definition - not included here so sched.h doesn't have to know pipes exist */
+struct eventfd;  /* M119: kernel/ipc/eventfd.h, timerfd.h and epoll.h - forward-declared for the same reason as the two above */
+struct timerfd;
+struct epoll;
 struct unixsock; /* M118: kernel/ipc/unixsock.h owns it, and that header includes THIS one - so the forward declaration is load-bearing, not tidy */
 
 /* M54: TASK_FREE is 0 so a zeroed table is a table of free slots, which
@@ -88,6 +91,15 @@ typedef enum {
      * capability while AF_INET needs CAP_NETWORK - see unixsock.h for
      * why that difference is the point rather than an inconsistency. */
     FD_UNIX,
+    /* M119: the three objects a message pump is made of
+     * (kernel/ipc/eventfd.h, timerfd.h, epoll.h). Three kinds rather than
+     * one "pollable" kind with a tag inside it, because read() means
+     * something different on each - a counter, an expiration count, and
+     * nothing at all - and a single type would put that switch somewhere
+     * less obvious than here. */
+    FD_EVENT,
+    FD_TIMER,
+    FD_EPOLL,
 } fd_type_t;
 
 /* M21: bumped from 8 - a compositor juggling several windows needs
@@ -277,6 +289,9 @@ typedef struct {
         struct openfile *file;
         struct socket *sock;
         struct unixsock *un; /* M118 */
+        struct eventfd *event;  /* M119 */
+        struct timerfd *timer;
+        struct epoll *epoll;
     };
     /* M84: FD_CLOEXEC, and it finally means something.
      *

@@ -596,6 +596,49 @@ int unixsock_pending(const struct unixsock *s) {
     return ready ? 1 : 0;
 }
 
+int unixsock_writable(const struct unixsock *s) {
+    if (!s) {
+        return 0;
+    }
+    uint64_t f = spin_lock_irqsave(&unix_lock);
+    int w;
+    if (!s->peer || s->shut_wr || s->peer->shut_rd) {
+        w = 1; /* the send will fail rather than block, which is not the same as "wait" */
+    } else {
+        unixsock_t *d = s->peer;
+        unixseg_t *tail = d->seg_count
+                              ? &d->segs[(d->seg_head + d->seg_count - 1) % UNIX_MAX_SEGS]
+                              : (unixseg_t *)0;
+        /* Room for a byte, and a record to put it in - both, because
+         * either one alone is a send that reports "would block". */
+        int has_record = tail && tail->nfds == 0 && s->type != UNIX_SOCK_SEQPACKET;
+        w = d->count < UNIX_BUF_SIZE && (has_record || d->seg_count < UNIX_MAX_SEGS);
+    }
+    spin_unlock_irqrestore(&unix_lock, f);
+    return w;
+}
+
+int unixsock_hup(const struct unixsock *s) {
+    if (!s) {
+        return 1;
+    }
+    uint64_t f = spin_lock_irqsave(&unix_lock);
+    int hup = (!s->peer || s->peer->shut_wr || s->shut_rd) && s->count == 0 &&
+              s->seg_count == 0;
+    spin_unlock_irqrestore(&unix_lock, f);
+    return hup;
+}
+
+int unixsock_rdhup(const struct unixsock *s) {
+    if (!s) {
+        return 1;
+    }
+    uint64_t f = spin_lock_irqsave(&unix_lock);
+    int rd = (!s->peer || s->peer->shut_wr);
+    spin_unlock_irqrestore(&unix_lock, f);
+    return rd;
+}
+
 int unixsock_shutdown(struct unixsock *s, int how) {
     if (!s || how < 0 || how > 2) {
         return -1;
