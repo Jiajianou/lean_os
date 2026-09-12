@@ -54,6 +54,15 @@ UEFI firmware
   `<sys/stat.h>`, `<unistd.h>`, `<signal.h>`, `<pthread.h>`,
   `<sys/mman.h>` and `<setjmp.h>` over the top of it. See M75-M79 in
   [milestones.md](milestones.md).
+- **A desktop that sleeps** (M117). Every window used to be a process
+  that never left the run queue - its event loop polled and yielded -
+  so an idle desktop cost 22% of a host core under QEMU and 44% with
+  eight windows open, and a window's own drawing reached the screen on
+  a 100 ms poll. Clients block in `SYS_waitfds` now and tell the
+  compositor when they have drawn; 11% and 23%, and a click's result
+  is composited the moment the client presents it. And a window
+  animation that used to be three to five pictures 60-100 ms apart is
+  four to seven, 40-50 ms apart.
 - **A desktop that remembers.** Whatever was open when the machine
   stopped is open again where it was when it starts; an editor with
   unsaved changes can veto a shutdown; recently-opened files are in the
@@ -163,6 +172,19 @@ UEFI firmware
   download went from never finishing to 35 ms. Google *search* still
   shows a blank page: its results are served only to a browser that
   runs modern JavaScript, and Duktape is ES5.
+
+  **And it survives the pages it used to die on** (M117): apple.com
+  and Wikipedia's *Unix* article both killed it on NetSurf's own
+  assertion, and the same NetSurf built for the host rendered both. A
+  bisection of apple.com down to three empty `div`s found the cause
+  under the browser: this libc's `malloc(0)` returned NULL - legal C,
+  and what every program written against glibc, macOS or musl reads as
+  out of memory. NetSurf's flex layout asks for a zero-item list for
+  every empty `display: flex` box. It returns a real block now, the
+  port is built with frame pointers so an assertion prints its
+  backtrace, and `tools/build-netsurf-host.sh` builds the twin that
+  decides whose bug the next one is. See
+  [docs/browser.md](docs/browser.md).
 
   It holds `CAP_FS_WRITE | CAP_NETWORK` and nothing else. **Not**
   `CAP_FRAMEBUFFER`: twenty megabytes of somebody else's C and C++,

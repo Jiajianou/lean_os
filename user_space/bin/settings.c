@@ -584,6 +584,8 @@ int main(void) {
 
         if (changed) {
             redraw(&win, clear_hover, clear_pressed);
+            wm_present(&win);
         }
+        wm_wait_ms(&win, NULL, 0, confirm_until_ms != 0 ? 50 : (int)(next_redraw - now)); /* M117: block until an event, a deadline, or the liveness cap - see wm_wait_ms */
     }
 }

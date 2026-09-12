@@ -3170,6 +3170,105 @@ def test_browser_loads_a_page_from_another_machine(m):
           % (time.time() - started))
 
 
+def test_browser_survives_an_empty_flex_container(m):
+    """M117: a page with an empty `display: flex` box, typed into the
+    address bar, must finish laying out - and the browser must still be
+    there afterwards.
+
+    apple.com killed the browser on NetSurf's own assertion, and a
+    bisection of the page down to three empty divs found the cause under
+    the browser rather than in it: this libc's malloc(0) returned NULL,
+    and NetSurf's flex layout - calloc(number_of_children, ...) for a
+    container with none - read that as out of memory, failed silently,
+    and asserted a few frames later. The same NetSurf built for this Mac
+    rendered the page, which is what pointed below the browser.
+
+    /usr/share/netsurf/flex.html (tools/netsurf-port/flex.html) is the
+    reduction: apple's properties on an empty flex container, and a red
+    block AFTER it in the source, so the block is on screen only if the
+    layout completed. Graded here, in pixels, because the host test for
+    malloc(0) says what the allocator does and this says what a person
+    sees; against the old allocator the browser is gone before the block
+    could appear."""
+    boot(m)
+    browser = ICONS[-1]
+    m.double_click(browser[3], browser[2])
+    wait_for_windows(m, 1, timeout=45.0)
+    wait_for(m, lambda s: _blue_in_page(s) > 5000,
+             "the browser never finished showing its own start page",
+             timeout=45.0)
+    m.click(620, 151)
+    time.sleep(0.3)
+    for _ in range(60):
+        m.sendkey("backspace")
+    m.type_text("file:///usr/share/netsurf/flex.html")
+    m.sendkey("ret")
+    wait_for(m, lambda s: s.count_color(0xE02020, 180, 160, 820, 560) > 20000,
+             "the block after an empty flex container never appeared - the "
+             "layout failed (M117: malloc(0) returning NULL was how) or the "
+             "browser died on its assertion",
+             timeout=20.0)
+    check(count_app_windows(m.screenshot()) == 1,
+          "the browser window is gone - it died on the page")
+
+
+def test_window_animations_stay_smooth(m):
+    """M117: a window animation is drawn as more than a few pictures.
+
+    Every open and close animates for 140 ms (compositor.c ANIM_MS), and
+    until M117 nobody had measured what that looked like: the serial
+    harness failed a boot on any single composite over 16 ms, a number
+    that excluded everything between two frames. With the compositor
+    reporting every animation - frame count, longest composite, longest
+    gap between frames - HEAD before M117 drew 3-5 frames per animation
+    with a longest gap of 60-100 ms, every time. After M117 (clients that
+    block, a compositor that sleeps between frames, presents that arrive
+    as they are drawn) it is 4-7 frames, 40-50 ms typical, one in seven
+    at 90.
+
+    Eight animations here - four opens, four closes - on a quiet desktop,
+    read back from the compositor's own [perf] anim_frame_gap_ms lines in
+    the guest's serial log. The two best are where HEAD cannot pass and
+    this tree does with room; the worst is where an animation has stopped
+    being motion. The battery grades the same row under its own load
+    (tests/budgets.tsv); this is the person's desktop."""
+    boot(m)
+    before = m.read_log().count("anim_frame_gap_ms")
+    n = 0
+    for name, _, y, x in ICONS[:4]:
+        m.double_click(x, y)
+        n += 1
+        wait_for_windows(m, n, timeout=30.0)
+        time.sleep(0.6)
+    for _ in range(4):
+        m.sendkey("alt-f4")
+        time.sleep(1.0)
+    time.sleep(2.0)   # the last close animation, and its report line, before the log is read
+    gaps = [int(l.split()[2]) for l in m.read_log().splitlines()
+            if l.startswith("[perf] anim_frame_gap_ms")][before:]
+    # Eight are started; a close that lands while the previous one is
+    # still animating shares its run, so fewer are reported than started.
+    check(len(gaps) >= 4, "expected at least four animations reported, saw %d" % len(gaps))
+    gaps.sort()
+    print("    %d animations, gaps %s ms" % (len(gaps), gaps))
+    # The grade is the second-best animation, not the median: with five
+    # to eight samples on a host that has its own load the median moved
+    # between 40 and 80 across two runs of the same tree, while the best
+    # two held at 40 in both - and HEAD never drew one under 60 (its
+    # eight read 60, 60, 100, 100, 100, 100, 100, 100). So: two of them
+    # at 50 ms or better says the desktop CAN animate at that pace, which
+    # is the property; a desktop whose clients spin again cannot.
+    check(gaps[1] <= 50, "the two best animations had gaps of %d and %d ms between frames - HEAD's best "
+                          "two were 60 and 60, M117's 40 and 40; a desktop that cannot draw one animation "
+                          "at that pace has its compositor not waking for its frames or its clients "
+                          "spinning again (see M117)" % (gaps[0], gaps[1]))
+    # 250, not 150: one animation in about ten shows a single 170 ms gap
+    # on this host (the commit tier read [40, 40, 40, 80, 170] once), and
+    # HEAD's worst was 100 - so the worst is a stall detector, at the
+    # same number tests/budgets.tsv uses, and the median is the grade.
+    check(gaps[-1] <= 250, "an animation had a %d ms gap between two frames - that is a stall, not motion" % gaps[-1])
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -3233,6 +3332,9 @@ TESTS = [
     ("browser_renders_a_page", test_browser_renders_a_page),
     ("browser_loads_a_page_from_another_machine",
      test_browser_loads_a_page_from_another_machine),
+    ("browser_survives_an_empty_flex_container",
+     test_browser_survives_an_empty_flex_container),
+    ("window_animations_stay_smooth", test_window_animations_stay_smooth),
 ]
 
 
@@ -3286,6 +3388,8 @@ QUICK_TESTS = [
     # were broken at once while every other test here passed, and the
     # person using the machine found it by typing google.com.
     "browser_loads_a_page_from_another_machine",
+    "browser_survives_an_empty_flex_container",
+    "window_animations_stay_smooth",
 ]
 
 

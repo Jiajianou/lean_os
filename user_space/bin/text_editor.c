@@ -1020,6 +1020,7 @@ int main(int argc, char **argv) {
     }
 
     redraw(&win);
+    wm_present(&win); /* M117: the first frame, like every other one */
 
     for (;;) {
         int changed = 0;
@@ -1215,6 +1216,8 @@ int main(int argc, char **argv) {
         }
         if (changed) {
             redraw(&win);
+            wm_present(&win);
         }
+        wm_wait_ms(&win, NULL, 0, -1); /* M117: nothing here changes without input */
     }
 }

@@ -239,8 +239,23 @@ static void *grow_heap(size_t min_bytes) {
 }
 
 void *malloc(size_t size) {
+    /* M117: malloc(0) returns a unique, freeable block and NOT NULL. C
+     * permits either, and this returned NULL from M19 until NetSurf
+     * asked for the size of an empty flex container's item list:
+     * layout_flex.c does `calloc(count, sizeof item)` with count 0, and
+     * the NULL it got back reads, in every program written against
+     * glibc, macOS or musl - all of which hand back a pointer here - as
+     * out of memory. NetSurf's layout failed silently on the first empty
+     * `display: flex` box on the page and died on its own assertion
+     * some frames later, on apple.com and on Wikipedia, while the same
+     * NetSurf built for the host rendered both. It took the port's
+     * first backtrace and a bisection of apple.com down to three empty
+     * divs to find, because the refusal was legal and nobody looked.
+     *
+     * The minimum block, so the pointer is real, distinct from every
+     * other live allocation, and free() takes it back. */
     if (size == 0) {
-        return (void *)0;
+        size = 1;
     }
     size = align_up(size, HEAP_ALIGN);
     /* M98: never smaller than the two links a free block carries in its

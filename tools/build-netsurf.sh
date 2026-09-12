@@ -207,7 +207,14 @@ cd "$NSDIR"
 # strcasestr and strndup, and this one has both - strcasestr in
 # <strings.h>, which is where POSIX puts it. Without this NetSurf
 # compiles its own strcasestr and the link fails on a duplicate symbol.
-export CFLAGS="-DWITHOUT_ICONV_FILTER -D_GNU_SOURCE"
+# M117: frame pointers, so an assertion or a crash in the browser leaves
+# the chain of return addresses on the serial log (this libc's
+# __assert_fail walks it) rather than one line. NetSurf on apple.com
+# stopped on an assertion in a function with eleven callers and nothing
+# on the machine could say which; the same build for the host rendered
+# the page. One register the compiler keeps, for a program this size
+# and this far from its authors.
+export CFLAGS="-DWITHOUT_ICONV_FILTER -D_GNU_SOURCE -fno-omit-frame-pointer"
 
 NSLIBS="libwapcaplet libnslog libparserutils libcss libhubbub libdom \
         libnsbmp libnsgif librosprite libnsutils libutf8proc libnspsl \

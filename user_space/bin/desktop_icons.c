@@ -336,6 +336,7 @@ int main(void) {
     int pressed_icon = -1;
 
     redraw(&win, -1);
+    wm_present(&win); /* M117: the first frame, like every other one */
 
     for (;;) {
         child_reap(); /* M54: hand back the task slot of anything launched from here that has since closed */
@@ -428,6 +429,8 @@ int main(void) {
         if (changed || pressed != was_pressed_icon) {
             redraw(&win, pressed);
             was_pressed_icon = pressed;
+            wm_present(&win);
         }
+        wm_wait_ms(&win, NULL, 0, pressed >= 0 ? 50 : (int)(next_theme_poll - now)); /* M117: block until an event, a deadline, or the liveness cap - see wm_wait_ms */
     }
 }

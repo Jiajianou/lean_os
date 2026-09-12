@@ -1136,9 +1136,9 @@ LLVM_CC    := $(shell for c in /opt/homebrew/opt/llvm/bin/clang \
                         command -v $$c >/dev/null 2>&1 && echo $$c && break; \
                       done)
 COV_CC     := $(LLVM_CC)
-COV_CFLAGS := -std=c11 -g -O0 -Wall -Wextra \
+COV_CFLAGS := -std=c11 -g -O0 -Wall -Wextra -DLEANOS_HOST_TEST \
               -fprofile-instr-generate -fcoverage-mapping \
-              -Itests -Itests/fakes -Ikernel -Isystem_api/include
+              -Itests -Itests/fakes -Ikernel -Isystem_api/include -Iuser_space/lib
 
 $(COV_BUILD):
 	mkdir -p $@

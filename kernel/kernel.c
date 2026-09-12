@@ -5295,6 +5295,136 @@ static void boot_selftests_system(void) {
                    "self-test passed (7/7 checks).\n\n");
     }
 
+    /* M117 self-test: a desktop that sleeps, and a click that shows.
+     *
+     * Two numbers a person feels and nothing here graded. Every wmclient
+     * program's main loop was `poll the event pipe, yield` - M68 built
+     * SYS_waitfds to replace exactly that and then reverted the client
+     * loops (see the archive: fifty fixed-budget boot tests broke at
+     * once), so every open window stayed a runnable process and the idle
+     * task never ran while one was open. And the compositor noticed a
+     * client's own drawing only on a 100 ms poll, so a click's result -
+     * drawn by the client, not the compositor - reached the screen up to
+     * a tenth of a second late. Both were invisible to every instrument:
+     * a desktop that spins and one that sleeps look the same, and the
+     * input-to-photon rows measure the cursor, which the compositor
+     * draws itself.
+     *
+     * Click-to-photon THROUGH A CLIENT: wm_zorder paints a tick on every
+     * press. Three presses, the framebuffer polled from the press until
+     * the tick is there, worst of the three reported. The tick's screen
+     * position is the M51 test's: the first window the compositor
+     * cascades has its content at (105,105), and tick_x(t) is 288-14t in.
+     *
+     * Then three clocks - the busiest ordinary client, redrawing four
+     * times a second - and what the compositor and its four clients cost
+     * in CPU over two seconds with nothing touching the machine, read
+     * from their own user and system tick counters (M101's) rather than
+     * from the BSP's idle count. The idle count would have been the
+     * obvious measure and it is the wrong one here: in the middle of the
+     * battery something is always runnable (the [m68] line in a graded
+     * log shows 2-3% idle across the whole boot), so it read 100% busy
+     * on the first run with clients that were provably asleep. Per-task
+     * ticks charge a spinning client and not a blocked one whatever else
+     * is on the run queue. Before this milestone a single open window
+     * was charged every tick it could get. */
+    {
+        size_t comp_size_bytes = 0;
+        uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
+        size_t z_size_bytes = 0;
+        uint8_t *z_image = read_program("/bin/wm_zorder", &z_size_bytes);
+        size_t clock_size_bytes = 0;
+        uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
+
+        task_t *comp_task = process_spawn("compositor", comp_image, comp_size_bytes, "");
+        kfree(comp_image);
+        selftest_wait_for_compositor();
+        task_t *z_task = process_spawn("wm_zorder", z_image, z_size_bytes, "zP 00A02020");
+        kfree(z_image);
+        pit_sleep_ms(600);
+
+        uint64_t worst_us = 0;
+        int missed = 0;
+        for (int t = 0; t < 3 && !missed; t++) {
+            int32_t tick_x = 393 - 14 * t + 4;
+            int32_t tick_y = 293 + 4;
+            mouse_inject(-4096, -4096, 0, 0);
+            mouse_inject(120, 250, 0, 0);
+            pit_sleep_ms(120); /* the move settles - not part of the measurement */
+            uint64_t deadline = pit_get_ticks() + 300; /* 3 s: a tick that never comes is a failure, not a slow frame */
+            /* Polled with schedule(), as M69's input-to-photon is, so the
+             * observer competes the same way and the rows are comparable:
+             * this costs the same tens of milliseconds M69 recorded, and
+             * what the row discriminates is a compositor that has stopped
+             * honouring presents, which would put the tick on the 1 s
+             * safety net instead. */
+            uint64_t t0 = tsc_read();
+            mouse_inject(0, 0, 1, 0);
+            for (;;) {
+                if (fb_get_pixel((uint32_t)tick_x, (uint32_t)tick_y) == 0x00F0E000u) {
+                    uint64_t us = tsc_to_us(tsc_read() - t0);
+                    if (us > worst_us) {
+                        worst_us = us;
+                    }
+                    klog_puts("[m117] press ");
+                    klog_put_dec((uint32_t)t);
+                    klog_puts(" on screen after ");
+                    klog_put_dec((uint32_t)(us / 1000));
+                    klog_puts(" ms\n");
+                    break;
+                }
+                if (pit_get_ticks() >= deadline) {
+                    missed = 1;
+                    break;
+                }
+                schedule();
+            }
+            mouse_inject(0, 0, 0, 0);
+            pit_sleep_ms(150);
+        }
+
+        task_t *clocks[3];
+        for (int i = 0; i < 3; i++) {
+            clocks[i] = process_spawn("gui_clock", clock_image, clock_size_bytes, "");
+            pit_sleep_ms(300);
+        }
+        kfree(clock_image);
+        pit_sleep_ms(700); /* every window up and its first frame drawn */
+        task_t *desktop[5] = { comp_task, z_task, clocks[0], clocks[1], clocks[2] };
+        uint64_t used0 = 0, used1 = 0;
+        for (int i = 0; i < 5; i++) {
+            used0 += desktop[i]->user_ticks + desktop[i]->sys_ticks;
+        }
+        uint64_t window0 = pit_get_ticks();
+        pit_sleep_ms(2000);
+        uint64_t window_ticks = pit_get_ticks() - window0;
+        for (int i = 0; i < 5; i++) {
+            used1 += desktop[i]->user_ticks + desktop[i]->sys_ticks;
+        }
+        uint64_t busy_pct = window_ticks ? (100 * (used1 - used0)) / window_ticks : 100;
+
+        for (int i = 0; i < 3; i++) {
+            selftest_reap(clocks[i]);
+        }
+        selftest_reap(z_task);
+        selftest_reap(comp_task);
+        console_init();
+        klog_use_console();
+
+        if (missed) {
+            panic("M117 self-test: a press on a window never showed as that window's tick - "
+                  "the click, the client's redraw or its present did not reach the screen");
+        }
+        klog_perf("click_to_photon_us", worst_us, "us");
+        klog_perf("desktop_busy_pct", busy_pct, "pct");
+        klog_puts("[m117] a desktop that sleeps and a click that shows: three presses on a "
+                   "client each on screen as its own tick within ");
+        klog_put_dec((uint32_t)(worst_us / 1000));
+        klog_puts(" ms, and the compositor and four idle windows used ");
+        klog_put_dec((uint32_t)busy_pct);
+        klog_puts("% of the CPU over two seconds - self-test passed.\n\n");
+    }
+
     /* M52 self-test: a user program that dereferences a null pointer
      * dies alone, and every syscall that takes a pointer refuses every
      * shape of bad one.

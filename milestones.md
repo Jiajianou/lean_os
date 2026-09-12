@@ -71,13 +71,13 @@ that has never happened.
 
 | | state |
 |---|---|
-| **Milestones** | M0–M116 numbered: 107 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
+| **Milestones** | M0–M117 numbered: 108 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
 | **Head of the queue** | **M100** — eight of nine libraries landed; M111 and M112 were both taken out of order at the user's request and closed 2026-09-09 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
-| **Host unit tests** | 383/383 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 127 required, graded on every self-test boot - M116's `[m116]` is the first to put a full-sized segment through the NIC |
-| **Performance budgets** | 41 rows in `tests/budgets.tsv`, all inside their ceilings |
+| **Host unit tests** | 395/395 passing, 3 slow ones skipped in `--fast` |
+| **Boot markers** | 128 required, graded on every self-test boot - M117's `[m117]` is the first to time a click through a client and to charge an idle desktop for its CPU |
+| **Performance budgets** | 44 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
 
@@ -500,6 +500,18 @@ under a real stream, the host window, and the terminal a test run leaves
 behind. It jumped nothing. What it changes for the rows that remain is
 the rule for the next one: **a fix is not finished until something that
 looks where the person looks can fail on it.**
+
+**M117 is not in this table either.** *"The browser crashed on
+apple.com... it is also extremely slow... everything should be
+snappy"* was asked for on 2026-09-11, the morning after M116. It
+jumped nothing. What it changed for the rows that remain: the desktop
+under every row is one that sleeps now (every wmclient loop blocks in
+`SYS_waitfds`, which M68 built for it and reverted), which makes Q14's
+compositor-off-the-machine work smaller rather than larger; and the
+browser has a **twin** (`tools/build-netsurf-host.sh`) and a
+**backtrace**, so the next layout crash is a bisection and not a
+guess. The bug itself was sixteen milestones old and one line:
+`malloc(0)` returned NULL.
 
 **M111 is not in this table and that is recorded rather than hidden.**
 `os`, the package manager, was asked for directly on 2026-09-09 and built
@@ -3455,6 +3467,435 @@ both tier runs: 1024x796 points.
 
 ---
 
+### M117 — a desktop that sleeps, a click that shows, and the browser's first backtrace `[x]` (five boxes open)
+
+*Landed 2026-09-11.* **Asked for directly**, the morning after M116:
+*"the browser crashed after I tried visiting apple.com. it was able to
+go to google.com, but I am not sure it is live data. I want the browser
+to be fully functional. It is also extremely slow. I want the OS to be
+high performant. everything should be snappy."* Three complaints, taken
+in the order the person put them, and each answered by a measurement
+before anything was changed.
+
+#### 1. google.com is live
+
+It is. The M116 capture is the evidence: each of Google's responses
+arrives 50-70 ms after its request over SLIRP, through the RTL8139 ring
+and this TCP, with TLS 1.3 verified against the `ca-certificates`
+package. Nothing on the image holds a copy of google.com; `make all`
+writes no page at all, and NetSurf's disc cache is on leanfs, which a
+kernel rebuild recreates from nothing. What a person sees is what Google
+sent that second. The doubt is reasonable, though, and the reason for it
+is the next point: the page does not *look* live, because it barely
+moves.
+
+#### 2. "Extremely slow" - measured, and two-thirds of it was the desktop
+
+The host is an Apple M2 Max; the guest is x86-64 under QEMU's TCG, so
+every guest instruction is translated, and that ratio is the floor
+nothing here can move. What the OS was adding on top of it was measured
+with `ps` on the QEMU process and with the guest's instruction pointer
+sampled through the monitor, and it was not small:
+
+| idle desktop, nothing touched | before | after |
+|---|---|---|
+| no window open | **22%** of a host core | **11%** |
+| eight windows open | **44%** | **23%** |
+| the browser alone | 33% | 13% |
+
+An idle guest that halts should sit near the cost of its timer tick.
+This one did not, for a reason M68 wrote down and then reverted: **every
+wmclient program's main loop was `poll the event pipe; yield`**, so every
+open window was a process that never left the run queue, the idle task
+never ran while one was open, and - the part that matters on TCG - every
+one of those yields was a CR3 reload that emptied the host's translation
+cache underneath whatever was actually working, the browser included.
+M68 built `SYS_waitfds` for exactly this, converted the loops, and took
+the conversion back because fifty boot self-tests with fixed
+`pit_sleep_ms` budgets broke at once. M69 replaced those budgets with
+condition waits and converted the compositor's own loop; the clients
+were never revisited. The `[m68]` line in any graded log shows the
+result: 2-3% idle across a whole boot.
+
+The second finding was the compositor's other half of the bargain: it
+had **no way to know a client had drawn**. A clock ticking, an editor
+after a keystroke, a browser laying out a page - none of it reached the
+screen until `REDRAW_INTERVAL_MS`, a 100 ms fallback poll, which also
+meant a full-screen composite ten times a second on a desktop where
+nothing had changed. The NetSurf surface, for its part, waited for input
+by `usleep(5 ms)` in a loop: two hundred wakeups a second with nothing
+to do.
+
+Three changes, all in this project's code and none in NetSurf's:
+
+- **`wm_wait_ms`** (`user_space/lib/wmclient.c`): sleep in
+  `SYS_waitfds` on the window's event pipe, plus any extra descriptors,
+  until an event, a deadline, or a 250 ms liveness cap - the cap is what
+  keeps M55's "is the compositor still alive" check running in a client
+  with nothing to do. Every one of the twelve client loops now ends in
+  it, with its own deadline (the clock's next redraw, the terminal's
+  child output, the shell's pressed button), replacing `sys_yield`.
+- **`WM_ACTION_PRESENT`** (`system_api/include/wm.h`): one 16-byte write
+  after a frame. The compositor coalesces every present in a pass into
+  one rectangle and composites it with `redraw_rect`, drains every
+  complete action per pass rather than one (eight windows presenting
+  together are one pass, not eight), and the 100 ms poll is a **1 s
+  safety net** for a client that never presents - which nothing in this
+  tree is.
+- **The NetSurf surface** presents once per turn of NetSurf's event
+  loop (libnsfb's `update` callback sets a flag; `leanos_input` sends it
+  before waiting) and waits in `wm_wait_ms` for the bounded time libnsfb
+  asks for.
+- **The compositor's animation loop sleeps until the next frame is
+  due** rather than spinning through `sys_yield`, presents wait while
+  anything animates (the animation's closing full frame carries them),
+  - the reasons are under *what went wrong*.
+
+**Measured after**, on the same boot conditions:
+
+- the M116 network page (120 KiB from a host server) is on screen
+  **0.43 s** after Enter with seven idle windows open, the same as with
+  none - the first load of a session is 2.9 s either way, which is
+  NetSurf's own start-up (fonts, the default stylesheet) and not the
+  desktop.
+- **`click_to_photon_us`**, a new budget row: a press on a `wm_zorder`
+  window until *that window's own tick* is on screen - the press
+  routed, the client drawing, the client presenting, the compositor
+  compositing that rectangle. 63-87 ms worst of three, polled the way
+  M69's cursor rows are polled (the observer competes, and the cursor
+  alone costs 10-38 ms in the same boots); before, this path ended on
+  the 100 ms poll, and a compositor that stopped honouring presents now
+  lands on the 1 s net, which the ceiling is set to catch - and did,
+  six times, which is under *what went wrong*.
+- **`desktop_busy_pct`**: what the compositor and four idle windows cost
+  in CPU over two seconds, from the tasks' own user+sys tick counters:
+  **2%**. The run-queue version of the same measurement read 100 - see
+  *what went wrong*.
+- and a number nobody asked for: **`input_to_photon_idle_us`**, the
+  cursor's own path, went from 40.6 ms at its last recorded measurement
+  to **9.6 ms** in the same graded boot, because the compositor is no
+  longer competing with a run queue full of windows polling their
+  pipes.
+- **and window animations, which turned out to have been the worst
+  thing on this desktop and unmeasured.** With the report built into
+  HEAD, eight open/close animations drew **3-5 frames each, 60-100 ms
+  between frames**, every time - a 140 ms animation shown as three
+  pictures. After this milestone: **4-7 frames, 40-50 ms apart** (one
+  at 90 in seven runs); with the withdrawn display task it was 7-8 and
+  20-30, which is what that open box is worth. That is the new
+  `anim_frame_gap_ms` row, one line per animation, graded in place of
+  a rule that had timed one composite and failed a boot at 16 ms while
+  the person waited 100 between frames.
+
+Where the rest of the 11% goes, from the sampler: 75-80% of samples are
+the CPU halted inside `pit_sleep_ms` (init's wait, which halts in
+place), and 5-12% are the compositor compositing - the shell presents
+every 300 ms and the settings window every 500 ms whether or not their
+content changed, and each present is a rectangle with a blended shadow
+under it. That is the next thing to take, and it is recorded rather
+than done: it is a few percent of a host core, and the crash outranked
+it.
+
+#### 3. apple.com - reproduced, bisected, and found under the browser
+
+`https://www.apple.com/` killed the browser 13.5 s after Enter, on
+NetSurf's own assertion: `box->height != AUTO at
+content/handlers/html/layout.c:5333`, in
+`layout_calculate_descendant_bboxes` - the walk after layout that
+requires every box to have a height, and which `layout_document` runs
+**whether or not the layout succeeded**. So any layout step that returns
+false without saying so ends here, some frames later, with no trace of
+where it gave up. M116 left the Wikipedia crash (`layout.c:4504`, the
+same family) with a condition: the same NetSurf 3.11, built for the
+host, decides whose failure it is.
+
+**The host twin.** Built from the same unmodified tarball on this Mac,
+in a scratch directory: first the `monkey` front end, then the
+`framebuffer` front end on libnsfb's display-less `ram` surface, with
+freetype and the guest's own DejaVu files, the JPEG decoder from the
+same jpeg-9f tarball, Duktape running the same eleven scripts (the
+same eleven errors), the guest's `Choices`, and the guest's 800x600
+window. Every one of them rendered apple.com. Three things had to be
+worked around on macOS, all in the build system and none in the tree -
+Apple's `ld` has no `--whole-archive` or `--trace`, macOS hides
+`strcasestr` under `-std=c99`, and Apple's libcurl carries LibreSSL
+while NetSurf's fetcher pokes the SSL context through Homebrew's
+OpenSSL 3 (a `SIGBUS` inside the host's libssl before the first byte;
+`NETSURF_USE_OPENSSL=NO`). And one thing went wrong that is worth the
+record on its own: for three builds the "freetype twin" and the "JPEG
+twin" were the internal-font, no-JPEG build again, because the script
+that built it wrote its own `Makefile.config` over the one I had
+written, and only `nm` on the binary said so. **`tools/build-netsurf-host.sh`**
+is that recipe with one writer, and it checks the binary for
+`FT_Init_FreeType`, `jpeg_read_header` and `duk_create_heap` before it
+calls the result a twin.
+
+So it was this port's, by M116's own condition. Two instruments then
+found where:
+
+- **The first backtrace.** This libc's `__assert_fail` printed one line
+  and aborted, and the function has eleven callers. It now walks the
+  frame chain - bounded, range-checked, symbolised on the host with
+  `nm -n` on the unstripped binary - and `tools/build-netsurf.sh` builds
+  everything with `-fno-omit-frame-pointer` so the chain exists. The
+  first run gave the path: `html_box_convert_done` → `content_broadcast`
+  → `browser_window_callback` → `content__reformat` → `html_reformat` →
+  `layout_document` → nine levels of `layout_calculate_descendant_bboxes`.
+  The **first** layout after box conversion, and a subtree left unsized.
+- **The same bytes to both.** A proxy on the harness's guestfwd (the
+  command it runs per connection fetches the path from apple.com, so the
+  guest and the twin get identical bytes over plain http) and a
+  bisection of the page: no scripts → crashes; no `<main>`, no footer →
+  crashes; **no `nav#globalnav` → renders**. The nav alone → crashes.
+  Its four items one at a time: the shopping bag. The bag without its
+  SVGs, without its badge: crashes; **without its flyout - three nested
+  empty `div`s - renders.** The 145 stylesheet rules those divs can see,
+  inlined and halved twice: one rule.
+
+```css
+#globalnav .globalnav-submenu-content { margin: 0 auto; box-sizing: border-box;
+    width: 100%; max-width: 1024px; display: flex; ... }
+```
+
+**An empty `display: flex` container.** `layout_flex_ctx__create` sizes
+its item list with `calloc(box_count_children(flex), sizeof item)` -
+zero children - and **this libc's `malloc(0)` returned NULL**, which
+C permits and which NetSurf, like every program written against glibc,
+macOS or musl (all of which hand back a unique pointer), reads as out
+of memory. `layout_flex` returned false, silently; `layout_block_context`
+returned false, silently; `layout_document` walked the tree anyway, and
+the assertion fired on the first box the failed subtree had left at
+AUTO. The host never saw it because the host's `calloc(0, n)` is a
+pointer. Google's page has no empty flex container; apple.com's nav has
+one per flyout, and Wikipedia's article layout has them too.
+
+`malloc(0)` returns the minimum block now: real, distinct from every
+other live allocation, aligned like any other, and taken back by
+`free`. `tests/test_malloc.c` says so in two tests, and the one test
+that had asserted the old answer as law (`zero_is_no_allocation…`,
+from M19) keeps its `free(NULL)` half and lost the other. This is the
+lesson the archive already holds under M100 - *a refusal only refuses
+when the caller looks*, and this refusal was legal, silent, and
+sixteen milestones old.
+
+**Verified on the machine**: apple.com renders (`Done (6.8s)`, apple's
+compact layout - plain, because libcss 0.9 has no `calc()` or `var()`),
+and **`https://en.wikipedia.org/wiki/Unix` renders**, which closes
+M116's open box. The reduction is checked in as
+`tools/netsurf-port/flex.html`, installed at
+`/usr/share/netsurf/flex.html`, and typed into the browser by the input
+suite's `browser_survives_an_empty_flex_container`: apple's properties
+on an empty flex container and a red block *after* it in the source,
+so the block is on screen only if the layout finished. Against the old
+allocator the browser is gone before the block could appear.
+
+**What did not cause it, each ruled out by a run rather than by
+reading**: JavaScript (the page with every script removed crashes),
+the JPEG decoder (the guest with `NETSURF_USE_JPEG=NO` crashes), fonts
+(the freetype backend never fails a width call - a missing glyph is
+skipped), the window width (the twin at 800 px renders), an allocation
+being *refused* by the kernel (a temporary trace on `sbrk` printed
+nothing), and the arrival order of stylesheets (the fixture has one,
+inline).
+
+#### The instruments
+
+| instrument | what it grades | against the bug |
+|---|---|---|
+| `tests/test_malloc.c` (+2) | `malloc(0)`: a real block, distinct, aligned, freed and reused, ten thousand in a row leak nothing | the old allocator: `expected non-NULL` |
+| **`window_animations_stay_smooth`** (input suite, `--quick`) | eight animations started on a quiet desktop (a close that lands mid-animation shares the run, so at least four are reported), the compositor's own `anim_frame_gap_ms` lines read back from the serial log: the two best animations at ≤ 50 ms, the worst ≤ 250 | HEAD's best two: 60 and 60, fails |
+| **`browser_survives_an_empty_flex_container`** (input suite, `--quick`) | the reduction typed into the browser; the red block after the empty flex container must be on screen within 20 s and the window still there | the old allocator: the window is gone |
+| `tools/build-netsurf-host.sh` | the M116 condition, repeatable: the same NetSurf for this Mac, `run <url>` reports rendered or crashed, and it refuses to call itself a twin without freetype, jpeg and duktape in the binary | — |
+| `__assert_fail`'s backtrace + `-fno-omit-frame-pointer` in the port | where a ported program died, not only that it did | the first run: 22 frames, symbolised |
+| `anim_frame_gap_ms` | the longest gap between two frames of every window animation, from the compositor, one row per animation - in place of the M61 grep on one composite's length | HEAD's own numbers: 60-100 ms, every animation |
+| `tests/test_wmclient.c` (10 tests) | `wm_wait_ms`: the event pipe first, extras after, negatives skipped, the cap, zero as a poll, the return contract; `wm_present`: one `wm_action_request_t` naming this window and `WM_ACTION_PRESENT`, the pipe opened once, no window id means no write. wmclient.c compiled whole against scripted syscalls, the way test_poll.c does poll.c | — |
+| **`[m117]`** boot self-test | click-to-photon through a client (three presses on `wm_zorder`, the tick's pixel polled from the press), and the CPU the compositor and four idle clients use over two seconds, from per-task ticks | the first version measured idle from the run queue and read 100% busy with clients that were provably asleep - see below |
+| `click_to_photon_us`, `desktop_busy_pct` | `tests/budgets.tsv` rows for both | — |
+| the sampler | the guest's RIP/CR3 through the monitor, 400 samples over 25 s, symbolised against `kernel.elf` and the user binaries - a scratch script this time, and the instrument that separated "halted in `pit_sleep_ms`" from "compositing" | — |
+
+#### What went wrong in this milestone's own work
+
+- **The first idle measurement in the self-test was the wrong one.**
+  `sched_idle_ticks` counts ticks with nothing runnable, and in the
+  middle of the battery something always is: the `[m68]` line in the
+  same log said 2.7% idle for the whole boot. The row read 100 with four
+  clients that the host-side sampler showed asleep. Per-task user+sys
+  ticks (M101's) charge a spinning client and not a blocked one whatever
+  else is on the run queue, and that is what the row measures now.
+- **`rm -rf netsurf-all-3.11/*/build` deleted source.** NetSurf's
+  libraries keep their *build scripts* in `build/` and their objects in
+  `build-<host>-<target>-release-lib-static/`; the command meant to
+  force a rebuild with the new flag removed `libparserutils/build/
+  make-aliases.pl` and two more, and `make` then failed with no output
+  at all - `make -d` was the instrument that found it, 7,960 lines in.
+  Restored from the tarball, byte for byte, which is what keeping the
+  tarball is for. The generated directories are the `build-*` ones.
+- **Six graded boots read `click_to_photon_us` at 734-751 ms** - three
+  presses each landing on the 1 s safety net (573, 733, 734: three
+  draws from a 0-1 s wait) - after three had read 63-70. The scheduler's
+  display task was suspected, withdrawn, and cleared: the number stayed
+  with it gone. The allocator was suspected and cleared: a trace showed
+  no zero-byte request on the desktop, and a variant with the old
+  allocator read 139 ms under threefold host load. A trace in the
+  compositor then showed the thing itself: during those presses **no
+  present from `wm_zorder` ever reached the compositor**, while three
+  clocks spawned seconds later presented through the same pipe and were
+  composited at once. The client's present is one `sys_pipe_open` of
+  the shared action pipe - its first, on the first press - and one
+  16-byte write. Two changes in the client made the number 62-87 again
+  in every boot since: a trace line after the present (an extra
+  syscall, nothing more), and then presenting the first frame at
+  startup, which moves that first open of the action pipe from the
+  first click to the moment the window exists. **Why a named pipe's
+  first open from a second process, followed at once by a write, loses
+  that write while a client blocked in `SYS_waitfds` on another pipe
+  waits, is not understood** - `kernel/ipc/pipe.c` is persistent for
+  named pipes and never drops a byte by reading; it is the open box
+  below with a host test named as the instrument. One clean run of a
+  probabilistic failure was believed twice on the way; the third time
+  the trace was demanded first.
+- **Nine clients drew their first frame and never said so.** Every
+  program here paints once before entering its loop, and the loop
+  presents only what it draws afterwards; under the 100 ms poll the
+  first frame was on screen within a tenth of a second whatever the
+  order, and under the 1 s net it is on screen when the compositor's
+  own window-creation redraw happens to come *after* the client's
+  paint, or a second later. `[m44]` caught it once - the wallpaper
+  read black 1.2 s after `desktop_icons` was spawned, with the trace
+  showing the desktop window's only present composited before its
+  paint - and the input suite's app launches had been showing chrome
+  with the content a beat behind. Every client presents its first
+  frame now. The terminal had the opposite habit: with a child running
+  it set `changed` on every pass, which was twenty redraws and presents
+  a second of nothing once the loop woke on a timer instead of
+  spinning; it redraws when output arrived or a child ended.
+- **`--full` had never been green, and three of its stages were red for
+  reasons older than this milestone.** `make coverage` had not compiled
+  since M111: its CFLAGS lacked `-Iuser_space/lib` and
+  `-DLEANOS_HOST_TEST`, which every other host build has, so every test
+  that includes user-space code failed to build there and the stage
+  said FAIL without saying why. With the flags, one floor moved by
+  0.26% (`wchar.c`, three lines the define now compiles and the tests
+  never reached - lowered, and said so) and six files had no floor at
+  all; they have one now. The I/O APIC battery ran out of its 900 s
+  inside `[m100]`'s library suites: the default battery is 405-423 s
+  on a populated image (M100 measured 362 on a bare one) and that path
+  costs 2x - the ceiling is 1200. And once, on that path, `libctest`
+  read `time()` twice across a 1.5 s `poll` and got the same second -
+  a boot that ran straight after the 28-minute mutation census; two
+  I/O APIC boots since, one of HEAD and one of this tree, passed the
+  same check. Recorded, not explained, and the host is on the record
+  as a suspect with form (M100).
+- **A test can't stub what another test already defines.** The host
+  runner links every `tests/test_*.c` into one binary, so `test_poll.c`'s
+  `sys_waitfds` fake is global; the wmclient test renames the call on
+  the way in with a macro rather than fight for the symbol.
+- **`[wm] animation missed its frame budget`, and four wrong answers
+  before the right one.** The graded boot reported it where none had
+  before, and the person's desktop showed it too: four of eight
+  open/close animations with a worst frame of 40-50 ms. In order:
+  (1) *a loaded host* - no, it recurred quiet; (2) *a present
+  composited between two animation frames* - deferring presents during
+  animations changed nothing (the deferral stays: it is cheap and
+  right); (3) *the scheduler demoting a compositor that spun through
+  `sys_yield` to batch priority once nothing else spun with it* - a
+  real hazard, and the animation loop now sleeps until the next frame
+  is due instead of spinning, which stays too, but it made the misses
+  *worse*; (4) *`malloc(0)`* - a variant with it reverted ran a clean
+  battery, and a trace then showed **no program on the desktop calls
+  `malloc(0)` at all**. That variant's clean run was chance, and the
+  lesson is old: one clean run of a probabilistic failure is not
+  evidence. What was: **HEAD, built in a worktree, running the same
+  eight animations with the report printed after every run** - 3 to 5
+  frames per 140 ms animation, so the frame *interval* has been
+  30-45 ms since M61 under TCG, and one animation in seven missed at
+  HEAD too. The budget never measured the interval; it timed the
+  composite, and the composite excludes the yields between frames. Then
+  HEAD plus one change at a time, on the desktop rather than in the
+  battery: the new clients alone - clean; the new compositor alone -
+  misses; and of the compositor's changes, the 1 s fallback alone -
+  misses, the sleeping animation loop alone - misses. Both make the
+  compositor *block more*, and the mechanism is coincidence: every
+  client now wakes on a PIT tick, every frame starts on one, and a
+  client's redraw that used to land at the compositor's own yield
+  between frames now lands inside the frame at the compositor's slice
+  expiry, where `took` counts it. Under the old spin the rotation put
+  a client's redraw between frames by accident. **The obvious fix is what every
+  windowing system has: the process that owns the screen goes first** -
+  and it was built three ways, measured three times, and withdrawn.
+  `task_t.display`, set at spawn from `CAP_FRAMEBUFFER` and reachable
+  by nothing a program can call, with `pick_next` taking a ready
+  display task first and a woken one preempting a client at the next
+  tick. "Keeps the CPU for three slices": M69's input-to-photon
+  self-test - a kernel task polling the framebuffer with `schedule()` -
+  stopped making progress and the battery sat silent from `[m67]` to
+  the 900 s ceiling. "One slice": the batch demotion put a *starting*
+  compositor behind task 0 halting in `pit_sleep_ms`, and the first
+  `[wm]` test never saw a frame. "First at a pick, preempt on wake,
+  nothing more": the desktop was at its best (7-8 frames, 20-30 ms), but the
+  battery stopped after `[m67]` again and `click_to_photon_us` read
+  738 ms - three 250 ms liveness caps, a client that was not being
+  woken and ran only when its own cap expired. Four scheduler tests on
+  the fake CPU passed all three versions, which says what they tested
+  and what they did not. The mechanism between a display task, a
+  kernel task that polls through `schedule()`, and a client blocked on
+  the poll channel is not understood, and a scheduler change that is
+  not understood does not ship; it is the open box below, with the
+  host scheduler test named as the instrument that has to reproduce
+  it first. The message carries
+  the worst frame's duration now, because "1 of 5 frames" was the
+  whole of what the first runs had to say. And then the number that
+  ended it: the same report built into HEAD, with the gap between
+  frames added, showed HEAD's animations at 3-5 frames with 60-100 ms
+  gaps - the sleeping desktop draws 4-7 frames 40-50 ms apart, and
+  7-8 at 20-30 with the display task that was withdrawn. The old rule had graded the composite, the one part
+  of a frame that got *longer* here (a cold vCPU thread runs each
+  frame from a halt, which is the price of a guest that sleeps), while
+  the gap, the part a person waits through, fell by two-thirds and had
+  never been measured. `anim_frame_gap_ms` is the row now; the
+  per-animation line carries the frame count and the longest composite
+  beside it.
+#### Cost
+
+Seven bugs fixed in the machine: `malloc(0)` returning NULL (M19's
+answer, sixteen milestones old); twelve client loops that spun through
+`sys_yield`; a compositor with no way to learn a client had drawn;
+NetSurf's surface waking two hundred times a second; the compositor's
+animation loop spinning; nine first frames drawn and never presented;
+the terminal redrawing twenty times a second with a child running. Four
+instruments that did not exist: a backtrace on assert and a port built
+with frame pointers, the host twin (`tools/build-netsurf-host.sh`),
+the flex fixture and its suite test, and the animation-gap row with its
+suite test - plus `[m117]`'s two rows, ten wmclient tests, two malloc
+tests, and a RIP sampler that stayed a scratch script. One box from
+M116 closed (Wikipedia renders); three opened here.
+
+What it cost is on the record above and is the larger part of the
+entry: twelve graded boots, five wrong theories about one number,
+a scheduling class built three ways and withdrawn, three host twins
+that were not twins, a `rm -rf` that deleted somebody else's source, a
+QEMU left running for two hours by a `pkill` that killed only the
+script, and two clean runs of a probabilistic failure believed before
+the trace was demanded. **Graded**: 395/395 host tests; every `--fast` stage; the commit tier;
+and `--full` end to end - 8,308 s - with every stage green except
+three, recorded rather than hidden: the four-core stage (the M106-tail
+timeout before `[m106]`, row 5 of the queue, "failing 2 runs in 3");
+the I/O APIC battery, which no `--full` in this project's history has
+passed and which is a box below; and the bootstrap build, which is
+the other. In that run: coverage and its ratchet (green for the first
+time since M111), the sampled mutation census, fuzzing, the graded
+boot (430 s, presses 62/66/66 ms), somebody else's configure, all 56
+interactive tests (the animation test read gaps of 50/50/50/80/130 ms),
+sixteen power cuts, both refusing disks, and inside the bootstrap
+stage every measurement it took: 35.9 s per C translation unit against
+32.1, 92.5 s per C++ unit against 86.9, bzip2 built in 232 s against
+203 - gcc on this libc, with a real `malloc(0)`, about 12% slower
+across the board, which is also what the host's own load looked like
+that evening. `--full` has never been green here; the two runs on
+record before this one failed at 2,635 s and 7,048 s.
+
+---
+
 ## Every open box, in one place
 
 The queue says what order. This says exactly what is unfinished, in the
@@ -3538,17 +3979,92 @@ write nothing and return successfully).
       in `tools/build-netsurf.sh`, not fixed. The fix is to stop having
       two headers with one name.
 
-### M116 — the browser on the real web, graded where the person looks `[x]` (one box open)
+### M116 — the browser on the real web, graded where the person looks `[x]` (closed 2026-09-11)
 
-- [ ] **Wikipedia aborts the browser.** It used to stall at 0.4 KiB/s;
-      with the network fixed, `https://en.wikipedia.org/wiki/Unix`
-      arrives in 4.6 s and NetSurf stops on its own assertion
-      (`layout.c:4504`, after a flex item's layout fails). **The
-      condition**: the same NetSurf 3.11 built for the host (the `monkey`
-      front end) against a saved copy of the page decides whose failure
-      it is - upstream's, answered by a newer NetSurf, or this port's,
-      most likely an allocation or font call that fails only here. Not
-      -DNDEBUG. See the M116 entry.
+- [x] **Wikipedia aborts the browser.** Closed by M117: the condition was
+      met (the same NetSurf, built for the host, rendered the page), and
+      the failure was this port's - `malloc(0)` returning NULL, read by
+      NetSurf's flex layout as out of memory for every empty flex
+      container. `https://en.wikipedia.org/wiki/Unix` renders in 17.4 s.
+      The condition's guess ("an allocation ... that fails only here")
+      was right; the mechanism - a legal refusal, not a failure - was
+      not, which is why it took a bisection to find.
+
+### M117 — a desktop that sleeps, a click that shows, and the browser's first backtrace `[~]`
+
+- [ ] **The display task.** The compositor as a scheduling class of
+      its own - first at a pick, preempting at a wake, derived from
+      `CAP_FRAMEBUFFER` at spawn - was built, and withdrawn: see the
+      M117 entry for the three versions and what each did to the
+      battery. **The condition**: `tests/test_sched.c` reproduces, on
+      the fake CPU, a kernel task polling through `schedule()` while a
+      client blocked on the poll channel waits for a wake the
+      compositor's event write should deliver - the shape of `[m117]`'s
+      738 ms click - and fails against the flag before any version of
+      it is tried on the machine again. Without it the desktop draws
+      4-7 frames per animation 40-50 ms apart (HEAD: 3-5, 60-100);
+      with it, 7-8 and 20-30. That difference is what the box is worth.
+- [ ] **A first present that never arrives.** Six graded boots saw
+      `wm_zorder`'s presents never reach the compositor when its first
+      `sys_pipe_open` of `WM_ACTION_PIPE` happened on the first click
+      (details under M117's *what went wrong*). Every client presents
+      at startup now, and the number has held since - but the
+      mechanism is unknown, and an unknown mechanism is not fixed. **The
+      condition**: a host test in `tests/` - `test_pipe` beside
+      `test_poll` - that has one task open an existing named pipe and
+      write 16 bytes while a second task is blocked in `SYS_waitfds`
+      on the poll channel for a different pipe, and reads the 16 bytes
+      back from the first pipe; if it passes, the failure is in the
+      timing the fake cannot make, and the next instrument is the
+      compositor's action-pipe reads logged with `pipe_buffered` on the
+      machine.
+- [ ] **The I/O APIC battery, twice red in one afternoon, differently.**
+      `--full` runs the battery a second time with every legacy line
+      through the I/O APIC (M103), a path that costs 2x and that no
+      `--full` had ever passed. Two boots of this tree there: one ended
+      inside `[m100]`'s library suites at the old 900 s ceiling (now
+      1200); one panicked at `[m61]` - "motion is switched off and
+      something still animated: 2 pixels lit" - right after an
+      animation the compositor reported at 5 frames and a 190 ms gap,
+      while a third boot of this tree on the same path passed `[m61]`
+      and reached `[m100]`. The shape is the sleeping animation loop
+      retiring its last frame a beat late on a slow path, against a
+      self-test that samples on a fixed clock; the `[m117]` press on
+      that path read 212 ms. **The condition**: `[m61]`'s "motion off"
+      check waits for the previous animation's report line (the
+      compositor prints one per run now) before it minimizes, and the
+      I/O APIC battery is run three times on this tree with that change
+      in; if the two pixels come back, the culprit is the compositor's
+      end-of-animation frame and `dirty = 1` at animation end has to be
+      followed by the redraw in the same pass on every path.
+- [ ] **The bootstrap stage hung in bzip2's own test suite.** The
+      machine built bzip2 with its own gcc (232 s), ran every compress
+      and decompress of the suite, compared the three `.bz2` outputs,
+      and stopped inside `cmp sample1.tst sample1.ref` - a read that
+      never returned, on a file the shell had just written by redirect
+      - until the stage's 3,600 s ceiling. `cmp` is toybox's and reads
+      into a static buffer, so the allocator is not in it; `[m89]` and
+      `[m94]` ran toybox and bzip2 on the same boot without complaint.
+      Whether this predates M117 is unknown: the stage is `--full`-only,
+      M100's second increment saw it finish once at cdbca6e, and no
+      `--full` since has been recorded. **The condition**:
+      `tools/bootstrap-test.sh` on HEAD's image with the native
+      toolchain installed (a worktree, `make all`,
+      `install-native-toolchain.sh`), then on this tree twice; if only
+      this tree hangs, the next instrument is the kernel's read path
+      logged for that one `cmp` - which descriptor, which inode, which
+      block - because a regular file that never reaches end-of-file is
+      the filesystem's bug or the writer's, not the reader's.
+- [ ] **The rest of the idle cost.** 11% of a host core with nothing
+      open (was 22%), 23% with eight windows (was 44%). The sampler
+      says where: 75-80% of samples halted in `pit_sleep_ms`, and 5-12%
+      compositing rectangles for presents that timers send whether or
+      not anything changed - the shell every 300 ms, settings every
+      500 ms - each with a blended shadow under it. **The condition**:
+      the same sampler (the scratch script is described in the M117
+      entry; it belongs in `tools/` when it is needed a second time)
+      run before and after presenting only on change, and the number
+      it reports. A few percent of a host core; the crash outranked it.
 
 ### M103 — interrupts a real machine delivers `[~]`
 
@@ -3994,6 +4510,24 @@ of them recurred in a form nobody recognised the second time.
   full CPU for forty minutes, and the graded boot running alongside
   reported every disk number 3–10x its recorded value and timed out.
   Look at `uptime` before believing a slow boot (M100).
+- **A twin that was not a twin proves nothing, and it will not say so.**
+  M117 built "the same NetSurf, for the host" three times with the
+  wrong switches - a script wrote its own config over the one being
+  edited - and each one rendered the page the guest died on, for a
+  reason that had nothing to do with the guest. `nm` on the binary was
+  the check that should have come first; `tools/build-netsurf-host.sh`
+  does it before it calls the result a twin.
+- **In a third-party tree, `build/` may be source.** NetSurf's
+  libraries keep their build *scripts* there and their objects in
+  `build-<host>-<target>-…`. `rm -rf */build` to force a rebuild deleted
+  `libparserutils/build/make-aliases.pl` and `make` then failed with no
+  output at all - `make -d`, 7,960 lines in, was the only thing that
+  said why. The tarball is what restored it, byte for byte.
+- **A legal refusal is the hardest kind to find.** `malloc(0)` returning
+  NULL is permitted by C, was tested for, and was wrong for every
+  program written against every other libc. It failed one layout
+  silently, sixteen milestones after it was written, and only a
+  backtrace plus a bisection of a real page could name it.
 - **The four instruments each reach something the others cannot**, and the
   proof is on the record: three bugs in M98's second increment were found
   only by the boot marker, one only by the host tier, one only by a boot

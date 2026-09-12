@@ -1094,6 +1094,34 @@ int snprintf(char *out, size_t n, const char *fmt, ...) {
 
 void __assert_fail(const char *expr, const char *file, int line) {
     fprintf(stderr, "assertion failed: %s at %s:%d\n", expr, file, line);
+    /* M117: the return addresses on this stack, for a program built with
+     * frame pointers - which everything tools/build-netsurf.sh builds now
+     * is. A ported program's assertion used to be a one-line epitaph:
+     * NetSurf stopped on `box->height != AUTO at layout.c:5333` on
+     * apple.com and nothing on the machine could say which of the
+     * eleven callers of that function it was in, while the same NetSurf
+     * built for the host rendered the page. Symbolise the addresses with
+     * `nm -n` on the unstripped binary (build/netsurf/netsurf).
+     *
+     * Bounded and checked rather than trusted: without frame pointers
+     * rbp is an ordinary register, so the walk stops at the first link
+     * that is not a stack address above the last one, and never goes far
+     * enough up the stack to leave it. A program that faults here was
+     * dying anyway, and the line above is already out. */
+    uintptr_t *fp = (uintptr_t *)__builtin_frame_address(0);
+    uintptr_t floor = (uintptr_t)&fp;
+    for (int i = 0; i < 32; i++) {
+        uintptr_t here = (uintptr_t)fp;
+        if (here <= floor || here - floor > (8u << 20) || (here & 7u) != 0) {
+            break;
+        }
+        fprintf(stderr, "  #%d %p\n", i, (void *)fp[1]);
+        uintptr_t *next = (uintptr_t *)fp[0];
+        if (next <= fp) {
+            break;
+        }
+        fp = next;
+    }
     abort();
 }
 

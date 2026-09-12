@@ -309,7 +309,7 @@ else
   # measurement that decided which is which.
   if [ "$TIER" = "full" ]; then
     run_stage "the same battery, through the I/O APIC" \
-      bash -c 'LEANOS_IOAPIC=1 ./tools/qemu-serial-test.sh 900'
+      bash -c 'LEANOS_IOAPIC=1 ./tools/qemu-serial-test.sh 1200' # M117: the default battery is 405-423 s on a populated image and this path costs 2x; at 900 it timed out inside [m100]'s library suites
   fi
 
   # ---- Stage 3: real clicks on real pixels ----------------------------

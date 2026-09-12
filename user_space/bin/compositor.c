@@ -121,7 +121,7 @@
 #define TITLEBAR_FOCUS_COLOR 0x004C99E6u
 #define CURSOR_COLOR         0x00FFFFFFu
 #define CURSOR_SIZE          8
-#define REDRAW_INTERVAL_MS   100 /* fallback cadence for changes the compositor has no way to notice itself - a client (M21's clock demo) redrawing its own window's pixels with no input involved at all. Input-driven changes no longer wait on this - see `dirty`, below. */
+#define REDRAW_INTERVAL_MS   1000 /* M117: a SAFETY NET, not a cadence. This was 100 ms - the fallback for changes the compositor has no way to notice itself, a client redrawing its own pixels with no input involved - which meant a full-screen composite ten times a second on a desktop where nothing had changed, and up to 100 ms between a browser laying out a page and the page being on screen. Clients now say when they have drawn (WM_ACTION_PRESENT, wmclient's wm_present), so this is one full frame a second for a client that never does - which nothing in this tree is - kept so that such a client is late rather than frozen. Input-driven changes never waited on this - see `dirty`, below. */
 
 /* M30: titlebar buttons, right-aligned, close nearest the edge (the
  * conventional rightmost slot) - minimize/maximize/close, left to right.
@@ -599,6 +599,9 @@ static long frame_due_ms;      /* when the next animation frame is owed */
 static int frame_settle_owed;
 static uint32_t frames_over_budget;
 static uint32_t frames_drawn;
+static long worst_frame_ms; /* M117: the longest composite of the run */
+static long worst_gap_ms;   /* M117: the longest wait between two frames - what a person sees as a stutter */
+static long last_frame_ms;  /* 0 between runs */
 static long anim_run_start_ms; /* when the current run of animations began */
 
 /* M61: where each window's taskbar button is, as desktop_shell.c last
@@ -715,6 +718,15 @@ static int32_t last_drawn_cursor_x, last_drawn_cursor_y; /* cursor position as o
  * of any single redraw, for a change that only ever touches an 8x8
  * pixel box. */
 static int dirty = 1; /* starts dirty: draw the first frame */
+/* M117: the union of every window presented since the last composite -
+ * screen coordinates, content rectangles only (a client cannot change
+ * its own chrome). Flushed once per loop pass with redraw_rect, which
+ * composites everything under that rectangle in z-order, so a window
+ * presenting behind another is exactly as correct as it was under the
+ * 100 ms poll and costs a rectangle rather than a screen. */
+static int present_pending;
+static int32_t present_x0, present_y0, present_x1, present_y1;
+
 
 /* ---- M51: the z-order -------------------------------------------------
  *
@@ -3649,12 +3661,32 @@ static void clamp_window_on_screen(int idx) {
                         max_i32(content_top_limit(), content_bottom_limit() - win->h));
 }
 
-static void accept_pending_action(int action_read_fd) {
-    if (sys_pipe_poll(action_read_fd) < (long)sizeof(wm_action_request_t)) {
+static void present_window(int id) {
+    const window_t *win = &windows[id];
+    if (win->minimized || !window_here(win)) {
+        return; /* nothing of it is on screen to composite */
+    }
+    int32_t x0 = win->x, y0 = win->y, x1 = win->x + win->w, y1 = win->y + win->h;
+    if (!present_pending) {
+        present_x0 = x0; present_y0 = y0; present_x1 = x1; present_y1 = y1;
+        present_pending = 1;
         return;
     }
+    present_x0 = min_i32(present_x0, x0);
+    present_y0 = min_i32(present_y0, y0);
+    present_x1 = max_i32(present_x1, x1);
+    present_y1 = max_i32(present_y1, y1);
+}
+
+static void accept_one_action(int action_read_fd) {
     wm_action_request_t req;
     if (read_exact(action_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
+        return;
+    }
+    if (req.action == WM_ACTION_PRESENT) {
+        if (req.window_id >= 0 && req.window_id < window_count && windows[req.window_id].alive) {
+            present_window(req.window_id);
+        }
         return;
     }
     /* M61: where a window's taskbar button is. Handled before the
@@ -3713,6 +3745,22 @@ static void accept_pending_action(int action_read_fd) {
         return;
     }
     apply_window_action(req.window_id, req.action, req.value);
+}
+
+/* M117: every complete request on the pipe, not one per pass. One per
+ * pass was fine when actions were things a person did - a click on a
+ * taskbar button - and is not once every client presents its frames
+ * through the same pipe: eight windows drawing at once would have been
+ * eight passes and eight composites instead of one rectangle. Bounded so
+ * a client presenting in a tight loop cannot keep this loop from ever
+ * reaching the mouse. */
+static void accept_pending_action(int action_read_fd) {
+    for (int i = 0; i < 32; i++) {
+        if (sys_pipe_poll(action_read_fd) < (long)sizeof(wm_action_request_t)) {
+            return;
+        }
+        accept_one_action(action_read_fd);
+    }
 }
 
 /* ---- M74: the desktop survives a settings mistake ----------------------
@@ -5076,6 +5124,10 @@ int main(void) {
          * keeps a 16 ms budget reachable at all. */
         if ((anim_any_active() || frame_settle_owed) && now >= frame_due_ms) {
             int32_t ax0, ay0, ax1, ay1;
+            if (last_frame_ms != 0 && now - last_frame_ms > worst_gap_ms) {
+                worst_gap_ms = now - last_frame_ms;
+            }
+            last_frame_ms = now;
             frame_due_ms = now + FRAME_MS;
             frame_settle_owed = anim_any_active();
             long began = sys_uptime_ms();
@@ -5109,6 +5161,9 @@ int main(void) {
                 if (took > FRAME_BUDGET_MS) {
                     frames_over_budget++;
                 }
+                if (took > worst_frame_ms) {
+                    worst_frame_ms = took;
+                }
             }
             if (!anim_any_active()) {
                 /* The run is over: the whole area every animation passed
@@ -5117,22 +5172,43 @@ int main(void) {
                  * it was not - a line printed on a good run would draw
                  * over the very desktop the animation was about. */
                 dirty = 1;
-                if (frames_over_budget > 0) {
-                    char msg[96];
+                /* M117: every run reports, and what is graded is the gap.
+                 * Since M61 the serial harness failed a boot on any frame
+                 * whose composite took more than FRAME_BUDGET_MS, and that
+                 * number excluded everything between frames - the yields,
+                 * the other tasks, the wait for the tick. HEAD before M117
+                 * drew 3-5 frames per 140 ms animation, 30-45 ms apart,
+                 * and never said so. The longest gap between two frames
+                 * is what a person sees as a stutter, so it is the
+                 * [perf] row (tests/budgets.tsv: anim_frame_gap_ms); the
+                 * frame count and the longest composite are on the same
+                 * line for whoever is reading the log. */
+                if (frames_drawn > 0) {
+                    char msg[128];
                     int n = 0;
-                    static const char pre[] = "[wm] animation missed its frame budget: ";
+                    static const char pre[] = "[wm] animation: ";
                     for (int i = 0; pre[i]; i++) {
                         msg[n++] = pre[i];
                     }
-                    n += format_uint((uint32_t)frames_over_budget, msg + n);
-                    static const char mid[] = " of ";
+                    n += format_uint(frames_drawn, msg + n);
+                    static const char mid[] = " frames, longest composite ";
                     for (int i = 0; mid[i]; i++) {
                         msg[n++] = mid[i];
                     }
-                    n += format_uint(frames_drawn, msg + n);
-                    static const char post[] = " frames\n";
+                    n += format_uint((uint32_t)worst_frame_ms, msg + n);
+                    static const char mid2[] = " ms, longest gap ";
+                    for (int i = 0; mid2[i]; i++) {
+                        msg[n++] = mid2[i];
+                    }
+                    n += format_uint((uint32_t)worst_gap_ms, msg + n);
+                    static const char post[] = " ms\n[perf] anim_frame_gap_ms ";
                     for (int i = 0; post[i]; i++) {
                         msg[n++] = post[i];
+                    }
+                    n += format_uint((uint32_t)worst_gap_ms, msg + n);
+                    static const char unit[] = " ms\n";
+                    for (int i = 0; unit[i]; i++) {
+                        msg[n++] = unit[i];
                     }
                     sys_write(1, msg, (size_t)n);
                 }
@@ -5150,13 +5226,42 @@ int main(void) {
                  * further to say about itself.) */
                 frames_over_budget = 0;
                 frames_drawn = 0;
+                worst_frame_ms = 0;
+                worst_gap_ms = 0;
+                last_frame_ms = 0;
             }
         }
 
         if (dirty || now - last_redraw_ms >= REDRAW_INTERVAL_MS) {
             redraw();
             dirty = 0;
+            present_pending = 0; /* a full frame covers whatever was presented */
             last_redraw_ms = now;
+            last_drawn_cursor_x = cursor_x;
+            last_drawn_cursor_y = cursor_y;
+        } else if (present_pending && !anim_any_active()) {
+            /* M117: the presented windows, and the cursor with them if it
+             * moved - redraw_rect repaints the cursor inside its clip, and
+             * a cursor half inside the rectangle would otherwise be drawn
+             * at its old place there and its new place elsewhere.
+             *
+             * Not while something is animating: the animation's frames
+             * are then the only composites in flight, and the full frame
+             * every animation ends with covers whatever was presented
+             * meanwhile. (M117's first graded boots missed the animation
+             * frame budget and this was the first suspect; it was not
+             * the cause - see the wait at the bottom of the loop - but a
+             * present composited between two animation frames does
+             * widen the gap, and the deferral stays.) */
+            int32_t x0 = present_x0, y0 = present_y0, x1 = present_x1, y1 = present_y1;
+            if (cursor_x != last_drawn_cursor_x || cursor_y != last_drawn_cursor_y) {
+                x0 = min_i32(x0, min_i32(last_drawn_cursor_x, cursor_x));
+                y0 = min_i32(y0, min_i32(last_drawn_cursor_y, cursor_y));
+                x1 = max_i32(x1, max_i32(last_drawn_cursor_x, cursor_x) + CURSOR_SIZE);
+                y1 = max_i32(y1, max_i32(last_drawn_cursor_y, cursor_y) + CURSOR_SIZE);
+            }
+            redraw_rect(x0, y0, x1, y1);
+            present_pending = 0;
             last_drawn_cursor_x = cursor_x;
             last_drawn_cursor_y = cursor_y;
         } else if (cursor_x != last_drawn_cursor_x || cursor_y != last_drawn_cursor_y) {
@@ -5207,22 +5312,37 @@ int main(void) {
          * sys_yield handed back, so this is not a latency regression by
          * construction.
          *
-         * While something is animating it still spins, because a 16 ms
-         * frame budget cannot be met by a 10 ms-granularity timer and a
-         * machine mid-animation is busy by definition. */
+         * M117: and while something is animating it sleeps too, until
+         * the next frame is due. It used to spin through sys_yield here
+         * (M61: "a 16 ms frame budget cannot be met by a 10 ms-granularity
+         * timer"), and that was survivable only because every client on
+         * the desktop was spinning with it - the yields rotated the CPU
+         * round the run queue, so no task was ever current at ten slice
+         * expiries in a row. M117 made the clients block, the spin became
+         * the only runnable task, and after SCHED_BATCH_THRESHOLD full
+         * slices (100 ms - shorter than a window's open animation) the
+         * scheduler demoted the compositor to batch priority: the first
+         * client its own events woke then preempted it mid-frame for a
+         * whole quantum, and the graded boot reported animation frames of
+         * 40-60 ms where none had missed before. A yield is not a block;
+         * this is. The frame interval is now a tick or two rather than
+         * exactly 16 ms - 50-60 Hz - and the compositor no longer burns a
+         * core for the length of every animation. Input still wakes it
+         * at once: the mouse and every pipe below wake SYS_waitfds. */
+        int wait_fds[10];
+        int nwait = 0;
+        wait_fds[nwait++] = 0; /* keystrokes */
+        wait_fds[nwait++] = req_fds[0];
+        wait_fds[nwait++] = query_fds[0];
+        wait_fds[nwait++] = action_fds[0];
+        wait_fds[nwait++] = settings_fds[0];
+        wait_fds[nwait++] = settings_query_fds[0];
+        wait_fds[nwait++] = notify_fds[0];
+        wait_fds[nwait++] = drag_fds[0];
         if (anim_any_active() || launcher_fading() || snap_fading()) {
-            sys_yield();
+            long remaining = frame_due_ms - sys_uptime_ms();
+            sys_waitfds(wait_fds, nwait, remaining > 0 ? (int)remaining : 0);
         } else {
-            int wait_fds[10];
-            int nwait = 0;
-            wait_fds[nwait++] = 0; /* keystrokes */
-            wait_fds[nwait++] = req_fds[0];
-            wait_fds[nwait++] = query_fds[0];
-            wait_fds[nwait++] = action_fds[0];
-            wait_fds[nwait++] = settings_fds[0];
-            wait_fds[nwait++] = settings_query_fds[0];
-            wait_fds[nwait++] = notify_fds[0];
-            wait_fds[nwait++] = drag_fds[0];
             sys_waitfds(wait_fds, nwait, 10);
         }
     }

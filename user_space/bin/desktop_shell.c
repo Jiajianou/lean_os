@@ -595,6 +595,7 @@ int main(void) {
 
     refresh_running_slots(&win);
     redraw(&win);
+    wm_present(&win); /* M117: the first frame, like every other one */
 
     long next_refresh = 0;
     for (;;) {
@@ -670,6 +671,7 @@ int main(void) {
         }
         if (changed) {
             redraw(&win);
+            wm_present(&win);
         }
         /* M45: tell the compositor how far out of the bar to draw, after
          * the pixels are already there - raising the overhang first would
@@ -680,5 +682,10 @@ int main(void) {
             ctx_overhang = want;
             wm_set_panel_overhang(win.window_id, want);
         }
+        /* M117: a pressed Start button and an open context menu are the
+         * two things here that change with time rather than with input,
+         * and both are short; everything else waits for the next refresh
+         * or an event. */
+        wm_wait_ms(&win, NULL, 0, (pressed || ctx_overhang) ? 50 : (int)(next_refresh - now));
     }
 }

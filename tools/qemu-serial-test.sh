@@ -549,6 +549,7 @@ REQUIRED_MARKERS=(
   # this harness is what provides the stream: an image that prints the
   # skip line here has lost the fw_cfg switch, not the network.
   "[m116] a stream from the host:"
+  "[m117] a desktop that sleeps and a click that shows:"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"
@@ -610,15 +611,10 @@ fi
 # Failing here on that run would be failing the compositor for something
 # the compositor did not do; ignoring it silently would be worse. So it
 # is reported, and says which.
-if [ "${LEANOS_IOAPIC:-0}" = "1" ] &&
-   grep -qF "[wm] animation missed its frame budget" "$LOG"; then
-  echo "NOTE: $(grep -F '[wm] animation missed its frame budget' "$LOG" | head -1)"
-  echo "      - not graded on the I/O APIC path: the budget is wall-clock and"
-  echo "        this emulator runs at about half speed with an enabled APIC."
-elif grep -qF "[wm] animation missed its frame budget" "$LOG"; then
-  pass=0
-  echo "FAIL: $(grep -F '[wm] animation missed its frame budget' "$LOG" | head -1)"
-fi
+# M117: the animation frame budget is a [perf] row now (anim_frame_gap_ms,
+# one line per animation) and is graded with the others below. The grep
+# that used to fail a boot here graded the length of one composite, which
+# excluded everything between two frames; what a person sees is the gap.
 
 # ---- Q6: the measurements, graded ------------------------------------
 #

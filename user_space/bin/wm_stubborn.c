@@ -38,6 +38,7 @@ int main(void) {
     sys_shm_create(OWNED_SHM_BYTES); /* deliberately never used, never freed - see the header comment */
 
     gfx_fill_rect(&win.gfx, 0, 0, (int32_t)win.width, (int32_t)win.height, FILL_COLOR);
+    wm_present(&win); /* M117: the first frame, like every other one */
 
     for (;;) {
         wm_event_t ev;
@@ -48,6 +49,6 @@ int main(void) {
          * (and much less interesting) reason for a window not to close. */
         while (wm_poll_event(&win, &ev)) {
         }
-        sys_yield();
+        wm_wait_ms(&win, NULL, 0, -1); /* M117 */
     }
 }

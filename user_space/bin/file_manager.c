@@ -1397,6 +1397,7 @@ int main(void) {
 
     refresh_list();
     redraw(&win);
+    wm_present(&win); /* M117: the first frame, like every other one */
 
     long last_click_ms = -1;
     int last_click_row = -1;
@@ -1704,6 +1705,8 @@ int main(void) {
 
         if (changed) {
             redraw(&win);
+            wm_present(&win);
         }
+        wm_wait_ms(&win, NULL, 0, (int)(next_refresh - now)); /* M117: block until an event, a deadline, or the liveness cap - see wm_wait_ms */
     }
 }

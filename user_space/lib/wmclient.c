@@ -391,6 +391,35 @@ int wm_send_action(int32_t window_id, uint32_t action) {
     return wm_send_action_value(window_id, action, 0);
 }
 
+int wm_present(wm_window_t *win) {
+    if (!win || win->window_id < 0) {
+        return -1;
+    }
+    return wm_send_action(win->window_id, WM_ACTION_PRESENT);
+}
+
+int wm_wait_ms(wm_window_t *win, const int *extra_fds, int n_extra, int timeout_ms) {
+    int fds[1 + 8];
+    int n = 0;
+    if (win && win->evt_fd >= 0) {
+        fds[n++] = win->evt_fd;
+    }
+    for (int i = 0; i < n_extra && n < (int)(sizeof(fds) / sizeof(fds[0])); i++) {
+        if (extra_fds[i] >= 0) {
+            fds[n++] = extra_fds[i];
+        }
+    }
+    /* The cap is the liveness check's period (see the header). A caller
+     * asking for less waits for less; a caller asking for more, or for no
+     * deadline at all, is woken at the cap and loops - at 4 Hz that is a
+     * rounding error next to the yield storm this replaces. */
+    if (timeout_ms < 0 || timeout_ms > WM_WAIT_CAP_MS) {
+        timeout_ms = WM_WAIT_CAP_MS;
+    }
+    long r = sys_waitfds(fds, n, timeout_ms);
+    return r >= 0 ? 1 : 0;
+}
+
 int wm_set_panel_overhang(int32_t window_id, int32_t rows) {
     return wm_send_action_value(window_id, WM_ACTION_SET_PANEL_OVERHANG, rows);
 }

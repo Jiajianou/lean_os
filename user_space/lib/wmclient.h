@@ -191,6 +191,39 @@ int wm_wait_event(wm_window_t *win, wm_event_t *out);
  * running even with no input, and can't afford to block on one. */
 int wm_poll_event(wm_window_t *win, wm_event_t *out);
 
+/* M117: sleep until this window has an event, one of `extra_fds` (may be
+ * NULL with n_extra 0) is readable, or `timeout_ms` has passed - whichever
+ * is first. Returns 1 if something is readable, 0 on the timeout.
+ *
+ * This is the call every client's main loop was missing. Each of them is
+ * `for (;;) { while (wm_poll_event(...)) ...; periodic work; }`, and with
+ * nothing to do wm_poll_event yields - so every open window was a process
+ * that never left the run queue, the idle task never ran, and on a
+ * machine emulated by TCG every one of those yields was a CR3 switch that
+ * emptied the host's translation cache underneath whatever was actually
+ * working. Measured (M117): an idle desktop cost 22% of a host core with
+ * nothing open and 44% with eight windows open. M68 built SYS_waitfds for
+ * exactly this and then reverted the client loops, because fifty boot
+ * self-tests were written against a desktop where nothing ever blocked;
+ * M69 replaced those with condition waits, and the compositor's own loop
+ * has blocked here since. This finishes that box.
+ *
+ * The wait is capped at WM_WAIT_CAP_MS whatever the caller asks, so that
+ * wm_poll_event's M55 liveness check (is the compositor still alive?)
+ * keeps running a few times a second in a client with nothing to do - a
+ * client parked forever on a pipe whose writer has died is precisely the
+ * wedge M55 removed. A negative timeout means "no deadline of my own". */
+#define WM_WAIT_CAP_MS 250
+int wm_wait_ms(wm_window_t *win, const int *extra_fds, int n_extra, int timeout_ms);
+
+/* M117: tell the compositor this window's pixels have changed. Call once
+ * after a frame is drawn, not per primitive: the compositor composites
+ * the window's whole rectangle per present, coalesced per loop pass. A
+ * client that never calls this still reaches the screen, one second late
+ * (see WM_ACTION_PRESENT in system_api/include/wm.h), which is the safety
+ * net and not the path. */
+int wm_present(wm_window_t *win);
+
 
 
 /* M55: has the compositor serving this window died, and if so, has a new

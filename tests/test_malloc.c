@@ -240,9 +240,11 @@ TEST(malloc, a_heap_that_cannot_grow_returns_null_and_still_works) {
     check_lists();
 }
 
-TEST(malloc, zero_is_no_allocation_and_free_of_null_is_nothing) {
+TEST(malloc, free_of_null_is_nothing) {
+    /* This used to assert malloc(0) == NULL as well - the M19 answer
+     * written down as law, which M117 found NetSurf could not live with.
+     * The zero-byte tests at the end of this file say what it does now. */
     malloc_reset();
-    CHECK_EQ(lean_malloc(0), NULL);
     lean_free(NULL);
     check_lists();
 }
@@ -329,6 +331,50 @@ TEST(malloc, a_block_reused_after_a_free_is_still_aligned) {
         CHECK_EQ(((unsigned long)p) % 16, 0u);
         CHECK(p != prev);
         prev = p;
+    }
+    check_lists();
+}
+
+/* M117: malloc(0). C allows NULL or a unique pointer; this returned NULL
+ * from M19 on, and NetSurf's flex layout - `calloc(count, ...)` for a
+ * container with no children - read that as out of memory and failed
+ * silently on the first empty `display: flex` box on apple.com. Every
+ * libc NetSurf was ever built against hands back a real block here, so
+ * this one does now, and these say what "real" means: distinct from every
+ * other live block, aligned like any other, and taken back by free. */
+TEST(malloc, a_zero_byte_request_is_a_block_and_not_a_refusal) {
+    malloc_reset();
+    void *a = lean_malloc(0);
+    void *b = lean_malloc(0);
+    void *c = lean_malloc(1);
+    REQUIRE(a != NULL);
+    REQUIRE(b != NULL);
+    REQUIRE(c != NULL);
+    CHECK(a != b);
+    CHECK(b != c);
+    CHECK(a != c);
+    CHECK_EQ(((unsigned long)a) % 16, 0u);
+    CHECK(lean_malloc_usable_size(a) >= 1);
+    lean_free(a);
+    lean_free(b);
+    lean_free(c);
+    check_lists();
+}
+
+TEST(malloc, zero_byte_blocks_are_freed_and_reused_like_any_other) {
+    malloc_reset();
+    void *a = lean_malloc(0);
+    REQUIRE(a != NULL);
+    lean_free(a);
+    void *b = lean_malloc(0);
+    CHECK_EQ(b, a); /* the same minimum block, handed out again */
+    lean_free(b);
+    /* Ten thousand of them in a row leak nothing: the heap after is one
+     * free run, the way the larger test above ends. */
+    for (int i = 0; i < 10000; i++) {
+        void *p = lean_malloc(0);
+        REQUIRE(p != NULL);
+        lean_free(p);
     }
     check_lists();
 }

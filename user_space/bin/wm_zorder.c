@@ -104,14 +104,17 @@ int main(int argc, char **argv) {
 
     int ticks = 0;
     gfx_fill_rect(&win.gfx, 0, 0, (int32_t)win.width, (int32_t)win.height, fill);
+    wm_present(&win); /* M117: the first frame, like every other one */
 
     for (;;) {
         wm_event_t ev;
+        int drew = 0;
         while (wm_poll_event(&win, &ev)) {
             /* Presses only - see the header comment. A press is a button
              * event whose button state has the left bit set; the matching
              * release arrives with it clear. */
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+                drew = 1;
                 /* M55: a replacement compositor handed this client a
                  * blank buffer. Repainting the fill *and* every tick
                  * already earned is what makes this program usable as a
@@ -123,11 +126,15 @@ int main(int argc, char **argv) {
                                    TICK_SIZE, TICK_SIZE, TICK_COLOR);
                 }
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ticks < TICK_MAX) {
+                drew = 1;
                 gfx_fill_rect(&win.gfx, tick_x(ticks), WIN_H - TICK_INSET - TICK_SIZE,
                                TICK_SIZE, TICK_SIZE, TICK_COLOR);
                 ticks++;
             }
         }
-        sys_yield();
+        if (drew) {
+            wm_present(&win);
+        }
+        wm_wait_ms(&win, NULL, 0, -1); /* M117 */
     }
 }

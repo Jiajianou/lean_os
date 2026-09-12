@@ -355,8 +355,13 @@ static void redraw(wm_window_t *win, int show_cursor) {
     }
 }
 
-static void drain_output(void) {
+/* Returns how many bytes reached the screen - M117: the loop redraws
+ * and presents only when this drew something or a child ended, not on
+ * every pass while a child runs, which was twenty frames a second of
+ * nothing once the loop stopped spinning and started waking. */
+static long drain_output(void) {
     char buf[IO_BUF_SIZE];
+    long drained = 0;
     long avail = sys_pipe_poll(read_fd);
     while (avail > 0) {
         size_t n = (size_t)avail < IO_BUF_SIZE ? (size_t)avail : IO_BUF_SIZE;
@@ -365,8 +370,10 @@ static void drain_output(void) {
             break;
         }
         print_term(buf, (size_t)got);
+        drained += got;
         avail = sys_pipe_poll(read_fd);
     }
+    return drained;
 }
 
 static void start_prompt(void) {
@@ -892,6 +899,7 @@ int main(void) {
                     "quotes, > redirect, >> append, | pipe, Tab completes\n");
     start_prompt();
     redraw(&win, 1);
+    wm_present(&win); /* M117: the first frame, like every other one */
 
     for (;;) {
         int changed = 0;
@@ -1010,7 +1018,9 @@ int main(void) {
         }
 
         if (running_pid >= 0 || pipe_pid >= 0) {
-            drain_output();
+            if (drain_output() > 0) {
+                changed = 1;
+            }
             /* M60: both halves of a pipe, and the prompt waits for both.
              * They are polled rather than waited on for the reason this
              * loop has always polled: pipe_write blocks a child once its
@@ -1019,19 +1029,31 @@ int main(void) {
              * whose output outgrew it. */
             if (running_pid >= 0 && sys_wait_nb(running_pid) != -2) {
                 running_pid = -1;
+                changed = 1;
             }
             if (pipe_pid >= 0 && sys_wait_nb(pipe_pid) != -2) {
                 pipe_pid = -1;
+                changed = 1;
             }
             if (running_pid < 0 && pipe_pid < 0) {
                 drain_output(); /* one last catch-up read after both are confirmed dead */
                 start_prompt();
+                changed = 1;
             }
-            changed = 1;
         }
 
         if (changed) {
             redraw(&win, running_pid < 0);
+            wm_present(&win);
+        }
+        /* M117: with a child running, wake on its output too, and on a
+         * short cap for the exit check above (sys_wait_nb has no
+         * descriptor to wait on). With no child, only input can change
+         * anything, so wait for that alone. */
+        if (running_pid >= 0 || pipe_pid >= 0) {
+            wm_wait_ms(&win, &read_fd, 1, 50);
+        } else {
+            wm_wait_ms(&win, NULL, 0, -1);
         }
     }
 }

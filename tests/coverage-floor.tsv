@@ -62,4 +62,10 @@ user_space/libc/src/errno.c	100.00	HEAD	M100: first floor. One line, and M99 is 
 user_space/libc/src/fnmatch.c	90.91	HEAD	M100: first floor. The uncovered part is the character-class names inside bracket expressions.
 user_space/libc/src/getopt.c	87.05	HEAD	M100: first floor.
 user_space/libc/src/libgen.c	100.00	HEAD	M100: first floor. dirname and basename, both entirely reached.
-user_space/libc/src/wchar.c	48.50	HEAD	M100: first floor, and the honest number for a file that exists because GNU hello's first line asked for it (M94). Half of it is the wide stdio family, which nothing in the host tier calls.
+user_space/libc/src/wchar.c	48.24	HEAD	M117: 48.50 -> 48.24. Not a test removed: `make coverage` had not compiled since M111 (its CFLAGS lacked -Iuser_space/lib and -DLEANOS_HOST_TEST, which every other host build has), and with them wchar.c compiles three lines the tests never reached. M100: first floor, and the honest number for a file that exists because GNU hello's first line asked for it (M94). Half of it is the wide stdio family, which nothing in the host tier calls.
+kernel/drivers/rtl8139_ring.c	100.00	HEAD	M117: first floor, set where M116's test left it - the ring model against every frame length.
+user_space/lib/dns.c	82.68	HEAD	M117: first floor, set where the M114 resolver tests left it.
+user_space/lib/fsutil.c	89.16	HEAD	M117: first floor, set where M112's tree-walk tests left it.
+user_space/lib/ospkg.c	90.97	HEAD	M117: first floor, set where M111's package tests left it.
+user_space/lib/sha256.c	100.00	HEAD	M117: first floor - the differential test against the host reaches every line.
+user_space/libc/src/wallclock.c	100.00	HEAD	M117: first floor - M116's four tests at every phase reach every line.

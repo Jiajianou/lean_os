@@ -66,10 +66,16 @@
 #include "input.h"   /* system_api: KBD_KEY_*, KBD_MOD_* */
 #include "wm.h"      /* system_api: wm_event_t */
 #include "wmclient.h"
-#include <unistd.h>  /* usleep - see the polling loop */
+#include "syscall_wrappers.h" /* sys_uptime_ms - the deadline in leanos_input */
 
 struct leanos_priv {
     wm_window_t win;
+    /* M117: libnsfb's update callback has been called since the last
+     * present - NetSurf has plotted something. Presented once per turn
+     * of its event loop (leanos_input) rather than per update, because
+     * a page repaint is hundreds of updates and the compositor's unit is
+     * the window. */
+    int damaged;
     /* The button state from the last mouse event the compositor sent.
      * lean_os reports a BUTTONS BITMASK on every mouse event; libnsfb
      * wants a key-down/key-up per button, so the change has to be
@@ -345,15 +351,22 @@ static bool leanos_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout) {
         return true;
     }
 
-    /* The polling loop. lean_os has a blocking wm_wait_event and a
-     * non-blocking wm_poll_event but nothing that waits with a bound,
-     * and libnsfb asks for one - NetSurf's scheduler needs to run its
-     * timers even when nobody is typing. So a bounded wait is a poll
-     * plus a sleep, at a granularity chosen to be well under the
-     * compositor's own frame interval so a click never waits a frame
-     * for this loop. */
-    const int SLICE_MS = 5;
-    int waited = 0;
+    /* M117: whatever NetSurf plotted since the last turn goes on screen
+     * now, before this turn's wait - which is the moment a page, or a
+     * scroll, is complete enough to show. Before this the compositor
+     * noticed on a 100 ms poll. */
+    if (p->damaged) {
+        p->damaged = 0;
+        wm_present(&p->win);
+    }
+
+    /* The bounded wait libnsfb asks for - NetSurf's scheduler needs to
+     * run its timers even when nobody is typing. M117: this was a poll
+     * plus a 5 ms usleep, two hundred wakeups a second with nothing to
+     * do; it is now wm_wait_ms on the event pipe, which returns the
+     * moment the compositor writes a click or a key and otherwise sleeps
+     * until the deadline (or the liveness cap, and loops). */
+    long started = sys_uptime_ms();
     for (;;) {
         wm_event_t in;
         while (wm_poll_event(&p->win, &in) == 1) {
@@ -373,11 +386,15 @@ static bool leanos_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout) {
         if (timeout == 0) {
             return false;
         }
-        if (timeout > 0 && waited >= timeout) {
-            return false;
+        int remaining = -1;
+        if (timeout > 0) {
+            long waited = sys_uptime_ms() - started;
+            if (waited >= timeout) {
+                return false;
+            }
+            remaining = timeout - (int)waited;
         }
-        usleep((unsigned int)SLICE_MS * 1000u);
-        waited += SLICE_MS;
+        wm_wait_ms(&p->win, NULL, 0, remaining);
     }
 }
 
@@ -388,8 +405,11 @@ static int leanos_claim(nsfb_t *nsfb, nsfb_bbox_t *box) {
 }
 
 static int leanos_update(nsfb_t *nsfb, nsfb_bbox_t *box) {
-    (void)nsfb;
     (void)box;
+    struct leanos_priv *p = nsfb->surface_priv;
+    if (p) {
+        p->damaged = 1; /* M117 - presented by leanos_input, see there */
+    }
     /* Deliberately nothing. This compositor composites from the shared
      * segment on its own schedule (M21) - there is no present, flush or
      * damage call to make, and inventing one that did nothing would be

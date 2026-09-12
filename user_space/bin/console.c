@@ -193,7 +193,11 @@ int main(void) {
         if (dirty) {
             redraw(&win, fell_behind);
             dirty = 0;
+            wm_present(&win);
         }
-        sys_yield();
+        /* M117: the kernel log has no descriptor to wait on, so this is
+         * a poll - at 10 Hz rather than as fast as the scheduler would
+         * hand the CPU back, which is what sys_yield here amounted to. */
+        wm_wait_ms(&win, NULL, 0, 100);
     }
 }

@@ -214,6 +214,70 @@ certificate authorities and ICU rather than a different engine — see
 *the browser that will not come*, below, for why there is no
 smaller-effort modern one.
 
+### The first crash, and what was under it - M117
+
+`https://www.apple.com/` killed the browser on NetSurf's own assertion
+(`layout.c:5333`, `box->height != AUTO`), and so did Wikipedia's
+`/wiki/Unix` (M116's open box). The same NetSurf 3.11 built for the
+host rendered both, which by M116's condition made it this port's
+failure. What it was: **this libc's `malloc(0)` returned NULL.** C
+allows that; NetSurf's flex layout sizes its item list with
+`calloc(number_of_children, ...)`, an empty `display: flex` container
+has none, and every libc NetSurf was ever built against - glibc, macOS,
+musl - answers a zero-byte request with a unique pointer, so NetSurf
+reads NULL as out of memory, fails the layout silently, and asserts
+some frames later. apple.com's nav has one empty flex container per
+flyout; google.com has none. `malloc(0)` returns the minimum block now
+(`user_space/lib/malloc.c`), graded by `tests/test_malloc.c` and, in
+pixels, by the input suite's `browser_survives_an_empty_flex_container`
+(`tools/netsurf-port/flex.html`, installed at
+`/usr/share/netsurf/flex.html`).
+
+Two instruments found it, and both stay:
+
+- **A backtrace on assert.** `tools/build-netsurf.sh` builds the port
+  with `-fno-omit-frame-pointer`, and this libc's `__assert_fail`
+  prints the chain of return addresses after its one line. Symbolise
+  with `nm -n build/netsurf/netsurf` (the unstripped binary):
+
+  ```
+  assertion failed: box->height != AUTO at content/handlers/html/layout.c:5333
+    #0 0x80000f89dc   layout_calculate_descendant_bboxes+0x36c
+    ...
+    #10 0x80001022b3  layout_document+0x1a3
+    #11 0x80000ef936  html_reformat+0x136
+  ```
+
+- **The twin.** `tools/build-netsurf-host.sh` builds the same NetSurf
+  for this Mac - the framebuffer front end on libnsfb's display-less
+  `ram` surface, freetype with the guest's DejaVu files, the JPEG
+  decoder from the same tarball, Duktape, the guest's `Choices` - and
+  `tools/build-netsurf-host.sh run <url>` says rendered or crashed. It
+  refuses to call the result a twin unless `FT_Init_FreeType`,
+  `jpeg_read_header` and `duk_create_heap` are in the binary, because
+  the first three twins built by hand were not twins (a script wrote
+  its own `Makefile.config` over the one being edited) and rendered the
+  page for reasons that had nothing to do with the guest. If the twin
+  crashes on a page the guest crashes on, the bug is upstream's; if it
+  does not, look under the browser.
+
+The bisection that went with them - a proxy on the test harness's
+guestfwd serving apple.com's bytes to the guest with one path
+replaced, the page cut down to three empty divs, the 145 stylesheet
+rules those divs could see halved twice - is written up in M117 in
+`milestones.md`. It is the method, not a tool: the fixture it ended
+at is the tool.
+
+**And the desktop under the browser** (M117, the "everything should be
+snappy" half): every wmclient program's main loop yielded instead of
+blocking, so an idle desktop cost 22% of a host core and 44% with eight
+windows open; the compositor learned a client had drawn only on a
+100 ms poll, so a page NetSurf had finished laying out waited up to a
+tenth of a second to appear. `wm_wait_ms` and `WM_ACTION_PRESENT`
+(`user_space/lib/wmclient.h`) fixed both, and the NetSurf surface
+presents once per turn of NetSurf's event loop and waits in
+`wm_wait_ms` for the bounded time libnsfb asks for.
+
 ### What porting it found
 
 Five gaps in this system, each named by a build rather than by a

@@ -56,6 +56,12 @@ echo "install-netsurf: /bin/netsurf ($((after / 1024))K, was $((before / 1024))K
 n=$(find "$OUT/res" -type f | wc -l | tr -d ' ')
 echo "install-netsurf: $n resource files under /usr/share/netsurf"
 
+# M117: a page with an empty `display: flex` box, for the interactive
+# suite's browser_survives_an_empty_flex_container. Checked in rather
+# than generated, beside the port's other files, because it is a fixture
+# and not a resource NetSurf asked for - see the comment in the file.
+"$PUT" "$IMAGE" tools/netsurf-port/flex.html /usr/share/netsurf/flex.html >/dev/null || exit 1
+
 # The fonts, at the path NETSURF_FB_FONTPATH names. NetSurf's freetype
 # font layer looks for DejaVuSans.ttf and its siblings by bare filename
 # along that path, so the directory matters and the names do.

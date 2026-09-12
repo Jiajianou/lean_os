@@ -53,13 +53,14 @@ int main(void) {
     }
     sys_shm_create(OWNED_SHM_BYTES); /* deliberately never used, never freed - see OWNED_SHM_BYTES */
     gfx_fill_rect(&win.gfx, 0, 0, (int32_t)win.width, (int32_t)win.height, FILL_COLOR);
+    wm_present(&win); /* M117: the first frame, like every other one */
 
     long deadline = sys_uptime_ms() + ALIVE_MS;
     while (sys_uptime_ms() < deadline) {
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
         }
-        sys_yield();
+        wm_wait_ms(&win, NULL, 0, (int)(deadline - sys_uptime_ms())); /* M117: the deadline, not a spin */
     }
 
     /* The whole point of this program. Before M52 this took the machine

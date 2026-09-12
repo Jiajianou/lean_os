@@ -64,6 +64,7 @@ int main(void) {
 
         long now = sys_uptime_ms();
         if (now < next_redraw && !expose) {
+            wm_wait_ms(&win, NULL, 0, (int)(next_redraw - now)); /* M117: block until an event, a deadline, or the liveness cap - see wm_wait_ms */
             continue;
         }
         next_redraw = now + REDRAW_INTERVAL_MS;
@@ -85,5 +86,6 @@ int main(void) {
         line[li] = '\0';
 
         gfx_draw_text(&win.gfx, 10, 34, line, TEXT_COLOR);
+        wm_present(&win);
     }
 }
