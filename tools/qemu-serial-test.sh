@@ -571,6 +571,17 @@ REQUIRED_MARKERS=(
   # exiting does NOT return them - which is the leak this marker exists to
   # catch.
   "[m120] a buffer shared across a channel:"
+  # M121: the second compiler. Required on [m94]'s exact reasoning -
+  # run-tests.sh installs what clang produced before this runs, so an
+  # image reaching here without /bin/clangtest is a broken build step
+  # unless clang itself was never built, which clang-test.sh says out
+  # loud. Two markers rather than one, because the milestone makes two
+  # claims that fail for different reasons: that a program clang produced
+  # runs here at all, and that its objects can be linked with GCC's. The
+  # second is the one no single-compiler test can make, and it is a
+  # separate line so a shortened sentence cannot hide it.
+  "[m121] a second compiler that knows this OS by name:"
+  "ONE PROGRAM FROM TWO COMPILERS"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

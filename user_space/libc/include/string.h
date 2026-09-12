@@ -67,6 +67,10 @@ char *strchr(const char *s, int c);
  * see <errno.h> on why errno here is coarse. "EINVAL" is true and
  * useful; "Invalid argument" would be a translation of a guess. */
 char *strerror(int errnum);
+/* M121: POSIX's XSI form, which returns int rather than glibc's GNU
+ * variant that returns char* - see string.c. libc++'s std::system_error
+ * calls it and has no path that does not. */
+int strerror_r(int errnum, char *buf, size_t buflen);
 char *strrchr(const char *s, int c);
 char *strstr(const char *haystack, const char *needle);
 size_t strspn(const char *s, const char *accept);

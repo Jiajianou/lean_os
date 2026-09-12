@@ -25,6 +25,18 @@ struct FILE {
      * of every assembly file became code, and the machine's own `as`
      * could not assemble a comment. Every reader consults this first. */
     int unget;
+    /* M121: and the WIDE one, which has to be its own slot rather than
+     * pushing the character's bytes back through `unget`.
+     *
+     * Two reasons, and the second is the one that decides it. A UTF-8
+     * character is up to four bytes and `unget` holds one - so a
+     * multi-byte pushback does not fit. And C guarantees one wide
+     * character of pushback for a wide-oriented stream *independently*
+     * of the one byte it guarantees for a byte-oriented one, because a
+     * stream has only one orientation and a program never uses both.
+     * libc++'s std_stream.h is such a program: __do_ungetc(wint_t) is
+     * the only path by which wcin puts a character back. -1 is empty. */
+    wint_t wunget;
     /* ---- M98: a write buffer, and the measurement that asked for it ---
      *
      * There was none. Every `fputc`, `fputs`, `fwrite` and `fprintf` was
@@ -60,10 +72,21 @@ struct FILE {
  * with (or, for stdin in a GUI terminal's child, does not - see
  * gui_terminal.c, which closes fd 0 deliberately). Static rather than
  * allocated so they exist before main does. */
+/* M121: the initialisers are designated now, and that is the change
+ * rather than the new field. Adding `wunget` to the middle of the struct
+ * silently shifted every positional value one place along - the write
+ * buffer would have been initialised from an int and `mode` from
+ * nothing - and -Wmissing-field-initializers is what caught it. A
+ * designated initialiser cannot be broken by a field appearing above it,
+ * which is the property worth having in a struct that has grown four
+ * times in four milestones. */
 static FILE std_files[3] = {
-    {0, 0, 1, 0, -1, {0}, 0, _IOLBF},
-    {1, 0, 1, 0, -1, {0}, 0, _IOLBF},
-    {2, 0, 1, 0, -1, {0}, 0, _IOLBF},
+    {.fd = 0, .eof = 0, .used = 1, .err = 0, .unget = -1,
+     .wunget = (wint_t)-1, .wbuf = {0}, .wlen = 0, .mode = _IOLBF},
+    {.fd = 1, .eof = 0, .used = 1, .err = 0, .unget = -1,
+     .wunget = (wint_t)-1, .wbuf = {0}, .wlen = 0, .mode = _IOLBF},
+    {.fd = 2, .eof = 0, .used = 1, .err = 0, .unget = -1,
+     .wunget = (wint_t)-1, .wbuf = {0}, .wlen = 0, .mode = _IOLBF},
 };
 FILE *stdin = &std_files[0];
 FILE *stdout = &std_files[1];
@@ -71,7 +94,9 @@ FILE *stdout = &std_files[1];
  * nothing else (sched.h's fd table). Pointing stderr at fd 1 is the
  * honest mapping: a ported program's diagnostics go where its output
  * goes, which on this desktop is the terminal window that launched it. */
-static FILE stderr_file = {1, 0, 1, 0, -1, {0}, 0, _IONBF};
+static FILE stderr_file = {.fd = 1, .eof = 0, .used = 1, .err = 0,
+                           .unget = -1, .wunget = (wint_t)-1, .wbuf = {0},
+                           .wlen = 0, .mode = _IONBF};
 FILE *stderr = &stderr_file;
 
 #define FOPEN_MAX_FILES 16
@@ -281,6 +306,13 @@ int fseek(FILE *f, long offset, int whence) {
         }
         f->unget = -1;
     }
+    /* M121: a wide pushback is discarded by a seek too. No offset
+     * correction for it, and that is not an oversight: fgetwc reads the
+     * character's bytes through this stream, so the file position is
+     * already past them whether or not the character was pushed back -
+     * unlike ungetc, whose byte never came from the descriptor at all
+     * when the caller pushed a different one. */
+    f->wunget = (wint_t)-1;
     return sys_lseek(f->fd, offset, whence) >= 0 ? 0 : -1;
 }
 
@@ -343,6 +375,7 @@ void rewind(FILE *f) {
         f->eof = 0;
         f->err = 0;
         f->unget = -1;
+        f->wunget = (wint_t)-1;
     }
 }
 
@@ -386,6 +419,82 @@ void setbuf(FILE *f, char *buf) {
  * because this stdio has no buffer to put it in and a descriptor here
  * has a real position (M59). A stream with no position - stdin, a pipe -
  * cannot take one back, and says so. */
+/* ---- M121: the wide input family's two struct-aware members ---------
+ *
+ * fgetwc and ungetwc live here rather than in wchar.c beside the wide
+ * OUTPUT family, and the reason is the one the file layout already uses:
+ * these two touch `struct FILE`, which is private to this file. The four
+ * that do not - getwc, getwchar, fgetws and fwide - are in wchar.c with
+ * fputwc and friends, where the family reads as a family.
+ *
+ * Asked for by libc++: src/std_stream.h's `__do_getc` and `__do_ungetc`
+ * overloads for wchar_t are the only path by which std::wcin reads a
+ * character, and there is no configuration under which it does not
+ * compile them.
+ */
+wint_t fgetwc(FILE *f) {
+    if (!f) {
+        return WEOF;
+    }
+    if (f->wunget != (wint_t)-1) {
+        wint_t c = f->wunget;
+        f->wunget = (wint_t)-1;
+        return c;
+    }
+    /* One byte at a time through mbrtowc, which is what its mbstate_t is
+     * for: a character's bytes may be split across anything, including
+     * the end of a buffer this stream has not read yet. Four is the
+     * longest UTF-8 sequence, so a fifth byte would mean the decoder
+     * accepted something it should have refused. */
+    mbstate_t st;
+    for (size_t i = 0; i < sizeof(st); i++) {
+        ((unsigned char *)&st)[i] = 0;
+    }
+    for (int i = 0; i < 4; i++) {
+        int b = fgetc(f);
+        if (b == EOF) {
+            /* End of input mid-character is EILSEQ rather than a plain
+             * EOF: there were bytes, and they were not a character. A
+             * caller that could not tell these apart would silently
+             * truncate a file whose last character is damaged. */
+            if (i > 0) {
+                errno = EILSEQ;
+            }
+            return WEOF;
+        }
+        char byte = (char)b;
+        wchar_t wc = 0;
+        size_t r = mbrtowc(&wc, &byte, 1, &st);
+        if (r == (size_t)-1) {
+            errno = EILSEQ;
+            return WEOF;
+        }
+        if (r == (size_t)-2) {
+            continue; /* a complete character needs more bytes */
+        }
+        /* r == 0 is a completed L'\0', and wc is 0, which is what to
+         * return - a NUL in a file is a character like any other. */
+        return (wint_t)wc;
+    }
+    errno = EILSEQ;
+    return WEOF;
+}
+
+/* One wide character of pushback, which is what C guarantees. It goes
+ * into its own slot rather than through ungetc - see the note on
+ * `wunget` in struct FILE for why the byte slot cannot hold it. */
+wint_t ungetwc(wint_t c, FILE *f) {
+    if (!f || c == WEOF) {
+        return WEOF;
+    }
+    if (f->wunget != (wint_t)-1) {
+        return WEOF; /* the standard guarantees one; this is it */
+    }
+    f->wunget = c;
+    f->eof = 0;
+    return c;
+}
+
 int ungetc(int c, FILE *f) {
     if (!f || c == EOF) {
         return EOF;
@@ -1092,6 +1201,51 @@ int snprintf(char *out, size_t n, const char *fmt, ...) {
     return r;
 }
 
+/* ---- M121: format into memory this allocates -------------------------
+ *
+ * See the note in <stdio.h>. Two passes, and the `va_copy` is the reason
+ * it has to be written here rather than by a caller: a va_list is
+ * consumed by the first vsnprintf and using it again is undefined, so
+ * the measuring pass needs its own copy. That is the whole trick, and
+ * getting it wrong produces a function that works on x86-64 for small
+ * argument lists and corrupts on large ones.
+ *
+ * `+ 1` for the terminator, which vsnprintf's return value excludes. */
+int vasprintf(char **out, const char *fmt, va_list ap) {
+    if (!out) {
+        return -1;
+    }
+    va_list measure;
+    va_copy(measure, ap);
+    int needed = vsnprintf((char *)0, 0, fmt, measure);
+    va_end(measure);
+    if (needed < 0) {
+        *out = (char *)0;
+        return -1;
+    }
+    char *buf = (char *)malloc((size_t)needed + 1);
+    if (!buf) {
+        *out = (char *)0;
+        return -1;
+    }
+    int written = vsnprintf(buf, (size_t)needed + 1, fmt, ap);
+    if (written < 0) {
+        free(buf);
+        *out = (char *)0;
+        return -1;
+    }
+    *out = buf;
+    return written;
+}
+
+int asprintf(char **out, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vasprintf(out, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
 void __assert_fail(const char *expr, const char *file, int line) {
     fprintf(stderr, "assertion failed: %s at %s:%d\n", expr, file, line);
     /* M117: the return addresses on this stack, for a program built with
@@ -1327,6 +1481,9 @@ FILE *freopen(const char *path, const char *mode, FILE *f) {
     f->eof = 0;
     f->err = 0;
     f->unget = -1;
+    /* M121: and the wide slot, which a static FILE table would otherwise
+     * hand out as 0 - a valid wide character, and one nobody pushed. */
+    f->wunget = (wint_t)-1;
     f->used = 1;
     return f;
 }

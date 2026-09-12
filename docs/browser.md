@@ -553,6 +553,45 @@ What would have to become true for Chromium specifically:
    **With conditions 1 and 2 closed, this is where the arc stops being
    ordinary work.** The two that are done were a few hundred lines each
    of kernel; this is a compiler.
+
+   **Done - M121, 2026-09-12.** `x86_64-lean_os-clang` and
+   `clang++` from LLVM 19.1.7, and `libc++`/`libc++abi` over GCC's
+   `libgcc_eh`. The port is `tools/clang-port/` - **thirteen anchored
+   edits and three files**, of which eight edits are the compiler
+   (against M94's nine for GCC) and five are libc++ - and the compiler
+   takes no flag supplied by hand, the same standard M94 set. See
+   [toolchain.md](toolchain.md) for what it cost and why it links
+   against libgcc rather than compiler-rt.
+
+   **This was the cheapest of the three conditions, not the dearest,
+   and the estimate above was wrong about which part is hard.** A
+   compiler *port* is configuration: what the OS is called, where the
+   C library is, which startup files a program links. What actually
+   cost the milestone was the **C library underneath it** - libc++
+   named **27 missing functions** in this project's own libc - plus six
+   C99 `lconv` fields and a `struct tm` declaration - and every one is
+   something C99 or POSIX requires that nothing here had ever asked
+   for: `wcsstr` and `wcspbrk`, the five wide numeric conversions, the
+   wide *input* family (M94 built only the output half), `asprintf`,
+   `strerror_r`, and thirteen more. That is the same shape M100
+   found porting NetSurf and M99 found porting CPython, and it is the
+   argument for porting somebody else's code stated once more: it asks
+   for what the standard says, not for what this project remembered to
+   build.
+
+   What is **not** built, with its condition: **over-aligned `new`**.
+   libc++ wants C11 `aligned_alloc` or POSIX `posix_memalign` and this
+   libc has neither - `user_space/lib/malloc.c` returns 16-byte
+   aligned memory, which is `max_align_t` on x86-64 and which M115 had
+   to fix after a `movaps` found the old 8, but it cannot return more,
+   because `free` finds a block by reading the header immediately
+   before the pointer it was given. The condition is a `free` that can
+   find the block from a pointer moved forward, which means a tagged
+   indirection header in the allocator every program on this machine
+   uses. `_LIBCPP_HAS_NO_LIBRARY_ALIGNED_ALLOCATION` says so rather
+   than an `aligned_alloc` that returns 16-byte memory for a request
+   of 64 - which is M65's rule, and the program that believed such a
+   function would fault somewhere else entirely.
 4. **A machine with 16 GB of RAM and 100 GB of disk**, which is a
    statement about M110's hardware rather than about this code.
 5. Then a sandbox story, which is a design question rather than a port:
@@ -561,8 +600,17 @@ What would have to become true for Chromium specifically:
    Those are not the same shape, and pretending otherwise would produce
    exactly the kind of thing M65 refused.
 
-Items 1 and 2 are ordinary work with conditions attached, which is what
-this project means by a deferral. Items 3 to 5 are an arc.
+Items 1, 2 and 3 are done. **What remains is 4 and 5, and neither is a
+porting problem**: one is a machine this project does not have, and the
+other is a design question about what a sandbox on a
+capability-addressed OS would even mean. Chromium is no closer to
+building here than it was - a 100 GB checkout and 535 sub-repositories
+do not fit on a 2 GiB image, and no amount of compiler work changes
+that - but the three conditions that were *code* are now code, and what
+they actually bought is larger than the browser they were aimed at: a
+channel, a wait, a shared buffer, and now a second compiler and a
+modern C++ standard library. That is the toolchain half of what every
+engine's build assumes.
 
 ### And Google Chrome, which is a different question
 

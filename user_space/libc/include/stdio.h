@@ -127,6 +127,24 @@ int fprintf(FILE *f, const char *fmt, ...) __attribute__((format(printf, 2, 3)))
 int sprintf(char *out, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 int snprintf(char *out, size_t n, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 int vsnprintf(char *out, size_t n, const char *fmt, va_list ap);
+
+/* ---- M121: asprintf and vasprintf ------------------------------------
+ *
+ * "Format this, and allocate whatever it needs." A GNU extension that
+ * BSD and musl both have, and the one function in this family that a
+ * caller cannot write for itself without knowing that `vsnprintf`
+ * returns the length it WOULD have written - which is the contract, and
+ * which this project's own formatter has honoured since M19 because
+ * `emit` counts a character it declines to store (see stdio.c).
+ *
+ * Found by building libc++: its locale layer formats a number whose
+ * length it cannot bound, and `__libcpp_asprintf_l` is the only way it
+ * asks. The buffer is malloc'd and the caller frees it; on failure
+ * `*out` is set to NULL and -1 is returned, which is the BSD behaviour
+ * rather than glibc's "unspecified", because a pointer left holding
+ * uninitialised stack is the worse of the two answers. */
+int asprintf(char **out, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+int vasprintf(char **out, const char *fmt, va_list ap);
 int vfprintf(FILE *f, const char *fmt, va_list ap);
 int vprintf(const char *fmt, va_list ap);
 

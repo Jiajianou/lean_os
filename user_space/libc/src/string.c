@@ -1,6 +1,7 @@
 /* Only what user_space/lib/str.c does not already provide - see
  * string.h's header comment on why these are not two sets. */
 #include <string.h>
+#include <errno.h> /* M121: strerror_r returns ERANGE */
 #include <stdlib.h> /* malloc - strdup, M80 groundwork */
 
 void *memmove(void *dst, const void *src, size_t n) {
@@ -190,6 +191,41 @@ char *strerror(int errnum) {
         }
     }
     return (char *)"error";
+}
+
+/* ---- M121: strerror_r, the form with nowhere to go wrong -------------
+ *
+ * POSIX's re-entrant strerror. It exists because strerror is allowed to
+ * return a pointer to a static buffer, and two threads formatting two
+ * errors is then a race - which is a real hazard even here, where the
+ * strings above happen to be immutable literals and no race is possible.
+ * A caller cannot know that, and libc++'s std::system_error does not:
+ * system_error.cpp calls strerror_r and has no path that does not.
+ *
+ * The XSI signature, which returns int, not glibc's GNU variant that
+ * returns char* - those two have the same name and different types, and
+ * a libc that picks the GNU one without defining _GNU_SOURCE semantics
+ * makes every portable caller wrong. ERANGE when it does not fit, with
+ * as much as does fit written and terminated, which is what POSIX
+ * specifies.
+ */
+int strerror_r(int errnum, char *buf, size_t buflen) {
+    if (!buf || buflen == 0) {
+        return ERANGE;
+    }
+    const char *name = strerror(errnum);
+    size_t len = strlen(name);
+    if (len + 1 > buflen) {
+        for (size_t i = 0; i + 1 < buflen; i++) {
+            buf[i] = name[i];
+        }
+        buf[buflen - 1] = '\0';
+        return ERANGE;
+    }
+    for (size_t i = 0; i <= len; i++) {
+        buf[i] = name[i];
+    }
+    return 0;
 }
 
 char *strpbrk(const char *s, const char *accept) {

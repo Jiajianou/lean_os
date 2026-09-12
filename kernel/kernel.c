@@ -12236,6 +12236,188 @@ static void boot_selftests_system(void) {
         klog_puts(" ms).\n\n");
     }
 
+    /* ---- M121 self-test: a second compiler, and the ABI between them --
+     *
+     * The compiles are graded on the host (tools/clang-test.sh, which is
+     * where every command line is written and where you can check that
+     * each is `$CC file.c -o out` with nothing else on it). These are the
+     * halves that cannot be faked.
+     *
+     * Three programs, and they prove three different things:
+     *
+     *   /bin/clangtest    a program clang compiled RUNS here. Beyond what
+     *                     [m94] proves for GCC, it proves the decisions
+     *                     in tools/clang-port/LeanOS.cpp: the large code
+     *                     model (it checks its own load address), the
+     *                     absent red zone (a signal delivered over live
+     *                     stack data, checksummed either side), that
+     *                     clang's code generator reaches GCC's libgcc
+     *                     (a 128-bit division is a call to __divti3),
+     *                     setjmp/longjmp, a thread-local, and an atomic.
+     *   /bin/mixedtest    **one program, two compilers.** One translation
+     *                     unit from clang and one from GCC, linked
+     *                     together, calling each other in both
+     *                     directions across every shape the x86-64 System
+     *                     V classification argues about. This is the
+     *                     check that matters most for a second toolchain
+     *                     and the one no single-compiler test can make:
+     *                     every archive in this sysroot was built by GCC,
+     *                     so two front ends that disagreed here would
+     *                     produce programs that run and are wrong.
+     *   /bin/clangcxxtest libc++ and libc++abi over GCC's libgcc_eh -
+     *                     LLVM's C++ runtime on GNU's unwinder, which is
+     *                     a combination nothing else in this tree
+     *                     exercises. Destructors are COUNTED and their
+     *                     order checked, on M97's reasoning: a catch that
+     *                     fires while skipping a cleanup looks like
+     *                     success.
+     *
+     * Skipped when /bin/clangtest is absent, for [m94]'s exact reason:
+     * the compiler takes most of an hour to build and is not part of
+     * `make`, so an image without it is a valid image. The C++ third is
+     * skipped separately, because tools/build-libcxx.sh is a step beyond
+     * tools/build-clang.sh.
+     */
+    {
+        os_stat_t ct;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/clangtest", (uint64_t)&ct, 0) != 0) {
+            klog_puts("[m121] /bin/clangtest is not on this image - skipped. "
+                       "tools/build-clang.sh builds the compiler and "
+                       "tools/clang-test.sh installs what it produces.\n\n");
+        } else {
+            int all_ok = 1;
+            int have_cxx =
+                do_syscall(SYS_stat, (uint64_t)"/bin/clangcxxtest",
+                           (uint64_t)&ct, 0) == 0;
+            const char *script = PATH_TMP_DIR "m121.sh";
+            const char *result = PATH_TMP_DIR "m121.out";
+            /* Through the shell so the output can be redirected to a file
+             * this test reads - the same shape [m86], [m89] and [m94] use.
+             * The three programs append to one file, so a program that
+             * did not run at all is a set of missing lines rather than a
+             * separate failure to interpret. */
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "/bin/clangtest > " PATH_TMP_DIR "m121.out\n"
+                "/bin/mixedtest >> " PATH_TMP_DIR "m121.out\n";
+            static const char SCRIPT_CXX[] =
+                "#!/bin/sh\n"
+                "/bin/clangtest > " PATH_TMP_DIR "m121.out\n"
+                "/bin/mixedtest >> " PATH_TMP_DIR "m121.out\n"
+                "/bin/clangcxxtest >> " PATH_TMP_DIR "m121.out\n";
+            const char *body = have_cxx ? SCRIPT_CXX : SCRIPT;
+            size_t body_len = have_cxx ? sizeof(SCRIPT_CXX) - 1
+                                       : sizeof(SCRIPT) - 1;
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)body,
+                            body_len) != 0) {
+                panic("M121 self-test: could not write the script fixture");
+            }
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                klog_puts("[m121] the compiled programs could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+
+            static char produced[1536];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                klog_puts("[m121] the compiled programs produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"clangtest: constructor ran",
+                     "crti/crtbegin/crtend/crtn linked in order by clang's driver"},
+                    {"clangtest: malloc and string round trip",
+                     "libc.a out of the sysroot, from clang's link line"},
+                    {"clangtest: struct return and varargs",
+                     "the ABI this kernel's crt0 assumes"},
+                    {"clangtest: floating point", "SSE state"},
+                    {"clangtest: 128-bit division through libgcc",
+                     "__divti3 - clang's codegen reaching M94's libgcc"},
+                    {"clangtest: the large code model, at 80",
+                     "the program loaded at 512 GiB, checked from inside it"},
+                    {"clangtest: a signal over live stack data",
+                     "-mno-red-zone: M76's signal frame did not eat live data"},
+                    {"clangtest: setjmp and longjmp", "a non-local exit"},
+                    {"clangtest: a thread-local in a static program",
+                     "local-exec TLS"},
+                    {"clangtest: an atomic read-modify-write",
+                     "an inline lock-prefixed operation"},
+                    {"clangtest: every check passed",
+                     "every check in tests/clang/hello.c"},
+                    {"clangtest: atexit ran",
+                     "the exit handlers, which run after main returns"},
+                    {"mixedtest: clang and gcc agree about this target's ABI",
+                     "one program from two compilers, calling both ways"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        klog_puts("[m121] missing: ");
+                        klog_puts(EXPECT[i].what);
+                        klog_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+                if (have_cxx) {
+                    static const struct { const char *needle; const char *what; } CXX[] = {
+                        {"clangcxxtest: a static destructor ran",
+                         "__cxa_atexit, from libc++abi"},
+                        {"clangcxxtest: every check passed",
+                         "every check in tests/clang/cxx.cpp - including the "
+                         "counted, ordered destructors of an unwind through "
+                         "libgcc_eh"},
+                    };
+                    for (unsigned i = 0; i < sizeof(CXX) / sizeof(CXX[0]); i++) {
+                        if (!selftest_contains(produced, CXX[i].needle)) {
+                            klog_puts("[m121] missing: ");
+                            klog_puts(CXX[i].what);
+                            klog_putc('\n');
+                            all_ok = 0;
+                        }
+                    }
+                }
+                if (selftest_contains(produced, "FAIL")) {
+                    klog_puts("[m121] a program reported a failure of its own\n");
+                    all_ok = 0;
+                }
+            }
+
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+
+            if (!all_ok) {
+                klog_puts("[m121] what the compiled programs actually wrote:\n");
+                klog_puts(produced);
+                klog_puts("[m121] ---- end\n");
+                panic("M121 self-test: a program x86_64-lean_os-clang produced "
+                      "does not run here");
+            }
+
+            klog_puts("[m121] a second compiler that knows this OS by name: a "
+                      "program from x86_64-lean_os-clang running here with no "
+                      "flag supplied by hand - the large code model checked "
+                      "from inside the program, a signal delivered over live "
+                      "stack data that survived it, __divti3 reached in GCC's "
+                      "libgcc, setjmp, a thread-local and an atomic; and ONE "
+                      "PROGRAM FROM TWO COMPILERS, clang's object and gcc's "
+                      "calling each other across twelve ABI shapes in both "
+                      "directions");
+            if (have_cxx) {
+                klog_puts("; and libc++ over libc++abi over libgcc_eh, with "
+                          "the destructors of an unwind counted and their "
+                          "order checked");
+            } else {
+                klog_puts(" (libc++ not on this image - "
+                          "tools/build-libcxx.sh builds it)");
+            }
+            klog_puts(" - self-test passed.\n\n");
+        }
+    }
+
     /* ---- M113 self-test: the browser is actually ON this machine ------
      *
      * M100 built NetSurf and graded what it *runs* like: [m100h] above

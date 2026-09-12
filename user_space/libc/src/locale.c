@@ -20,6 +20,12 @@ static struct lconv c_lconv = {
     UNSPECIFIED, UNSPECIFIED,
     UNSPECIFIED, UNSPECIFIED, UNSPECIFIED, UNSPECIFIED,
     UNSPECIFIED, UNSPECIFIED,
+    /* M121: the six C99 international-monetary fields. CHAR_MAX is the
+     * standard's own value for "not available in this locale", which is
+     * the C locale's answer and is what libc++'s moneypunct facet reads.
+     * See <locale.h>. */
+    UNSPECIFIED, UNSPECIFIED, UNSPECIFIED, UNSPECIFIED,
+    UNSPECIFIED, UNSPECIFIED,
 };
 
 static int name_eq(const char *s, const char *want) {

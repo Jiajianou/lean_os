@@ -89,10 +89,63 @@ int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n);
  * conversion is the narrow one applied per character. */
 long wcstol(const wchar_t *s, wchar_t **end, int base);
 unsigned long wcstoul(const wchar_t *s, wchar_t **end, int base);
+/* ---- M121: and the rest of the C99 numeric family -------------------
+ *
+ * M80 wrote the two above and stopped there, which was right while the
+ * only wide strings on this machine were this project's own. libc++'s
+ * std::stoll, std::stof and std::stod on a std::wstring are each one
+ * call to one of these five, so `string.cpp` would not compile at all -
+ * and the error was "reference to unresolved using declaration", from
+ * <cwchar>, naming none of them.
+ *
+ * `wcstoll` is `wcstol` widened rather than a second parser, and on this
+ * target that is exact rather than approximate: x86-64 is LP64, so
+ * `long` and `long long` are both 64 bits. Written as a widening call
+ * with this note instead of a copy of the digit loop, because a second
+ * copy is a second place for a base-36 bug to live. */
+long long          wcstoll(const wchar_t *s, wchar_t **end, int base);
+unsigned long long wcstoull(const wchar_t *s, wchar_t **end, int base);
+double             wcstod(const wchar_t *s, wchar_t **end);
+float              wcstof(const wchar_t *s, wchar_t **end);
+long double        wcstold(const wchar_t *s, wchar_t **end);
+
 /* The re-entrant form only, which is the one C99 specifies - there is no
  * hidden static state here for a `wcstok(s, d)` to keep. */
 wchar_t *wcstok(wchar_t *s, const wchar_t *delim, wchar_t **saveptr);
 wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n);
+
+/* ---- M121: the four wide-string searches C99 requires and this header
+ * ---- did not have ----------------------------------------------------
+ *
+ * Found by building libc++ against this libc, and the way it was found
+ * is worth keeping. libc++'s own <wchar.h> supplies the const-correct
+ * C++ overloads of wcschr, wcspbrk, wcsrchr, wcsstr and wmemchr, and it
+ * builds each one on top of the C function of the same name. Three of
+ * the five were here; `wcsstr` and `wcspbrk` were not, so the overload
+ * resolved to the C++ declaration libc++ had just made and the error
+ * was about const-qualification in a file nobody here wrote - which is
+ * a long way from "your libc is missing two functions".
+ *
+ * wcsspn and wcscspn come with them because wcspbrk is the third member
+ * of that family and a header with two of the three is the same trap one
+ * step further along.
+ */
+size_t   wcsspn(const wchar_t *s, const wchar_t *accept);
+size_t   wcscspn(const wchar_t *s, const wchar_t *reject);
+wchar_t *wcspbrk(const wchar_t *s, const wchar_t *accept);
+wchar_t *wcsstr(const wchar_t *haystack, const wchar_t *needle);
+/* POSIX's, not C's, and it allocates with malloc like strdup does. */
+wchar_t *wcsdup(const wchar_t *s);
+
+/* The wide half of the pair <string.h> already has, with the same note:
+ * on a machine with one locale, collation is comparison and a transform
+ * is a copy, which is what C says they must be in "C" and is the whole of
+ * what this OS has to say about collation. libc++'s locale layer calls
+ * both through wcscoll_l/wcsxfrm_l, which is where their absence showed
+ * up - as "no member named 'wcscoll' in the global namespace" from a
+ * header that supplies the _l forms by calling these. */
+int      wcscoll(const wchar_t *a, const wchar_t *b);
+size_t   wcsxfrm(wchar_t *dst, const wchar_t *src, size_t n);
 
 /* UTF-8 both ways - see the header note.
  *
@@ -134,6 +187,45 @@ size_t wcsrtombs(char *dst, const wchar_t **src, size_t n, mbstate_t *ps);
  * script probes for by name. */
 int mblen(const char *s, size_t n);
 
+/* ---- M121: and the restartable/single-character forms ---------------
+ *
+ * `mbrlen` is `mbrtowc` with nowhere to put the result, which is exactly
+ * how it is written; `btowc` and `wctob` are the single-byte special
+ * cases a program uses when it knows the character is ASCII and wants
+ * to say so. All three are C99 and all three are named in libc++'s
+ * <cwchar>, which is where their absence was noticed.
+ *
+ * The `n`-limited string forms are POSIX rather than C, and they are
+ * here for the reason the M111 note above gives about `mbsinit`: a
+ * conversion loop over a buffer that must not be overrun cannot be
+ * written with the C forms, so every library that has one of these
+ * loops probes for them. */
+size_t mbrlen(const char *s, size_t n, mbstate_t *ps);
+wint_t btowc(int c);
+int    wctob(wint_t c);
+size_t mbsnrtowcs(wchar_t *dst, const char **src, size_t nms, size_t len,
+                  mbstate_t *ps);
+size_t wcsnrtombs(char *dst, const wchar_t **src, size_t nwc, size_t len,
+                  mbstate_t *ps);
+
+/* ---- M121: struct tm, and why an incomplete type is the point --------
+ *
+ * C requires <wchar.h> to declare `struct tm` - as an incomplete type,
+ * which is all `wcsftime`'s prototype needs. This header did not, and
+ * the failure was not a missing function: libc++'s <cwchar> and <ctime>
+ * both say `using ::tm __attribute__((using_if_exists))`, so <cwchar>
+ * bound the name to nothing and <ctime> then bound the same name to the
+ * real struct, and clang reported "target of using declaration conflicts
+ * with declaration already in scope" from inside <chrono>. One missing
+ * line in a header, three files away from where it was reported.
+ *
+ * Not `#include <time.h>`: the standard asks for the tag to be visible,
+ * not for the whole header, and a <wchar.h> that dragged in <time.h>
+ * would be a difference from every other libc for no reason. */
+struct tm;
+size_t wcsftime(wchar_t *out, size_t n, const wchar_t *fmt,
+                const struct tm *tm);
+
 /* ---- M94: the wide stdio family ---------------------------------------
  *
  * Built on the narrow printf rather than beside it - see wchar.c for why
@@ -161,6 +253,24 @@ int fputwc(wchar_t c, FILE *f);
 int putwc(wchar_t c, FILE *f);
 int putwchar(wchar_t c);
 int fputws(const wchar_t *ws, FILE *f);
+
+/* ---- M121: and the input half, which M94 did not build --------------
+ *
+ * M94 built the wide OUTPUT family because GNU hello's `wprintf` asked
+ * for it. libc++ asks for the other half and asks unconditionally:
+ * src/std_stream.h reads std::wcin through `getwc` and puts a character
+ * back through `ungetwc`, and compiles both whatever this libc has.
+ *
+ * fgetwc decodes UTF-8 one byte at a time through mbrtowc's state, so a
+ * character split across a read is finished rather than lost. `fwide`
+ * answers 0 - "no orientation" - which is the truth here rather than a
+ * stub; see wchar.c for why this libc has no orientation to report. */
+wint_t   fgetwc(FILE *f);
+wint_t   getwc(FILE *f);
+wint_t   getwchar(void);
+wint_t   ungetwc(wint_t c, FILE *f);
+wchar_t *fgetws(wchar_t *ws, int n, FILE *f);
+int      fwide(FILE *f, int mode);
 
 /* M94: POSIX declares these in <wchar.h> and this project had them only
  * in <wctype.h>, which is where the ctype-shaped ones live. gnulib's

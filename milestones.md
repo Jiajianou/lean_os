@@ -71,12 +71,12 @@ that has never happened.
 
 | | state |
 |---|---|
-| **Milestones** | M0–M117 numbered: 108 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110) |
+| **Milestones** | M0–M121 numbered: 112 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110). M121 is `[x]` with one *measurement* open, not one feature — see its entry |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
 | **Head of the queue** | **M100** — eight of nine libraries landed; M111 and M112 were both taken out of order at the user's request and closed 2026-09-09 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
-| **Host unit tests** | 395/395 passing, 3 slow ones skipped in `--fast` |
-| **Boot markers** | 128 required, graded on every self-test boot - M117's `[m117]` is the first to time a click through a client and to charge an idle desktop for its CPU |
+| **Host unit tests** | 493/493 passing, 3 slow ones skipped in `--fast` - M121's `tests/test_wcs.c` is the 18 newest, and found three bugs in M80's `wcstol` on its first run |
+| **Boot markers** | 133 required, graded on every self-test boot - M121's `[m121]` is the first to grade a program built by *two* compilers, and the only marker whose subject is an agreement rather than a feature |
 | **Performance budgets** | 44 rows in `tests/budgets.tsv`, all inside their ceilings |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
@@ -459,7 +459,7 @@ unbuilt is the drift *Deferred* exists to catch.
 | # | milestone | state | why here |
 |---|---|---|---|
 | ~~**1**~~ | ~~**M99 (2nd)**~~ | **done 2026-09-04** | all five boxes closed across three increments — see *Landed since this snapshot*. Neither open box was about what its own entry predicted: the loader box was mostly a target-description box, and the build box was a shell box |
-| ~~**2**~~ | ~~**M100** — the browser gap, measured~~ | **engine and measurement done 2026-09-10** (ninth increment); ICU is the one library still open, and it is a wall-clock question rather than a capability one. The measurement's own conclusion opens the next row of this arc: `AF_UNIX` | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on |
+| ~~**2**~~ | ~~**M100** — the browser gap, measured~~ | **engine and measurement done 2026-09-10** (ninth increment); ICU is the one library still open, and it is a wall-clock question rather than a capability one. The measurement's own conclusion opened an arc of its own, and **all three of its conditions that were code are now closed**: `AF_UNIX` (M118), `epoll`/`eventfd`/`timerfd` (M119), `memfd_create` (M120) and **clang + libc++** (M121). The two that remain — a 16 GB machine, and a sandbox story — are not porting problems | the last milestone of its arc and the one that specifies the arc after it. **TLS lives here**, which is also the fetch M108's three TCP deferrals are conditioned on |
 | **3** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not |
 | **4** | **Q14** — the compositor, off the machine | not started | the move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded in milliseconds rather than only through a screendump |
 | **5** | **M106 (tail)** — the battery green on four cores | 3 known failures, **plus `smp-test.sh` itself failing 2 runs in 3** (measured 2026-09-09 at HEAD — see *The machine as it stands*) | not a new milestone: the three failures M106 named and left. It gates CPU affinity, and there are now two reproductions on demand — M98's bootstrap profiler, and a 21-second `tools/smp-test.sh` that panics with "this CPU is not on the stack of the task it thinks it is running" about two attempts in three. **Start with the second one**. M112 adds a third, and it needs no second CPU: two graded boots in three stalled inside a `spawn`-then-`SYS_wait` self-test (`[m100d]` once, `[m100f]` once) on a single-CPU battery, eight to nine minutes with no serial output, while a third run of the same image was 123/123 in 410 s |
@@ -2837,10 +2837,14 @@ buffer - are all here. Between them this kernel has **128 syscalls**; twelve of 
 91 and a gap of 336. What has not moved is the part that decides the rest:
 `signalfd4`, `seccomp`, `prctl(PR_SET_SECCOMP)` and `clone` with a
 namespace flag - the first a feature nothing in `base` calls, the other
-three the sandbox. **The condition for this row is now the
-third item on that list: clang and libc++ for `x86_64-lean_os`**, which is
-a compiler rather than a few hundred lines of kernel - and that is the
-honest shape of the remaining three.
+three the sandbox. **M121 then closed the third item on that list -
+clang and libc++ for `x86_64-lean_os`** - and the estimate above was
+wrong about where the cost sat: the compiler half of the port was eight
+anchored edits, and what the milestone actually paid for was eleven
+missing functions in this project's own libc. **The condition for this row is now the two that
+are not porting problems**: a machine with 16 GB of RAM and 100 GB of
+disk, and a sandbox story that is not a pretence. Neither is reachable by
+writing code here, which is the honest shape of what remains.
 
 ### M113 — the browser, actually installed `[x]`
 
@@ -4362,6 +4366,318 @@ build yet: what they actually bought is a machine on which *any*
 multi-process program can be written - a channel, a wait, and a buffer -
 and the first programs to use them will be this project's own.
 
+### M121 — a second compiler: clang and libc++ for `x86_64-lean_os` `[x]` (one measurement open)
+
+*Landed 2026-09-12.* The third of `docs/browser.md`'s five conditions, and
+the one its own text called the place where *"the arc stops being ordinary
+work — the two that are done were a few hundred lines each of kernel; this
+is a compiler."* Both halves of that sentence turned out to be wrong, in
+opposite directions, and the correction is the most useful thing in this
+entry.
+
+**The compiler port was the cheap half.** `tools/clang-port/` is
+**thirteen anchored edits and three files** in all, and it splits in two:
+**eight edits and two files are the compiler** — against M94's nine edits
+and one header for GCC, so comparable rather than smaller — and **five
+edits and one file are libc++**, which is a second port. The eight are a
+name in an enum, a name in two string tables, a `TargetInfo` saying which
+macros the preprocessor defines, the two lines that reach the new classes,
+and one line of the driver's source list. The shapes differ from GCC's for
+a structural reason rather than because less was needed: GCC's per-target
+knowledge is spread across `config.gcc`, `config.bfd`, `configure.tgt` and
+three makefile fragments; clang's is one `ToolChain` class in one file.
+Every decision that actually matters is in
+`tools/clang-port/LeanOS.cpp`, which names the spec in
+`tools/toolchain-port/lean_os.h` it corresponds to — because the two
+compilers agreeing about the code model and the startup files is not a
+nicety here: they link against **the same `libc.a`, the same `crt1.o` and
+the same `libgcc.a`**, and a disagreement would produce programs that run
+and are wrong.
+
+`x86_64-lean_os-clang hello.c -o hello` takes **no flag supplied by hand**,
+which is M94's standard held to a second front end for the same reason:
+every flag invented by hand is a flag someone else's build system will not
+pass.
+
+**What made it a milestone was the C library underneath it.** libc++ named
+**27 missing functions in this project's own libc** — plus six C99
+`lconv` fields and a `struct tm` declaration — and every one is something C99
+or POSIX requires that nothing here had ever asked for:
+
+| gap | how it presented |
+|---|---|
+| `wcsstr`, `wcspbrk` | libc++'s `<wchar.h>` supplies const-correct C++ overloads by calling the C function of the same name. Two of the five were missing, so the call resolved to the declaration libc++ had just made, and the error was about const-qualification in a file nobody here wrote |
+| `struct tm` absent from `<wchar.h>` | C requires the *tag* to be visible there for `wcsftime`. `<cwchar>` and `<ctime>` both do `using ::tm __attribute__((using_if_exists))`; the first bound the name to nothing and the second to the real struct, and clang reported *"target of using declaration conflicts with declaration already in scope"* from inside `<chrono>` |
+| `wcstoll`, `wcstoull`, `wcstod`, `wcstof`, `wcstold` | `std::stoll`/`stof`/`stod` on a `std::wstring` are each one call to one of these. M80 built `wcstol`/`wcstoul` and stopped, correctly, while the only wide strings here were this project's own |
+| the wide **input** family — `fgetwc`, `getwc`, `getwchar`, `ungetwc`, `fgetws`, `fwide` | M94 built the wide *output* family because GNU hello's `wprintf` asked for it. libc++'s `std_stream.h` reads `std::wcin` through `getwc` and puts a character back through `ungetwc`, and compiles both unconditionally |
+| `asprintf`/`vasprintf` | the one function in the printf family a caller cannot write for itself without knowing `vsnprintf` returns the length it *would* have written |
+| `strerror_r` | `std::system_error` calls it and has no path that does not |
+| the six C99 `int_*` fields of `struct lconv` | sixteen errors from `locale.cpp`. C89's `lconv` ended at `n_sign_posn`; this struct had too |
+| `wcscoll`/`wcsxfrm` | the wide half of a pair `<string.h>` already had |
+
+That is the same shape M99 found porting CPython and M100 found porting
+NetSurf, and it is the argument for porting somebody else's code stated
+once more: **it asks for what the standard says, not for what this project
+remembered to build.** A libc grown against this project's own programs is
+a libc shaped like this project's own programs.
+
+**And two files that are not edits at all: a CMake platform.** libc++ is
+built by CMake, so a cross build needs `CMAKE_SYSTEM_NAME`, and the easy
+answer was `Linux`. That would be a lie with consequences — a project
+configured against a Linux platform description believes it has an
+ldconfig cache, a `/proc`, versioned soname rules and `dlopen` in libdl,
+and libc++'s own CMake asks about several of those. So
+`tools/clang-port/cmake/Platform/lean_os.cmake` says what is actually
+here, in the format CMake documents for adding a platform, and the lines
+where it differs from `Linux.cmake` are the interesting ones:
+`CMAKE_DL_LIBS` is **empty**, because dlopen lives in `ld-lean.so` and
+there has never been a libdl (glibc's own arrangement since 2.34), and
+there is no rpath-link or ldconfig because this loader has no cache.
+Those are the same true statements `tools/toolchain-port/apply.py`
+already hands libtool. Nothing third-party is involved: it is this
+project's own description of its own OS.
+
+The toolchain file beside it cost one real debugging session worth
+recording, because the failure names the wrong thing.
+`CMAKE_TRY_COMPILE_PLATFORM_VARIABLES` is how a toolchain file says which
+variables must survive into the throwaway project CMake builds to
+identify the compiler — that project does not inherit the parent's cache,
+so `-DLEANOS_PREFIX=` was simply absent there and the file failed with
+*its own* `message(FATAL_ERROR)` reported from inside
+`CMakeSystem.cmake`, followed by `CMAKE_C_COMPILER not set, after
+EnableLanguage`. Neither line mentions the cache.
+
+**Two decisions worth naming, both of them refusals of the easy answer.**
+
+- **libgcc, not compiler-rt; libgcc_eh, not libunwind.** LLVM ships both
+  and libc++abi prefers its own. This build says no, and not for size:
+  libgcc's exception machinery keeps a *static registry* of the
+  `.eh_frame` tables it has been told about, so two unwinders in one
+  program means a throw that crosses from a frame one registered into a
+  frame the other did finds no handler, calls `std::terminate`, and aborts
+  with no message from a program whose other tests all pass. M97 learned
+  that for libstdc++ the hard way; this chose it deliberately. Every
+  archive in the sysroot was produced against GCC's runtime, so there is
+  one unwinder on this machine and it is GCC's.
+- **libc++'s locale layer takes the Fuchsia path, and that is a true
+  statement rather than a shortcut.** `locale_base_api.h` is a switch over
+  which libc a platform has; the generic branch expects forty
+  `newlocale`-flavoured `*_l` functions. This machine has **one locale and
+  it is "C"** (`<locale.h>`, M89), so it takes the branch that uses
+  libc++'s own inline fallbacks — which accept a `locale_t` and ignore it.
+  Forty functions that formatted for a locale which cannot differ from the
+  default would be forty functions of pretence, and M65's rule decides it.
+  Localization is **on**: `<iostream>`, `<sstream>` and `<regex>` all
+  exist.
+
+**What is explicitly not built, with its condition.** **Over-aligned
+`new`.** libc++ wants C11 `aligned_alloc` or POSIX `posix_memalign` and
+this libc has neither: `user_space/lib/malloc.c` returns 16-byte aligned
+memory — `max_align_t` on x86-64, and what M115 had to fix after a
+`movaps` found the old 8 — but it cannot return more, because `free`
+finds a block by reading the header immediately *before* the pointer it
+was given, and a shifted pointer has no header there. The condition is a
+`free` that can find the block from a pointer moved forward, which means a
+tagged indirection header in the allocator every program on this machine
+uses — and nothing asks for over-aligned `new` yet.
+`_LIBCPP_HAS_NO_LIBRARY_ALIGNED_ALLOCATION` says so, rather than an
+`aligned_alloc` that hands back 16-byte memory for a request of 64 and
+lets the caller fault somewhere else. Also not built: a **shared** libc++
+(nothing asks), and `<filesystem>` (it needs `openat`, `utimensat` and
+`readlink` semantics this libc has not got; the condition is those calls).
+
+**What the instruments said.**
+
+- `tools/clang-test.sh`, four stages, cheapest first, and the second is
+  the one worth copying. `clang -###` prints the commands the driver
+  *would* run without running them, so **every decision in `LeanOS.cpp` is
+  a string to grep for**: thirteen flags that must be present, two that
+  must be absent on a static line, and four that must flip under `-fPIC
+  -shared`. That catches the failure this port was most likely to ship and
+  which no working program can see — *a flag silently stopping being
+  supplied*. A binary compiled without `-disable-red-zone` runs, passes
+  every check it makes about itself, and loses 128 bytes of stack the
+  first time it takes a signal.
+- **`/bin/mixedtest`: one program, two compilers.** `tests/clang/abi_main.c`
+  compiled by clang and `tests/clang/abi_peer.c` by GCC, linked together,
+  calling each other in **both directions** across twelve shapes the
+  x86-64 System V classification argues about — a struct of two longs, a
+  struct of two floats in one SSE register, a mixed INTEGER/SSE pair, a
+  struct returned through a hidden pointer, bitfields with a `_Bool`,
+  mixed integer and floating-point varargs, an x87 `long double`, and a
+  function pointer called across the boundary. Nothing else in this tree
+  can make this claim, and it is the claim a second toolchain actually
+  needs.
+- `tests/clang/hello.c` and the `[m121]` marker: the compile is graded on
+  the host, and the program **runs here**. Beyond what `[m94]` proves for
+  GCC it checks its **own load address** from inside the program (the
+  large code model), survives a **signal delivered over 256 bytes of live
+  stack data** with the checksum taken either side (the absent red zone —
+  M76 builds the signal frame on this stack), and reaches `__divti3` in
+  GCC's libgcc through a 128-bit division, which is the evidence that the
+  port uses M94's runtime rather than a compiler-rt that was deliberately
+  not built.
+- `tests/clang/cxx.cpp`: destructors **counted and their order checked**
+  through an unwind, on M97's reasoning that a catch which fires while
+  skipping a cleanup looks like success. It is the only program here that
+  exercises libc++abi over libgcc_eh.
+- `tests/test_wcs.c`: **18 new host tests**, differential against the
+  host's narrow functions, 493/493 in the fast tier. Three of the eleven
+  libc additions are *not* in it and the file says why: `asprintf`,
+  `strerror_r` and the `lconv` fields live in stdio.c, string.c and
+  locale.c, none of which is in the Makefile's `TEST_USER_SRCS` — they are
+  graded on the machine instead, by libc++ calling all three.
+
+**And the three bugs the new test found in code that was eleven
+milestones old.** `tests/test_wcs.c` grades the wide-string functions
+against **the host's own narrow ones** — `wcsstr(L"aaab", L"aab")` has to
+find its match where `strstr("aaab", "aab")` finds one, and
+`wcstod(L"0x1p-3", &e)` has to leave `e` where `strtod` leaves it. The
+narrow function is the better oracle here for a reason worth stating:
+wchar.c is compiled into the test binary, so a differential against the
+host's *wide* `wcsstr` would have silently graded this implementation
+against itself.
+
+It failed on its first run, and not on anything M121 wrote — on
+`wcstol`/`wcstoul`, which are M80's:
+
+- **No overflow saturation.** `9223372036854775807` in base 36 came back
+  as `3707029189907929095`. C requires the limit with `ERANGE`; this
+  wrapped. The reason that is worse than it sounds is the direction: a
+  wrapped result is a *smaller* number, which a bounds check accepts.
+- **Undefined behaviour on exactly one input.** `-(long)v` where `v` is
+  2^63 — which is `LONG_MIN`, the one value a sign-handling path must get
+  right. UBSan named the line. It is unsigned arithmetic now.
+- **`"0x"` with no hex digit after it.** C defines the subject sequence
+  as the longest initial subsequence of the expected form, and `0x` alone
+  is not of that form — `0` is. This consumed both characters, found no
+  digits, and reported the end pointer back at the start of the string,
+  telling a caller parsing a list that nothing was there. The host puts
+  it on the `x`.
+
+M121's own `wcstoll`/`wcstoull` are `wcstol`/`wcstoul` widened, so all
+three were inherited before the ink was dry. **This is the fourth time in
+this project that pointing somebody else's standard at this libc has
+found a bug that was already shipping** (M89's toybox, M99's CPython,
+M100's iconv, this) and the pattern in all four is the same: the code was
+correct for every input this project's own programs had ever given it.
+
+**And a guard somebody else built that caught this milestone.**
+`tools/printf-test.sh` and `tools/stdio-test.sh` compile stdio.c for the
+host and put it in one process beside the host's own, which only works if
+every symbol it exports is renamed - so both scripts check, by name, that
+nothing in the object escapes unrenamed:
+
+    stdio-test: stdio.c exports symbols this script does not rename:
+    asprintf
+    fgetwc
+    ungetwc
+    vasprintf
+
+Four new functions in stdio.c, four unrenamed symbols, and the failure it
+prevented is the worst kind a differential test can have: an unrenamed
+`asprintf` shadows the host's, so the harness would have graded this
+implementation **against itself** and passed. The check is four lines and
+it has now paid for itself; the general form is worth copying into any
+harness that puts two implementations of the same library in one process.
+
+**The bug found by reading, and the one found by a warning.**
+
+The port's own fingerprint hashed all three of its files, so editing
+`LeanOS.cpp` — which is *copied* over whatever is there and cannot
+double-apply — would have thrown away a 2,607-target build. Only
+`apply.py` needs that reset, and the general rule is worth writing down:
+**an anchored edit needs the tree thrown away, a whole file does not.**
+
+And `-Wmissing-field-initializers` earned its place. Adding `wunget` to the
+middle of `struct FILE` silently shifted every positional value in the
+three static stream initialisers one place along — the write buffer would
+have been initialised from an int and `mode` from nothing. They are
+designated now, which cannot be broken by a field appearing above them, in
+a struct that has grown in four of the last five milestones.
+
+**Two mistakes of my own worth recording, because both cost real time.**
+
+**I edited `tools/build-clang.sh` with a script while bash was executing
+it.** Bash reads a script incrementally by byte offset, so the rewrite
+shifted the ground under the running interpreter and it resumed
+mid-token: `-DLLVM_INCLUDE_EXAMPLES=OFF: command not found`, after a
+successful 40-minute build, with the install step skipped. Never rewrite a
+shell script that is running.
+
+**And I spent two hours measuring a machine that had two operating
+systems booting on it.** `sqlite_fixture_ms` came back **over budget** —
+7,420 ms against a 6,000 ceiling, where HEAD measured 2,280 — and it
+reproduced four times. What followed was three bisections, and the first
+two answered cleanly: **the kernel change is innocent** (M121's self-test
+block plus HEAD's libc measured 2,280), and **120 MB of junk written onto
+the disk changes nothing** (2,520), which killed the disk-occupancy
+theory. The third pointed at the libc, and there was no mechanism: the
+whole diff moves `/bin/sqlite3` not at all (it is a prebuilt binary from
+M100), grows `/bin/sh` by **8 bytes**, and leaves `/bin/toybox`
+byte-identical.
+
+The cause was on the desk, and it took two forms, neither of them in the
+diff. First VS Code's `cpptools` indexing the **120,000-file LLVM tree
+this milestone unpacked into `build/`** at 98% of a core. Then a **second
+session running the same 400-second, disk-heavy boot battery on this
+host** — a separate worktree with its own `build/`, so it never touched
+this image, but a second 2 GiB sparse-file workload and a second vCPU
+competing for exactly the resource `sqlite_fixture_ms` measures.
+
+**Two anomalies along the way were mine, and both are worth recording
+because each cost a whole measurement.** A saved image that booted with
+`/bin/sqlite3 is not on this image` after its payloads had demonstrably
+been installed: `make browser-if-built` invoked as a *separate* `make`
+after the install chain found `$(IMAGE)` stale and recreated the disk,
+wiping leanfs — which is the hazard CLAUDE.md already names, met head-on.
+And QEMU processes "terminating on signal 15 from pid <unknown>": a
+`pkill -f "qemu-system-x86_64.*OVMF"` I had put at the top of an A/B loop
+to guard against orphans, whose pattern matched **every** QEMU on the
+machine including the other worktree's, and matched the loop's own
+command line as well.
+
+**The instrument that made this answerable is worth naming.**
+`disk_1mib_write_through_us` is a raw `blk_write` to a fixed LBA at the
+end of the disk — no libc, no leanfs, no image layout, and **nothing in
+this diff can reach it**. It swung **53,196 → 126,406 µs at one commit**.
+So when HEAD measured 2,120 ms for sqlite *while* that metric read
+126,406, the two were shown to be uncorrelated and the fixture's readings
+were shown to be environmental. A battery that contains one metric the
+change under test provably cannot affect is a battery that can tell
+contamination from causation; this one does, by luck rather than design,
+and it should be by design.
+
+My own notes already said *"kill orphaned QEMUs before timing anything"*.
+Three things belong beside it now. **A performance budget measured while
+a second VM is running this same battery is not a measurement**, even
+when the two have separate images — the contention is the host's disk and
+it is exactly what the fixture measures; the check is `ps -Ao
+pid,ppid,command | grep qemu-system` with the **parents** read, because
+the count alone does not say whose. **Never `pkill -f` a pattern broad
+enough to match a sibling worktree** — or the harness's own command line.
+And **run the payload installs in one chain with `make all`**, never as a
+separate `make` afterwards.
+
+**One box left open, and it is a measurement rather than a feature.**
+
+- [ ] **`sqlite_fixture_ms` re-measured on a machine with one VM on it.**
+      Every *marker* in the boot battery passes, `[m121]` included, and
+      every host tier is green (493/493, plus seven differential
+      harnesses). What could not be established is one **performance
+      budget**: `sqlite_fixture_ms` read 7,420–8,820 ms against a 6,000
+      ceiling in five runs, and 2,400–2,520 ms in two others on the same
+      tree — while HEAD read 2,120–2,280 ms in three. The ceiling was
+      **not** raised, and that is deliberate: this project's rule is that
+      a number is a claim, and the honest state of this number is that it
+      was taken on a host running a second copy of this same boot battery
+      (see above). The condition for closing it is one
+      run of `./tools/run-tests.sh` with nothing else on the machine —
+      `ps -Ao pid,ppid,command | grep qemu-system` empty before it
+      starts. If it reads over 6,000 there, it is a real regression and
+      the bisection above says where to start: not the kernel, not disk
+      occupancy, and with no mechanism yet found in the libc.
+
 ## Every open box, in one place
 
 The queue says what order. This says exactly what is unfinished, in the
@@ -4443,6 +4759,19 @@ write nothing and return successfully).
       condition is **not Chromium's** - WebKit, Gecko and Ladybird pass
       descriptors over a Unix-domain socket too, and none of the four has
       a single-process mode. See [docs/unix-sockets.md](docs/unix-sockets.md).
+- [x] **clang and libc++ for `x86_64-lean_os` — done 2026-09-12, as M121.**
+      The third of the measurement's five conditions and the one its own
+      text called the end of ordinary work. It was the cheap half: six
+      anchored edits and two files (`tools/clang-port/`), against M94's
+      nine for GCC. **The expensive half was this libc** - libc++ named
+      **27 missing functions** in it, plus six C99 `lconv` fields and a
+      `struct tm` declaration, every one something C99 or POSIX requires
+      that nothing here had asked for. Graded by `[m121]` and by
+      `tools/clang-test.sh`, whose sharpest instrument is **one program
+      linked from a clang object and a gcc object**. Over-aligned `new`
+      is refused with a condition attached (a `free` that can find a
+      block from a shifted pointer). See
+      [docs/toolchain.md](docs/toolchain.md).
 - [ ] **Two headers named `signal.h`.** Not a missing feature - a
       fragility in this project's own sysroot that the curl port found
       (see the ninth increment). Any third-party build that puts
@@ -4856,14 +5185,25 @@ condition rather than by an opinion.
   gave this kernel write-readiness it had never had. **M120 added
   `memfd_create`** the same day, which was not one of the five conditions
   but was one of the six absent syscalls behind them: with it a buffer can
-  cross a channel, which is how Mojo moves anything bigger than a message. **The condition is
-  now the third, and it is where this stops being ordinary work: clang
-  and libc++ for `x86_64-lean_os`.** The two that are done were a few
-  hundred lines of kernel each; this is a second compiler port, with
-  M94's nine edits as the template for what that costs. After it: a
-  machine with 16 GB of RAM and 100 GB of disk, and a sandbox story that
-  is not a pretence - Chromium's code calls `seccomp` and namespaces and
-  this OS assigns a capability set at spawn, which is not the same shape.
+  cross a channel, which is how Mojo moves anything bigger than a message.
+  **And M121 closed the third** (2026-09-12): `x86_64-lean_os-clang`,
+  `clang++` and libc++ - thirteen anchored edits and three files, eight
+  of the edits being the compiler against M94's nine, so the "this is
+  where it stops being ordinary work" estimate was wrong, and wrong in an
+  interesting direction: **the compiler was
+  configuration and the C library was the work**: 27 missing C99 and
+  POSIX functions, found by building somebody else's standard library
+  against it.
+
+  **What is still deferred is everything that is not code.** A machine
+  with 16 GB of RAM and 100 GB of disk - which is M110's hardware, and
+  held by instruction - and a sandbox story that is not a pretence:
+  Chromium's code calls `seccomp`, namespaces and `prctl`, and this OS
+  assigns a capability set at spawn, which is not the same shape, and
+  M65's rule governs what may be built to bridge them. Beyond both,
+  the arithmetic that has not moved at all: **100 GB of checkout and 535
+  sub-repositories against a 2 GiB image**. Four conditions closed does
+  not make a hundred-gigabyte build fit, and no compiler work will.
   Chrome itself is proprietary and so not a porting question at all. GPU
   compositing stays refused on its own terms above.
 - **Multi-user, logins, uids.** Becomes real if and when two people share

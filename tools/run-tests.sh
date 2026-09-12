@@ -148,6 +148,18 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
     echo "the dynamic linker or something it loads would not build" >&2
     exit 1
   fi
+  # M121: the second compiler, and the ABI between the two. Same shape and
+  # the same reason as the gcc stage above - it needs the clang
+  # tools/build-clang.sh builds, skips with a message when that is not
+  # there, and the [m121] boot marker downstream is what grades the
+  # programs it installs. After cxx-test.sh because that stage regenerates
+  # the sysroot and this one's libc++ link reads it.
+  run_stage "a program from x86_64-lean_os-clang, and one from both" \
+    ./tools/clang-test.sh
+  if [ "$OVERALL" -ne 0 ]; then
+    echo "the clang port produced something that will not link or run" >&2
+    exit 1
+  fi
   # M98: the toolchain that runs ON the machine, if it has been built.
   # Skips with a message otherwise, same as the three stages above; the
   # [m98] boot marker downstream is what actually grades it.

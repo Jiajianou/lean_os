@@ -331,7 +331,8 @@ for s in __assert_fail __fpending __lean_stdio_flush_all \
          fputs fread freopen fseek fsetpos ftell fwrite getc getchar \
          getdelim getline perror printf putc putchar puts remove rename \
          rewind setbuf setvbuf snprintf sprintf stderr stdin stdout \
-         tmpfile ungetc vdprintf vfprintf vprintf vsnprintf vsprintf; do
+         tmpfile ungetc vdprintf vfprintf vprintf vsnprintf vsprintf \
+         asprintf vasprintf fgetwc ungetwc; do
   RENAMES="$RENAMES -D$s=lean_$s"
 done
 

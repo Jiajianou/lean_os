@@ -58,6 +58,27 @@ struct lconv {
     char n_sep_by_space;
     char p_sign_posn;
     char n_sign_posn;
+    /* ---- M121: the six C99 added, and why their value is CHAR_MAX ----
+     *
+     * C89's `lconv` ended at n_sign_posn; C99 added these six, which
+     * describe how an INTERNATIONAL monetary amount is punctuated as
+     * distinct from a local one. This struct stopped at the C89 set, and
+     * libc++'s moneypunct facet reads all six - sixteen errors from
+     * locale.cpp, each one "no member named 'int_p_cs_precedes' in
+     * 'lconv'".
+     *
+     * CHAR_MAX is not a placeholder: C specifies it as the value meaning
+     * "this quantity is not available in the current locale", and it is
+     * what the C locale's own entry must be. localeconv() sets them (see
+     * locale.c), so a program reading them gets the standard's answer
+     * for "C" rather than a zero that would read as "the symbol follows
+     * the amount with no space". */
+    char int_p_cs_precedes;
+    char int_n_cs_precedes;
+    char int_p_sep_by_space;
+    char int_n_sep_by_space;
+    char int_p_sign_posn;
+    char int_n_sign_posn;
 };
 
 /* Returns "C" for LC_* with a NULL, an empty, or a "C"/"POSIX" locale

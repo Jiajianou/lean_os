@@ -263,6 +263,43 @@ UEFI firmware
   child existed and kept after both descriptors were closed. Which is, in
   one sentence, what a browser's renderer and its parent do all day.
 
+- **And the fourth** (M121): **a second compiler.**
+  `x86_64-lean_os-clang`, `clang++`, and **libc++** — LLVM 19.1.7 ported
+  to this OS from **thirteen anchored edits and three files** — eight of
+  the edits are the compiler, against the nine M94's GCC port needed, and
+  five are libc++, which is a second port rather than a postscript. `x86_64-lean_os-clang hello.c -o hello`
+  produces a program this machine runs with **no flag supplied by hand**,
+  which is the same standard M94 set and for the same reason.
+
+  It links against **GCC's** libgcc and libgcc_eh rather than LLVM's own
+  compiler-rt and libunwind, and that is a decision rather than a
+  default: libgcc's exception machinery keeps a static registry of the
+  `.eh_frame` tables it has been told about, so two unwinders in one
+  program means a throw that crosses between them finds no handler and
+  aborts with no message. There is one unwinder on this machine and it is
+  GCC's.
+
+  The sharpest thing it proves is **one program built by two
+  compilers**: one translation unit from clang and one from GCC, linked
+  together and calling each other in both directions across twelve
+  shapes the x86-64 ABI argues about — a struct of two floats in one SSE
+  register, a mixed integer/SSE pair, a struct returned through a hidden
+  pointer, mixed varargs, an x87 `long double`. Every archive in this
+  sysroot was built by GCC, so two front ends that disagreed there would
+  produce programs that run and are wrong, and no single-compiler test
+  can see it.
+
+  **And porting libc++ found 27 missing functions in this project's own
+  C library** — `wcsstr`, `wcspbrk`, the five wide numeric conversions,
+  the whole wide *input* family (M94 built only the output half),
+  `asprintf`, `strerror_r` and thirteen more — plus six C99 `lconv`
+  fields and a `struct tm` declaration missing from one header, which
+  presented as an error inside `<chrono>` three files away. Every one is
+  a function C99 or POSIX requires. The same lesson CPython and
+  NetSurf taught: somebody else's code asks for what the standard says,
+  not for what this project remembered to build. See
+  [docs/toolchain.md](docs/toolchain.md).
+
 - **A package manager.** `os install grep` puts **GNU grep 3.11** on
   this machine — built here by this project's own compiler from the
   published tarball with no edit to its source — and the machine runs
@@ -305,6 +342,15 @@ tools/build-packages.sh      # cross-build grep and bzip2 into .osp archives
 make packages                # ...and write them into the image as /pkg/repo
 make browser                 # cross-build NetSurf 3.11, libcurl and 14
                              #   libraries, and write the browser in
+```
+
+The two compilers for this target are separate again, and neither is part
+of `make` — both take most of an hour, once:
+
+```sh
+tools/build-toolchain.sh     # x86_64-lean_os-gcc and binutils (M94)
+tools/build-clang.sh         # x86_64-lean_os-clang, into the same prefix (M121)
+tools/build-libcxx.sh        # ...and libc++/libc++abi for the target
 ```
 
 `make browser` builds the port only if it has never been built, and
@@ -356,9 +402,9 @@ Four instruments, and none of them subsumes another:
   fake timer and a fake CPU, so a tick is a function call and a
   fairness property can be checked at every task count, and it learns
   the order locks are taken in so an inversion is an error rather than
-  a comment (Q9). 474 tests.
+  a comment (Q9). 493 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 131 markers and 41 performance
+  image and grade the serial log against 133 markers and 44 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It
