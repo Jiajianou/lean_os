@@ -71,13 +71,13 @@ that has never happened.
 
 | | state |
 |---|---|
-| **Milestones** | M0–M121 numbered: 112 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 4 not started (M107–M110). M121 is `[x]` with one *measurement* open, not one feature — see its entry |
+| **Milestones** | M0–M121 numbered: 113 `[x]`, 4 `[~]` (M28, M92, M99, M103), 1 `[⊘]` (M80), 3 not started (M108–M110). **M107 landed 2026-09-12**; it and M121 are both `[x]` carrying the *same* open measurement, which is one row of `tests/budgets.tsv` and not a feature — see M107's entry for the four runs that eliminated its most likely cause |
 | **Testing arc** | Q1–Q20 written, 18 `[x]`; Q7 half landed, Q14 not started |
 | **Head of the queue** | **M100** — eight of nine libraries landed; M111 and M112 were both taken out of order at the user's request and closed 2026-09-09 |
 | **Held by instruction** | all real-hardware work: M110, M28's last box, M108's link half, M103's two hardware-conditioned boxes |
-| **Host unit tests** | 493/493 passing, 3 slow ones skipped in `--fast` - M121's `tests/test_wcs.c` is the 18 newest, and found three bugs in M80's `wcstol` on its first run |
-| **Boot markers** | 133 required, graded on every self-test boot - M121's `[m121]` is the first to grade a program built by *two* compilers, and the only marker whose subject is an agreement rather than a feature |
-| **Performance budgets** | 44 rows in `tests/budgets.tsv`, all inside their ceilings |
+| **Host unit tests** | 564/564 passing, 3 slow ones skipped in `--fast` - M107's 71 are the newest, across four files. One found an invariant of the xHCI ring nobody had written down, and sixteen of them exist because `make mutate` said the first fifty-five were coverage without an assertion (81.5% -> 88.9%) |
+| **Boot markers** | 134 required, graded on every self-test boot - M107's `[m107]` is the newest, and the only one that *names the backend it ran on*, so four passes of an identical test are distinguishable in a log |
+| **Performance budgets** | 44 rows in `tests/budgets.tsv`, 43 inside their ceilings. `sqlite_fixture_ms` is the exception and has been since 2026-09-12: it is **bimodal rather than noisy** (~2,300 or ~8,000 ms, at commits with and without M107 alike) and the ceiling has deliberately not been raised - see M107 |
 | **Source** | ~50k lines kernel, ~50k user space, ~3.3k system_api, ~9.5k tests |
 | **Working tree** | clean; nothing half-landed anywhere |
 
@@ -446,9 +446,12 @@ it. They decide arguments; they are not preferences.
 
 Eleven entries are still open — M28, M92, M99, M100, M103, M107, M108,
 M109, M110, Q7 and Q14 — and two that are `[x]` named work they did not
-finish (M98's tail and M106's). They fold to the ten rows below: M28's one open box **is** M110's first box, M92's last box
-collects inside M107 under the condition already written for it, M103's
-three boxes split two ways between M107 and M110, and M98's tail is
+finish (M98's tail and M106's). They fold to the ten rows below: M28's one open box **is** M110's first box, M92's AHCI box
+**closed inside M107** and its interrupt box did not (M107 enlarged it
+from one driver to three, on the same condition), M103's
+three boxes split two ways between M107 and M110 - and M107 turned out
+**not** to fire M103's MSI-X condition, for a reason written in row 6 -
+and M98's tail is
 mostly row 5's bug with three items recorded rather than scheduled.
 
 **This is the order.** Nothing below is invented and nothing is promoted
@@ -463,8 +466,8 @@ unbuilt is the drift *Deferred* exists to catch.
 | **3** | **Q7 (2nd)** — the golden-frame baselines | half landed | the invariant half exists and has caught its bug; the baselines, the diff artifact and `make accept-visuals` do not |
 | **4** | **Q14** — the compositor, off the machine | not started | the move Q13 made on the scheduler, on a 5,189-line file — taken *before* M107 puts USB input underneath it, so the rewiring is graded in milliseconds rather than only through a screendump |
 | **5** | **M106 (tail)** — the battery green on four cores | 3 known failures, **plus `smp-test.sh` itself failing 2 runs in 3** (measured 2026-09-09 at HEAD — see *The machine as it stands*) | not a new milestone: the three failures M106 named and left. It gates CPU affinity, and there are now two reproductions on demand — M98's bootstrap profiler, and a 21-second `tools/smp-test.sh` that panics with "this CPU is not on the stack of the task it thinks it is running" about two attempts in three. **Start with the second one**. M112 adds a third, and it needs no second CPU: two graded boots in three stalled inside a `spawn`-then-`SYS_wait` self-test (`[m100d]` once, `[m100f]` once) on a single-CPU battery, eight to nine minutes with no serial output, while a third run of the same image was 123/123 in 410 s |
-| **6** | **M103 (2nd)** — MSI/MSI-X | condition fires at row 7 | its own condition is *"a driver for a part that has no other way to interrupt"*, and M107's NVMe bullet answers it by name. The LAPIC-timer and interrupt-driven-virtio boxes are **not** collected here — they wait for hardware |
-| **7** | **M107** — AHCI, NVMe, xHCI + USB HID | not started | all three gradeable under QEMU at this desk, which is what makes M110 a boot rather than a bring-up. Collects M92's last open box on the way |
+| **6** | **M103 (2nd)** — MSI/MSI-X | **condition did not fire at row 7** | its condition was *"a driver for a part that has no other way to interrupt"*, and M107 was expected to answer it. It did not: NVMe has a perfectly good polled path, and an interrupt that completes a command buys nothing while `leanfs` holds one lock across the request and the caller cannot proceed without the bytes. M107 folded it into the existing **interrupt-driven-virtio** deferral on that deferral's own condition - a latency measured on metal with the machine shown to be idle across it - so all three of these boxes now wait on the same measurement, and it is M110's |
+| ~~**7**~~ | ~~**M107** — AHCI, NVMe, xHCI + USB HID~~ | **done 2026-09-12** | all three built and graded here: the battery green on four storage backends with the disk numbers recorded separately, and the whole input suite passing on a machine with **no PS/2 controller at all**. Found a VMM bug that only a BAR above 512 GiB could expose. MSI-X was declined with its condition restated - see row 6 |
 | **8** | **M108 (driver half)** — a real NIC | not started | the `e1000e` driver is QEMU-gradeable and belongs here. The link half is held — see below |
 | **9** | **M109** — lean_os built on lean_os | not started | needs nothing from rows 7–8 and stays after them anyway: the tree it rebuilds should be the whole tree, drivers included, or the generational test grades a subset of the machine it runs on |
 | **10** | **M110** — the boot that has never happened | **held** | see the hold |
@@ -4678,6 +4681,277 @@ separate `make` afterwards.
       the bisection above says where to start: not the kernel, not disk
       occupancy, and with no mechanism yet found in the libc.
 
+
+### M107 — the devices a real machine has `[x]` (one measurement open, inherited)
+
+*Landed 2026-09-12.* Three controllers — **AHCI**, **NVMe**, and **xHCI
+with USB HID** — plus the two pieces of kernel underneath them that
+nothing here had needed before: a PCI layer that can find a device by
+*class* and decode a memory BAR, and a way to map one that a user process
+can still see.
+
+**Why it is one milestone and not three.** Because all three are the same
+sentence: `kernel/drivers/keyboard.c:12`'s port 0x60 and
+`kernel/drivers/ata.c`'s IDE registers describe a machine built in about
+1998, and every one of the 121 milestones before this was graded on an
+emulator that still pretends to be one. A ThinkPad of the generation
+`docs/real-hardware.md` is written for has no SATA controller and no 8042
+worth speaking of: its disk is NVMe and its pointing device is on a bus
+this kernel could not see. Two of these three are the difference between
+a machine that boots and one that does not.
+
+**Found by class, not by vendor**, which is the decision the whole PCI
+half rests on. `pci_find_device` was the right question for virtio-blk,
+the RTL8139 and the AC'97 controller — each of those drivers speaks one
+manufacturer's registers and would be wrong to bind to anything else.
+"AHCI" is a standardised *interface*, and the class code is the field
+that says so: matching by vendor id would mean a table of every SATA
+controller ever shipped and would still miss the one in the machine
+somebody actually has. So `pci_find_class(class, subclass, prog_if,
+index, out)`, with the prog-if part of the match — 01:01 is the same
+silicon in legacy IDE mode and 0C:03:20 is EHCI, and binding to either
+would be binding the wrong driver to the right chip.
+
+#### The bug, which was in something else
+
+**The NVMe driver page-faulted the machine on the first doorbell written
+after the scheduler switched to a user process, and the fault was in
+`kernel/mm/vmm.c`.**
+
+`vmm_map_mmio` originally mapped a BAR identity-style, `virt == phys`,
+the way `drivers/fb.c` has mapped the framebuffer since M20. QEMU puts a
+64-bit PCI BAR at **768 GiB**. Every address space in this kernel shares
+`PML4[0]` and nothing else — which is the reason
+`KERNEL_HEAP_VIRT_BASE`'s own note gives for the heap living at 256 GiB
+— so an identity mapping of that BAR lands under `PML4[1]`: visible while
+the kernel's own address space is loaded, which is to say *throughout
+device probing*, and invisible the moment anything else runs. Every
+register access during init worked. The admin queue came up, the I/O
+queue was created, the namespace was identified, `[blk]` reported `nvme`,
+init reached PID 1 — and then `desktop_icons` was scheduled and the next
+doorbell wrote to an unmapped page.
+
+MMIO has a window of its own inside `PML4[0]` now (384 GiB, 128 GiB
+wide), and `virt != phys` there. It costs nothing: a BAR is registers,
+and registers are never handed back to a device as a DMA address — the
+buffers that are come from `pmm_alloc_contiguous` and are identity-mapped
+like all of low memory.
+
+**The part worth keeping is which driver found it.** AHCI was written
+first, booted to the desktop on its first run, and never came near this:
+its BAR is below 4 GiB, so identity-mapping it happened to land under
+`PML4[0]` and was correct by luck of address. A milestone that had
+shipped AHCI alone would have shipped the bug, and the boot log would
+have said nothing. It took the second driver — the same kernel mechanism,
+a different address — to ask the question.
+
+#### What the tests found, and what they are for
+
+Three pieces are split into units the host tier compiles, and the rule
+for what gets split out is the one `rtl8139_ring.h` states: the part that
+can be **plausibly wrong** rather than loudly wrong. A controller
+programmed incorrectly does not enumerate, and that is one line of a boot
+log. These three fail while appearing to work:
+
+- **`usb_hid.c`** — a boot keyboard report is *state*, not events, so a
+  keystroke is the difference between two reports. A decoder that forgets
+  to diff turns every held key into a keystroke per poll: typing "hello"
+  produces "hhhhheeeeellllllllllooooo", and nothing in a serial log can
+  see it, because every other instrument here grades what the machine
+  *did* with a keystroke rather than how many it thought it got.
+- **`xhci_ring.c`** — the cycle bit is the entire handshake with the
+  controller. Flip it one entry early and the controller stops at the
+  Link TRB permanently: a keyboard that works for fifteen keystrokes and
+  then goes silent, fifteen being the ring's usable depth. The test
+  models the *consumer* the way the specification describes one and wraps
+  the ring a thousand times, which is the method `test_rtl8139_ring.c`
+  set and for the same reason: a test that only models the driver proves
+  the driver agrees with itself.
+- **`nvme_split.c`** — **the one path QEMU cannot reach at all.** QEMU's
+  namespace has 512-byte logical blocks, so `shift` is zero, every
+  request is aligned, and a 4Kn drive's read-modify-write path is dead
+  code on the only machine this project has ever booted. It would first
+  execute on hardware, on somebody's filesystem, with no log of what it
+  did. The test is a property test over every alignment and length: the
+  chunks must tile the request exactly, no chunk may span a block
+  boundary unless aligned at both ends, and a 512-byte namespace must
+  produce **no** partial chunks at all — because a read-modify-write per
+  sector there would be a silent trebling of every write on the machine
+  rather than a wrong answer.
+
+**A test found a real invariant nobody had written down.** The first
+version of the xHCI ring test pushed a whole lap, drained a whole lap,
+three times, and failed on the second. That is not a bug in the ring —
+it is the ring-full rule, with a sharper edge than usual: a consumer that
+has taken the last entry of a lap is sitting *on* the Link TRB and
+follows it only on its next step, so a producer that completes another
+whole lap in that window rewrites the Link's cycle bit and the consumer
+arrives at a Link that no longer matches and stops for good. `xhci.c`
+keeps the rule with room to spare (three TRBs outstanding against
+fifteen), and it is now stated in `xhci_ring.h` and asserted from both
+sides rather than left to be rediscovered.
+
+`tests/test_pci.c` grades BAR decoding against a **modelled
+configuration space** (`tests/fakes/fake_pci.c`) — the Q11 move applied
+to the dword ports, which until now read back `0xFFFFFFFF`
+unconditionally, so `pci.c` compiled into this tier would have found no
+devices and proved nothing. Every wrong answer in a BAR decode is a
+*plausible* address: a 64-bit BAR read as two independent 32-bit ones
+gives a real address in the low 4 GiB belonging to something else, and a
+driver would map it and write a doorbell into it.
+
+**And the boot self-test's own scratch sectors took two tries**, which is
+worth recording because the first version passed. `[m107]` writes a
+sector and reads it back, and the first choice of where was an LBA a
+gigabyte into the disk, on the reasoning that it was "past the
+filesystem". It is not: `LEANFS_START_LBA` is 8192 and leanfs's data
+region runs to the end of the image. That sector is an ordinary data
+block, and it was free only because about 400 MB of a 2 GiB disk is in
+use and leanfs allocates from the front. The test passed on every backend
+while being, on a fuller image, a corruption that would present as a
+checksum failure inside some ported program several milestones later. It
+writes the sixteen sectors immediately *before* the filesystem now -
+which is safe under an invariant the image build already depends on
+rather than a new one, since `$(IMAGE)` lays leanfs down at 8192 and a
+kernel that reached 8176 would be overwriting the superblock at build
+time.
+
+**And `make mutate` was run over all three of them, which is what the
+number is for.** The first run scored **81.5%** with forty survivors, and
+a survivor in a file this well covered is the interesting kind: the line
+ran and nothing checked what it did. Every one of them was read and the
+assertions they asked for were written - that a report is *exactly* eight
+bytes (asserted with a `malloc`'d buffer, because ASan sees past the end
+of an allocation and does not see past the end of an array a parameter
+has decayed from); that usage 103 is inside the table and 104 is not;
+that usage codes 0-3 are statuses and 4 is `'a'`; that six simultaneous
+presses are all six reported; that a held key is found in *any* of the
+six slots; that the translation tables are the US layout entry by entry,
+because a character changed by one is still a character and no other
+test could see it. **88.9% on the second run**, and the survivors that
+remain are equivalent mutants - `usage <= 3` to `usage < 3` selects a
+table entry that is zero either way.
+
+**71 new host tests** (493 → 564), and one new boot marker, `[m107]`,
+which writes one sector and eight sectors past the filesystem, drops the
+block cache, reads them back byte for byte, and **names the backend it
+got** — so four runs of an identical test are distinguishable in a log.
+
+#### Four numbers, because the point is that they differ
+
+`QEMU_DISK=nvme|ahci|virtio|ide` are four supported configurations of one
+byte-identical image, and the kernel picks by probing. The battery was
+run once per backend, same image, same host, same boot, one device model
+apart:
+
+| µs | virtio-blk | AHCI | NVMe | ATA PIO |
+|---|---|---|---|---|
+| `disk_1mib_cold_us` | 5210 | 4905 | 5154 | IDE_COLD |
+| `disk_1mib_warm_us` | 2492 | 2369 | 2360 | IDE_WARM |
+| `disk_1mib_write_absorbed_us` | 18780 | 11534 | 13083 | IDE_ABS |
+| `disk_1mib_write_through_us` | **83246** | **46791** | **59599** | **IDE_WT** |
+
+The write-through row is the one that earns the milestone's bullet. AHCI
+moves the same megabyte in a little over half the time virtio does, on
+the same host, through a driver in this tree doing strictly *more* work
+per request — four levels of indirection, a command list, a FIS and a
+PRDT against virtio's three chained descriptors. That is a measurement
+and not an explanation, and it is the sort of thing that cannot exist
+until there is a second backend to compare against. The warm row, by
+contrast, is the same three numbers within 6%, which is the cache doing
+its job and saying so.
+
+#### The keyboard is the same keyboard
+
+`xhci.c` delivers through `keyboard_inject()` and `mouse_inject()` — the
+ring buffers the PS/2 IRQ handlers have fed since M51 and M56. There is
+no second input path, no second kind of key event, and no change anywhere
+above the driver.
+
+That is what makes the proof cheap, and it is the milestone's own grading
+bar: **`LEANOS_QEMU_INPUT=usb tools/qemu-input-test.sh` runs the whole
+existing input suite on a machine with `-machine pc,i8042=off` — no PS/2
+controller in the machine at all — and a USB keyboard and mouse on xHCI
+instead.** Not one test changes. With the 8042 gone, a key that reaches
+the guest reached it over USB, and every assertion in that suite is about
+what the machine did with the keystroke rather than about which wire
+carried it. The snapshot key grew a field to match: a snapshot is the
+guest's *devices* as well as its RAM, and one taken with an 8042 cannot
+be restored onto a machine without one.
+
+#### Written for a machine this project has never booted
+
+Two pieces here will not execute under QEMU and are written anyway,
+because both are assumptions this project would otherwise ship
+unexamined — which is precisely what M107's "graded under QEMU first"
+bullet exists to prevent:
+
+- **`VMM_FLAG_NOCACHE`.** The synchronisation model of all three drivers
+  is "write a doorbell, then spin on a status word the device updates by
+  DMA", and a cached mapping is entitled to serve that spin from L1
+  forever. QEMU's emulated MMIO traps to the hypervisor whatever the
+  guest's page tables say, so every one of these drivers works perfectly
+  with the flag absent.
+- **`USBLEGSUP`.** On a real machine the firmware owns the xHCI
+  controller when the kernel starts, because it has been reading a USB
+  keyboard in its own boot menu. A driver that programs it without asking
+  first is fighting SMM code for the same registers, and the resulting
+  hang is not one a serial log can explain. QEMU implements no such
+  capability, so the handshake is a no-op here.
+
+#### What is deliberately not built, each with its condition
+
+- **NCQ, and more than one NVMe queue pair.** M107's own bullet asked for
+  "NCQ deep enough to matter" and both drivers have a queue depth of one.
+  The reason is M69's rule rather than difficulty: NCQ buys overlapping
+  commands and there is nothing here to overlap — `leanfs` holds one lock
+  across a request, so the second command cannot be issued until the
+  first has returned to the caller, and 32 command slots would sit 31
+  empty. **Condition: per-inode locking in the filesystem**, not a faster
+  disk.
+- **MSI-X**, which the bullet also asked for by name, and which is the
+  condition M103's second box was waiting on. The honest finding on
+  arriving is that it is the second half of a change whose first half
+  nobody needs yet: an interrupt that completes a command is worth having
+  only if the CPU has something else to do while the command runs, and it
+  does not. It **joins the existing "interrupt-driven virtio" deferral on
+  the same condition** rather than opening a second one — a disk
+  command's latency measured on metal with the machine shown to be idle
+  across it. `INTMS` and `PxIE` are masked so no controller can raise a
+  line nothing is listening on. So M103's box does *not* close here, and
+  its condition is restated rather than met.
+- **USB hubs.** A device behind a hub is not enumerated. Every machine
+  this is aimed at has its keyboard and trackpad on root ports; **a USB
+  keyboard through a dock is the case this misses**, written down here
+  rather than discovered on the day somebody plugs one in.
+- **Anything but boot-protocol HID**, and **hotplug on any of the three.**
+
+#### The one box left open is inherited, and this milestone sharpened it
+
+M121 left `sqlite_fixture_ms` open with an explicit condition: *"one run
+of `./tools/run-tests.sh` with nothing else on the machine — `ps -Ao
+pid,ppid,command | grep qemu-system` empty before it starts."*
+
+**That condition was met four times here, and the answer is that it is
+not host contention.** The host was checked and quiet — one VM, no
+`cpptools`, no sibling worktree — and the row read **8060 (virtio), 7820
+(AHCI)** against a 6,000 ceiling. Every other budget was inside its
+ceiling and all 134 markers passed on every backend.
+
+It is also **not M107**: the same row read 7,420–8,820 at commit
+`454cf0d` earlier the same day, on a tree containing none of this work,
+and the two figures bracket each other. `build/perf-history.tsv` records
+the whole shape — every measurement at every commit before today is
+2,000–3,000 ms, and every measurement today is either ~2,300 or ~8,000,
+on both old and new code. The distribution is **bimodal rather than
+noisy**, which is the useful new fact: noise does not have two modes, so
+there is a mechanism and it is environmental rather than random.
+
+**The ceiling was not raised**, for the reason M121 gave for not raising
+it: a number is a claim, and raising a ceiling to make a run green is
+how a budget stops being one. What changed is that its most likely
+explanation has been eliminated, and the box now says so.
+
 ## Every open box, in one place
 
 The queue says what order. This says exactly what is unfinished, in the
@@ -4885,9 +5159,20 @@ controllers.
 
 ### M92 — the disk `[~]`
 
-- [~] Interrupt-driven virtio and **AHCI not attempted**, both declined
-      with reasons rather than deferred vaguely. This box **collects
-      inside M107** under the condition already written for it.
+- [x] **AHCI** — built in M107 (`kernel/drivers/ahci.c`), beside virtio
+      and ATA under `blk.h`'s existing abstraction rather than instead of
+      them, exactly as M92's own note said it would have to be. It moves
+      a megabyte write-through in **46,791 us against virtio's 83,246**
+      on the same host and the same image, which is the comparison M92
+      could not make because it had one backend.
+- [~] **Interrupt-driven virtio** is still declined, and M107 did not
+      collect it - it *enlarged* it. M107's NVMe and AHCI drivers are
+      polled for M92's own reason ("an interrupt would buy a context
+      switch this kernel has nothing to switch to"), and M107 declined
+      MSI-X on the same ground, so **three drivers now wait on one
+      measurement** rather than one driver waiting on it. The condition
+      is unchanged and is M110's: a disk command's latency measured on
+      metal, with the machine shown to be idle across it.
 
 ### M106's tail — the battery on four cores
 
@@ -5046,16 +5331,29 @@ window list.
 both reproduced as failing host tests against reverted fixes, in
 milliseconds rather than by launching seven applications.
 
-### M107, M108, M109, M110 `[ ]`
+### M108, M109, M110 `[ ]`
 
 Not started; their bullets and grading bars are written in full in the
-archive (`grep -n '^### M107' milestones-archive.md`). In short: M107 is
-AHCI + NVMe + xHCI/USB HID, all graded under QEMU first, with
-`QEMU_DISK=ahci` and `QEMU_DISK=nvme` joining `ide` and `virtio` as
-supported configurations. M108 is an `e1000e`-class NIC (driver half
-gradeable here, link half held). M109 is the whole tree rebuilt on the
-machine with the **generational test** — images two and three
-byte-identical — as the falsifiable part. M110 is the USB boot, held.
+archive (`grep -n '^### M108' milestones-archive.md`). In short: M108 is
+an `e1000e`-class NIC (driver half gradeable here, link half held). M109
+is the whole tree rebuilt on the machine with the **generational test** —
+images two and three byte-identical — as the falsifiable part. M110 is
+the USB boot, held.
+
+**M107 landed on 2026-09-12** and is in *Landed since this snapshot*.
+`QEMU_DISK=ahci` and `QEMU_DISK=nvme` have joined `ide` and `virtio` as
+supported configurations, and the battery is green on all four.
+
+**What M107 changes about M110**, which is the reason it was ordered
+before it: M110 was a *bring-up* while the kernel had no driver for any
+storage or input controller a modern machine has. It is a **boot** now.
+Every driver a ThinkPad of that generation needs to reach its own desktop
+exists and has been graded here — with two exceptions that are written
+down rather than assumed, because QEMU cannot exercise either: the
+`USBLEGSUP` handshake that takes the controller from the firmware, and
+`VMM_FLAG_NOCACHE`, without which a spin on a DMA-updated status word may
+be served from L1 forever. Those two are M110's first suspects, and they
+are suspects because they are the only code here that has never run.
 
 ### Smaller things left open, with where they were left
 

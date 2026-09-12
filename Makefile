@@ -1025,7 +1025,7 @@ TEST_FAKES := tests/fakes/fake_panic.c tests/fakes/fake_klog.c \
               tests/fakes/fake_vmm.c tests/fakes/fake_blk.c \
               tests/fakes/fake_rtc.c tests/fakes/fake_net.c \
               tests/fakes/fake_pit.c tests/fakes/fake_socket.c \
-              tests/fakes/fake_fwcfg.c \
+              tests/fakes/fake_fwcfg.c tests/fakes/fake_pci.c \
               tests/fakes/fake_arch.c tests/fakes/fake_kernel_objects.c \
               tests/fakes/fake_user_syscalls.c tests/fakes/fake_user_fs.c \
               tests/fakes/fake_user_net.c
@@ -1037,6 +1037,8 @@ TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
                     kernel/dev/fwcfg.c kernel/dev/tty.c kernel/dev/pty.c \
                     kernel/sched/sched.c kernel/fs/flock.c kernel/dev/random.c \
                     kernel/drivers/rtl8139_ring.c kernel/ipc/unixsock.c \
+                    kernel/drivers/usb_hid.c kernel/drivers/xhci_ring.c \
+                    kernel/drivers/nvme_split.c kernel/drivers/pci.c \
                     kernel/ipc/eventfd.c kernel/ipc/timerfd.c kernel/ipc/epoll.c \
                     kernel/ipc/memfd.c
 

@@ -34,6 +34,25 @@
  * caller in this kernel had to be looked at when it was introduced. */
 #define VMM_FLAG_EXEC     (1ULL << 3)
 
+/* M107: PCD - "page cache disable" - and it matches the hardware bit
+ * directly, like WRITABLE and USER rather than like EXEC.
+ *
+ * It exists because three drivers arrived at once that talk to their
+ * controller through memory rather than through ports, and a device
+ * register read out of a cache line is not a device register read. The
+ * whole synchronisation model of AHCI, NVMe and xHCI is "write a
+ * doorbell, then spin on a status word the device updates by DMA"; a
+ * cached mapping is entitled to serve that spin from L1 forever.
+ *
+ * Nothing here caught it, and that is the point worth writing down:
+ * QEMU's emulated MMIO is a trap into the hypervisor whatever the guest
+ * PAT says, so every one of these drivers works perfectly with this flag
+ * absent. It is a flag whose whole value is on hardware this project has
+ * never booted - M110's business - which is exactly the class of
+ * assumption M107's "graded under QEMU first" bullet is meant to stop
+ * shipping unexamined. */
+#define VMM_FLAG_NOCACHE  (1ULL << 4)
+
 /* M90: where the kernel heap starts, and the one virtual address in this
  * kernel that is chosen rather than derived.
  *
@@ -86,6 +105,46 @@ uint64_t vmm_protect_range_in(uint64_t pml4_phys, uint64_t start, uint64_t end,
  * regardless of which CR3 is loaded - user mappings live in a separate,
  * private PML4 slot instead (see proc.c). */
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
+
+/* ---- M107: mapping a device's memory BAR ------------------------------
+ *
+ * Maps [phys, phys + len) uncacheable and returns a pointer to it. `len`
+ * is rounded up to whole pages, because a BAR is the device's to own.
+ *
+ * ---- the window, which is the whole reason this is not identity-mapped
+ *
+ * The first version of this mapped virt == phys, the way drivers/fb.c
+ * maps the framebuffer, and it worked perfectly for AHCI and then page-
+ * faulted the machine on the first NVMe doorbell written after the
+ * scheduler had switched to a user process.
+ *
+ * The reason is the note on KERNEL_HEAP_VIRT_BASE above, read the other
+ * way round. Every address space shares PML4[0] and nothing else, so a
+ * kernel mapping is only reachable from a process's CR3 if it lives below
+ * 512 GiB. QEMU puts a 64-bit PCI BAR at 768 GiB. An identity mapping of
+ * that BAR is a kernel-PML4 entry under PML4[1], which is visible while
+ * the kernel's own address space is loaded - that is, throughout init,
+ * which is exactly why every register access during probing worked - and
+ * invisible the moment anything else runs.
+ *
+ * So MMIO gets a window of its own inside PML4[0], and virt != phys. That
+ * costs nothing: a BAR is registers, and registers are never handed back
+ * to a device as a DMA address - the buffers that are come from
+ * pmm_alloc_contiguous and are identity-mapped like all of low memory.
+ *
+ * 384 GiB is the base: 128 GiB above the kernel heap and 128 GiB below
+ * USER_REGION_BASE. The heap is backed one-to-one by physical frames, so
+ * reaching this window would mean a machine with 128 GiB of RAM entirely
+ * inside the kernel heap, which is not a configuration that boots for
+ * other reasons first.
+ *
+ * Returns 0 if the window is exhausted or a page table cannot be
+ * allocated - a refusal rather than a panic, for Q16's reason: a card
+ * this kernel cannot address is a fact about the machine, and the machine
+ * should still boot without it. */
+#define KERNEL_MMIO_VIRT_BASE 0x0000006000000000ULL /* 384 GiB */
+#define KERNEL_MMIO_VIRT_SIZE 0x0000002000000000ULL /* 128 GiB of window */
+void *vmm_map_mmio(uint64_t phys, uint64_t len);
 void vmm_unmap_page(uint64_t virt);
 uint64_t vmm_kernel_pml4_phys(void);
 

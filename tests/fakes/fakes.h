@@ -75,6 +75,19 @@ void fake_fwcfg_reset(void);
 void fake_fwcfg_set_item(uint16_t selector, const uint8_t *data, uint32_t len);
 void fake_fwcfg_append_item(uint16_t selector, const uint8_t *data, uint32_t len);
 
+/* ---- fake_pci --------------------------------------------------------- */
+/* A modelled PCI configuration space on ports 0xCF8/0xCFC, so
+ * kernel/drivers/pci.c can be compiled into this tier. fake_pci_add
+ * returns a handle; the rest take it. A BAR's `size_mask` is what the
+ * device reports when all ones are written to it - the low bits it does
+ * not decode read back zero, which is how a size is discovered. */
+void fake_pci_reset(void);
+int fake_pci_add(uint8_t bus, uint8_t slot, uint8_t func, uint16_t vendor, uint16_t device,
+                 uint8_t class_code, uint8_t subclass, uint8_t prog_if);
+void fake_pci_set_config(int handle, uint8_t offset, uint32_t value);
+uint32_t fake_pci_get_config(int handle, uint8_t offset);
+void fake_pci_set_bar(int handle, int index, uint32_t value, uint32_t size_mask);
+
 /* ---- fake_socket ------------------------------------------------------ */
 /* What UDP handed up to the socket layer - the assertion that separates
  * "it did not crash" from "it delivered exactly these bytes to exactly

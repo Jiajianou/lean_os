@@ -7,6 +7,7 @@
 #include "arch/x86_64/pic.h"
 #include "pcspk.h"
 #include "profile/sampler.h"
+#include "xhci.h" /* M107: the USB event ring is drained from the tick */
 
 #define PIT_CHANNEL0_DATA 0x40
 #define PIT_COMMAND       0x43
@@ -39,6 +40,12 @@ static void pit_irq(isr_regs_t *regs) {
      * Ahead of the scheduler hook deliberately: a tick that ends in a
      * context switch never comes back here. */
     pcspk_tick();
+    /* M107: the USB event ring, drained at 100 Hz. Ahead of the
+     * scheduler hook for the same reason the speaker is: a keystroke that
+     * arrived during this tick should be in the ring buffer before
+     * anything gets a chance to run and read it. See xhci.h for why this
+     * is polled rather than interrupt-driven. */
+    xhci_poll();
     if (tick_hook) {
         tick_hook();
     }

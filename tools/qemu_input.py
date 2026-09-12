@@ -207,8 +207,9 @@ class Ppm:
 # before the snapshot is used at all - so a file that somehow has the
 # right name and the wrong contents is deleted rather than trusted. The
 # key covers everything that changes what a boot IS: the image, the disk
-# backend, the core count and the memory size, because a snapshot taken
-# on one of those cannot be resumed under another.
+# backend, the core count, the memory size and (M107) whether the guest's
+# input devices are PS/2 or USB, because a snapshot taken on one of those
+# cannot be resumed under another.
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "build", "snapshot")
 SNAPSHOT_TAG = "desktop"
@@ -308,9 +309,14 @@ def snapshot_key():
     with open(IMAGE, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
-    h.update(("|%s|%s|%s" % (_qemu_disk_kind(),
-                             os.environ.get("QEMU_CPUS", "1"),
-                             os.environ.get("LEANOS_QEMU_MEM", "4096"))).encode())
+    # M107: the input mode joins the key. A snapshot is the guest's
+    # DEVICES as well as its RAM, and one taken on a machine with an 8042
+    # cannot be restored onto a machine without one - QEMU refuses, or
+    # worse, restores into a device model the guest is not expecting.
+    h.update(("|%s|%s|%s|%s" % (_qemu_disk_kind(),
+                                os.environ.get("QEMU_CPUS", "1"),
+                                os.environ.get("LEANOS_QEMU_MEM", "4096"),
+                                os.environ.get("LEANOS_QEMU_INPUT", "ps2"))).encode())
     return h.hexdigest()
 
 
@@ -496,8 +502,35 @@ class Machine:
             pflash_vars = ["-drive", "if=pflash,format=raw,file=" + vars_rt]
             restore_args = []
 
+        # ---- M107: the same suite, with no PS/2 controller at all -------
+        #
+        # LEANOS_QEMU_INPUT=usb removes the 8042 from the machine and
+        # attaches an xHCI controller with a boot keyboard and a boot
+        # mouse on it. Every test in this suite then grades the USB path,
+        # with not one of them changed - which is the whole argument for
+        # kernel/drivers/xhci.c delivering through keyboard_inject() and
+        # mouse_inject() rather than through an input path of its own.
+        #
+        # `i8042=off` is what makes it a proof rather than a coincidence.
+        # With the PS/2 devices merely unused, a suite that passed would
+        # say nothing: QEMU routes a `sendkey` to one keyboard handler,
+        # and which one it picks is not this suite's business to know.
+        # With no 8042 in the machine, a key that reaches the guest
+        # reached it over USB.
+        input_mode = os.environ.get("LEANOS_QEMU_INPUT", "ps2")
+        if input_mode == "usb":
+            machine_args = ["-machine", "pc,i8042=off"]
+            usb_args = ["-device", "qemu-xhci,id=xhci0",
+                        "-device", "usb-kbd,bus=xhci0.0",
+                        "-device", "usb-mouse,bus=xhci0.0"]
+        else:
+            machine_args = []
+            usb_args = []
+
         self._proc = subprocess.Popen([
             "qemu-system-x86_64",
+            *machine_args,
+            *usb_args,
             # M106: stated rather than defaulted, for the reason
             # tools/qemu-serial-test.sh's QEMU_CPUS note gives at length.
             # This suite grades real pixels, so it is the instrument that

@@ -256,12 +256,46 @@ QEMU_CPUS=${QEMU_CPUS:-1}
 # M92: virtio-blk rather than the default IDE drive - see tools/run-qemu.sh.
 # QEMU_DISK=ide runs the same image through kernel/drivers/ata.c instead,
 # which is how the two numbers in the [m92] line get compared.
-if [ "${QEMU_DISK:-virtio}" = "ide" ]; then
-  DISK_ARGS=(-drive "format=raw,snapshot=on,file=$IMAGE")
-else
-  DISK_ARGS=(-drive "if=none,id=disk0,format=raw,snapshot=on,file=$IMAGE"
-             -device virtio-blk-pci,drive=disk0)
+# M107: ahci and nvme join them, and the battery is expected to be green
+# on all four. The disk budgets differ per backend on purpose - that
+# difference is the measurement, and tests/budgets.tsv carries a column
+# for each rather than one number that would have to be loose enough to
+# cover the slowest.
+case "${QEMU_DISK:-virtio}" in
+  ide)
+    DISK_ARGS=(-drive "format=raw,snapshot=on,file=$IMAGE")
+    ;;
+  ahci)
+    DISK_ARGS=(-device ich9-ahci,id=ahci0
+               -drive "if=none,id=disk0,format=raw,snapshot=on,file=$IMAGE"
+               -device ide-hd,drive=disk0,bus=ahci0.0)
+    ;;
+  nvme)
+    DISK_ARGS=(-drive "if=none,id=disk0,format=raw,snapshot=on,file=$IMAGE"
+               -device nvme,drive=disk0,serial=leanos0)
+    ;;
+  *)
+    DISK_ARGS=(-drive "if=none,id=disk0,format=raw,snapshot=on,file=$IMAGE"
+               -device virtio-blk-pci,drive=disk0)
+    ;;
+esac
+# M107: an xHCI controller with a boot keyboard and a boot mouse on it,
+# on every run of the battery. The [m107] marker reports how many HID
+# devices came up, so enumeration - slot, address, descriptors,
+# configuration, SET_PROTOCOL - is graded on every boot rather than only
+# when somebody remembers to ask.
+#
+# The PS/2 devices are still here, and both keyboards feed the same ring
+# buffer. QEMU_INPUT=usb (tools/qemu-input-test.sh) is the configuration
+# that removes the 8042 entirely, which is the only way to prove the USB
+# path is carrying the keys rather than sitting beside one that works.
+USB_ARGS=(-device qemu-xhci,id=xhci0
+          -device usb-kbd,bus=xhci0.0
+          -device usb-mouse,bus=xhci0.0)
+if [ "${QEMU_USB:-1}" = "0" ]; then
+  USB_ARGS=()
 fi
+
 qemu-system-x86_64 \
   -m "$QEMU_MEM" -smp "$QEMU_CPUS" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
@@ -269,6 +303,7 @@ qemu-system-x86_64 \
   "${DISK_ARGS[@]}" -display none \
   -netdev "$NETDEV" -device rtl8139,netdev=net0 \
   -audiodev none,id=snd0 -device AC97,audiodev=snd0 \
+  "${USB_ARGS[@]}" \
   -fw_cfg name=opt/leanos/selftest,string=1 \
   -fw_cfg "name=opt/leanos/nicstream,string=$NIC_STREAM_BYTES" \
   $IOAPIC_FWCFG \
@@ -595,6 +630,12 @@ REQUIRED_MARKERS=(
   "a file mapped MAP_PRIVATE reading back as its own bytes"
   "the same file mapped MAP_SHARED twice as one piece of memory"
   "[m92] a disk worth reading:"
+  # M107: one marker, and the word after "is on" is the whole point of
+  # running the battery four times. The line names the backend it got, so
+  # a run through AHCI and a run through NVMe produce visibly different
+  # passes of an identical test rather than two identical lines nobody
+  # can tell apart in a log.
+  "[m107] the devices a real machine has:"
   "[m93] a filesystem that can hold a source tree:"
   # M101: five markers rather than one, because they fail independently.
   # The sampler working says nothing about the syscall counters, and both

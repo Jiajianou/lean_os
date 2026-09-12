@@ -25,6 +25,7 @@
 #include "drivers/pcspk.h"
 #include "drivers/pit.h"
 #include "drivers/rtc.h"
+#include "drivers/xhci.h" /* M107 */
 #include "fs/leanfs.h"
 #include "fs/leanfs_format.h" /* M93 (second attempt): leanfs_fnv1a, shared with tools/leanfs-put.c so the image manifest's hash has one definition */
 #include "fs/flock.h"    /* M100: flock_count, for [m100d] */
@@ -15764,6 +15765,27 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     klog_putc('\n');
 
     keyboard_init();
+
+    /* ---- M107: and whatever is on the USB bus ------------------------
+     *
+     * After keyboard_init() rather than instead of it, and the ordering
+     * is the whole design: a machine with both a PS/2 keyboard and a USB
+     * one gets both, because there is nothing to choose between - the USB
+     * driver delivers through keyboard_inject(), the same ring buffer the
+     * PS/2 IRQ handler feeds, so a key is a key however it arrived.
+     *
+     * That is what lets the entire existing input suite grade the USB
+     * path with no change to a single test: qemu-input-test.sh's
+     * `sendkey` reaches whichever keyboard QEMU was given, and every
+     * assertion above this line is about what the machine did with the
+     * keystroke rather than about which wire carried it. */
+    int usb_devices = xhci_init();
+    if (usb_devices > 0) {
+        klog_puts("[usb] ");
+        klog_put_dec(usb_devices);
+        klog_puts(" boot-protocol HID device(s) on the USB bus.\n");
+    }
+
     klog_puts("[kbd] IRQ1 unmasked, waiting up to 3s for a test keypress "
                "(QEMU monitor: 'sendkey <key>')...\n");
     int key = -1;
@@ -16073,6 +16095,130 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         klog_puts(" of 0x");
         klog_put_hex64(after.reads);
         klog_puts(" reads served without touching the device since boot - self-test passed.\n\n");
+    }
+
+    /* ---- M107 self-test: the devices a real machine has -----------------
+     *
+     * Four storage backends now answer blk.h's four functions, and the
+     * whole point of the milestone is that the machine cannot tell which
+     * one it is on. So this test does not ask which backend is live - it
+     * asserts the properties that must hold on all four and then NAMES
+     * the one it got, which is what makes a battery run per backend
+     * worth something: four passes of an identical test, with a
+     * different word in the middle of each.
+     *
+     * The scratch LBA is deliberately past the filesystem, at a sector
+     * the image is big enough to hold and leanfs will never allocate -
+     * writing inside the filesystem to test the driver under it would be
+     * a test that corrupts what it runs on.
+     */
+    {
+        /* ---- Where a driver test may write, which took two tries ------
+         *
+         * The first version of this used an LBA a gigabyte into the disk,
+         * on the reasoning that it was "past the filesystem". It is not:
+         * LEANFS_START_LBA is 8192 and leanfs's data region runs to the
+         * end of the image (see leanfs_format.h's magic-number note, "the
+         * data region from 32 MiB to 2 GiB"), so that sector is an
+         * ordinary data block. It happened to be free on today's image -
+         * about 400 MB of a 2 GiB disk is in use, and leanfs allocates
+         * from the front - which is exactly the kind of "happened to" a
+         * test should never rest on. As the image fills, that sector
+         * becomes somebody's file, and this self-test becomes a
+         * corruption that presents as a checksum failure in a ported
+         * program six milestones later.
+         *
+         * The sixteen sectors immediately BEFORE the filesystem are
+         * safe, and safe under an invariant the image build already
+         * depends on rather than a new one: $(IMAGE) writes the MBR and
+         * the kernel from sector 0 and lays leanfs down at 8192, so a
+         * kernel that reached 8176 would already be overwriting the
+         * superblock at build time. The kernel is 5,897 sectors today.
+         * Nothing else in the image claims this gap. */
+        const uint32_t SCRATCH_LBA = LEANFS_START_LBA - 16;
+        static uint8_t m107_write[512];
+        static uint8_t m107_read[512];
+
+        for (uint32_t i = 0; i < sizeof(m107_write); i++) {
+            /* A pattern that is not constant and not a ramp: a driver
+             * that returns the same sector twice, or an off-by-one in a
+             * PRP or a PRDT, changes these bytes in a way a constant
+             * fill could not show. */
+            m107_write[i] = (uint8_t)(i * 7 + 13);
+        }
+
+        int ok = 1;
+        if (blk_write(SCRATCH_LBA, 1, m107_write) != 0) {
+            klog_puts("[m107] the scratch write failed\n");
+            ok = 0;
+        }
+        if (ok && blk_flush() != 0) {
+            klog_puts("[m107] the barrier after the scratch write failed\n");
+            ok = 0;
+        }
+        /* Dropped, so the read below has to reach the device rather than
+         * the cache - otherwise this tests memcpy. */
+        blk_cache_drop();
+        if (ok && blk_read(SCRATCH_LBA, 1, m107_read) != 0) {
+            klog_puts("[m107] the scratch read failed\n");
+            ok = 0;
+        }
+        if (ok) {
+            for (uint32_t i = 0; i < sizeof(m107_write); i++) {
+                if (m107_read[i] != m107_write[i]) {
+                    klog_puts("[m107] the scratch sector read back wrong at byte 0x");
+                    klog_put_hex32(i);
+                    klog_putc('\n');
+                    ok = 0;
+                    break;
+                }
+            }
+        }
+
+        /* A multi-sector transfer, which is a different code path in
+         * every one of the four drivers: virtio chains one descriptor,
+         * AHCI builds a PRDT entry, NVMe counts blocks into CDW12, and
+         * ATA loops. An off-by-one in any of them reads the right first
+         * sector and the wrong last one. */
+        static uint8_t m107_multi[512 * 8];
+        static uint8_t m107_back[512 * 8];
+        for (uint32_t i = 0; i < sizeof(m107_multi); i++) {
+            m107_multi[i] = (uint8_t)(i * 31 + (i >> 9));
+        }
+        if (ok && blk_write(SCRATCH_LBA + 8, 8, m107_multi) != 0) {
+            klog_puts("[m107] the eight-sector write failed\n");
+            ok = 0;
+        }
+        if (ok && blk_flush() != 0) {
+            ok = 0;
+        }
+        blk_cache_drop();
+        if (ok && blk_read(SCRATCH_LBA + 8, 8, m107_back) != 0) {
+            klog_puts("[m107] the eight-sector read failed\n");
+            ok = 0;
+        }
+        if (ok) {
+            for (uint32_t i = 0; i < sizeof(m107_multi); i++) {
+                if (m107_back[i] != m107_multi[i]) {
+                    klog_puts("[m107] the eight-sector round trip differs at byte 0x");
+                    klog_put_hex32(i);
+                    klog_putc('\n');
+                    ok = 0;
+                    break;
+                }
+            }
+        }
+
+        if (!ok) {
+            panic("M107 self-test: the block backend did not return what was written to it");
+        }
+
+        klog_puts("[m107] the devices a real machine has: the block layer is on ");
+        klog_puts(blk_backend_name());
+        klog_puts(", one sector and eight sectors written, dropped from the cache, "
+                  "and read back byte for byte; USB: ");
+        klog_put_dec((uint32_t)xhci_device_count());
+        klog_puts(" boot-protocol HID device(s) - self-test passed.\n\n");
     }
 
     /* ---- M104 self-test: writeback, and a disk that keeps up ------------

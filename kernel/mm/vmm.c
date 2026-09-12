@@ -15,6 +15,7 @@
 #define PTE_PRESENT   (1ULL << 0)
 #define PTE_WRITABLE  (1ULL << 1)
 #define PTE_USER      (1ULL << 2) /* U/S bit: ring 3 may access this translation */
+#define PTE_PCD       (1ULL << 4) /* M107: cache disable - VMM_FLAG_NOCACHE maps straight onto it */
 #define PTE_HUGE      (1ULL << 7) /* PS bit: this PDE maps a 2 MiB page directly, no PT below it */
 /* M83: bit 9 is one of the three bits the CPU ignores in a page table
  * entry and leaves entirely to the operating system. This one marks a
@@ -92,7 +93,7 @@ int vmm_nx_enabled(void) {
  * is the bug M91 would otherwise ship: a page that loses its NX bit on
  * the first write to it is a W^X hole that only appears after a fork. */
 static uint64_t leaf_flags(uint64_t flags) {
-    uint64_t e = (flags & (PTE_WRITABLE | PTE_USER)) | PTE_PRESENT;
+    uint64_t e = (flags & (PTE_WRITABLE | PTE_USER | PTE_PCD)) | PTE_PRESENT;
     if (nx_enabled && !(flags & VMM_FLAG_EXEC)) {
         e |= PTE_NX;
     }
@@ -113,6 +114,7 @@ static uint64_t leaf_flags(uint64_t flags) {
  * vmm_map_page_in, and vmm_switch_address_space only ever touches this
  * CPU's own CR3, never shared table contents. */
 static spinlock_t vmm_lock;
+static spinlock_t mmio_lock; /* M107: guards the MMIO window bump pointer only */
 
 /* Every frame pmm_alloc_frame() can return lives within the identity map
  * this file builds, under whichever page tables are currently active (the
@@ -642,6 +644,47 @@ uint64_t vmm_protect_range_in(uint64_t pml4_phys, uint64_t start, uint64_t end,
 
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     vmm_map_page_in(kernel_pml4_phys, virt, phys, flags);
+}
+
+/* A bump allocator over the MMIO window. Never freed, and that is not a
+ * leak: a driver maps its BAR once at boot and holds it for the life of
+ * the machine, so the only thing a free list could serve is a driver that
+ * declines a card after mapping it - which costs one BAR's worth of
+ * address space out of 128 GiB. */
+static uint64_t mmio_next = KERNEL_MMIO_VIRT_BASE;
+
+void *vmm_map_mmio(uint64_t phys, uint64_t len) {
+    if (len == 0) {
+        return (void *)0;
+    }
+    uint64_t start = phys & ~(PAGE_SIZE - 1);
+    uint64_t offset = phys - start;
+    uint64_t end = (phys + len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    if (end <= start) {
+        return (void *)0; /* the addition wrapped - not an address */
+    }
+    uint64_t span = end - start;
+
+    uint64_t irq = spin_lock_irqsave(&mmio_lock);
+    if (span > KERNEL_MMIO_VIRT_SIZE ||
+        mmio_next - KERNEL_MMIO_VIRT_BASE > KERNEL_MMIO_VIRT_SIZE - span) {
+        spin_unlock_irqrestore(&mmio_lock, irq);
+        return (void *)0;
+    }
+    uint64_t virt = mmio_next;
+    mmio_next += span;
+    spin_unlock_irqrestore(&mmio_lock, irq);
+
+    for (uint64_t i = 0; i < span; i += PAGE_SIZE) {
+        if (vmm_try_map_page_in(kernel_pml4_phys, virt + i, start + i,
+                                VMM_FLAG_WRITABLE | VMM_FLAG_NOCACHE) != 0) {
+            /* Whatever was mapped stays mapped, pointing at a BAR nobody
+             * will use. See the note on the bump allocator: the window is
+             * 128 GiB and this happens at most once per boot. */
+            return (void *)0;
+        }
+    }
+    return (void *)(uintptr_t)(virt + offset);
 }
 
 void vmm_unmap_page(uint64_t virt) {

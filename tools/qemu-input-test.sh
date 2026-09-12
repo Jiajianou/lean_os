@@ -25,6 +25,22 @@
 #   tools/qemu-input-test.sh --check-stale   # prove a stale snapshot is refused
 #   tools/qemu-input-test.sh alt_tab_cycles_focus [more...]
 #
+# M107:
+#   LEANOS_QEMU_INPUT=usb tools/qemu-input-test.sh
+#
+# runs the whole suite on a machine with NO PS/2 controller - `-machine
+# pc,i8042=off` - and a USB keyboard and mouse on an xHCI controller
+# instead. Not one test changes, which is the argument for
+# kernel/drivers/xhci.c delivering through keyboard_inject() and
+# mouse_inject(): there is no second input path to grade, so the existing
+# forty-seven tests grade the new driver as they stand.
+#
+# It is a separate run rather than the default because it answers a
+# different question. The default asks "does the desktop still work"; this
+# asks "did the keystroke arrive over USB", and it can only answer that
+# because with the 8042 gone there is nothing else it could have arrived
+# over.
+#
 # Q19: each test gets its own guest, which is what makes them
 # independent - but that guest is RESTORED from a snapshot of a painted
 # desktop rather than booted. The boot happens once per image. Several

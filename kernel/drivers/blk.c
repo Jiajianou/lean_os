@@ -1,7 +1,9 @@
 #include "blk.h"
 
+#include "drivers/ahci.h"
 #include "drivers/ata.h"
 #include "drivers/klog.h"
+#include "drivers/nvme.h"
 #include "drivers/virtio_blk.h"
 #include "lib/libk.h"
 #include "lib/spinlock.h"
@@ -89,7 +91,25 @@ static uint32_t cache_lines; /* how many of them actually exist - see blk_init *
  * flush_if_overdue_locked, which learned that the hard way. */
 static uint64_t oldest_dirty_ms;
 
-static int have_virtio;
+/* M107: which of the four drivers is live.
+ *
+ * This was `static int have_virtio` from M92 until M107, and a boolean
+ * was exactly the right shape while there were two backends and one of
+ * them was the fallback. There are four now - NVMe, AHCI, virtio and ATA
+ * - and the order below is the order they are probed in, which is also
+ * the order of how likely a machine is to have one that works.
+ *
+ * NVMe first is not a performance ranking. It is that a machine with an
+ * NVMe disk and a legacy IDE controller in its chipset has both, and the
+ * IDE controller is not where the filesystem is. */
+typedef enum {
+    BACKEND_NVME,
+    BACKEND_AHCI,
+    BACKEND_VIRTIO,
+    BACKEND_ATA,
+} blk_backend_t;
+
+static blk_backend_t backend = BACKEND_ATA;
 static blk_stats_t stats;
 
 /* One lock over the whole cache. leanfs already serialises itself above
@@ -142,7 +162,21 @@ static int device_read(uint32_t lba, uint32_t count, void *buf) {
         io_errors++;
         return -1;
     }
-    if (have_virtio) {
+    if (backend == BACKEND_NVME) {
+        if (nvme_read(lba, count, buf) != 0) {
+            io_errors++;
+            return -1;
+        }
+        return 0;
+    }
+    if (backend == BACKEND_AHCI) {
+        if (ahci_read(lba, count, buf) != 0) {
+            io_errors++;
+            return -1;
+        }
+        return 0;
+    }
+    if (backend == BACKEND_VIRTIO) {
         if (virtio_blk_read(lba, count, buf) != 0) {
             io_errors++;
             return -1;
@@ -171,7 +205,21 @@ static int device_write(uint32_t lba, uint32_t count, const void *buf) {
         io_errors++;
         return -1;
     }
-    if (have_virtio) {
+    if (backend == BACKEND_NVME) {
+        if (nvme_write(lba, count, buf) != 0) {
+            io_errors++;
+            return -1;
+        }
+        return 0;
+    }
+    if (backend == BACKEND_AHCI) {
+        if (ahci_write(lba, count, buf) != 0) {
+            io_errors++;
+            return -1;
+        }
+        return 0;
+    }
+    if (backend == BACKEND_VIRTIO) {
         if (virtio_blk_write(lba, count, buf) != 0) {
             io_errors++;
             return -1;
@@ -193,7 +241,15 @@ static int device_write(uint32_t lba, uint32_t count, const void *buf) {
 }
 
 void blk_init(void) {
-    have_virtio = virtio_blk_init();
+    if (nvme_init()) {
+        backend = BACKEND_NVME;
+    } else if (ahci_init()) {
+        backend = BACKEND_AHCI;
+    } else if (virtio_blk_init()) {
+        backend = BACKEND_VIRTIO;
+    } else {
+        backend = BACKEND_ATA;
+    }
 
     /* Sized against what the machine has as well as against what the
      * filesystem needs. CACHE_LINES is the ceiling; a sixteenth of free
@@ -244,7 +300,12 @@ void blk_init(void) {
 }
 
 const char *blk_backend_name(void) {
-    return have_virtio ? "virtio-blk" : "ata-pio";
+    switch (backend) {
+    case BACKEND_NVME:   return "nvme";
+    case BACKEND_AHCI:   return "ahci";
+    case BACKEND_VIRTIO: return "virtio-blk";
+    default:             return "ata-pio";
+    }
 }
 
 /* Direct-mapped: a line's home is its own number modulo the cache size.

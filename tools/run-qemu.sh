@@ -105,12 +105,31 @@ QEMU_CPUS=${QEMU_CPUS:-1}
 # it; kernel/drivers/ata.c stays as the fallback for anything that has no
 # virtio, and QEMU_DISK=ide selects that path so the two can be measured
 # against each other. OVMF boots either.
-if [ "${QEMU_DISK:-virtio}" = "ide" ]; then
-  DISK_ARGS=(-drive "format=raw,file=$IMAGE")
-else
-  DISK_ARGS=(-drive "if=none,id=disk0,format=raw,file=$IMAGE"
-             -device virtio-blk-pci,drive=disk0)
-fi
+# M107: two more, and they are the two a machine built in the last twenty
+# years actually has. QEMU_DISK=ahci attaches the disk to an ICH9 AHCI
+# controller (kernel/drivers/ahci.c) and QEMU_DISK=nvme to an NVMe
+# controller (kernel/drivers/nvme.c). Four supported paths now, on
+# CLAUDE.md's existing terms: the image is byte-identical across all
+# four, and the kernel picks a backend by probing rather than by being
+# told - nothing on this command line reaches the guest as a flag.
+case "${QEMU_DISK:-virtio}" in
+  ide)
+    DISK_ARGS=(-drive "format=raw,file=$IMAGE")
+    ;;
+  ahci)
+    DISK_ARGS=(-device ich9-ahci,id=ahci0
+               -drive "if=none,id=disk0,format=raw,file=$IMAGE"
+               -device ide-hd,drive=disk0,bus=ahci0.0)
+    ;;
+  nvme)
+    DISK_ARGS=(-drive "if=none,id=disk0,format=raw,file=$IMAGE"
+               -device nvme,drive=disk0,serial=leanos0)
+    ;;
+  *)
+    DISK_ARGS=(-drive "if=none,id=disk0,format=raw,file=$IMAGE"
+               -device virtio-blk-pci,drive=disk0)
+    ;;
+esac
 # Q1: the one thing that tells the guest this is a test boot. Absent
 # here, so kernel/dev/fwcfg.c's boot_selftests_enabled() reads no such
 # file and returns 0. tools/run-tests.sh passes it.

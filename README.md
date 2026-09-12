@@ -83,6 +83,30 @@ UEFI firmware
   this machine unresolvable while UDP to the public internet was working
   in the next window. See M114 in [milestones.md](milestones.md) for the
   packet capture that settled it.
+- **The devices a real machine has** (M107). AHCI, **NVMe** and
+  **xHCI with USB HID** — three controllers found by PCI *class* rather
+  than by vendor, which is what lets one driver drive everybody's
+  silicon. The block layer probes NVMe, AHCI, virtio and ATA in that
+  order and nothing above `blk_read` can tell which answered;
+  `QEMU_DISK=nvme|ahci|virtio|ide` are four supported configurations of
+  one byte-identical image, and the boot battery is green on all four
+  with the disk numbers recorded separately, because the point is that
+  they differ.
+
+  **And the keyboard is the same keyboard.** The USB driver delivers
+  through the ring buffers the PS/2 IRQ handlers have fed since M51, so
+  there is no second input path — which means the entire existing input
+  suite grades it unchanged, on a machine booted with **no PS/2
+  controller at all**. That is the only way to prove the USB path is
+  carrying the keys rather than sitting beside one that still works.
+
+  Finding it cost a bug in something else: QEMU puts a 64-bit PCI BAR at
+  768 GiB, every address space shares only `PML4[0]`, and an
+  identity-mapped BAR above 512 GiB is therefore visible throughout
+  device probing and invisible the moment a user process runs. AHCI never
+  found it — its BAR is below 4 GiB and was correct by luck of address.
+  See [docs/devices.md](docs/devices.md).
+
 - **Settings that stick.** Wallpaper, colours, **screen resolution**
   (changed live, with a countdown that puts it back if you do not
   confirm), motion, and volume.
@@ -402,9 +426,15 @@ Four instruments, and none of them subsumes another:
   fake timer and a fake CPU, so a tick is a function call and a
   fairness property can be checked at every task count, and it learns
   the order locks are taken in so an inversion is an error rather than
-  a comment (Q9). 493 tests.
+  a comment (Q9). It also compiles the three pieces of M107's device
+  drivers whose failure mode is a *plausible wrong answer* rather than a
+  loud one - the USB boot-report decoder, the xHCI ring's cycle bit, and
+  the NVMe request splitter, **which is the one path QEMU cannot reach at
+  all**: its namespace has 512-byte blocks, so a 4Kn drive's
+  read-modify-write path is dead code here and would first execute on
+  somebody's real filesystem. 564 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 133 markers and 44 performance
+  image and grade the serial log against 134 markers and 44 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It
