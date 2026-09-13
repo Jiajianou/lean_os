@@ -36,10 +36,6 @@ static void ata_select(uint32_t lba, uint8_t count) {
 
 static uint32_t errors;
 
-uint32_t ata_error_count(void) {
-    return errors;
-}
-
 static int ata_wait_ready(void) {
     for (uint32_t i = 0; i < ATA_POLL_LIMIT; i++) {
         uint8_t status = inb(ATA_REG_STATUS);

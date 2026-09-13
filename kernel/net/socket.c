@@ -74,10 +74,6 @@ struct socket *socket_alloc(int type) {
     return (struct socket *)0;
 }
 
-int socket_type(const struct socket *s) {
-    return s ? s->type : SOCK_DGRAM;
-}
-
 struct tcpcb *socket_tcb(struct socket *s) {
     return (s && s->in_use && s->type == SOCK_STREAM) ? s->tcb : (struct tcpcb *)0;
 }

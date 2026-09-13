@@ -19,7 +19,6 @@ void socket_init(void);
 
 struct socket *socket_alloc(int type);
 
-int socket_type(const struct socket *s);
 
 struct tcpcb *socket_tcb(struct socket *s);
 

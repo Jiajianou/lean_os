@@ -6,10 +6,6 @@
 
 static uint64_t cycles_per_us;
 
-uint64_t tsc_cycles_per_us(void) {
-    return cycles_per_us;
-}
-
 uint64_t tsc_to_us(uint64_t cycles) {
     if (cycles_per_us == 0) {
         return 0;

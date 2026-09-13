@@ -90,14 +90,6 @@ void pipe_unref_write(pipe_t *p) {
     }
 }
 
-void pipe_close_read(pipe_t *p) {
-    uint64_t f = spin_lock_irqsave(&pipe_lock);
-    p->read_closed = 1;
-    spin_unlock_irqrestore(&pipe_lock, f);
-    sched_wake_all(PIPE_SPACE_CHAN(p));
-    sched_wake_all(SCHED_POLL_CHAN);
-}
-
 void pipe_close_write(pipe_t *p) {
     uint64_t f = spin_lock_irqsave(&pipe_lock);
     p->write_closed = 1;

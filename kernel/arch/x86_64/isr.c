@@ -193,14 +193,6 @@ void irq_enable_line(uint8_t irq) {
     }
 }
 
-void irq_disable_line(uint8_t irq) {
-    if (ioapic_available()) {
-        ioapic_mask_irq(irq);
-    } else {
-        pic_set_mask(irq);
-    }
-}
-
 void irq_handler(isr_regs_t *r) {
     uint8_t irq = (uint8_t)(r->vector - 32);
     if (ioapic_available()) {

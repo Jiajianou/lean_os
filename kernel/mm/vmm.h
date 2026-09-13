@@ -30,7 +30,6 @@ uint64_t vmm_kernel_pml4_phys(void);
 
 uint64_t vmm_kernel_heap_base(void);
 
-void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
 
 int vmm_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
 

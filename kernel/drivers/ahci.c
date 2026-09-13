@@ -322,14 +322,6 @@ int ahci_init(void) {
     return 0;
 }
 
-uint64_t ahci_capacity(void) {
-    return present ? capacity_sectors : 0;
-}
-
-uint32_t ahci_error_count(void) {
-    return errors;
-}
-
 static int transfer(uint64_t lba, uint32_t count, void *buf, int write) {
     if (!present) {
         return -1;

@@ -41,11 +41,3 @@ void syscount_get(int num, syscount_entry_t *out) {
     out->calls = __atomic_load_n(&table[num].calls, __ATOMIC_RELAXED);
     out->cycles = __atomic_load_n(&table[num].cycles, __ATOMIC_RELAXED);
 }
-
-uint64_t syscount_total_calls(void) {
-    uint64_t total = 0;
-    for (int i = 0; i < SYSCALL_COUNT; i++) {
-        total += __atomic_load_n(&table[i].calls, __ATOMIC_RELAXED);
-    }
-    return total;
-}

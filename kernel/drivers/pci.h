@@ -31,5 +31,3 @@ uint64_t pci_bar_mem_size(const pci_device_t *dev, uint8_t index);
 #define PCI_CAP_ID_MSIX 0x11
 uint8_t pci_find_capability(const pci_device_t *dev, uint8_t cap_id);
 
-uint32_t pci_config_read32(const pci_device_t *dev, uint8_t offset);
-void pci_config_write32(const pci_device_t *dev, uint8_t offset, uint32_t value);

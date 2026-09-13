@@ -330,14 +330,6 @@ int nvme_init(void) {
     return 0;
 }
 
-uint64_t nvme_capacity(void) {
-    return present ? (ns_blocks << ns_shift) : 0;
-}
-
-uint32_t nvme_error_count(void) {
-    return errors;
-}
-
 static int io_command(int write, uint64_t block, uint32_t blocks, uint32_t bytes,
                       uint64_t data_phys) {
     nvme_sqe_t cmd;

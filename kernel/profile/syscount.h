@@ -18,4 +18,3 @@ void syscount_reset(void);
 
 void syscount_get(int num, syscount_entry_t *out);
 
-uint64_t syscount_total_calls(void);

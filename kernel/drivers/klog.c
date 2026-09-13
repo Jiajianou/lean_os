@@ -27,10 +27,6 @@ void klog_release_console(void) {
     console_released = 1;
 }
 
-int klog_console_released(void) {
-    return console_released;
-}
-
 static spinlock_t klog_lock;
 
 static volatile int klog_panicking;
@@ -157,10 +153,6 @@ void klog_put_hex64(uint64_t value) {
 
 static klog_level_t current_level = KLOG_INFO;
 
-void klog_set_level(klog_level_t level) {
-    current_level = level;
-}
-
 static void klog_log_putc(klog_level_t level, char c) {
     klog_emit(c, level >= current_level);
 }
@@ -174,12 +166,6 @@ void klog_log(klog_level_t level, const char *s) {
     }
     spin_unlock(&klog_lock);
     irq_restore(flags);
-}
-
-void klog_log_hex32(klog_level_t level, uint32_t value) {
-    for (int shift = 28; shift >= 0; shift -= 4) {
-        klog_log_putc(level, hex_digit((value >> shift) & 0xF));
-    }
 }
 
 void klog_log_hex64(klog_level_t level, uint64_t value) {

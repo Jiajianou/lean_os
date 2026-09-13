@@ -12,4 +12,3 @@ void tsc_init(void);
 
 uint64_t tsc_to_us(uint64_t cycles);
 
-uint64_t tsc_cycles_per_us(void);

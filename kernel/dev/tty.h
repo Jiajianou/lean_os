@@ -47,7 +47,6 @@ uint32_t tty_read(tty_t *t, char *buf, uint32_t len);
 
 int tty_may_read(tty_t *t, int sid, int pgid);
 
-void tty_signal_foreground(tty_t *t, int sig);
 
 int tty_release_session(tty_t *t, int sid);
 

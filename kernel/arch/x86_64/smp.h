@@ -9,7 +9,6 @@ typedef struct {
     volatile int online;
 } cpu_info_t;
 
-extern cpu_info_t smp_cpus[MAX_CPUS];
 extern int smp_cpu_count;
 
 void smp_init(void);

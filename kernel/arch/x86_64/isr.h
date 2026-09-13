@@ -29,4 +29,3 @@ void lapic_vector_handler(isr_regs_t *regs);
 void irq_register_handler(uint8_t irq, irq_handler_fn handler);
 
 void irq_enable_line(uint8_t irq);
-void irq_disable_line(uint8_t irq);

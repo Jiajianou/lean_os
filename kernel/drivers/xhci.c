@@ -624,14 +624,6 @@ int xhci_device_count(void) {
     return hid_count;
 }
 
-uint64_t xhci_keyboard_reports(void) {
-    return kbd_reports;
-}
-
-uint64_t xhci_mouse_reports(void) {
-    return mouse_reports;
-}
-
 static void deliver_keyboard(hid_device_t *d) {
     usb_hid_keys_t keys;
     usb_hid_decode_keyboard(&d->hid, d->report, &keys);

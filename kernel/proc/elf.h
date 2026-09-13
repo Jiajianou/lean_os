@@ -3,7 +3,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size);
 
 uint64_t elf_validate(const uint8_t *image, size_t image_size);
 

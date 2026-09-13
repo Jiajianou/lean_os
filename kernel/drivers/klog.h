@@ -13,7 +13,6 @@ uint64_t klog_begin(void);
 void klog_end(uint64_t flags);
 
 void klog_release_console(void);
-int klog_console_released(void);
 
 void klog_enter_panic(void);
 void klog_put_hex32(uint32_t value);
@@ -28,9 +27,7 @@ typedef enum {
     KLOG_ERROR,
 } klog_level_t;
 
-void klog_set_level(klog_level_t level);
 void klog_log(klog_level_t level, const char *s);
-void klog_log_hex32(klog_level_t level, uint32_t value);
 void klog_log_hex64(klog_level_t level, uint64_t value);
 
 static inline void klog_debug(const char *s) { klog_log(KLOG_DEBUG, s); }

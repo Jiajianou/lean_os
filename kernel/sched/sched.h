@@ -172,14 +172,12 @@ extern const int sched_poll_channel;
 
 extern const int sched_keyboard_channel;
 #define SCHED_SLEEP_CHAN (&sched_sleep_channel)
-extern const int sched_sleep_channel;
 #define SCHED_KEYBOARD_CHAN (&sched_keyboard_channel)
 
 void sched_spawn_idle_tasks(int cpus);
 
 void sched_mark_self_idle(void);
 
-void sched_sleep_until(uint64_t deadline_ms);
 
 void sched_idle_enter(void);
 void sched_idle_exit(void);
@@ -202,7 +200,6 @@ task_t *task_spawn_in(const char *name, uint64_t pml4_phys, void (*entry)(void *
 
 void schedule(void);
 
-void sched_deliver_pending_signal(void);
 
 void task_exit(void) __attribute__((noreturn));
 void task_exit_with_code(int code) __attribute__((noreturn));

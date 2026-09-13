@@ -36,14 +36,6 @@ static void cfg_write32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset,
     outl(PCI_CONFIG_DATA, value);
 }
 
-uint32_t pci_config_read32(const pci_device_t *dev, uint8_t offset) {
-    return cfg_read32(dev->bus, dev->slot, dev->func, offset);
-}
-
-void pci_config_write32(const pci_device_t *dev, uint8_t offset, uint32_t value) {
-    cfg_write32(dev->bus, dev->slot, dev->func, offset, value);
-}
-
 int pci_find_device(uint16_t vendor_id, uint16_t device_id, pci_device_t *out) {
     for (uint32_t bus = 0; bus < 256; bus++) {
         for (uint32_t slot = 0; slot < 32; slot++) {

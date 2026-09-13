@@ -21,7 +21,6 @@ pipe_t *pipe_create(void);
 #define NAMED_PIPE_NAME_LEN 16
 
 pipe_t *pipe_named(const char *name);
-void pipe_close_read(pipe_t *p);
 void pipe_close_write(pipe_t *p);
 
 void pipe_ref_read(pipe_t *p);

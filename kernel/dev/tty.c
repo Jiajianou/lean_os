@@ -5,6 +5,8 @@
 #include "sched/sched.h"
 #include "signal.h"
 
+static void tty_signal_foreground(tty_t *t, int sig);
+
 static tty_t console;
 
 tty_t *tty_console(void) {
@@ -213,7 +215,7 @@ uint32_t tty_read(tty_t *t, char *buf, uint32_t len) {
     return n;
 }
 
-void tty_signal_foreground(tty_t *t, int sig) {
+static void tty_signal_foreground(tty_t *t, int sig) {
     if (!t || t->fg_pgid == 0) {
         return;
     }

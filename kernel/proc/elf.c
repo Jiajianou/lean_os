@@ -204,11 +204,6 @@ uint16_t elf_phnum(const uint8_t *image, size_t image_size) {
     return ((const elf64_ehdr_t *)image)->e_phnum;
 }
 
-uint64_t elf_load(uint64_t pml4_phys, const uint8_t *image, size_t image_size) {
-    return elf_load_at(pml4_phys, image, image_size,
-                       elf_is_dyn(image, image_size) ? USER_IMAGE_BASE : 0);
-}
-
 uint64_t elf_load_at(uint64_t pml4_phys, const uint8_t *image, size_t image_size,
                      uint64_t bias) {
     uint64_t entry = elf_validate_biased(image, image_size, bias);

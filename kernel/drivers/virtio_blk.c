@@ -168,15 +168,7 @@ int virtio_blk_init(void) {
     return 1;
 }
 
-uint64_t virtio_blk_capacity(void) {
-    return present ? capacity_sectors : 0;
-}
-
 static uint32_t errors;
-
-uint32_t virtio_blk_error_count(void) {
-    return errors;
-}
 
 static int submit(uint32_t type, uint64_t sector, uint32_t len, int device_writes) {
     req_hdr->type = type;

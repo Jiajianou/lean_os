@@ -293,11 +293,6 @@ task_t *process_spawnve(const char *name, const uint8_t *image, size_t image_siz
                                    caps_for_program(name ? name : ""));
 }
 
-task_t *process_spawnv_capped(const char *name, const uint8_t *image, size_t image_size,
-                              const char *const *argv, uint32_t caps) {
-    return process_spawnve_capped(name, image, image_size, argv, (const char *const *)0, caps);
-}
-
 task_t *process_spawnve_capped(const char *name, const uint8_t *image, size_t image_size,
                                const char *const *argv, const char *const *envp, uint32_t caps) {
     task_t *self = sched_vm_owner(sched_current());

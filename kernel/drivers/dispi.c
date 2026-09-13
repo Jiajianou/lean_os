@@ -100,14 +100,6 @@ int dispi_available(void) {
     return available;
 }
 
-uint32_t dispi_vram_bytes(void) {
-    return vram_bytes;
-}
-
-int dispi_mode_count(void) {
-    return mode_count;
-}
-
 int dispi_get_modes(display_mode_t *out, int max) {
     int n = mode_count < max ? mode_count : max;
     for (int i = 0; i < n; i++) {

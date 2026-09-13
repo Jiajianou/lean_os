@@ -35,6 +35,8 @@
 #include "mm/filemap.h"
 #include "signal.h"
 
+static void sched_deliver_pending_signal(void);
+
 #define TASK_STACK_SIZE (32 * 1024)
 #define SCHED_QUANTUM_TICKS 2
 
@@ -66,7 +68,6 @@ static void unblock_self(task_t *self);
 
 const int sched_poll_channel = 0;
 const int sched_keyboard_channel = 0;
-const int sched_sleep_channel = 0;
 
 static uint64_t idle_ticks[MAX_CPUS];
 static uint64_t total_ticks[MAX_CPUS];
@@ -94,22 +95,6 @@ void sched_debug_dump(const char *label) {
         klog_put_dec((uint32_t)t->wake_deadline_ms);
         klog_putc('\n');
     }
-}
-
-void sched_sleep_until(uint64_t deadline_ms) {
-    int cpu = smp_current_cpu();
-    uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
-    task_t *self = current_task[cpu];
-    self->wait_chan = SCHED_SLEEP_CHAN;
-    self->wake_deadline_ms = deadline_ms;
-    self->state = TASK_BLOCKED;
-    blocked_count++;
-    spin_unlock(&sched_lock);
-    irq_restore(flags);
-
-    schedule();
-    unblock_self(self);
 }
 
 void sched_idle_enter(void) {
@@ -859,7 +844,7 @@ void sched_dump_cpus(void) {
     klog_putc('\n');
 }
 
-void sched_deliver_pending_signal(void) {
+static void sched_deliver_pending_signal(void) {
     task_t *t = current_task[smp_current_cpu()];
     if (t->pending_signal != 0) {
         deliver_pending_signal_and_exit(t);

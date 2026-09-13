@@ -6,7 +6,6 @@
 
 #define PKG_REGISTRY_MAX 32768
 
-uint32_t pkg_caps_for_path(const char *path);
 
 uint32_t caps_for_spawn_path(const char *path);
 

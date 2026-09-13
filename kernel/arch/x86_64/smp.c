@@ -16,7 +16,7 @@
 #include "profile/sampler.h"
 #include "sched/sched.h"
 
-cpu_info_t smp_cpus[MAX_CPUS];
+static cpu_info_t smp_cpus[MAX_CPUS];
 int smp_cpu_count = 1;
 
 static volatile int initialized;

@@ -72,7 +72,7 @@ static int hex_value(char c) {
     return -1;
 }
 
-uint32_t pkg_caps_for_path(const char *path) {
+static uint32_t pkg_caps_for_path(const char *path) {
     if (!path || !path_is_under_pkg(path)) {
         return CAP_PKG_UNLISTED;
     }

@@ -8,6 +8,8 @@
 #include "mm/pmm.h"
 #include "panic.h"
 
+static void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
+
 #define PAGE_SIZE 4096ULL
 #define HUGE_PAGE_SIZE (2ULL * 1024 * 1024)
 #define ENTRIES_PER_TABLE 512ULL
@@ -343,7 +345,7 @@ int vmm_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64
     return 0;
 }
 
-void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
+static void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
     if (vmm_try_map_page_in(pml4_phys, virt, phys, flags) != 0) {
         panic("vmm_map_page_in: out of memory for a page table");
     }

@@ -146,14 +146,3 @@ void fb_scroll_up(uint32_t rows, uint32_t bg_rgb) {
     }
     fb_fill_rect(0, fb_h - rows, fb_w, rows, bg_rgb);
 }
-
-void fb_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, const uint32_t *pixels) {
-    if (x + w > fb_w || y + h > fb_h) {
-        panic("fb_blit: rectangle out of bounds");
-    }
-    for (uint32_t row = 0; row < h; row++) {
-        volatile uint32_t *dst = pixel_addr(x, y + row);
-        const uint32_t *src = pixels + (uint64_t)row * w;
-        k_memcpy((void *)dst, src, (size_t)w * sizeof(uint32_t));
-    }
-}
