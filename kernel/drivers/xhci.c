@@ -6,9 +6,9 @@
 #include "drivers/pci.h"
 #include "drivers/usb_hid.h"
 #include "drivers/xhci_ring.h"
-#include "lib/libk.h"
-#include "mm/pmm.h"
-#include "mm/vmm.h"
+#include "library/libk.h"
+#include "memory_management/pmm.h"
+#include "memory_management/vmm.h"
 
 #define XHCI_CLASS    0x0C
 #define XHCI_SUBCLASS 0x03

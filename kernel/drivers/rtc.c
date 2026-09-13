@@ -1,8 +1,8 @@
 #include "rtc.h"
 
-#include "arch/x86_64/io.h"
+#include "architecture/x86_64/io.h"
 #include "klog.h"
-#include "arch/x86_64/tsc.h"
+#include "architecture/x86_64/tsc.h"
 
 #define CMOS_ADDR 0x70
 #define CMOS_DATA 0x71

@@ -1,9 +1,9 @@
 #include "check.h"
 #include "fakes/fakes.h"
 
-#include "dev/pty.h"
-#include "dev/tty.h"
-#include "sched/sched.h"
+#include "device/pty.h"
+#include "device/tty.h"
+#include "scheduler/sched.h"
 #include "signal.h"
 
 #include <string.h>

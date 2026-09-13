@@ -506,9 +506,9 @@ switch comes from outside the image rather than from a `#ifdef`.
 ```
 kernel/          boot, arch/x86_64, mm, sched, drivers, fs, ipc, net, kernel.c
 system_api/      the syscall ABI: numbers, structs, the kernel/user contract
-user_space/lib   the runtime every program links: crt0, syscalls, gfx, wmclient
+user_space/library   the runtime every program links: crt0, syscalls, gfx, wmclient
 user_space/libc  a C library subset, for programs written against standard headers
-user_space/bin   the applications
+user_space/binaries   the applications
 third_party/     source nobody here wrote, kept clearly separate
 tools/           build scripts, the QEMU harnesses, the font generator
 docs/            per-subsystem design notes

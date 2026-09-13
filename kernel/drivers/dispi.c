@@ -1,6 +1,6 @@
 #include "dispi.h"
 
-#include "arch/x86_64/io.h"
+#include "architecture/x86_64/io.h"
 #include "klog.h"
 
 #define DISPI_IOPORT_INDEX 0x01CE

@@ -8,8 +8,8 @@
 #include <unistd.h>
 
 #include "caps.h"
-#include "../user_space/lib/ospkg.h"
-#include "../user_space/lib/sha256.h"
+#include "../user_space/library/ospkg.h"
+#include "../user_space/library/sha256.h"
 
 #define MAX_STAGE_FILES OSP_MAX_FILES
 

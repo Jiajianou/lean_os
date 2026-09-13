@@ -1,8 +1,8 @@
 #include "check.h"
 
 #include "fakes/fakes.h"
-#include "ipc/memfd.h"
-#include "proc/proc.h"
+#include "inter_process_communication/memfd.h"
+#include "process/proc.h"
 
 #include <string.h>
 
@@ -244,7 +244,7 @@ TEST(memfd, a_size_change_inside_one_page_is_recorded) {
     clean();
 }
 
-#include "sched/sched.h"
+#include "scheduler/sched.h"
 
 static task_t parent_task;
 static task_t child_task;

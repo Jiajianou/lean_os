@@ -909,10 +909,10 @@ int main(int argc, char **argv) {
     int bad = 0;
     build_header(1); bad |= write_if("kernel/drivers/font8x16.h", check_only);
     build_source(1); bad |= write_if("kernel/drivers/font8x16.c", check_only);
-    build_header(0); bad |= write_if("user_space/lib/font8x16.h", check_only);
-    build_source(0); bad |= write_if("user_space/lib/font8x16.c", check_only);
-    build_uifont_header(); bad |= write_if("user_space/lib/uifont.h", check_only);
-    build_uifont_source(); bad |= write_if("user_space/lib/uifont.c", check_only);
+    build_header(0); bad |= write_if("user_space/library/font8x16.h", check_only);
+    build_source(0); bad |= write_if("user_space/library/font8x16.c", check_only);
+    build_uifont_header(); bad |= write_if("user_space/library/uifont.h", check_only);
+    build_uifont_source(); bad |= write_if("user_space/library/uifont.c", check_only);
 
     if (bad) return 1;
     if (check_only) printf("gen-font: all six font files match the generator.\n");

@@ -1,6 +1,6 @@
 #include "check.h"
 #include "fakes/fakes.h"
-#include "mm/heap.h"
+#include "memory_management/heap.h"
 
 #include <stdint.h>
 #include <string.h>

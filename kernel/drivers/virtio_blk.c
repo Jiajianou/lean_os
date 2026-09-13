@@ -1,10 +1,10 @@
 #include "virtio_blk.h"
 
-#include "arch/x86_64/io.h"
+#include "architecture/x86_64/io.h"
 #include "drivers/klog.h"
 #include "drivers/pci.h"
-#include "lib/libk.h"
-#include "mm/pmm.h"
+#include "library/libk.h"
+#include "memory_management/pmm.h"
 #include "panic.h"
 
 #define VIRTIO_VENDOR      0x1AF4

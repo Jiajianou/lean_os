@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "arch/x86_64/isr.h"
+#include "architecture/x86_64/isr.h"
 #include "profile.h"
 
 #define PROF_BUCKETS 2048

@@ -9,7 +9,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "../kernel/fs/leanfs_format.h"
+#include "../kernel/file_system/leanfs_format.h"
 
 static FILE *img;
 static leanfs_superblock_t sb;
@@ -742,13 +742,13 @@ static void image_open(const char *image_path) {
             fprintf(stderr,
                     "leanfs-put: this image's inode table is %u blocks and this tool is built "
                     "for %zu.\n            The image predates this build's "
-                    "kernel/fs/leanfs_format.h - rebuild the image.\n",
+                    "kernel/file_system/leanfs_format.h - rebuild the image.\n",
                     sb.inode_table_blocks, (size_t)INODE_TABLE_BLOCKS);
             exit(1);
         }
         if (sb.bitmap_blocks_field > BITMAP_BLOCKS || sb.data_blocks > LEANFS_DATA_BLOCKS) {
             die("this image's data region is larger than this tool is built for - "
-                "the image predates this build's kernel/fs/leanfs_format.h");
+                "the image predates this build's kernel/file_system/leanfs_format.h");
         }
         static uint8_t table_buf[INODE_TABLE_BLOCKS * LEANFS_BLOCK_SIZE];
         memset(table_buf, 0, sizeof(table_buf));
@@ -765,7 +765,7 @@ static void image_open(const char *image_path) {
         fprintf(stderr,
                 "leanfs-put: this image's leanfs magic is 0x%08X and this tool writes 0x%08X.\n"
                 "            The on-disk format has moved - rebuild this tool against the\n"
-                "            current kernel/fs/leanfs_format.h, and rebuild the image.\n",
+                "            current kernel/file_system/leanfs_format.h, and rebuild the image.\n",
                 sb.magic, (unsigned)LEANFS_MAGIC);
         exit(1);
     } else {

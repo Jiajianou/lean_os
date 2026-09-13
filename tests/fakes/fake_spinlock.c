@@ -1,4 +1,4 @@
-#include "lib/spinlock.h"
+#include "library/spinlock.h"
 
 #include <stddef.h>
 

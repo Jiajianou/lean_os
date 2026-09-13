@@ -30,8 +30,8 @@ LEANFS_PUT   := $(BUILD)/leanfs-put
 GEN_FONT     := $(BUILD)/gen-font
 FONT_STAMP   := $(BUILD)/.font-check-stamp
 FONT_FILES   := kernel/drivers/font8x16.h kernel/drivers/font8x16.c \
-                user_space/lib/font8x16.h user_space/lib/font8x16.c \
-                user_space/lib/uifont.h user_space/lib/uifont.c
+                user_space/library/font8x16.h user_space/library/font8x16.c \
+                user_space/library/uifont.h user_space/library/uifont.c
 
 CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
           -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Werror \
@@ -40,7 +40,7 @@ CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
 USER_CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
                -mcmodel=large -mno-red-zone -Wall -Wextra -Werror \
                -ffunction-sections -fdata-sections \
-               -MMD -MP -Iuser_space/lib -Iuser_space/libc/include \
+               -MMD -MP -Iuser_space/library -Iuser_space/libc/include \
                -Isystem_api/include -c
 
 MBR_BIN    := $(BUILD)/mbr.bin
@@ -53,7 +53,7 @@ UEFI_BOOT_OBJ := $(BUILD)/uefi_boot.obj
 UEFI_BOOT_EFI := $(BUILD)/BOOTX64.EFI
 
 UOBJ      := $(BUILD)/user_obj
-USER_LD   := user_space/lib/user.ld
+USER_LD   := user_space/library/user.ld
 USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/malloc.o \
                 $(UOBJ)/gfx.o $(UOBJ)/font8x16.o $(UOBJ)/wmclient.o $(UOBJ)/wallpaper.o \
                 $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o \
@@ -112,7 +112,7 @@ $(KOBJ)/%.o: kernel/%.c | $(KOBJ)
 $(UOBJ):
 	mkdir -p $@
 
-$(UOBJ)/%.o: user_space/lib/%.c | $(UOBJ)
+$(UOBJ)/%.o: user_space/library/%.c | $(UOBJ)
 	$(CC) $(USER_CFLAGS) $< -o $@
 
 $(UOBJ)/libc_%.o: user_space/libc/src/%.c | $(UOBJ)
@@ -123,10 +123,10 @@ THIRD_PARTY_CFLAGS := $(filter-out -Wall -Wextra -Werror,$(USER_CFLAGS)) -Wno-fo
 $(UOBJ)/whetstone.o: third_party/whetstone/whetstone.c | $(UOBJ)
 	$(CC) $(THIRD_PARTY_CFLAGS) $< -o $@
 
-$(UOBJ)/%.o: user_space/lib/%.asm | $(UOBJ)
+$(UOBJ)/%.o: user_space/library/%.asm | $(UOBJ)
 	$(AS) -f elf64 $< -o $@
 
-$(UOBJ)/%.o: user_space/bin/%.c | $(UOBJ)
+$(UOBJ)/%.o: user_space/binaries/%.c | $(UOBJ)
 	$(CC) $(USER_CFLAGS) $< -o $@
 
 $(UOBJ)/%.o: user_space/init/%.c | $(UOBJ)
@@ -143,7 +143,7 @@ $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(USER_LD)
 
 AP_TRAMPOLINE_BIN := $(BUILD)/ap_trampoline.bin
 
-$(AP_TRAMPOLINE_BIN): kernel/arch/x86_64/ap_trampoline.asm | $(BUILD)
+$(AP_TRAMPOLINE_BIN): kernel/architecture/x86_64/ap_trampoline.asm | $(BUILD)
 	$(AS) -f bin $< -o $@
 
 $(KOBJ)/proc/embed_ap_trampoline.o: $(AP_TRAMPOLINE_BIN)
@@ -153,8 +153,8 @@ $(KOBJ)/proc/embed_programs.o: $(USER_PROGRAM_ELFS) | check-embedded-programs
 .PHONY: check-embedded-programs
 check-embedded-programs:
 	@for p in $(USER_PROGRAMS); do \
-	  grep -q "^$${p}_elf_start:" kernel/proc/embed_programs.asm || { \
-	    echo "Makefile: '$$p' is in USER_PROGRAMS but has no incbin block in kernel/proc/embed_programs.asm." >&2; \
+	  grep -q "^$${p}_elf_start:" kernel/process/embed_programs.asm || { \
+	    echo "Makefile: '$$p' is in USER_PROGRAMS but has no incbin block in kernel/process/embed_programs.asm." >&2; \
 	    echo "          Add one (see that file's header comment on why it is written out longhand)." >&2; \
 	    exit 1; }; \
 	done
@@ -198,7 +198,7 @@ ESP_SECTOR_COUNT := 1024
 $(IMAGE): $(MBR_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)
 	@boot_sectors=$$(( ($$(stat -f%z $(MBR_BIN)) + $$(stat -f%z $(KERNEL_BIN))) / 512 )); \
 	if [ $$boot_sectors -ge $(FS_START_LBA) ]; then \
-		echo "error: boot image ($$boot_sectors sectors) has grown into the filesystem's start (LBA $(FS_START_LBA)) - move FS_START_LBA out further here and in kernel/fs/leanfs.c's LEANFS_START_LBA" >&2; \
+		echo "error: boot image ($$boot_sectors sectors) has grown into the filesystem's start (LBA $(FS_START_LBA)) - move FS_START_LBA out further here and in kernel/file_system/leanfs.c's LEANFS_START_LBA" >&2; \
 		exit 1; \
 	fi; \
 	fs_end=$$(( $(FS_START_LBA) + $(FS_TOTAL_SECTORS) )); \
@@ -226,11 +226,11 @@ $(LEANFS_PUT): tools/leanfs-put.c | $(BUILD)
 leanfs-put: $(LEANFS_PUT)
 
 OS_PKG      := $(BUILD)/os-pkg
-OS_PKG_SRCS := tools/os-pkg.c user_space/lib/ospkg.c user_space/lib/sha256.c
+OS_PKG_SRCS := tools/os-pkg.c user_space/library/ospkg.c user_space/library/sha256.c
 
-$(OS_PKG): $(OS_PKG_SRCS) user_space/lib/ospkg.h user_space/lib/sha256.h \
+$(OS_PKG): $(OS_PKG_SRCS) user_space/library/ospkg.h user_space/library/sha256.h \
            system_api/include/caps.h | $(BUILD)
-	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -Iuser_space/lib \
+	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -Iuser_space/library \
 	          -Isystem_api/include -o $@ $(OS_PKG_SRCS)
 
 os-pkg: $(OS_PKG)
@@ -278,7 +278,7 @@ toybox: $(TOYBOX_BIN) $(IMAGE) $(LEANFS_PUT) preseed
 
 NETSURF_BIN := $(BUILD)/netsurf/netsurf
 
-$(NETSURF_BIN): tools/build-netsurf.sh user_space/bin/nsfb_leanos.c
+$(NETSURF_BIN): tools/build-netsurf.sh user_space/binaries/nsfb_leanos.c
 	@./tools/build-netsurf.sh
 
 browser: $(NETSURF_BIN) $(IMAGE) $(LEANFS_PUT) preseed
@@ -322,8 +322,8 @@ $(NETSURF_BIN): $(LIBC_A)
 
 LIBC_SO := $(BUILD)/libc.so
 LIBC_SO_SRCS := $(wildcard user_space/libc/src/*.c) \
-                user_space/lib/syscall_wrappers.c user_space/lib/str.c \
-                user_space/lib/malloc.c user_space/lib/dns.c
+                user_space/library/syscall_wrappers.c user_space/library/str.c \
+                user_space/library/malloc.c user_space/library/dns.c
 
 $(LIBC_SO): $(LIBC_SO_SRCS) $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
 	@mkdir -p $(UOBJ)/pic
@@ -331,7 +331,7 @@ $(LIBC_SO): $(LIBC_SO_SRCS) $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
 	  obj=$(UOBJ)/pic/$$(echo $$src | tr / _ | sed 's/\.c$$/.o/'); \
 	  $(CC) -std=c11 -O2 -ffreestanding -fno-stack-protector -fPIC \
 	    -mcmodel=small -mno-red-zone -ftls-model=initial-exec \
-	    -Iuser_space/lib -Iuser_space/libc/include -Isystem_api/include \
+	    -Iuser_space/library -Iuser_space/libc/include -Isystem_api/include \
 	    -c $$src -o $$obj || exit 1; \
 	done
 	$(LD) -shared -soname libc.so -o $@ $(UOBJ)/pic/*.o \
@@ -339,11 +339,11 @@ $(LIBC_SO): $(LIBC_SO_SRCS) $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
 
 LD_SO := $(BUILD)/ld-lean.so
 
-$(LD_SO): user_space/ld/ld-lean.c user_space/ld/ld-start.S
+$(LD_SO): user_space/loader/ld-lean.c user_space/loader/ld-start.S
 	@mkdir -p $(UOBJ)/pic
-	$(CC) -c -o $(UOBJ)/pic/ld-start.o user_space/ld/ld-start.S \
+	$(CC) -c -o $(UOBJ)/pic/ld-start.o user_space/loader/ld-start.S \
 	  -Isystem_api/include
-	$(CC) -c -o $(UOBJ)/pic/ld-lean.o user_space/ld/ld-lean.c \
+	$(CC) -c -o $(UOBJ)/pic/ld-lean.o user_space/loader/ld-lean.c \
 	  -std=c11 -O2 -ffreestanding -fno-stack-protector -fPIC \
 	  -mcmodel=small -mno-red-zone -fvisibility=hidden \
 	  -Wall -Wextra -Isystem_api/include
@@ -355,7 +355,7 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crt
 	@mkdir -p $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include $(SYSROOT)/usr/lib
 	@cp -R user_space/libc/include/. $(SYSROOT)/usr/local/include/
 	@cp -R system_api/include/. $(SYSROOT)/usr/include/
-	@cp user_space/lib/syscall_wrappers.h $(SYSROOT)/usr/include/
+	@cp user_space/library/syscall_wrappers.h $(SYSROOT)/usr/include/
 	@cp $(LIBC_A) $(SYSROOT)/usr/lib/libc.a
 	@cp $(LIBC_SO) $(SYSROOT)/usr/lib/libc.so
 	@# M99: the loader, so that -pie can find dlopen without a path
@@ -369,11 +369,11 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crt
 	@# directory before, which meant the compiler could not find it -
 	@# a `-pie` link had to name it by path. It is a startup file, so
 	@# it belongs in the sysroot beside the other three.
-	@nasm -f elf64 -o $(UOBJ)/crt0-pie.o user_space/lib/crt0-pie.asm
+	@nasm -f elf64 -o $(UOBJ)/crt0-pie.o user_space/library/crt0-pie.asm
 	@cp $(UOBJ)/crt0-pie.o $(SYSROOT)/usr/lib/Scrt1.o
 	@cp $(UOBJ)/crti.o $(SYSROOT)/usr/lib/crti.o
 	@cp $(UOBJ)/crtn.o $(SYSROOT)/usr/lib/crtn.o
-	@cp user_space/lib/user.ld $(SYSROOT)/usr/lib/lean_os.ld
+	@cp user_space/library/user.ld $(SYSROOT)/usr/lib/lean_os.ld
 	@# M97: libm.a, and it is empty on purpose.
 	@#
 	@# g++'s link spec ends in `-lm` on essentially every target, so a
@@ -440,7 +440,7 @@ TEST_BUILD  := $(BUILD)/tests
 TEST_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Werror -DLEANOS_HOST_TEST \
                -fno-omit-frame-pointer \
                -Itests -Itests/fakes -Ikernel -Isystem_api/include \
-               -Iuser_space/lib
+               -Iuser_space/library
 
 ifneq ($(TEST_SAN),0)
 TEST_CFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -456,20 +456,20 @@ TEST_FAKES := tests/fakes/fake_panic.c tests/fakes/fake_klog.c \
               tests/fakes/fake_user_syscalls.c tests/fakes/fake_user_fs.c \
               tests/fakes/fake_user_net.c
 
-TEST_KERNEL_SRCS := kernel/lib/libk.c kernel/mm/heap.c kernel/fs/leanfs.c \
-                    kernel/net/arp.c kernel/net/ip.c kernel/net/icmp.c \
-                    kernel/net/udp.c kernel/net/ethernet.c kernel/net/tcp.c \
-                    kernel/dev/fwcfg.c kernel/dev/tty.c kernel/dev/pty.c \
-                    kernel/sched/sched.c kernel/fs/flock.c kernel/dev/random.c \
-                    kernel/drivers/rtl8139_ring.c kernel/ipc/unixsock.c \
+TEST_KERNEL_SRCS := kernel/library/libk.c kernel/memory_management/heap.c kernel/file_system/leanfs.c \
+                    kernel/network/arp.c kernel/network/ip.c kernel/network/icmp.c \
+                    kernel/network/udp.c kernel/network/ethernet.c kernel/network/tcp.c \
+                    kernel/device/fwcfg.c kernel/device/tty.c kernel/device/pty.c \
+                    kernel/scheduler/sched.c kernel/file_system/flock.c kernel/device/random.c \
+                    kernel/drivers/rtl8139_ring.c kernel/inter_process_communication/unixsock.c \
                     kernel/drivers/usb_hid.c kernel/drivers/xhci_ring.c \
                     kernel/drivers/nvme_split.c kernel/drivers/pci.c \
-                    kernel/ipc/eventfd.c kernel/ipc/timerfd.c kernel/ipc/epoll.c \
-                    kernel/ipc/memfd.c
+                    kernel/inter_process_communication/eventfd.c kernel/inter_process_communication/timerfd.c kernel/inter_process_communication/epoll.c \
+                    kernel/inter_process_communication/memfd.c
 
-TEST_USER_SRCS := user_space/lib/symtab.c \
-                  user_space/lib/sha256.c user_space/lib/ospkg.c \
-                  user_space/lib/fsutil.c user_space/lib/dns.c \
+TEST_USER_SRCS := user_space/library/symtab.c \
+                  user_space/library/sha256.c user_space/library/ospkg.c \
+                  user_space/library/fsutil.c user_space/library/dns.c \
                   user_space/libc/src/wchar.c user_space/libc/src/errno.c \
                   user_space/libc/src/fnmatch.c user_space/libc/src/libgen.c \
                   user_space/libc/src/getopt.c user_space/libc/src/wallclock.c
@@ -489,7 +489,7 @@ $(TEST_SAN_STAMP): | $(TEST_BUILD)
 
 TEST_HDRS := $(shell find kernel system_api tests -name '*.h' 2>/dev/null)
 
-TEST_USER_DEPS := $(shell find user_space/lib user_space/libc -name '*.c' \
+TEST_USER_DEPS := $(shell find user_space/library user_space/libc -name '*.c' \
                           -o -name '*.h' 2>/dev/null)
 
 $(TEST_BIN): $(TEST_SRCS) $(TEST_HDRS) $(TEST_USER_DEPS) $(TEST_SAN_STAMP) | $(TEST_BUILD)
@@ -507,7 +507,7 @@ LLVM_CC    := $(shell for c in /opt/homebrew/opt/llvm/bin/clang \
 COV_CC     := $(LLVM_CC)
 COV_CFLAGS := -std=c11 -g -O0 -Wall -Wextra -DLEANOS_HOST_TEST \
               -fprofile-instr-generate -fcoverage-mapping \
-              -Itests -Itests/fakes -Ikernel -Isystem_api/include -Iuser_space/lib
+              -Itests -Itests/fakes -Ikernel -Isystem_api/include -Iuser_space/library
 
 $(COV_BUILD):
 	mkdir -p $@

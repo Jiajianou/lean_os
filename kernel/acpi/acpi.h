@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "arch/x86_64/cpu.h"
+#include "architecture/x86_64/cpu.h"
 
 #define MAX_IOAPICS 4
 #define MAX_IRQ_OVERRIDES 16

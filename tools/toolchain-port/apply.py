@@ -53,7 +53,7 @@ def port_binutils(root):
         os.path.join(root, "ld/emulparams/elf_x86_64_lean_os.sh"),
         "source_sh ${srcdir}/emulparams/elf_x86_64.sh\n"
         "# Where a lean_os process image lives: PML4[1], 512 GiB - the\n"
-        "# same address user_space/lib/user.ld sets, kept in step by\n"
+        "# same address user_space/library/user.ld sets, kept in step by\n"
         "# M98's boot self-test linking with no script at all.\n"
         "TEXT_START_ADDR=0x8000000000\n"
         "# This machine has 4 KiB pages and no transparent huge ones, so\n"

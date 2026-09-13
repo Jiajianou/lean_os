@@ -1,6 +1,6 @@
 #include "pcspk.h"
 
-#include "arch/x86_64/io.h"
+#include "architecture/x86_64/io.h"
 #include "pit.h"
 
 #define PIT_CHANNEL2_DATA 0x42

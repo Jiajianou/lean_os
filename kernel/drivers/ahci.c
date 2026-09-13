@@ -2,9 +2,9 @@
 
 #include "drivers/klog.h"
 #include "drivers/pci.h"
-#include "lib/libk.h"
-#include "mm/pmm.h"
-#include "mm/vmm.h"
+#include "library/libk.h"
+#include "memory_management/pmm.h"
+#include "memory_management/vmm.h"
 
 #define AHCI_CLASS    0x01
 #define AHCI_SUBCLASS 0x06

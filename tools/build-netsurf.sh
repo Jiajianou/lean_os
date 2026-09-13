@@ -120,8 +120,8 @@ export PATH="$NSDIR/inst-host/bin:$PATH"
 make -s -C "$ROOT" sysroot >/dev/null || exit 1
 x86_64-lean_os-gcc -O2 -std=c99 -Wall -Wextra -Werror -c \
   -I "$NSDIR/libnsfb/include" -I "$NSDIR/libnsfb/src" \
-  -I "$ROOT/system_api/include" -I "$ROOT/user_space/lib" \
-  -o "$OUT/nsfb_leanos.o" "$ROOT/user_space/bin/nsfb_leanos.c" || {
+  -I "$ROOT/system_api/include" -I "$ROOT/user_space/library" \
+  -o "$OUT/nsfb_leanos.o" "$ROOT/user_space/binaries/nsfb_leanos.c" || {
   echo "build-netsurf: the lean_os surface did not compile" >&2
   exit 1
 }
@@ -213,7 +213,7 @@ homepage_url:file:///usr/share/netsurf/welcome.html
 font_size:128
 # The window. NetSurf's own window_width/window_height options override
 # whatever the surface reports as its default (see leanos_defaults in
-# user_space/bin/nsfb_leanos.c, whose 900x640 is therefore only what a
+# user_space/binaries/nsfb_leanos.c, whose 900x640 is therefore only what a
 # build with no Choices file would get). Sized to leave the taskbar and
 # the icon column visible on this machine's 1024x768 default.
 window_width:800

@@ -1,6 +1,6 @@
 #include "syscount.h"
 
-#include "lib/libk.h"
+#include "library/libk.h"
 
 static syscount_entry_t table[SYSCALL_COUNT];
 static volatile int timing_on;

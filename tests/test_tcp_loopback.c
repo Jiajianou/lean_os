@@ -1,7 +1,7 @@
 #include "check.h"
 #include "fakes/fakes.h"
 
-#include "net/tcp.h"
+#include "network/tcp.h"
 
 #include <string.h>
 

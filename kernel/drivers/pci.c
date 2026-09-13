@@ -1,6 +1,6 @@
 #include "pci.h"
 
-#include "arch/x86_64/io.h"
+#include "architecture/x86_64/io.h"
 #include "panic.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8

@@ -35,7 +35,7 @@ make test-fast TEST_SAN=0           # without ASan/UBSan, for timing
 make coverage                       # per-file coverage of the units under test
 make coverage-check                 # ...and fail if any file went down
 make mutate                         # does this suite detect anything? (Q12)
-make mutate FILE=kernel/mm/heap.c   # one file
+make mutate FILE=kernel/memory_management/heap.c   # one file
 make fuzz-run                       # 60 seconds per fuzz target
 tools/crash-test.sh                 # 16 power cuts, then check the filesystem
 tools/leanfs-fsck.py <image>        # an independent structural check

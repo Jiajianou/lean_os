@@ -1,6 +1,6 @@
 #include "panic.h"
 
-#include "arch/x86_64/smp.h"
+#include "architecture/x86_64/smp.h"
 #include "drivers/fb.h"
 #include "drivers/font8x16.h"
 #include "drivers/klog.h"

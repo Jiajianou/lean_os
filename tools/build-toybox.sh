@@ -45,7 +45,7 @@ done
 
 LEANOS_CFLAGS="-ffreestanding -fno-stack-protector -fno-pic -mcmodel=large \
   -mno-red-zone -D__lean_os__ \
-  -I$ROOT/user_space/libc/include -I$ROOT/user_space/lib -I$ROOT/system_api/include"
+  -I$ROOT/user_space/libc/include -I$ROOT/user_space/library -I$ROOT/system_api/include"
 
 cd "$WORK"
 echo "build-toybox: configuring"
@@ -149,6 +149,6 @@ if [ -z "$USER_LIBOBJS" ] || [ ! -f "$ROOT/build/user_obj/crt0.o" ]; then
   echo "build-toybox: run make first - this links against build/user_obj" >&2
   exit 1
 fi
-export LDFLAGS="-static -nostdlib -Wl,-T,$ROOT/user_space/lib/user.ld $LIBOBJS_ABS"
+export LDFLAGS="-static -nostdlib -Wl,-T,$ROOT/user_space/library/user.ld $LIBOBJS_ABS"
 
 make CROSS_COMPILE=x86_64-elf- CC=gcc HOSTCC=cc CFLAGS="$LEANOS_CFLAGS" "$@"

@@ -1,9 +1,9 @@
-#include "net/arp.h"
-#include "net/ethernet.h"
-#include "net/icmp.h"
-#include "net/ip.h"
-#include "net/tcp.h"
-#include "net/udp.h"
+#include "network/arp.h"
+#include "network/ethernet.h"
+#include "network/icmp.h"
+#include "network/ip.h"
+#include "network/tcp.h"
+#include "network/udp.h"
 
 #include <stdint.h>
 #include <stdlib.h>

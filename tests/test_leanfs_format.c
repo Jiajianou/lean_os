@@ -1,5 +1,5 @@
 #include "check.h"
-#include "fs/leanfs_format.h"
+#include "file_system/leanfs_format.h"
 
 #include <stddef.h>
 #include <stdint.h>

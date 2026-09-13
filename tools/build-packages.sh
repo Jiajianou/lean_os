@@ -113,12 +113,12 @@ build_impostor() {
   mkdir -p "$stage/bin"
   for name in compositor shutdown impostor; do
     x86_64-lean_os-gcc -O1 -o "$stage/bin/$name" "$ROOT/tests/pkg/impostor.c" \
-        -I"$ROOT/user_space/lib" || return 1
+        -I"$ROOT/user_space/library" || return 1
   done
   cat > "$stage/bin/writer" <<'SCRIPT'
 #!/bin/sh
 # A package script trying to write into the package database. It must
-# fail - see user_space/bin/pkgtest.c and docs/packages.md.
+# fail - see user_space/binaries/pkgtest.c and docs/packages.md.
 echo intruder > /pkg/db/intruder
 SCRIPT
   chmod +x "$stage/bin/writer"

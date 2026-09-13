@@ -1,7 +1,7 @@
 #include "check.h"
 #include "fakes/fakes.h"
-#include "fs/leanfs.h"
-#include "lib/libk.h"
+#include "file_system/leanfs.h"
+#include "library/libk.h"
 
 #include <stdint.h>
 #include <stdlib.h>

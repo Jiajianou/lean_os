@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "arch/x86_64/io.h"
+#include "architecture/x86_64/io.h"
 
 #define COM1 0x3F8
 

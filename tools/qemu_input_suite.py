@@ -1716,7 +1716,7 @@ def test_browser_renders_a_page(m):
     check(blue > 20 * (red + 1),
           "%d blue against %d red on a page whose banner is blue. If those "
           "are the wrong way round, this surface has red and blue swapped - "
-          "see user_space/bin/nsfb_leanos.c, where the pixel format is "
+          "see user_space/binaries/nsfb_leanos.c, where the pixel format is "
           "claimed to match the compositor's exactly" % (blue, red))
     check(text > 50,
           "only %d dark pixels between white ones - freetype rasterised no "

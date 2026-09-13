@@ -2,8 +2,8 @@
 
 #include "console.h"
 #include "klog.h"
-#include "lib/libk.h"
-#include "mm/vmm.h"
+#include "library/libk.h"
+#include "memory_management/vmm.h"
 #include "panic.h"
 
 #define PAGE_SIZE 4096ULL

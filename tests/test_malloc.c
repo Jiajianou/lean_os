@@ -8,7 +8,7 @@
 #define calloc lean_calloc
 #define realloc lean_realloc
 #define malloc_usable_size lean_malloc_usable_size
-#include "../user_space/lib/malloc.c"
+#include "../user_space/library/malloc.c"
 #undef malloc
 #undef free
 #undef calloc

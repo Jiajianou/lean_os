@@ -1,11 +1,11 @@
 #include "ac97.h"
 
-#include "arch/x86_64/io.h"
-#include "arch/x86_64/isr.h"
-#include "arch/x86_64/pic.h"
+#include "architecture/x86_64/io.h"
+#include "architecture/x86_64/isr.h"
+#include "architecture/x86_64/pic.h"
 #include "klog.h"
-#include "lib/libk.h"
-#include "mm/pmm.h"
+#include "library/libk.h"
+#include "memory_management/pmm.h"
 #include "pci.h"
 
 #define AC97_VENDOR_ID 0x8086

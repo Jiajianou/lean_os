@@ -75,7 +75,7 @@ class Fsck:
             if got != want:
                 self.bad("superblock %s is %d, this checker is built for %d - "
                          "tools/leanfs-fsck.py has drifted from "
-                         "kernel/fs/leanfs_format.h", name, got, want)
+                         "kernel/file_system/leanfs_format.h", name, got, want)
                 ok = False
         if self.state == STATE_DIRTY:
             self.note("mounted dirty (the machine did not unmount cleanly) - "

@@ -1,6 +1,6 @@
 #include "check.h"
 #include "fakes/fakes.h"
-#include "dev/fwcfg.h"
+#include "device/fwcfg.h"
 
 #include <stdint.h>
 #include <string.h>

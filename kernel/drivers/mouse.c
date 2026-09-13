@@ -1,10 +1,10 @@
 #include "mouse.h"
 
-#include "sched/sched.h"
+#include "scheduler/sched.h"
 
-#include "arch/x86_64/io.h"
-#include "arch/x86_64/isr.h"
-#include "arch/x86_64/pic.h"
+#include "architecture/x86_64/io.h"
+#include "architecture/x86_64/isr.h"
+#include "architecture/x86_64/pic.h"
 #include "drivers/klog.h"
 #include "drivers/pit.h"
 

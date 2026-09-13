@@ -1,9 +1,9 @@
 #include "check.h"
 
-#include "ipc/epoll.h"
-#include "ipc/eventfd.h"
-#include "ipc/timerfd.h"
-#include "sched/sched.h"
+#include "inter_process_communication/epoll.h"
+#include "inter_process_communication/eventfd.h"
+#include "inter_process_communication/timerfd.h"
+#include "scheduler/sched.h"
 
 #include <string.h>
 

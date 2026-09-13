@@ -3,10 +3,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "arch/x86_64/io.h"
-#include "arch/x86_64/smp.h"
+#include "architecture/x86_64/io.h"
+#include "architecture/x86_64/smp.h"
 #include "console.h"
-#include "lib/spinlock.h"
+#include "library/spinlock.h"
 #include "serial.h"
 #include "vga.h"
 

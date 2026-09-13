@@ -1,6 +1,6 @@
-#include "fs/leanfs.h"
+#include "file_system/leanfs.h"
 
-#include "fs/leanfs_format.h"
+#include "file_system/leanfs_format.h"
 
 #include <stdint.h>
 #include <stdlib.h>

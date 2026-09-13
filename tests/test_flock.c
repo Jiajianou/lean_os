@@ -1,6 +1,6 @@
 #include "check.h"
 
-#include "fs/flock.h"
+#include "file_system/flock.h"
 
 static void clean(void) {
     for (int pid = 1; pid <= 8; pid++) {

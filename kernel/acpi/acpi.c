@@ -1,7 +1,7 @@
 #include "acpi.h"
 
 #include "drivers/klog.h"
-#include "mm/vmm.h"
+#include "memory_management/vmm.h"
 #include "panic.h"
 
 typedef struct __attribute__((packed)) {

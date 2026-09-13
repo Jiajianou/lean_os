@@ -1,4 +1,4 @@
-#include "net/socket.h"
+#include "network/socket.h"
 
 #include <stdint.h>
 #include <string.h>

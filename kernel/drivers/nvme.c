@@ -3,9 +3,9 @@
 #include "drivers/klog.h"
 #include "drivers/nvme_split.h"
 #include "drivers/pci.h"
-#include "lib/libk.h"
-#include "mm/pmm.h"
-#include "mm/vmm.h"
+#include "library/libk.h"
+#include "memory_management/pmm.h"
+#include "memory_management/vmm.h"
 
 #define NVME_CLASS    0x01
 #define NVME_SUBCLASS 0x08

@@ -2,12 +2,12 @@
 #include <stdint.h>
 
 #include "acpi/acpi.h"
-#include "arch/x86_64/gdt.h"
-#include "arch/x86_64/idt.h"
-#include "arch/x86_64/ioapic.h"
-#include "arch/x86_64/pic.h"
-#include "arch/x86_64/smp.h"
-#include "arch/x86_64/tsc.h"
+#include "architecture/x86_64/gdt.h"
+#include "architecture/x86_64/idt.h"
+#include "architecture/x86_64/ioapic.h"
+#include "architecture/x86_64/pic.h"
+#include "architecture/x86_64/smp.h"
+#include "architecture/x86_64/tsc.h"
 #include "drivers/blk.h"
 #include "drivers/console.h"
 #include "drivers/cursor.h"
@@ -19,37 +19,37 @@
 #include "drivers/keyboard.h"
 #include "drivers/klog.h"
 #include "drivers/mouse.h"
-#include "arch/x86_64/fpu.h"
-#include "arch/x86_64/io.h"
+#include "architecture/x86_64/fpu.h"
+#include "architecture/x86_64/io.h"
 #include "drivers/ac97.h"
 #include "drivers/pcspk.h"
 #include "drivers/pit.h"
 #include "drivers/rtc.h"
 #include "drivers/xhci.h"
-#include "fs/leanfs.h"
-#include "fs/leanfs_format.h"
-#include "fs/flock.h"
-#include "fs/openfile.h"
-#include "dev/random.h"
-#include "dev/tty.h"
-#include "dev/fwcfg.h"
-#include "fs/vfs.h"
-#include "ipc/pipe.h"
-#include "ipc/shm.h"
-#include "ipc/unixsock.h"
-#include "ipc/eventfd.h"
-#include "ipc/timerfd.h"
-#include "ipc/epoll.h"
-#include "ipc/memfd.h"
-#include "lib/libk.h"
-#include "mm/e820.h"
-#include "mm/heap.h"
-#include "mm/filemap.h"
-#include "mm/pmm.h"
-#include "mm/vmm.h"
-#include "net/icmp.h"
-#include "net/net.h"
-#include "net/tcp.h"
+#include "file_system/leanfs.h"
+#include "file_system/leanfs_format.h"
+#include "file_system/flock.h"
+#include "file_system/openfile.h"
+#include "device/random.h"
+#include "device/tty.h"
+#include "device/fwcfg.h"
+#include "file_system/vfs.h"
+#include "inter_process_communication/pipe.h"
+#include "inter_process_communication/shm.h"
+#include "inter_process_communication/unixsock.h"
+#include "inter_process_communication/eventfd.h"
+#include "inter_process_communication/timerfd.h"
+#include "inter_process_communication/epoll.h"
+#include "inter_process_communication/memfd.h"
+#include "library/libk.h"
+#include "memory_management/e820.h"
+#include "memory_management/heap.h"
+#include "memory_management/filemap.h"
+#include "memory_management/pmm.h"
+#include "memory_management/vmm.h"
+#include "network/icmp.h"
+#include "network/net.h"
+#include "network/tcp.h"
 #include "panic.h"
 #include "paths.h"
 #include "proc.h"
@@ -57,9 +57,9 @@
 #include "profile/sampler.h"
 #include "profile.h"
 #include "profile/syscount.h"
-#include "proc/proc.h"
-#include "proc/pkgcaps.h"
-#include "sched/sched.h"
+#include "process/proc.h"
+#include "process/pkgcaps.h"
+#include "scheduler/sched.h"
 #include "shortcuts.h"
 #include "signal.h"
 #include "spawn_error.h"
@@ -6203,7 +6203,7 @@ static void boot_selftests_system(void) {
             }
             klog_puts("[m103] interrupts a real machine delivers: this boot is on "
                        "the 8259, which is the measured default (see "
-                       "kernel/dev/fwcfg.h) - every vector counted per CPU in "
+                       "kernel/device/fwcfg.h) - every vector counted per CPU in "
                        "/proc/interrupts, and LEANOS_IOAPIC=1 runs the same "
                        "battery through the I/O APIC - self-test passed.\n\n");
         } else {
@@ -7314,7 +7314,7 @@ static void boot_selftests_system(void) {
             if (rc != 0) {
                 klog_puts("[m75] the first child exited ");
                 klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-                klog_puts(" - see user_space/bin/envtest.c for what each code means\n");
+                klog_puts(" - see user_space/binaries/envtest.c for what each code means\n");
                 all_ok = 0;
             }
         }
@@ -7483,7 +7483,7 @@ static void boot_selftests_system(void) {
         if (!ready) {
             klog_puts("[m76] sigtest never reached its ready point - it exited ");
             klog_put_dec((uint32_t)st->exit_code);
-            klog_puts(" (see user_space/bin/sigtest.c for what each code means)\n");
+            klog_puts(" (see user_space/binaries/sigtest.c for what each code means)\n");
             all_ok = 0;
         }
 
@@ -7539,7 +7539,7 @@ static void boot_selftests_system(void) {
             if (code != 0) {
                 klog_puts("[m76] sigtest exited ");
                 klog_put_dec((uint32_t)code);
-                klog_puts(" - see user_space/bin/sigtest.c for what that code means\n");
+                klog_puts(" - see user_space/binaries/sigtest.c for what that code means\n");
                 all_ok = 0;
             }
         }
@@ -7595,7 +7595,7 @@ static void boot_selftests_system(void) {
         if (ft_rc != 0) {
             klog_puts("[m99fault] faulttest exited ");
             klog_put_dec((uint32_t)(ft_rc < 0 ? 99 : ft_rc));
-            klog_puts(" - see user_space/bin/faulttest.c for what each code "
+            klog_puts(" - see user_space/binaries/faulttest.c for what each code "
                        "means\n");
             panic("M99 self-test: a fault this program caught was not delivered, "
                   "or one it could not catch did not end it");
@@ -7792,7 +7792,7 @@ static void boot_selftests_system(void) {
                 klog_put_dec((uint32_t)round);
                 klog_puts(" exited ");
                 klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-                klog_puts(" - see user_space/bin/exhausttest.c for what each "
+                klog_puts(" - see user_space/binaries/exhausttest.c for what each "
                           "code means\n");
                 kfree(ex_img);
                 panic("Q9 self-test: a resource this machine ran out of did not "
@@ -7920,7 +7920,7 @@ static void boot_selftests_system(void) {
             if (rc != 0) {
                 klog_puts("[m111] pkgtest exited ");
                 klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-                klog_puts(" - see user_space/bin/pkgtest.c for what each code "
+                klog_puts(" - see user_space/binaries/pkgtest.c for what each code "
                           "means\n");
                 panic("M111 self-test: the package manager did not install, run "
                       "or isolate a package the way it says it does");
@@ -7965,7 +7965,7 @@ static void boot_selftests_system(void) {
         if (rc != 0) {
             klog_puts("[m112] dirtest exited ");
             klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/bin/dirtest.c for what each code "
+            klog_puts(" - see user_space/binaries/dirtest.c for what each code "
                       "means\n");
             panic("M112 self-test: the recursive tree walk behind the Files "
                   "app does not do what it says on this filesystem");
@@ -7993,7 +7993,7 @@ static void boot_selftests_system(void) {
         if (rc != 0) {
             klog_puts("[m100h] browsertest exited ");
             klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/bin/browsertest.c for what each "
+            klog_puts(" - see user_space/binaries/browsertest.c for what each "
                       "code means\n");
             panic("M100 self-test: what the browser port added to this "
                   "system does not work on this machine");
@@ -8023,7 +8023,7 @@ static void boot_selftests_system(void) {
         if (rc != 0) {
             klog_puts("[m118] unixtest exited ");
             klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/bin/unixtest.c for what each "
+            klog_puts(" - see user_space/binaries/unixtest.c for what each "
                       "code means\n");
             panic("M118 self-test: AF_UNIX or descriptor passing does not "
                   "work on this machine");
@@ -8071,7 +8071,7 @@ static void boot_selftests_system(void) {
         if (rc != 0) {
             klog_puts("[m119] epolltest exited ");
             klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/bin/epolltest.c for what each "
+            klog_puts(" - see user_space/binaries/epolltest.c for what each "
                       "code means\n");
             panic("M119 self-test: epoll, eventfd or timerfd does not work "
                   "on this machine");
@@ -8126,7 +8126,7 @@ static void boot_selftests_system(void) {
         if (rc != 0) {
             klog_puts("[m120] memfdtest exited ");
             klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/bin/memfdtest.c for what each "
+            klog_puts(" - see user_space/binaries/memfdtest.c for what each "
                       "code means\n");
             panic("M120 self-test: shared memory by descriptor does not work "
                   "on this machine");
@@ -8556,7 +8556,7 @@ static void boot_selftests_system(void) {
         if (rc != 0) {
             klog_puts("[m78] mmaptest exited ");
             klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/bin/mmaptest.c for what each code means\n");
+            klog_puts(" - see user_space/binaries/mmaptest.c for what each code means\n");
             all_ok = 0;
         }
 
@@ -8655,7 +8655,7 @@ static void boot_selftests_system(void) {
         if (rc != 0) {
             klog_puts("[m79] threadtest exited ");
             klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/bin/threadtest.c for what each code means\n");
+            klog_puts(" - see user_space/binaries/threadtest.c for what each code means\n");
             all_ok = 0;
         }
         selftest_reap(tt);
@@ -8714,7 +8714,7 @@ static void boot_selftests_system(void) {
         if (code != 0) {
             klog_puts("[m96] the fixture exited 0x");
             klog_put_hex32((uint32_t)code);
-            klog_puts(" - see user_space/bin/futextest.c for what each code means\n");
+            klog_puts(" - see user_space/binaries/futextest.c for what each code means\n");
             panic("M96 self-test: threads do not have their own variables, or a "
                   "waiting thread still costs a core");
         }
@@ -8803,7 +8803,7 @@ static void boot_selftests_system(void) {
                 klog_put_dec((uint32_t)w);
                 klog_puts(" exited ");
                 klog_put_dec((uint32_t)code);
-                klog_puts(" - see user_space/bin/fswriter.c for what each code means\n");
+                klog_puts(" - see user_space/binaries/fswriter.c for what each code means\n");
                 panic("M105 self-test: a writer could not verify its own bytes with "
                       "three others writing beside it");
             }
@@ -9310,7 +9310,7 @@ static void boot_selftests_system(void) {
         if (rc != 0) {
             klog_puts("[m82] lazytest exited ");
             klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/bin/lazytest.c for what each code means\n");
+            klog_puts(" - see user_space/binaries/lazytest.c for what each code means\n");
             all_ok = 0;
         }
 
@@ -9400,7 +9400,7 @@ static void boot_selftests_system(void) {
         if (vrc != 0) {
             klog_puts("[m91] vmtest exited ");
             klog_put_hex32((uint32_t)vrc);
-            klog_puts(" - see user_space/bin/vmtest.c for what each code means\n");
+            klog_puts(" - see user_space/binaries/vmtest.c for what each code means\n");
             all_ok = 0;
         }
 
@@ -9450,7 +9450,7 @@ static void boot_selftests_system(void) {
             klog_puts("[m91] 0x");
             klog_put_hex32((uint32_t)shared_left);
             klog_puts(" shared file page(s) still held after every mapping was "
-                       "dropped - see kernel/mm/filemap.c\n");
+                       "dropped - see kernel/memory_management/filemap.c\n");
             all_ok = 0;
         }
 
@@ -9493,7 +9493,7 @@ static void boot_selftests_system(void) {
         if (rc != 0) {
             klog_puts("[m83] forktest exited ");
             klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/bin/forktest.c for what each code means\n");
+            klog_puts(" - see user_space/binaries/forktest.c for what each code means\n");
             all_ok = 0;
         }
 
@@ -9609,7 +9609,7 @@ static void boot_selftests_system(void) {
         if (rc != 0) {
             klog_puts("[m84] exectest exited ");
             klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/bin/exectest.c for what each code means\n");
+            klog_puts(" - see user_space/binaries/exectest.c for what each code means\n");
             all_ok = 0;
         }
 
@@ -9780,7 +9780,7 @@ static void boot_selftests_system(void) {
             if (rc != 0) {
                 klog_puts("[m85] ptytest exited ");
                 klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-                klog_puts(" - see user_space/bin/ptytest.c for what each code means\n");
+                klog_puts(" - see user_space/binaries/ptytest.c for what each code means\n");
                 all_ok = 0;
             }
         }

@@ -1,6 +1,6 @@
 #include "ata.h"
 
-#include "arch/x86_64/io.h"
+#include "architecture/x86_64/io.h"
 
 #define ATA_IO_BASE 0x1F0
 

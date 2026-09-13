@@ -15,14 +15,14 @@ fi
 
 BUILD="build"
 UOBJ="$BUILD/user_obj"
-USER_LD="user_space/lib/user.ld"
+USER_LD="user_space/library/user.ld"
 CC="x86_64-elf-gcc"
 LD="x86_64-elf-ld"
 
 USER_CFLAGS=$(make -s print-USER_CFLAGS)
 USER_LIBOBJS=$(make -s print-USER_LIBOBJS)
 
-echo "Building user_space/lib prerequisites..."
+echo "Building user_space/library prerequisites..."
 make -s $USER_LIBOBJS "$USER_LD" >/dev/null
 
 mkdir -p "$UOBJ"

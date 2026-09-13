@@ -5,10 +5,10 @@
 #include "drivers/klog.h"
 #include "drivers/nvme.h"
 #include "drivers/virtio_blk.h"
-#include "lib/libk.h"
-#include "lib/spinlock.h"
+#include "library/libk.h"
+#include "library/spinlock.h"
 #include "drivers/pit.h"
-#include "mm/pmm.h"
+#include "memory_management/pmm.h"
 
 #define BLK_PER_LINE 8
 #define LINE_BYTES   (BLK_PER_LINE * BLK_SECTOR_SIZE)

@@ -3,7 +3,7 @@
 #include <string.h>
 
 #define sys_waitfds wm_test_waitfds
-#include "../user_space/lib/wmclient.c"
+#include "../user_space/library/wmclient.c"
 #undef sys_waitfds
 
 static int last_fds[16];

@@ -1,10 +1,10 @@
 #include "check.h"
 #include "fakes/fakes.h"
 
-#include "net/arp.h"
-#include "net/ethernet.h"
-#include "net/ip.h"
-#include "net/tcp.h"
+#include "network/arp.h"
+#include "network/ethernet.h"
+#include "network/ip.h"
+#include "network/tcp.h"
 
 #include <stdint.h>
 #include <string.h>

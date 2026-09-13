@@ -150,7 +150,7 @@ done
 
 if ! $HOSTCC -std=c11 -O1 -g -c -o "$BUILD/printf-engine.o" \
      user_space/libc/src/stdio.c \
-     -I user_space/libc/include -I user_space/lib -I system_api/include \
+     -I user_space/libc/include -I user_space/library -I system_api/include \
      $RENAMES 2>"$BUILD/printf-engine.log"; then
   echo "printf-test: could not compile stdio.c for the host:" >&2
   tail -20 "$BUILD/printf-engine.log" >&2

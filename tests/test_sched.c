@@ -1,10 +1,10 @@
 #include "check.h"
 #include "fakes/fakes.h"
 
-#include "arch/x86_64/cpu.h"
-#include "lib/spinlock.h"
-#include "fs/flock.h"
-#include "sched/sched.h"
+#include "architecture/x86_64/cpu.h"
+#include "library/spinlock.h"
+#include "file_system/flock.h"
+#include "scheduler/sched.h"
 #include "signal.h"
 
 #include <string.h>

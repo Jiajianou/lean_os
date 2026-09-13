@@ -1,6 +1,6 @@
 #include "check.h"
 
-#include "dev/random.h"
+#include "device/random.h"
 
 #include <string.h>
 
