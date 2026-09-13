@@ -28,6 +28,8 @@ HOSTCC       := cc
 LEANFS_PUT   := $(BUILD)/leanfs-put
 
 GEN_FONT     := $(BUILD)/gen-font
+GEN_ICONS    := $(BUILD)/gen-icons
+ICON_STAMP   := $(BUILD)/.icons-checked
 FONT_STAMP   := $(BUILD)/.font-check-stamp
 FONT_FILES   := kernel/drivers/font8x16.h kernel/drivers/font8x16.c \
                 user_space/library/font8x16.h user_space/library/font8x16.c \
@@ -58,7 +60,7 @@ UOBJ      := $(BUILD)/user_obj
 USER_LD   := user_space/library/user.ld
 USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/string_utilities.o $(UOBJ)/malloc.o \
                 $(UOBJ)/graphics.o $(UOBJ)/font8x16.o $(UOBJ)/window_manager_client.o $(UOBJ)/wallpaper.o \
-                $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o \
+                $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o $(UOBJ)/icon_draw.o \
                 $(UOBJ)/user_interface_font.o $(UOBJ)/recent.o $(UOBJ)/sntp.o $(UOBJ)/dns.o $(UOBJ)/http.o \
                 $(UOBJ)/libc_string.o $(UOBJ)/libc_stdlib.o $(UOBJ)/libc_stdio.o \
                 $(UOBJ)/libc_math.o $(UOBJ)/libc_time.o \
@@ -267,6 +269,21 @@ $(OS_PKG): $(OS_PKG_SRCS) user_space/library/os_package.h user_space/library/sha
 	          -Isystem_api/include -o $@ $(OS_PKG_SRCS)
 
 os-pkg: $(OS_PKG)
+
+$(GEN_ICONS): tools/gen-icons.c | $(BUILD)
+	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -o $@ $< -lm
+
+icons: $(GEN_ICONS)
+	@$(GEN_ICONS) --write
+
+icons-check: $(GEN_ICONS)
+	@$(GEN_ICONS) --check
+
+$(ICON_STAMP): tools/gen-icons.c user_space/library/icons.c user_space/library/icons.h $(GEN_ICONS) | $(BUILD)
+	@$(GEN_ICONS) --check
+	@touch $@
+
+$(UOBJ)/icons.o: $(ICON_STAMP)
 
 $(GEN_FONT): tools/gen-font.c | $(BUILD)
 	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -o $@ $<
@@ -505,6 +522,7 @@ TEST_USER_SRCS := user_space/library/symbol_table.c \
                   user_space/library/file_system_utilities.c user_space/library/dns.c \
                   user_space/library/graphics.c user_space/library/font8x16.c \
                   user_space/library/user_interface_font.c \
+                  user_space/library/icons.c user_space/library/icon_draw.c \
                   user_space/libc/src/wchar.c user_space/libc/src/errno.c \
                   user_space/libc/src/fnmatch.c user_space/libc/src/libgen.c \
                   user_space/libc/src/getopt.c user_space/libc/src/wallclock.c

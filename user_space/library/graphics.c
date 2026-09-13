@@ -83,6 +83,8 @@ void graphics_draw_line(graphics_context_t *context, int32_t x0, int32_t y0, int
 
 static const ui_font_t *ui_font_current = &ui_font_ui;
 
+static uint32_t text_alpha_scale = 255;
+
 void graphics_set_ui_font(const ui_font_t *font) {
     if (font) {
         ui_font_current = font;
@@ -233,8 +235,11 @@ void graphics_draw_glyph_font(graphics_context_t *context, int32_t x, int32_t y,
     for (int32_t row = 0; row < font->height; row++) {
         const uint8_t *line = glyph + (int32_t)row * w;
         for (int32_t col = 0; col < w; col++) {
-            uint8_t alpha = line[col];
+            uint32_t alpha = line[col];
             if (alpha) {
+                if (text_alpha_scale != 255) {
+                    alpha = alpha * text_alpha_scale / 255u;
+                }
                 graphics_blend_pixel(context, x + col, y + row, color, alpha);
             }
         }
@@ -452,4 +457,145 @@ void graphics_draw_rect_rounded(graphics_context_t *context, int32_t x, int32_t 
         graphics_fill_rect(context, x + inset, y + row, run, 1, color);
         graphics_fill_rect(context, x + w - inset - run, y + row, run, 1, color);
     }
+}
+
+static uint32_t integer_square_root(uint64_t value) {
+    if (value == 0) {
+        return 0;
+    }
+    uint64_t guess = value;
+    uint64_t previous = 0;
+    while (guess != previous) {
+        previous = guess;
+        guess = (guess + value / guess) / 2;
+    }
+    while (guess * guess > value) {
+        guess--;
+    }
+    while ((guess + 1) * (guess + 1) <= value) {
+        guess++;
+    }
+    return (uint32_t)guess;
+}
+
+#define GRAPHICS_SUBPIXEL 256
+
+static int32_t rounded_edge_subpixels(int32_t row, int32_t h, int32_t radius) {
+    if (radius <= 0) {
+        return 0;
+    }
+    int32_t distance_from_corner;
+    if (row < radius) {
+        distance_from_corner = radius - row;
+    } else if (row >= h - radius) {
+        distance_from_corner = radius - (h - 1 - row);
+    } else {
+        return 0;
+    }
+    int64_t dy = (int64_t)distance_from_corner * GRAPHICS_SUBPIXEL - GRAPHICS_SUBPIXEL / 2;
+    int64_t r = (int64_t)radius * GRAPHICS_SUBPIXEL;
+    if (dy <= 0) {
+        return 0;
+    }
+    if (dy >= r) {
+        return radius * GRAPHICS_SUBPIXEL;
+    }
+    int64_t inside = r * r - dy * dy;
+    int64_t horizontal = (int64_t)integer_square_root((uint64_t)inside);
+    return (int32_t)(r - horizontal);
+}
+
+static uint32_t span_coverage(int32_t column, int32_t left_subpixels, int32_t right_subpixels) {
+    int32_t pixel_left = column * GRAPHICS_SUBPIXEL;
+    int32_t pixel_right = pixel_left + GRAPHICS_SUBPIXEL;
+    int32_t covered_left = left_subpixels > pixel_left ? left_subpixels : pixel_left;
+    int32_t covered_right = right_subpixels < pixel_right ? right_subpixels : pixel_right;
+    if (covered_right <= covered_left) {
+        return 0;
+    }
+    return (uint32_t)((covered_right - covered_left) * 255 / GRAPHICS_SUBPIXEL);
+}
+
+void graphics_fill_rounded(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h,
+                           int32_t radius, uint32_t color, uint32_t alpha) {
+    if (w <= 0 || h <= 0 || alpha == 0) {
+        return;
+    }
+    int32_t maximum = (w < h ? w : h) / 2;
+    if (radius > maximum) {
+        radius = maximum;
+    }
+    for (int32_t row = 0; row < h; row++) {
+        int32_t left = rounded_edge_subpixels(row, h, radius);
+        if (left == 0) {
+            if (alpha >= 255) {
+                graphics_fill_rect(context, x, y + row, w, 1, color);
+            } else {
+                for (int32_t column = 0; column < w; column++) {
+                    graphics_blend_pixel(context, x + column, y + row, color, alpha);
+                }
+            }
+            continue;
+        }
+        int32_t right = w * GRAPHICS_SUBPIXEL - left;
+        int32_t first = left / GRAPHICS_SUBPIXEL;
+        int32_t last = (right + GRAPHICS_SUBPIXEL - 1) / GRAPHICS_SUBPIXEL;
+        for (int32_t column = first; column < last && column < w; column++) {
+            uint32_t coverage = span_coverage(column, left, right);
+            if (coverage == 0) {
+                continue;
+            }
+            graphics_blend_pixel(context, x + column, y + row, color, coverage * alpha / 255);
+        }
+    }
+}
+
+void graphics_stroke_rounded(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h,
+                             int32_t radius, uint32_t color, uint32_t alpha) {
+    if (w <= 2 || h <= 2 || alpha == 0) {
+        return;
+    }
+    int32_t maximum = (w < h ? w : h) / 2;
+    if (radius > maximum) {
+        radius = maximum;
+    }
+    int32_t inner_radius = radius > 0 ? radius - 1 : 0;
+    for (int32_t row = 0; row < h; row++) {
+        int32_t outer_left = rounded_edge_subpixels(row, h, radius);
+        int32_t outer_right = w * GRAPHICS_SUBPIXEL - outer_left;
+        int32_t inner_left;
+        int32_t inner_right;
+        if (row == 0 || row == h - 1) {
+            inner_left = outer_right;
+            inner_right = outer_right;
+        } else {
+            inner_left = GRAPHICS_SUBPIXEL + rounded_edge_subpixels(row - 1, h - 2, inner_radius);
+            inner_right = (w - 1) * GRAPHICS_SUBPIXEL - (inner_left - GRAPHICS_SUBPIXEL);
+        }
+        for (int32_t column = 0; column < w; column++) {
+            int32_t outer = (int32_t)span_coverage(column, outer_left, outer_right);
+            int32_t inner = (int32_t)span_coverage(column, inner_left, inner_right);
+            int32_t coverage = outer - inner;
+            if (coverage <= 0) {
+                continue;
+            }
+            graphics_blend_pixel(context, x + column, y + row, color, (uint32_t)coverage * alpha / 255);
+        }
+    }
+}
+
+void graphics_draw_text_alpha(graphics_context_t *context, int32_t x, int32_t y, const char *s,
+                              uint32_t color, uint32_t alpha) {
+    if (alpha > 255) {
+        alpha = 255;
+    }
+    text_alpha_scale = alpha;
+    graphics_draw_text(context, x, y, s, color);
+    text_alpha_scale = 255;
+}
+
+void graphics_draw_text_shadowed(graphics_context_t *context, int32_t x, int32_t y, const char *s,
+                                 uint32_t color, uint32_t shadow_color, uint32_t shadow_alpha) {
+    graphics_draw_text_alpha(context, x, y + 1, s, shadow_color, shadow_alpha);
+    graphics_draw_text(context, x, y, s, color);
 }

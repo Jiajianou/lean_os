@@ -19,6 +19,18 @@ UEFI firmware
   traffic-light buttons, drag and resize, snapping, minimize/restore with
   motion, a taskbar, a Spotlight-style launcher, context menus, toasts,
   drag and drop, four virtual desktops, and keyboard chords.
+- **Artwork with an alpha channel.** The desktop icons are RGBA, drawn by
+  a first-party vector rasteriser in `tools/gen-icons.c` rather than typed
+  as hex: closed contours filled with a scanline rasteriser at four
+  sub-scanlines a row, vertical gradients, and a rounded tile with a
+  hairline highlight. The same description renders at 48px for the
+  desktop and 24px for the taskbar, and the generator refuses a face
+  whose corners are not transparent, whose centre is not opaque, whose
+  edge has no partly-covered pixel, or whose two sizes disagree about the
+  silhouette. The taskbar is 44px of vertical gradient with rounded
+  translucent hover and focus states, an accent bar under the focused
+  app, a dimmer dot under the ones merely running, and each slot showing
+  the icon its window title maps to.
 - **Applications.** A terminal with a real shell (arguments, quoting,
   `>`/`>>`, a pipe, tab completion, `cd`), a text editor (undo, redo,
   find, paste), a file manager (columns, sorting, exact sizes, free

@@ -78,6 +78,18 @@ void graphics_fill_rect_rounded(graphics_context_t *context, int32_t x, int32_t 
 
 void graphics_draw_rect_rounded(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);
 
+void graphics_draw_text_alpha(graphics_context_t *context, int32_t x, int32_t y, const char *s,
+                              uint32_t color, uint32_t alpha);
+
+void graphics_draw_text_shadowed(graphics_context_t *context, int32_t x, int32_t y, const char *s,
+                                 uint32_t color, uint32_t shadow_color, uint32_t shadow_alpha);
+
+void graphics_fill_rounded(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h,
+                           int32_t radius, uint32_t color, uint32_t alpha);
+
+void graphics_stroke_rounded(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h,
+                             int32_t radius, uint32_t color, uint32_t alpha);
+
 void graphics_draw_button_state(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h,
                             uint32_t bg_color, uint32_t border_color,
                             const char *label, uint32_t label_color, int pressed);

@@ -1,44 +1,53 @@
+#include "icons.h"
+#include "string_utilities.h"
 #include "syscall_wrappers.h"
 #include "window_manager_client.h"
 
-#define PANEL_HEIGHT      32
+#define PANEL_HEIGHT      44
 
 #define PANEL_OVERHANG_MAX 96
 #define PANEL_BUFFER_H       (PANEL_OVERHANG_MAX + PANEL_HEIGHT)
 
-#define CONTEXT_W        124
-#define CONTEXT_ITEM_H   22
+#define CONTEXT_W        132
+#define CONTEXT_ITEM_H   26
 #define CONTEXT_COUNT    3
-#define CONTEXT_BG       0x00243040u
-#define CONTEXT_HOVER_BG 0x003A5A80u
-#define CONTEXT_BORDER   0x00506070u
-#define CONTEXT_TEXT     0x00FFFFFFu
-#define BTN_H             24
-#define BTN_Y             4
-#define EDGE_PAD          4
+#define CONTEXT_RADIUS   9
+#define CONTEXT_BG       0x001E2430u
+#define CONTEXT_HOVER_BG 0x00FFFFFFu
+#define CONTEXT_HOVER_ALPHA 28u
+#define CONTEXT_BORDER   0x00FFFFFFu
+#define CONTEXT_BORDER_ALPHA 34u
+#define CONTEXT_TEXT     0x00E8ECF4u
+
+#define BTN_H            34
+#define BTN_Y            ((PANEL_HEIGHT - BTN_H) / 2)
+#define EDGE_PAD         8
+#define TILE_RADIUS      9
 
 #define START_X       EDGE_PAD
-#define START_W       72
-#define START_GLYPH_X (START_X + 8)
-#define START_TILE    5
-#define START_TILE_GAP 2
-#define START_TEXT_X  (START_X + 24)
+#define START_W       46
+#define START_DOT     5
+#define START_DOT_GAP 4
 
-#define SLOT_W            96
-#define SLOT_H            BTN_H
-#define SLOT_GAP          4
-#define SLOTS_X           (START_X + START_W + 8)
-#define LABEL_PAD         6
-#define LABEL_MAX         10
+#define SLOT_ICON        ICON_SMALL_SIZE
+#define SLOT_W           130
+#define SLOT_H           BTN_H
+#define SLOT_GAP         6
+#define SLOTS_X          (START_X + START_W + 10)
+#define LABEL_PAD        (8 + SLOT_ICON + 8)
+#define LABEL_MAX        10
 #define MAX_RUNNING_SLOTS  WINDOW_MANAGER_MAX_ROUTABLE_WINDOWS
 
+#define FOCUS_BAR_W      22
+#define FOCUS_BAR_H      3
+#define RUNNING_DOT      4
+
 #define CLOCK_CHARS   5
-#define TRAY_PAD      10
-#define WS_DOT      8
+#define TRAY_PAD      12
+#define WS_DOT_W    14
+#define WS_DOT_H    5
 #define WS_DOT_GAP  5
-#define WS_DOT_ON   0x004C99E6u
-#define WS_DOT_OFF  0x00506070u
-#define TRAY_ICONS_W  (TRAY_PAD + WINDOW_MANAGER_WORKSPACE_COUNT * WS_DOT + (WINDOW_MANAGER_WORKSPACE_COUNT - 1) * WS_DOT_GAP + TRAY_PAD)
+#define TRAY_ICONS_W  (TRAY_PAD + WINDOW_MANAGER_WORKSPACE_COUNT * WS_DOT_W + (WINDOW_MANAGER_WORKSPACE_COUNT - 1) * WS_DOT_GAP + TRAY_PAD)
 
 static int32_t clock_text_w(void) {
     return graphics_text_width(graphics_ui_font(), "00:00");
@@ -51,25 +60,28 @@ static int32_t tray_w(void) {
 #define REFRESH_INTERVAL_MS 300
 #define PRESS_FLASH_MS      150
 
-#define PANEL_BG            0x00181828u
-#define PANEL_BORDER_COLOR  0x00445566u
-#define PANEL_BEVEL_COLOR   0x00223349u
-#define SLOT_BORDER_COLOR   0x00445566u
-#define RUNNING_SLOT_BG            0x00263447u
-#define RUNNING_SLOT_HOVER_BG      0x00365070u
-#define RUNNING_SLOT_FOCUS_BG      0x002E4A63u
-#define RUNNING_SLOT_FOCUS_BORDER  0x004C99E6u
-#define RUNNING_SLOT_MIN_BG        0x00352A20u
-#define RUNNING_SLOT_FRONT_BORDER  0x002E5C86u
-#define LABEL_COLOR         0x00FFFFFFu
+#define PANEL_TOP_COLOR     0x00222A38u
+#define PANEL_BOTTOM_COLOR  0x00141821u
+#define PANEL_HAIRLINE      0x00FFFFFFu
+#define PANEL_HAIRLINE_ALPHA 30u
+#define PANEL_SHADE         0x00000000u
+#define PANEL_SHADE_ALPHA   70u
 
-#define START_BG        0x00243447u
-#define START_HOVER_BG  0x00365070u
-#define START_PRESS_BG  0x004C99E6u
-#define START_GLYPH_FG  0x004C99E6u
-#define START_PRESS_GLYPH_FG 0x00FFFFFFu
-#define TRAY_SEP_COLOR  0x00303C4Eu
-#define CLOCK_FG        0x00C8D4E4u
+#define ACCENT_COLOR        0x004C99E6u
+#define OVERLAY_COLOR       0x00FFFFFFu
+#define HOVER_ALPHA         22u
+#define FOCUS_ALPHA         38u
+#define PRESS_ALPHA         64u
+#define EDGE_ALPHA          26u
+
+#define LABEL_COLOR         0x00F0F3F8u
+#define LABEL_DIM_COLOR     0x009AA5B6u
+#define CLOCK_FG            0x00DCE3EDu
+#define WS_DOT_OFF          0x00FFFFFFu
+#define WS_DOT_OFF_ALPHA    46u
+
+#define MINIMIZED_TINT      0x00161A24u
+#define MINIMIZED_TINT_PCT  55u
 
 #define HOVER_NONE  (-1)
 #define HOVER_START (-2)
@@ -82,6 +94,7 @@ typedef struct {
     uint8_t minimized;
     int32_t reported_id;
     int32_t reported_x;
+    const uint8_t *image;
     char name[LABEL_MAX + 1];
 } running_slot_t;
 
@@ -119,6 +132,36 @@ static void format_clock(long now_ms, char *out) {
     out[3] = (char)('0' + secs / 10);
     out[4] = (char)('0' + secs % 10);
     out[5] = '\0';
+}
+
+typedef struct {
+    const char *title;
+    const uint8_t *image;
+} title_icon_t;
+
+static const title_icon_t TITLE_ICONS[] = {
+    {"Terminal", ICON_TERMINAL_SMALL},
+    {"Console",  ICON_TERMINAL_SMALL},
+    {"Editor",   ICON_EDITOR_SMALL},
+    {"Files",    ICON_FILES_SMALL},
+    {"Settings", ICON_SETTINGS_SMALL},
+    {"Clock",    ICON_CLOCK_SMALL},
+    {"Paint",    ICON_PAINT_SMALL},
+    {"Tasks",    ICON_TASKS_SMALL},
+    {"NetSurf",  ICON_BROWSER_SMALL},
+    {"Browser",  ICON_BROWSER_SMALL},
+};
+#define TITLE_ICON_COUNT ((int)(sizeof(TITLE_ICONS) / sizeof(TITLE_ICONS[0])))
+
+static const uint8_t *icon_for_title(const char *title) {
+    if (title) {
+        for (int i = 0; i < TITLE_ICON_COUNT; i++) {
+            if (strcmp(title, TITLE_ICONS[i].title) == 0) {
+                return TITLE_ICONS[i].image;
+            }
+        }
+    }
+    return ICON_APPLICATION_SMALL;
 }
 
 static void copy_label(char *destination, const char *source) {
@@ -164,6 +207,7 @@ static void refresh_running_slots(window_manager_window_t *self) {
         slot->focused = info->focused;
         slot->frontmost = 0;
         slot->minimized = info->minimized;
+        slot->image = icon_for_title(info->title);
         copy_label(slot->name, info->title);
         x += SLOT_W + SLOT_GAP;
         running_count++;
@@ -205,35 +249,74 @@ static void refresh_running_slots(window_manager_window_t *self) {
 }
 
 static void draw_start_button(int pressed) {
-    uint32_t bg = pressed ? START_PRESS_BG
-                          : (hovered == HOVER_START ? START_HOVER_BG : START_BG);
-    uint32_t glyph = pressed ? START_PRESS_GLYPH_FG : START_GLYPH_FG;
-    graphics_fill_rect_rounded(&bar_graphics, START_X, BTN_Y, START_W, BTN_H, bg);
-    graphics_draw_rect_rounded(&bar_graphics, START_X, BTN_Y, START_W, BTN_H, SLOT_BORDER_COLOR);
+    uint32_t alpha = pressed ? PRESS_ALPHA : (hovered == HOVER_START ? HOVER_ALPHA : 0u);
+    if (alpha) {
+        graphics_fill_rounded(&bar_graphics, START_X, BTN_Y, START_W, BTN_H, TILE_RADIUS,
+                              OVERLAY_COLOR, alpha);
+    }
+    graphics_stroke_rounded(&bar_graphics, START_X, BTN_Y, START_W, BTN_H, TILE_RADIUS,
+                            OVERLAY_COLOR, EDGE_ALPHA);
 
-    int32_t gy = BTN_Y + (BTN_H - (2 * START_TILE + START_TILE_GAP)) / 2;
+    uint32_t glyph = pressed ? OVERLAY_COLOR : ACCENT_COLOR;
+    int32_t span = 2 * START_DOT + START_DOT_GAP;
+    int32_t gx = START_X + (START_W - span) / 2;
+    int32_t gy = BTN_Y + (BTN_H - span) / 2;
     for (int row = 0; row < 2; row++) {
         for (int col = 0; col < 2; col++) {
-            graphics_fill_rect(&bar_graphics,
-                          START_GLYPH_X + col * (START_TILE + START_TILE_GAP),
-                          gy + row * (START_TILE + START_TILE_GAP),
-                          START_TILE, START_TILE, glyph);
+            graphics_fill_rounded(&bar_graphics,
+                                  gx + col * (START_DOT + START_DOT_GAP),
+                                  gy + row * (START_DOT + START_DOT_GAP),
+                                  START_DOT, START_DOT, 2, glyph, 255);
         }
     }
-    graphics_draw_text(&bar_graphics, START_TEXT_X, BTN_Y + (BTN_H - (int32_t)graphics_ui_font()->height) / 2, "Start", LABEL_COLOR);
+}
+
+static void draw_slot(const running_slot_t *slot, int hover) {
+    uint32_t alpha = slot->focused ? FOCUS_ALPHA : (hover ? HOVER_ALPHA : 0u);
+    if (alpha) {
+        graphics_fill_rounded(&bar_graphics, slot->x, BTN_Y, slot->w, SLOT_H, TILE_RADIUS,
+                              OVERLAY_COLOR, alpha);
+    }
+    if (slot->focused) {
+        graphics_stroke_rounded(&bar_graphics, slot->x, BTN_Y, slot->w, SLOT_H, TILE_RADIUS,
+                                OVERLAY_COLOR, EDGE_ALPHA);
+    }
+
+    int32_t icon_y = BTN_Y + (SLOT_H - SLOT_ICON) / 2;
+    if (slot->minimized) {
+        icon_draw_tinted(&bar_graphics, slot->x + 8, icon_y, slot->image, 1,
+                         MINIMIZED_TINT, MINIMIZED_TINT_PCT);
+    } else {
+        icon_draw(&bar_graphics, slot->x + 8, icon_y, slot->image, 1);
+    }
+
+    int32_t text_y = BTN_Y + (SLOT_H - (int32_t)graphics_ui_font()->height) / 2;
+    graphics_draw_text(&bar_graphics, slot->x + LABEL_PAD, text_y, slot->name,
+                       slot->minimized ? LABEL_DIM_COLOR : LABEL_COLOR);
+
+    if (slot->focused) {
+        graphics_fill_rounded(&bar_graphics, slot->x + (slot->w - FOCUS_BAR_W) / 2,
+                              BTN_Y + SLOT_H - FOCUS_BAR_H, FOCUS_BAR_W, FOCUS_BAR_H,
+                              1, ACCENT_COLOR, 255);
+    } else {
+        graphics_fill_rounded(&bar_graphics, slot->x + (slot->w - RUNNING_DOT) / 2,
+                              BTN_Y + SLOT_H - FOCUS_BAR_H, RUNNING_DOT, FOCUS_BAR_H,
+                              1, OVERLAY_COLOR, slot->minimized ? 48u : 150u);
+    }
 }
 
 static void draw_tray(window_manager_window_t *self) {
     int32_t tray_x = (int32_t)self->width - tray_w();
-    graphics_draw_line(&bar_graphics, tray_x, BTN_Y + 2, tray_x, BTN_Y + BTN_H - 3, TRAY_SEP_COLOR);
 
-    int32_t dot_y = (PANEL_HEIGHT - WS_DOT) / 2;
+    int32_t dot_y = (PANEL_HEIGHT - WS_DOT_H) / 2;
     for (int i = 0; i < WINDOW_MANAGER_WORKSPACE_COUNT; i++) {
-        int32_t dx = tray_x + TRAY_PAD + i * (WS_DOT + WS_DOT_GAP);
+        int32_t dx = tray_x + TRAY_PAD + i * (WS_DOT_W + WS_DOT_GAP);
         if (i == shown_workspace) {
-            graphics_fill_rect(&bar_graphics, dx, dot_y, WS_DOT, WS_DOT, WS_DOT_ON);
+            graphics_fill_rounded(&bar_graphics, dx, dot_y, WS_DOT_W, WS_DOT_H, 2,
+                                  ACCENT_COLOR, 255);
         } else {
-            graphics_draw_rect(&bar_graphics, dx, dot_y, WS_DOT, WS_DOT, WS_DOT_OFF);
+            graphics_fill_rounded(&bar_graphics, dx, dot_y, WS_DOT_W, WS_DOT_H, 2,
+                                  WS_DOT_OFF, WS_DOT_OFF_ALPHA);
         }
     }
 
@@ -260,14 +343,19 @@ static const char *context_label(int i) {
 static void draw_context_menu(window_manager_window_t *self) {
     int32_t by = PANEL_OVERHANG_MAX + context_y;
     int32_t h = CONTEXT_ITEM_H * CONTEXT_COUNT;
-    graphics_fill_rect_rounded(&self->graphics, context_x, by, CONTEXT_W, h, CONTEXT_BG);
-    graphics_draw_rect_rounded(&self->graphics, context_x, by, CONTEXT_W, h, CONTEXT_BORDER);
+    graphics_fill_rounded(&self->graphics, context_x, by, CONTEXT_W, h, CONTEXT_RADIUS,
+                          CONTEXT_BG, 255u);
+    graphics_stroke_rounded(&self->graphics, context_x, by, CONTEXT_W, h, CONTEXT_RADIUS,
+                            CONTEXT_BORDER, CONTEXT_BORDER_ALPHA);
     for (int i = 0; i < CONTEXT_COUNT; i++) {
         int32_t ry = by + i * CONTEXT_ITEM_H;
         if (i == context_hover) {
-            graphics_fill_rect_rounded(&self->graphics, context_x + 2, ry + 1, CONTEXT_W - 4, CONTEXT_ITEM_H - 2, CONTEXT_HOVER_BG);
+            graphics_fill_rounded(&self->graphics, context_x + 4, ry + 2, CONTEXT_W - 8,
+                                  CONTEXT_ITEM_H - 4, 6, CONTEXT_HOVER_BG, CONTEXT_HOVER_ALPHA);
         }
-        graphics_draw_text(&self->graphics, context_x + 8, ry + (CONTEXT_ITEM_H - (int32_t)graphics_ui_font()->height) / 2, context_label(i), CONTEXT_TEXT);
+        graphics_draw_text(&self->graphics, context_x + 12,
+                           ry + (CONTEXT_ITEM_H - (int32_t)graphics_ui_font()->height) / 2,
+                           context_label(i), CONTEXT_TEXT);
     }
 }
 
@@ -287,27 +375,31 @@ static void bar_graphics_bind(const window_manager_window_t *self) {
 
 static void redraw(window_manager_window_t *self) {
     bar_graphics_bind(self);
-    graphics_fill_rect(&bar_graphics, 0, 0, (int32_t)self->width, PANEL_HEIGHT, PANEL_BG);
-    graphics_draw_line(&bar_graphics, 0, 0, (int32_t)self->width - 1, 0, PANEL_BORDER_COLOR);
-    graphics_draw_line(&bar_graphics, 0, 1, (int32_t)self->width - 1, 1, PANEL_BEVEL_COLOR);
+    int32_t width = (int32_t)self->width;
+    for (int32_t row = 0; row < PANEL_HEIGHT; row++) {
+        uint32_t color = 0;
+        for (int shift = 16; shift >= 0; shift -= 8) {
+            int32_t top = (int32_t)((PANEL_TOP_COLOR >> shift) & 0xFFu);
+            int32_t bottom = (int32_t)((PANEL_BOTTOM_COLOR >> shift) & 0xFFu);
+            int32_t value = top + (bottom - top) * row / (PANEL_HEIGHT - 1);
+            color |= (uint32_t)value << shift;
+        }
+        graphics_fill_rect(&bar_graphics, 0, row, width, 1, color);
+    }
+    for (int32_t col = 0; col < width; col++) {
+        graphics_blend_pixel(&bar_graphics, col, 0, PANEL_SHADE, PANEL_SHADE_ALPHA);
+        graphics_blend_pixel(&bar_graphics, col, 1, PANEL_HAIRLINE, PANEL_HAIRLINE_ALPHA);
+    }
 
     draw_start_button(sys_uptime_ms() < start_pressed_until_ms);
 
     for (int i = 0; i < running_count; i++) {
-        const running_slot_t *slot = &running_slots[i];
-        uint32_t bg = slot->minimized ? RUNNING_SLOT_MIN_BG
-                                      : (slot->focused ? RUNNING_SLOT_FOCUS_BG
-                                                       : (i == hovered ? RUNNING_SLOT_HOVER_BG : RUNNING_SLOT_BG));
-        uint32_t border = slot->focused ? RUNNING_SLOT_FOCUS_BORDER
-                                        : (slot->frontmost ? RUNNING_SLOT_FRONT_BORDER : SLOT_BORDER_COLOR);
-        graphics_fill_rect_rounded(&bar_graphics, slot->x, BTN_Y, slot->w, SLOT_H, bg);
-        graphics_draw_rect_rounded(&bar_graphics, slot->x, BTN_Y, slot->w, SLOT_H, border);
-        graphics_draw_text(&bar_graphics, slot->x + LABEL_PAD, BTN_Y + 4, slot->name, LABEL_COLOR);
+        draw_slot(&running_slots[i], i == hovered);
     }
 
     draw_tray(self);
 
-    graphics_fill_rect(&self->graphics, 0, 0, (int32_t)self->width, PANEL_OVERHANG_MAX, PANEL_BG);
+    graphics_fill_rect(&self->graphics, 0, 0, width, PANEL_OVERHANG_MAX, PANEL_BOTTOM_COLOR);
     if (context_slot >= 0) {
         draw_context_menu(self);
     }

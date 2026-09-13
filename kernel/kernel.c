@@ -726,7 +726,7 @@ static void boot_selftests_desktop(void) {
         if (!all_ok) {
             panic("compositor self-test: framebuffer content did not match");
         }
-        kernel_log_puts("[wm] compositor + client self-test passed (5/5 pixel checks matched).\n\n");
+        kernel_log_puts("[wm] compositor + client self-test passed (4/4 pixel checks matched).\n\n");
     }
 
     {
@@ -821,10 +821,9 @@ static void boot_selftests_desktop(void) {
         pit_sleep_ms(1000);
 
         static const struct { uint32_t x, y; uint32_t expected; const char *what; } checks[] = {
-            {124, 742, 0x00293E55u, "running slot 0 background (focused)"},
-            {90,  749, 0x00C5C5CAu, "running slot 0 'C' glyph - on pixel (left stem)"},
-            {93,  749, 0x00293E55u, "running slot 0 'C' glyph - off pixel (bowl interior)"},
-            {500, 738, 0x00181829u, "panel background (margin strip above the slot row, y=2 - never overdrawn by any slot regardless of window count)"},
+            {500, 726, 0x00202634u, "panel gradient at row 2 - a flat row above the slots, never overdrawn by any slot regardless of window count"},
+            {129, 761, 0x003F79B8u, "running slot 0 focus bar - accent at full coverage, which proves the shell queried the window manager and knows the Clock holds focus"},
+            {77,  739, 0x00BEBFC6u, "running slot 0 icon - a flat pixel of the Clock tile, which proves the shell mapped the window title to an icon"},
             {500, 500, 0x001A1A2Eu, "desktop background color, above the panel"},
         };
         uint32_t got[sizeof(checks) / sizeof(checks[0])];
@@ -855,7 +854,7 @@ static void boot_selftests_desktop(void) {
             panic("M22 desktop shell self-test: framebuffer content did not match");
         }
         kernel_log_puts("[wm22] desktop shell (panel + taskbar query, no launcher) self-test passed "
-                  "(5/5 pixel checks matched).\n\n");
+                  "(4/4 pixel checks matched).\n\n");
     }
 
     {
@@ -2230,11 +2229,11 @@ static void boot_selftests_system(void) {
         kfree(clock_image);
         pit_sleep_ms(1000);
 
-        uint32_t panel_bg_px = framebuffer_get_pixel(512, 738);
+        uint32_t panel_bg_px = framebuffer_get_pixel(512, 726);
         uint32_t above_panel_px = framebuffer_get_pixel(512, 700);
-        uint32_t start_btn_px = framebuffer_get_pixel(71, 742);
-        uint32_t running_slot_px = framebuffer_get_pixel(168, 752);
-        uint32_t tray_sep_px = framebuffer_get_pixel(912, 750);
+        uint32_t start_btn_px = framebuffer_get_pixel(26, 741);
+        uint32_t running_slot_px = framebuffer_get_pixel(77, 739);
+        uint32_t workspace_px = framebuffer_get_pixel(901, 745);
 
         int action_file_descriptors[2];
         if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
@@ -2247,7 +2246,7 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t maximized_titlebar = selftest_pixel_settled(100, 12, 0x004C99E6u,
                                                               "the maximized window's titlebar");
-        uint32_t panel_over_maximized = selftest_pixel_settled(512, 738, 0x00181829u,
+        uint32_t panel_over_maximized = selftest_pixel_settled(512, 726, 0x00202634u,
                                                                 "the taskbar to stay on top of the maximized window");
 
         k_memset(&request, 0, sizeof(request));
@@ -2267,18 +2266,18 @@ static void boot_selftests_system(void) {
         kernel_log_use_console();
 
         static const struct { const char *what; uint32_t expected; } names[] = {
-            {"taskbar background, docked at the screen's bottom edge (desktop_shell.c PANEL_BG, translucent)", 0x00181829u},
+            {"taskbar gradient at row 2, docked at the screen's bottom edge (desktop_shell.c PANEL_TOP_COLOR, translucent)", 0x00202634u},
             {"desktop background above the taskbar (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
-            {"Start button fill at the taskbar's left edge (desktop_shell.c START_BG, translucent)", 0x00212D40u},
-            {"running-app button 0, drawn focused, right of the Start button (desktop_shell.c RUNNING_SLOT_FOCUS_BG, translucent)", 0x00293E55u},
-            {"system tray separator, right-aligned (desktop_shell.c TRAY_SEP_COLOR, translucent)", 0x002A3346u},
+            {"the launcher button's accent glyph at the taskbar's left edge (desktop_shell.c ACCENT_COLOR, translucent)", 0x003F79B8u},
+            {"running-app button 0's icon - a flat pixel of the Clock tile, which proves the shell mapped the window title to an icon", 0x00BEBFC6u},
+            {"the current workspace's pill in the tray, right-aligned (desktop_shell.c ACCENT_COLOR, translucent)", 0x003F79B8u},
             {"a maximized window's titlebar starting at the top of the screen (compositor.c TITLEBAR_FOCUS_COLOR)", 0x004C99E6u},
-            {"the taskbar staying on top of a maximized window (desktop_shell.c PANEL_BG, translucent)", 0x00181829u},
+            {"the taskbar staying on top of a maximized window (desktop_shell.c PANEL_TOP_COLOR, translucent)", 0x00202634u},
             {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG, translucent)", 0x001B2032u},
             {"the launcher overlay gone again after a second toggle (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
         };
         const uint32_t got[] = {
-            panel_bg_px, above_panel_px, start_btn_px, running_slot_px, tray_sep_px,
+            panel_bg_px, above_panel_px, start_btn_px, running_slot_px, workspace_px,
             maximized_titlebar, panel_over_maximized, launcher_open_px, launcher_closed_px,
         };
         int all_ok = 1;
@@ -2458,7 +2457,7 @@ static void boot_selftests_system(void) {
         static const struct { const char *what; uint32_t expected; } names[] = {
             {"the wallpaper gradient near the top of the desktop (155% of 0x1A1A2E, ramped to row 100)", 0x00252542u},
             {"the wallpaper gradient near the bottom of the desktop (ramped to row 600)", 0x00151525u},
-            {"the translucent taskbar blended over the gradient row underneath it, not over a flat fill", 0x00161625u},
+            {"the translucent taskbar blended over the gradient row underneath it, not over a flat fill", 0x001A1F2Cu},
             {"the desktop after switching to WALLPAPER_FLAT - top", 0x001A1A2Eu},
             {"the desktop after switching to WALLPAPER_FLAT - bottom, the same color as the top", 0x001A1A2Eu},
         };
@@ -4858,16 +4857,29 @@ static void boot_selftests_system(void) {
             }
         }
 
-        static uint8_t blob[512];
-        int64_t n = virtual_file_system_read(PATH_ICONS_DIRECTORY "Terminal.icn", blob, sizeof(blob));
+        uint8_t *blob = kmalloc(ICON_MAX_BYTES);
+        if (!blob) {
+            panic("M63 self-test: could not allocate an icon buffer");
+        }
+        int64_t n = virtual_file_system_read(PATH_ICONS_DIRECTORY "Terminal.icn", blob, ICON_MAX_BYTES);
         int wrote = 0;
-        if (n < ICON_HEADER_BYTES || !icon_valid(blob)) {
-            kernel_log_puts("[m63] the desktop did not write its icons out as files\n");
+        if (n < ICON_HEADER_BYTES || !icon_valid(blob) || !icon_is_truecolor(blob) ||
+            icon_bytes(blob) != (int)n) {
+            kernel_log_puts("[m63] the desktop did not write its icons out as whole files\n");
             all_ok = 0;
         } else {
-            blob[ICON_HEADER_BYTES + 3] = 0xFF;
-            blob[ICON_HEADER_BYTES + 4] = 0x00;
-            blob[ICON_HEADER_BYTES + 5] = 0xFF;
+            int width = icon_width(blob);
+            int height = icon_height(blob);
+            uint8_t *pixels = blob + ICON_HEADER_BYTES;
+            for (int row = height / 3; row < 2 * height / 3; row++) {
+                for (int column = width / 3; column < 2 * width / 3; column++) {
+                    uint8_t *pixel = pixels + ((size_t)row * (size_t)width + (size_t)column) * 4u;
+                    pixel[0] = 0xFF;
+                    pixel[1] = 0x00;
+                    pixel[2] = 0xFF;
+                    pixel[3] = 0xFF;
+                }
+            }
             if (virtual_file_system_write(PATH_ICONS_DIRECTORY "Terminal.icn", blob, (size_t)n) != 0) {
                 kernel_log_puts("[m63] could not write the edited icon back\n");
                 all_ok = 0;
@@ -4875,6 +4887,7 @@ static void boot_selftests_system(void) {
                 wrote = 1;
             }
         }
+        kfree(blob);
 
         uint32_t after_magenta = 0;
         if (wrote) {

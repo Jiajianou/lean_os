@@ -9,11 +9,16 @@
 #include "wallpaper.h"
 #include "window_manager_client.h"
 
-#define ICON_BOX_COLOR 0x004C99E6u
-#define ICON_HOVER_COLOR 0x006CB9FFu
-#define LABEL_COLOR    0x00FFFFFFu
+#define LABEL_COLOR        0x00FFFFFFu
+#define LABEL_SHADOW_COLOR 0x00000000u
+#define LABEL_SHADOW_ALPHA 150u
+#define SELECTION_COLOR    0x00FFFFFFu
+#define SELECTION_ALPHA    46u
+#define SELECTION_EDGE_ALPHA 72u
+#define SELECTION_RADIUS   10
+#define SELECTION_PAD      6
 
-#define ICON_SIZE    48
+#define ICON_SIZE    ICON_LARGE_SIZE
 #define ICON_MARGIN  32
 #define ICON_CELL_W  90
 #define ICON_CELL_H  90
@@ -65,7 +70,7 @@ static void launch(const char *label, const char *program) {
     launch_with(label, program, "");
 }
 
-#define ICON_IMAGE_SCALE 2
+#define ICON_IMAGE_SCALE 1
 
 typedef struct {
     const char *label;
@@ -89,7 +94,7 @@ static const icon_def_t ICONS[] = {
 
 static int32_t icon_x[ICON_COUNT], icon_y[ICON_COUNT];
 
-#define ICON_FILE_MAX 512
+#define ICON_FILE_MAX (ICON_HEADER_BYTES + 4 * ICON_LARGE_SIZE * ICON_LARGE_SIZE)
 static uint8_t icon_file_data[ICON_COUNT][ICON_FILE_MAX];
 static const uint8_t *icon_image[ICON_COUNT];
 
@@ -123,15 +128,19 @@ static void load_icons(void) {
         if (icon_path_for(i, path) != 0) {
             continue;
         }
-        if (sys_stat(path, &st) != 0) {
+        long n = -1;
+        if (sys_stat(path, &st) == 0) {
+            n = sys_readfile(path, icon_file_data[i], ICON_FILE_MAX);
+        }
+        int usable = (n >= ICON_HEADER_BYTES && n <= ICON_FILE_MAX &&
+                      icon_valid(icon_file_data[i]) &&
+                      icon_is_truecolor(icon_file_data[i]) &&
+                      icon_bytes(icon_file_data[i]) <= (int)n);
+        if (!usable) {
             sys_writefile(path, ICONS[i].image, (size_t)icon_bytes(ICONS[i].image));
+            continue;
         }
-        long n = sys_readfile(path, icon_file_data[i], ICON_FILE_MAX);
-        if (n >= ICON_HEADER_BYTES && n <= ICON_FILE_MAX &&
-            icon_valid(icon_file_data[i]) &&
-            icon_bytes(icon_file_data[i]) <= (int)n) {
-            icon_image[i] = icon_file_data[i];
-        }
+        icon_image[i] = icon_file_data[i];
     }
 }
 
@@ -155,19 +164,31 @@ static int point_in_icon(int i, int32_t x, int32_t y) {
 }
 
 static void redraw_icon(window_manager_window_t *self, int i, int pressed) {
-    uint32_t box_color = pressed ? ICON_HOVER_COLOR : ICON_BOX_COLOR;
-    graphics_fill_rect_rounded(&self->graphics, icon_x[i], icon_y[i], ICON_SIZE, ICON_SIZE, box_color);
-
-    {
-        const uint8_t *blob = icon_image[i];
-        int32_t drawn = 24 * ICON_IMAGE_SCALE;
-        icon_draw(&self->graphics, icon_x[i] + (ICON_SIZE - drawn) / 2,
-                   icon_y[i] + (ICON_SIZE - drawn) / 2, blob, ICON_IMAGE_SCALE);
-    }
-
     int32_t label_w = graphics_text_width(graphics_ui_font(), ICONS[i].label);
     int32_t label_x = icon_x[i] + ICON_SIZE / 2 - label_w / 2;
-    graphics_draw_text(&self->graphics, label_x, icon_y[i] + ICON_SIZE + 4, ICONS[i].label, LABEL_COLOR);
+    int32_t label_y = icon_y[i] + ICON_SIZE + 4;
+
+    if (pressed) {
+        int32_t left = icon_x[i] - SELECTION_PAD;
+        int32_t right = label_x + label_w + SELECTION_PAD;
+        if (icon_x[i] + ICON_SIZE + SELECTION_PAD > right) {
+            right = icon_x[i] + ICON_SIZE + SELECTION_PAD;
+        }
+        if (label_x - SELECTION_PAD < left) {
+            left = label_x - SELECTION_PAD;
+        }
+        int32_t top = icon_y[i] - SELECTION_PAD / 2;
+        int32_t bottom = label_y + LABEL_H + SELECTION_PAD / 2;
+        graphics_fill_rounded(&self->graphics, left, top, right - left, bottom - top,
+                              SELECTION_RADIUS, SELECTION_COLOR, SELECTION_ALPHA);
+        graphics_stroke_rounded(&self->graphics, left, top, right - left, bottom - top,
+                                SELECTION_RADIUS, SELECTION_COLOR, SELECTION_EDGE_ALPHA);
+    }
+
+    icon_draw(&self->graphics, icon_x[i], icon_y[i], icon_image[i], ICON_IMAGE_SCALE);
+
+    graphics_draw_text_shadowed(&self->graphics, label_x, label_y, ICONS[i].label,
+                                LABEL_COLOR, LABEL_SHADOW_COLOR, LABEL_SHADOW_ALPHA);
 }
 
 static void redraw(window_manager_window_t *self, int pressed_icon) {

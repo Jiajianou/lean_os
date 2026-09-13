@@ -33,7 +33,6 @@ ICONS = [
     ("Browser", "netsurf", 146, ICON_X + 90),
 ]
 
-ICON_BOX = 0x4C99E6
 CTX_MENU_BG = 0x243040
 EMPTY_DESKTOP = (500, 500)
 
@@ -85,35 +84,48 @@ EDITOR_MENU_ITEM_H = 20
 EDITOR_MENU_X = 4
 
 FONT_H = 16
-PANEL_TOP = SCREEN_H - 32
-BTN_Y = 4
-BTN_H = 24
-SLOT_W = 96
-SLOT_GAP = 4
-START_X = 4
-START_W = 72
-SLOTS_X = START_X + START_W + 8
-TRAY_W = 112
+PANEL_H = 44
+PANEL_TOP = SCREEN_H - PANEL_H
+BTN_H = 34
+BTN_Y = (PANEL_H - BTN_H) // 2
+SLOT_W = 130
+SLOT_GAP = 6
+SLOT_H = BTN_H
+START_X = 8
+START_W = 46
+SLOTS_X = START_X + START_W + 10
+CLOCK_W = 35
+TRAY_PAD = 12
+WS_DOT_W, WS_DOT_GAP = 14, 5
+TRAY_W = TRAY_PAD + 4 * WS_DOT_W + 3 * WS_DOT_GAP + TRAY_PAD + CLOCK_W + TRAY_PAD
 
-PANEL_PROBE_Y = PANEL_TOP + 2
-BTN_PROBE_Y = PANEL_TOP + BTN_Y + 12
+PANEL_TOP_RAW = 0x222A38
+PANEL_BOTTOM_RAW = 0x141821
+ACCENT = 0x4C99E6
 
-PANEL_BG = panel_px(0x181828, PANEL_PROBE_Y)
-SLOT_BG = panel_px(0x263447, BTN_PROBE_Y)
-SLOT_HOVER_BG = panel_px(0x365070, BTN_PROBE_Y)
-SLOT_FOCUS_BG = panel_px(0x2E4A63, BTN_PROBE_Y)
-SLOT_MIN_BG = panel_px(0x352A20, BTN_PROBE_Y)
-SLOT_COLORS = (SLOT_BG, SLOT_HOVER_BG, SLOT_FOCUS_BG, SLOT_MIN_BG)
+def panel_row_raw(row):
+    out = 0
+    for shift in (16, 8, 0):
+        top = (PANEL_TOP_RAW >> shift) & 0xFF
+        bottom = (PANEL_BOTTOM_RAW >> shift) & 0xFF
+        out |= (top + _trunc_div((bottom - top) * row, PANEL_H - 1)) << shift
+    return out
 
-START_PROBE = (71, PANEL_TOP + 6)
-START_CLICK = (40, PANEL_TOP + BTN_Y + BTN_H // 2)
-START_BG = panel_px(0x243447, START_PROBE[1])
-START_HOVER_BG = panel_px(0x365070, START_PROBE[1])
-START_PRESS_BG = panel_px(0x4C99E6, START_PROBE[1])
-START_COLORS = (START_BG, START_HOVER_BG, START_PRESS_BG)
+PANEL_PROBE_ROW = 20
+PANEL_PROBE_Y = PANEL_TOP + PANEL_PROBE_ROW
+PANEL_BG = panel_px(panel_row_raw(PANEL_PROBE_ROW), PANEL_PROBE_Y)
 
-TRAY_SEP_PROBE = (1024 - TRAY_W, PANEL_TOP + 14)
-TRAY_SEP = panel_px(0x303C4E, TRAY_SEP_PROBE[1])
+START_DOT, START_DOT_GAP = 5, 4
+START_GLYPH_SPAN = 2 * START_DOT + START_DOT_GAP
+START_PROBE = (START_X + (START_W - START_GLYPH_SPAN) // 2 + START_DOT // 2,
+               PANEL_TOP + BTN_Y + (BTN_H - START_GLYPH_SPAN) // 2 + START_DOT // 2)
+START_GLYPH = panel_px(ACCENT, START_PROBE[1])
+START_CLICK = (START_X + START_W // 2, PANEL_TOP + BTN_Y + BTN_H // 2)
+START_BG_PROBE = (START_X + 6, PANEL_TOP + BTN_Y + BTN_H // 2)
+START_HIGHLIGHT_MARGIN = 20
+
+INDICATOR_Y = PANEL_TOP + BTN_Y + SLOT_H - 2
+PANEL_GROUND_X = 3
 
 LAUNCHER_BG_RAW = 0x1C2233
 LAUNCHER_SEL_BG = 0x335577
@@ -152,12 +164,43 @@ SNAP_PREVIEW_NUM, SNAP_PREVIEW_DEN = 1, 4
 def launcher_row_probe(i):
     return (LAUNCHER_X + 428, LAUNCHER_Y + LAUNCHER_LIST_Y + i * LAUNCHER_ROW_H + 10)
 
-def slot_probe(i):
-    return (SLOTS_X + i * (SLOT_W + SLOT_GAP) + SLOT_W - 8,
-            PANEL_TOP + BTN_Y + 12)
+def slot_center_x(i):
+    return SLOTS_X + i * (SLOT_W + SLOT_GAP) + SLOT_W // 2
 
 def slot_click(i):
-    return (SLOTS_X + i * (SLOT_W + SLOT_GAP) + SLOT_W - 24, PANEL_TOP + BTN_Y)
+    return (slot_center_x(i), PANEL_TOP + BTN_Y + SLOT_H // 2)
+
+def channel_sum(color):
+    return ((color >> 16) & 0xFF) + ((color >> 8) & 0xFF) + (color & 0xFF)
+
+def panel_ground(shot, y):
+    return shot.px(PANEL_GROUND_X, y)
+
+SLOT_OCCUPIED_MARGIN = 60
+SLOT_MINIMIZED_CEILING = 165
+SLOT_ACCENT_MARGIN = 40
+
+def slot_indicator(shot, i):
+    return shot.px(slot_center_x(i), INDICATOR_Y)
+
+def slot_occupied(shot, i):
+    ground = channel_sum(panel_ground(shot, INDICATOR_Y))
+    return channel_sum(slot_indicator(shot, i)) > ground + SLOT_OCCUPIED_MARGIN
+
+def slot_is_focused(shot, i):
+    px = slot_indicator(shot, i)
+    return (slot_occupied(shot, i) and
+            (px & 0xFF) - ((px >> 16) & 0xFF) > SLOT_ACCENT_MARGIN)
+
+def start_highlighted(shot):
+    ground = channel_sum(panel_ground(shot, START_BG_PROBE[1]))
+    return channel_sum(shot.px(*START_BG_PROBE)) > ground + START_HIGHLIGHT_MARGIN
+
+def slot_is_minimized(shot, i):
+    if not slot_occupied(shot, i) or slot_is_focused(shot, i):
+        return False
+    ground = channel_sum(panel_ground(shot, INDICATOR_Y))
+    return channel_sum(slot_indicator(shot, i)) < ground + SLOT_MINIMIZED_CEILING
 
 TITLEBAR_H = 20
 BTN_SIZE = 14
@@ -312,15 +355,20 @@ MENU_ITEM_H = 22
 MENU_MINIMIZE, MENU_CLOSE, MENU_FORCE_QUIT = 0, 1, 2
 MENU_BG_RAW = 0x243040
 
+TASKBAR_MENU_W = 132
+TASKBAR_MENU_ITEM_H = 26
+TASKBAR_MENU_BG_RAW = 0x1E2430
+
 def taskbar_menu_row_center(slot, row):
     x = SLOTS_X + slot * (SLOT_W + SLOT_GAP)
-    top = PANEL_TOP - MENU_ITEM_H * 3
-    return (x + MENU_W // 2, top + row * MENU_ITEM_H + MENU_ITEM_H // 2)
+    top = PANEL_TOP - TASKBAR_MENU_ITEM_H * 3
+    return (x + TASKBAR_MENU_W // 2,
+            top + row * TASKBAR_MENU_ITEM_H + TASKBAR_MENU_ITEM_H // 2)
 
 FIRST_APP_IDX = 2
 
 CONTENT_TOP = 22
-CONTENT_BOTTOM = SCREEN_H - 32
+CONTENT_BOTTOM = SCREEN_H - PANEL_H
 
 def app_origin(slot, height=None):
     x = 100 + slot * 40
@@ -351,8 +399,7 @@ def refusals(machine):
 def count_app_windows(shot):
     n = 0
     for i in range(10):
-        x, y = slot_probe(i)
-        if shot.px(x, y) not in SLOT_COLORS:
+        if not slot_occupied(shot, i):
             break
         n += 1
     return n
@@ -366,12 +413,18 @@ def save_failure_shot(machine, name):
     shutil.copyfile(src, dst)
     return dst
 
+ICON_TILE_BOX = (122, 32, 48, 48)
+ICON_TILE_SUM = 600
+ICON_TILE_PIXELS = 900
+
+def icon_tile_painted(shot):
+    return shot.count_brighter(ICON_TILE_SUM, *ICON_TILE_BOX) > ICON_TILE_PIXELS
+
 def desktop_is_painted(shot):
     return (shot.px(*EMPTY_DESKTOP) == DESKTOP_BG and
-            shot.px(76, 76) == ICON_BOX and
+            icon_tile_painted(shot) and
             shot.px(512, PANEL_PROBE_Y) == PANEL_BG and
-            shot.px(*TRAY_SEP_PROBE) == TRAY_SEP and
-            shot.px(*START_PROBE) in START_COLORS)
+            shot.px(*START_PROBE) == START_GLYPH)
 
 def boot(machine, timeout=None):
     machine.boot_to_desktop(settle=0.0, timeout=timeout or machine.boot_timeout or 300)
@@ -384,10 +437,12 @@ def boot(machine, timeout=None):
         time.sleep(0.5)
     probes = (
         ("wallpaper", shot.px(*EMPTY_DESKTOP), desktop_px(EMPTY_DESKTOP[1])),
-        ("first icon", shot.px(76, 76), ICON_BOX),
+        ("README icon tile pixels (wanted more than)",
+         shot.count_brighter(ICON_TILE_SUM, *ICON_TILE_BOX)
+         if shot.count_brighter(ICON_TILE_SUM, *ICON_TILE_BOX) <= ICON_TILE_PIXELS
+         else ICON_TILE_PIXELS, ICON_TILE_PIXELS),
         ("taskbar", shot.px(512, PANEL_PROBE_Y), PANEL_BG),
-        ("tray separator", shot.px(*TRAY_SEP_PROBE), TRAY_SEP),
-        ("Start button", shot.px(*START_PROBE), START_COLORS[0]),
+        ("Start glyph", shot.px(*START_PROBE), START_GLYPH),
     )
     wrong = ", ".join("%s 0x%06X (wanted 0x%06X)" % p for p in probes if p[1] != p[2])
     raise Failure("the desktop never finished painting after boot - %s; "
@@ -415,11 +470,9 @@ def wait_for_windows(machine, n, timeout=12.0):
 
 def focused_slot(shot):
     for i in range(10):
-        x, y = slot_probe(i)
-        px = shot.px(x, y)
-        if px not in SLOT_COLORS:
+        if not slot_occupied(shot, i):
             break
-        if px == SLOT_FOCUS_BG:
+        if slot_is_focused(shot, i):
             return i
     return -1
 
@@ -534,11 +587,14 @@ def test_launch_close_stress(m):
 
 def test_start_button_opens_launcher(m):
     boot(m)
-    check(m.screenshot().px(*START_PROBE) == START_BG,
-          "the Start button is not drawn at rest")
+    shot = m.screenshot()
+    check(shot.px(*START_PROBE) == START_GLYPH,
+          "the Start button's glyph is not drawn at rest")
+    check(not start_highlighted(shot),
+          "the Start button is highlighted before the pointer has reached it")
 
     m.move_to(*START_CLICK)
-    wait_for(m, lambda s: s.px(*START_PROBE) in (START_HOVER_BG, START_PRESS_BG),
+    wait_for(m, start_highlighted,
              "hovering the Start button did not highlight it - a panel should "
              "receive WM_EVENT_MOUSE_MOVE even though it never holds focus")
 
@@ -574,7 +630,7 @@ def test_taskbar_button_focus_and_minimize(m):
     wait_for(m, lambda s: focused_slot(s) == 0,
              "clicking the Clock's taskbar button did not focus it")
     m.click(*slot_click(0))
-    wait_for(m, lambda s: s.px(*slot_probe(0)) == SLOT_MIN_BG,
+    wait_for(m, lambda s: slot_is_minimized(s, 0),
              "clicking the focused app's taskbar button did not minimize it")
 
 def test_editor_in_window_file_menu(m):
@@ -660,8 +716,8 @@ def test_taskbar_right_click_force_quit(m):
     wait_for_windows(m, 1)
 
     m.right_click(*slot_click(0))
-    probe = (SLOTS_X + MENU_W - 12, PANEL_TOP - MENU_ITEM_H * 3 + 6)
-    expected = panel_px(MENU_BG_RAW, probe[1])
+    probe = (SLOTS_X + TASKBAR_MENU_W - 14, PANEL_TOP - TASKBAR_MENU_ITEM_H * 3 + 8)
+    expected = panel_px(TASKBAR_MENU_BG_RAW, probe[1])
     wait_for(m, lambda s: s.px(*probe) == expected,
              "right-clicking a taskbar button did not raise its context menu "
              "(the panel overhang never came up)")
@@ -1493,7 +1549,7 @@ class Region:
     def contains(self, px, py):
         return self.x <= px < self.x + self.w and self.y <= py < self.y + self.h
 
-CLOCK_REGION = Region(1024 - 80, PANEL_TOP, 80, 32, "the taskbar clock ticks")
+CLOCK_REGION = Region(1024 - 80, PANEL_TOP, 80, PANEL_H, "the taskbar clock ticks")
 
 def burst(machine, n=25):
     return [machine.screenshot() for _ in range(n)]
@@ -1549,7 +1605,7 @@ def test_launching_an_app_does_not_disturb_the_rest_of_the_screen(m):
     allowed = [
         Region(140, 100, 340, 240, "the window that opened, its chrome, its "
                                    "shadow and its open animation"),
-        Region(0, PANEL_TOP, 400, 32, "the taskbar gaining a button"),
+        Region(0, PANEL_TOP, 400, PANEL_H, "the taskbar gaining a button"),
         CLOCK_REGION,
         Region(ICON_X - 48, ICONS[4][2] - 48, 96, 96,
                "the icon that was double-clicked, and the cursor on it"),
@@ -1574,7 +1630,7 @@ def test_closing_an_app_does_not_disturb_the_rest_of_the_screen(m):
     allowed = [
         Region(140, 100, 340, 240, "the window that closed, its shadow and "
                                    "its close animation"),
-        Region(0, PANEL_TOP, 400, 32, "the taskbar losing a button"),
+        Region(0, PANEL_TOP, 400, PANEL_H, "the taskbar losing a button"),
         CLOCK_REGION,
         Region(300, 100, 120, 60, "the cursor, parked on the close button"),
         Region(ICON_X - 48, ICONS[4][2] - 48, 96, 96,
@@ -1620,7 +1676,7 @@ def test_typing_into_a_window_changes_only_that_window(m):
 
     allowed = [
         Region(x - 40, y - 60, 700, 520, "the editor window, its chrome and its shadow"),
-        Region(0, PANEL_TOP, 400, 32, "the taskbar"),
+        Region(0, PANEL_TOP, 400, PANEL_H, "the taskbar"),
         CLOCK_REGION,
     ]
     assert_stable_outside(m, base, shots, allowed,
@@ -1644,7 +1700,7 @@ def test_a_window_redrawing_itself_leaves_its_neighbours_alone(m):
 
     allowed = [
         Region(100, 60, 640, 520, "the two windows, their chrome and shadows"),
-        Region(0, PANEL_TOP, 500, 32, "the taskbar"),
+        Region(0, PANEL_TOP, 500, PANEL_H, "the taskbar"),
         CLOCK_REGION,
         Region(660, 560, 80, 80, "the cursor, parked"),
     ]
