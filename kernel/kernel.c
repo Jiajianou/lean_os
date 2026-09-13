@@ -5469,10 +5469,15 @@ static void boot_selftests_system(void) {
 
         virtual_file_system_check();
         uint32_t free_after = virtual_file_system_free_blocks();
-        if (free_after != free_before) {
+        if (free_after < free_before) {
             kernel_log_puts("[m71] the check did not reclaim every orphaned block (");
             kernel_log_put_dec(free_before - free_after);
             kernel_log_puts(" still missing)\n");
+            all_ok = 0;
+        } else if (free_after > free_before) {
+            kernel_log_puts("[m71] the check freed blocks that no orphan accounts for (");
+            kernel_log_put_dec(free_after - free_before);
+            kernel_log_puts(" more free than before the fixture was written)\n");
             all_ok = 0;
         }
 
