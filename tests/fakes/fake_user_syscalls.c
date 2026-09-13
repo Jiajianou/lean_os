@@ -1,22 +1,3 @@
-/* tests/fakes/fake_user_syscalls.c - M98
- *
- * The four calls user_space/lib/malloc.c makes, backed by host memory,
- * so the allocator itself can be compiled for the machine you are
- * sitting at and tested in microseconds.
- *
- * Why this fake exists at all: M98 profiled a C++ compile on the machine
- * and found 72% of it inside malloc's free-list walk. The fix - size
- * binned free lists threaded through free blocks' own payloads - is the
- * kind of change that is either right or corrupts memory, and "corrupts
- * memory" on a machine reached only through a five-minute boot is the
- * worst debugging position this project has. So the allocator joins the
- * scheduler, the heap, leanfs and the network parsers on the host tier.
- *
- * `sbrk` is a real bump allocator over one big host mapping, which is
- * what the kernel's own sbrk is: address space that only grows, handed
- * out in whole pages. `mmap` and `munmap` are host mmap and munmap,
- * because they are what they claim to be.
- */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,9 +28,6 @@ void fake_user_sbrk_refuse(int on) { sbrk_refusing = on; }
 
 size_t fake_user_heap_used(void) { return heap_used; }
 
-/* The four wrappers malloc.c calls. Names match
- * user_space/lib/syscall_wrappers.h exactly - that header is not
- * included here, because including it drags in the whole ABI. */
 long sys_sbrk(long increment) {
     if (sbrk_refusing || increment < 0) {
         return -1;

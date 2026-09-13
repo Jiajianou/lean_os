@@ -111,4 +111,4 @@ case "$(uname -s)" in
 esac
 
 echo
-echo "Done. See docs/real-hardware.md for how to actually boot from this drive."
+echo "Done."

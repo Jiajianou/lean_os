@@ -1,18 +1,3 @@
-/* user_space/libc/src/readyfds.c - M119
- *
- * epoll, eventfd and timerfd: the libc half of the message pump. Three
- * headers, seven syscalls and almost no work, which is the point - the ABI
- * was shaped so that `struct epoll_event` is the kernel's structure
- * (system_api/include/os_poll.h says why) and the only real translation in
- * this file is `struct itimerspec`, which is two timespecs where the kernel
- * carries two nanosecond counts.
- *
- * One file rather than three because they are one feature. A pump that has
- * epoll and not eventfd cannot be woken from another thread, and one
- * without timerfd recomputes a timeout from a heap of deadlines on every
- * pass; docs/browser.md's condition names all three in one line, and this
- * is that line.
- */
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/timerfd.h>
@@ -22,16 +7,10 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "os_poll.h" /* system_api/include/os_poll.h */
+#include "os_poll.h"
 #include "syscall_wrappers.h"
 
-/* ---- epoll ------------------------------------------------------------ */
-
 int epoll_create(int size) {
-    /* Ignored since Linux 2.6.8, and this is where that is said out loud
-     * rather than in a comment nobody reads: a negative size is still
-     * refused, because a program passing one has computed something wrong
-     * and glibc refuses it too. */
     if (size <= 0) {
         errno = EINVAL;
         return -1;
@@ -49,10 +28,6 @@ int epoll_create1(int flags) {
 }
 
 int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
-    /* The struct IS os_epoll_event_t - same size, same offsets, checked
-     * here rather than assumed, because the day somebody adds a field to
-     * one of them this is the line that stops the other from being read
-     * wrong. */
     _Static_assert(sizeof(struct epoll_event) == sizeof(os_epoll_event_t),
                    "struct epoll_event must be os_poll.h's os_epoll_event_t");
     _Static_assert(sizeof(((struct epoll_event *)0)->data) == sizeof(uint64_t),
@@ -68,12 +43,6 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
         memcpy(&ev.data, &event->data, sizeof(ev.data));
     }
     if (sys_epoll_ctl(epfd, op, fd, &ev) != 0) {
-        /* Three refusals with three meanings on Linux - EEXIST for an ADD
-         * of something already watched, ENOENT for a MOD or DEL of
-         * something that is not, EBADF for a descriptor this process does
-         * not hold - and one return value from the kernel. EINVAL is the
-         * honest answer where the reason is not carried; the ABI note at
-         * SYS_epoll_ctl says which cases exist. */
         errno = EINVAL;
         return -1;
     }
@@ -97,8 +66,6 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
     return (int)n;
 }
 
-/* ---- eventfd ---------------------------------------------------------- */
-
 int eventfd(unsigned int initval, int flags) {
     long fd = sys_eventfd(initval, flags);
     if (fd < 0) {
@@ -112,7 +79,7 @@ int eventfd_read(int fd, eventfd_t *value) {
     eventfd_t v = 0;
     ssize_t n = read(fd, &v, sizeof(v));
     if (n != (ssize_t)sizeof(v)) {
-        return -1; /* errno is read()'s - EAGAIN on a non-blocking empty counter */
+        return -1;
     }
     if (value) {
         *value = v;
@@ -124,15 +91,10 @@ int eventfd_write(int fd, eventfd_t value) {
     return write(fd, &value, sizeof(value)) == (ssize_t)sizeof(value) ? 0 : -1;
 }
 
-/* ---- timerfd ---------------------------------------------------------- */
-
 static uint64_t to_ns(const struct timespec *ts) {
     if (!ts) {
         return 0;
     }
-    /* A negative field is not clamped silently: it comes back as zero,
-     * which disarms, and the caller is told by timerfd_settime's EINVAL
-     * below rather than getting a timer at a time it did not ask for. */
     if (ts->tv_sec < 0 || ts->tv_nsec < 0) {
         return 0;
     }
@@ -169,7 +131,7 @@ int timerfd_settime(int fd, int flags, const struct itimerspec *new_value,
     if (new_value->it_value.tv_nsec < 0 || new_value->it_value.tv_nsec >= 1000000000L ||
         new_value->it_interval.tv_nsec < 0 || new_value->it_interval.tv_nsec >= 1000000000L ||
         new_value->it_value.tv_sec < 0 || new_value->it_interval.tv_sec < 0) {
-        errno = EINVAL; /* the same range check Linux makes, and for the same reason: a nsec field over a second is a unit mistake */
+        errno = EINVAL;
         return -1;
     }
     os_itimer_t want;

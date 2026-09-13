@@ -1,32 +1,3 @@
-/* user_space/libc/src/iconv.c - M100: charset conversion.
- *
- * NetSurf named this: utils/utf8.c includes <iconv.h> unconditionally,
- * and a browser that cannot read a windows-1252 page is a browser that
- * cannot read most of the pages that predate 2010.
- *
- * ---- the shape, and why it is this shape -----------------------------
- *
- * Every conversion goes through Unicode scalar values, which turns N
- * charsets into N decoders and N encoders rather than N^2 conversions.
- * That is how every iconv is built and it is worth saying why it is
- * right *here*: the alternative pays off only for pairs that share a
- * structure, and the pairs a browser actually asks for (anything to
- * UTF-8) share none.
- *
- * The single-byte charsets are a generated table - see iconv_tables.c
- * and tools/gen-iconv-tables.py - and the multibyte ones are code,
- * because UTF-8 and UTF-16 are algorithms rather than tables.
- *
- * ---- the part that is easy to get wrong ------------------------------
- *
- * On any failure, `iconv` must leave *inbuf and *inbytesleft pointing at
- * the first byte it did NOT convert. A loop that decoded a character,
- * then found no room for it, and had already advanced the input, would
- * lose that character silently on the caller's retry. So the input
- * cursor advances only after the output has been written, and the
- * decoder reports how many bytes a character occupied rather than
- * consuming them itself.
- */
 #include <errno.h>
 #include <iconv.h>
 #include <stdint.h>
@@ -35,7 +6,6 @@
 
 #include "iconv_tables.h"
 
-/* The multibyte encodings, plus the two that need no table. */
 enum enc {
     ENC_UTF8,
     ENC_UTF16LE,
@@ -44,25 +14,12 @@ enum enc {
     ENC_UTF32BE,
     ENC_ASCII,
     ENC_LATIN1,
-    ENC_SB /* one of the generated tables; `tbl` says which */
+    ENC_SB
 };
 
 struct iconv_cd {
     enum enc from, to;
     const uint16_t *from_tbl, *to_tbl;
-    /* ---- byte order marks -------------------------------------------
-     *
-     * UTF-16 and UTF-32 spelled WITHOUT an endianness carry one.
-     * Decoding such a stream means reading a leading BOM, letting it
-     * choose the endianness, and then not treating it as a character;
-     * encoding one means emitting a BOM before the first character and
-     * never again.
-     *
-     * `from_initial` exists because decoding can CHANGE `from` - a
-     * little-endian BOM on a stream opened as "UTF-16" flips it - and
-     * iconv(cd, NULL, ...) has to put the descriptor back the way it
-     * was. Without it a reset would leave the endianness the last
-     * stream happened to have. */
     int from_has_bom, to_has_bom;
     int from_bom_pending, to_bom_pending;
     enum enc from_initial;
@@ -70,13 +27,6 @@ struct iconv_cd {
 
 #define REPLACEMENT_UNASSIGNED 0xFFFFu
 
-/* ---- name matching --------------------------------------------------
- *
- * Case-insensitive and ignoring '-' and '_', because the charset labels
- * in real documents are written every way a person can write them and
- * "ISO-8859-1", "iso8859-1" and "ISO_8859_1" are one charset in every
- * standard that mentions the question.
- */
 static int name_eq(const char *a, const char *b) {
     while (*a && *b) {
         while (*a == '-' || *a == '_') {
@@ -108,20 +58,14 @@ static int name_eq(const char *a, const char *b) {
 struct alias {
     const char *name;
     enum enc enc;
-    int bom; /* 1: no endianness in the name, so a BOM decides */
-    enum enc dflt; /* what to assume when there is no BOM */
+    int bom;
+    enum enc dflt;
 };
 
-/* The aliases that appear in real HTML and in real HTTP headers. The
- * list is short on purpose: an alias nobody has seen in the wild is a
- * name this libc would have to keep working forever. */
 static const struct alias ALIASES[] = {
     {"utf-8", ENC_UTF8, 0, ENC_UTF8},
     {"utf8", ENC_UTF8, 0, ENC_UTF8},
     {"csutf8", ENC_UTF8, 0, ENC_UTF8},
-    /* Unicode without an endianness: big-endian unless a BOM says
-     * otherwise, which is what the Unicode standard specifies and what
-     * catches people out, since the common file on disk is little. */
     {"utf-16", ENC_UTF16BE, 1, ENC_UTF16BE},
     {"utf-16le", ENC_UTF16LE, 0, ENC_UTF16LE},
     {"utf-16be", ENC_UTF16BE, 0, ENC_UTF16BE},
@@ -141,17 +85,13 @@ static const struct alias ALIASES[] = {
     {"latin1", ENC_LATIN1, 0, ENC_LATIN1},
     {"iso-latin-1", ENC_LATIN1, 0, ENC_LATIN1},
     {"cp819", ENC_LATIN1, 0, ENC_LATIN1},
-    {"iso-8859-15", ENC_SB, 0, ENC_SB}, /* also in the table; see below */
+    {"iso-8859-15", ENC_SB, 0, ENC_SB},
 };
 
-/* Resolves a charset name. Returns 0 if this libc does not have it. */
 static int lookup(const char *name, enum enc *enc, const uint16_t **tbl,
                   int *bom, enum enc *dflt) {
     *tbl = 0;
     *bom = 0;
-    /* The aliases first, so that "iso-8859-1" is the identity path
-     * rather than a table lookup - it is much the most common charset
-     * after UTF-8 and it needs no table at all. */
     for (size_t i = 0; i < sizeof(ALIASES) / sizeof(ALIASES[0]); i++) {
         if (ALIASES[i].enc != ENC_SB && name_eq(name, ALIASES[i].name)) {
             *enc = ALIASES[i].enc;
@@ -168,9 +108,6 @@ static int lookup(const char *name, enum enc *enc, const uint16_t **tbl,
             return 1;
         }
     }
-    /* A few single-byte charsets go by a second name often enough to be
-     * worth carrying. Kept here rather than in the generated table so
-     * that regenerating the table never has to preserve them. */
     static const struct { const char *alias, *real; } SB_ALIASES[] = {
         {"latin2", "iso-8859-2"},
         {"latin9", "iso-8859-15"},
@@ -199,9 +136,6 @@ iconv_t iconv_open(const char *tocode, const char *fromcode) {
         errno = EINVAL;
         return (iconv_t)-1;
     }
-    /* GNU's //TRANSLIT and //IGNORE change what the call MEANS, so
-     * quietly ignoring the suffix would answer a different question
-     * from the one asked. See <iconv.h>. */
     if (strstr(tocode, "//") || strstr(fromcode, "//")) {
         errno = EINVAL;
         return (iconv_t)-1;
@@ -241,13 +175,6 @@ int iconv_close(iconv_t cd) {
     return 0;
 }
 
-/* ---- decoding -------------------------------------------------------
- *
- * Reports the scalar value in *cp and the number of bytes it occupied as
- * the return value; 0 means "the input ends mid-character" (EINVAL) and
- * -1 means "this is not valid in this charset" (EILSEQ). It never
- * advances anything itself, for the reason in the file header.
- */
 static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
                   uint32_t *cp) {
     switch (c->from) {
@@ -258,8 +185,6 @@ static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
         *cp = in[0];
         return 1;
     case ENC_LATIN1:
-        /* ISO-8859-1 is the identity on the first 256 scalars, which is
-         * the whole reason it needs no table. */
         *cp = in[0];
         return 1;
     case ENC_SB: {
@@ -269,7 +194,7 @@ static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
         }
         uint16_t v = c->from_tbl[in[0] - 0x80];
         if (v == REPLACEMENT_UNASSIGNED) {
-            return -1; /* a real hole in the charset, not a stray byte */
+            return -1;
         }
         *cp = v;
         return 1;
@@ -288,7 +213,7 @@ static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
         } else if ((b & 0xF8) == 0xF0) {
             n = 4; v = b & 0x07u;
         } else {
-            return -1; /* a continuation byte or an 0xF8+ lead */
+            return -1;
         }
         if (len < (size_t)n) {
             return 0;
@@ -299,10 +224,6 @@ static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
             }
             v = (v << 6) | (in[i] & 0x3Fu);
         }
-        /* Overlong forms are rejected. This is not pedantry: an overlong
-         * encoding of '/' or '.' that a decoder accepted is the classic
-         * way a path check is walked past, and a browser is exactly the
-         * program that gets handed one on purpose. */
         static const uint32_t MIN[5] = {0, 0, 0x80, 0x800, 0x10000};
         if (v < MIN[n] || v > 0x10FFFF ||
             (v >= 0xD800 && v <= 0xDFFF)) {
@@ -326,18 +247,18 @@ static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
             uint32_t lo = be ? (uint32_t)((in[2] << 8) | in[3])
                              : (uint32_t)((in[3] << 8) | in[2]);
             if (lo < 0xDC00 || lo > 0xDFFF) {
-                return -1; /* a high surrogate with no low one after it */
+                return -1;
             }
             *cp = 0x10000u + ((u - 0xD800u) << 10) + (lo - 0xDC00u);
             return 4;
         }
         if (u >= 0xDC00 && u <= 0xDFFF) {
-            return -1; /* a low surrogate on its own */
+            return -1;
         }
         *cp = u;
         return 2;
     }
-    default: { /* ENC_UTF32LE / ENC_UTF32BE */
+    default: {
         int be = c->from == ENC_UTF32BE;
         if (len < 4) {
             return 0;
@@ -355,10 +276,6 @@ static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
     }
 }
 
-/* Writes `cp` in the target charset. Returns the number of bytes
- * written, 0 if the output buffer is too small (E2BIG), or -1 if this
- * charset cannot represent the character (EILSEQ). Nothing is written
- * unless the whole character fits. */
 static int encode(struct iconv_cd *c, uint32_t cp, unsigned char *out,
                   size_t room) {
     switch (c->to) {
@@ -391,21 +308,9 @@ static int encode(struct iconv_cd *c, uint32_t cp, unsigned char *out,
         if (cp > 0xFFFF) {
             return -1;
         }
-        /* U+FFFF is this table's sentinel for "this byte is unassigned
-         * in this charset", and it is also a real (if noncharacter)
-         * code point. Without this line, encoding U+FFFF matched the
-         * first hole in the table and produced that hole's byte - so
-         * `iconv -t ISO-8859-3` turned U+FFFF into 0xA5, which decodes
-         * back to nothing at all. tools/iconv-test.sh found it in
-         * thirteen charsets at once, which is what a sentinel sharing a
-         * value with real data looks like from the outside. */
         if (cp == REPLACEMENT_UNASSIGNED) {
             return -1;
         }
-        /* A linear scan of 128 entries. The alternative is a reverse
-         * table per charset - 26 more tables, to save 64 comparisons on
-         * a path that is already one branch per character. Measured
-         * nowhere, so not optimised; see CLAUDE.md on that. */
         for (int i = 0; i < 128; i++) {
             if (c->to_tbl[i] == (uint16_t)cp) {
                 if (room < 1) {
@@ -466,7 +371,7 @@ static int encode(struct iconv_cd *c, uint32_t cp, unsigned char *out,
         out[be ? 1 : 0] = (unsigned char)(cp & 0xFF);
         return 2;
     }
-    default: { /* UTF-32 */
+    default: {
         int be = c->to == ENC_UTF32BE;
         if (room < 4) {
             return 0;
@@ -488,10 +393,6 @@ size_t iconv(iconv_t cdp, char **inbuf, size_t *inbytesleft,
         return (size_t)-1;
     }
     if (!inbuf || !*inbuf) {
-        /* "Reset to the initial state". No charset here has a shift
-         * state, so the whole of that state is the BOM bookkeeping - and
-         * the endianness, which a BOM on the previous stream may have
-         * flipped. */
         c->from = c->from_initial;
         c->from_bom_pending = c->from_has_bom;
         c->to_bom_pending = c->to_has_bom;
@@ -503,9 +404,6 @@ size_t iconv(iconv_t cdp, char **inbuf, size_t *inbytesleft,
     size_t inleft = *inbytesleft;
     size_t outleft = outbytesleft ? *outbytesleft : 0;
 
-    /* A BOM on the way out goes first, and only once. It is written
-     * before the loop so that a full output buffer reports E2BIG with
-     * nothing consumed, rather than after a character has gone. */
     if (c->to_bom_pending) {
         int n = encode(c, 0xFEFF, out, outleft);
         if (n == 0) {
@@ -519,16 +417,6 @@ size_t iconv(iconv_t cdp, char **inbuf, size_t *inbytesleft,
         *outbytesleft = outleft;
     }
 
-    /* ---- the leading BOM, read as BYTES rather than as a character ---
-     *
-     * This has to happen before decode() sees them, and the reason is
-     * UTF-32: a big-endian stream opened little-endian starts with the
-     * bytes 00 00 FE FF, which reads as 0xFFFE0000 - larger than
-     * U+10FFFF, so the decoder correctly refuses it as an invalid
-     * scalar value and the stream fails with EILSEQ instead of simply
-     * being the other endianness. Deciding the byte order is not a
-     * question a Unicode decoder can answer, because the bytes are not
-     * Unicode yet. */
     if (c->from_bom_pending) {
         int is16 = c->from == ENC_UTF16LE || c->from == ENC_UTF16BE;
         int is32 = c->from == ENC_UTF32LE || c->from == ENC_UTF32BE;
@@ -554,25 +442,17 @@ size_t iconv(iconv_t cdp, char **inbuf, size_t *inbytesleft,
                 *inbuf = (char *)in;
                 *inbytesleft = inleft;
             }
-            /* Either way the question has been asked once. A stream with
-             * no BOM keeps the endianness its name implied, which for
-             * "UTF-16" is big - what the Unicode standard specifies, and
-             * what catches people out, since the common file on disk is
-             * little. */
             c->from_bom_pending = 0;
         } else if (!is16 && !is32) {
-            c->from_bom_pending = 0; /* nothing else carries one */
+            c->from_bom_pending = 0;
         }
-        /* Too few bytes to tell yet: leave it pending. The loop below
-         * will report EINVAL, the caller will come back with more, and
-         * this runs again. */
     }
 
     while (inleft > 0) {
         uint32_t cp;
         int used = decode(c, in, inleft, &cp);
         if (used == 0) {
-            errno = EINVAL; /* ends mid-character */
+            errno = EINVAL;
             return (size_t)-1;
         }
         if (used < 0) {
@@ -585,10 +465,9 @@ size_t iconv(iconv_t cdp, char **inbuf, size_t *inbytesleft,
             return (size_t)-1;
         }
         if (wrote < 0) {
-            errno = EILSEQ; /* the target charset has no such character */
+            errno = EILSEQ;
             return (size_t)-1;
         }
-        /* Both cursors move only now, together - see the file header. */
         in += used;
         inleft -= (size_t)used;
         out += wrote;
@@ -598,5 +477,5 @@ size_t iconv(iconv_t cdp, char **inbuf, size_t *inbytesleft,
         *outbuf = (char *)out;
         *outbytesleft = outleft;
     }
-    return 0; /* nothing here converts approximately, so never non-zero */
+    return 0;
 }

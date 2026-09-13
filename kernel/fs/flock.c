@@ -1,18 +1,14 @@
-/* kernel/fs/flock.c - M100: POSIX record locks. See flock.h. */
 #include "flock.h"
 
 typedef struct {
     uint8_t used;
-    uint8_t type;   /* OS_FLOCK_RD or OS_FLOCK_WR */
+    uint8_t type;
     int pid;
     uint32_t ino;
-    uint64_t start; /* inclusive */
-    uint64_t end;   /* exclusive; FLOCK_EOF for "to end of file" */
+    uint64_t start;
+    uint64_t end;
 } flock_entry_t;
 
-/* An open-ended lock reaches every byte the file will ever have, so its
- * end is the largest offset there is. A lock over [x, FLOCK_EOF) then
- * conflicts with any lock at or past x, which is what "to EOF" means. */
 #define FLOCK_EOF UINT64_MAX
 
 static flock_entry_t table[FLOCK_MAX];
@@ -50,9 +46,6 @@ static flock_entry_t *claim(void) {
     return (flock_entry_t *)0;
 }
 
-/* The first lock held by somebody else that stands in the way of `type`
- * over [start, end). Two read locks never conflict; anything else
- * overlapping does. */
 static const flock_entry_t *conflict(uint32_t ino, int pid, int type,
                                      uint64_t start, uint64_t end) {
     for (int i = 0; i < FLOCK_MAX; i++) {
@@ -75,7 +68,7 @@ int flock_test(uint32_t ino, int pid, int type, uint64_t start, uint64_t len,
                os_flock_t *out) {
     uint64_t end = range_end(start, len);
     const flock_entry_t *e = conflict(ino, pid, type, start, end);
-    out->whence = 0; /* SEEK_SET: the answer is absolute whatever the question was */
+    out->whence = 0;
     if (!e) {
         out->type = OS_FLOCK_UNLCK;
         out->start = 0;
@@ -95,11 +88,6 @@ int flock_set(uint32_t ino, int pid, int type, uint64_t start, uint64_t len) {
     if (type != OS_FLOCK_UNLCK && conflict(ino, pid, type, start, end)) {
         return FLOCK_CONFLICT;
     }
-    /* Everything below changes the table, so the room has to be known
-     * first: carving the range out of an own lock that strictly contains
-     * it costs one entry (the lock becomes two), and recording the new
-     * lock costs another. A process's own locks are disjoint, so at most
-     * one of them can strictly contain the range. */
     int needed = type != OS_FLOCK_UNLCK ? 1 : 0;
     for (int i = 0; i < FLOCK_MAX; i++) {
         const flock_entry_t *e = &table[i];
@@ -111,15 +99,13 @@ int flock_set(uint32_t ino, int pid, int type, uint64_t start, uint64_t len) {
     if (free_entries() < needed) {
         return FLOCK_FULL;
     }
-    /* 1. Carve [start, end) out of this process's own locks on the file,
-     *    whatever their type: the new lock replaces them there. */
     for (int i = 0; i < FLOCK_MAX; i++) {
         flock_entry_t *e = &table[i];
         if (!e->used || e->ino != ino || e->pid != pid || !overlaps(e, start, end)) {
             continue;
         }
         if (e->start < start && e->end > end) {
-            flock_entry_t *tail = claim(); /* counted above, so it is there */
+            flock_entry_t *tail = claim();
             tail->type = e->type;
             tail->pid = pid;
             tail->ino = ino;
@@ -137,10 +123,6 @@ int flock_set(uint32_t ino, int pid, int type, uint64_t start, uint64_t len) {
     if (type == OS_FLOCK_UNLCK) {
         return 0;
     }
-    /* 2. Record the lock, absorbing any own lock of the same type that
-     *    touches it, so that locking [0,10) and then [10,20) is one
-     *    entry rather than two - the table is small and sqlite's
-     *    lock/unlock pattern would otherwise fragment it. */
     for (int i = 0; i < FLOCK_MAX; i++) {
         flock_entry_t *e = &table[i];
         if (!e->used || e->ino != ino || e->pid != pid || e->type != type) {

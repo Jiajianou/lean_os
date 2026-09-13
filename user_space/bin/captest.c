@@ -1,24 +1,3 @@
-/* user_space/bin/captest.c
- *
- * M65's self-test, in user space for the third time and the same reason
- * as badptr.c (M52), libctest.c (M63) and nettest.c (M64): what is new
- * is a *boundary at the syscall*, and a test that ran inside the kernel
- * would be on the wrong side of it.
- *
- * This program is granted nothing beyond CAP_APP_DEFAULT by the manifest
- * in system_api/include/caps.h, and that is the point - almost every
- * assertion here is that something it tried was refused. An ordinary
- * desktop application is what this program is pretending to be, and the
- * claim is that an ordinary desktop application cannot paint on the
- * screen, cannot read the clipboard, cannot enumerate processes, cannot
- * open a socket, cannot change the resolution, cannot set the clock and
- * cannot switch the machine off.
- *
- * The two things it *can* do are checked too, because a capability model
- * that refuses everything is indistinguishable from a broken kernel.
- *
- * Exit 0 for all-passed, 1 otherwise.
- */
 #include <stdio.h>
 #include <string.h>
 
@@ -42,11 +21,9 @@ static void check(int ok, const char *what) {
 int main(int argc, char **argv) {
     uint32_t mine = (uint32_t)sys_getcaps();
 
-    /* ---- the manifest was applied at all ------------------------------ */
     check(mine == CAP_APP_DEFAULT,
           "this program did not start with the default application capability set");
 
-    /* ---- what an application may not do -------------------------------- */
     check((uint64_t)sys_fb_map() == (uint64_t)-1, "an ordinary program mapped the framebuffer");
 
     char clip[16];
@@ -64,20 +41,8 @@ int main(int argc, char **argv) {
 
     check(sys_audio_claim() < 0, "an ordinary program claimed the sound hardware");
 
-    /* Not tested by *calling* it: a successful SYS_shutdown does not
-     * return, so an unrefused one would end the machine mid-self-test
-     * and leave no evidence of why. The check is that the capability is
-     * absent, which is the same claim the gate makes. */
     check((mine & CAP_POWER) == 0, "an ordinary program holds the power capability");
 
-    /* ---- who you may signal -------------------------------------------- */
-    /* argv[1] is the pid of a task the boot self-test spawned just for
-     * this: something alive that is emphatically not one of this
-     * program's children. (It cannot be init - init does not exist yet
-     * when this runs, and a pid nothing holds would make this check pass
-     * vacuously.) Without CAP_KILL_ANY the kill must be refused - and
-     * the return code is only half the assertion: the boot self-test
-     * checks that the victim is still running afterwards. */
     int victim = 0;
     if (argc > 1) {
         for (const char *p = argv[1]; *p >= '0' && *p <= '9'; p++) {
@@ -91,10 +56,6 @@ int main(int argc, char **argv) {
         check(0, "no victim pid on the command line - nothing to prove the kill refusal against");
     }
 
-    /* But a parent may always end what it started, capability or not -
-     * the relationship that gave you the pid is what entitles you to use
-     * it, and a launcher that cannot stop its own children is not a
-     * launcher. */
     long child = sys_spawn("/bin/hello", 0);
     if (child > 0) {
         check(sys_kill((int)child, SIGKILL) == 0, "a program could not kill its own child");
@@ -103,16 +64,10 @@ int main(int argc, char **argv) {
         check(0, "could not spawn a child to test signalling one");
     }
 
-    /* ---- what it may do ------------------------------------------------ */
-    /* Geometry is not authority: every program is entitled to know how
-     * big the screen is, and gating that would break layout in programs
-     * that never touch a pixel of it. */
     wm_fb_info_t fb;
     check(sys_fb_info(&fb) == 0, "an ordinary program could not ask the screen's size");
     check(fb.width > 0 && fb.height > 0, "the screen geometry came back empty");
 
-    /* And it can use the filesystem, which is nearly the whole of what
-     * CAP_APP_DEFAULT is. */
     const char *path = "/tmp/captest.txt";
     check(sys_writefile(path, "kept", 4) == 0, "an ordinary program could not write a file");
     char back[8];
@@ -121,13 +76,9 @@ int main(int argc, char **argv) {
     check(memcmp(back, "kept", 4) == 0, "the file read back wrong");
     check(sys_unlink(path) == 0, "an ordinary program could not delete its own file");
 
-    /* ---- dropping is one-way ------------------------------------------- */
     long after = sys_dropcaps(0);
     check(after == 0, "sys_dropcaps(0) did not clear every capability");
     check(sys_getcaps() == 0, "capabilities came back after being dropped");
-    /* The whole model rests on this: nothing anywhere can put a bit
-     * back. sys_dropcaps is the only call that touches the mask and it
-     * only ever ANDs, so asking for everything gets nothing. */
     check(sys_dropcaps(CAP_ALL) == 0, "sys_dropcaps handed capabilities back");
     check(sys_writefile("/tmp/captest2.txt", "no", 2) < 0,
           "a program that dropped CAP_FS_WRITE could still write a file");

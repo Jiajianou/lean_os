@@ -1,43 +1,10 @@
-/* user_space/bin/badptr.c
- *
- * M52's garbage-argument matrix, and the reason it is a program rather
- * than a block in kernel.c: the checks it tests only apply to ring-3
- * callers. syscall.c's user_range_ok returns immediately for a task
- * sharing the kernel's address space - a kernel thread passing kernel
- * pointers is doing exactly what it is supposed to - so every row of a
- * matrix run from kernel_main would take that early return and prove
- * nothing at all.
- *
- * The matrix is a table rather than prose, which is the point: adding a
- * syscall that takes a pointer without adding a row here is a visible
- * omission, and every row is exercised against every shape of bad
- * pointer rather than against whichever one somebody thought of.
- *
- * The five shapes, all derived here rather than taken from kernel
- * headers - kernel/proc/proc.h is not on a user program's include path,
- * and a program that could only be written by reading the kernel's own
- * constants would not be testing the interface:
- *
- *   BAD_NULL       0
- *   BAD_KERNEL     an address in the kernel's identity map
- *   BAD_BELOW      one byte below the private region's base
- *   BAD_UNMAPPED   inside the private region, nothing mapped there
- *   BAD_STRADDLE   a real, mapped byte whose range runs one past the end
- *                  of that page into an unmapped one
- *   BAD_OVERFLOW   a real pointer with a length that overflows the range
- *
- * Exit code is the number of rows that were *not* refused, so the [m52]
- * self-test can assert 0 and the log says which ones if not.
- */
-#include "syscall.h" /* system_api/include/syscall.h - SYS_* numbers, used raw here */
+#include "syscall.h"
 #include "syscall_wrappers.h"
 
 #define PAGE_SIZE 4096ULL
 
-/* Substituted per row - see run_row. Chosen so they cannot collide with
- * a real argument value any row wants to pass. */
-#define P_PTR 0xF0F0F0F0F0F0F001ULL /* this slot takes the bad pointer under test */
-#define P_LEN 0xF0F0F0F0F0F0F002ULL /* this slot takes the length that goes with it */
+#define P_PTR 0xF0F0F0F0F0F0F001ULL
+#define P_LEN 0xF0F0F0F0F0F0F002ULL
 
 typedef enum {
     BAD_NULL = 0,
@@ -58,15 +25,6 @@ static const char *const BAD_NAME[BAD_COUNT] = {
     "a valid pointer with a length that overflows",
 };
 
-/* Every syscall that dereferences at least one pointer the caller chose.
- * `a[]` is the raw three-argument tuple, with P_PTR marking the pointer
- * slot and P_LEN (where there is one) the length that goes with it.
- *
- * Deliberately absent, and worth naming so their absence reads as a
- * decision rather than an oversight: SYS_shm_free's `vaddr` is an
- * address but never dereferenced (it is unmapped, and its own range
- * check is tested by the kernel-side [m52] block), and SYS_fb_map /
- * SYS_shm_map / SYS_sbrk *return* addresses without taking any. */
 static const struct {
     const char *name;
     long nr;
@@ -125,33 +83,10 @@ static void put_num(long v) {
 
 int main(int argc, char **argv) {
     (void)argc;
-    /* The private region's base is PML4 entry 1, so it is this program's
-     * own load address with the low 39 bits (everything one PML4 entry
-     * covers) masked off - derived from where the linker actually put
-     * this code rather than restated from a kernel header. */
     unsigned long long here = (unsigned long long)(void *)&main;
     unsigned long long region_base = here & ~((1ULL << 39) - 1ULL);
 
-    /* The argument region ends at a page above which nothing is mapped
-     * (kernel/proc/proc.c maps USER_ARG_PAGES frames at USER_ARG_ADDR and
-     * the stack grows *below* it), which is what makes a read that starts
-     * on its last byte cross into nothing.
-     *
-     * M60: taken from `argv` rather than from a string in it. The vector
-     * itself is at a fixed offset into the region's first page, so this
-     * is true even for a program launched with no arguments at all -
-     * where the only string would have been a .rodata "" that is nowhere
-     * near the page this test is about.
-     *
-     * M75: the region became two pages when it grew an environment, and
-     * this number has to move with it or the straddle case straddles into
-     * a page that is now perfectly valid - which is precisely how it
-     * failed, loudly, on the first boot after that change. Kept as a
-     * local constant rather than pulled from a kernel header because
-     * this program deliberately derives everything from where it actually
-     * finds itself; what it cannot derive, it states here next to the
-     * name of the constant it has to agree with. */
-    const unsigned long long ARG_REGION_PAGES = 2; /* kernel/proc/proc.h's USER_ARG_PAGES */
+    const unsigned long long ARG_REGION_PAGES = 2;
     unsigned long long arg_page =
         (unsigned long long)(void *)argv & ~(unsigned long long)(PAGE_SIZE - 1);
     unsigned long long arg_region_last_page = arg_page + (ARG_REGION_PAGES - 1) * PAGE_SIZE;
@@ -169,10 +104,6 @@ int main(int argc, char **argv) {
     int failures = 0;
     for (int r = 0; r < ROW_COUNT; r++) {
         for (int k = 0; k < BAD_COUNT; k++) {
-            /* BAD_STRADDLE and BAD_OVERFLOW only mean anything for a row
-             * whose length the caller chooses. A row with a fixed-size
-             * payload (a struct, an fd pair) has no length to overflow,
-             * and its own straddle case is BAD_UNMAPPED already. */
             int has_len = 0;
             for (int i = 0; i < 3; i++) {
                 if (ROWS[r].a[i] == P_LEN) {
@@ -194,10 +125,6 @@ int main(int argc, char **argv) {
                 }
             }
             long ret = sys_raw(ROWS[r].nr, (long)a[0], (long)a[1], (long)a[2]);
-            /* Every one of these must be an error return. Negative is
-             * the contract for all fourteen; the one that matters more
-             * is that we are still here to read it at all, since before
-             * M52 half of these would have faulted the kernel. */
             if (ret >= 0) {
                 failures++;
                 put("[badptr] ");

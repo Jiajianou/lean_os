@@ -1,25 +1,3 @@
-/* tests/harfbuzz/hbshape.c - M100: harfbuzz, graded against itself.
- *
- * The same shape as tests/freetype/ftrender.c and for the same reason:
- * harfbuzz's own tests want glib, python and a corpus, and "the text
- * came out shaped" is not an assertion. So this is compiled twice from
- * the same source - for the host against a host build of harfbuzz, and
- * for the machine against the one this project's compiler built - and
- * the two outputs must be byte-identical. harfbuzz on another machine
- * decides what the right shaping is.
- *
- * What it reaches: the OpenType shaper over DejaVu Sans's GSUB and GPOS
- * tables - Latin ligatures (fi, ffl), kerning through GPOS pair
- * adjustment, Greek and Cyrillic, Arabic joining (initial, medial,
- * final forms substituted per letter, run right-to-left), Hebrew
- * with combining marks positioned by GPOS - and, through hb-ft, the
- * same font served by the freetype beside it in the sysroot, so that
- * harfbuzz's freetype integration is graded as well as its own font
- * loader. Every glyph's id, cluster, advance and offset is printed, and
- * everything is hashed at the end. No floats; `cmp` decides.
- *
- * Usage: hbshape <font.ttf>
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,8 +67,6 @@ int main(int argc, char **argv) {
     }
     printf("harfbuzz %s\n", hb_version_string());
 
-    /* 1. harfbuzz's own font loader: the file as a blob, at 2048 upem
-     *    with no scaling, so positions are font units. */
     hb_blob_t *blob = hb_blob_create_from_file_or_fail(argv[1]);
     if (!blob) {
         printf("could not read %s\n", argv[1]);
@@ -107,10 +83,6 @@ int main(int argc, char **argv) {
     hb_face_destroy(face);
     hb_blob_destroy(blob);
 
-    /* 2. The same text through hb-ft: freetype opens the font and
-     *    answers for advances and extents at 24 px, in 26.6 fixed
-     *    point, so this half is the two libraries agreeing with each
-     *    other as well as with the host. */
     FT_Library lib;
     FT_Face ftface;
     if (FT_Init_FreeType(&lib) != 0 || FT_New_Face(lib, argv[1], 0, &ftface) != 0) {

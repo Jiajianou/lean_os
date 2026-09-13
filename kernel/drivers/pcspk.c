@@ -7,18 +7,10 @@
 #define PIT_COMMAND       0x43
 #define PIT_BASE_FREQ     1193182u
 
-/* Channel 2, low byte then high byte, square-wave mode - the same shape
- * pit.c programs channel 0 with, which is why the two do not interfere:
- * the command byte names the channel it configures. */
 #define PIT_CMD_CHANNEL2     0x80
 #define PIT_CMD_LOHI         0x30
 #define PIT_CMD_MODE3_SQUARE 0x06
 
-/* Port 0x61 (the "system control port" on every PC since the AT): bit 0
- * gates channel 2's output into the speaker, bit 1 connects the speaker.
- * Both have to be set for a sound, and the rest of the byte belongs to
- * other things - so it is read, modified and written back, never
- * assigned. */
 #define SPEAKER_PORT       0x61
 #define SPEAKER_GATE_BITS  0x03
 
@@ -48,11 +40,6 @@ void pcspk_tone(uint32_t freq_hz, uint32_t ms) {
         pcspk_off();
         return;
     }
-    /* The 8254 divides a fixed 1.193182 MHz clock, so the lowest tone it
-     * can make is about 18 Hz (divisor 65535) and the highest useful one
-     * is bounded by the 16-bit divisor at the other end. Anything outside
-     * that is clamped rather than refused: a system beep is not worth an
-     * error path, and a clamped tone is still a tone. */
     uint32_t divisor = PIT_BASE_FREQ / freq_hz;
     if (divisor < 2) {
         divisor = 2;
@@ -70,8 +57,6 @@ void pcspk_tone(uint32_t freq_hz, uint32_t ms) {
         outb(SPEAKER_PORT, (uint8_t)(gate | SPEAKER_GATE_BITS));
     }
 
-    /* Rounded up, so a duration shorter than one tick is still audible
-     * rather than silently nothing. */
     uint64_t ticks = ((uint64_t)ms * PIT_HZ + 999) / 1000;
     if (ticks == 0) {
         ticks = 1;

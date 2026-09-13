@@ -26,12 +26,6 @@ int syscount_timing_enabled(void) {
 }
 
 void syscount_reset(void) {
-    /* Not atomic against concurrent records, and deliberately not: a
-     * reset races with whatever is running on another core no matter how
-     * it is written, and the honest cost of that race is "a handful of
-     * calls either side of the reset land on the wrong side of it".
-     * Locking the whole table on every syscall to make a once-a-profile
-     * operation exact would be the tail wagging the dog. */
     k_memset(table, 0, sizeof(table));
 }
 

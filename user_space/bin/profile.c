@@ -1,59 +1,16 @@
-/* user_space/bin/profile.c - M101
- *
- * Turns the kernel's sample histogram into a report a person can read.
- *
- *   profile start                 begin sampling
- *   profile stop                  stop
- *   profile reset                 throw the histogram away
- *   profile report [n]            the top n addresses (default 20)
- *   profile syscalls [n]          the top n syscalls by call count
- *   profile timing on|off         time syscalls as well as counting them
- *   profile run <secs> <cmd>...   reset, start, spawn, wait, stop, report
- *
- * ---- Why the last one exists ------------------------------------------
- *
- * Because a profile of "whatever the machine happened to be doing" is
- * the profile people accidentally take, and it is dominated by the
- * compositor's idle loop. `profile run` brackets one workload, which is
- * the only shape of measurement this milestone's own question - where
- * does a build's time go - can be asked in.
- *
- * ---- Symbols ----------------------------------------------------------
- *
- * Resolved against /etc/kernel.syms, written by tools/gen-kernel-syms.sh
- * and put on the disk by `make syms`. If it is absent the report prints
- * raw addresses and says why in one line, rather than failing: an
- * unresolved profile is still a profile, and the failure to say so is
- * what would make it look like a broken one.
- */
 #include "symtab.h"
 #include "syscall_wrappers.h"
 
-#include <profile.h> /* system_api - the ops and the structs */
+#include <profile.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* PROF_BUCKETS' worth, which is the most the kernel can ever hand back.
- * Static rather than malloc'd: this program's whole job is to run beside
- * a workload being measured, and a 48 KiB heap request at exactly that
- * moment is the profiler perturbing the thing it profiles. */
 #define MAX_SAMPLES 2048
 static prof_sample_t samples[MAX_SAMPLES];
 
 #define SYMS_PATH "/etc/kernel.syms"
 
-/* Sized against the real file with headroom, and both limits are
- * *checked* rather than trusted - see load_symbols. The kernel this was
- * written against has 763 text symbols in 23 KiB; these are about three
- * times that.
- *
- * The reason the check matters more than the size: a symbol file read
- * only part way through parses cleanly, and every lookup past the
- * truncation point returns the last symbol that did fit. That is a
- * confident wrong name on every line of the report, which is worse than
- * no name at all - so overflowing either limit refuses the whole table
- * rather than using part of it. */
 #define MAX_SYMS 2048
 #define SYMS_TEXT_MAX (64 * 1024)
 static char syms_text[SYMS_TEXT_MAX];
@@ -61,9 +18,6 @@ static symtab_entry_t syms_storage[MAX_SYMS];
 static symtab_t syms;
 static int syms_loaded;
 
-/* Reads the symbol file if it is there. Silent about its absence - the
- * report says so once, in context, rather than here where it would be a
- * warning about something the caller may not care about. */
 static void load_symbols(void) {
     int fd = (int)sys_open(SYMS_PATH, 0);
     if (fd < 0) {
@@ -73,10 +27,6 @@ static void load_symbols(void) {
     int truncated = 0;
     for (;;) {
         if (total >= sizeof(syms_text)) {
-            /* The buffer filled. Either the file is exactly this long -
-             * which one more read will tell us - or there is more of it
-             * than fits, and a partial symbol table is the thing this
-             * must not use. */
             char probe;
             truncated = sys_read(fd, &probe, 1) > 0;
             break;
@@ -102,17 +52,11 @@ static void load_symbols(void) {
         return;
     }
     if (n == MAX_SYMS) {
-        /* Hit the ceiling, so there may be symbols the table does not
-         * have - and the ones it does have would own their addresses.
-         * Same refusal, same reason. */
         printf("profile: %s has more than %d symbols - not using it\n",
                SYMS_PATH, MAX_SYMS);
         return;
     }
     if (!symtab_is_sorted(&syms)) {
-        /* Reported rather than sorted here - see symtab.h. A file that
-         * is not ascending means the generator changed, and resolving
-         * against it would produce confident wrong names. */
         printf("profile: %s is not in ascending order - not using it\n", SYMS_PATH);
         return;
     }
@@ -121,9 +65,6 @@ static void load_symbols(void) {
 
 static void print_name(uint64_t rip, int pid) {
     if (pid != PROF_PID_KERNEL) {
-        /* A user address. There is no symbol file for a user program
-         * here yet, and inventing one from the kernel's would be worse
-         * than an address: it would be a wrong name. */
         printf("  (pid %d) 0x%llx", pid, (unsigned long long)rip);
         return;
     }
@@ -138,9 +79,6 @@ static void print_name(uint64_t rip, int pid) {
     printf("  0x%llx", (unsigned long long)rip);
 }
 
-/* Descending by count. An insertion sort over at most 2048 entries,
- * which is the kind of thing that would be embarrassing in the kernel
- * and is free here - this runs once, after the measurement is over. */
 static void sort_desc(prof_sample_t *a, int n) {
     for (int i = 1; i < n; i++) {
         prof_sample_t key = a[i];
@@ -178,9 +116,6 @@ static int report(int top) {
            (unsigned long long)st.user, pct(st.user, st.samples),
            (unsigned long long)st.idle, pct(st.idle, st.samples));
     if (st.overflow) {
-        /* Loud, because a report taken against a full table is a report
-         * about the first 2048 addresses the workload touched, which is
-         * a different thing from a profile. */
         printf("WARNING: %llu samples did not fit - this report is partial\n",
                (unsigned long long)st.overflow);
     }
@@ -215,10 +150,6 @@ static int syscalls_report(int top) {
         return 1;
     }
 
-    /* Ranked by calls, carrying the number along so the name survives
-     * the sort. A parallel array rather than a struct because
-     * prof_syscount_t is the ABI's shape and adding a field to it here
-     * would be two layouts for one struct - the thing Q3 was about. */
     static int order[SYSCALL_COUNT];
     int live = 0;
     uint64_t total = 0;
@@ -315,28 +246,12 @@ int main(int argc, char **argv) {
             printf("profile: cannot start (needs process-list)\n");
             return 1;
         }
-        /* argv[3] onward is the command and its arguments, and it is
-         * already NULL-terminated - main's argv is. So the child's argv
-         * is a slice of this one rather than a copy. */
         long pid = sys_spawnve(argv[3], (const char *const *)&argv[3], NULL);
         if (pid < 0) {
             sys_profile(PROFILE_OP_STOP, NULL, 0);
             printf("profile: cannot start %s\n", argv[3]);
             return 1;
         }
-        /* Wait for the child, but not forever: a workload that hangs
-         * should still produce the profile of it hanging, which is
-         * usually the report somebody wanted.
-         *
-         * M98: parked rather than yielded, and on a one-core machine the
-         * difference is the whole measurement. `sys_yield` leaves this
-         * task READY, so the scheduler alternates between the profiler
-         * and the workload every quantum - the thing being profiled runs
-         * at half speed and half the samples land in the waiter. A
-         * 200 ms park costs five wakes a second and gets the CPU out of
-         * the way, which is what a profiler owes the thing it is
-         * measuring. sys_waitfds with no descriptors and a timeout is
-         * this machine's sleep (see libc's sleep_ms). */
         long deadline = sys_uptime_ms() + (long)secs * 1000;
         for (;;) {
             if (sys_wait_nb((int)pid) != -2) {
@@ -354,12 +269,6 @@ int main(int argc, char **argv) {
     return usage();
 }
 
-/* The names, for the report. Deliberately a table here rather than a
- * string in system_api's syscall.h: that header is the ABI, it is
- * included by the kernel, and adding ninety-nine string literals to
- * every translation unit that names a syscall number would put a
- * kilobyte of text in the kernel to make one user program's output
- * prettier. A number with no name still ranks correctly. */
 static const char *syscall_name(int num) {
     switch (num) {
     case SYS_write:       return "write";

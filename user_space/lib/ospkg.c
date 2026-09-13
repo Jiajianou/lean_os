@@ -1,35 +1,6 @@
-/* user_space/lib/ospkg.c - M111: reading a package, and refusing one.
- *
- * See ospkg.h for the format. This file is the half that matters: it is
- * the only code on this machine that reads bytes somebody else produced
- * and then creates files from them, so every refusal in it is a rule
- * about what a package may be.
- *
- * **The order of the checks is the design.** A reader that unpacks and
- * then validates has already lost; so has one that trusts a length field
- * to bound the read that checks the length field. So:
- *
- *   1. Is the file long enough to hold a header at all?
- *   2. Is it a package, of a format this can read?
- *   3. Do the three counts in the header fit inside the file, and inside
- *      the ceilings? (Arithmetic done so that no product can wrap.)
- *   4. Does the body hash match? Everything after this point is reading
- *      bytes that are known to be the bytes somebody built.
- *   5. Manifest, paths, extents, per-file hashes.
- *
- * Only step 4 makes the rest cheap to reason about, and only steps 1-3
- * make step 4 safe to attempt. Nothing here allocates.
- *
- * Compiled for the target (into /bin/os) and for the host (tools/os-pkg.c
- * and tests/test_ospkg.c) from this one source. A package built by the
- * host tool and verified by the machine is then a comparison between two
- * ends of the same code rather than between two implementations, which
- * is the weaker claim - so tools/pkg-test.sh makes the stronger one
- * separately, by hashing with the host's own `shasum`.
- */
 #include "ospkg.h"
 
-#include "caps.h" /* system_api/include/caps.h - CAP_* and the names */
+#include "caps.h"
 
 static size_t osp_strlen(const char *s) {
     size_t n = 0;
@@ -68,23 +39,6 @@ const char *osp_strerror(int err) {
     }
 }
 
-/* ---- what a path in a package may be ---------------------------------
- *
- * The list is short and every entry on it is a real attack or a real
- * accident:
- *
- *   absolute        writes outside the package prefix
- *   "..", "."       the same, by arithmetic
- *   empty component "a//b" resolves differently in different readers,
- *                   and a rule that depends on the reader is not a rule
- *   backslash       refused because this machine's separator is '/' and
- *                   a name containing '\' is either a Windows path that
- *                   escaped or somebody testing what this does with one
- *   control bytes   a name with a newline in it cannot be reported
- *                   truthfully in any log, index or error message, which
- *                   makes it exactly the name to attack a log with
- *   trailing '/'    a directory pretending to be a file
- */
 int ospkg_check_path(const char *path) {
     if (!path || !path[0]) {
         return -OSP_E_PATH;
@@ -94,23 +48,23 @@ int ospkg_check_path(const char *path) {
         n++;
     }
     if (n >= OSP_MAX_PATH) {
-        return -OSP_E_PATH; /* unterminated within the record */
+        return -OSP_E_PATH;
     }
     if (path[0] == '/' || path[n - 1] == '/') {
         return -OSP_E_PATH;
     }
-    size_t comp = 0; /* length of the component being scanned */
+    size_t comp = 0;
     for (size_t i = 0; i <= n; i++) {
         unsigned char c = (unsigned char)path[i];
         if (c == '/' || c == '\0') {
             if (comp == 0) {
-                return -OSP_E_PATH; /* "" or "//" */
+                return -OSP_E_PATH;
             }
             if (comp == 1 && path[i - 1] == '.') {
-                return -OSP_E_PATH; /* "." */
+                return -OSP_E_PATH;
             }
             if (comp == 2 && path[i - 1] == '.' && path[i - 2] == '.') {
-                return -OSP_E_PATH; /* ".." */
+                return -OSP_E_PATH;
             }
             comp = 0;
             continue;
@@ -123,16 +77,6 @@ int ospkg_check_path(const char *path) {
     return OSP_OK;
 }
 
-/* ---- the manifest -----------------------------------------------------
- *
- * "key: value", one per line, '#' starts a comment, blank lines ignored.
- * An unknown key is IGNORED rather than refused, and that asymmetry is
- * deliberate: an unknown *capability* is refused because it changes what
- * the package may do, and an unknown *key* is ignored because a package
- * built by a later version of this tool should still install if
- * everything this version enforces is present. The rule is "refuse what
- * you cannot enforce, ignore what you do not need".
- */
 static void copy_field(char *dst, size_t cap, const char *src, size_t len) {
     size_t i = 0;
     for (; i < len && i < cap - 1; i++) {
@@ -167,10 +111,8 @@ int ospkg_parse_manifest(const char *text, size_t len, osp_manifest_t *out) {
         }
         size_t end = i;
         if (i < len) {
-            i++; /* step over the newline */
+            i++;
         }
-        /* Trailing '\r', so a manifest that made a round trip through a
-         * text editor on another system still parses. */
         if (end > start && text[end - 1] == '\r') {
             end--;
         }
@@ -186,7 +128,7 @@ int ospkg_parse_manifest(const char *text, size_t len, osp_manifest_t *out) {
             colon++;
         }
         if (colon >= end) {
-            return -OSP_E_MANIFEST; /* a line that is not key: value */
+            return -OSP_E_MANIFEST;
         }
         const char *key = text + start;
         size_t keylen = colon - start;
@@ -218,22 +160,15 @@ int ospkg_parse_manifest(const char *text, size_t len, osp_manifest_t *out) {
         } else if (field_matches(key, keylen, "license")) {
             copy_field(out->license, sizeof(out->license), val, vlen);
         }
-        /* else: an unknown key, ignored - see the note above. */
     }
 
     if (!out->name[0] || !out->version[0]) {
         return -OSP_E_MANIFEST;
     }
-    /* A package name becomes a directory name under /pkg, so it obeys the
-     * same rule every other path in the package does. Same for the
-     * version, which is the directory below it. */
     if (ospkg_check_path(out->name) != OSP_OK ||
         ospkg_check_path(out->version) != OSP_OK) {
         return -OSP_E_MANIFEST;
     }
-    /* ...and neither may contain a '/', because they are ONE component
-     * each. check_path allows "a/b", which is right for a file inside a
-     * package and wrong for the package's own name. */
     for (const char *p = out->name; *p; p++) {
         if (*p == '/') {
             return -OSP_E_MANIFEST;
@@ -275,12 +210,6 @@ int ospkg_open(const uint8_t *bytes, size_t len, osp_t *out) {
     if (h.format != 1) {
         return -OSP_E_FORMAT;
     }
-    /* The alignment rule, from both ends. The manifest is padded to a
-     * multiple of 8 so that the file table starts 8-aligned, and the
-     * buffer has to be 8-aligned for that to mean anything - see
-     * ospkg.h. A package that does not obey it is refused rather than
-     * read unaligned, because the point of reading the records in place
-     * is that nothing is copied and nothing is allocated. */
     if ((h.meta_bytes & 7u) != 0) {
         return -OSP_E_FORMAT;
     }
@@ -291,22 +220,10 @@ int ospkg_open(const uint8_t *bytes, size_t len, osp_t *out) {
         h.meta_bytes > 64u * 1024u) {
         return -OSP_E_HUGE;
     }
-    /* A reserved field must be zero, and refusing a package that puts
-     * something there is the only thing that keeps it reserved. A field
-     * that is ignored is a field a later format version cannot use,
-     * because packages will already be in the world with rubbish in it.
-     * (Found by the mutation harness: the line that reads this field
-     * could be broken with nothing noticing, which is what a field
-     * nothing checks looks like from the outside.) */
     if (h.reserved != 0) {
         return -OSP_E_FORMAT;
     }
 
-    /* Every one of these is computed so it cannot wrap: the ceilings
-     * above bound each term, and the sum of the bounds is far below
-     * 2^63. That is the argument, and it is here rather than assumed
-     * because "the length field was hostile" is how this kind of reader
-     * is broken. */
     uint64_t table_bytes = (uint64_t)h.file_count * (uint64_t)OSP_FILE_BYTES;
     uint64_t need = (uint64_t)OSP_HEADER_BYTES + (uint64_t)h.meta_bytes +
                     table_bytes + h.payload_bytes;
@@ -314,7 +231,6 @@ int ospkg_open(const uint8_t *bytes, size_t len, osp_t *out) {
         return -OSP_E_SHORT;
     }
 
-    /* The body hash, before anything below it is believed. */
     uint8_t digest[SHA256_DIGEST_BYTES];
     sha256(bytes + OSP_HEADER_BYTES, (size_t)(need - OSP_HEADER_BYTES), digest);
     if (!sha256_equal(digest, h.body_sha256)) {
@@ -331,9 +247,6 @@ int ospkg_open(const uint8_t *bytes, size_t len, osp_t *out) {
         return rc;
     }
 
-    /* The file table is copied nowhere: the records are read in place,
-     * which is why osp_file_t's layout has to match the wire exactly.
-     * Checked at compile time below rather than trusted. */
     const osp_file_t *files = (const osp_file_t *)(const void *)table;
 
     for (uint32_t i = 0; i < h.file_count; i++) {
@@ -347,8 +260,6 @@ int ospkg_open(const uint8_t *bytes, size_t len, osp_t *out) {
             off + sz > h.payload_bytes) {
             return -OSP_E_OVERLAP;
         }
-        /* Two records naming the same path would make "what is installed"
-         * depend on the order of the loop that installs it. */
         for (uint32_t j = 0; j < i; j++) {
             const char *a = f->path, *b = files[j].path;
             size_t k = 0;
@@ -437,9 +348,5 @@ void ospkg_caps_to_names(uint32_t caps, char *out, size_t cap) {
     }
 }
 
-/* The wire layout is the struct layout. If a compiler ever disagrees,
- * this stops the build rather than producing a package nothing else can
- * read - which is the failure that would otherwise be found by a machine
- * refusing every package with OSP_E_PATH for no visible reason. */
 _Static_assert(sizeof(osp_file_t) == OSP_FILE_BYTES, "osp_file_t is the wire record");
 _Static_assert(sizeof(osp_header_t) == OSP_HEADER_BYTES, "osp_header_t is the wire header");

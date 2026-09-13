@@ -1,73 +1,9 @@
-/* user_space/libc/include/errno.h - M80 groundwork
- *
- * `errno`, and an honest account of what it can and cannot tell you
- * here.
- *
- * This kernel's syscalls return -1 for almost every kind of failure and
- * do not carry a reason: SYS_open returns -1 for a path that does not
- * exist, for a path that is a directory, and for a descriptor table that
- * is full, and there is nowhere in its ABI for it to say which. So an
- * errno set from those returns would be a guess dressed as a diagnosis.
- *
- * What is here is therefore deliberately modest, and the modesty is the
- * point:
- *
- *  - `errno` is a real, writable variable, because that is what a C
- *    program written elsewhere expects to find and half of them set it
- *    themselves.
- *  - the E* numbers match Linux's, so a program comparing against
- *    ENOENT means here what it meant there.
- *  - libc sets it only where this system genuinely knows the reason,
- *    which today is the handful of places a wrapper checks its own
- *    arguments before making a syscall at all.
- *
- * The alternative - inventing ENOENT for every failed open - would be
- * exactly the kind of plausible fiction this project declined to write
- * for uids (M65) and for st_mode (M77). When a syscall here grows a real
- * error code, this is where it surfaces.
- *
- * M98: the first one grew. SYS_stat/SYS_lstat return -OS_ERR_NOENT for
- * a path that does not resolve - a fact, not a guess, because that is
- * the only way leanfs_stat can fail - and stat()/lstat() turn it into
- * ENOENT. The program that forced it was `ar`, whose create-an-archive
- * path is written as "stat, and proceed only if errno == ENOENT".
- */
 #pragma once
 
-/* M97: C++ linkage.
- *
- * Without this every declaration below is a C++ function when a C++
- * program includes it, so `malloc` in a header and `malloc` in libc.a
- * are different symbols and nothing links. It cost a whole libstdc++
- * build to find, and the error names the caller rather than the header:
- * "undefined reference to `malloc(unsigned long)`" - with the argument
- * list, which is the tell. */
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ---- M97: errno is a MACRO, and that is not cosmetic -----------------
- *
- * It was `extern __thread int errno;` from M96, which is a per-thread
- * variable and works. What it is not is what every other C library
- * provides, and the difference is load-bearing: portable code guards its
- * own fallback declaration with `#ifndef errno`, because `errno` being a
- * macro is what the C standard actually specifies. GCC's own
- * `gcc/tsystem.h` does exactly that -
- *
- *     #ifndef errno
- *     extern int errno;
- *     #endif
- *
- * - and a variable declaration does not satisfy a macro test, so libgcc
- * declared a NON-thread-local `errno` over ours and would not compile.
- * That is how this was found: building GCC's own runtime for this
- * target.
- *
- * Still one int per thread. `__errno_location` is a leaf function that
- * returns the address of a `__thread` int, which the compiler turns into
- * one `%fs:`-relative lea - the same cost M96's note claimed, with the
- * spelling every other libc uses. */
 int *__errno_location(void);
 #define errno (*__errno_location())
 
@@ -85,7 +21,7 @@ int *__errno_location(void);
 #define ENOMEM  12
 #define EACCES  13
 #define EFAULT  14
-#define ENOTBLK 15 /* M89: "not a block device" - nothing here is one, so this is only ever the answer, never the question */
+#define ENOTBLK 15
 #define EBUSY   16
 #define EEXIST  17
 #define EXDEV   18
@@ -108,23 +44,9 @@ int *__errno_location(void);
 #define ENOSYS  38
 #define ENOTEMPTY 39
 #define ELOOP   40
-/* M89: "no medium found" - what a removable drive with nothing in it
- * reports. Nothing here can produce it; it is defined so that a program
- * which tests for it compiles, and it will never be the answer. */
 #define ENOMEDIUM 123
-/* M89: "no data available" - what a read of an extended attribute that
- * does not exist reports. Nothing here produces it either; see
- * <sys/xattr.h>, which refuses with ENOTSUP one level before this could
- * be reached. */
 #define ENODATA 61
-/* M88: a byte sequence that is not valid in this locale's encoding.
- * Unlike the socket codes below, this one is set: every conversion in
- * <wchar.h> reports a malformed or overlong UTF-8 sequence with it, and
- * a program that reads a file of unknown bytes will see it. */
 #define EILSEQ  84
-/* The socket and blocking-operation codes. Present because a program
- * that compares errno against them has to compile; nothing on this
- * machine sets them yet, for the reason at the top of this file. */
 #define ENOTSOCK 88
 #define EOPNOTSUPP 95
 #define EADDRINUSE 98
@@ -134,10 +56,6 @@ int *__errno_location(void);
 #define EALREADY 114
 #define ECONNRESET 104
 #define ECONNABORTED 103
-/* M89: the rest of the socket errors, at Linux's numbers like the others
- * above. These ones ARE set: <sys/socket.h>'s refusals report through
- * them - a family this stack does not have, an option it cannot set, a
- * peer it cannot name. */
 #define ENOTCONN        107
 #define EAFNOSUPPORT    97
 #define ESOCKTNOSUPPORT 94
@@ -149,24 +67,7 @@ int *__errno_location(void);
 #define ENETDOWN        100
 #define ENOTSUP EOPNOTSUPP
 #define EHOSTUNREACH 113
-/* M97: ENETUNREACH was defined twice, here and thirty lines up, both as
- * 101. Harmless and still wrong - the second one is deleted rather than
- * left, because the next person to change one of them would have changed
- * the wrong one. */
 
-/* ---- M97: the codes a C++ standard library names ---------------------
- *
- * <system_error> builds a table of every errno constant the standard
- * lists, and <mutex> throws EDEADLK from once_flag when a call to
- * call_once re-enters itself. Neither is optional: an absent macro is a
- * compile error inside a system header, not a feature this OS declines.
- *
- * The values are Linux's, which is what every other number in this file
- * already is - not because Linux is the standard but because a program
- * ported here that hard-codes one (and they do) should find the number
- * it expects. Nothing here returns most of them; they exist so that code
- * that names them compiles, and a code this OS never produces is a code
- * no program will see. */
 #define EDEADLK      35
 #define ENOLCK       37
 #define EADDRNOTAVAIL 99

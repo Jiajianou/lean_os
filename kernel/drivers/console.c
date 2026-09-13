@@ -42,9 +42,6 @@ static void newline(void) {
 }
 
 void console_init(void) {
-    /* Whole pixels only - any leftover fraction of a cell at the right/
-     * bottom edge is simply never drawn to, same as any other fixed-cell
-     * text console over an arbitrary-resolution display. */
     cols = fb_width() / FONT_WIDTH;
     rows = fb_height() / FONT_HEIGHT;
     cur_col = 0;

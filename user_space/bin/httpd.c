@@ -1,20 +1,3 @@
-/* user_space/bin/httpd.c
- *
- * M73's test server, and it exists so that the self-test needs no host
- * network at all.
- *
- * Same reasoning as M66's loopback TCP test: the point is to check *this*
- * machine's client against a server whose every byte is known, not to
- * check whether the machine running QEMU happens to have internet. It
- * serves exactly what it is told to and exits, so a test can assert on
- * bytes rather than on the weather.
- *
- *   httpd PORT       serve one request, then exit
- *
- * Deliberately serves ONE request and stops. A test wants a server that
- * is finished when the test is, and a loop would be a process the test
- * then has to remember to kill.
- */
 #include <stdio.h>
 #include <string.h>
 
@@ -57,9 +40,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Drain the request. Not parsed - this server has exactly one answer
-     * and giving it regardless is honest for a fixture; pretending to
-     * route would be a second thing to get wrong. */
     char req[512];
     long rdeadline = sys_uptime_ms() + 3000;
     while (sys_uptime_ms() < rdeadline) {
@@ -94,7 +74,6 @@ int main(int argc, char **argv) {
         }
         sent += n;
     }
-    /* Let the bytes drain before the close turns into a FIN. */
     long drain = sys_uptime_ms() + 500;
     while (sys_uptime_ms() < drain) {
         sys_yield();

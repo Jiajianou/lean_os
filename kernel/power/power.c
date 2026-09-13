@@ -7,28 +7,14 @@
 #include "drivers/pit.h"
 #include "fs/vfs.h"
 #include "sched/sched.h"
-#include "signal.h" /* system_api/include/signal.h */
+#include "signal.h"
 
 static acpi_power_info_t power_info;
 static int power_info_valid;
 
-/* The sleep type S5 ("soft off") wants written into PM1_CNT's SLP_TYP
- * field. Properly this comes from the `\_S5` object in the DSDT, which is
- * AML - and for sixteen milestones this said writing a parser for that
- * was out of scope and used the well-known values instead.
- *
- * M63's stretch goals ended that: acpi_find_s5 reads the real values out
- * of the DSDT (see its own comment for the narrow sense in which it is a
- * parser). These stay as the fallback, and the fallback is not
- * ceremonial - a machine whose DSDT defines `_S5` inside a method is a
- * machine this cannot read, and it should still switch off. 0 is what
- * QEMU's own tables define; 5 is what most physical chipsets
- * historically used. Writing a wrong SLP_TYP is harmless - the machine
- * simply does not sleep - so trying both costs two port writes. */
 static const uint16_t S5_SLEEP_TYPES[] = {0, 5};
 #define S5_SLEEP_TYPE_COUNT ((int)(sizeof(S5_SLEEP_TYPES) / sizeof(S5_SLEEP_TYPES[0])))
 
-/* M63: what the DSDT said, if it said anything. */
 static int s5_from_aml;
 static uint8_t s5_slp_a, s5_slp_b;
 
@@ -36,12 +22,6 @@ static uint8_t s5_slp_a, s5_slp_b;
 #define PM1_SLP_EN        (1u << 13)
 #define PM1_SCI_EN        1
 
-/* QEMU's documented ACPI PM base. The last-resort tier: if the FADT was
- * unreadable (or its PM1a_CNT was 0) this is still the right answer on
- * the emulator this project is developed against, and being explicit
- * about that in the log is the point - a machine that powers off this way
- * has not proved anything about its own ACPI tables. 0xB004 is the older
- * Bochs/QEMU base, kept because it costs one more outw. */
 #define QEMU_PM1A_CNT      0x604
 #define BOCHS_PM1A_CNT     0xB004
 
@@ -51,19 +31,9 @@ static uint8_t s5_slp_a, s5_slp_b;
 
 void power_init(void) {
     power_info_valid = acpi_find_power(&power_info);
-    /* M63: asked once, at boot, rather than on the way down. A shutdown
-     * path is the worst possible place to discover that a table walk
-     * faults - and this way the boot log records what the firmware said
-     * about S5 whether or not anybody ever powers the machine off. */
     s5_from_aml = acpi_find_s5(&s5_slp_a, &s5_slp_b);
 }
 
-/* Hands the PM registers from firmware to the OS, if this platform says
- * that handshake is needed at all (SMI_CMD == 0 means it isn't, which is
- * the normal case under UEFI - the firmware has already done it). Bounded
- * rather than an unbounded poll: a chipset that never sets SCI_EN would
- * otherwise hang the shutdown path, which is the one path that must not
- * hang. */
 static void acpi_enable_if_needed(void) {
     if (!power_info_valid || power_info.smi_cmd == 0 || power_info.pm1a_cnt == 0) {
         return;
@@ -85,20 +55,10 @@ static void write_sleep(uint16_t port, uint16_t slp_typ) {
     outw(port, (uint16_t)((slp_typ << PM1_SLP_TYP_SHIFT) | PM1_SLP_EN));
 }
 
-/* Every tier, in order, each announcing itself before it fires - so the
- * last line in the log is always the mechanism that was actually tried
- * last, whether or not it worked. Returns only if the machine is still
- * on afterwards, which for a successful S5 it never does. */
 static void power_off_now(void) {
     acpi_enable_if_needed();
 
     if (power_info_valid && power_info.pm1a_cnt != 0 && s5_from_aml) {
-        /* The values the firmware itself declared, tried first and on
-         * their own - if the DSDT said what S5 is, guessing afterwards
-         * would only be writing wrong values to a machine that has
-         * already been told the right ones. The well-known list below
-         * still runs if this did not switch the machine off, because a
-         * DSDT that parsed is not a DSDT that was necessarily right. */
         klog_puts("[power] S5 via the FADT's PM1a_CNT (port 0x");
         klog_put_hex32(power_info.pm1a_cnt);
         klog_puts(", SLP_TYP ");
@@ -134,9 +94,6 @@ static void power_off_now(void) {
     pit_sleep_ms(50);
 }
 
-/* Reboot in three tiers, worst case a deliberate triple fault - which is
- * not elegant, but a machine that will not restart at all is worse than
- * one that restarts inelegantly. */
 static void reboot_now(void) {
     if (power_info_valid && power_info.reset_port != 0) {
         klog_puts("[power] reset via the FADT's reset register (port 0x");
@@ -148,17 +105,10 @@ static void reboot_now(void) {
 
     klog_puts("[power] falling back to the 8042 reset pulse (0xFE to port 0x64).\n");
     for (int i = 0; i < 1000 && (inb(KBD_STATUS_PORT) & KBD_INPUT_FULL); i++) {
-        /* Drain the controller's input buffer first - it ignores a
-         * command written while one is still pending. Bounded, for the
-         * same reason acpi_enable_if_needed's poll is. */
     }
     outb(KBD_STATUS_PORT, KBD_CMD_RESET);
     pit_sleep_ms(50);
 
-    /* Triple fault: load a zero-length IDT so the next interrupt has no
-     * handler, then raise one. The CPU faults, fails to deliver the
-     * fault handler, fails again handling *that*, and resets - the
-     * classic last-resort reboot. */
     klog_puts("[power] falling back to a triple fault.\n");
     struct __attribute__((packed)) {
         uint16_t limit;
@@ -172,11 +122,6 @@ int power_orderly_stop(uint64_t grace_ticks) {
     task_t *self = sched_current();
     int total = sched_task_count();
 
-    /* Task 0 is the boot/idle task and the AP idle identities
-     * (sched_init_ap) are the same thing on other cores - neither is a
-     * program anyone asked to run, and killing them is how a machine
-     * stops being able to reach its own shutdown code. They are told
-     * apart the only way this scheduler can: they have no parent. */
     for (int i = 0; i < total; i++) {
         task_t *t = sched_task_by_slot(i);
         if (!t || t == self || t->parent_id < 0 || t->state == TASK_TERMINATED) {
@@ -210,13 +155,7 @@ int power_orderly_stop(uint64_t grace_ticks) {
         killed++;
     }
 
-    /* A SIGKILL is noticed at the target's next syscall or scheduler tick
-     * (sched.c), so this has to wait for the deaths themselves rather
-     * than for the signals to have been posted - the same distinction
-     * kernel.c's selftest_reap exists for. Bounded again: a task that
-     * somehow cannot be killed must not be able to prevent the machine
-     * from powering off. */
-    uint64_t kill_deadline = pit_get_ticks() + 100; /* 100 ticks = ~1s */
+    uint64_t kill_deadline = pit_get_ticks() + 100;
     while (pit_get_ticks() < kill_deadline) {
         int alive = 0;
         for (int i = 0; i < total; i++) {
@@ -236,9 +175,6 @@ int power_orderly_stop(uint64_t grace_ticks) {
 void power_shutdown(int mode) {
     klog_puts(mode == POWER_REBOOT ? "[power] restarting.\n" : "[power] shutting down.\n");
 
-    /* ~1 second, counted in real PIT ticks rather than as a spin - a
-     * grace period measured in loop iterations would mean something
-     * different on every host. */
     int killed = power_orderly_stop(100);
     klog_puts("[power] orderly stop complete (0x");
     klog_put_hex32((uint32_t)killed);
@@ -246,10 +182,6 @@ void power_shutdown(int mode) {
 
     vfs_sync();
 
-    /* Other cores are still running whatever they were running. The
-     * sleep/reset write below stops the whole machine either way, but
-     * halting them first means nothing is touching the disk or the
-     * framebuffer while this finishes. No-op on a single-core boot. */
     smp_halt_other_cpus();
 
     if (mode == POWER_REBOOT) {

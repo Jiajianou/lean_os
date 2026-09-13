@@ -1,45 +1,3 @@
-/* tests/check.h - Q2
- *
- * The whole test framework. There is not a lot of it on purpose.
- *
- * ---- Why this exists at all ------------------------------------------
- *
- * For ninety-three milestones every check in this project cost a QEMU
- * boot, because every check *was* a boot: a self-test compiled into
- * kernel.c, run on the real machine, graded by grepping a serial log.
- * That is the right instrument for "does the filesystem work when it is
- * mounted on a real disk under a real scheduler", and it is why this
- * project has the regression record it has.
- *
- * What it cannot do is reach an error path. Getting to "the disk is
- * full" from inside a booted OS means filling the disk; getting to
- * "kmalloc returned NULL" means exhausting the heap; getting to "the
- * superblock is corrupt" means corrupting one. So those branches - and
- * there are several hundred of them in this kernel - have never been
- * executed by anything. This is the tier that reaches them, and it is
- * additive: not one boot self-test was deleted to make room for it.
- *
- * The second reason is the feedback loop. A check that takes 200
- * milliseconds is a check that runs while you type.
- *
- * ---- Why it is written here rather than fetched ----------------------
- *
- * Same reason as everything else in this tree. A test framework is a
- * `CHECK` macro, a counter and a list; Unity and Check and cmocka are
- * that plus thirty thousand lines of things this project will not use.
- * The one dependency taken anywhere near this is libFuzzer in Q4, and
- * that is a compiler flag rather than a library.
- *
- * ---- The part that is not obvious: catching a panic ------------------
- *
- * A kernel's answer to "you did something impossible" is panic(), which
- * never returns. Two hundred and nineteen calls to it exist and no test
- * has ever executed one, because on the real machine executing one ends
- * the test run. tests/fakes/fake_panic.c makes panic() a longjmp back to
- * here, so a test can assert *that* the kernel panicked and on what
- * message - see CHECK_PANIC. That turns a whole category of "this must
- * never happen" comment into something gradeable.
- */
 #ifndef LEANOS_TESTS_CHECK_H
 #define LEANOS_TESTS_CHECK_H
 
@@ -48,12 +6,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ---- Registration ----------------------------------------------------
- *
- * A constructor per test, so a test file is added to the build and needs
- * no second edit anywhere to be run. The failure mode this avoids is the
- * one worth avoiding: a test that is written, compiled, and silently
- * never called because a list somewhere was not updated. */
 typedef void (*test_fn_t)(void);
 
 typedef struct test_case {
@@ -74,14 +26,6 @@ void test_register(test_case_t *tc);
     }                                                                         \
     static void test_##suite_##_##name_(void)
 
-/* ---- Assertions ------------------------------------------------------
- *
- * CHECK records a failure and keeps going; REQUIRE records one and
- * abandons the test. The distinction matters more than it looks: a test
- * that stops at its first failed assertion tells you one thing per run,
- * and a test that keeps going tells you the shape of the breakage. But a
- * test that keeps going *past a null pointer* segfaults and tells you
- * nothing, which is what REQUIRE is for. */
 void test_fail(const char *file, int line, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 void test_abandon(void);
@@ -101,8 +45,6 @@ void test_abandon(void);
         }                                                                      \
     } while (0)
 
-/* Values printed on failure, because "CHECK(n == expected) failed" is a
- * bisect and "expected 4096, got 4088" is a diagnosis. */
 #define CHECK_EQ(actual, expected)                                             \
     do {                                                                       \
         long long a_ = (long long)(actual);                                    \
@@ -150,17 +92,6 @@ void test_abandon(void);
         }                                                                      \
     } while (0)
 
-/* ---- Panic assertions ------------------------------------------------
- *
- * CHECK_PANIC(stmt, "substring") runs stmt and passes only if it reached
- * panic() with a message containing that substring. CHECK_NO_PANIC is the
- * other half and is the one that catches the more common bug: a
- * defensive check that fires when it should not.
- *
- * The substring is required rather than optional. "It panicked" is not an
- * assertion worth making - a test that passes on *any* panic passes when
- * the code panics for a completely unrelated reason, which is exactly how
- * a test stops meaning what its name says. */
 extern jmp_buf test_panic_jmp;
 extern int test_panic_armed;
 extern char test_panic_msg[256];
@@ -199,4 +130,4 @@ extern char test_panic_msg[256];
         }                                                                      \
     } while (0)
 
-#endif /* LEANOS_TESTS_CHECK_H */
+#endif

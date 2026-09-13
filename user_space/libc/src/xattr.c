@@ -1,8 +1,3 @@
-/* user_space/libc/src/xattr.c - M89
- *
- * Twelve refusals. See <sys/xattr.h> for why ENOTSUP rather than an
- * empty success, which is the only interesting decision in this file.
- */
 #include <sys/xattr.h>
 
 #include <errno.h>

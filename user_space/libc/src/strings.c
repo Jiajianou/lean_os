@@ -1,5 +1,3 @@
-/* user_space/libc/src/strings.c - M89. See <strings.h>, including why
- * the case folding is ASCII-only on a system whose encoding is UTF-8. */
 #include <strings.h>
 
 #include <ctype.h>
@@ -44,9 +42,6 @@ void bzero(void *dst, size_t n) {
 }
 
 void bcopy(const void *src, void *dst, size_t n) {
-    /* The argument order is reversed from memcpy's, which is the entire
-     * reason this deprecated function still catches people out. It also
-     * has memmove's overlap guarantee rather than memcpy's. */
     memmove(dst, src, n);
 }
 

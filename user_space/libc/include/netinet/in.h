@@ -1,28 +1,8 @@
-/* user_space/libc/include/netinet/in.h - M89
- *
- * IPv4 addresses in the shape a ported program expects.
- *
- * The one thing to know: `sockaddr_in` holds its address and port in
- * NETWORK byte order, and this kernel's own ABI (system_api/os_net.h)
- * holds them in HOST order - deliberately, and it says why: "this OS
- * never byte-swaps an address into a register, so an on-wire order here
- * would be a second representation to get wrong." Both are right for
- * their side, and the conversion happens in libc's socket.c, which is
- * the single seam between them.
- */
 #pragma once
 
 #include <sys/socket.h>
 #include <stdint.h>
 
-/* M97: C++ linkage.
- *
- * Without this every declaration below is a C++ function when a C++
- * program includes it, so `malloc` in a header and `malloc` in libc.a
- * are different symbols and nothing links. It cost a whole libstdc++
- * build to find, and the error names the caller rather than the header:
- * "undefined reference to `malloc(unsigned long)`" - with the argument
- * list, which is the tell. */
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -31,12 +11,12 @@ typedef uint16_t in_port_t;
 typedef uint32_t in_addr_t;
 
 struct in_addr {
-    in_addr_t s_addr; /* network byte order */
+    in_addr_t s_addr;
 };
 
 struct sockaddr_in {
     sa_family_t    sin_family;
-    in_port_t      sin_port;   /* network byte order */
+    in_port_t      sin_port;
     struct in_addr sin_addr;
     char           sin_zero[8];
 };
@@ -54,26 +34,6 @@ struct sockaddr_in {
 #define INET_ADDRSTRLEN 16
 #define INET6_ADDRSTRLEN 46
 
-/* ---- M89: IPv6, declared and not implemented -------------------------
- *
- * There is no IPv6 in this stack. M27 built Ethernet/ARP/IPv4 and M66
- * built TCP over it; nothing here has ever parsed a 40-byte header or
- * done neighbour discovery, and this milestone does not add one.
- *
- * These declarations exist because a program that has been written for
- * both families puts a `sockaddr_in6` inside a union next to a
- * `sockaddr_in` and cannot compile without the type - toybox's
- * `lib/lib.h` does exactly that, and its `sizeof` decides how big the
- * union is. A type with no stack behind it is a strictly different thing
- * from a call that pretends to work: nothing here returns a success for
- * an AF_INET6 socket. `socket(AF_INET6, ...)` fails with
- * EAFNOSUPPORT, which is precisely the error a machine with no IPv6 is
- * supposed to give and the one every dual-stack program already handles
- * by falling back.
- *
- * The layout is the standard one, byte for byte, so that the day a v6
- * stack exists this is not a second representation to reconcile.
- */
 struct in6_addr {
     union {
         uint8_t  __u6_addr8[16];
@@ -87,7 +47,7 @@ struct in6_addr {
 
 struct sockaddr_in6 {
     sa_family_t     sin6_family;
-    in_port_t       sin6_port;     /* network byte order */
+    in_port_t       sin6_port;
     uint32_t        sin6_flowinfo;
     struct in6_addr sin6_addr;
     uint32_t        sin6_scope_id;

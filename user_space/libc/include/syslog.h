@@ -1,44 +1,11 @@
-/* user_space/libc/include/syslog.h - M89
- *
- * `syslog`, over the kernel log this machine already has.
- *
- * There is no syslogd here and there is not going to be one: a daemon
- * that collects messages into a file is a second logging system beside
- * M70's, which already has a ring buffer and a reader (`console`).
- *
- * **It writes to stderr.** Not to M70's log, and the reason is worth
- * stating because the opposite looks plausible: that log has no writer
- * available to user space at all. SYS_klog and SYS_klog_total are both
- * readers - the kernel log is written by the kernel - and CAP_SYSLOG
- * guards *reading* it. So a program's syslog() output goes where an
- * unprivileged program's diagnostics belong, and a program that needs it
- * collected can redirect stderr, which is the mechanism this system
- * does have.
- *
- * The priorities and facilities are the standard numbers because a
- * program computes them (`LOG_MAKEPRI`, `LOG_UPTO`) and compares them.
- * What this system does with them is narrower than the names suggest and
- * is stated in syslog.c: the facility is ignored, and the priority
- * decides only whether a message is dropped by setlogmask.
- */
 #pragma once
 
 #include <stdarg.h>
 
-/* M97: C++ linkage.
- *
- * Without this every declaration below is a C++ function when a C++
- * program includes it, so `malloc` in a header and `malloc` in libc.a
- * are different symbols and nothing links. It cost a whole libstdc++
- * build to find, and the error names the caller rather than the header:
- * "undefined reference to `malloc(unsigned long)`" - with the argument
- * list, which is the tell. */
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Priorities, most severe first - the order matters because LOG_UPTO
- * builds a mask from it. */
 #define LOG_EMERG   0
 #define LOG_ALERT   1
 #define LOG_CRIT    2
@@ -54,7 +21,6 @@ extern "C" {
 #define LOG_MASK(pri) (1 << (pri))
 #define LOG_UPTO(pri) ((1 << ((pri) + 1)) - 1)
 
-/* Facilities. Carried and ignored - see the header note. */
 #define LOG_KERN     (0 << 3)
 #define LOG_USER     (1 << 3)
 #define LOG_MAIL     (2 << 3)
@@ -77,9 +43,6 @@ extern "C" {
 #define LOG_LOCAL7   (23 << 3)
 #define LOG_FACMASK  0x03f8
 
-/* openlog() options. LOG_PID and LOG_PERROR do something; the rest are
- * accepted and ignored, which is safe because each one asks for a
- * behaviour whose absence is invisible. */
 #define LOG_PID    0x01
 #define LOG_CONS   0x02
 #define LOG_ODELAY 0x04

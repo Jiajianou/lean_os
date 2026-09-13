@@ -1,15 +1,3 @@
-/* tests/fakes/fake_net.c - Q4
- *
- * The wire, as a list of frames nobody sent.
- *
- * The point of this fake is not to let the parsers run - it is to let a
- * test assert what they *replied*. "It did not crash on a malformed
- * packet" is a weak claim; "it replied to this ARP request with exactly
- * this reply, and it replied to that malformed one with nothing at all"
- * is the claim worth making, and it needs the transmit side captured.
- *
- * The addresses are fixed and are the ones QEMU's SLIRP backend hands
- * out, so a test's expectations read the same as the boot self-test's. */
 #include "net/net.h"
 #include "drivers/rtl8139.h"
 
@@ -26,8 +14,8 @@ static uint32_t tx_len[MAX_TX];
 static int tx_count;
 
 static const uint8_t local_mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
-static uint32_t local_ip   = 0x0A00020Fu; /* 10.0.2.15 */
-static uint32_t gateway_ip = 0x0A000202u; /* 10.0.2.2  */
+static uint32_t local_ip   = 0x0A00020Fu;
+static uint32_t gateway_ip = 0x0A000202u;
 static uint32_t subnet     = 0xFFFFFF00u;
 static uint32_t dns_ip     = 0x0A000203u;
 
@@ -54,9 +42,6 @@ const uint8_t *fake_net_tx_frame(int i, uint32_t *len_out) {
 
 int rtl8139_send(const uint8_t *frame, uint16_t len) {
     if (tx_count >= MAX_TX) {
-        /* Not silently dropped. A parser that answers one bad packet with
-         * sixty-four frames is a bug worth stopping on, not one to
-         * discover by reading a count afterwards. */
         panic("fake_net: transmit queue overflow - the stack is replying far too much");
     }
     if (len > MAX_FRAME) {
@@ -65,9 +50,6 @@ int rtl8139_send(const uint8_t *frame, uint16_t len) {
     memcpy(tx[tx_count], frame, len);
     tx_len[tx_count] = len;
     tx_count++;
-    /* Q16: the driver reports now - see kernel/drivers/rtl8139.h. This
-     * fake never refuses a frame it could hold, because the cases it
-     * refuses are harness bugs and panic above. */
     return 0;
 }
 
@@ -82,11 +64,6 @@ uint32_t net_subnet_mask(void) { return subnet; }
 uint32_t net_dns_ip(void) { return dns_ip; }
 int net_have_nic(void) { return 1; }
 int net_config_is_leased(void) { return 0; }
-/* M100: the loopback clause the real one has (kernel/net/net.c). Without
- * it a connection to 127.0.0.1 left through the fake NIC, and the first
- * two-ended TCP test on the host could not complete a handshake - a
- * fake that is narrower than the definition it stands in for grades a
- * machine that does not exist. */
 int net_is_local_ip(uint32_t ip) {
     return ip == local_ip || (ip & NET_LOOPBACK_MASK) == NET_LOOPBACK_NET;
 }
@@ -98,10 +75,6 @@ void net_set_config(uint32_t ip, uint32_t mask, uint32_t gateway, uint32_t dns) 
     dns_ip = dns;
 }
 
-/* Single-threaded here, and deliberately not routed through the fake
- * spinlock: the net lock is taken on the inbound path and a test that
- * drives two packets back to back would trip the recursion check for a
- * reason that is about this harness rather than about the kernel. */
 void net_lock_acquire(void) {}
 void net_lock_release(void) {}
 

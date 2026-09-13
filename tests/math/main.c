@@ -1,28 +1,8 @@
-/* tests/math/main.c - M99: this project's libm, against the host's.
- *
- * The fourth instrument of the kind tools/sh-test.sh introduced and
- * tools/regex-test.sh, scanf-test.sh and printf-test.sh followed:
- * compile this project's own source for the machine you are sitting at,
- * run it beside an implementation nobody here wrote, and let the other
- * one decide what the right answer is.
- *
- * It is the right instrument for a libm for the same reason it was right
- * for a shell. Nothing in tests/math/cases.tsv says what sin(0.7) is.
- * A table of expected values written here would be a table of whatever
- * this implementation happened to produce on the day it was written, and
- * every one of its rows would pass forever - which is precisely the
- * shape of test the mutation harness (Q12) exists to catch.
- *
- * The build renames every function this libc declares to lean_*, so both
- * libms are in one process and the comparison is a subtraction rather
- * than two runs of a program. See tools/math-test.sh.
- */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* This project's, renamed at compile time by -Dname=lean_name. */
 double lean_fabs(double), lean_sqrt(double), lean_floor(double);
 double lean_ceil(double), lean_trunc(double), lean_round(double);
 double lean_sin(double), lean_cos(double), lean_tan(double);
@@ -38,26 +18,18 @@ double lean_pow(double, double), lean_atan2(double, double);
 double lean_fmod(double, double), lean_hypot(double, double);
 double lean_copysign(double, double), lean_nextafter(double, double);
 double lean_fmax(double, double), lean_fmin(double, double);
-/* M100: the float variants. */
 float lean_fabsf(float), lean_floorf(float), lean_ceilf(float);
 float lean_sinf(float), lean_cosf(float), lean_tanf(float);
 float lean_hypotf(float, float);
 float lean_sqrtf(float), lean_atanf(float), lean_roundf(float);
-/* M100: the lround family - the first entries here that do not return a
- * floating-point type, which is why kind "i" compares exactly rather
- * than through err_of. */
 long lean_lround(double), lean_lroundf(float);
 long long lean_llround(double), lean_llroundf(float);
 
 typedef double (*fn1)(double);
 typedef double (*fn2)(double, double);
 typedef double (*fn3)(double, double, double);
-typedef float (*fn1f)(float); /* M100: one float argument, kind "f" */
-typedef float (*fn2f)(float, float); /* and two, kind "F" */
-/* M100: integer-returning, kind "i". Four pointers rather than one
- * because the four differ in BOTH the argument type and the return
- * type, and a cast that flattened them would be the harness agreeing
- * with itself about a conversion instead of grading one. */
+typedef float (*fn1f)(float);
+typedef float (*fn2f)(float, float);
 typedef long (*fnl)(double);
 typedef long (*fnlf)(float);
 typedef long long (*fnll)(double);
@@ -70,15 +42,12 @@ struct entry {
     fn3 ours3, theirs3;
     fn1f oursf, theirsf;
     fn2f oursF, theirsF;
-    fnl oursl, theirsl;       /* M100: kind "i" */
+    fnl oursl, theirsl;
     fnlf ourslf, theirslf;
     fnll oursll, theirsll;
     fnllf oursllf, theirsllf;
 };
 
-/* The host's are taken by address rather than called through a macro, so
- * that what runs is the C library's function and not something the
- * compiler folded at -O2 into a constant of its own opinion. */
 static const struct entry TABLE[] = {
     {.name = "fabsf", .oursf = lean_fabsf, .theirsf = fabsf},
     {.name = "floorf", .oursf = lean_floorf, .theirsf = floorf},
@@ -127,20 +96,12 @@ static const struct entry TABLE[] = {
     {.name = "cbrt", .ours1 = lean_cbrt, .theirs1 = cbrt},
     {.name = "exp2", .ours1 = lean_exp2, .theirs1 = exp2},
     {.name = "fma", .ours3 = lean_fma, .theirs3 = fma},
-    /* M100: the lround family. The whole table is written this way
-     * since the four kind-"i" pointers were added - positional rows
-     * would have carried eighteen zeros to reach the two that matter,
-     * and -Wmissing-field-initializers is right to refuse the shorter
-     * lie. */
     {.name = "lround",   .oursl = lean_lround,     .theirsl = lround},
     {.name = "lroundf",  .ourslf = lean_lroundf,   .theirslf = lroundf},
     {.name = "llround",  .oursll = lean_llround,   .theirsll = llround},
     {.name = "llroundf", .oursllf = lean_llroundf, .theirsllf = llroundf},
 };
 
-/* Relative where the answer is not near zero, absolute where it is -
- * the alternative is grading sin(pi) against a denominator of 1e-16 and
- * calling every implementation on earth broken. */
 static double err_of(double got, double want) {
     if (isnan(want)) {
         return isnan(got) ? 0.0 : 1.0;
@@ -169,27 +130,6 @@ int main(int argc, char **argv) {
 
     int failures = 0, graded = 0, skipped = 0;
 
-    /* ---- the special values, before any sweep ------------------------
-     *
-     * M99 added this section after CPython's own test suite found what
-     * the sweeps could not: `log(INFINITY)` did not return a wrong
-     * answer, it did not return. The scaling loop inside it is
-     * `while (x > sqrt(2)) x *= 0.5`, and infinity halved is infinity.
-     *
-     * A range sweep asks "is the answer right in the middle". These ask
-     * "is there an answer at all at the edges", and the edges are where
-     * a range reduction, a cast to an integer, or a loop bound stops
-     * being valid. Every one-argument function in the table is asked
-     * about every one of them, so a function added later is covered by
-     * arithmetic rather than by somebody remembering.
-     *
-     * The oracle is the same as everywhere else in this file: the
-     * host's libm. Nothing here says what acosh(inf) should be.
-     *
-     * A hang is not caught here and cannot be - a test that hangs is a
-     * harness that hangs. What this catches is the wrong ANSWER at an
-     * edge; the hang it was written for is caught by the function
-     * returning at all. */
     {
         static const struct { const char *name; double v; } SPECIALS[] = {
             {"+inf", 0}, {"-inf", 0}, {"nan", 0}, {"+0", 0.0}, {"-0", -0.0},
@@ -206,12 +146,6 @@ int main(int argc, char **argv) {
         values[7] = 5e-324;
         values[8] = 1.7976931348623157e308;
 
-        /* Divergences this project has decided on, with the reason. A
-         * row here is not a suppression - it is printed on every run,
-         * and it is why the harness can be strict everywhere else. The
-         * rule for adding one: the divergence has to be a REFUSAL (a
-         * NaN, an error) rather than a plausible wrong number, and the
-         * reason has to be written in the source it refers to. */
         static const struct {
             const char *fn; const char *at; const char *why;
         } DIVERGE[] = {
@@ -219,13 +153,11 @@ int main(int argc, char **argv) {
             {"cos", "huge", "same"},
             {"tan", "huge", "same"},
         };
-        /* No float function is on that list: (float)1.8e308 is infinity,
-         * and sinf(inf) is NaN on both sides for the ordinary reason. */
 
         int special_failures = 0;
         for (size_t i = 0; i < sizeof(TABLE) / sizeof(TABLE[0]); i++) {
             if (!TABLE[i].ours1 && !TABLE[i].oursf) {
-                continue; /* one-argument functions only */
+                continue;
             }
             for (size_t v = 0; v < sizeof(values) / sizeof(values[0]); v++) {
                 double got, want;
@@ -233,17 +165,9 @@ int main(int argc, char **argv) {
                     got = TABLE[i].ours1(values[v]);
                     want = TABLE[i].theirs1(values[v]);
                 } else {
-                    /* M100: a float function is asked the same nine
-                     * questions in float - where "huge" is infinity and
-                     * "tiny" is zero, which is the point. */
                     got = (double)TABLE[i].oursf((float)values[v]);
                     want = (double)TABLE[i].theirsf((float)values[v]);
                 }
-                /* A float function is judged at float precision here:
-                 * one ulp, 2^-23 relative. atanf(+inf) is the case that
-                 * asked - the host's is the float just BELOW pi/2 and
-                 * ours the one just above, which is the correctly
-                 * rounded one; an ulp apart, and an ulp is the claim. */
                 double special_tol = TABLE[i].ours1 ? 1e-12 : 1.2e-7;
                 if (err_of(got, want) <= special_tol) {
                     continue;
@@ -257,9 +181,6 @@ int main(int argc, char **argv) {
                     }
                 }
                 if (why) {
-                    /* And it must be a refusal. A "known divergence" that
-                     * returns a number is a wrong answer with a note
-                     * beside it. */
                     if (!isnan(got)) {
                         printf("FAIL %-10s at %-5s is a known divergence but "
                                "returned %.17g rather than refusing\n",
@@ -335,10 +256,6 @@ int main(int argc, char **argv) {
         int n = points > 1 ? points : 2;
         double step = (hi - lo) / (double)(n - 1);
         if (kind[0] == 'f') {
-            /* M100: one float argument. The grid point is rounded to
-             * float BEFORE either side sees it, so both are asked about
-             * the same number; the comparison is in double, where a
-             * float ulp is about 6e-8 relative. */
             for (int i = 0; i < n; i++) {
                 float x = (float)(lo + step * (double)i);
                 double got = (double)e->oursf(x), want = (double)e->theirsf(x);
@@ -348,7 +265,6 @@ int main(int argc, char **argv) {
                 }
             }
         } else if (kind[0] == 'F') {
-            /* M100: two float arguments, the same grid pairwise. */
             for (int i = 0; i < n; i++) {
                 float x = (float)(lo + step * (double)i);
                 for (int j = 0; j < n; j++) {
@@ -362,15 +278,6 @@ int main(int argc, char **argv) {
                 }
             }
         } else if (kind[0] == 'i') {
-            /* M100: an integer-returning function. Compared as long long
-             * and not through err_of, because there is no tolerance to
-             * have: lround(x) is one number, the host names it, and
-             * "within 1e-12 of the right integer" is not a claim anyone
-             * should be allowed to make. worst is 0 or 1, and the tol
-             * column for these rows is 0.
-             *
-             * The float grid point is rounded to float before either
-             * side sees it, for the same reason kind "f" does it. */
             for (int i = 0; i < n; i++) {
                 double x = lo + step * (double)i;
                 long long got, want;
@@ -413,9 +320,6 @@ int main(int argc, char **argv) {
                 }
             }
         } else {
-            /* Three arguments, which only fma has. The third is not
-             * reported in the failure line and does not need to be: an
-             * fma that is wrong is wrong for a whole plane of z. */
             for (int i = 0; i < n; i++) {
                 double x = lo + step * (double)i;
                 for (int j = 0; j < n; j++) {

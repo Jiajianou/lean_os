@@ -1,20 +1,3 @@
-/* user_space/libc/src/iconv_tables.c - GENERATED. Do not edit.
- *
- * Written by tools/gen-iconv-tables.py from Python's codec tables and
- * graded on every --fast run by tools/iconv-test.sh against the host's
- * own iconv, which is a different implementation built from different
- * data. Two independent sources agree on every entry below or the fast
- * tier goes red.
- *
- * Only the high half (0x80-0xFF) is stored: every charset here is ASCII
- * underneath, and storing the 128 entries that are their own index
- * would double the table to say nothing. 0xFFFF means the byte is
- * unassigned in that charset - which is a real state (ISO-8859-3 has
- * five such holes) and NOT the same as U+FFFF, which none of these
- * encode.
- *
- * 26 charsets, 3328 entries.
- */
 #include "iconv_tables.h"
 
 static const uint16_t tbl_iso_8859_2[128] = {

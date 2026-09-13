@@ -1,51 +1,7 @@
-/* user_space/bin/text_editor.c
- *
- * M33: the missing "edit a file without a host toolchain" piece - a
- * real (if deliberately small) multi-line text editor, same "own the
- * pixels, own the input" shape as every other WM client here (gui_
- * terminal.c especially - the grid/viewport rendering below is the same
- * idea, just persistent and cursor-addressable instead of scrolling
- * output away).
- *
- * Editing model, and why it's this shape: this kernel's keyboard driver
- * (kernel/drivers/keyboard.c) decodes exactly four extended scancodes -
- * the arrow keys, M33's own addition - and nothing else extended (no
- * Home/End/Delete/PageUp). Left/Right/Up/Down move the cursor anywhere
- * in the already-loaded text, and typing/Backspace edit *at* that
- * position - real mid-file editing, not just appending. Enter is the one
- * real simplification: it always inserts a fresh empty line at the very
- * *end* of the file and moves the cursor there, regardless of the
- * cursor's current row - splitting the current line at the cursor would
- * need each line to be its own growable/shiftable slot in the lines[]
- * array rather than a fixed MAX_LINES table of fixed MAX_LINE_LEN
- * buffers, real complexity this milestone's scope doesn't need. Net
- * effect: you can fix a typo anywhere, but new lines only ever get added
- * at the bottom, then edited into place with Up/Down/Left/Right same as
- * anything else already there.
- *
- * Ctrl+S saves to the filename this process was spawned with (SYS_spawn's
- * single-string arg - "untitled" if launched with none). SYS_writefile is
- * this milestone's other new addition (system_api/include/syscall.h) -
- * the write half of SYS_readfile that had simply never been exposed to
- * user space before something needed to save a file back out.
- *
- * M35/M36 added a File menu (New/Save/Save As/Quit) - drawn in this
- * window's own top row (M41 briefly moved it to a shared screen-top bar;
- * M42 brought it back, see MENU_ROWS below) - and the two prompts
- * "Save As" and "Quit"/titlebar-close needed once there was a real way to
- * lose unsaved work: a filename input (there was previously no way to
- * save under a different name at all) and a discard-confirm, both drawn
- * as a small modal-to-this-window overlay rather than a new compositor-
- * level popup surface - see milestones.md's M35/M36 entries for why. The
- * titlebar close button reaching this editor's own confirm prompt instead
- * of an unconditional SIGTERM needed one new opt-in protocol field
- * (wm_create_request_t.confirm_close, system_api/include/wm.h) - every
- * other GUI client in this project still closes the old way, unchanged.
- */
-#include "paths.h" /* system_api/include/paths.h - M53: /home is where a new document goes */
-#include "font8x16.h" /* FONT_WIDTH/FONT_HEIGHT - the editor's column arithmetic is a fixed cell by definition (M57) */
+#include "paths.h"
+#include "font8x16.h"
 #include "str.h"
-#include "recent.h" /* M74 - the recently-opened list */
+#include "recent.h"
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
@@ -65,19 +21,8 @@
 #define MENU_TEXT     0x00E0E0E0u
 
 #define MAX_LINE_LEN (COLS)
-#define MAX_LINES    600 /* 600 * 80 = 48000 bytes of line storage - comfortably within a user process's SYS_sbrk-backed heap */
+#define MAX_LINES    600
 #define STATUS_ROWS 1
-/* M35: one row reserved for the File menu bar, on top of the existing
- * status row at the bottom - see redraw()/menu_open below.
- *
- * M41 moved this row out to a shared, screen-top menu bar that drew the
- * labels for whichever app was focused, over a three-pipe protocol.
- * M42 brought it back: this project follows the Windows convention, where
- * an app's menus live in its own window. That makes the whole
- * cross-process round trip unnecessary - the menu is drawn by the process
- * that owns it, hit-tested by the same gfx_draw_menu/gfx_menu_hit_test
- * pair desktop_icons.c's context menu uses, and "what does Save As mean"
- * never has to leave this file. */
 #define MENU_ROWS 1
 #define TEXT_ROWS (ROWS - STATUS_ROWS - MENU_ROWS)
 #define CONTENT_Y0 (MENU_ROWS * FONT_HEIGHT)
@@ -85,24 +30,10 @@
 #define FILE_MENU_X 4
 #define FILE_MENU_ITEM_W 110
 #define FILE_MENU_ITEM_H (UI_FONT_UI_HEIGHT + 4)
-/* M57: "Save As" opens a dialog and now says so with the ellipsis glyph -
- * the oldest menu convention there is, and one this project could not
- * write down until the font had the character. */
 static const char *const FILE_MENU_ITEMS[] = {"New", "Save", "Save As" UI_S_ELLIPSIS, "Quit"};
 #define FILE_MENU_COUNT ((int)(sizeof(FILE_MENU_ITEMS) / sizeof(FILE_MENU_ITEMS[0])))
 
-/* M36: modal-to-this-window-only prompts (see this file's own note in
- * redraw()/main() and milestones.md's M36 entry for why this stays
- * client-side rather than a compositor-level modal). Both share one
- * centered box; only PROMPT_SAVE_AS's contents accept typed input. */
-/* M60: PROMPT_FIND joins them - the most-reached-for editor feature that
- * is not typing, and the same typed-input prompt shape Save As already
- * uses rather than a second kind of dialog. */
 typedef enum { PROMPT_NONE = 0, PROMPT_SAVE_AS, PROMPT_CONFIRM_DISCARD, PROMPT_FIND } prompt_kind_t;
-/* M49: PENDING_DROP joins the two the File menu already had - a file
- * dragged onto this window is one more thing that replaces the buffer,
- * so it goes through the same confirm-discard prompt rather than round
- * an existing guard. Which file is in pending_drop, below. */
 typedef enum { PENDING_NONE = 0, PENDING_NEW, PENDING_QUIT, PENDING_DROP } pending_action_t;
 
 #define PROMPT_W 360
@@ -118,63 +49,29 @@ static int line_len[MAX_LINES];
 static int line_count = 1;
 
 static int cur_row, cur_col;
-static int scroll_top; /* index of the first line[] drawn in the text viewport */
-static int dirty; /* unsaved changes since the last Ctrl+S */
-/* M60: this file has more lines than this editor can hold, so what is on
- * screen is a prefix of it. A plain save over the original is refused
- * while this is set - writing back 600 lines of a thousand-line file is
- * how a person loses the other four hundred. */
+static int scroll_top;
+static int dirty;
 static int truncated;
-static int menu_open; /* M35: File menu dropdown - toggled by clicking "File" in the menu row */
+static int menu_open;
 
-/* M53: a path, not a name - PATH_MAX_LEN so it can hold anything the
- * resolver will accept. It was 64 when a filename was at most 28
- * characters and there was nowhere for it to live but the root. */
 static char filename[PATH_MAX_LEN];
-/* M49: the file a pending PENDING_DROP will open once the discard prompt
- * is answered. Its own buffer rather than filename's, so declining the
- * prompt leaves the current file's name untouched. */
 static char pending_drop[64];
 static char status[COLS + 1];
 
 static prompt_kind_t prompt_kind;
-static pending_action_t pending_action; /* what to do once a PROMPT_CONFIRM_DISCARD is answered "yes" */
+static pending_action_t pending_action;
 static char prompt_buf[PROMPT_MAX_LEN + 1];
 static int prompt_len;
 
-/* M37: click-drag text selection - the piece M32's own header comment on
- * gui_terminal.c's Ctrl+C flagged as missing ("there's no text selection
- * UI to copy from") ever since. sel_dragging is true only while the
- * mouse button is physically held; sel_active survives the button
- * release so the highlight (and a later Ctrl+C) still has something to
- * act on until the next click or keystroke clears it. */
 static int sel_dragging, sel_active;
 static int sel_anchor_row, sel_anchor_col, sel_end_row, sel_end_col;
 #define SELECTION_COLOR 0x00355070u
 
-/* M60: streamed through a descriptor rather than read whole.
- *
- * This used to `sys_readfile` into a 16 KiB buffer, which is why the
- * editor's real limit was neither MAX_LINES nor MAX_LINE_LEN but "how
- * much of a file fits in one whole-file read" - and why a file larger
- * than that opened silently truncated. The byte cap is gone: what is
- * left is the line cap, which is a property of what this editor can hold
- * rather than of how it reads.
- *
- * A file with more lines than MAX_LINES still cannot be *held*, and that
- * is said out loud rather than hidden - `truncated` refuses a plain save
- * over the original afterwards, because writing back 600 lines of a
- * thousand-line file is how a person loses the other four hundred. */
 static void load_file(const char *name) {
     long fd = sys_open(name, OPEN_READ);
     if (fd < 0) {
-        return; /* doesn't exist yet - starts as one empty line, same as "new file" */
+        return;
     }
-    /* M74: recorded here rather than at startup, so that a file dropped
-     * onto this window mid-session counts too - the recents list is about
-     * what was opened, not about how the program was launched. A file
-     * that could not be opened is deliberately not recorded: offering it
-     * again is offering the same failure. */
     recent_add(name);
     line_count = 0;
     truncated = 0;
@@ -217,37 +114,11 @@ static void load_file(const char *name) {
 }
 
 static void save_file(void) {
-    /* M60: a file this editor could only hold a prefix of is not one it
-     * may write back over. Save As is still offered, and is the honest
-     * way to keep what is on screen without destroying what is not. */
     if (truncated) {
         memcpy(status, "File is longer than this editor holds - use Save As.",
                sizeof("File is longer than this editor holds - use Save As."));
         return;
     }
-    /* ---- M71: save to a temp, then rename over the original -----------
-     *
-     * This used to open the real file with OPEN_TRUNCATE and stream into
-     * it, which means that from the instant the truncate lands until the
-     * last line is written, the file on disk is neither the old document
-     * nor the new one. A power cut in that window - or a crash, or the
-     * machine being switched off - loses BOTH: the version being written
-     * and the version being replaced. For an editor, which is one of the
-     * two programs on this desktop people actually keep things in, that
-     * is the worst failure the machine has.
-     *
-     * So: write the whole thing to a sibling temp name, then ask the
-     * kernel to repoint the directory entry (SYS_rename_replace, M71).
-     * The rename changes one record, so the real filename resolves to the
-     * old inode right up until it resolves to the new one and never to
-     * nothing. A crash before the rename leaves the old document intact
-     * and a stray temp file; a crash after it leaves the new one. There
-     * is no third outcome, which is the entire point.
-     *
-     * The temp name is derived from the target rather than fixed, so two
-     * editors saving at once cannot collide, and it lives in the same
-     * directory because a rename across directories is a different
-     * operation with different failure modes. */
     char tmpname[PATH_MAX_LEN];
     int t = 0;
     for (; filename[t] && t < PATH_MAX_LEN - 8; t++) {
@@ -275,9 +146,6 @@ static void save_file(void) {
         ok = (sys_rename_replace(tmpname, filename) == 0);
     }
     if (!ok) {
-        /* Whatever went wrong, do not leave the temp behind - it would
-         * show up in the file manager next to the real document looking
-         * like something the person made. */
         sys_unlink(tmpname);
     }
     int i = 0;
@@ -292,22 +160,6 @@ static void save_file(void) {
     if (ok) {
         dirty = 0;
     }
-    /* M74: deliberately NOT recorded here, and the reason is measurable
-     * rather than aesthetic. A save is an open as far as a person is
-     * concerned, so recording one looked right - but recent_add on a
-     * name that is not already at the front writes /etc/recent.conf, and
-     * *creating* a file in leanfs rewrites the whole inode table and
-     * bitmap (see M59's note on the thirty-one metadata sectors). That
-     * put roughly half a second of PIO inside the first Ctrl+S of every
-     * editing session, which the [m60] self-test caught immediately: it
-     * types, saves, undoes and saves again on a 200/600 ms cadence, and
-     * the editor was still inside the disk write when the undo arrived.
-     *
-     * Recording on *open* alone is also the more faithful reading of
-     * what the list is: it is recently OPENED files. A document saved
-     * under a new name is one the person will open again from the file
-     * manager, and it is recorded then - by the program that opened it,
-     * which is the rule the whole feature is built on. */
 }
 
 static void clamp_cursor(void) {
@@ -331,52 +183,13 @@ static void clamp_cursor(void) {
     }
 }
 
-/* ---- M56: undo -------------------------------------------------------
- *
- * The single most-missed thing in any editor, and this one had a
- * clipboard before it had this - so a paste was unrecoverable.
- *
- * A bounded ring of edit *records*, not snapshots. A snapshot-per-
- * keystroke editor is one that stops working on a large file: this
- * buffer is 600 x 80 characters, so even ten levels of undo would be
- * half a megabyte of copies, and the thing being copied barely changes
- * between them. A record is six bytes.
- *
- * There are exactly three mutations in this file, which is what makes
- * records practical here at all: insert one character, delete one
- * character, and append an empty line. Enter deliberately does not split
- * a line and Backspace deliberately does not merge one (see this file's
- * header), so there is no structural edit more complicated than "the
- * buffer grew by one empty row" to undo.
- *
- * `group` is what makes a paste undo as one action rather than as
- * eighty. Every user-visible action bumps the counter; undo pops records
- * until the group changes. Typing gets a group per keystroke, which is
- * the behavior of every editor that does not try to be clever about
- * coalescing runs - and being clever about it is how undo starts
- * surprising people. */
 #define UNDO_MAX 512
 
 typedef enum {
-    EDIT_INSERT = 0, /* a character was inserted at (row, col) - undo deletes it */
-    EDIT_DELETE = 1, /* `ch` was deleted from (row, col) - undo puts it back */
-    /* M60: EDIT_NEWLINE is gone with the primitive that produced it.
-     * Enter appended an empty line at the *end* of the buffer regardless
-     * of the cursor - it split nothing, which is why undoing it was just
-     * "drop the last line". Enter splits now, so every newline this
-     * editor makes is an EDIT_SPLIT. The ring lives only in memory, so
-     * there is no old record of the retired kind anywhere to honour. */
-    /* M60: the two structural edits M56 deferred, and said why: they are
-     * the only edits that change how many lines there are, and undo has
-     * to invert them. That was the right call when undo did not exist; it
-     * exists now and works, which turns the argument around - these are
-     * the two edits that make it an editor.
-     *
-     * Each inverse is performed through the same primitive as the edit
-     * (split_line / join_line), under M56's own rule, so undo cannot
-     * drift from what it is undoing. */
-    EDIT_SPLIT = 3,  /* line `row` was split at `col` - undo joins them back */
-    EDIT_JOIN = 4,   /* line `row + 1` was appended onto `row` at `col` - undo splits at (row, col) */
+    EDIT_INSERT = 0,
+    EDIT_DELETE = 1,
+    EDIT_SPLIT = 3,
+    EDIT_JOIN = 4,
 } edit_kind_t;
 
 typedef struct {
@@ -387,18 +200,10 @@ typedef struct {
 } edit_t;
 
 static edit_t undo_ring[UNDO_MAX];
-static int undo_count;   /* records behind `head` that can still be undone */
-static int undo_head;    /* where the next record goes */
-/* M60: records *ahead* of head that have been undone and can be redone.
- * The ring already held what redo needs; what was missing was a cursor
- * into it and the rule that a fresh edit discards the forward half. That
- * rule is one line in undo_record, and it is what keeps redo from
- * replaying an edit against a buffer that has since moved on. */
+static int undo_count;
+static int undo_head;
 static int redo_count;
 static uint8_t undo_group;
-/* Set while undo or redo is replaying, so the edits they perform are not
- * themselves recorded - which would make undo a loop rather than a
- * history. */
 static int undo_replaying;
 
 static void undo_begin_group(void) {
@@ -419,14 +224,7 @@ static void undo_record(edit_kind_t kind, int row, int col, char ch) {
     if (undo_count < UNDO_MAX) {
         undo_count++;
     }
-    /* M60: a fresh edit discards the forward half. Anything that was
-     * undone described a buffer this edit has just diverged from, and
-     * replaying it would apply a change at coordinates that no longer
-     * mean what they did. */
     redo_count = 0;
-    /* Full: the oldest record is simply overwritten. Bounded history is
-     * the trade this design makes on purpose - an editor that can undo
-     * forever is one that can run out of memory while you type. */
 }
 
 static void undo_reset(void) {
@@ -439,7 +237,7 @@ static void undo_reset(void) {
 static void insert_char(char c) {
     int *len = &line_len[cur_row];
     if (*len >= MAX_LINE_LEN - 1) {
-        return; /* line's own fixed cap - silently refuses rather than corrupting adjacent memory */
+        return;
     }
     for (int i = *len; i > cur_col; i--) {
         lines[cur_row][i] = lines[cur_row][i - 1];
@@ -451,10 +249,6 @@ static void insert_char(char c) {
     dirty = 1;
 }
 
-/* M60: split line `row` at `col` - everything from `col` onward becomes a
- * new line below it. The primitive, with no cursor movement and no undo
- * record of its own, because undo performs it too (as the inverse of a
- * join) and a primitive that recorded itself would make undo a loop. */
 static int split_line(int row, int col) {
     if (line_count >= MAX_LINES) {
         return 0;
@@ -471,9 +265,6 @@ static int split_line(int row, int col) {
     return 1;
 }
 
-/* The inverse: append line `row + 1` onto the end of `row`. Returns 0 if
- * the joined line would not fit, which is what keeps Backspace from
- * silently losing the tail of a long line. */
 static int join_line(int row) {
     if (row + 1 >= line_count) {
         return 0;
@@ -491,10 +282,6 @@ static int join_line(int row) {
     return 1;
 }
 
-/* M60: Enter, at last. It appended an empty line at the end of the buffer
- * regardless of where the cursor was - which is what "you cannot split a
- * line" looks like from the inside, and the first thing anyone typing a
- * paragraph discovers. */
 static void split_at_cursor(void) {
     if (!split_line(cur_row, cur_col)) {
         return;
@@ -507,9 +294,6 @@ static void split_at_cursor(void) {
 
 static void backspace(void) {
     if (cur_col == 0) {
-        /* M60: and the other half - Backspace at column 0 joins this line
-         * onto the one above, landing the cursor exactly where the join
-         * happened, which is where the text you just merged now starts. */
         if (cur_row == 0) {
             return;
         }
@@ -549,7 +333,7 @@ static void handle_char(char ch) {
     } else if (ch >= 0x20 && ch < 0x7F) {
         insert_char(ch);
     } else {
-        return; /* unrecognized control byte - nothing to redraw for */
+        return;
     }
     clamp_cursor();
 }
@@ -567,20 +351,11 @@ static void reset_to_new_file(void) {
     scroll_top = 0;
     memcpy(filename, PATH_HOME_DIR "untitled", sizeof(PATH_HOME_DIR "untitled"));
     dirty = 0;
-    undo_reset(); /* M56: the history described a buffer that no longer exists */
+    undo_reset();
     status[0] = '\0';
-    clear_selection(); /* M37: the old selection's row indices may no longer even exist in the fresh, 1-line buffer */
+    clear_selection();
 }
 
-/* M36: the exit code deliberately isn't 0 - M29's reap_dead_clients only
- * ever reclaims a window slot on a *nonzero* SYS_exit (a clean exit(0) is
- * treated as "still meant to be showing something," see wm_demo's own
- * self-test) - so a plain sys_exit(0) here would leave a stale, unclosable
- * window on screen despite the process actually being gone. Any nonzero
- * code reclaims it identically (SYS_task_alive's own doc comment already
- * lumps "any other non-zero SYS_exit" in with a real crash for exactly
- * this reason) - 1 is just this app's own convention for "closed on
- * purpose," not a magic value the kernel treats specially. */
 static void quit_now(void) {
     sys_exit(1);
 }
@@ -601,20 +376,12 @@ static void confirm_save_as(void) {
             filename[i] = prompt_buf[i];
         }
         filename[i] = '\0';
-        /* M60: Save As under a new name is exactly the escape hatch a
-         * truncated buffer needs, so the flag clears here - what gets
-         * written is the whole of *this* file, whatever it was a prefix
-         * of before. */
         truncated = 0;
         save_file();
     }
     prompt_kind = PROMPT_NONE;
 }
 
-/* Shared by the File menu's New/Quit items and WM_EVENT_CLOSE_REQUEST
- * (the titlebar close button, once this window opted into confirm_close -
- * see wm_connect_confirm_close) - same "one real path, not near-copies"
- * shape as compositor.c's own apply_window_action. */
 static void request_action(pending_action_t action) {
     if (!dirty) {
         if (action == PENDING_NEW) {
@@ -645,13 +412,13 @@ static void confirm_discard(int discard) {
 }
 
 static void run_file_menu_item(int idx) {
-    if (idx == 0) { /* New */
+    if (idx == 0) {
         request_action(PENDING_NEW);
-    } else if (idx == 1) { /* Save */
+    } else if (idx == 1) {
         save_file();
-    } else if (idx == 2) { /* Save As */
+    } else if (idx == 2) {
         begin_save_as();
-    } else if (idx == 3) { /* Quit */
+    } else if (idx == 3) {
         request_action(PENDING_QUIT);
     }
 }
@@ -689,17 +456,6 @@ static void normalized_selection(int *sr, int *sc, int *er, int *ec) {
     }
 }
 
-/* M56: replays the most recent group of edits backwards. Each record's
- * inverse is one of the same three mutations, performed through the same
- * primitives - so undo cannot drift away from what it is undoing, which
- * is the failure mode of every hand-written inverse. */
-/* ---- M60: find and find-next ----------------------------------------
- *
- * Searches forward from just after the cursor and wraps to the top, which
- * is what makes repeated find-next walk every occurrence and stop where
- * it started rather than at the end of the file. Case-sensitive and plain
- * substring: this editor has no notion of a word and inventing one would
- * be guessing at what somebody meant. */
 static char find_needle[PROMPT_MAX_LEN + 1];
 
 static int line_has_at(int row, int col, const char *needle) {
@@ -737,8 +493,6 @@ static void find_next(void) {
         memcpy(status, "Nothing to find - Ctrl+F first.", sizeof("Nothing to find - Ctrl+F first."));
         return;
     }
-    /* From one past the cursor, so find-next moves off the match it is
-     * standing on rather than finding it again forever. */
     int from_row = cur_row;
     int from_col = cur_col + 1;
     if (from_col > line_len[cur_row]) {
@@ -761,11 +515,6 @@ static void find_next(void) {
     }
 }
 
-/* One record, undone. Every inverse is performed through the same
- * primitive as the edit it reverses, which is what keeps undo from
- * drifting away from what it is undoing - M56's rule, and the reason the
- * two structural kinds M60 added needed no new machinery, only their own
- * two lines here. */
 static void apply_inverse(const edit_t *e) {
     if (e->kind == EDIT_INSERT) {
         cur_row = e->row;
@@ -788,8 +537,6 @@ static void apply_inverse(const edit_t *e) {
     }
 }
 
-/* And the same record, re-done - the edit itself rather than its
- * inverse, through the same primitives again. */
 static void apply_forward(const edit_t *e) {
     if (e->kind == EDIT_INSERT) {
         cur_row = e->row;
@@ -829,7 +576,7 @@ static void undo_last_group(void) {
         undo_head = at;
         undo_count--;
         if (redo_count < UNDO_MAX) {
-            redo_count++; /* the record stays in the ring, ahead of head, for redo */
+            redo_count++;
         }
         apply_inverse(&e);
     }
@@ -838,10 +585,6 @@ static void undo_last_group(void) {
     dirty = 1;
 }
 
-/* M60: redo. The ring already held what this needs - the records are
- * still there, ahead of head; what was missing was a cursor into it.
- * Symmetric with undo down to the group rule, so one Ctrl+Y puts back
- * exactly what one Ctrl+Z took away. */
 static void redo_next_group(void) {
     if (redo_count == 0) {
         memcpy(status, "Nothing to redo.", sizeof("Nothing to redo."));
@@ -863,11 +606,6 @@ static void redo_next_group(void) {
     dirty = 1;
 }
 
-/* M56: the other half of the clipboard this editor has had since M32.
- * Copy existed; paste did not, which made "the clipboard" a one-way
- * street between this window and gui_terminal. One undo group for the
- * whole thing - eighty separate undos for one Ctrl+V would be a worse
- * feature than none. */
 static void paste_from_clipboard(void) {
     static char buf[1024];
     long n = sys_clipboard_get(buf, sizeof(buf));
@@ -880,8 +618,6 @@ static void paste_from_clipboard(void) {
     undo_begin_group();
     for (long i = 0; i < n; i++) {
         if (buf[i] == '\n' || buf[i] == '\r') {
-            /* M60: a pasted newline splits too, so pasting two lines into
-             * the middle of a third does what it looks like it should. */
             split_at_cursor();
         } else if (buf[i] >= 0x20 && buf[i] < 0x7F) {
             insert_char(buf[i]);
@@ -921,7 +657,7 @@ static void redraw(wm_window_t *win) {
             int col_start = (r == sr) ? sc : 0;
             int col_end = (r == er) ? ec : line_len[r];
             if (col_end <= col_start) {
-                continue; /* an empty span on this row (e.g. selection starts at EOL) - nothing to shade */
+                continue;
             }
             int32_t y = CONTENT_Y0 + (r - scroll_top) * FONT_HEIGHT;
             gfx_fill_rect(&win->gfx, col_start * FONT_WIDTH, y, (col_end - col_start) * FONT_WIDTH, FONT_HEIGHT, SELECTION_COLOR);
@@ -953,11 +689,6 @@ static void redraw(wm_window_t *win) {
                                          : "Ctrl+S save  Ctrl+Z undo  Ctrl+Y redo  Ctrl+F find  Ctrl+G next"),
                   STATUS_COLOR);
 
-    /* Dropdown drawn last so it overlays whatever content is underneath -
-     * this app owns its whole window buffer, there's no compositor-level
-     * popup surface to draw it into instead (see M35's milestones.md
-     * note on that scope trim, and M42's on why the menu came back here
-     * rather than staying in a shared bar). */
     if (menu_open) {
         gfx_draw_menu(&win->gfx, FILE_MENU_X, CONTENT_Y0, FILE_MENU_ITEM_W, FILE_MENU_ITEM_H,
                       FILE_MENU_ITEMS, FILE_MENU_COUNT, -1,
@@ -967,10 +698,6 @@ static void redraw(wm_window_t *win) {
     if (prompt_kind != PROMPT_NONE) {
         int32_t x = (WIN_W - PROMPT_W) / 2;
         int32_t y = (WIN_H - PROMPT_H) / 2;
-        /* M44: same corner radius as every other rounded surface on this
-         * desktop (gfx.h's GFX_CORNER_R) - a dialog was the last flat-
-         * cornered box left once the taskbar, the launcher and the icons
-         * were done. */
         gfx_fill_rect_rounded(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BG);
         gfx_draw_rect_rounded(&win->gfx, x, y, PROMPT_W, PROMPT_H, PROMPT_BORDER);
         if (prompt_kind == PROMPT_SAVE_AS || prompt_kind == PROMPT_FIND) {
@@ -985,7 +712,7 @@ static void redraw(wm_window_t *win) {
             gfx_draw_text(&win->gfx, x + GFX_PAD + 4, y + 30, buf, PROMPT_TEXT);
             gfx_fill_rect(&win->gfx, x + GFX_PAD + 4 + gfx_text_width(gfx_ui_font(), buf), y + 30,
                           2, (int32_t)gfx_ui_font()->height, CURSOR_COLOR);
-        } else { /* PROMPT_CONFIRM_DISCARD */
+        } else {
             gfx_draw_text(&win->gfx, x + GFX_PAD, y + 8, "Discard unsaved changes?", PROMPT_TEXT);
             gfx_draw_text(&win->gfx, x + GFX_PAD, y + 32, "Y = discard      N / click = cancel", PROMPT_TEXT);
         }
@@ -993,10 +720,6 @@ static void redraw(wm_window_t *win) {
 }
 
 int main(int argc, char **argv) {
-    /* M60: argv[0] is this program's own path; argv[1] is the first thing
-     * the caller had to say. `arg` keeps the name the body already uses,
-     * and is the empty string when there was nothing - which is exactly
-     * what the single-string mechanism this replaced handed over. */
     const char *arg = argc > 1 ? argv[1] : "";
     int i = 0;
     for (; arg && arg[i] && i < (int)sizeof(filename) - 1; i++) {
@@ -1004,8 +727,6 @@ int main(int argc, char **argv) {
     }
     filename[i] = '\0';
     if (filename[0] == '\0') {
-        /* M53: a new document belongs in /home, which is where the file
-         * manager opens and where a person would look for it. */
         memcpy(filename, PATH_HOME_DIR "untitled", sizeof(PATH_HOME_DIR "untitled"));
     }
 
@@ -1020,34 +741,27 @@ int main(int argc, char **argv) {
     }
 
     redraw(&win);
-    wm_present(&win); /* M117: the first frame, like every other one */
+    wm_present(&win);
 
     for (;;) {
         int changed = 0;
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
-                changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
+                changed = 1;
                 continue;
             }
-            /* M36: an open prompt owns every event until answered - same
-             * "in-progress interaction takes over the input stream"
-             * shape as compositor.c's own drag state machine (M31), just
-             * scoped to this one window instead of the whole desktop. */
             if (prompt_kind == PROMPT_SAVE_AS || prompt_kind == PROMPT_FIND) {
                 if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
-                    prompt_kind = PROMPT_NONE; /* click anywhere cancels */
+                    prompt_kind = PROMPT_NONE;
                 } else if (ev.type == WM_EVENT_KEY) {
                     if (ev.ch == '\n' || ev.ch == '\r') {
                         if (prompt_kind == PROMPT_FIND) {
                             prompt_buf[prompt_len] = '\0';
                             memcpy(find_needle, prompt_buf, (size_t)prompt_len + 1);
                             prompt_kind = PROMPT_NONE;
-                            /* From the cursor itself, so the first Enter
-                             * finds the nearest match rather than
-                             * skipping one. */
                             if (!find_from(cur_row, cur_col, find_needle)) {
-                                find_next(); /* not found from here - say so, having wrapped */
+                                find_next();
                             }
                             clamp_cursor();
                         } else {
@@ -1066,7 +780,7 @@ int main(int argc, char **argv) {
             }
             if (prompt_kind == PROMPT_CONFIRM_DISCARD) {
                 if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
-                    confirm_discard(0); /* click cancels, same as N */
+                    confirm_discard(0);
                 } else if (ev.type == WM_EVENT_KEY && (ev.ch == 'y' || ev.ch == 'Y')) {
                     confirm_discard(1);
                 } else if (ev.type == WM_EVENT_KEY && (ev.ch == 'n' || ev.ch == 'N')) {
@@ -1077,12 +791,6 @@ int main(int argc, char **argv) {
             }
 
             if (ev.type == WM_EVENT_DROP) {
-                /* M49: a file dragged onto this window opens it here -
-                 * the one case drag and drop was scoped to. Routed
-                 * through request_action's existing confirm-discard path
-                 * rather than loading straight over the top, because
-                 * losing unsaved work to a mis-drop is exactly the
-                 * accident M36's prompt exists to prevent. */
                 char dropped[sizeof(pending_drop)];
                 if (wm_drag_payload(dropped, sizeof(dropped)) == 0 && dropped[0]) {
                     if (dirty) {
@@ -1100,25 +808,10 @@ int main(int argc, char **argv) {
             } else if (ev.type == WM_EVENT_CLOSE_REQUEST) {
                 request_action(PENDING_QUIT);
             } else if (ev.type == WM_EVENT_QUERY_SHUTDOWN) {
-                /* M74: the machine is about to stop and is asking whether
-                 * this window minds. It does, if and only if there is
-                 * something in the buffer that is not on disk - which is
-                 * exactly the `dirty` flag the titlebar's close button has
-                 * consulted since M36. A veto is one call and no state:
-                 * the compositor abandons the shutdown and says which
-                 * window objected, and the person is then looking at this
-                 * one with an unsaved document in it, which is the whole
-                 * outcome this is for. */
                 if (dirty) {
                     wm_veto_shutdown(win.window_id);
                 }
             } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
-                /* M49: one text row per detent. Scrolls the viewport
-                 * without moving the caret - clamp_scroll (which the
-                 * caret's own movement goes through) would immediately
-                 * drag the view back if it did, so this deliberately
-                 * writes scroll_top directly and lets the next arrow key
-                 * or click re-anchor it. */
                 int max_top = line_count - TEXT_ROWS;
                 if (max_top < 0) {
                     max_top = 0;
@@ -1137,10 +830,6 @@ int main(int argc, char **argv) {
                 cur_col = sel_end_col;
                 clamp_cursor();
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
-                /* M35: the "File" label toggles the dropdown; any other
-                 * click while it's open either picks an item or - same
-                 * as a real menu - just dismisses it, consumed either
-                 * way so it never also reaches handle_char/save_file. */
                 if (gfx_point_in_rect(ev.x, ev.y, 0, 0,
                                       FILE_MENU_X + gfx_text_width(gfx_ui_font(), "File") + 8, CONTENT_Y0)) {
                     menu_open = !menu_open;
@@ -1152,10 +841,6 @@ int main(int argc, char **argv) {
                         run_file_menu_item(idx);
                     }
                 } else if (ev.y >= CONTENT_Y0 && ev.y < CONTENT_Y0 + TEXT_ROWS * FONT_HEIGHT) {
-                    /* M37: a plain click (no drag) just moves the cursor
-                     * there, same as a real editor - sel_active only
-                     * turns on at button-up if the drag actually covered
-                     * more than one grid cell. */
                     sel_active = 0;
                     sel_dragging = 1;
                     pixel_to_grid(ev.x, ev.y, &sel_anchor_row, &sel_anchor_col);
@@ -1169,11 +854,6 @@ int main(int argc, char **argv) {
                 sel_dragging = 0;
                 sel_active = (sel_anchor_row != sel_end_row || sel_anchor_col != sel_end_col);
             } else if (ev.type == WM_EVENT_KEY) {
-                /* M-fix: from the event, not from the kernel's global
-                 * "most recently read" state - see wm_event_t.mods. The
-                 * keystroke this handler is holding was decoded before
-                 * the compositor forwarded it, so asking now is asking
-                 * about somebody else's key. */
                 long mods = ev.mods;
                 if ((mods & KBD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
                     if (sel_active) {
@@ -1206,8 +886,6 @@ int main(int argc, char **argv) {
                 } else {
                     status[0] = '\0';
                     clear_selection();
-                    /* M56: one group per keystroke - see UNDO_MAX's note
-                     * on why this deliberately does not coalesce runs. */
                     undo_begin_group();
                     handle_char(ev.ch);
                 }
@@ -1218,6 +896,6 @@ int main(int argc, char **argv) {
             redraw(&win);
             wm_present(&win);
         }
-        wm_wait_ms(&win, NULL, 0, -1); /* M117: nothing here changes without input */
+        wm_wait_ms(&win, NULL, 0, -1);
     }
 }

@@ -1,43 +1,3 @@
-/* user_space/bin/racetest.c
- *
- * M67's self-test, and it is a user-space program for a reason this
- * project has now given five times (badptr.c, libctest.c, nettest.c,
- * captest.c): what M67 changed is what happens *at the syscall
- * boundary*, so a test that ran inside the kernel would be on the wrong
- * side of it.
- *
- * What M67 changed is that `int 0x80` became a trap gate, so interrupts
- * stay enabled through a syscall. For sixty-six milestones IF=0 was this
- * kernel's only mutual exclusion, never written down and load-bearing
- * everywhere. This program's job is to be the thing that would have
- * noticed.
- *
- * The shape of every check here is the same, and it is the only shape
- * that works for a race: **write something only this process could have
- * written, then demand it back byte for byte.** A test that merely calls
- * a syscall a lot proves nothing - two processes that corrupted each
- * other's state would both still get their syscalls answered. A test
- * that writes a pattern keyed to its own pid and reads back somebody
- * else's has caught the bug, and can say so.
- *
- * Four subsystems, chosen because they are exactly the four that had
- * shared mutable state and no lock before M67:
- *
- *   fs      -> fs_lock       (kernel/fs/vfs.c)      inode table, bitmap
- *   shm     -> shm_lock      (kernel/ipc/shm.c)     the segment table
- *   pipe    -> pipe_lock     (kernel/ipc/pipe.c)    ring buffer, refcounts
- *   socket  -> net_lock      (kernel/net/net.h)     the socket table
- *
- * Run several of these at once (kernel.c spawns four) and the timer tick
- * plus a second core does the rest. Exit 0 for all-passed, 1 otherwise.
- *
- * Deliberately NOT a timing loop with a "ran for N seconds without
- * crashing" verdict. That is the test everybody writes for a race and it
- * is worth nothing: it fails intermittently on a broken kernel and
- * passes intermittently on one, so it can never be believed in either
- * direction. Every assertion below is deterministic - the byte is right
- * or it is not.
- */
 #include <stdio.h>
 #include <string.h>
 
@@ -64,11 +24,6 @@ static void check(int ok, const char *what) {
     }
 }
 
-/* A byte that depends on who wrote it, which round, and where in the
- * buffer. All three matter: without the pid another process's identical
- * write would be indistinguishable from ours, without the round a stale
- * buffer would pass, and without the offset a memcpy that got the length
- * wrong would too. */
 static unsigned char stamp(int pid, int round, int offset) {
     return (unsigned char)((pid * 31 + round * 7 + offset * 13) & 0xFF);
 }
@@ -78,9 +33,6 @@ int main(int argc, char **argv) {
     (void)argv;
     int pid = (int)sys_getpid();
 
-    /* The label is this program's own pid rather than an argv index, so a
-     * failure message names a task the log and the task manager also
-     * name. */
     int n = 0;
     int v = pid;
     char digits[12];
@@ -98,12 +50,6 @@ int main(int argc, char **argv) {
     static unsigned char back[FILE_BYTES];
 
     for (int round = 0; round < ROUNDS; round++) {
-        /* ---- fs_lock ---------------------------------------------------
-         * A whole-file write is a bitmap update, an inode update and a
-         * run of sector writes. Before M67 nothing could interleave with
-         * that; now four processes are doing it at once. If two of them
-         * are handed the same block, one of these reads comes back with
-         * the other's pattern in it. */
         for (int i = 0; i < FILE_BYTES; i++) {
             out[i] = stamp(pid, round, i);
         }
@@ -119,12 +65,6 @@ int main(int argc, char **argv) {
         }
         check(fs_ok, "a file read back bytes this process did not write");
 
-        /* ---- shm_lock --------------------------------------------------
-         * The failure this catches is two callers being handed the same
-         * segment id, which before M67 needed only a timer tick between
-         * find_free_slot and the store that claims the slot. Two owners
-         * of one buffer means whichever writes second wins, so the first
-         * one's read comes back wrong. */
         long id = sys_shm_create(SHM_BYTES);
         check(id >= 0, "shm_create failed");
         if (id >= 0) {
@@ -134,10 +74,6 @@ int main(int argc, char **argv) {
                 for (int i = 0; i < SHM_BYTES; i += 64) {
                     p[i] = stamp(pid, round, i);
                 }
-                /* Give the scheduler a chance to run somebody else
-                 * between the write and the read - the window this is
-                 * looking for is exactly the one a context switch opens,
-                 * so not yielding here would be testing the easy case. */
                 sys_yield();
                 int shm_ok = 1;
                 for (int i = 0; i < SHM_BYTES; i += 64) {
@@ -148,11 +84,6 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* ---- pipe_lock -------------------------------------------------
-         * head/tail/count are read-modify-write on both sides. This is a
-         * self-pipe (under PIPE_BUF_SIZE, so the write cannot block),
-         * which tests the ring arithmetic rather than the rendezvous -
-         * and the ring arithmetic is the part that tears. */
         int fds[2];
         check(sys_pipe(fds) == 0, "pipe failed");
         if (fds[0] >= 0 && fds[1] >= 0) {
@@ -178,14 +109,6 @@ int main(int argc, char **argv) {
             sys_close(fds[1]);
         }
 
-        /* ---- net_lock --------------------------------------------------
-         * Bind to port 0 and the kernel picks an unused one. Two
-         * processes handed the *same* ephemeral port is the visible
-         * symptom of an unserialised socket table, and it is checkable
-         * without a second machine: this process binds two at once and
-         * they must differ. Closing them returns both to the table, so a
-         * leak here shows up as a bind failure within a few rounds
-         * rather than at some unrelated point much later. */
         int s1 = (int)sys_socket(OS_SOCK_DGRAM);
         int s2 = (int)sys_socket(OS_SOCK_DGRAM);
         check(s1 >= 0 && s2 >= 0, "socket allocation failed");
@@ -199,26 +122,6 @@ int main(int argc, char **argv) {
         if (s2 >= 0) { sys_close(s2); }
     }
 
-    /* ---- M68: SYS_waitfds ---------------------------------------------
-     *
-     * Checked here rather than in a test of its own because this program
-     * is already the one that owns a pipe with a known writer, and the
-     * three answers the call can give are all reachable from that:
-     *
-     *   ready    - a pipe with bytes in it comes back immediately,
-     *              with the index of the fd that was ready
-     *   timeout  - an empty pipe with a deadline comes back -2, and does
-     *              so having actually waited rather than spun
-     *   sleep    - M88: a count of zero with a deadline is a SLEEP. It
-     *              used to be an argument error, and this test asserted
-     *              that it was; `poll` is what changed it, because POSIX
-     *              says an empty set with a timeout is a sleep and this
-     *              libc had no other way to ask for one. A wait with
-     *              nothing that could satisfy it early is exactly that.
-     *
-     * The timeout case is the one that matters: it is the only assertion
-     * here that would fail if the call returned instantly, which is what
-     * a "blocking" wait that forgot to block looks like from user space. */
     {
         int wfds[2];
         check(sys_pipe(wfds) == 0, "pipe for waitfds failed");
@@ -233,10 +136,6 @@ int main(int argc, char **argv) {
             check(sys_waitfds(wfds, 1, 1000) == 0,
                   "waitfds did not report a pipe with bytes in it as ready");
 
-            /* M88: a count of zero is a sleep, not an error - and it has
-             * to actually sleep, which is the half that would still be
-             * wrong if it returned immediately. Checked the same way the
-             * timeout case above is, because it is the same property. */
             {
                 long before0 = sys_uptime_ms();
                 long r0 = sys_waitfds(wfds, 0, 50);
@@ -244,8 +143,6 @@ int main(int argc, char **argv) {
                 check(r0 == -2, "waitfds with no descriptors did not report a timeout");
                 check(waited0 >= 30, "waitfds with no descriptors returned without sleeping");
             }
-            /* An over-long count is still an argument error - the refusal
-             * moved, it did not go away. */
             check(sys_waitfds(wfds, 100000, 10) == -1,
                   "waitfds accepted a count larger than the fd table");
             sys_close(wfds[0]);

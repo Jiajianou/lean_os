@@ -15,9 +15,6 @@ void *k_memmove(void *dst, const void *src, size_t n) {
     if (d == s || n == 0) {
         return dst;
     }
-    /* Copy backwards only when the destination starts inside the source,
-     * which is the one direction a forward copy would overwrite bytes it
-     * has not read yet. */
     if (d > s && d < s + n) {
         for (size_t i = n; i > 0; i--) {
             d[i - 1] = s[i - 1];

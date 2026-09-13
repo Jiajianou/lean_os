@@ -1,81 +1,19 @@
-/* user_space/libc/include/unistd.h - M75
- *
- * The POSIX names for things this kernel already does, plus the two
- * M75 adds. See string.h's header comment for why this project ships its
- * own headers rather than borrowing a libc's.
- *
- * Deliberately small, and it grows the way M63's rule says: when a
- * program somebody else wrote fails to link without a name, not when a
- * standard lists one. What is here is what "a place to stand" needs -
- * `chdir`/`getcwd`, `environ` - alongside the read/write/close that were
- * already syscalls under a different spelling.
- */
 #pragma once
 
 #include <stddef.h>
 #include <sys/types.h>
 
-/* M98: the announcement macro, and it is interface the same way
- * <stdio.h>'s _STDIO_H is: ported code asks "is this a POSIX system"
- * by testing _POSIX_VERSION, and code older than ANSI then declares
- * its OWN prototypes for lseek and getcwd when the answer is no - GNU
- * make's makeint.h does exactly that, and its `char *getcwd(void)`
- * collides with the real declaration below. The value is the version
- * whose *names* this header set out to provide (M75/M77's bullet is
- * literally "POSIX names for what is already here"); what is absent is
- * absent by link error, which is the same honest failure it was before
- * this macro existed. */
 #define _POSIX_VERSION 200809L
 
-/* M99: and the option macro that says threads are one of the names.
- *
- * POSIX puts the per-option macros here rather than in the header that
- * declares the functions, and a program that wants to know whether it
- * has threads is required to test this one. CPython's
- * Include/internal/pycore_condvar.h does exactly that, and its `#else`
- * is not a fallback - it declares no PyCOND_T at all, so the failure is
- * "unknown type name 'PyCOND_T'" in a file that mentions neither
- * pthreads nor this header.
- *
- * It is defined because it is true: pthread_create, join, the mutex,
- * the condition variable and pthread_once are all here (M79, M96), and
- * pthread_cond_timedwait is the one CPython's GIL is built on. The
- * options this system does NOT have - _POSIX_SEMAPHORES above all - are
- * deliberately absent, so a program that needs sem_open finds out by
- * asking rather than by a link error at the end of a long build. */
 #define _POSIX_THREADS 200809L
 
-/* M97: C++ linkage.
- *
- * Without this every declaration below is a C++ function when a C++
- * program includes it, so `malloc` in a header and `malloc` in libc.a
- * are different symbols and nothing links. It cost a whole libstdc++
- * build to find, and the error names the caller rather than the header:
- * "undefined reference to `malloc(unsigned long)`" - with the argument
- * list, which is the tell. */
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* The environment, as every program that has ever walked one expects to
- * find it: a NULL-terminated array of "NAME=value". Points into the
- * kernel's argument region until something calls setenv/putenv, at which
- * point libc/src/env.c moves it onto the heap - see that file. */
 extern char **environ;
 
-/* M75. `chdir` refuses anything that is not an existing directory, so a
- * cd that succeeded and one that quietly did nothing cannot be confused.
- * `getcwd` returns `buf` on success and NULL if the directory does not
- * fit - refusing rather than truncating, because a truncated path names
- * a different directory. */
-/* M89: which errno a failed path operation should report on a machine
- * whose path syscalls all return -1 and nothing else. Not POSIX and not
- * for programs - this library's own path calls use it, and it is
- * declared here rather than being static so that the several files that
- * need it share one inference. See unistd.c for what it can and cannot
- * tell, which is the part worth reading. */
 int __lean_path_errno(const char *path, int creating);
-/* M99: its counterpart for a descriptor - see the note in unistd.c. */
 int __lean_fd_errno(int fd);
 
 int chdir(const char *path);
@@ -83,13 +21,6 @@ char *getcwd(char *buf, size_t size);
 
 int getpid(void);
 
-/* M77. `mode` is F_OK / R_OK / W_OK / X_OK, and only F_OK is answered
- * from anything real: this machine has no permission bits (see
- * <sys/stat.h>), so R/W/X are reported as granted for anything that
- * exists. That is not a stub - it is the true answer on a system where
- * what a process may do is decided by its capability set (M65) and never
- * by a file mode. A program that wants to know whether it may write
- * should try, and read the error. */
 #define F_OK 0
 #define X_OK 1
 #define W_OK 2
@@ -99,12 +30,6 @@ int access(const char *path, int mode);
 int rmdir(const char *path);
 int unlink(const char *path);
 
-/* M100: the three names POSIX gives the descriptors every process starts
- * with. curl's src/terminal.c is what named them - it asks whether
- * STDIN_FILENO is a terminal - and they had never been here, which is
- * the same shape of gap M94 found with wcwidth: the thing exists (fd 0
- * is stdin on this machine and always has been), and the spelling every
- * portable program uses for it did not. */
 #define STDIN_FILENO  0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
@@ -112,107 +37,35 @@ int unlink(const char *path);
 long read(int fd, void *buf, size_t count);
 long write(int fd, const void *buf, size_t count);
 
-/* M100: the same two transfers from a stated place, leaving the
- * descriptor's own position alone. NetSurf's disc cache asked; see
- * SYS_pread for why this is a syscall and not an lseek sandwich. */
 ssize_t pread(int fd, void *buf, size_t count, off_t offset);
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 int close(int fd);
 
-/* M86: exit without running anything on the way out.
- *
- * The shell asked for this by name and the reason is fork: a child that
- * has decided not to exec must leave WITHOUT running what the parent
- * registered on its way out. Nothing here registers anything yet -
- * `exit` is a syscall and no more (see stdlib.c) - so today the two are
- * the same call, and that is worth stating rather than hiding. The
- * distinction becomes real the day this libc grows atexit or a buffered
- * stdio that flushes, and a shell that had spelled it `exit` would then
- * quietly flush its parent's buffers once per forked command. */
 void _exit(int status) __attribute__((noreturn));
-int getentropy(void *buf, size_t len); /* M100: also in <sys/random.h>, where it is explained */
-/* M80 groundwork. `isatty` answers from what this system actually knows:
- * fd 0 and 1 are the implicit stdin/stdout every task starts with
- * (kernel/sched/sched.h's fd table), and everything else is a pipe, a
- * socket or a file. There is no terminal device here to ask, so this is
- * the honest approximation and not a stub - it is right for every use a
- * ported program puts it to (deciding whether to prompt). */
+int getentropy(void *buf, size_t len);
 int isatty(int fd);
-/* M89: the name of the terminal on `fd`, or NULL if it is not one.
- *
- * There is exactly one terminal on this machine and its path is
- * "/dev/tty" (M87's devfs), so this answers that for anything isatty
- * says yes to and NULL otherwise. That is not a stub: a system with one
- * terminal reporting one terminal is the same shape of truth <pwd.h>
- * documents for its one user. The _r form takes the caller's buffer. */
 char *ttyname(int fd);
 int ttyname_r(int fd, char *buf, size_t len);
 long lseek(int fd, long offset, int whence);
 int dup2(int oldfd, int newfd);
-/* M87: it arrived. The paragraph here used to say "no ftruncate... a
- * declaration with no implementation would be worse than its absence: a
- * program that probes for it at configure time would find it and then
- * fail to link. It arrives the day something asks." There is a syscall
- * behind it now (SYS_ftruncate), and it does more than the function that
- * note described: growing a file only changes its size, because an
- * unallocated block already reads as zeros. */
 int ftruncate(int fd, off_t length);
 
-/* M87: symbolic links. Note symlink's argument order - the target first,
- * then the name to create - which is symlink(2)'s everywhere and the
- * reverse of what most people guess.
- *
- * `readlink` does NOT follow the link it is given, which is the whole
- * point of it, and does NOT NUL-terminate: it returns the byte count,
- * exactly as POSIX specifies, because a target may legitimately contain
- * anything a path can. Every caller has to terminate it themselves and
- * every caller written elsewhere already does. */
-/* ---- M88: who is running this, and how much of what there is --------
- *
- * `getuid` and friends return 0, and that is not a placeholder. M65
- * argued at length that there are no users on this machine and refused
- * to invent one; a machine with exactly one principal that reports one
- * principal is telling the truth. What M65 declined was a *permission
- * model* that pretended to enforce something, and nothing here enforces
- * anything - `access()` still says so in its own comment, and `chmod`
- * is still a truthful failure.
- *
- * The effective and real forms are the same number for the same reason:
- * there is no setuid on this machine, so there is nothing for them to
- * differ about. A program that compares them is asking "am I running
- * with borrowed authority", and the honest answer here is no. */
 uid_t getuid(void);
 uid_t geteuid(void);
-char *getlogin(void); /* M98: "root", agreeing with getpwuid(0) - see unistd.c */
+char *getlogin(void);
 gid_t getgid(void);
 gid_t getegid(void);
 
-/* M89: the ownership setters, refused for the reason <sys/stat.h> gives
- * for chmod. leanfs stores no owner; a call that returned 0 would be
- * claiming a file now belongs to somebody. */
 int chown(const char *path, uid_t uid, gid_t gid);
 int fchown(int fd, uid_t uid, gid_t gid);
 int lchown(const char *path, uid_t uid, gid_t gid);
 int fchownat(int dirfd, const char *path, uid_t uid, gid_t gid, int flags);
 
-/* M89: the setters for the identity calls above. There is one principal
- * and it is uid 0, so setting the id to 0 succeeds (it is already that)
- * and setting it to anything else fails - which is exactly what a
- * privileged process on any Unix sees when it tries to become a user
- * that does not exist. */
 int setuid(uid_t uid);
 int setgid(gid_t gid);
 
-/* M89: the parent's pid. The kernel has held `parent_id` in every task
- * since M14 and never had a call that reported it - SYS_taskinfo's
- * whole-table snapshot needs CAP_PROC_LIST, which is exactly the wrong
- * shape for a process asking about itself. */
 pid_t getppid(void);
 
-/* M89: process groups and sessions, in the POSIX spelling. The syscalls
- * have been here since M85 (SYS_setsid, SYS_getsid, SYS_setpgid,
- * SYS_getpgid) and only the shell, which calls the wrappers directly,
- * had ever used them. A ported program calls these names. */
 pid_t setsid(void);
 pid_t getsid(pid_t pid);
 int setpgid(pid_t pid, pid_t pgid);
@@ -220,74 +73,25 @@ pid_t getpgid(pid_t pid);
 pid_t getpgrp(void);
 int setpgrp(void);
 
-/* M89: the lowest free descriptor naming the same file. Built over
- * dup2 - which is the only duplication the kernel has - by finding a
- * free slot first, because dup2 to a descriptor already in use would
- * close it. See unistd.c for how "free" is asked. */
 int dup(int oldfd);
 
-/* M89: refused. A root directory a process cannot escape is a boundary,
- * and this machine's boundary is the capability set (M65), which a
- * chroot does not narrow. Returning 0 would tell a program it was
- * confined when it was not, which is the one failure mode a sandbox must
- * not have. */
 int chroot(const char *path);
 
-/* M89: chdir to a directory named by a descriptor. Over SYS_fdpath, like
- * the *at() family and with the same non-atomicity - see <fcntl.h>. */
 int fchdir(int fd);
 
-/* M89: the machine's name. There is no hostname stored anywhere on this
- * system - see unistd.c for what is reported and why that is a fact
- * rather than a placeholder. sethostname refuses. */
 int gethostname(char *name, size_t len);
 int sethostname(const char *name, size_t len);
 
-/* M89: fork, with the promise the caller will exec or _exit immediately.
- * On this machine it IS fork - M83's is copy-on-write, so the copy a
- * vfork exists to avoid has already been avoided. Provided as a name
- * rather than as a mechanism, and that is the honest relationship: a
- * program that uses vfork for speed gets the speed from COW, and one
- * that relies on vfork's shared address space is relying on undefined
- * behaviour that this implementation does not provide. */
 pid_t vfork(void);
 
-/* ---- sysconf: what this machine has, and what it does not -----------
- *
- * M88 shipped six of these with the note that "each answer below is a
- * real fact about this machine rather than a plausible number - see the
- * implementation, where the ones that cannot be answered return -1
- * rather than a guess."
- *
- * M89 makes that list complete rather than a subset, because `getconf`
- * asks for all of it - and the result is the most useful thing in this
- * header: **a machine that says which POSIX options it implements.**
- * Every `_SC_` name below that describes an *option* answers 200809L or
- * 1 if this system has it and **-1 if it does not**, which is what -1
- * means in POSIX and is a fact rather than a failure. A program that
- * asks whether there are message queues here gets "no" instead of an
- * error it has to interpret.
- *
- * The list is worth reading as documentation: it is the honest inventory
- * of this OS's POSIX surface, and several entries are expected to change
- * from -1 to a version as later milestones land - _SC_MAPPED_FILES when
- * M91 finishes file-backed mmap, _SC_TIMERS if a timer_create ever
- * arrives, _SC_2_C_DEV when M98 puts a compiler here.
- *
- * The numbers themselves are this project's own and are NOT Linux's;
- * they never were (see <fcntl.h>'s note on the same subject). Nothing
- * passes one across an ABI boundary - sysconf takes the name a program
- * wrote, which the compiler turned into whatever number is here.
- */
 #define _SC_PAGESIZE      1
-#define _SC_PAGE_SIZE     _SC_PAGESIZE /* both spellings are in use */
+#define _SC_PAGE_SIZE     _SC_PAGESIZE
 #define _SC_OPEN_MAX      2
 #define _SC_NPROCESSORS_ONLN 3
 #define _SC_CLK_TCK       4
 #define _SC_PHYS_PAGES    5
 #define _SC_AVPHYS_PAGES  6
 
-/* The POSIX options. */
 #define _SC_ADVISORY_INFO              100
 #define _SC_BARRIERS                   101
 #define _SC_ASYNCHRONOUS_IO            102
@@ -349,7 +153,6 @@ pid_t vfork(void);
 #define _SC_V6_LP64_OFF64              158
 #define _SC_V6_LPBIG_OFFBIG            159
 
-/* POSIX.2, which is about utilities rather than about the kernel. */
 #define _SC_2_C_BIND          200
 #define _SC_2_C_DEV           201
 #define _SC_2_CHAR_TERM       202
@@ -366,7 +169,6 @@ pid_t vfork(void);
 #define _SC_2_UPE             213
 #define _SC_2_VERSION         214
 
-/* X/Open. None of it is here, and each is -1 for that reason. */
 #define _SC_XOPEN_CRYPT            300
 #define _SC_XOPEN_ENH_I18N         301
 #define _SC_XOPEN_REALTIME         302
@@ -377,7 +179,6 @@ pid_t vfork(void);
 #define _SC_XOPEN_UUCP             307
 #define _SC_XOPEN_VERSION          308
 
-/* Sizes and counts. */
 #define _SC_AIO_LISTIO_MAX    400
 #define _SC_AIO_MAX           401
 #define _SC_AIO_PRIO_DELTA_MAX 402
@@ -414,41 +215,16 @@ pid_t vfork(void);
 #define _SC_THREAD_KEYS_MAX   433
 #define _SC_THREAD_STACK_MIN  434
 #define _SC_THREAD_THREADS_MAX 435
-/* M99: the two buffer-size hints for the _r forms of the passwd and
- * group lookups. CPython's pwdmodule.c calls sysconf(_SC_GETPW_R_SIZE_MAX)
- * without an #ifdef around the constant - reasonably, since POSIX has
- * required it since 1995 - and takes a negative answer as "pick your own
- * size and grow", which is a path it has and this system should let it
- * take rather than fail to compile. */
 #define _SC_GETPW_R_SIZE_MAX  436
 #define _SC_GETGR_R_SIZE_MAX  437
 
 long sysconf(int name);
 
-/* ---- confstr: the two strings a system has ---------------------------
- *
- * `_CS_PATH` is the PATH a program can rely on to find the standard
- * utilities, which here is "/bin" and nothing else - there is one
- * directory of programs and it is that one. `_CS_V7_ENV` is empty,
- * because there are no environment settings needed to get a conforming
- * environment: this system's only environment is a conforming one, so
- * far as it conforms at all.
- *
- * Same contract as every confstr: returns the length including the NUL,
- * copies what fits, and a `len` of 0 asks only for the length. */
 #define _CS_PATH    1
 #define _CS_V7_ENV  2
 #define _CS_V6_ENV  3
 size_t confstr(int name, char *buf, size_t len);
 
-/* M89: the per-path limits, which `stat -f` asks for by name.
- *
- * Every answer is a constant here rather than a per-path lookup, and
- * that is a fact about this machine rather than a shortcut: there is one
- * filesystem (see /proc/mounts), so a limit cannot differ between two
- * paths. `path` and `fd` are validated - a nonexistent path is still an
- * error, because a program probing a path it cannot reach should hear
- * about that rather than get a number. */
 #define _PC_LINK_MAX       1
 #define _PC_NAME_MAX       2
 #define _PC_PATH_MAX       3
@@ -466,87 +242,33 @@ size_t confstr(int name, char *buf, size_t len);
 long pathconf(const char *path, int name);
 long fpathconf(int fd, int name);
 
-/* POSIX spells the page size both ways and programs use both. */
 int getpagesize(void);
 
-/* M89: <unistd.h> is where a program looks for these two; the
- * implementation and the resolution argument are in <time.h> beside
- * nanosleep, which is what all three are. */
 unsigned int sleep(unsigned int seconds);
 int usleep(unsigned int usec);
 
-/* M89: raise SIGALRM in `seconds`, and report what was left of the
- * previous alarm. 0 cancels.
- *
- * The resolution is a scheduler tick, which is 10 ms - so alarm(1) fires
- * between 1.00 and 1.01 seconds from now. That is stated rather than
- * rounded away because a program timing something short is entitled to
- * know. There is one alarm per process and no setitimer beside it; see
- * SYS_alarm. */
 unsigned int alarm(unsigned int seconds);
 
-/* M89: POSIX puts getopt here and the long-option form in <getopt.h>.
- * The declarations are the same ones; see that header for the two
- * behaviours that differ between implementations. */
 extern char *optarg;
 extern int optind, opterr, optopt;
 int getopt(int argc, char *const argv[], const char *optstring);
 
 int symlink(const char *target, const char *path);
-/* M93: a hard link. Note the argument order is the opposite way round
- * from symlink's, and that is POSIX's doing rather than this project's -
- * link(existing, new) reads as a copy, symlink(target, path) reads as an
- * assignment, and every Unix has had both spellings since V7. */
 int link(const char *old_path, const char *new_path);
-/* M93. On this machine a file's contents are already durable when write()
- * returns (leanfs and M92's cache are both write-through); what this
- * pushes is the metadata that write dirtied. See SYS_fsync. fdatasync is
- * the same call - there is no metadata this could skip and still be
- * honest about. */
 int fsync(int fd);
 int fdatasync(int fd);
-/* M89: everything, rather than one file. See SYS_sync for why that is a
- * different question from fsync's rather than the same one with a
- * wildcard. Returns nothing, as POSIX specifies, because there is no
- * failure it could report that a caller could act on. */
 void sync(void);
 long readlink(const char *path, char *buf, size_t bufsiz);
 
 int unlink(const char *path);
 int pipe(int fds[2]);
 
-/* M83: the real thing. Returns the child's pid in the parent, 0 in the
- * child, and -1 if the fork failed.
- *
- * The paragraph that used to be below this one said "there is no fork on
- * this machine", and it was true for eighty-two milestones. The child is
- * a copy-on-write clone: it shares every page with its parent until one
- * of them writes, which is what makes this affordable and what M82's
- * page-fault handler had to exist first for. */
 pid_t fork(void);
 
-/* M84: replaces this program with another. Does not return on success,
- * which is why every caller in the world writes the error path with no
- * `if` around it. `execv` supplies the current environment; `execvp`
- * searches PATH when `file` contains no '/'.
- *
- * A `#!` script is refused: the kernel does not resolve shebangs (see
- * SYS_execve), and a program that wants to run a script can run its
- * interpreter. The shell resolves them, which is where M72 put that job
- * and where it belongs. */
 int execve(const char *path, char *const argv[], char *const envp[]);
 int execv(const char *path, char *const argv[]);
 int execvp(const char *file, char *const argv[]);
 
-/* Runs `path` with `argv` and, for the `e` form, `envp`; returns the new
- * process's pid rather than replacing this one.
- *
- * Still not execve, and still useful: SYS_spawn is a combined fork+exec
- * (see system_api/include/syscall.h) and remains the cheap path for the
- * overwhelmingly common case of "start this program", which is what every
- * launcher on this desktop actually wants. `fork` above is for the cases
- * that need the two halves apart. M84 is where `execve` lands and where
- * this stops being the only way to start a program with arguments. */
 long spawnv(const char *path, char *const argv[]);
 long spawnve(const char *path, char *const argv[], char *const envp[]);
 

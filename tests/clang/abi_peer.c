@@ -1,14 +1,3 @@
-/* tests/clang/abi_peer.c - M121. Compiled by x86_64-lean_os-GCC.
- *
- * The other half of the cross-compiler ABI fixture. Every function here
- * is called from tests/clang/abi_main.c, which clang compiled, and one
- * function here calls back into it - see tests/clang/abi.h for why each
- * shape is on the list.
- *
- * Nothing in this file checks anything. It computes, and abi_main.c
- * decides: a fixture that asserted on both sides could agree with
- * itself while both sides were wrong.
- */
 #include "abi.h"
 
 #include <stdarg.h>
@@ -51,8 +40,6 @@ struct packed_flags peer_packed_flags(unsigned a, unsigned b, int set) {
     return r;
 }
 
-/* Mixed integer and floating-point varargs, which is the case that needs
- * the register save area and `al` to agree. */
 long peer_sum_mixed_varargs(int count, ...) {
     va_list ap;
     va_start(ap, count);
@@ -65,8 +52,6 @@ long peer_sum_mixed_varargs(int count, ...) {
     return total;
 }
 
-/* x87 long double, 16 bytes wide with 10 bytes of it meaningful, passed
- * on the stack and returned in st0. */
 long double peer_long_double(long double v) {
     return v * 3.0L + 1.0L;
 }
@@ -91,8 +76,6 @@ long peer_take_big(struct big s) {
     return total;
 }
 
-/* And the direction that is easy to forget: GCC's code calling clang's.
- * abi_main.c exports main_doubler; this is what reaches it. */
 int peer_reaches_main_doubler(int a, int b) {
     return main_doubler(a, b);
 }

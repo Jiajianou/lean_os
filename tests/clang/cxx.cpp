@@ -1,30 +1,3 @@
-/* tests/clang/cxx.cpp - M121's C++ fixture.
- *
- * Compiled by x86_64-lean_os-clang++ with **no flag supplied by hand**,
- * against the libc++ tools/build-libcxx.sh installs. See
- * tools/clang-test.sh for the command line.
- *
- * ---- what this grades that tests/cxx/exceptions.cpp does not ----------
- *
- * M97's fixture is the same idea for g++ and libstdc++, and its opening
- * argument applies here unchanged: nothing is checked by "did control
- * reach the handler", because a catch that fires while skipping a
- * destructor is the bug this gets wrong and it looks like success. So
- * every check below is a count or an identity.
- *
- * What is new here is the seam. This program's exceptions are thrown and
- * caught by **libc++abi**, and unwound by **libgcc_eh** - LLVM's C++
- * runtime over GCC's unwinder, which is a combination this project chose
- * on purpose (see tools/build-libcxx.sh) and which nothing else in the
- * tree exercises. A mismatch there does not fail to link: it aborts in
- * std::terminate with no message, from a program whose every other test
- * passes.
- *
- * The last section is conditional, and the condition is the news:
- * <sstream> exists only if libc++ was built with localization, which
- * needs more of this libc's <locale.h> than M89 built. The fixture
- * reports which libc++ it is running against rather than assuming.
- */
 #include <algorithm>
 #include <cstdio>
 #include <functional>
@@ -48,7 +21,6 @@ static void check(bool ok, const char *what) {
     }
 }
 
-/* ---- destructor counting, which is the whole point ------------------ */
 static int destroyed;
 static int destroy_order[8];
 static int destroy_n;
@@ -82,12 +54,9 @@ static void middle() {
     inner();
 }
 
-/* Static initialization, and the __cxa_atexit path out of it. */
 struct AtStartup {
     AtStartup() { constructed = true; }
     ~AtStartup() {
-        /* Nothing inside the program can observe this, so it writes -
-         * a destructor that did not run is a line that is not there. */
         std::printf("clangcxxtest: a static destructor ran\n");
     }
     static bool constructed;
@@ -98,7 +67,6 @@ static AtStartup at_startup;
 int main() {
     check(AtStartup::constructed, "a namespace-scope constructor before main");
 
-    /* ---- the unwind, counted ------------------------------------- */
     bool caught_by_type = false;
     int payload = 0;
     try {
@@ -114,15 +82,10 @@ int main() {
     check(caught_by_type, "a throw caught by its derived type");
     check(payload == 99, "the payload survived the unwind");
     check(destroyed == 3, "three destructors ran during the unwind");
-    /* Innermost frame first: b(2), a(1) from inner, then c(3) from
-     * middle. A cleanup run in the wrong order is a real bug that a
-     * count alone would miss. */
     check(destroy_n == 3 && destroy_order[0] == 2 && destroy_order[1] == 1 &&
           destroy_order[2] == 3,
           "the destructors ran innermost-frame-first");
 
-    /* A base-class catch, which needs RTTI comparison rather than an
-     * address match. */
     bool as_base = false;
     try {
         throw Derived("again", 1);
@@ -131,7 +94,6 @@ int main() {
     }
     check(as_base, "a derived exception caught as its base");
 
-    /* And a rethrow, which has to preserve both. */
     bool rethrown = false;
     try {
         try {
@@ -146,7 +108,6 @@ int main() {
 
     check(typeid(Derived).name() != nullptr, "RTTI has a name for a type");
 
-    /* ---- the containers, which is most of what a program uses ----- */
     std::vector<int> v{5, 3, 9, 1, 7};
     std::sort(v.begin(), v.end());
     check(v.front() == 1 && v.back() == 9 && v.size() == 5,
@@ -175,7 +136,6 @@ int main() {
 
     check(std::to_string(1234) == "1234", "std::to_string");
 
-    /* ---- and the part that says which libc++ this is -------------- */
 #ifdef _LIBCPP_HAS_NO_LOCALIZATION
     std::printf("clangcxxtest: libc++ without localization "
                 "(no <sstream>, no <iostream>)\n");

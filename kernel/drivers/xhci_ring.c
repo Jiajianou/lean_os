@@ -11,9 +11,6 @@ void xhci_ring_reset(xhci_ring_t *r, void *buf, uint64_t phys) {
     r->phys = phys;
     r->index = 0;
     r->cycle = 1;
-    /* The Link TRB's cycle bit starts matching the producer's, because
-     * the producer's first lap is cycle 1 and the controller will reach
-     * the Link on that same lap. */
     trb[XHCI_RING_TRBS - 1].param = phys;
     trb[XHCI_RING_TRBS - 1].status = 0;
     trb[XHCI_RING_TRBS - 1].control =
@@ -29,12 +26,6 @@ void xhci_ring_push(xhci_ring_t *r, uint64_t param, uint32_t status, uint32_t co
 
     r->index++;
     if (r->index == XHCI_RING_TRBS - 1) {
-        /* The Link is the last entry and is never "pushed" - it is
-         * rewritten with the cycle bit the producer has been using, so
-         * the controller follows it, and only then does the producer
-         * flip. Flipping first is the bug this file exists to make
-         * testable: the controller would reach a Link whose cycle bit no
-         * longer matches and stop there permanently. */
         xhci_trb_t *link = &r->trb[XHCI_RING_TRBS - 1];
         link->control = (XHCI_TRB_LINK << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_TC |
                         (r->cycle ? XHCI_TRB_CYCLE : 0);

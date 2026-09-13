@@ -41,7 +41,7 @@ WORK=build/toybox
 PATCHES=tools/toybox-port
 
 if [ ! -d "$SRC" ]; then
-  echo "build-toybox: $SRC is missing - see milestones.md M89" >&2
+  echo "build-toybox: $SRC is missing" >&2
   exit 1
 fi
 if [ -z "$(command -v gsed 2>/dev/null)" ]; then

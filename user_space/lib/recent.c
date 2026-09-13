@@ -1,10 +1,8 @@
-/* user_space/lib/recent.c - M74. See recent.h. */
 #include "recent.h"
 
 #include "str.h"
 #include "syscall_wrappers.h"
 
-/* Eight paths of at most PATH_MAX_LEN, plus a newline each. */
 #define RECENT_BUF ((PATH_MAX_LEN + 1) * RECENT_MAX)
 
 static int copy_path(char *dst, const char *src) {
@@ -16,9 +14,6 @@ static int copy_path(char *dst, const char *src) {
     return n;
 }
 
-/* Reads the file into `out` without checking whether anything still
- * exists - recent_add needs the raw list so that adding a path does not
- * quietly drop entries whose files are temporarily unreadable. */
 static int read_raw(char out[][PATH_MAX_LEN], int max) {
     static char buf[RECENT_BUF];
     long n = sys_readfile(RECENT_PATH, buf, sizeof(buf) - 1);
@@ -47,7 +42,7 @@ static int read_raw(char out[][PATH_MAX_LEN], int max) {
 
 void recent_add(const char *path) {
     if (!path || !path[0] || path[0] != '/') {
-        return; /* only absolute paths - a relative one means nothing to another program */
+        return;
     }
     if (strlen(path) >= PATH_MAX_LEN) {
         return;
@@ -55,10 +50,6 @@ void recent_add(const char *path) {
     static char list[RECENT_MAX][PATH_MAX_LEN];
     int count = read_raw(list, RECENT_MAX);
 
-    /* Already at the front: nothing to write, and not writing is the
-     * point - the editor calls this on every save, and a file rewritten
-     * on every keystroke-triggered save would be a disk write nobody
-     * asked for. */
     if (count > 0 && strcmp(list[0], path) == 0) {
         return;
     }
@@ -68,7 +59,7 @@ void recent_add(const char *path) {
     int m = 1;
     for (int i = 0; i < count && m < RECENT_MAX; i++) {
         if (strcmp(list[i], path) == 0) {
-            continue; /* moved to the front rather than duplicated */
+            continue;
         }
         copy_path(merged[m++], list[i]);
     }
@@ -93,7 +84,7 @@ int recent_load(char out[][PATH_MAX_LEN], int max) {
     for (int i = 0; i < count && kept < max; i++) {
         os_stat_t st;
         if (sys_stat(raw[i], &st) != 0 || st.is_dir) {
-            continue; /* gone, or turned into a directory - either way not this */
+            continue;
         }
         copy_path(out[kept], raw[i]);
         kept++;

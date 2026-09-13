@@ -3,17 +3,8 @@
 #include "str.h"
 #include "syscall_wrappers.h"
 
-/* Comfortably larger than the three lines this ever writes (about 50
- * bytes), and small enough to be a plain stack/static buffer in either of
- * the two processes that use it. A file bigger than this is truncated on
- * read, which parse_line then rejects as malformed - the correct outcome
- * for something that is not the file this wrote. */
 #define SETTINGS_BUF 256
 
-/* "0x1A1A2E" or "1717294" into *out. Returns 1 on a clean parse of at
- * least one digit with nothing but digits after it; 0 otherwise, which is
- * what makes a hand-edited typo fall back to defaults instead of
- * silently becoming some other color. */
 static int parse_uint(const char *s, uint32_t *out) {
     uint32_t value = 0;
     int digits = 0;
@@ -43,10 +34,6 @@ static int parse_uint(const char *s, uint32_t *out) {
     return 1;
 }
 
-/* Appends "key=0xVALUE\n" to buf at *len. No printf in this project (no
- * libc at all - see milestones.md's ground rules), so the hex digits are
- * emitted by hand; 8 of them, always, so the file is fixed-width and easy
- * to eyeball. */
 static void append_key(char *buf, int *len, const char *key, uint32_t value) {
     for (int i = 0; key[i]; i++) {
         buf[(*len)++] = key[i];
@@ -61,11 +48,6 @@ static void append_key(char *buf, int *len, const char *key, uint32_t value) {
     buf[(*len)++] = '\n';
 }
 
-/* Every key the file can hold, parsed in one pass. M58 split this out of
- * settings_file_load because there are two readers now with different
- * ideas of what "present" has to mean - and because a *writer* has to
- * read the whole file first so that saving one half does not erase the
- * other. */
 typedef struct {
     uint32_t bg, accent, wallpaper, display_w, display_h, animations, volume;
     int have_bg, have_accent, have_wallpaper, have_display, have_animations, have_volume;
@@ -129,8 +111,6 @@ static void parse_all(settings_all_t *out) {
         }
         line = end + 1;
     }
-    /* A width with no height is not half a resolution, it is a damaged
-     * file - and applying it would be applying a guess. */
     out->have_display = have_w && have_h && out->display_w > 0 && out->display_h > 0;
 }
 
@@ -158,10 +138,6 @@ int settings_file_load(wm_settings_request_t *out) {
     out->bg_color = all.bg;
     out->accent_color = all.accent;
     out->wallpaper = all.wallpaper;
-    /* M61: optional, like the display keys and for the same reason - a
-     * settings.conf written before this milestone existed has no opinion
-     * about animations, and "whatever the caller already had" (which is
-     * on) is the right answer rather than off. */
     if (all.have_animations) {
         out->animations = all.animations;
     }
@@ -184,7 +160,7 @@ int settings_file_load_display(uint32_t *w, uint32_t *h) {
 
 int settings_file_save(const wm_settings_request_t *in) {
     settings_all_t all;
-    parse_all(&all); /* M58: read-modify-write - the display keys are not this caller's to erase */
+    parse_all(&all);
     all.bg = in->bg_color;
     all.accent = in->accent_color;
     all.wallpaper = in->wallpaper;

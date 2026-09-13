@@ -1,28 +1,5 @@
-/* user_space/libc/include/sys/mount.h - M89
- *
- * `mount` and `umount`, which this machine cannot do and says so.
- *
- * There IS a mount table here - M87 built one, and /dev and /proc are
- * mounted on it - but it is assembled by the kernel at boot and there is
- * no syscall that lets a program add to it. So both calls are truthful
- * failures with ENOSYS rather than stubs returning 0, for the reason M65
- * set out at length: a program told its mount succeeded would then
- * believe a filesystem is there.
- *
- * The MS_* flags are defined because code that never calls mount still
- * has to compile when it mentions them in a table of options, and
- * because a flag with no call behind it cannot mislead anyone.
- */
 #pragma once
 
-/* M97: C++ linkage.
- *
- * Without this every declaration below is a C++ function when a C++
- * program includes it, so `malloc` in a header and `malloc` in libc.a
- * are different symbols and nothing links. It cost a whole libstdc++
- * build to find, and the error names the caller rather than the header:
- * "undefined reference to `malloc(unsigned long)`" - with the argument
- * list, which is the tell. */
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,7 +18,6 @@ extern "C" {
 #define MS_REC         16384
 #define MS_SILENT      32768
 
-/* umount2()'s flags. Same status as the above. */
 #define MNT_FORCE      1
 #define MNT_DETACH     2
 #define MNT_EXPIRE     4

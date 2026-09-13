@@ -1,27 +1,9 @@
-/* user_space/bin/fetch.c
- *
- * M73: the first program that can put something on this machine that was
- * not compiled into its disk image.
- *
- * That is the whole significance of it. M63 ran somebody else's program
- * and M65 built a capability model arguing that a *downloaded* program is
- * a real category - both reasoning about something that could not yet
- * happen here. After this it can, which is also why this program holds
- * CAP_NETWORK and an ordinary one does not.
- *
- *   fetch URL              print the body
- *   fetch URL FILE         write the body to FILE
- */
 #include <stdio.h>
 #include <string.h>
 
 #include "http.h"
 #include "syscall_wrappers.h"
 
-/* Bounded on purpose. There is no streaming here - the body is held whole
- * so that writing it to a file is one call - so the cap is also the
- * promise that a hostile or enormous response cannot exhaust this
- * program's heap. */
 #define FETCH_MAX 65536
 
 static char body[FETCH_MAX];
@@ -46,8 +28,6 @@ int main(int argc, char **argv) {
     }
 
     if (status < 200 || status >= 300) {
-        /* Printed even when the body is empty: "404 with nothing in it"
-         * and "200 with nothing in it" are different answers. */
         printf("fetch: server returned %d\n", status);
     }
 

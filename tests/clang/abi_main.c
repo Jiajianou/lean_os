@@ -1,25 +1,9 @@
-/* tests/clang/abi_main.c - M121. Compiled by x86_64-lean_os-CLANG.
- *
- * Half of the cross-compiler ABI fixture, and the half that decides.
- * tests/clang/abi_peer.c is the same program's other half, compiled by
- * GCC; tools/clang-test.sh compiles each with its own compiler and links
- * the two objects into /bin/mixedtest. tests/clang/abi.h says what each
- * shape below is doing there.
- *
- * The link itself is a third of this test and is worth naming: clang's
- * object, GCC's object, GCC's crt1.o, GCC's libgcc.a and a libc.a GCC
- * built, resolved by GCC's ld under a linker script written here. If any
- * of the five disagreed about the target, this program would not exist.
- */
 #include "abi.h"
 
 #include <stdio.h>
 
 int peer_reaches_main_doubler(int a, int b);
 
-/* Called from abi_peer.c, so GCC's caller and clang's callee have to
- * agree too. Not static, obviously - but also not inlinable, which is
- * the point: the call has to really happen. */
 int main_doubler(int a, int b) {
     return (a + b) * 2;
 }
@@ -63,7 +47,6 @@ int main(void) {
     check(pf.a == 5 && pf.b == 21 && pf.set == 1 && pf.tail == (char)26,
           "bitfields and a _Bool, laid out the same way");
 
-    /* 1 + 2 + 3 + 4 = 10, as ints and doubles interleaved. */
     long mixed = peer_sum_mixed_varargs(2, 1, 2.0, 3, 4.0);
     check(mixed == 10, "mixed integer and floating-point varargs");
 

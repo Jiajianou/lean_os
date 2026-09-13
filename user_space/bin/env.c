@@ -1,15 +1,3 @@
-/* user_space/bin/env.c - M75
- *
- * Prints the environment, one NAME=value per line. The same reason
- * `netconf` and `caps` exist: the thing that makes a subsystem checkable
- * is a program that prints what it did. An environment that is inherited
- * across a spawn is a claim, and this is how you see it.
- *
- * With arguments, it runs one: `env NAME=value program args...` sets what
- * it is given and then spawns, which is the other half of what /bin/env
- * is for everywhere - and here it is also the shortest way to prove that
- * a *child* sees what its parent set, without a shell in the middle.
- */
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -23,7 +11,6 @@ static void out(const char *s) {
 
 int main(int argc, char **argv) {
     int i = 1;
-    /* Leading NAME=value assignments, exactly as /bin/env takes them. */
     for (; i < argc && strchr(argv[i], '=') && strchr(argv[i], '=') != argv[i]; i++) {
         char name[64];
         const char *eq = strchr(argv[i], '=');
@@ -44,9 +31,6 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    /* A program to run. A name with no '/' is looked up in $PATH, which
-     * is exactly what this program has just been asked to be able to
-     * change. */
     char path[PATH_MAX_LEN];
     if (strchr(argv[i], '/')) {
         int n = 0;
@@ -72,7 +56,6 @@ int main(int argc, char **argv) {
         path[n] = '\0';
     }
 
-    /* argv[1..] for the child - the kernel supplies argv[0] itself. */
     long pid = sys_spawnv(path, (const char *const *)&argv[i + 1]);
     if (pid < 0) {
         out("env: cannot run ");

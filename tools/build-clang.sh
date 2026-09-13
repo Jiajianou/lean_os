@@ -66,7 +66,7 @@ fi
 for tool in cmake ninja; do
   command -v "$tool" >/dev/null || {
     echo "build-clang: $tool is required and is not on PATH." >&2
-    echo "             Both are dev-time only - see docs/toolchain.md." >&2
+    echo "             Both are dev-time only." >&2
     exit 1
   }
 done

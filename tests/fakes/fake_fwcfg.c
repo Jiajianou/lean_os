@@ -1,16 +1,3 @@
-/* tests/fakes/fake_fwcfg.c - Q11
- *
- * The QEMU firmware-config device, as a scripted answer to port reads.
- *
- * kernel/dev/fwcfg.c talks to two I/O ports and nothing else, which makes
- * it one of the easiest drivers in this tree to test off the machine and
- * one of the more important: it decides whether the boot self-tests run
- * at all. A silent failure in it turns the whole serial harness into a
- * passing no-op.
- *
- * This backs the `inb`/`outw` in tests/fakes/arch/x86_64/io.h. An item
- * nobody scripted reads back 0xFF, which is what an unclaimed port does
- * on real hardware and is exactly the case the no-device test wants. */
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -86,8 +73,6 @@ void fake_fwcfg_append_item(uint16_t selector, const uint8_t *data, uint32_t len
     it->len += len;
 }
 
-/* ---- the port layer the io.h shadow calls ---------------------------- */
-
 #define FWCFG_PORT_SEL  0x510
 #define FWCFG_PORT_DATA 0x511
 
@@ -104,10 +89,6 @@ uint8_t fake_port_inb(uint16_t port) {
     }
     item_t *it = find(selected);
     if (!it || pos >= it->len) {
-        /* Past the end of an item, or an item nobody scripted. An
-         * unclaimed port reads 0xFF, and a device that has run out of
-         * bytes keeps returning them - both are what the real hardware
-         * does and both are cases fwcfg.c has to survive. */
         return 0xFF;
     }
     return it->data[pos++];

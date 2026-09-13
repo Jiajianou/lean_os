@@ -1,70 +1,3 @@
-/* user_space/bin/os.c - M111: `os`, the package manager.
- *
- *   os install <name>     install a package and what it needs
- *   os remove  <name>     take one out again
- *   os list               what is installed
- *   os available          what the repository has
- *   os info    <name>     one package, in detail
- *   os verify  [name]     re-hash installed files against what was installed
- *   os preinstall         M116: what this image lists, once each - see below
- *   os help
- *
- * ---- what "securely, in an isolated fashion" is made of ---------------
- *
- * Five things, and each of them is a property somebody can check rather
- * than a word in a sentence:
- *
- *   1. **Nothing runs at install time.** The format has no hooks (see
- *      ospkg.h). Installing is: verify, then copy. That is the whole
- *      threat surface of `os install`, and it is why the answer to "what
- *      can this package do to my machine while installing" is "write the
- *      files it lists, under a directory named after itself".
- *
- *   2. **Every byte is hashed twice on the way in.** The repository
- *      index carries the archive's SHA-256, so a bad archive is refused
- *      before it is opened; the archive's header carries a SHA-256 over
- *      its own body, and every file record carries one over its
- *      content. `os verify` re-reads the installed files months later
- *      and compares them against the third.
- *
- *   3. **A package cannot escape its prefix.** Every path in an archive
- *      is checked against ospkg_check_path (no absolute, no "..", no
- *      empty component) and then checked AGAIN after being joined onto
- *      the install root, so a rule that passed the first check and a
- *      join that produced something outside cannot both be wrong
- *      silently.
- *
- *   4. **A package cannot shadow a shipped program.** Its commands go in
- *      /pkg/bin, never in /bin. `grep` from a package is a different
- *      name in a different directory from anything this OS ships, and
- *      which one a person gets is decided by their PATH rather than by
- *      whoever installed last.
- *
- *   5. **The kernel decides what it may do, from the manifest.** A
- *      package declares its capabilities; `os` records them in
- *      /pkg/db/caps; the kernel reads that at spawn and intersects it
- *      with CAP_PKG_MAX. A package that declares nothing gets nothing -
- *      not the default, nothing - and a program under /pkg that `os` did
- *      not install gets nothing either. This is also why /bin/os holds
- *      CAP_PKG_ADMIN and is the only thing on the machine that does:
- *      every write under /pkg is refused to everything else, in the
- *      kernel, so the registry is not a file another program can edit.
- *
- * ---- and what it is not ----------------------------------------------
- *
- * There are no signatures. There is nothing to verify one against - no
- * key distribution, no trust root, one principal and no login - so a
- * signature check here would verify a key that shipped in the same image
- * as the thing it signs, which is a check that cannot fail and therefore
- * is not one. The hashes above establish INTEGRITY (these are the bytes
- * that were built) and say nothing about AUTHENTICITY (they were built
- * by someone you trust). docs/packages.md states this in the same words,
- * and names the condition under which signing becomes real work.
- *
- * Nor is any of it a defence against this disk being edited by something
- * that is not this OS. CAP_PKG_ADMIN is a rule this kernel enforces
- * while it is running.
- */
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -74,7 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "caps.h"    /* system_api/include/caps.h - CAP_PKG_MAX and the names */
+#include "caps.h"
 #include "ospkg.h"
 #include "sha256.h"
 #include "syscall_wrappers.h"
@@ -89,17 +22,8 @@
 
 #define PATHBUF 512
 
-/* The largest archive this will read into memory at once. Deliberately
- * a number rather than "whatever malloc gives me": this machine boots
- * with 128 MiB in one of its supported configurations, and a package
- * manager that cannot say in advance how much memory an install costs
- * is a package manager that fails on the small machine and not the
- * large one. 64 MiB, against a grep that is 1.3. */
 #define PKG_MAX_ARCHIVE (64u * 1024u * 1024u)
 
-/* Depth of the dependency resolution. A package that needs a package
- * that needs a package is fine; sixteen deep is a cycle or a mistake,
- * and either way stopping with a message beats recursing. */
 #define MAX_DEPTH 16
 
 static int quiet;
@@ -114,8 +38,6 @@ static void say(const char *fmt, ...) {
     __builtin_va_end(ap);
 }
 
-/* ---- small filesystem helpers ---------------------------------------- */
-
 static int is_dir(const char *path) {
     struct stat st;
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
@@ -126,9 +48,6 @@ static int exists(const char *path) {
     return stat(path, &st) == 0;
 }
 
-/* mkdir -p. SYS_mkdir is deliberately one level (see its note in
- * syscall.h), so the recursion is here, where a package's "share/man/man1"
- * needs it. */
 static int mkdir_p(const char *path) {
     char buf[PATHBUF];
     size_t n = strlen(path);
@@ -193,7 +112,7 @@ static unsigned char *read_whole(const char *path, size_t *len_out, size_t cap) 
 }
 
 static int write_whole(const char *path, const void *data, size_t len, int exec) {
-    (void)exec; /* this filesystem has no execute bit - see docs/packages.md */
+    (void)exec;
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
     if (fd < 0) {
         return -1;
@@ -212,11 +131,10 @@ static int write_whole(const char *path, const void *data, size_t len, int exec)
     return 0;
 }
 
-/* Remove a tree. Used by `os remove` and by the rollback in install. */
 static int remove_tree(const char *path) {
     struct stat st;
     if (lstat(path, &st) != 0) {
-        return 0; /* already gone */
+        return 0;
     }
     if (!S_ISDIR(st.st_mode)) {
         return unlink(path);
@@ -227,20 +145,6 @@ static int remove_tree(const char *path) {
     }
     struct dirent *de;
     char child[PATHBUF];
-    /* Collected first, then removed: deleting entries while reading the
-     * directory they are in is the kind of thing that works until the
-     * directory spans two blocks.
-     *
-     * On the STACK and not `static`, which is the whole point. The first
-     * version of this used a static array, because 128 KiB is a lot to
-     * put on a user stack - and this function recurses, so the recursive
-     * call would have overwritten the list its caller was still walking.
-     * A package one directory deep would have removed correctly and one
-     * two deep would have left files behind, silently. The answer is a
-     * smaller list per level rather than a shared big one: 64 names of
-     * 128 bytes is 8 KiB per frame, and a directory inside a package
-     * with more than 64 entries in it is refused loudly below rather
-     * than half-removed. */
     char names[64][128];
     int n = 0;
     int overflow = 0;
@@ -271,14 +175,6 @@ static int remove_tree(const char *path) {
     return rmdir(path);
 }
 
-/* ---- the repository index --------------------------------------------
- *
- * Stanzas of "key: value" separated by blank lines, which is the same
- * grammar a manifest uses - so this hands each stanza to
- * ospkg_parse_manifest and has one parser rather than two. The extra
- * keys (file, bytes, sha256) are read here because they are about the
- * archive rather than about the package.
- */
 typedef struct {
     osp_manifest_t man;
     char           file[OSP_MAX_PATH];
@@ -333,7 +229,6 @@ static int load_index(void) {
     }
     size_t i = 0;
     while (i < len && index_count < MAX_INDEX) {
-        /* One stanza: up to the first blank line. */
         size_t start = i;
         size_t end = i;
         while (i < len) {
@@ -345,7 +240,7 @@ static int load_index(void) {
             if (i < len) {
                 i++;
             }
-            if (le == ls) { /* blank line ends the stanza */
+            if (le == ls) {
                 break;
             }
             end = i;
@@ -358,7 +253,7 @@ static int load_index(void) {
         index_entry_t *e = &index_entries[index_count];
         memset(e, 0, sizeof(*e));
         if (ospkg_parse_manifest(stanza, slen, &e->man) != OSP_OK) {
-            continue; /* a comment block, or a stanza with no name */
+            continue;
         }
         read_key(stanza, slen, "file", e->file, sizeof(e->file));
         read_key(stanza, slen, "sha256", e->sha256_hex, sizeof(e->sha256_hex));
@@ -366,7 +261,7 @@ static int load_index(void) {
         read_key(stanza, slen, "bytes", b, sizeof(b));
         e->bytes = strtoul(b, NULL, 10);
         if (!e->file[0] || ospkg_check_path(e->file) != OSP_OK) {
-            continue; /* an index entry naming a path is not a package */
+            continue;
         }
         index_count++;
     }
@@ -384,12 +279,6 @@ static index_entry_t *find_in_index(const char *name) {
     return NULL;
 }
 
-/* ---- what is installed ------------------------------------------------
- *
- * /pkg/db/installed/<name> holds the manifest of the installed version,
- * verbatim - so "what is installed" and "what did it say about itself"
- * are one file and cannot disagree.
- */
 static int installed_version(const char *name, char *out, size_t cap) {
     char path[PATHBUF];
     snprintf(path, sizeof(path), "%s/%s", PKG_DB_INST, name);
@@ -421,19 +310,6 @@ static int read_installed(const char *name, osp_manifest_t *out) {
     return rc == OSP_OK;
 }
 
-/* ---- the capability registry the kernel reads -------------------------
- *
- * Rewritten whole from what is installed, every time anything changes,
- * rather than appended to. An append-only registry drifts from the
- * truth the first time a remove fails halfway; regenerating it means the
- * registry is a FUNCTION of /pkg/db/installed rather than a second
- * record that has to agree with it.
- *
- * Every executable an installed package provides gets a line, and so
- * does its /pkg/bin alias - because the kernel looks the spawned path up
- * literally, and /pkg/bin/grep and /pkg/grep/3.11/bin/grep are two
- * spellings a person can type.
- */
 static int registry_overflowed;
 
 static void registry_add_line(char *buf, size_t cap, size_t *len,
@@ -441,10 +317,6 @@ static void registry_add_line(char *buf, size_t cap, size_t *len,
     char line[PATHBUF + 32];
     int n = snprintf(line, sizeof(line), "%x %s\n", (unsigned)caps, path);
     if (n < 0 || *len + (size_t)n >= cap) {
-        /* Recorded rather than dropped quietly. A registry missing a
-         * line is a program that will be launched with nothing when its
-         * manifest asked for something, and the symptom of that is a
-         * package failing for a reason nowhere near the cause. */
         registry_overflowed = 1;
         return;
     }
@@ -467,9 +339,6 @@ static int rewrite_registry(void) {
 
     DIR *d = opendir(PKG_DB_INST);
     if (!d) {
-        /* Nothing installed. The registry still gets written, empty:
-         * "no packages" and "the registry is missing" should not look
-         * the same to whoever is debugging this. */
         return write_whole(PKG_DB_CAPS, buf, len, 0);
     }
     struct dirent *de;
@@ -491,7 +360,6 @@ static int rewrite_registry(void) {
         }
         int unknown = 0;
         uint32_t caps = ospkg_caps_from_names(man.caps, &unknown) & (uint32_t)CAP_PKG_MAX;
-        /* Every command the package provides, under both names. */
         const char *p = man.provides;
         while (*p) {
             while (*p == ' ' || *p == '\t') {
@@ -526,8 +394,6 @@ static int rewrite_registry(void) {
     }
     return write_whole(PKG_DB_CAPS, buf, len, 0);
 }
-
-/* ---- install ----------------------------------------------------------- */
 
 static int install_one(const char *name, int depth);
 
@@ -570,12 +436,6 @@ static int install_one(const char *name, int depth) {
 
     index_entry_t *e = find_in_index(name);
     if (!e) {
-        /* Two different failures, said differently. "There is no
-         * repository" and "the repository does not have that" send a
-         * person to different places, and the first version of this
-         * printed the second message for both - which is how a
-         * truncated index on the disk presented as `os install grep`
-         * reporting that grep does not exist. */
         if (index_count == 0) {
             fprintf(stderr, "os: this machine's package index (%s) lists no "
                             "packages at all. It is missing or unreadable - "
@@ -613,10 +473,6 @@ static int install_one(const char *name, int depth) {
         return 1;
     }
 
-    /* The first of the two hash checks: the archive against what the
-     * index says it should be. This one is cheap to state - the index is
-     * small - and it is the one that catches a repository whose archive
-     * was replaced. */
     if (e->sha256_hex[0]) {
         uint8_t want[SHA256_DIGEST_BYTES], got[SHA256_DIGEST_BYTES];
         if (sha256_unhex(e->sha256_hex, want) != 0) {
@@ -636,8 +492,6 @@ static int install_one(const char *name, int depth) {
         }
     }
 
-    /* The second: the archive against itself, plus every path rule and
-     * every per-file hash. Nothing has been created yet. */
     osp_t pkg;
     int rc = ospkg_open(bytes, len, &pkg);
     if (rc != OSP_OK) {
@@ -696,12 +550,6 @@ static int install_one(const char *name, int depth) {
             failed = 1;
             break;
         }
-        /* The second path check, on the joined result. ospkg_open already
-         * refused anything with a ".." in it; this asks the different
-         * question of whether what came OUT of the join is still under
-         * the root. Two checks because they can fail independently, and
-         * because a directory traversal that gets through one of them is
-         * the whole of the bug. */
         if (strncmp(dest, root, strlen(root)) != 0 || dest[strlen(root)] != '/') {
             fprintf(stderr, "os: %s would be installed outside %s - refused\n",
                     f->path, root);
@@ -740,16 +588,11 @@ static int install_one(const char *name, int depth) {
     }
 
     if (failed) {
-        /* Everything or nothing. A half-installed package whose files
-         * are on the disk and whose database record is not is the state
-         * that makes every later operation ambiguous, so the tree goes
-         * away and the machine is where it was. */
         remove_tree(root);
         free(bytes);
         return 1;
     }
 
-    /* The commands, in /pkg/bin and never in /bin. */
     if (pkg.manifest.provides[0]) {
         mkdir_p(PKG_BIN_DIR);
         const char *p = pkg.manifest.provides;
@@ -785,10 +628,6 @@ static int install_one(const char *name, int depth) {
         }
     }
 
-    /* The database record last, because it is what makes the package
-     * installed. Everything before this point is files on a disk that
-     * nothing refers to; after it, `os list` and the kernel's registry
-     * both see it. */
     mkdir_p(PKG_DB_INST);
     char rec[PATHBUF];
     snprintf(rec, sizeof(rec), "%s/%s", PKG_DB_INST, name);
@@ -821,11 +660,6 @@ static int install_one(const char *name, int depth) {
     }
 
     if (rewrite_registry() != 0) {
-        /* The files and the record are on the disk and the kernel's view
-         * of what this package may do is not. Rather than leave that,
-         * the install is undone - a package the kernel would launch with
-         * nothing when its manifest asked for the network is a package
-         * that fails somewhere else entirely. */
         fprintf(stderr, "os: the capability registry could not be written - "
                         "%s is being removed again\n", pkg.manifest.name);
         remove_tree(root);
@@ -848,15 +682,12 @@ static int install_one(const char *name, int depth) {
     return 0;
 }
 
-/* ---- remove ------------------------------------------------------------ */
-
 static int cmd_remove(const char *name) {
     osp_manifest_t man;
     if (!read_installed(name, &man)) {
         fprintf(stderr, "os: %s is not installed\n", name);
         return 1;
     }
-    /* Anything that needs it? Asked before anything is deleted. */
     DIR *d = opendir(PKG_DB_INST);
     if (d) {
         struct dirent *de;
@@ -892,9 +723,6 @@ static int cmd_remove(const char *name) {
         closedir(d);
     }
 
-    /* The links first, then the tree, then the record. The reverse of
-     * the install order, so that a failure part way through never leaves
-     * a record pointing at files that are gone. */
     const char *p = man.provides;
     while (*p) {
         while (*p == ' ' || *p == '\t') {
@@ -930,8 +758,6 @@ static int cmd_remove(const char *name) {
     say("os: removed %s-%s\n", name, man.version);
     return 0;
 }
-
-/* ---- list, available, info, verify ------------------------------------- */
 
 static int cmd_list(void) {
     DIR *d = opendir(PKG_DB_INST);
@@ -1003,9 +829,6 @@ static int cmd_info(const char *name) {
     return 0;
 }
 
-/* Re-hash what is on the disk against the archive it came from. The one
- * command here that can tell you something you did not already know:
- * everything else reports what a record says, and this one checks it. */
 static int verify_one(const char *name) {
     osp_manifest_t man;
     if (!read_installed(name, &man)) {
@@ -1040,7 +863,7 @@ static int verify_one(const char *name) {
     for (uint32_t i = 0; i < pkg.file_count; i++) {
         const osp_file_t *f = &pkg.files[i];
         if (f->flags & OSP_F_SYMLINK) {
-            continue; /* a link's content is its target; leanfs holds it */
+            continue;
         }
         char dest[PATHBUF];
         snprintf(dest, sizeof(dest), "%s/%s", root, f->path);
@@ -1100,31 +923,9 @@ static int cmd_verify(const char *name) {
     return rc;
 }
 
-/* ---- M116: what an image was built to have installed ------------------
- *
- * `os preinstall` installs the packages /pkg/repo/preinstall names, one
- * per line, through exactly the path `os install` takes - the index hash,
- * the archive hash, every file hash, the prefix check, the registry. It
- * is here because a browser that cannot open https is not a browser, and
- * M115's answer to that - `os install ca-certificates`, typed by hand
- * into a terminal - was a step nobody who opened Browser and typed
- * google.com was ever going to know to take. The build that puts a
- * browser on an image also lists ca-certificates here (Makefile,
- * `browser-if-built`), and init runs this once per boot.
- *
- * Once per package, not once per boot. Each name is recorded in
- * /pkg/db/preinstalled when it is installed, and a name already recorded
- * is not installed again - so `os remove ca-certificates` is a decision
- * that sticks rather than one the next boot quietly undoes. The trust
- * store is still a package: removable, verifiable, replaceable without
- * rebuilding the image, which is the condition docs/browser.md set for
- * shipping it at all.
- *
- * Silent when there is nothing to do, because it runs on every boot. */
 #define PKG_PREINSTALL      PKG_REPO_DIR "/preinstall"
 #define PKG_DB_PREINSTALLED PKG_DB_DIR "/preinstalled"
 
-/* Is `name` a whole line of `list`? */
 static int list_has_line(const char *list, const char *name) {
     size_t n = strlen(name);
     const char *p = list;
@@ -1143,7 +944,7 @@ static int cmd_preinstall(void) {
     size_t len = 0;
     char *list = (char *)read_whole(PKG_PREINSTALL, &len, 4096);
     if (!list) {
-        return 0; /* an image built without a list - the ordinary case */
+        return 0;
     }
     size_t dlen = 0;
     char *done = (char *)read_whole(PKG_DB_PREINSTALLED, &dlen, 4096);
@@ -1209,9 +1010,6 @@ static void usage(void) {
     printf("See docs/packages.md.\n");
 }
 
-/* `os caps` - what this process holds and what a package could ever
- * hold. Here rather than in /bin/caps because the interesting half is
- * the ceiling, and the ceiling is this milestone's. */
 static int cmd_caps(void) {
     uint32_t mine = (uint32_t)sys_getcaps();
     char buf[OSP_MAX_TEXT];

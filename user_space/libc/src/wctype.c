@@ -1,24 +1,5 @@
-/* user_space/libc/src/wctype.c - M89
- *
- * <wctype.h>'s out-of-line half: the four calls that take a character
- * class by name, and wcwidth. Everything else in that header is inline.
- *
- * A separate file from wchar.c rather than appended to it, and the
- * reason is the host test tier: tests/ compiles wchar.c for the machine
- * you are sitting at, and macOS's own <ctype.h> declares `iswctype`, so
- * a translation unit that includes both this project's <wctype.h> and
- * the host's ctype.h cannot compile. Splitting the file is a smaller
- * change than shadowing a third host header - see tests/fakes/wchar.h
- * for the two that already are, and why that list should stay short.
- *
- * See <wctype.h> for why every answer here is an ASCII answer on a
- * system whose encoding is UTF-8.
- */
 #include <wctype.h>
 
-/* The class names, in the order iswctype's opaque value indexes them. A
- * value of 0 means "no such class", which is what wctype() returns for a
- * name it does not know and what iswctype() must then report false for. */
 static int class_matches(int index, wint_t c) {
     switch (index) {
     case 1:  return iswalpha(c);
@@ -68,10 +49,10 @@ wctrans_t wctrans(const char *name) {
         return 0;
     }
     if (name[0] == 't' && name[1] == 'o' && name[2] == 'u') {
-        return 1; /* toupper */
+        return 1;
     }
     if (name[0] == 't' && name[1] == 'o' && name[2] == 'l') {
-        return 2; /* tolower */
+        return 2;
     }
     return 0;
 }
@@ -86,10 +67,6 @@ wint_t towctrans(wint_t c, wctrans_t desc) {
     return c;
 }
 
-/* One column per character, and the header says why that is true of what
- * this machine actually draws rather than a simplification. A control
- * character occupies no columns and is reported as -1, which is the
- * signal a terminal layout uses to skip it. */
 int wcwidth(wchar_t c) {
     if (c == 0) {
         return 0;

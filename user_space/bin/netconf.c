@@ -1,15 +1,3 @@
-/* user_space/bin/netconf.c
- *
- * M64: what this machine's network configuration actually is.
- *
- * Small on purpose, and the first thing worth running after M64: it is
- * the difference between "the kernel logged an address at boot" and "a
- * program can ask", and it is what makes the DHCP client visible to a
- * person rather than only to a self-test. The "(DHCP lease)" versus
- * "(fallback - nothing answered)" line is the whole point: on QEMU the
- * two configurations are identical, so without saying which one this is,
- * a completely broken DHCP client would look exactly like a working one.
- */
 #include <stdio.h>
 
 #include "os_net.h"

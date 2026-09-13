@@ -1,33 +1,3 @@
-/* tests/freetype/ftrender.c - M100: freetype, graded against itself.
- *
- * ---- what this is for --------------------------------------------------
- *
- * freetype's tarball ships no test suite that runs without meson and a
- * network, and "the glyph looks right" is not an assertion. So this is a
- * differential test of the kind tools/sh-test.sh and tools/math-test.sh
- * are: one program, compiled twice from the same source - once for the
- * host against a host build of freetype 2.13.3, once for the machine
- * against the freetype the cross compiler built - and the two outputs
- * must be byte-identical. Nothing here says what a glyph should look
- * like. freetype on another machine decides.
- *
- * What it grades is not small. The TrueType bytecode interpreter, the
- * smooth rasterizer and the monochrome one are tens of thousands of
- * lines of fixed-point integer arithmetic, and every glyph's bitmap is
- * hashed - a compiler that gets one shift or one signed division wrong
- * anywhere in that changes the hash. It also grades this libc's FILE
- * layer on a 750 KB font: freetype's stdio stream seeks and reads its
- * tables piecemeal, and a wrong ftell is a wrong glyph.
- *
- * ---- what it prints ----------------------------------------------------
- *
- * One line per face with its metrics, then one line per (size, mode,
- * glyph) with the bitmap's geometry, the advance, and an FNV-1a hash of
- * the bitmap's bytes, then kerning for a few pairs, then a hash over
- * everything. Deterministic, text, no floats - so `cmp` decides.
- *
- * Usage: ftrender <font.ttf>
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,9 +31,6 @@ static int render_range(FT_Face face, int px, int32_t flags, const char *mode) {
         }
         FT_GlyphSlot g = face->glyph;
         FT_Bitmap *b = &g->bitmap;
-        /* The bitmap is hashed row by row for exactly `width` bytes (or
-         * width/8 rounded up for mono), never the pitch: pitch padding is
-         * allocator territory and may legitimately differ. */
         unsigned rowbytes = b->pixel_mode == FT_PIXEL_MODE_MONO
                                 ? (b->width + 7) / 8 : b->width;
         uint64_t h = 1469598103934665603ULL;
@@ -112,11 +79,6 @@ int main(int argc, char **argv) {
 
     total = 1469598103934665603ULL;
     int failures = 0;
-    /* Three renderers and two hinting regimes:
-     *   default   the TrueType interpreter (v40) into the smooth rasterizer
-     *   nohint    outlines scaled and rasterized with no bytecode run
-     *   mono      the monochrome rasterizer, which is a separate module
-     *   autohint  freetype's own hinter rather than the font's bytecode */
     failures += render_range(face, 12, FT_LOAD_DEFAULT, "default");
     failures += render_range(face, 24, FT_LOAD_DEFAULT, "default");
     failures += render_range(face, 48, FT_LOAD_DEFAULT, "default");
@@ -124,9 +86,6 @@ int main(int argc, char **argv) {
     failures += render_range(face, 16, FT_LOAD_TARGET_MONO, "mono");
     failures += render_range(face, 20, FT_LOAD_FORCE_AUTOHINT, "autohint");
 
-    /* Kerning is a table lookup plus a scale, and the pairs below are
-     * ones a Latin font actually kerns. At 48px so the deltas are not
-     * all rounded to zero. */
     FT_Set_Pixel_Sizes(face, 0, 48);
     static const char PAIRS[][2] = {{'A','V'},{'T','o'},{'W','a'},{'L','T'},{'f','f'},{'r','.'}};
     for (unsigned i = 0; i < sizeof(PAIRS) / sizeof(PAIRS[0]); i++) {

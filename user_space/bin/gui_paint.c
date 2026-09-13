@@ -1,21 +1,3 @@
-/* user_space/bin/gui_paint.c
- *
- * M21 demo GUI app #2: a minimal paint program, the input-driven
- * counterpart to gui_clock.c's timer-driven one. Proves the whole M21
- * pipeline that can only really be exercised by real input: focus-
- * follows-click (this window has to actually be focused before any of
- * its events arrive at all), mouse-move-while-button-held routed as a
- * live stream of window-relative coordinates, and a keystroke ('c')
- * routed to whichever window currently holds focus.
- *
- * Static content (the border, caption, and separator line) is drawn
- * once at startup and is what kernel_main's automated M21 self-test can
- * actually pixel-check headlessly; drawing a real stroke needs live
- * mouse input, which - like M18's mouse driver - is verified manually
- * via QEMU monitor `mouse_move`/`mouse_button`/`sendkey` injection
- * rather than baked into the boot-time self-test. See milestones.md's
- * M21 entry for how that was verified.
- */
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
@@ -52,11 +34,6 @@ int main(void) {
         wm_wait_event(&win, &ev);
 
         if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
-            /* M55: a replacement compositor handed this client a blank
-             * buffer. The strokes themselves are gone - this program
-             * keeps no model of what was drawn, the pixel buffer *was*
-             * the model - so the honest thing is to come back as an
-             * empty canvas rather than pretend otherwise. */
             draw_chrome(&win.gfx);
             continue;
         }

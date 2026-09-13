@@ -4,9 +4,6 @@
 
 #include "cpu.h"
 
-/* Standard 8-byte segment descriptor. Base/limit are meaningless for the
- * 64-bit code/data segments below (the CPU runs them flat regardless) but
- * are still encoded for completeness/documentation. */
 typedef struct __attribute__((packed)) {
     uint16_t limit_low;
     uint16_t base_low;
@@ -16,8 +13,6 @@ typedef struct __attribute__((packed)) {
     uint8_t  base_high;
 } gdt_entry_t;
 
-/* TSS descriptors are 16 bytes in long mode (need a full 64-bit base),
- * i.e. two GDT slots wide. */
 typedef struct __attribute__((packed)) {
     uint16_t limit_low;
     uint16_t base_low;
@@ -43,12 +38,6 @@ typedef struct __attribute__((packed)) {
     uint64_t base;
 } table_ptr_t;
 
-/* x86_64 TSS: only the RSP0/IST slots are used. IST1 gives the
- * double-fault handler its own known-good stack, so a fault caused by a
- * corrupt/overflowed kernel stack doesn't turn into a silent triple fault
- * when the CPU tries to push the exception frame. RSP0 is the stack the
- * CPU switches to on any ring3->ring0 transition (M9) - see
- * tss_set_rsp0, updated per-task by the scheduler. */
 typedef struct __attribute__((packed)) {
     uint32_t reserved0;
     uint64_t rsp0, rsp1, rsp2;
@@ -59,17 +48,17 @@ typedef struct __attribute__((packed)) {
     uint16_t iomap_base;
 } tss_t;
 
-#define GDT_ACCESS_KERNEL_CODE 0x9A /* present, ring0, code, exec/read */
-#define GDT_ACCESS_KERNEL_DATA 0x92 /* present, ring0, data, read/write */
-#define GDT_ACCESS_TSS         0x89 /* present, ring0, 64-bit TSS (available) */
-#define GDT_ACCESS_USER_CODE   0xFA /* present, ring3, code, exec/read */
-#define GDT_ACCESS_USER_DATA   0xF2 /* present, ring3, data, read/write */
-#define GDT_GRAN_LONG_MODE     0x20 /* L bit: 64-bit code segment */
+#define GDT_ACCESS_KERNEL_CODE 0x9A
+#define GDT_ACCESS_KERNEL_DATA 0x92
+#define GDT_ACCESS_TSS         0x89
+#define GDT_ACCESS_USER_CODE   0xFA
+#define GDT_ACCESS_USER_DATA   0xF2
+#define GDT_GRAN_LONG_MODE     0x20
 
 #define DOUBLE_FAULT_STACK_SIZE 4096
 
 static gdt_table_t gdt;
-static tss_t tss[MAX_CPUS]; /* one per possible CPU - see gdt.h's header comment */
+static tss_t tss[MAX_CPUS];
 static table_ptr_t gdtp;
 static uint8_t double_fault_stack[MAX_CPUS][DOUBLE_FAULT_STACK_SIZE] __attribute__((aligned(16)));
 
@@ -106,7 +95,7 @@ void gdt_init(void) {
             ((uint8_t *)&tss[i])[b] = 0;
         }
         tss[i].ist1 = (uint64_t)&double_fault_stack[i][DOUBLE_FAULT_STACK_SIZE];
-        tss[i].iomap_base = sizeof(tss_t); /* no I/O bitmap: place it past the TSS limit */
+        tss[i].iomap_base = sizeof(tss_t);
         tss_set_descriptor(&gdt.tss[i], (uint64_t)&tss[i], sizeof(tss_t) - 1);
     }
 
@@ -121,14 +110,10 @@ void gdt_init(void) {
 }
 
 void gdt_init_ap(int cpu_id) {
-    gdt_flush(&gdtp); /* per-CPU register (GDTR), same shared table gdt_init already built */
+    gdt_flush(&gdtp);
     tss_flush(gdt_tss_selector(cpu_id));
 }
 
-/* M106: what the CPU will actually use for a ring-3 -> ring-0 transition.
- * A double fault whose first fault was "could not push an interrupt frame"
- * is indistinguishable from any other double fault unless the dump says
- * what rsp0 was, so the fault reporter asks. */
 uint64_t tss_get_rsp0(int cpu_id) {
     return tss[cpu_id].rsp0;
 }

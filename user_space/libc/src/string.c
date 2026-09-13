@@ -1,8 +1,6 @@
-/* Only what user_space/lib/str.c does not already provide - see
- * string.h's header comment on why these are not two sets. */
 #include <string.h>
-#include <errno.h> /* M121: strerror_r returns ERANGE */
-#include <stdlib.h> /* malloc - strdup, M80 groundwork */
+#include <errno.h>
+#include <stdlib.h>
 
 void *memmove(void *dst, const void *src, size_t n) {
     unsigned char *d = (unsigned char *)dst;
@@ -10,9 +8,6 @@ void *memmove(void *dst, const void *src, size_t n) {
     if (d == s || n == 0) {
         return dst;
     }
-    /* Overlap is the whole reason this is not memcpy: copying forward
-     * through a region that overlaps ahead of itself reads bytes it has
-     * already written. */
     if (d < s) {
         for (size_t i = 0; i < n; i++) {
             d[i] = s[i];
@@ -71,10 +66,6 @@ char *strncpy(char *dst, const char *src, size_t n) {
     for (; i < n && src[i]; i++) {
         dst[i] = src[i];
     }
-    /* The standard's own strange rule: pad with NULs to exactly n, and
-     * do *not* terminate if src was longer. Kept faithful rather than
-     * improved, because third-party code is written against the strange
-     * rule. */
     for (; i < n; i++) {
         dst[i] = '\0';
     }
@@ -163,15 +154,6 @@ size_t strcspn(const char *s, const char *reject) {
     return n;
 }
 
-/* ---- M80 groundwork: strerror -----------------------------------------
- *
- * The E* *name*, not a sentence. See <errno.h> for why: this kernel
- * returns -1 without a reason for almost everything, so a libc that
- * printed "No such file or directory" would be describing a failure
- * nothing actually reported. A name is exactly as much as is known.
- *
- * A code with no entry comes back as "error", which is also true.
- */
 char *strerror(int errnum) {
     static const struct {
         int code;
@@ -193,22 +175,6 @@ char *strerror(int errnum) {
     return (char *)"error";
 }
 
-/* ---- M121: strerror_r, the form with nowhere to go wrong -------------
- *
- * POSIX's re-entrant strerror. It exists because strerror is allowed to
- * return a pointer to a static buffer, and two threads formatting two
- * errors is then a race - which is a real hazard even here, where the
- * strings above happen to be immutable literals and no race is possible.
- * A caller cannot know that, and libc++'s std::system_error does not:
- * system_error.cpp calls strerror_r and has no path that does not.
- *
- * The XSI signature, which returns int, not glibc's GNU variant that
- * returns char* - those two have the same name and different types, and
- * a libc that picks the GNU one without defining _GNU_SOURCE semantics
- * makes every portable caller wrong. ERANGE when it does not fit, with
- * as much as does fit written and terminated, which is what POSIX
- * specifies.
- */
 int strerror_r(int errnum, char *buf, size_t buflen) {
     if (!buf || buflen == 0) {
         return ERANGE;
@@ -239,9 +205,6 @@ char *strpbrk(const char *s, const char *accept) {
     return (char *)0;
 }
 
-/* Allocates, which is why it lives here rather than in str.c with the
- * copies that do not: a program that calls strdup has already accepted
- * that it owns the result and must free it. */
 char *strdup(const char *s) {
     if (!s) {
         return (char *)0;
@@ -254,8 +217,6 @@ char *strdup(const char *s) {
     memcpy(out, s, n);
     return out;
 }
-
-/* ---- M89 - see <string.h> for what each of these buys ---------------- */
 
 char *strndup(const char *s, size_t n) {
     if (!s) {
@@ -279,7 +240,7 @@ char *stpcpy(char *dst, const char *src) {
         dst++;
         src++;
     }
-    return dst; /* the NUL, not the start - that is the whole point */
+    return dst;
 }
 
 char *stpncpy(char *dst, const char *src, size_t n) {
@@ -289,9 +250,6 @@ char *stpncpy(char *dst, const char *src, size_t n) {
         i++;
     }
     char *end = dst + i;
-    /* strncpy's zero-fill, which stpncpy inherits: the remainder is
-     * padded, and the return is the first NUL written rather than the
-     * end of the padding. */
     while (i < n) {
         dst[i++] = '\0';
     }
@@ -303,16 +261,11 @@ void *memmem(const void *haystack, size_t hlen, const void *needle,
     const unsigned char *h = (const unsigned char *)haystack;
     const unsigned char *n = (const unsigned char *)needle;
     if (nlen == 0) {
-        return (void *)h; /* the empty needle is at the start - POSIX's rule */
+        return (void *)h;
     }
     if (nlen > hlen) {
         return (void *)0;
     }
-    /* The naive scan. A source tree's worth of `wget` output is a few
-     * hundred kilobytes against a needle of a dozen bytes, so the O(hn)
-     * worst case is not reachable by anything this machine does - and a
-     * Boyer-Moore table would be more code than the thing it speeds up.
-     * Said here so the next reader knows it was a choice. */
     for (size_t i = 0; i + nlen <= hlen; i++) {
         if (h[i] == n[0] && memcmp(h + i, n, nlen) == 0) {
             return (void *)(h + i);
@@ -342,14 +295,6 @@ size_t strnlen(const char *s, size_t n) {
     return i;
 }
 
-/* ---- M97: strtok, and the two locale functions that are not ----------
- *
- * strtok holds its position between calls in a static, which is exactly
- * the design C89 chose and exactly why it cannot be used from two
- * threads. strtok_r is the same walk with the caller holding the state,
- * and strtok is written in terms of it so there is one tokeniser here
- * rather than two that could disagree about a run of delimiters.
- */
 char *strtok_r(char *s, const char *delim, char **saveptr) {
     if (!s) {
         s = *saveptr;
@@ -357,9 +302,6 @@ char *strtok_r(char *s, const char *delim, char **saveptr) {
     if (!s) {
         return (char *)0;
     }
-    /* Skip leading delimiters. A run of them is ONE separator, which is
-     * the behaviour that distinguishes strtok from a field splitter and
-     * the thing a hand-written version usually gets wrong. */
     while (*s && strchr(delim, *s)) {
         s++;
     }
@@ -385,16 +327,6 @@ char *strtok(char *s, const char *delim) {
     return strtok_r(s, delim, &saved);
 }
 
-/* This machine has one locale, and in the "C" locale the standard says
- * strcoll IS strcmp and strxfrm IS a copy. So these are not stubs and
- * not approximations - they are the specified behaviour for the only
- * locale that exists here, which is the same argument M65 made about
- * chmod: a machine with one principal reports one principal.
- *
- * strxfrm returns the length it WOULD have written, and copies only if
- * there is room. Getting that backwards is the classic bug: a caller
- * sizes a buffer from the return value of a first call with n == 0, and
- * a version that returned the copied length would tell it zero. */
 int strcoll(const char *a, const char *b) {
     return strcmp(a, b);
 }

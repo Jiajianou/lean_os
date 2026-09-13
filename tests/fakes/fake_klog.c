@@ -1,11 +1,3 @@
-/* tests/fakes/fake_klog.c - Q2
- *
- * The kernel log, captured into a buffer instead of a serial port.
- *
- * Captured rather than discarded because some of what this kernel does is
- * only observable through what it says: klog_capture_contains() lets a
- * test assert that a code path reported something, which is the host-side
- * equivalent of the marker grep the serial harness does. */
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,7 +27,6 @@ void klog_put_hex64(uint64_t v) { char b[24]; snprintf(b, sizeof(b), "%016llX", 
 void klog_put_dec(uint32_t v) { char b[16]; snprintf(b, sizeof(b), "%u", v); cap_puts(b); }
 void klog_put_dec64(uint64_t v) { char b[24]; snprintf(b, sizeof(b), "%llu", (unsigned long long)v); cap_puts(b); }
 
-/* The test-visible half. */
 void klog_capture_reset(void) { cap_len = 0; cap_buf[0] = '\0'; }
 const char *klog_capture(void) { return cap_buf; }
 int klog_capture_contains(const char *needle) {

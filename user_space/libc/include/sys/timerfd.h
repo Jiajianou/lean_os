@@ -1,13 +1,6 @@
-/* user_space/libc/include/sys/timerfd.h - M119
- *
- * A deadline as a descriptor. **The granularity is 10 ms** - PIT_HZ, the
- * only clock this machine has - and a shorter request is rounded up to one
- * tick rather than down to zero, because a timer that is readable
- * immediately is an event loop that spins. See kernel/ipc/timerfd.h.
- */
 #pragma once
 
-#include <time.h> /* struct itimerspec, struct timespec */
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {

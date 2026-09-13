@@ -1,14 +1,3 @@
-/* user_space/bin/audiograb.c
- *
- * M62's ownership check, from the only place it can honestly be made:
- * another process. The rule this exists to prove is that there is one
- * speaker and one owner - the compositor, or in the boot self-test the
- * kernel task - and that a program which simply asks cannot take it.
- *
- * Exits 0 when it was correctly refused, which is the *success* case and
- * worth saying out loud: this program working means this program failing
- * to do what it tries to do.
- */
 #include "str.h"
 #include "syscall_wrappers.h"
 

@@ -1,9 +1,3 @@
-/* user_space/libc/src/termios.c - M89
- *
- * The POSIX terminal calls over M85's ioctls. See <termios.h> for why
- * the struct is system_api's rather than this file's, and for why the
- * baud-rate calls refuse.
- */
 #include <termios.h>
 #include <errno.h>
 #include <sys/ioctl.h>
@@ -17,9 +11,6 @@ int tcgetattr(int fd, struct termios *out) {
         return -1;
     }
     if (sys_ioctl(fd, TCGETS, out) != 0) {
-        /* The kernel refuses this for anything that is not a terminal,
-         * which is what ENOTTY means and is the errno every caller of
-         * isatty-by-tcgetattr is testing for. */
         errno = ENOTTY;
         return -1;
     }
@@ -27,11 +18,6 @@ int tcgetattr(int fd, struct termios *out) {
 }
 
 int tcsetattr(int fd, int optional_actions, const struct termios *in) {
-    /* All three actions behave identically, and <termios.h> says why:
-     * there is no output queue to drain. Accepted rather than refused,
-     * because a program passing TCSADRAIN is asking for its setting to
-     * take effect after pending output - and on a terminal with no
-     * buffered output that is the same instant as TCSANOW. */
     (void)optional_actions;
     if (!in) {
         errno = EFAULT;
@@ -62,25 +48,6 @@ int tcsetpgrp(int fd, pid_t pgrp) {
     return 0;
 }
 
-/* ---- the three that have nothing to do ------------------------------
- *
- * A success that does nothing, and unlike the baud-rate calls below that
- * is the honest answer rather than a convenient one. tcdrain waits for
- * queued output to be written: this line discipline writes synchronously,
- * so by the time a caller can ask, there is nothing queued and the wait
- * is already over. Returning -1 would make a program think it could not
- * do something that has in fact already happened.
- *
- * tcflush is the one with a real gap, and it is worth naming: it should
- * discard unread input, and this kernel's tty has no call to do that. A
- * program calling tcflush(TCIFLUSH) to drop type-ahead before a prompt
- * will still see the type-ahead. That is a missing feature reported as a
- * success, which is the shape this project usually refuses - it is
- * accepted here because the alternative fails a program that would
- * otherwise work correctly except for stale input, and because the fix
- * is a kernel ioctl rather than anything this file can do. It is written
- * down so the next person meets it here rather than in a debugger.
- */
 int tcdrain(int fd) {
     (void)fd;
     return 0;
@@ -95,23 +62,17 @@ int tcflush(int fd, int queue) {
 int tcflow(int fd, int action) {
     (void)fd;
     (void)action;
-    return 0; /* there is no flow control to suspend or resume - see <termios.h> */
+    return 0;
 }
 
 int tcsendbreak(int fd, int duration) {
     (void)fd;
     (void)duration;
-    return 0; /* a break is a condition on a serial line this terminal is not */
+    return 0;
 }
-
-/* ---- the refusals ---------------------------------------------------- */
 
 speed_t cfgetispeed(const struct termios *t) {
     (void)t;
-    /* 0 is B0, which on a real terminal means "hung up". It is the
-     * closest true statement about a line that has no baud rate at all -
-     * and a program that treats 0 as an error will take its error path,
-     * which is better than one that believes it got 9600. */
     return 0;
 }
 
@@ -120,20 +81,6 @@ speed_t cfgetospeed(const struct termios *t) {
     return 0;
 }
 
-/* M99: B0 succeeds, everything else still refuses.
- *
- * The refusal was M89's and its reasoning stands: there is no UART here,
- * and a program that needs a real baud rate should find out rather than
- * be told 0. What M89 did not separate is *setting the speed the line
- * already has* from setting a speed it cannot have. cfgetispeed answers
- * B0, so the ordinary save-and-restore - read the settings, change one
- * flag, write them back - passes B0 straight back in, and refusing that
- * refuses a program that never asked about baud rates at all.
- *
- * CPython's termios.tcsetattr is the one that found it: it calls
- * cfsetispeed and cfsetospeed with the values tcgetattr gave it, before
- * every tcsetattr, which makes tty.setraw and everything built on it
- * fail with EINVAL on a terminal that has no speed to set. */
 static int set_speed(speed_t speed) {
     if (speed == B0) {
         return 0;
@@ -157,18 +104,6 @@ int cfsetspeed(struct termios *t, speed_t speed) {
     return set_speed(speed);
 }
 
-/* ---- and the one that is not a refusal -------------------------------
- *
- * cfmakeraw is the flag arithmetic every program that wants bytes as
- * typed writes by hand, and every flag it clears that this discipline
- * implements is genuinely honoured afterwards: ICANON, ECHO, ECHOE, ISIG
- * and ICRNL are the five kernel/dev/tty.c reads, and clearing them is
- * exactly what makes ^C arrive as byte 3.
- *
- * The rest of what it touches is carried and ignored, which changes
- * nothing about the result - a discipline that never stripped a parity
- * bit does not start behaving differently when ISTRIP is cleared.
- */
 void cfmakeraw(struct termios *t) {
     if (!t) {
         return;
@@ -183,23 +118,6 @@ void cfmakeraw(struct termios *t) {
     t->c_cc[VTIME] = 0;
 }
 
-/* ---- M89: ioctl itself ----------------------------------------------
- *
- * <sys/ioctl.h> has declared this since M89's header pass and nothing
- * implemented it - every caller in this tree went through sys_ioctl or
- * through tcgetattr above. A program written elsewhere calls `ioctl`.
- *
- * It lives in this file rather than in one of its own because every
- * request this kernel implements is a terminal request (see
- * system_api/include/termios.h), so this is where the reader who wants
- * to know what an ioctl can do here is already looking.
- *
- * The variadic third argument is always taken as a pointer, which is
- * what all six commands take. An ioctl the kernel does not know returns
- * -1 with ENOTTY - the error that means "this descriptor does not
- * support that request", which is exactly the situation and is what a
- * caller probing for a capability tests for.
- */
 int ioctl(int fd, unsigned long request, ...) {
     __builtin_va_list ap;
     __builtin_va_start(ap, request);

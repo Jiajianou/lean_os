@@ -9,8 +9,8 @@
 #define PCI_REG_VENDOR_DEVICE 0x00
 #define PCI_REG_COMMAND       0x04
 #define PCI_REG_STATUS        0x06
-#define PCI_REG_REVISION      0x08 /* prog-if, subclass, class in the upper three bytes */
-#define PCI_REG_HEADER_TYPE   0x0C /* byte 2: bit 7 = multifunction, low bits = header layout */
+#define PCI_REG_REVISION      0x08
+#define PCI_REG_HEADER_TYPE   0x0C
 #define PCI_REG_BAR0          0x10
 #define PCI_REG_BAR1          0x14
 #define PCI_REG_CAP_PTR       0x34
@@ -51,7 +51,7 @@ int pci_find_device(uint16_t vendor_id, uint16_t device_id, pci_device_t *out) {
                 uint32_t vendor_device = cfg_read32((uint8_t)bus, (uint8_t)slot, (uint8_t)func, PCI_REG_VENDOR_DEVICE);
                 uint16_t vid = (uint16_t)(vendor_device & 0xFFFF);
                 if (vid == 0xFFFF) {
-                    continue; /* no device in this slot/function */
+                    continue;
                 }
                 uint16_t did = (uint16_t)(vendor_device >> 16);
                 if (vid == vendor_id && did == device_id) {
@@ -70,21 +70,6 @@ int pci_find_device(uint16_t vendor_id, uint16_t device_id, pci_device_t *out) {
     return 0;
 }
 
-/* ---- Q16: a memory-mapped BAR is a fact about the card ----------------
- *
- * These two halted, and the triage that milestone asks for is what
- * reclassified them: "BAR0 is memory-mapped, not I/O-mapped" is not a
- * kernel bug and it is not an impossible state. It is a perfectly
- * ordinary card that this kernel's three PCI drivers cannot drive,
- * because all three of them speak port I/O - and the same part number
- * genuinely ships both ways. On QEMU's `pc` machine they are always
- * I/O-mapped, which is why nine milestones of PCI work never saw it.
- *
- * 0 means "not an I/O BAR", and 0 is a safe sentinel rather than a
- * convenient one: port 0 is not a device address on x86 and every caller
- * here compares against it before using the value. A driver that gets 0
- * declines the card, and a machine whose sound card is memory-mapped
- * boots to a desktop with no sound instead of not booting. */
 uint16_t pci_bar1_io_base(const pci_device_t *dev) {
     uint32_t bar1 = cfg_read32(dev->bus, dev->slot, dev->func, PCI_REG_BAR1);
     if ((bar1 & 1) == 0) {
@@ -103,38 +88,13 @@ uint16_t pci_bar0_io_base(const pci_device_t *dev) {
 
 void pci_enable_device(const pci_device_t *dev) {
     uint32_t command = cfg_read32(dev->bus, dev->slot, dev->func, PCI_REG_COMMAND);
-    command |= (1u << 0); /* I/O Space Enable */
-    /* M107: Memory Space Enable, which no driver here needed until three
-     * arrived whose registers are only reachable that way. Setting it on
-     * a device whose BARs are all I/O costs nothing - firmware has
-     * already assigned the BARs either way, and this bit only says
-     * whether the device answers cycles in that space. */
-    command |= (1u << 1); /* Memory Space Enable */
-    command |= (1u << 2); /* Bus Master Enable */
-    /* M62: and clear Interrupt Disable (bit 10), which UEFI firmware
-     * routinely leaves *set* - it has no reason to want INTx while it is
-     * driving devices by polling. Nothing here noticed until an AC'97
-     * controller became the first device this kernel actually waits on an
-     * interrupt from: its completion bits were set in its own status
-     * register the whole time and no interrupt had ever been delivered.
-     * (rtl8139.c registers a handler too, but polls its status register
-     * rather than depending on it, which is why it never found this.) */
+    command |= (1u << 0);
+    command |= (1u << 1);
+    command |= (1u << 2);
     command &= ~(1u << 10);
     cfg_write32(dev->bus, dev->slot, dev->func, PCI_REG_COMMAND, command);
 }
 
-/* ---- M107: finding a device by what it IS rather than by who made it --
- *
- * pci_find_device above matches a vendor and device id, which is the
- * right question for virtio-blk, the RTL8139 and the AC'97 controller:
- * each of those drivers speaks one manufacturer's register layout and
- * would be wrong to bind to anything else.
- *
- * The three controllers M107 adds are the opposite case. "AHCI" is a
- * register interface standardised across every manufacturer, and the
- * class code is the field that says so. Matching by vendor id would mean
- * a table of every SATA controller ever shipped, and would still miss the
- * one in the machine somebody actually has. */
 int pci_find_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
                    uint32_t index, pci_device_t *out) {
     uint32_t seen = 0;
@@ -174,9 +134,6 @@ int pci_find_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
     return 0;
 }
 
-/* Is BAR `index` the upper half of the 64-bit BAR below it? A caller that
- * asks about BAR1 of a device whose BAR0 is 64-bit is asking about half
- * an address, and the honest answer is "there is no BAR there". */
 static int bar_is_upper_half(const pci_device_t *dev, uint8_t index) {
     if (index == 0) {
         return 0;
@@ -193,12 +150,12 @@ uint64_t pci_bar_mem_base(const pci_device_t *dev, uint8_t index) {
     uint8_t off = (uint8_t)(PCI_REG_BAR0 + index * 4);
     uint32_t low = cfg_read32(dev->bus, dev->slot, dev->func, off);
     if (low & PCI_BAR_IO) {
-        return 0; /* an I/O BAR - pci_bar0_io_base is the function for that */
+        return 0;
     }
     uint64_t base = low & 0xFFFFFFF0u;
     if ((low & PCI_BAR_TYPE_MASK) == PCI_BAR_TYPE_64) {
         if (index >= 5) {
-            return 0; /* a 64-bit BAR with no register to hold its top half */
+            return 0;
         }
         base |= (uint64_t)cfg_read32(dev->bus, dev->slot, dev->func, (uint8_t)(off + 4)) << 32;
     }
@@ -219,11 +176,6 @@ uint64_t pci_bar_mem_size(const pci_device_t *dev, uint8_t index) {
         return 0;
     }
 
-    /* The sizing protocol: all ones in, and the bits that read back zero
-     * are the ones the device does not decode. The device stops
-     * responding at its old address while the probe value is in there,
-     * which is why this runs at boot with nothing using the BAR - and why
-     * the original value goes back before anything else happens. */
     uint32_t high = is64 ? cfg_read32(dev->bus, dev->slot, dev->func, (uint8_t)(off + 4)) : 0;
     cfg_write32(dev->bus, dev->slot, dev->func, off, 0xFFFFFFFFu);
     uint32_t size_low = cfg_read32(dev->bus, dev->slot, dev->func, off);
@@ -237,10 +189,10 @@ uint64_t pci_bar_mem_size(const pci_device_t *dev, uint8_t index) {
 
     uint64_t mask = ((uint64_t)size_high << 32) | (size_low & 0xFFFFFFF0u);
     if (!is64) {
-        mask |= 0xFFFFFFFF00000000ULL; /* only the low 32 bits were probed */
+        mask |= 0xFFFFFFFF00000000ULL;
     }
     if (mask == 0xFFFFFFFFFFFFFFF0ULL || mask == 0) {
-        return 0; /* unimplemented BAR */
+        return 0;
     }
     return (~mask) + 1;
 }
@@ -251,9 +203,6 @@ uint8_t pci_find_capability(const pci_device_t *dev, uint8_t cap_id) {
         return 0;
     }
     uint8_t off = (uint8_t)(cfg_read32(dev->bus, dev->slot, dev->func, PCI_REG_CAP_PTR) & 0xFC);
-    /* 48 hops is more than the 256-byte config space can hold distinct
-     * 4-byte capabilities, so a list that has not ended by then is a loop
-     * - which is a thing firmware does, and which must not hang a boot. */
     for (int hops = 0; hops < 48 && off >= 0x40; hops++) {
         uint32_t cap = cfg_read32(dev->bus, dev->slot, dev->func, off);
         if ((cap & 0xFF) == cap_id) {

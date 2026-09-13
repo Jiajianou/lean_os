@@ -7,7 +7,7 @@
 #define ICMP_TYPE_ECHO_REPLY   0
 #define ICMP_TYPE_ECHO_REQUEST 8
 
-#define ICMP_HEADER_LEN 8 /* type, code, checksum, id, seq */
+#define ICMP_HEADER_LEN 8
 #define ICMP_MAX_PAYLOAD 1024
 
 static volatile uint16_t last_reply_id;
@@ -21,8 +21,8 @@ static void send_icmp(uint32_t dst_ip, uint8_t type, uint16_t id, uint16_t seq, 
     }
 
     packet[0] = type;
-    packet[1] = 0; /* code */
-    packet[2] = 0; /* checksum, filled in below */
+    packet[1] = 0;
+    packet[2] = 0;
     packet[3] = 0;
     packet[4] = (uint8_t)(id >> 8);
     packet[5] = (uint8_t)(id & 0xFF);

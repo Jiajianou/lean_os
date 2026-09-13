@@ -8,16 +8,6 @@
 static uint8_t clipboard_buf[CLIPBOARD_MAX];
 static size_t clipboard_len;
 
-/* ---- M67: clipboard_lock ---------------------------------------------
- *
- * What it protects: the one shared buffer and its length, together.
- *
- * Against whom: a reader arriving between the k_memcpy and the length
- * assignment in clipboard_set. Without the lock that reader gets the new
- * bytes with the old length - a copy that is half of one thing and half
- * of another, which is the worst of the three possible answers and the
- * only one that is not a valid clipboard. Interrupts off for
- * consistency with every other lock a dying task can be holding. */
 static spinlock_t clipboard_lock;
 
 void clipboard_set(const void *buf, size_t len) {

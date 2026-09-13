@@ -20,7 +20,7 @@ void eth_send(const uint8_t dst_mac[ETH_ADDR_LEN], uint16_t ethertype, const uin
 
     uint16_t total = (uint16_t)(ETH_HEADER_LEN + payload_len);
     if (total < ETH_MIN_FRAME) {
-        total = ETH_MIN_FRAME; /* trailing bytes already zeroed by the k_memset above */
+        total = ETH_MIN_FRAME;
     }
     rtl8139_send(frame, total);
 }
@@ -29,8 +29,6 @@ void eth_receive(const uint8_t *frame, uint16_t len) {
     if (len < ETH_HEADER_LEN) {
         return;
     }
-    /* M67 boundary 1 of 3: inbound from the wire, in the NIC's interrupt
-     * handler. See net.h. */
     net_lock_acquire();
     uint16_t ethertype = (uint16_t)((frame[12] << 8) | frame[13]);
     const uint8_t *payload = frame + ETH_HEADER_LEN;

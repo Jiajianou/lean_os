@@ -1,42 +1,3 @@
-/* tests/bootstrap/bigtu.cc - M98's peak-RSS fixture
- *
- * A translation unit whose job is to be expensive to compile.
- *
- * ---- why C++ and not a large C file ------------------------------------
- *
- * The number M98's fourth box asks for is "peak RSS of the largest
- * translation unit", and the reason anybody wants it is to know whether
- * a GCC bootstrap fits on this machine. GCC 14 is written in C++ and its
- * own worst translation units are C++ ones: a few thousand lines of
- * source, a few hundred thousand lines of headers, and a template
- * instantiation graph that is where the memory actually goes. A 5,000
- * line C file is a bigger *file* and a much smaller *compile* - it would
- * measure the wrong thing and flatter the answer.
- *
- * So this is deliberately header-heavy and template-heavy rather than
- * long: every instantiation below is one cc1plus has to keep in memory
- * at once. It is compiled with -c: the question is what the compiler
- * needs, not what the linker does.
- *
- * ---- what it must NOT be ----------------------------------------------
- *
- * Not unbounded. A fixture that grows the compiler's memory until
- * something dies measures this machine's ceiling rather than a build's
- * demand, and M102 already has a test for the ceiling. This is sized to
- * be a plausible worst case for a real project's file, and the harness
- * reports what it cost rather than asserting a number - a budget row
- * that nobody has measured yet would be a guess with a decimal point.
- *
- * **And it was cut down once, deliberately, with both numbers kept.**
- * As first written - Chain<200>, spread<64>, four instantiations of
- * `exercise` - it peaked at 261 MiB and took fifteen minutes of this
- * machine's time, which is a measurement worth having exactly once and
- * a test nobody will run twice. The sizes below are the same shape at
- * about a third of the work; milestones.md M98 records what the larger
- * one cost, because the larger number is the one that answers "would a
- * GCC bootstrap fit in this machine's memory" and the smaller one is
- * the one that can be run before every commit.
- */
 #include <algorithm>
 #include <functional>
 #include <map>
@@ -51,9 +12,6 @@
 
 namespace {
 
-/* A recursive template, instantiated to a depth the compiler has to hold
- * all of at once - the cheapest honest way to make a compile expensive
- * without making the file long. */
 template <int N>
 struct Chain {
     static long value(long x) { return Chain<N - 1>::value(x) + N; }
@@ -63,8 +21,6 @@ struct Chain<0> {
     static long value(long x) { return x; }
 };
 
-/* One container graph per element type, each dragging in its own copy of
- * the standard library's algorithms. */
 template <typename T>
 struct Bag {
     std::vector<T> items;
@@ -119,8 +75,6 @@ struct Pairs {
     }
 };
 
-/* Instantiate the whole graph over a spread of types. Each line below is
- * a full set of container, algorithm and stream instantiations. */
 template <typename T>
 long exercise(const T &seed, const std::string &key) {
     Bag<T> bag;
@@ -169,7 +123,7 @@ long spread<0>(long acc) {
     return acc;
 }
 
-} /* namespace */
+}
 
 long bigtu_total();
 

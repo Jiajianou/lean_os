@@ -6,14 +6,6 @@
 #include "socket.h"
 #include "wire.h"
 
-/* The one's-complement sum ip.c also computes, but split into
- * accumulate/fold so the pseudo-header and the datagram can go through
- * the same running total without being copied into one buffer first.
- * `sum` carries between calls; fold_checksum finishes it. */
-/* RFC 768's pseudo-header: source and destination address, a zero, the
- * protocol number and the UDP length - the fields UDP borrows from IP so
- * a datagram delivered to the wrong host or the wrong protocol fails its
- * checksum instead of being accepted. */
 static uint32_t pseudo_header_sum(uint32_t src_ip, uint32_t dst_ip, uint16_t udp_len) {
     uint8_t pseudo[12];
     pseudo[0] = (uint8_t)(src_ip >> 24); pseudo[1] = (uint8_t)(src_ip >> 16);
@@ -43,18 +35,12 @@ int udp_send_from(uint32_t src_ip, uint32_t dst_ip, uint16_t dst_port, uint16_t 
     net_write_be16(datagram + 0, src_port);
     net_write_be16(datagram + 2, dst_port);
     net_write_be16(datagram + 4, udp_len);
-    datagram[6] = 0; /* checksum, filled in below */
+    datagram[6] = 0;
     datagram[7] = 0;
     k_memcpy(datagram + UDP_HEADER_LEN, payload, payload_len);
 
-    /* The pseudo-header must be computed over the address that will
-     * actually be in the IP header - which for a DHCP DISCOVER is
-     * 0.0.0.0, not this interface's guess at its own address. */
     uint32_t sum = pseudo_header_sum(src_ip, dst_ip, udp_len);
     uint16_t csum = net_fold16(net_sum16(sum, datagram, udp_len));
-    /* RFC 768: an all-zero checksum means "not computed", so a real
-     * result of zero is transmitted as all ones instead. Both are the
-     * same number in one's complement; only the wire encoding differs. */
     if (csum == 0) {
         csum = 0xFFFF;
     }
@@ -73,7 +59,7 @@ void udp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *payload,
     }
 
     uint16_t csum = net_read_be16(payload + 6);
-    if (csum != 0) { /* zero means the sender did not compute one */
+    if (csum != 0) {
         uint32_t sum = pseudo_header_sum(src_ip, dst_ip, udp_len);
         if (net_fold16(net_sum16(sum, payload, udp_len)) != 0) {
             return;

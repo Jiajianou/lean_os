@@ -1,15 +1,3 @@
-/* user_space/bin/nslookup.c
- *
- * M73: what `netconf` and `caps` are for one more time - a rule or a
- * mechanism nobody can see is one nobody can check. M64 made this OS
- * print the DNS server it had been handed while carefully not using it;
- * this is the program that uses it and says what happened.
- *
- * Every failure gets its own message, because "the name does not exist"
- * and "the network is down" want different things from whoever is
- * reading, and a resolver that printed one line for both would make both
- * undiagnosable.
- */
 #include <stdio.h>
 
 #include "dns.h"
@@ -22,28 +10,15 @@ static void print_ip(uint32_t ip) {
             (int)((ip >> 8) & 0xFF), (int)(ip & 0xFF));
 }
 
-/* ---- the parser, checked without a network ----------------------------
- *
- * The wire format is where a resolver actually goes wrong, and none of it
- * needs a server: a response is just bytes. So the interesting cases are
- * built here by hand and fed straight to dns_parse_response - which is
- * why that function is exposed at all.
- *
- * Each case is a specific way a real server (or a hostile one) can ruin
- * a naive parser, not a variation on "it works".
- */
 static int selftest(void) {
     int failures = 0;
     uint32_t ip = 0;
 
-    /* A compression pointer, which is what makes every real reply
-     * unparseable to a resolver that has not implemented one: the answer
-     * names the question by offset rather than repeating it. */
     static const uint8_t compressed[] = {
         0xAB, 0xCD, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
         3, 'w','w','w', 7, 'e','x','a','m','p','l','e', 3, 'c','o','m', 0,
         0x00, 0x01, 0x00, 0x01,
-        0xC0, 0x0C,                          /* pointer back to offset 12 */
+        0xC0, 0x0C,
         0x00, 0x01, 0x00, 0x01,
         0x00, 0x00, 0x00, 0x3C,
         0x00, 0x04, 93, 184, 216, 34,
@@ -54,14 +29,12 @@ static int selftest(void) {
         failures++;
     }
 
-    /* A CNAME in front of the A record, which is what a real answer for
-     * almost any hosted name looks like. */
     static const uint8_t cname[] = {
         0x00, 0x2A, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
         1, 'a', 4, 't','e','s','t', 0,
         0x00, 0x01, 0x00, 0x01,
         0xC0, 0x0C, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C,
-        0x00, 0x04, 1, 'b', 0xC0, 0x0E,      /* CNAME a.test -> b.test */
+        0x00, 0x04, 1, 'b', 0xC0, 0x0E,
         1, 'b', 4, 't','e','s','t', 0,
         0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C,
         0x00, 0x04, 10, 0, 0, 7,
@@ -72,12 +45,9 @@ static int selftest(void) {
         failures++;
     }
 
-    /* A pointer that points at itself. A resolver without a jump budget
-     * loops here forever, which is a hang rather than an error and is the
-     * single nastiest thing a malicious reply can do. */
     static const uint8_t loop[] = {
         0x00, 0x2B, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-        0xC0, 0x0C,                          /* offset 12 points to offset 12 */
+        0xC0, 0x0C,
         0x00, 0x01, 0x00, 0x01,
     };
     if (dns_parse_response(loop, (int)sizeof(loop), 0x002B, 0, &ip) != -4) {
@@ -85,23 +55,18 @@ static int selftest(void) {
         failures++;
     }
 
-    /* Somebody else's reply, arriving with the wrong id. M64's DHCP
-     * client makes the same check for the same reason: another program's
-     * answer on the same wire must not be able to answer our question. */
     if (dns_parse_response(compressed, (int)sizeof(compressed), 0x0001,
                             "www.example.com", &ip) != -4) {
         printf("nslookup: FAILED - a reply with the wrong id was accepted\n");
         failures++;
     }
 
-    /* An answer to a question nobody asked. */
     if (dns_parse_response(compressed, (int)sizeof(compressed), 0xABCD,
                             "elsewhere.test", &ip) != -4) {
         printf("nslookup: FAILED - a reply for a different name was accepted\n");
         failures++;
     }
 
-    /* NXDOMAIN, which must be told apart from a timeout. */
     static const uint8_t nxdomain[] = {
         0x00, 0x2C, 0x81, 0x83, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         2, 'n','x', 4, 't','e','s','t', 0, 0x00, 0x01, 0x00, 0x01,
@@ -111,13 +76,11 @@ static int selftest(void) {
         failures++;
     }
 
-    /* Truncated mid-record: the length says more than the message holds. */
     if (dns_parse_response(compressed, 20, 0xABCD, "www.example.com", &ip) != -4) {
         printf("nslookup: FAILED - a truncated reply was not refused\n");
         failures++;
     }
 
-    /* And a query round-trips through the encoder. */
     uint8_t q[64];
     int qn = dns_build_query("a.test", 0x1234, q, sizeof(q));
     if (qn != 12 + 8 + 4 || q[0] != 0x12 || q[1] != 0x34 || q[12] != 1 || q[13] != 'a') {
@@ -145,12 +108,6 @@ int main(int argc, char **argv) {
         printf("nslookup: no network on this machine\n");
         return 1;
     }
-    /* M114: the servers it will actually ask, not the one DHCP handed
-     * over. Those were the same thing until this milestone, and the
-     * milestone exists because a person could not tell from any output
-     * on this machine that the only server being asked was one that
-     * never answered. `nslookup` printing the list is the cheapest
-     * possible answer to "why will this name not resolve". */
     uint32_t servers[DNS_MAX_SERVERS];
     int nservers = dns_servers(servers, DNS_MAX_SERVERS);
     if (nservers == 0) {

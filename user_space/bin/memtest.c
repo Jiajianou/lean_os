@@ -1,24 +1,4 @@
-/* user_space/bin/memtest.c
- *
- * M19 self-test, run from kernel_main the same way M9's ring3_test/M11's
- * hello proved earlier milestones: real ring-3 code exercising the new
- * mechanism, not just "it compiled". Two things needed proving here -
- * malloc/free actually work, and two *different* processes mapping the
- * same shm id genuinely see the same physical memory (not just "shm
- * works for one process talking to itself").
- *
- * With no arg (the creator role, kernel_main spawns it this way):
- * allocates and exercises the heap, creates a shared segment, writes a
- * distinctive pattern into it, then spawns a second copy of itself
- * passing the shm id as argv (lean_os's one-string "argv" - see
- * kernel/proc/proc.c) and checks that child's exit code.
- *
- * With an arg (the child role, only ever reached by that spawn above):
- * parses the id, maps the same segment, and verifies the pattern is
- * really there - proof this is genuine cross-process shared memory, not
- * a per-process illusion.
- */
-#include "paths.h" /* system_api/include/paths.h - M53: /bin is where programs live now */
+#include "paths.h"
 #include "malloc.h"
 #include "str.h"
 #include "syscall_wrappers.h"
@@ -37,9 +17,6 @@ static void fail(const char *msg) {
     sys_exit(1);
 }
 
-/* Decimal-only, single call site each (no snprintf/atoi in this minimal
- * a libc replacement - same "not worth a shared helper for one caller"
- * reasoning hello.c's inline hex-digit loop already uses). */
 static void itoa_dec(long v, char *buf) {
     if (v == 0) {
         buf[0] = '0';
@@ -95,10 +72,6 @@ static void malloc_self_test(void) {
         }
     }
 
-    /* Free the middle block and allocate something that should reuse it
-     * (first-fit over a free list, same as kernel/mm/heap.c) - proves
-     * free() really returns a block to circulation, not just marks a bit
-     * nothing else looks at. */
     free(b);
     char *d = (char *)malloc(150);
     if (!d) {
@@ -161,10 +134,6 @@ static int run_as_shm_reader(const char *arg) {
 }
 
 int main(int argc, char **argv) {
-    /* M60: argv[0] is this program's own path; argv[1] is the first thing
-     * the caller had to say. `arg` keeps the name the body already uses,
-     * and is the empty string when there was nothing - which is exactly
-     * what the single-string mechanism this replaced handed over. */
     const char *arg = argc > 1 ? argv[1] : "";
     if (arg[0] == '\0') {
         malloc_self_test();

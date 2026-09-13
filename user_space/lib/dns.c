@@ -8,20 +8,13 @@
 
 #define DNS_PORT        53
 #define DNS_TIMEOUT_MS  3000
-#define DNS_MAX_MSG     512  /* RFC 1035's limit for UDP without EDNS0 */
-#define DNS_MAX_CNAME   4    /* how many CNAMEs to follow inside one reply */
+#define DNS_MAX_MSG     512
+#define DNS_MAX_CNAME   4
 
 #define DNS_TYPE_A      1
 #define DNS_TYPE_CNAME  5
 #define DNS_CLASS_IN    1
 
-/* ---- writing a name ---------------------------------------------------
- *
- * "www.example.com" becomes 3 w w w 7 e x a m p l e 3 c o m 0. Every
- * label is length-prefixed and the whole thing is terminated by a zero
- * length, which is also why a label may not be longer than 63: the top
- * two bits of that byte are reserved for the compression pointer form.
- */
 static int encode_name(const char *name, uint8_t *out, int cap) {
     int n = 0;
     const char *p = name;
@@ -47,27 +40,6 @@ static int encode_name(const char *name, uint8_t *out, int cap) {
     return n;
 }
 
-/* ---- reading a name ---------------------------------------------------
- *
- * THE part of this parser that has to be right, and the one every
- * from-scratch resolver gets wrong the first time.
- *
- * A label whose top two bits are set is not a label - it is a POINTER to
- * an offset earlier in the message, which is how DNS avoids repeating
- * "example.com" in every record. Two consequences, both hostile:
- *
- *   - a pointer can point at another pointer, so following them is a
- *     loop, and a malicious or broken server can make that loop infinite
- *     by pointing a name at itself. Bounded by a jump budget rather than
- *     by trusting the sender.
- *   - a pointer can point anywhere in the message, including forwards or
- *     into the middle of a record, so every offset is range-checked
- *     against the message rather than assumed.
- *
- * Returns the number of bytes consumed *at the original position* (which
- * is 2 for a pure pointer, however long the name turns out to be), or -1.
- * `out` may be NULL when the caller only needs to skip a name.
- */
 static int decode_name(const uint8_t *msg, int len, int pos, char *out, int out_cap) {
     int consumed = 0;
     int jumps = 0;
@@ -85,7 +57,7 @@ static int decode_name(const uint8_t *msg, int len, int pos, char *out, int out_
                 followed = 1;
             }
             if (++jumps > 16) {
-                return -1; /* a pointer loop - bounded, not trusted */
+                return -1;
             }
             pos = ((l & 0x3F) << 8) | msg[pos + 1];
             continue;
@@ -124,8 +96,6 @@ static int decode_name(const uint8_t *msg, int len, int pos, char *out, int out_
 }
 
 static int name_eq(const char *a, const char *b) {
-    /* Case-insensitive: a server is free to echo the question back in a
-     * different case, and RFC 1035 says names compare that way. */
     while (*a && *b) {
         char ca = *a, cb = *b;
         if (ca >= 'A' && ca <= 'Z') { ca = (char)(ca - 'A' + 'a'); }
@@ -145,9 +115,9 @@ int dns_build_query(const char *name, uint16_t id, uint8_t *buf, int cap) {
     }
     buf[0] = (uint8_t)(id >> 8);
     buf[1] = (uint8_t)id;
-    buf[2] = 0x01; /* recursion desired - we are a stub resolver, not a server */
+    buf[2] = 0x01;
     buf[3] = 0x00;
-    buf[4] = 0; buf[5] = 1; /* one question */
+    buf[4] = 0; buf[5] = 1;
     buf[6] = 0; buf[7] = 0;
     buf[8] = 0; buf[9] = 0;
     buf[10] = 0; buf[11] = 0;
@@ -168,17 +138,14 @@ int dns_parse_response(const uint8_t *msg, int len, uint16_t expect_id,
     }
     uint16_t id = (uint16_t)((msg[0] << 8) | msg[1]);
     if (id != expect_id) {
-        /* Not our exchange. M64 made the same check in the DHCP client
-         * and for the same reason: another program's reply on the same
-         * wire must not be able to answer our question. */
         return -4;
     }
     if (!(msg[2] & 0x80)) {
-        return -4; /* not a response */
+        return -4;
     }
     int rcode = msg[3] & 0x0F;
     if (rcode != 0) {
-        return -3; /* NXDOMAIN and friends - a real answer, just not one we wanted */
+        return -3;
     }
     int qdcount = (msg[4] << 8) | msg[5];
     int ancount = (msg[6] << 8) | msg[7];
@@ -196,15 +163,11 @@ int dns_parse_response(const uint8_t *msg, int len, uint16_t expect_id,
     if (pos + 4 > len) {
         return -4;
     }
-    pos += 4; /* qtype + qclass */
+    pos += 4;
     if (expect_name && !name_eq(qname, expect_name)) {
-        return -4; /* answered a different question */
+        return -4;
     }
 
-    /* Follow CNAMEs within this reply. `want` is the name currently being
-     * chased; an A record only counts if it is for that name, which is
-     * what stops an answer section from smuggling in an address for
-     * something nobody asked about. */
     char want[DNS_MAX_NAME + 1];
     strncpy(want, qname, sizeof(want) - 1);
     want[sizeof(want) - 1] = '\0';
@@ -235,7 +198,7 @@ int dns_parse_response(const uint8_t *msg, int len, uint16_t expect_id,
         }
         if (rclass == DNS_CLASS_IN && rtype == DNS_TYPE_CNAME && name_eq(rname, want)) {
             if (++cnames > DNS_MAX_CNAME) {
-                return -4; /* a CNAME chain long enough to be a loop */
+                return -4;
             }
             if (decode_name(msg, len, pos, want, sizeof(want)) < 0) {
                 return -4;
@@ -243,16 +206,9 @@ int dns_parse_response(const uint8_t *msg, int len, uint16_t expect_id,
         }
         pos += rdlen;
     }
-    return -4; /* no answer we asked for */
+    return -4;
 }
 
-/* ---- the cache --------------------------------------------------------
- *
- * Eight entries, expiring on the TTL the server gave rather than on a
- * number invented here. Small on purpose: a desktop resolves a handful of
- * names, and a cache large enough to need eviction policy is a cache with
- * a policy to get wrong.
- */
 #define DNS_CACHE_ENTRIES 8
 
 static struct {
@@ -283,7 +239,7 @@ static void cache_store(const char *name, uint32_t ip, long ttl_ms) {
         }
     }
     if (slot < 0) {
-        slot = 0; /* nothing expired - overwrite the first, no policy to get wrong */
+        slot = 0;
     }
     strncpy(cache[slot].name, name, sizeof(cache[slot].name) - 1);
     cache[slot].name[sizeof(cache[slot].name) - 1] = '\0';
@@ -292,15 +248,6 @@ static void cache_store(const char *name, uint32_t ip, long ttl_ms) {
     cache[slot].used = 1;
 }
 
-/* ---- M114: which servers to ask --------------------------------------
- *
- * resolv.conf is the file every Unix keeps this in and the file a person
- * already knows how to edit, so it is the one this machine reads. Only
- * `nameserver` is understood: `search`, `domain` and `options` are a
- * different feature each, and a parser that silently ignores a directive
- * it does not implement is a parser that lies about what the machine
- * will do. They are skipped as unknown lines, which they are.
- */
 static int parse_dotted_quad(const char *p, const char *end, uint32_t *out) {
     uint32_t ip = 0;
     int octets = 0;
@@ -314,7 +261,7 @@ static int parse_dotted_quad(const char *p, const char *end, uint32_t *out) {
             v = v * 10 + (uint32_t)(*p - '0');
             p++;
             if (++digits > 3 || v > 255) {
-                return 0; /* 256, or 0000000001 - both are somebody guessing */
+                return 0;
             }
         }
         ip = (ip << 8) | v;
@@ -326,8 +273,6 @@ static int parse_dotted_quad(const char *p, const char *end, uint32_t *out) {
             p++;
         }
     }
-    /* Trailing rubbish makes the whole line wrong rather than the prefix
-     * right: "1.1.1.1.1" is not an address and must not read as 1.1.1.1. */
     if (p != end) {
         return 0;
     }
@@ -348,10 +293,8 @@ int dns_parse_resolv_conf(const char *text, int len, uint32_t *out, int max) {
         }
         int end = i;
         if (i < len) {
-            i++; /* step over the newline */
+            i++;
         }
-        /* A comment runs to end of line. Both spellings, because
-         * resolv.conf has historically taken either. */
         for (int k = start; k < end; k++) {
             if (text[k] == '#' || text[k] == ';') {
                 end = k;
@@ -382,8 +325,6 @@ int dns_parse_resolv_conf(const char *text, int len, uint32_t *out, int max) {
             continue;
         }
         int v = start + KEYLEN;
-        /* The keyword has to be a whole word: "nameservers 1.1.1.1" is
-         * not a directive this file understands. */
         if (text[v] != ' ' && text[v] != '\t') {
             continue;
         }
@@ -392,7 +333,7 @@ int dns_parse_resolv_conf(const char *text, int len, uint32_t *out, int max) {
         }
         uint32_t ip = 0;
         if (!parse_dotted_quad(text + v, text + end, &ip) || ip == 0) {
-            continue; /* not an address, or 0.0.0.0 - which is not a server */
+            continue;
         }
         int dup = 0;
         for (int k = 0; k < n; k++) {
@@ -414,19 +355,6 @@ int dns_servers(uint32_t *out, int max) {
     }
     int n = 0;
 
-    /* The file first, because it is what a person edited on purpose and
-     * DHCP is what a machine on the other end of a cable decided.
-     *
-     * Clamped to the buffer, and that is not defensive noise:
-     * sys_readfile returns the FILE's size and copies at most `maxlen`
-     * (see syscall_wrappers.h), so a file bigger than this buffer
-     * returns a length longer than the bytes it wrote. Handing that
-     * number to the parser reads past the end of the array - which is
-     * exactly what the first version of this function did, and what the
-     * seeded resolv.conf (675 bytes, against a 512-byte buffer) then
-     * did to it: the parse ran off the end and found no nameserver at
-     * all, so the machine silently went back to asking the one server
-     * this milestone exists to stop trusting. */
     char text[2048];
     long got = sys_readfile(PATH_RESOLV_CONF, text, sizeof(text));
     if (got > (long)sizeof(text)) {
@@ -481,9 +409,6 @@ int dns_resolve(const char *name, uint32_t *out) {
         return -1;
     }
 
-    /* The id ties a reply to *this* exchange. Derived from the clock
-     * rather than a counter so two runs of the same program do not open
-     * with the same number. */
     uint16_t id = (uint16_t)(sys_uptime_ms() ^ (sys_getpid() << 8));
 
     uint8_t query[DNS_MAX_MSG];
@@ -498,28 +423,6 @@ int dns_resolve(const char *name, uint32_t *out) {
     uint8_t reply[DNS_MAX_MSG];
 
     while (sys_uptime_ms() < deadline) {
-        /* ---- M114: every configured server, each round ----------------
-         *
-         * Asked in parallel rather than in turn, and that is the whole
-         * fix. A stub resolver that walks its list in order pays the
-         * full timeout for each dead server before it reaches a live
-         * one - so on the machine that produced this milestone, where
-         * the first nameserver was a router that answered nothing, every
-         * name cost three seconds and then failed, while the second
-         * server would have answered in five milliseconds.
-         *
-         * The cost is one extra datagram per server per second to a
-         * handful of servers a person listed themselves, and the
-         * benefit is that a broken server costs nothing at all instead
-         * of costing the whole lookup. It is written down in
-         * docs/networking.md because "this machine asks every nameserver
-         * you configured" is a thing somebody should be able to find out
-         * without reading this loop.
-         *
-         * Resent on a one-second cadence: UDP loses datagrams and a stub
-         * resolver that asked once would report "timed out" for a single
-         * dropped packet.
-         */
         if (sys_uptime_ms() >= next_send) {
             for (int i = 0; i < nservers; i++) {
                 sys_sendto(fd, servers[i], DNS_PORT, query, (uint32_t)qlen);
@@ -530,8 +433,6 @@ int dns_resolve(const char *name, uint32_t *out) {
             os_sockaddr_t from;
             long n = sys_recvfrom(fd, reply, sizeof(reply), &from);
             if (n > 0) {
-                /* Only a server we asked. Anyone on this segment can
-                 * send us a datagram; only these were asked a question. */
                 int asked = 0;
                 for (int i = 0; i < nservers; i++) {
                     if (from.ip == servers[i]) {
@@ -548,7 +449,7 @@ int dns_resolve(const char *name, uint32_t *out) {
                     }
                     if (rc == -3) {
                         sys_close(fd);
-                        return -3; /* a definite "no" - do not keep asking */
+                        return -3;
                     }
                 }
             }

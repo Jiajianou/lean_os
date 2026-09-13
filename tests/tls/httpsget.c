@@ -1,32 +1,3 @@
-/* tests/tls/httpsget.c - M100: the first https:// this machine has had.
- *
- * A GET over TLS, written here and linked against mbedtls: connect,
- * verify the server's certificate chain against a trusted CA, check the
- * name on it, send a request, print the reply. Everything a browser does
- * before it has a byte of HTML, and nothing it does after.
- *
- * ---- why this is a test program and not `fetch` ----------------------
- *
- * M73's fetch refuses https:// by name and says why: a from-scratch TLS
- * is a project, and an https that quietly was not encrypted would be a
- * lie. M100's bullet says "TLS end to end over M66's TCP ... which gives
- * fetch something to do". It does not, and cannot: the non-negotiable
- * is that no third-party code ships in the OS, and fetch is the OS.
- * mbedtls is ported AGAINST this system, the way zlib and freetype are,
- * and a program that links it lives here, beside ftrender and hbshape,
- * as the thing that proves the port works. fetch stays honest.
- *
- * ---- what it checks, and what it refuses ----------------------------
- *
- * The chain is verified (MBEDTLS_SSL_VERIFY_REQUIRED) against the CA
- * given on the command line - a PEM file on this filesystem - and the
- * hostname is checked against the certificate's names. A server whose
- * certificate does not chain to that CA, or is for another name, is
- * refused with mbedtls's own verification flags printed, and the exit
- * status says so. The boot self-test runs it both ways.
- *
- * Usage: httpsget <host> <port> <ca.pem> <path>
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,10 +42,6 @@ int main(int argc, char **argv) {
         printf("httpsget: psa_crypto_init failed: %d\n", ret);
         goto out;
     }
-    /* The DRBG is seeded from mbedtls's entropy sources, which on this
-     * target is /dev/urandom - kernel/dev/random.c, as of M100. A
-     * generator that failed to seed fails here, loudly, before a key is
-     * ever made from it. */
     if ((ret = mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
                                      (const unsigned char *)"httpsget", 8)) != 0) {
         say("seeding the DRBG from the entropy source", ret);
@@ -101,9 +68,6 @@ int main(int argc, char **argv) {
         say("ssl_setup", ret);
         goto out;
     }
-    /* The name checked against the certificate is the host given, so
-     * "127.0.0.1" against a certificate for "localhost" is a refusal -
-     * which is the second half of what the self-test asks. */
     if ((ret = mbedtls_ssl_set_hostname(&ssl, host)) != 0) {
         say("set_hostname", ret);
         goto out;
@@ -129,10 +93,6 @@ int main(int argc, char **argv) {
             printf("httpsget: the certificate did not verify (0x%08x)\n", (unsigned)flags);
             goto out;
         }
-        /* The verify result being zero under VERIFY_REQUIRED is the
-         * proof the chain checked out - printed unconditionally so the
-         * self-test has one line that means "verified", independent of
-         * whether the peer certificate was retained for inspection. */
         printf("httpsget: certificate verified against the CA\n");
         const mbedtls_x509_crt *peer = mbedtls_ssl_get_peer_cert(&ssl);
         char subject[256];

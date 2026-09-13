@@ -7,54 +7,18 @@
 #include "lib/spinlock.h"
 
 #define PAGE_SIZE 4096ULL
-/* M41: 16 -> 32. One segment per window plus the compositor's own back
- * buffer, and a segment is deliberately leaked (not freed) whenever a
- * window slot is reused - see user_space/bin/compositor.c's
- * reclaim_window. With MAX_WINDOWS now 12, 16 was less than two full
- * desktops' worth, i.e. an exact-fit cap of exactly the kind M40 found
- * silently breaking the desktop. */
-/* M50: 32 is now a real bound rather than a countdown. Until this
- * milestone nothing ever released a segment except a task exiting, so
- * every window this OS composited consumed a slot permanently - about
- * thirty window opens exhausted the table for the life of the machine.
- * With SYS_shm_free, a compositor's live usage is exactly
- * 1 (its back buffer) + one per live window = 13 at WM_MAX_ROUTABLE_WINDOWS,
- * which the boot self-test measures and logs ("[m50] compositor after the
- * storm"). Left at 32 deliberately: the number was never the problem. */
 #define MAX_SHM_SEGMENTS 32
 
 typedef struct {
     int used;
     int owner_task_id;
-    uint64_t size;       /* requested size in bytes, not page-rounded */
+    uint64_t size;
     uint64_t page_count;
-    uint64_t *frames;    /* kmalloc'd array of page_count physical addresses */
+    uint64_t *frames;
 } shm_segment_t;
 
 static shm_segment_t segments[MAX_SHM_SEGMENTS];
 
-/* ---- M67: shm_lock ---------------------------------------------------
- *
- * What it protects: the `segments` table above - the `used` flag that
- * makes find_free_slot's answer meaningful, and the frame array behind
- * each live entry.
- *
- * Against whom: two tasks calling SYS_shm_create at the same moment.
- * Before M67 that could not happen, because IF was clear for the whole
- * of `int 0x80`; find_free_slot could return a slot and the caller could
- * fill it in with no possibility of anyone looking in between. With a
- * trap gate, two callers can both see the same slot free and both claim
- * it - and the loser's frames are then leaked and the winner's window is
- * silently shared with a stranger.
- *
- * Interrupts off, same reasoning as fs_lock: shm_free_by_owner is on the
- * task-exit path, and the task-exit path is reachable from a timer tick
- * delivering SIGKILL. A lock a dying task can be interrupted while
- * holding is a lock nobody ever unlocks.
- *
- * The pmm/vmm calls made while holding this take their own locks, and
- * always in that order (shm -> pmm, shm -> vmm), never the reverse -
- * neither pmm nor vmm has any reason to know shm exists. */
 static spinlock_t shm_lock;
 
 static int find_free_slot(void) {
@@ -70,9 +34,6 @@ int shm_create(size_t size, int owner_task_id) {
     if (size == 0) {
         return -1;
     }
-    /* Q5: before anything is allocated, including the bookkeeping array.
-     * See SHM_MAX_SEGMENT_BYTES in shm.h - a user-supplied size reached
-     * kmalloc unbounded, and kmalloc panics rather than failing. */
     if ((uint64_t)size > SHM_MAX_SEGMENT_BYTES) {
         return -1;
     }
@@ -82,10 +43,6 @@ int shm_create(size_t size, int owner_task_id) {
         spin_unlock_irqrestore(&shm_lock, flags);
         return -1;
     }
-    /* Claim the slot before dropping into the allocation loop below, so a
-     * second caller arriving mid-allocation cannot pick the same one.
-     * Everything else about the entry is filled in at the bottom; `used`
-     * alone is what find_free_slot consults. */
     segments[id].used = 1;
 
     uint64_t page_count = ((uint64_t)size + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -96,14 +53,6 @@ int shm_create(size_t size, int owner_task_id) {
         return -1;
     }
 
-    /* M29: pmm_try_alloc_frame, not pmm_alloc_frame - a shm segment's size
-     * is caller-controlled (SYS_shm_create's `size` argument), so a large
-     * enough request from a user process could exhaust physical memory
-     * mid-loop; that has to fail this call, not panic the whole kernel.
-     * Frees whatever this call itself allocated before the shortfall
-     * (there's no earlier owner to leave anything usefully mapped for,
-     * unlike SYS_sbrk growing an already-live heap) so a failed
-     * shm_create never leaks partial state into the segment table. */
     for (uint64_t i = 0; i < page_count; i++) {
         uint64_t phys = pmm_try_alloc_frame();
         if (phys == 0) {
@@ -150,9 +99,6 @@ int shm_free(int id, int owner_task_id) {
         return -1;
     }
     if (segments[id].owner_task_id != owner_task_id) {
-        /* Not a permission model - this project has none - but the one
-         * check that keeps "exactly one owner is responsible for
-         * releasing it" true rather than aspirational. */
         spin_unlock_irqrestore(&shm_lock, flags);
         return -1;
     }
@@ -206,10 +152,6 @@ int shm_map_into(int id, uint64_t pml4_phys, uint64_t vaddr, uint64_t flags) {
     }
     shm_segment_t *seg = &segments[id];
     for (uint64_t i = 0; i < seg->page_count; i++) {
-        /* Q9: mapping a shared segment can run out of page tables, and
-         * this is a syscall an ordinary program makes. Refusing is the
-         * answer; the pages already mapped stay, and go with the address
-         * space when the process ends. */
         if (vmm_try_map_page_in(pml4_phys, vaddr + i * PAGE_SIZE,
                                 seg->frames[i], flags) != 0) {
             spin_unlock_irqrestore(&shm_lock, irqf);

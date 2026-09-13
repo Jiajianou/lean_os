@@ -1,28 +1,9 @@
-/* tests/test_symtab.c - M101
- *
- * The symbol resolver behind /bin/profile's report.
- *
- * This is the first user-space code in the host tier, and it is here for
- * the reason user_space/lib/symtab.h gives: it is the one part of the
- * profiler that can be wrong *quietly*. A binary search with an
- * off-by-one boundary resolves every address to the function before the
- * right one, and the resulting report is completely plausible. Booting
- * the machine cannot catch that - there is nothing in there to compare
- * against - and neither can reading it, because both versions look
- * right.
- *
- * So the cases below are mostly boundaries: an address exactly on a
- * symbol, one byte below it, one byte into the previous function, the
- * first symbol, the last real symbol, and past the end-of-text marker.
- */
 #include "check.h"
 
 #include "../user_space/lib/symtab.h"
 
 #include <string.h>
 
-/* The shape gen-kernel-syms.sh writes: ascending, sixteen hex digits, a
- * space, a name, and an end-of-text marker on the last line. */
 static const char SAMPLE[] =
     "0000000000100000 _start\n"
     "0000000000100050 enter_user_mode\n"
@@ -53,10 +34,6 @@ TEST(symtab, parses_every_line) {
     CHECK_EQ(symtab_is_sorted(&st), 1);
 }
 
-/* The boundary this whole file exists for. An address that IS a symbol's
- * address belongs to that symbol - resolving it to the previous one is
- * the classic form of this bug and it shifts every attribution by one
- * function. */
 TEST(symtab, an_address_on_a_boundary_belongs_to_that_symbol) {
     symtab_entry_t storage[16];
     symtab_t st;
@@ -76,16 +53,10 @@ TEST(symtab, the_first_symbol_and_below_it) {
     REQUIRE(parse_sample(&st, storage, 16) == 5);
 
     CHECK(name_is(symtab_lookup(&st, 0x100000), "_start"));
-    /* Below the kernel's text entirely. A resolver that clamped to the
-     * first entry would report time in _start for an address that is not
-     * in the kernel at all. */
     CHECK(symtab_lookup(&st, 0x0fffff) == NULL);
     CHECK(symtab_lookup(&st, 0) == NULL);
 }
 
-/* The end marker's whole purpose. Without it the last real function owns
- * every address above it, so a wild jump reads as a hotspot in whatever
- * the linker put last. */
 TEST(symtab, past_the_end_of_text_resolves_to_nothing) {
     symtab_entry_t storage[16];
     symtab_t st;
@@ -100,23 +71,17 @@ TEST(symtab, past_the_end_of_text_resolves_to_nothing) {
 TEST(symtab, capacity_is_a_ceiling_not_a_crash) {
     symtab_entry_t storage[2];
     symtab_t st;
-    /* Three lines' worth of file, room for two. Stops at two rather than
-     * writing past the array - which ASan would catch here and which on
-     * the real machine would be a corrupted neighbour. */
     CHECK_EQ(parse_sample(&st, storage, 2), 2);
     CHECK(name_is(&st.entries[1], "enter_user_mode"));
 }
 
-/* A malformed line is skipped, not fatal. A symbol file with one bad
- * line should still resolve the other seven hundred; refusing the whole
- * file turns a cosmetic problem into no report. */
 TEST(symtab, malformed_lines_are_skipped) {
     static const char text[] =
         "# a comment nm would never write, but a person might\n"
         "\n"
         "0000000000100000 _start\n"
         "not_an_address_at_all\n"
-        "0000000000100050\n"            /* an address with no name */
+        "0000000000100050\n"
         "0000000000100070 context_switch\n"
         "0000000000100080 [end-of-text]\n";
     symtab_entry_t storage[16];
@@ -144,9 +109,6 @@ TEST(symtab, an_empty_or_single_entry_table_answers_nothing) {
     CHECK_EQ(symtab_parse(&st, storage, 8, "", 0), 0);
     CHECK(symtab_lookup(&st, 0x100000) == NULL);
 
-    /* One entry, which is the end marker with nothing before it. Every
-     * address is at or past it, so nothing resolves - the honest answer
-     * for a table that contains no functions. */
     static const char one[] = "0000000000100000 [end-of-text]\n";
     CHECK_EQ(symtab_parse(&st, storage, 8, one, strlen(one)), 1);
     CHECK(symtab_lookup(&st, 0x100000) == NULL);
@@ -163,9 +125,6 @@ TEST(symtab, bad_arguments_are_refused) {
     CHECK(symtab_lookup(NULL, 0x100000) == NULL);
 }
 
-/* An out-of-order file is reported rather than repaired. Sorting it here
- * would hide a generator that had stopped emitting ascending addresses,
- * and every lookup after that would be wrong in a way nothing checks. */
 TEST(symtab, an_unsorted_file_is_detected_not_fixed) {
     static const char text[] =
         "0000000000100070 context_switch\n"
@@ -178,8 +137,6 @@ TEST(symtab, an_unsorted_file_is_detected_not_fixed) {
     CHECK_EQ(symtab_is_sorted(&(symtab_t){storage, 1, 8}), 1);
 }
 
-/* Sixteen hex digits is an address; seventeen is not, and must not wrap
- * into a plausible small one. */
 TEST(symtab, an_overlong_address_is_not_an_entry) {
     static const char text[] =
         "00000000001000000 nonsense\n"

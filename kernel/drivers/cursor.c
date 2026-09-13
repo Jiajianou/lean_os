@@ -5,9 +5,6 @@
 #define CURSOR_SIZE  8
 #define CURSOR_COLOR 0x00FFFFFFu
 
-/* Classic small arrow silhouette, hand-authored (a shape, not font/asset
- * data) - one bit per pixel, MSB = leftmost column, matching font8x16's
- * convention. */
 static const uint8_t shape[CURSOR_SIZE] = {
     0b10000000,
     0b11000000,

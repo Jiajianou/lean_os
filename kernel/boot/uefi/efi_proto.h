@@ -1,24 +1,6 @@
-/* kernel/boot/uefi/efi_proto.h
- *
- * The System/Boot Services tables and the handful of protocols boot.c
- * needs (console output, the graphics framebuffer, raw block I/O, and
- * "which image/device am I"). See efi.h's header comment for why these
- * are hand-written instead of pulled from GNU-EFI or edk2.
- *
- * Function-pointer table layout matters here in a way plain structs
- * don't: EFI_BOOT_SERVICES is a fixed, spec-mandated sequence of
- * pointers, and boot.c calls into it by field name (bs->AllocatePages(...),
- * bs->ExitBootServices(...)). Every field boot.c doesn't use is still
- * declared - as a bare VOID* with the real UEFI name in a comment - purely
- * to hold that slot's place, so the fields boot.c *does* use land at the
- * offset the real firmware's table actually has them at. Same reasoning
- * for EFI_SYSTEM_TABLE and the protocol structs below.
- */
 #pragma once
 
 #include "efi.h"
-
-/* ---- Simple Text Output (console messages during boot) ---- */
 
 typedef EFI_STATUS(EFIAPI *EFI_TEXT_STRING)(void *This, CHAR16 *String);
 
@@ -34,8 +16,6 @@ typedef struct {
     void *EnableCursor;
     void *Mode;
 } EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
-
-/* ---- Boot Services (memory, protocol lookup, ExitBootServices) ---- */
 
 typedef EFI_STATUS(EFIAPI *EFI_ALLOCATE_PAGES)(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType,
                                                 UINTN Pages, EFI_PHYSICAL_ADDRESS *Memory);
@@ -110,8 +90,6 @@ typedef struct {
     void *CreateEventEx;
 } EFI_BOOT_SERVICES;
 
-/* boot.c never indexes ConfigurationTable - this only exists to give
- * EFI_SYSTEM_TABLE's ConfigurationTable field a pointer type. */
 typedef struct {
     EFI_GUID VendorGuid;
     void *VendorTable;
@@ -132,8 +110,6 @@ typedef struct {
     UINTN NumberOfTableEntries;
     EFI_CONFIGURATION_TABLE *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
-
-/* ---- Loaded Image (this app's own DeviceHandle, to find "our" disk) ---- */
 
 typedef struct {
     UINT32 Revision;
@@ -156,19 +132,10 @@ typedef struct {
         0x5B1B31A1, 0x9562, 0x11d2, { 0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }   \
     }
 
-/* ---- Device Path: what find_whole_disk_block_io (boot.c) walks to tell
- * "the physical disk this app was loaded from" apart from every *other*
- * disk a real machine might have attached (an internal SSD alongside the
- * USB stick this actually boots from, say) - QEMU only ever gives this
- * kernel one disk to be confused between, so that distinction was free to
- * skip until the real-hardware stretch goal made it a real possibility.
- * Only the generic node header is modeled - boot.c only ever needs to
- * walk length-prefixed nodes and find the terminator, never interpret a
- * specific node's type-specific payload. */
 typedef struct __attribute__((packed)) {
     UINT8 Type;
     UINT8 SubType;
-    UINT8 Length[2]; /* little-endian total node length, including this header */
+    UINT8 Length[2];
 } EFI_DEVICE_PATH_PROTOCOL;
 
 #define EFI_DEVICE_PATH_TYPE_END          0x7F
@@ -178,11 +145,6 @@ typedef struct __attribute__((packed)) {
     (EFI_GUID) {                                                                        \
         0x09576e91, 0x6d3f, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }   \
     }
-
-/* ---- Block I/O (raw LBA disk reads - kernel.bin lives outside the ESP's
- * FAT filesystem entirely, at boot.c's own fixed KERNEL_START_LBA, so this
- * is the only protocol boot.c needs to fetch it - no filesystem driver
- * required) ---- */
 
 typedef struct {
     UINT32 MediaId;
@@ -213,17 +175,6 @@ typedef struct {
         0x964e5b21, 0x6459, 0x11d2, { 0x8e, 0x39, 0x0, 0xa0, 0xc9, 0x69, 0x72, 0x3b }  \
     }
 
-/* ---- Graphics Output (the linear framebuffer - GOP is UEFI's mode-set
- * mechanism for it, the counterpart to the BIOS-era VBE calls M16
- * originally used before M26 removed the BIOS boot path) ---- */
-
-/* Byte layout [0]=Blue [1]=Green [2]=Red [3]=Reserved - read as a
- * little-endian UINT32 that's Reserved<<24 | Red<<16 | Green<<8 | Blue,
- * i.e. 0x00RRGGBB. That's exactly kernel/drivers/fb.h's assumed pixel
- * format, which is why boot.c specifically searches for this mode
- * (confusingly, PixelRedGreenBlueReserved8BitPerColor is the *other*
- * byte order - [0]=Red - which as a UINT32 comes out 0x00BBGGRR, the one
- * fb.c does *not* support). */
 typedef enum {
     PixelRedGreenBlueReserved8BitPerColor,
     PixelBlueGreenRedReserved8BitPerColor,

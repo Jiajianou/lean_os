@@ -1,30 +1,3 @@
-/* user_space/bin/netrecv.c - M116: a stream from another machine, byte for byte.
- *
- *   netrecv A.B.C.D PORT BYTES
- *
- * Connects, reads until end of stream, and checks that exactly BYTES
- * arrived and that every one of them is the pattern below. Prints what
- * it measured; exits 0 only if all of it was right.
- *
- * Every network test before this one talked to this machine over
- * loopback or exchanged a few hundred bytes with a DNS server, and so
- * none of them ever sent a full-sized segment through the NIC's receive
- * ring - which is where M116 found one frame in five being corrupted,
- * silently, since M27. The boot self-test runs this against a stream the
- * HOST produces (tools/qemu-serial-test.sh gives QEMU a `guestfwd` that
- * runs `cat` on a file it wrote with the same pattern), so the bytes
- * come through QEMU's SLIRP, the RTL8139 and the whole of kernel/net the
- * way a web page does, and are checked against something this program
- * did not send.
- *
- * Through the POSIX socket calls, because that is what NetSurf's libcurl
- * uses and so that is the path worth grading.
- *
- * The pattern is written in one other place, tools/qemu-serial-test.sh,
- * and the two must agree: byte i is (i * 7 + (i >> 9)) & 0xFF. The
- * second term makes a byte's value depend on where in the stream it is
- * beyond the first 512, so a segment delivered twice or at the wrong
- * offset cannot match by coincidence. */
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -78,7 +51,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         if (n == 0) {
-            break; /* end of stream - the peer's FIN */
+            break;
         }
         for (long k = 0; k < n; k++) {
             if (buf[k] != pattern(got + (unsigned long)k)) {

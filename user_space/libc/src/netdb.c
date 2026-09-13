@@ -1,11 +1,3 @@
-/* user_space/libc/src/netdb.c - M89
- *
- * Address conversion and name resolution: the <arpa/inet.h> family,
- * getaddrinfo over M73's DNS client, and the two if_* calls.
- *
- * See <netdb.h> for why there is no /etc/hosts and no /etc/services,
- * and what stands in for them.
- */
 #include <netdb.h>
 
 #include <arpa/inet.h>
@@ -16,12 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "dns.h"    /* user_space/lib/dns.h - M73's resolver */
+#include "dns.h"
 #include "syscall_wrappers.h"
 
 int h_errno;
-
-/* ---- dotted quad both ways -------------------------------------------- */
 
 int inet_aton(const char *s, struct in_addr *out) {
     if (!s) {
@@ -39,7 +29,7 @@ int inet_aton(const char *s, struct in_addr *out) {
         while (isdigit((unsigned char)*p)) {
             v = v * 10 + (uint32_t)(*p++ - '0');
             if (++digits > 3 || v > 255) {
-                return 0; /* 256 and 0300 are both rejected - see the note below */
+                return 0;
             }
         }
         parts[n] = v;
@@ -53,10 +43,6 @@ int inet_aton(const char *s, struct in_addr *out) {
     if (*p != '\0') {
         return 0;
     }
-    /* Four decimal parts only. The historical forms - "10.1" meaning
-     * 10.0.0.1, and octal or hex parts - are deliberately not accepted:
-     * they are a source of address-parsing confusion between programs
-     * that agree on nothing else, and nothing here needs them. */
     if (out) {
         out->s_addr = htonl((parts[0] << 24) | (parts[1] << 16) |
                             (parts[2] << 8) | parts[3]);
@@ -73,9 +59,6 @@ in_addr_t inet_addr(const char *s) {
 }
 
 char *inet_ntoa(struct in_addr addr) {
-    /* A static buffer, which is this function's documented and
-     * unfortunate contract - the next call overwrites it. inet_ntop
-     * exists because of exactly this and is what new code should use. */
     static char buf[INET_ADDRSTRLEN];
     uint32_t h = ntohl(addr.s_addr);
     snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
@@ -110,13 +93,6 @@ int inet_pton(int af, const char *src, void *dst) {
     return inet_aton(src, (struct in_addr *)dst) ? 1 : 0;
 }
 
-/* ---- services, without /etc/services ---------------------------------
- *
- * A short table rather than a file. <netdb.h> says why: a program asking
- * to connect to "http" should reach port 80, and failing for want of a
- * file nobody here would have written is a worse answer than a table
- * that covers what anything on this machine will ask for. A name not in
- * it is EAI_SERVICE, which is the honest "I do not know that one". */
 static int service_port(const char *name, int *out) {
     static const struct { const char *name; int port; } table[] = {
         {"echo", 7}, {"ftp", 21}, {"ssh", 22}, {"telnet", 23},
@@ -140,8 +116,6 @@ static int service_port(const char *name, int *out) {
     return EAI_SERVICE;
 }
 
-/* ---- getaddrinfo ------------------------------------------------------ */
-
 int getaddrinfo(const char *node, const char *service,
                 const struct addrinfo *hints, struct addrinfo **res) {
     if (!res) {
@@ -157,40 +131,27 @@ int getaddrinfo(const char *node, const char *service,
 
     int family = hints ? hints->ai_family : AF_UNSPEC;
     if (family != AF_UNSPEC && family != AF_INET) {
-        return EAI_FAMILY; /* no IPv6 in this stack - see <sys/socket.h> */
+        return EAI_FAMILY;
     }
     int socktype = hints ? hints->ai_socktype : 0;
     int flags = hints ? hints->ai_flags : 0;
 
     uint32_t ip;
     if (!node) {
-        /* A NULL node with AI_PASSIVE means "bind to anything", which on
-         * a machine with one interface is that interface. */
         ip = (flags & AI_PASSIVE) ? INADDR_ANY : INADDR_LOOPBACK;
     } else {
         struct in_addr a;
         if (inet_aton(node, &a)) {
             ip = ntohl(a.s_addr);
         } else if (!strcmp(node, "localhost") || !strcmp(node, "localhost.localdomain")) {
-            /* M100: localhost resolves to the loopback address without a
-             * query, which is what every resolver does and what an
-             * /etc/hosts would say if this machine kept one. mbedtls's
-             * https client (tests/tls/httpsget.c) uses the same string
-             * for the connection and for the certificate name check, so
-             * it has to resolve here, and the first program to hand
-             * getaddrinfo a name rather than a numeric address was it. */
             ip = INADDR_LOOPBACK;
         } else if (flags & AI_NUMERICHOST) {
-            return EAI_NONAME; /* the caller said not to resolve, and it is not numeric */
+            return EAI_NONAME;
         } else if (dns_resolve(node, &ip) != 0) {
             return EAI_NONAME;
         }
     }
 
-    /* One result. A real getaddrinfo returns a list because a name may
-     * have several addresses and several socket types; this machine has
-     * one address family and the DNS client reports one address, so a
-     * list of one is the whole truth rather than a simplification. */
     struct addrinfo *ai = calloc(1, sizeof(*ai) + sizeof(struct sockaddr_in));
     if (!ai) {
         return EAI_MEMORY;
@@ -220,7 +181,7 @@ void freeaddrinfo(struct addrinfo *res) {
     while (res) {
         struct addrinfo *next = res->ai_next;
         free(res->ai_canonname);
-        free(res); /* the sockaddr is in the same allocation - see getaddrinfo */
+        free(res);
         res = next;
     }
 }
@@ -250,11 +211,6 @@ int getnameinfo(const struct sockaddr *addr, socklen_t addrlen,
     }
     const struct sockaddr_in *in = (const struct sockaddr_in *)(const void *)addr;
     if (host && hostlen) {
-        /* Numeric always. There is no reverse DNS here - M73's client
-         * resolves names to addresses and not back - so a caller that
-         * did not pass NI_NUMERICHOST gets the number anyway rather than
-         * an error, which is what every resolver does when a reverse
-         * lookup fails. */
         if (!inet_ntop(AF_INET, &in->sin_addr, host, hostlen)) {
             return EAI_MEMORY;
         }
@@ -264,8 +220,6 @@ int getnameinfo(const struct sockaddr *addr, socklen_t addrlen,
     }
     return 0;
 }
-
-/* ---- gethostbyname, the 1983 spelling --------------------------------- */
 
 struct hostent *gethostbyname(const char *name) {
     static struct hostent he;
@@ -296,15 +250,10 @@ struct hostent *gethostbyname(const char *name) {
     he.h_addrtype = AF_INET;
     he.h_length = (int)sizeof(struct in_addr);
     he.h_addr_list = addr_list;
-    return &he; /* static storage, overwritten by the next call - the documented contract */
+    return &he;
 }
 
-/* ---- interfaces, of which there is one -------------------------------- */
-
 unsigned int if_nametoindex(const char *name) {
-    /* One interface, index 1. Any name is accepted for it, because this
-     * machine has never had a second one to tell it apart from and a
-     * program that guessed "eth0" should not fail for guessing. */
     (void)name;
     return 1;
 }

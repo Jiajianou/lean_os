@@ -1,5 +1,3 @@
-/* user_space/libc/src/grp.c - M89. See <grp.h>, and <pwd.h> for the
- * argument both files rest on: one principal, reported as one. */
 #include <grp.h>
 
 #include <errno.h>
@@ -43,8 +41,6 @@ void endgrent(void) {
 }
 
 int getgroups(int size, gid_t *list) {
-    /* One group. A size of 0 is the "how many are there" query, which is
-     * the form every caller uses before allocating. */
     if (size == 0) {
         return 1;
     }
@@ -65,20 +61,15 @@ int getgrouplist(const char *user, gid_t group, gid_t *groups, int *count) {
     int room = *count;
     *count = 1;
     if (room < 1 || !groups) {
-        return -1; /* the documented "too small, here is the size you need" */
+        return -1;
     }
     groups[0] = group;
     return 1;
 }
 
-/* ---- M89: the reentrant forms - see pwd.c for the contract ---------- */
-
 static int copy_gr(struct group *out, char *buf, size_t buflen,
                    struct group **result) {
-    /* The member list is an array of pointers followed by the strings,
-     * laid out in the caller's buffer: gr_mem has to survive this call
-     * as much as gr_name does. */
-    size_t vec = 2 * sizeof(char *); /* one member plus the NULL */
+    size_t vec = 2 * sizeof(char *);
     size_t nlen = strlen(name_root) + 1;
     size_t plen = strlen(no_password) + 1;
     if (vec + nlen + plen > buflen) {
@@ -123,9 +114,6 @@ int getgrnam_r(const char *name, struct group *out, char *buf, size_t buflen,
     return copy_gr(out, buf, buflen, result);
 }
 
-/* The supplementary list on a machine with one principal already in one
- * group: asking for that is a success that changes nothing, and asking
- * for anything else is a refusal. Same shape as setuid, same reason. */
 int initgroups(const char *user, gid_t group) {
     if (user && strcmp(user, name_root) == 0 && group == 0) {
         return 0;

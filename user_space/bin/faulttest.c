@@ -1,42 +1,3 @@
-/* user_space/bin/faulttest.c - M99's fixture for a fault a program can catch.
- *
- * M76 built signals a program can catch and excluded the synchronous
- * ones: SIGSEGV was uncatchable, and every ring-3 fault - a divide
- * error, an invalid opcode, an alignment check - was reported as
- * SIGSEGV and killed the process. M52's own note said why: "they share
- * one exit code because this project has no per-signal handling to tell
- * them apart with."
- *
- * It has since M76. M99 is where the fault path uses it, because
- * CPython's `faulthandler.enable()` installs handlers for SIGSEGV,
- * SIGFPE, SIGILL, SIGBUS and SIGABRT - and CPython's own test runner
- * calls it before running a single test, so the whole regression suite
- * failed at `sigaction(SIGSEGV)` returning -1.
- *
- * What this proves, in the order it proves it:
- *
- *   1. a null dereference runs a SIGSEGV handler and the process lives
- *   2. an integer divide by zero runs a SIGFPE handler - a DIFFERENT
- *      signal, which is the half M52 said this project could not do
- *   3. an opcode this CPU does not have runs a SIGILL handler
- *   4. all three again, which is the check that the mask came back:
- *      signal_deliver blocks a signal while its handler runs and
- *      siglongjmp is what puts it back, so a program that can survive
- *      one fault and not two has a mask leak rather than a fault bug
- *   5. a child whose SIGSEGV handler itself faults DIES, once. That is
- *      the loop being cut, and it is the property that makes catching a
- *      fault safe rather than a way to hang the machine
- *
- * Exit codes, so a failure names itself:
- *   0  everything worked
- *   2  signal() refused a handler for a fault it should now accept
- *   3  the SIGSEGV handler never ran
- *   4  the SIGFPE handler never ran
- *   5  the SIGILL handler never ran
- *   6  the second round of faults did not arrive - the mask leaked
- *   7  the child whose handler faults did not die
- *   8  the child whose handler faults died of the wrong thing
- */
 #include <setjmp.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -51,10 +12,6 @@ static volatile int segv_count;
 static volatile int fpe_count;
 static volatile int ill_count;
 
-/* Each handler leaves by siglongjmp rather than by returning, and that
- * is not a style choice: returning from a fault handler re-executes the
- * instruction that faulted, which faults again. Unwinding to a known
- * point is what every real program that catches a fault does. */
 static void on_segv(int sig) {
     (void)sig;
     segv_count++;
@@ -73,8 +30,6 @@ static void on_ill(int sig) {
     siglongjmp(recover, 1);
 }
 
-/* volatile, so the compiler cannot decide these are undefined behaviour
- * and delete them. Each one is a fault the hardware raises. */
 static volatile int *null_pointer;
 static volatile int zero;
 
@@ -92,19 +47,14 @@ static void bad_opcode(void) {
     __asm__ volatile("ud2");
 }
 
-/* Runs `fault` with `handler` installed, and returns 1 if the handler
- * ran and control came back here. */
 static int survives(int signo, void (*fault)(void)) {
     if (sigsetjmp(recover, 1) == 0) {
         fault();
-        return 0; /* the fault did not happen at all */
+        return 0;
     }
     (void)signo;
     return 1;
 }
-
-
-/* ---- M99: the SA_SIGINFO half ---------------------------------------- */
 
 static sigjmp_buf info_recover;
 static volatile void *seen_addr;
@@ -130,10 +80,6 @@ static void on_chld_info(int sig, siginfo_t *si, void *uc) {
     chld_seen++;
 }
 
-/* A page nothing has mapped, well inside the address space and well
- * outside anything this program owns - so the faulting address is a
- * number chosen here and comparable afterwards, rather than 0, which
- * would pass even if si_addr were never written. */
 static volatile int *const KNOWN_BAD = (volatile int *)0x00000000DEAD0000ULL;
 
 static int siginfo_checks(void) {
@@ -161,11 +107,6 @@ static int siginfo_checks(void) {
         return 0;
     }
 
-    /* And a query must not quietly downgrade it. sigaction(sig, NULL,
-     * &old) is a read-modify-write on this system - it installs SIG_DFL
-     * to learn the old handler and puts it back - so a version that put
-     * it back with flags of zero would turn this three-argument handler
-     * into a one-argument one by asking a question about it. */
     struct sigaction got;
     memset(&got, 0, sizeof(got));
     if (sigaction(SIGSEGV, 0, &got) != 0 || !(got.sa_flags & SA_SIGINFO)) {
@@ -184,9 +125,6 @@ static int siginfo_checks(void) {
         return 0;
     }
 
-    /* SIGCHLD, where the interesting fields are si_pid and si_status -
-     * the two toybox's `timeout` reads and the two a siginfo_t full of
-     * zeroes would answer wrongly without failing. */
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = on_chld_info;
     sa.sa_flags = SA_SIGINFO;
@@ -196,7 +134,7 @@ static int siginfo_checks(void) {
     }
     long pid = sys_fork();
     if (pid == 0) {
-        _exit(42); /* a number nothing else here uses */
+        _exit(42);
     }
     if (pid < 0) {
         printf("faulttest: could not fork for the SIGCHLD check\n");
@@ -240,9 +178,6 @@ int main(void) {
         return 5;
     }
 
-    /* Round two. The mask, not the fault: signal_deliver blocked each of
-     * these while its handler ran, and siglongjmp is what unblocked it
-     * on the way out. Without that this round hangs or dies. */
     if (!survives(SIGSEGV, touch_null) || segv_count != 2) {
         return 6;
     }
@@ -256,18 +191,11 @@ int main(void) {
     printf("faulttest: three faults caught twice each - segv %d, fpe %d, ill %d\n",
            segv_count, fpe_count, ill_count);
 
-    /* ---- and the loop, cut ------------------------------------------
-     *
-     * A child that installs a SIGSEGV handler which itself faults. The
-     * signal is blocked while its own handler runs, so the second fault
-     * finds nothing deliverable and the child is terminated with it -
-     * once. A machine where that looped would be a machine any program
-     * could hang by catching a fault badly. */
     long pid = sys_fork();
     if (pid == 0) {
-        signal(SIGSEGV, (void (*)(int))touch_null); /* a handler that faults */
+        signal(SIGSEGV, (void (*)(int))touch_null);
         *null_pointer = 1;
-        _exit(0); /* not reached: the second fault is fatal */
+        _exit(0);
     }
     if (pid < 0) {
         return 7;
@@ -276,13 +204,6 @@ int main(void) {
     if (sys_waitpid(pid, &status, 0) < 0) {
         return 7;
     }
-    /* Through the macros rather than against a number. SYS_waitpid's
-     * status is the POSIX encoding - a signal number in the low seven
-     * bits for a death by signal, the exit code in the second byte for
-     * an ordinary exit - and 139 is the SHELL's rendering of the same
-     * fact, which is what SYS_wait returns and this is not. Written the
-     * wrong way first, and the failure said "exited 11, not 139", which
-     * is two correct numbers for two different questions. */
     if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGSEGV) {
         printf("faulttest: the looping child's status was 0x%x - "
                "signalled=%d signal=%d, wanted SIGSEGV (%d)\n",
@@ -292,25 +213,6 @@ int main(void) {
 
     printf("faulttest: and a handler that faults kills its process once\n");
 
-    /* ---- SA_SIGINFO, and the lie it used to be ----------------------
-     *
-     * `<signal.h>` said, in as many words, that "a handler installed
-     * with SA_SIGINFO is called through sa_handler with the signal
-     * number ... the pointer arguments are never passed". That is an
-     * accurate description of calling a three-argument function with one
-     * argument: the handler reads %rsi as a pointer and gets whatever
-     * the last caller left there.
-     *
-     * toybox's `timeout` is what found it - its SIGCHLD handler's first
-     * statement is `si->si_status`, and it faulted at address 5 (the
-     * offset of that field) every single time it ran, which on this
-     * machine was once per module of CPython's regression suite.
-     *
-     * Two claims here and they are different: that si_addr is the
-     * address that actually faulted, and that si_pid/si_status describe
-     * the child that actually ended. A siginfo_t full of zeroes would
-     * pass a test that only checked the handler was reached with three
-     * arguments. */
     if (!siginfo_checks()) {
         return 9;
     }

@@ -1,34 +1,3 @@
-/* tools/os-pkg.c - M111: the host half of the package manager.
- *
- * `os` runs on the machine and installs packages. This builds them, on
- * the machine doing the porting, and it is the only place a `.osp` file
- * is ever created.
- *
- * ---- why the builder is a host tool and the installer is not ----------
- *
- * Because building a package means running somebody else's `make
- * install` into a staging directory, and that is a cross-compilation
- * step that happens where the cross-compiler is. The machine's job is
- * the part that has to be safe: read bytes from somewhere, check them,
- * and create files. Splitting it that way means the code that parses a
- * package is small enough to be read in one sitting, and it is the SAME
- * code on both sides - user_space/lib/ospkg.c, compiled here for the
- * host and there for the target.
- *
- * That shared-source arrangement is deliberately not the whole test.
- * A builder and an installer that agree because they are the same code
- * would agree just as happily about something wrong, so tools/pkg-test.sh
- * checks the hashes against the host's own `shasum -a 256` and the file
- * contents against the staging directory they came from, with `cmp`.
- * Nothing in that comparison is this project's own opinion.
- *
- * Usage:
- *   os-pkg build <manifest> <stage-dir> <out.osp>
- *   os-pkg info    <pkg.osp>
- *   os-pkg verify  <pkg.osp>          # exit 0 iff it parses and hashes
- *   os-pkg extract <pkg.osp> <dir>    # the independent reader, for tests
- *   os-pkg index   <repo-dir>         # write <repo-dir>/index
- */
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
@@ -38,7 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "caps.h" /* system_api/include/caps.h - CAP_PKG_MAX */
+#include "caps.h"
 #include "../user_space/lib/ospkg.h"
 #include "../user_space/lib/sha256.h"
 
@@ -97,14 +66,6 @@ static unsigned char *read_whole(const char *path, size_t *len_out) {
     return buf;
 }
 
-/* ---- walking the staging directory ------------------------------------
- *
- * Depth first, names sorted at every level, so that the same tree always
- * produces the same archive byte for byte. That is not tidiness: a
- * package whose hash changes when nothing changed cannot be compared
- * against anything, and "did this rebuild produce the same package"
- * is the question a reproducible port is trying to answer.
- */
 static int cmp_names(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
@@ -149,11 +110,6 @@ static void walk(const char *host_dir, const char *rel_prefix) {
         }
 
         if (S_ISDIR(st.st_mode)) {
-            /* Directories are not records. They are implied by the paths
-             * of the files in them and created by the installer as it
-             * goes - which means a package cannot contain an EMPTY
-             * directory, and that is a real limitation stated here
-             * rather than discovered. Nothing so far needs one. */
             walk(host, rel);
             continue;
         }
@@ -209,10 +165,6 @@ static int cmd_build(const char *manifest_path, const char *stage, const char *o
         die("cannot read the manifest %s: %s", manifest_path, strerror(errno));
     }
 
-    /* Padded with newlines to a multiple of 8, which is what makes the
-     * file table 8-aligned in the finished archive - see ospkg.h. A
-     * newline and not a NUL: the manifest parser skips blank lines and
-     * would stop on a line with a NUL in it. */
     while ((meta_len & 7u) != 0) {
         meta = realloc(meta, meta_len + 2);
         if (!meta) {
@@ -246,7 +198,6 @@ static int cmd_build(const char *manifest_path, const char *stage, const char *o
         die("%s is empty - a package with no files is not a package", stage);
     }
 
-    /* Lay the payload out, then the table, then hash the whole body. */
     uint64_t payload_bytes = 0;
     for (int i = 0; i < entry_count; i++) {
         payload_bytes += entries[i].size;
@@ -295,10 +246,6 @@ static int cmd_build(const char *manifest_path, const char *stage, const char *o
         off += e->size;
     }
 
-    /* The records go to disk field by field rather than by writing the
-     * struct, because the struct's layout being right is checked by a
-     * _Static_assert in ospkg.c and relying on it here as well would
-     * make the file format depend on two things instead of one. */
     size_t table_bytes = (size_t)entry_count * OSP_FILE_BYTES;
     unsigned char *table_raw = calloc(table_bytes, 1);
     if (!table_raw) {
@@ -347,9 +294,6 @@ static int cmd_build(const char *manifest_path, const char *stage, const char *o
     }
     fclose(o);
 
-    /* Read it back and verify it with the same reader the machine uses.
-     * A builder that cannot produce a package its own installer accepts
-     * should fail here rather than at the far end of a disk image. */
     size_t back_len = 0;
     unsigned char *back = read_whole(out_path, &back_len);
     if (!back) {
@@ -498,14 +442,6 @@ static int cmd_extract(const char *path, const char *dir) {
     return 0;
 }
 
-/* ---- the repository index ---------------------------------------------
- *
- * One "key: value" stanza per package, blank line between - the same
- * grammar as a manifest, so `os` has one parser rather than two. It
- * carries the archive's own SHA-256, which is what makes `os install`
- * able to refuse a package that does not match the index BEFORE
- * unpacking anything: the index is the smaller thing to be sure of.
- */
 static int cmd_index(const char *repo) {
     DIR *d = opendir(repo);
     if (!d) {
@@ -523,18 +459,6 @@ static int cmd_index(const char *repo) {
     closedir(d);
     qsort(names, (size_t)n, sizeof(names[0]), cmp_names);
 
-    /* Written to a temporary and renamed at the end.
-     *
-     * The first version opened the real file and wrote as it went, and
-     * the first time a package failed to verify - which happened the
-     * first time the format changed under an archive built by the old
-     * writer - it died with the header written and nothing after it.
-     * That is worse than no index at all: `os available` then reports an
-     * empty repository, which reads as "there are no packages" rather
-     * than as "the index is broken", and the machine's self-test failed
-     * three hundred lines away from the cause. An index is a summary of
-     * a directory, and a summary that is half true is the one kind that
-     * should never reach the disk. */
     char out_path[4096];
     char tmp_path[4096];
     snprintf(out_path, sizeof(out_path), "%s/index", repo);
@@ -582,10 +506,6 @@ static int cmd_index(const char *repo) {
         die("cannot rename %s to %s: %s", tmp_path, out_path, strerror(errno));
     }
     if (n == 0) {
-        /* A repository with no packages in it is almost certainly a
-         * mistake - an empty directory, or a build that failed earlier
-         * in this script - and saying so here is much cheaper than
-         * finding out from a machine that cannot install anything. */
         fprintf(stderr, "os-pkg: %s has no .osp files in it - the index is "
                         "empty\n", repo);
         return 1;

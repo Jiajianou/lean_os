@@ -1,12 +1,7 @@
 #include "syscall_wrappers.h"
 
-#include "syscall.h" /* system_api/include/syscall.h - the shared ABI */
+#include "syscall.h"
 
-/* Matches system_api/include/syscall.h's convention exactly: rax =
- * number/return, rdi/rsi/rdx = args 1-3. Same helper shape as the
- * kernel's own self-test one (kernel/kernel.c) - this is the real,
- * reusable version every user program links against instead of hand-
- * rolling its own inline asm. */
 static long do_syscall(long num, long a1, long a2, long a3) {
     long ret;
     __asm__ volatile("int $0x80"
@@ -16,13 +11,6 @@ static long do_syscall(long num, long a1, long a2, long a3) {
     return ret;
 }
 
-/* M64: the same trap with the three argument registers the kernel's
- * dispatcher has always passed and nothing had ever used. SYS_sendto is
- * the first call here with five arguments, and packing them into a
- * struct to keep a three-argument wrapper would have been a second ABI
- * to describe rather than a smaller one. rcx is safe to pass in because
- * this is `int`/`iret`, not `syscall`/`sysret` - only the latter
- * commandeers it for the return address. */
 static long do_syscall6(long num, long a1, long a2, long a3, long a4, long a5, long a6) {
     long ret;
     register long r8 __asm__("r8") = a5;
@@ -45,9 +33,6 @@ long sys_write(int fd, const void *buf, size_t len) {
 void sys_exit(int code) {
     do_syscall(SYS_exit, code, 0, 0);
     for (;;) {
-        /* Unreachable: SYS_exit terminates this task and never returns.
-         * The loop only exists so the compiler doesn't have to take that
-         * on faith - `noreturn` with a plain fall-through would warn. */
     }
 }
 
@@ -60,22 +45,10 @@ long sys_spawnve(const char *path, const char *const *argv, const char *const *e
 }
 
 long sys_spawnv(const char *path, const char *const *argv) {
-    /* M75: `environ`, not NULL. The kernel's NULL case means "the
-     * environment this process was *started* with", which is right for a
-     * raw syscall and wrong for a program that has just called setenv -
-     * so the wrapper every program actually uses passes the live one.
-     * environ is NULL only in a program linked without libc's startup,
-     * which cannot happen here (crt0 calls it), and the kernel treats a
-     * NULL envp as inherit, so even that degrades to the old behaviour
-     * rather than to an empty environment. */
     extern char **environ;
     return sys_spawnve(path, argv, (const char *const *)environ);
 }
 
-/* M99: a fourth argument, so do_syscall6 rather than do_syscall. The
- * kernel reads exactly one bit of it - SA_SIGINFO - and that bit is a
- * calling convention: it decides whether the handler is entered with
- * one argument or with three. */
 long sys_sigaction(int signo, void *handler, void (*restorer)(void),
                    unsigned int flags) {
     return do_syscall6(SYS_sigaction, signo, (long)handler, (long)restorer,
@@ -97,9 +70,6 @@ long sys_thread_create(void *entry, void *arg, unsigned long stack_top) {
 void sys_thread_exit(int value) {
     do_syscall(SYS_thread_exit, value, 0, 0);
     for (;;) {
-        /* Unreachable: SYS_thread_exit ends this thread. Same shape as
-         * sys_exit's own loop, and for the same reason - `noreturn` with
-         * a plain fall-through would warn. */
     }
 }
 
@@ -141,8 +111,6 @@ long sys_getcwd(char *buf, size_t maxlen) {
 }
 
 long sys_spawn(const char *path, const char *arg) {
-    /* M60: one argument is a vector of one. The kernel supplies argv[0]
-     * (the path), so this array holds only what the caller had to say. */
     const char *v[2];
     int n = 0;
     if (arg && arg[0]) {
@@ -168,25 +136,15 @@ long sys_listdir(const char *path, void *buf, size_t maxlen) {
     return do_syscall(SYS_listdir, (long)path, (long)buf, (long)maxlen);
 }
 
-/* M81: the streaming counterpart. `cookie` is opaque - zero to start, and
- * handed straight back untouched on every following call. Returns the
- * bytes of os_dirent_t records written, 0 at the end of the directory, or
- * -1. See SYS_getdents in system_api/include/syscall.h. */
 long sys_getdents(const char *path, unsigned int *cookie, void *buf, size_t buflen) {
     return do_syscall6(SYS_getdents, (long)path, (long)cookie, (long)buf,
                        (long)buflen, 0, 0);
 }
 
-/* M83: the child's pid in the parent, 0 in the child, -1 on failure.
- *
- * No arguments, and none possible: the two sides of a fork differ only in
- * what this returns. See SYS_fork in system_api/include/syscall.h for
- * what the child does and does not inherit. */
 long sys_fork(void) {
     return do_syscall(SYS_fork, 0, 0, 0);
 }
 
-/* M84: does not return on success. See SYS_execve. */
 long sys_execve(const char *path, char *const argv[], char *const envp[]) {
     return do_syscall(SYS_execve, (long)path, (long)argv, (long)envp);
 }
@@ -199,7 +157,6 @@ long sys_fcntl(int fd, int cmd, long arg) {
     return do_syscall(SYS_fcntl, fd, cmd, arg);
 }
 
-/* M85: process groups and sessions. See SYS_setpgid. */
 long sys_setpgid(long pid, long pgid) {
     return do_syscall(SYS_setpgid, pid, pgid, 0);
 }
@@ -216,13 +173,10 @@ long sys_ioctl(int fd, unsigned long cmd, void *arg) {
     return do_syscall(SYS_ioctl, fd, (long)cmd, (long)arg);
 }
 
-/* M87: set a file's length. See SYS_ftruncate. */
 long sys_ftruncate(int fd, long length) {
     return do_syscall(SYS_ftruncate, fd, length, 0);
 }
 
-/* M87: symbolic links. Note the argument order on symlink - target
- * first, then the name to create - which is symlink(2)'s everywhere. */
 long sys_symlink(const char *target, const char *path) {
     return do_syscall(SYS_symlink, (long)target, (long)path, 0);
 }
@@ -235,8 +189,6 @@ long sys_lstat(const char *path, void *out) {
     return do_syscall(SYS_lstat, (long)path, (long)out, 0);
 }
 
-/* M88: the three a build probes for. See the ABI notes in
- * system_api/include/syscall.h. */
 long sys_rusage(int who, void *out) {
     return do_syscall(SYS_rusage, who, (long)out, 0);
 }
@@ -245,8 +197,6 @@ long sys_statvfs(const char *path, void *out) {
     return do_syscall(SYS_statvfs, (long)path, (long)out, 0);
 }
 
-/* M89: the absolute path an open descriptor was opened with, for the
- * *at() family - see SYS_fdpath. */
 long sys_fdpath(int fd, char *out, unsigned long out_len) {
     return do_syscall(SYS_fdpath, fd, (long)out, (long)out_len);
 }
@@ -271,8 +221,6 @@ long sys_msync(void *addr, unsigned long len, int flags) {
     return do_syscall(SYS_msync, (long)addr, (long)len, flags);
 }
 
-/* M96: the thread pointer and the futex - see SYS_arch_prctl and
- * SYS_futex for what each argument means and what the returns are. */
 long sys_arch_prctl(int code, unsigned long addr) {
     return do_syscall(SYS_arch_prctl, code, (long)addr, 0);
 }
@@ -286,8 +234,6 @@ long sys_getrandom(void *buf, unsigned long len, unsigned int flags) {
     return do_syscall(SYS_getrandom, (uint64_t)buf, len, flags);
 }
 
-/* M100: NetSurf's disc cache. The offset is the fourth argument and the
- * descriptor's own position is untouched - see SYS_pread. */
 long sys_pread(int fd, void *buf, unsigned long len, long offset) {
     return do_syscall6(SYS_pread, (long)fd, (long)buf, (long)len, offset, 0, 0);
 }
@@ -376,8 +322,6 @@ long sys_time(os_datetime_t *out) {
     return do_syscall(SYS_time, (long)out, 0, 0);
 }
 
-/* ---- M65: capabilities ----------------------------------------------- */
-
 long sys_getcaps(void) {
     return do_syscall(SYS_getcaps, 0, 0, 0);
 }
@@ -386,17 +330,10 @@ long sys_dropcaps(uint32_t keep) {
     return do_syscall(SYS_dropcaps, (long)keep, 0, 0);
 }
 
-/* ---- M64: the network ------------------------------------------------ */
-
 long sys_socket(int type) {
     return do_syscall(SYS_socket, type, OS_AF_INET, 0);
 }
 
-/* M118: the same call with the family said out loud. The wrapper above
- * keeps its one-argument shape rather than growing a second - forty-odd
- * call sites across this tree pass a type and mean the internet, and a
- * mechanical edit of all of them would have been a change with no
- * content. */
 long sys_socket_in(int type, int domain) {
     return do_syscall(SYS_socket, type, domain, 0);
 }
@@ -445,8 +382,6 @@ long sys_netconf(os_netconf_t *out) {
     return do_syscall(SYS_netconf, (long)out, 0, 0);
 }
 
-/* ---- M118: AF_UNIX --------------------------------------------------- */
-
 long sys_socketpair(int type, int fds_out[2]) {
     return do_syscall(SYS_socketpair, type, (long)fds_out, 0);
 }
@@ -470,8 +405,6 @@ long sys_recvmsg(int fd, os_msg_t *msg, int flags) {
 long sys_sockshut(int fd, int how) {
     return do_syscall(SYS_sockshut, fd, how, 0);
 }
-
-/* ---- M119: the message pump ------------------------------------------- */
 
 long sys_epoll_create(int flags) {
     return do_syscall(SYS_epoll_create, flags, 0, 0);
@@ -553,7 +486,6 @@ long sys_uptime_ms(void) {
     return do_syscall(SYS_uptime_ms, 0, 0, 0);
 }
 
-/* M70 */
 long sys_klog(uint64_t from, char *buf, size_t max, uint64_t *next_out) {
     return do_syscall6(SYS_klog, (long)from, (long)buf, (long)max, (long)next_out, 0, 0);
 }
@@ -562,12 +494,10 @@ long sys_klog_total(void) {
     return do_syscall(SYS_klog_total, 0, 0, 0);
 }
 
-/* M71 */
 long sys_rename_replace(const char *old_path, const char *new_path) {
     return do_syscall(SYS_rename_replace, (long)old_path, (long)new_path, 0);
 }
 
-/* M68 */
 long sys_waitfds(const int *fds, int count, int timeout_ms) {
     return do_syscall(SYS_waitfds, (uint64_t)fds, (uint64_t)count, (uint64_t)(long)timeout_ms);
 }

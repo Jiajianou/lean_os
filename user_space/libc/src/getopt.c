@@ -1,8 +1,3 @@
-/* user_space/libc/src/getopt.c - M89
- *
- * See <getopt.h>, which states the two behaviours that differ between
- * implementations and which one this picks.
- */
 #include <getopt.h>
 
 #include <stdio.h>
@@ -13,9 +8,6 @@ int optind = 1;
 int opterr = 1;
 int optopt;
 
-/* Where inside a cluster ("-abc") the next option is. Reset whenever
- * optind moves to a new word, which is what makes "-abc" and "-a -b -c"
- * the same thing. */
 static int nextchar;
 
 static void report(const char *argv0, const char *msg, int c) {
@@ -34,7 +26,7 @@ static int do_getopt(int argc, char *const argv[], const char *optstring,
         optstring++;
     }
     if (optstring && optstring[0] == '+') {
-        optstring++; /* "stop at the first operand" - already what this does */
+        optstring++;
     }
 
     optarg = 0;
@@ -44,14 +36,12 @@ static int do_getopt(int argc, char *const argv[], const char *optstring,
     if (nextchar == 0) {
         const char *w = argv[optind];
         if (w[0] != '-' || w[1] == '\0') {
-            return -1; /* an operand: stop here, see <getopt.h> */
+            return -1;
         }
         if (w[1] == '-' && w[2] == '\0') {
             optind++;
-            return -1; /* "--" ends the options and is consumed */
+            return -1;
         }
-        /* A long option: "--name" always, and "-name" too when the
-         * caller asked for getopt_long_only. */
         int is_long = (w[1] == '-') || (long_only && longopts);
         if (is_long && longopts) {
             const char *name = w[1] == '-' ? w + 2 : w + 1;
@@ -65,7 +55,7 @@ static int do_getopt(int argc, char *const argv[], const char *optstring,
                     continue;
                 }
                 if (strlen(longopts[i].name) == nlen) {
-                    match = &longopts[i]; /* exact wins over any prefix */
+                    match = &longopts[i];
                     index = i;
                     ambiguous = 0;
                     break;
@@ -78,9 +68,6 @@ static int do_getopt(int argc, char *const argv[], const char *optstring,
                 }
             }
             if (long_only && !match && w[1] != '-') {
-                /* getopt_long_only falls back to short options for a
-                 * "-x" that names no long option, which is the whole
-                 * difference between the two functions. */
                 goto short_option;
             }
             optind++;
@@ -142,12 +129,11 @@ static int do_getopt(int argc, char *const argv[], const char *optstring,
     if (spec[1] == ':') {
         int optional = (spec[2] == ':');
         if (nextchar != 0) {
-            /* The rest of this word is the argument: "-ofile". */
             optarg = (char *)w + nextchar;
             optind++;
             nextchar = 0;
         } else if (optional) {
-            optarg = 0; /* an optional argument is never a separate word */
+            optarg = 0;
         } else if (optind < argc) {
             optarg = argv[optind++];
         } else {

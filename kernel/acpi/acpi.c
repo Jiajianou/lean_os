@@ -5,12 +5,11 @@
 #include "panic.h"
 
 typedef struct __attribute__((packed)) {
-    char signature[8]; /* "RSD PTR " */
+    char signature[8];
     uint8_t checksum;
     char oem_id[6];
-    uint8_t revision; /* 0 = ACPI 1.0 (RSDT only), >=2 = ACPI 2.0+ (XSDT available) */
+    uint8_t revision;
     uint32_t rsdt_address;
-    /* ACPI 2.0+ only - only valid if revision >= 2, not read otherwise */
     uint32_t length;
     uint64_t xsdt_address;
     uint8_t extended_checksum;
@@ -19,7 +18,7 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
     char signature[4];
-    uint32_t length; /* whole table, header included */
+    uint32_t length;
     uint8_t revision;
     uint8_t checksum;
     char oem_id[6];
@@ -29,24 +28,6 @@ typedef struct __attribute__((packed)) {
     uint32_t creator_revision;
 } acpi_sdt_header_t;
 
-/* Every physical address this file dereferences - the RSDP search range,
- * and every table the RSDT/XSDT points at - has to fall inside what vmm.c
- * identity-maps. M29: NOT something a real machine's firmware owes this
- * kernel - ACPI tables commonly live in high reserved memory on real
- * hardware, and this was the one ACPI outcome that still panicked instead
- * of degrading, exactly the "assumes present, panics if not" pattern M27
- * already flagged and fixed for RTL8139/PS2 - see table_at, below, which
- * is where this actually got softened once M28's real-hardware boot made
- * it a real risk rather than a hypothetical one.
- *
- * M90: the test used to be `phys < 1 GiB`, hardcoding the size of a map
- * this file does not own. It now asks the map. That is strictly better
- * for the reason M29 wrote the degradation in the first place: the
- * identity map covers every RAM range the firmware described, so a table
- * in high reserved memory is now usually *in range* rather than
- * gracefully skipped - and where it genuinely is not (a firmware that
- * described the range as MMIO, or did not describe it at all), the answer
- * is still NULL rather than a fault. */
 static int acpi_addr_readable(uint64_t phys, uint64_t len) {
     return phys != 0 && vmm_identity_covers(phys, len);
 }
@@ -61,9 +42,6 @@ static int sig_eq(const void *a, const char *b, int len) {
     return 1;
 }
 
-/* Set once by kernel_main from the boot loader's handoff - see
- * acpi_set_rsdp. 0 means "the firmware told us nothing", which sends
- * find_rsdp back to its legacy scan. */
 static uint64_t handoff_rsdp_phys;
 
 void acpi_set_rsdp(uint64_t phys) {
@@ -71,20 +49,11 @@ void acpi_set_rsdp(uint64_t phys) {
 }
 
 static const acpi_rsdp_t *find_rsdp(void) {
-    /* M47: the firmware's own answer first. Still signature-checked
-     * rather than trusted: a pointer that doesn't start with "RSD PTR "
-     * is not an RSDP whatever handed it over, and falling through to the
-     * scan is a better outcome than parsing whatever is there. */
     if (acpi_addr_readable(handoff_rsdp_phys, sizeof(acpi_rsdp_t)) &&
         sig_eq((const void *)(uintptr_t)handoff_rsdp_phys, "RSD PTR ", 8)) {
         return (const acpi_rsdp_t *)(uintptr_t)handoff_rsdp_phys;
     }
 
-    /* EBDA base address is a segment stored at the fixed BIOS Data Area
-     * offset 0x40E; a physical address of 0 means "no EBDA reported",
-     * which some BIOSes (QEMU included, depending on version) do - skip
-     * straight to the fixed BIOS ROM range in that case rather than
-     * scanning from a bogus base. */
     uint16_t ebda_seg = *(const uint16_t *)(uintptr_t)0x40EUL;
     uint64_t ebda_addr = (uint64_t)ebda_seg << 4;
     if (ebda_addr != 0) {
@@ -102,15 +71,6 @@ static const acpi_rsdp_t *find_rsdp(void) {
     return (const acpi_rsdp_t *)0;
 }
 
-/* M29: returns NULL (not a panic) for a table address outside the
- * identity-mapped range - real firmware placing ACPI tables in high
- * reserved memory is a legitimate, expected outcome on real hardware,
- * not kernel/hardware misbehavior. Every caller already has a
- * "couldn't find what I needed, fall back to single-core" path for
- * every other ACPI-absent case (find_rsdp returning NULL, a signature
- * mismatch, no MADT) - this makes an out-of-range table pointer just
- * another instance of that same path instead of the one outcome that
- * used to take the whole kernel down. */
 static const acpi_sdt_header_t *table_at(uint64_t phys) {
     if (!acpi_addr_readable(phys, sizeof(acpi_sdt_header_t))) {
         return (const acpi_sdt_header_t *)0;
@@ -118,14 +78,6 @@ static const acpi_sdt_header_t *table_at(uint64_t phys) {
     return (const acpi_sdt_header_t *)(uintptr_t)phys;
 }
 
-/* M47: the RSDT/XSDT walk, lifted out of acpi_find_madt now that a second
- * caller wants a different table out of the same list. Returns the table
- * whose signature is `sig`, or NULL - and NULL genuinely covers every
- * "this platform didn't give us one" case (no RSDP, a root table outside
- * the identity map, a signature mismatch, no such table), which is
- * exactly what both callers already treat as a normal fallback rather
- * than an error. Silent by design: the two callers say different things
- * about a missing table, so the message belongs to them. */
 static const acpi_sdt_header_t *find_table(const char *sig) {
     const acpi_rsdp_t *rsdp = find_rsdp();
     if (!rsdp) {
@@ -150,22 +102,18 @@ static const acpi_sdt_header_t *find_table(const char *sig) {
     return (const acpi_sdt_header_t *)0;
 }
 
-/* FADT field offsets from the start of the table (ACPI spec 5.2.9's
- * "Fixed ACPI Description Table" layout). Written out as offsets rather
- * than as a packed struct because only six of forty-odd fields are ever
- * read here, and a struct would have to be correct about all of them. */
 #define FADT_SMI_CMD      48
 #define FADT_ACPI_ENABLE  52
 #define FADT_PM1A_CNT_BLK 64
 #define FADT_PM1B_CNT_BLK 68
 #define FADT_FLAGS        112
-#define FADT_RESET_REG    116 /* a 12-byte Generic Address Structure */
+#define FADT_RESET_REG    116
 #define FADT_RESET_VALUE  128
 #define FADT_FLAG_RESET_REG_SUP (1u << 10)
 #define GAS_SPACE_SYSTEM_IO 1
 
 int acpi_find_power(acpi_power_info_t *out) {
-    const acpi_sdt_header_t *fadt = find_table("FACP"); /* the FADT's signature is "FACP", not "FADT" */
+    const acpi_sdt_header_t *fadt = find_table("FACP");
     if (!fadt) {
         klog_puts("[acpi] no FADT found - power off/reset will use their fallback tiers.\n");
         return 0;
@@ -178,9 +126,6 @@ int acpi_find_power(acpi_power_info_t *out) {
     out->reset_port = 0;
     out->reset_value = 0;
 
-    /* Every read is bounds-checked against the table's own declared
-     * length: RESET_REG in particular only exists on ACPI 2.0+ FADTs, and
-     * a 1.0 one is genuinely shorter than the offset it would live at. */
     if (fadt->length > FADT_PM1A_CNT_BLK + 4) {
         out->pm1a_cnt = *(const uint32_t *)(t + FADT_PM1A_CNT_BLK);
     }
@@ -195,10 +140,6 @@ int acpi_find_power(acpi_power_info_t *out) {
         uint32_t flags = *(const uint32_t *)(t + FADT_FLAGS);
         const uint8_t *gas = t + FADT_RESET_REG;
         uint64_t addr = *(const uint64_t *)(gas + 4);
-        /* Only a SystemIO reset register is usable here: a memory-mapped
-         * one would need a vmm mapping this kernel has no reason to make
-         * for a single byte, and the 8042 tier below is a perfectly good
-         * answer when it isn't. */
         if ((flags & FADT_FLAG_RESET_REG_SUP) && gas[0] == GAS_SPACE_SYSTEM_IO &&
             addr != 0 && addr <= 0xFFFF) {
             out->reset_port = (uint32_t)addr;
@@ -216,30 +157,6 @@ int acpi_find_power(acpi_power_info_t *out) {
     return 1;
 }
 
-/* ---- M63 stretch goal: reading \_S5 out of the DSDT --------------------
- *
- * AML is a bytecode with a namespace, methods, and control flow, and a
- * real interpreter for it is a subsystem. This is not that, and the
- * header says so: it looks for one specific encoding and decodes the
- * package that follows it.
- *
- * What a `\_S5` definition compiles to is:
- *
- *     08              NameOp
- *     5C 5F 53 35 5F  the name, "\_S5_" (the leading 5C - a RootChar -
- *                     is optional; both spellings appear in the wild)
- *     12              PackageOp
- *     <pkglen>        1-4 bytes, the top two bits of the first saying how
- *                     many more follow
- *     <count>         number of elements
- *     <elem> ...      SLP_TYPa, SLP_TYPb, and two the OS does not use
- *
- * Each element is a small integer: ZeroOp, OneOp, or a BytePrefix and a
- * byte. Anything else here is a definition this cannot read, which is
- * reported as "not found" rather than guessed at - a wrong SLP_TYP is a
- * machine that does not switch off, and the fallback is a better guess
- * than a misparse.
- */
 #define AML_NAME_OP    0x08
 #define AML_PACKAGE_OP 0x12
 #define AML_ZERO_OP    0x00
@@ -248,11 +165,9 @@ int acpi_find_power(acpi_power_info_t *out) {
 #define AML_WORD_PREFIX 0x0B
 #define AML_ROOT_CHAR  0x5C
 
-#define FADT_DSDT   40  /* 32-bit physical address of the DSDT */
-#define FADT_X_DSDT 140 /* 64-bit, ACPI 2.0+ - preferred when the table is long enough to have one */
+#define FADT_DSDT   40
+#define FADT_X_DSDT 140
 
-/* One package element as an integer, advancing *at. Returns 0 if the
- * element is not one of the small-integer encodings this understands. */
 static int aml_read_int(const uint8_t *p, uint32_t len, uint32_t *at, uint8_t *out) {
     if (*at >= len) {
         return 0;
@@ -271,7 +186,7 @@ static int aml_read_int(const uint8_t *p, uint32_t len, uint32_t *at, uint8_t *o
         return 1;
     }
     if (op == AML_WORD_PREFIX && *at + 1 < len) {
-        *out = p[*at]; /* SLP_TYP is three bits; the high byte cannot matter */
+        *out = p[*at];
         *at += 2;
         return 1;
     }
@@ -316,10 +231,6 @@ int acpi_find_s5(uint8_t *slp_a, uint8_t *slp_b) {
         if (n >= len || aml[n++] != AML_PACKAGE_OP) {
             continue;
         }
-        /* PkgLength: the top two bits of the lead byte say how many more
-         * bytes it occupies. The value itself is not needed - the element
-         * count that follows bounds the read - but the bytes have to be
-         * stepped over. */
         if (n >= len) {
             continue;
         }
@@ -337,7 +248,7 @@ int acpi_find_s5(uint8_t *slp_a, uint8_t *slp_b) {
             continue;
         }
         if (count < 2 || !aml_read_int(aml, len, &n, &b)) {
-            b = a; /* a single-element package means both registers take the same value */
+            b = a;
         }
         *slp_a = (uint8_t)(a & 0x07);
         *slp_b = (uint8_t)(b & 0x07);
@@ -359,14 +270,6 @@ int acpi_find_madt(acpi_madt_info_t *out) {
         return 0;
     }
 
-    /* MADT body, right after the standard SDT header: local_apic_address
-     * (4 bytes), flags (4 bytes), then a stream of variable-length
-     * entries (Intel ACPI spec 5.2.12). Only types this kernel acts on:
-     * type 0 (Processor Local APIC) and type 5 (Local APIC Address
-     * Override), plus - M103 - type 1 (I/O APIC) and type 2 (Interrupt
-     * Source Override), which this parser skipped while the PIC was the
-     * only interrupt controller. x2APIC entries for more than 255 CPUs
-     * are still out of scope, and MAX_CPUS is 8. */
     const uint8_t *madt_body = (const uint8_t *)madt + sizeof(acpi_sdt_header_t);
     out->lapic_base = *(const uint32_t *)madt_body;
     out->cpu_count = 0;
@@ -379,29 +282,29 @@ int acpi_find_madt(acpi_madt_info_t *out) {
         uint8_t type = p[0];
         uint8_t len = p[1];
         if (len < 2 || p + len > end) {
-            break; /* malformed entry - stop rather than walk off the table */
+            break;
         }
-        if (type == 0 && len >= 8) { /* Processor Local APIC */
+        if (type == 0 && len >= 8) {
             uint8_t apic_id = p[3];
             uint32_t flags = *(const uint32_t *)(p + 4);
             if ((flags & 1) && out->cpu_count < MAX_CPUS) {
                 out->cpu_apic_ids[out->cpu_count++] = apic_id;
             }
-        } else if (type == 1 && len >= 12) { /* M103: I/O APIC */
+        } else if (type == 1 && len >= 12) {
             if (out->ioapic_count < MAX_IOAPICS) {
                 acpi_ioapic_t *io = &out->ioapics[out->ioapic_count++];
                 io->id = p[2];
                 io->address = *(const uint32_t *)(p + 4);
                 io->gsi_base = *(const uint32_t *)(p + 8);
             }
-        } else if (type == 2 && len >= 10) { /* M103: Interrupt Source Override */
+        } else if (type == 2 && len >= 10) {
             if (out->override_count < MAX_IRQ_OVERRIDES) {
                 acpi_irq_override_t *ov = &out->overrides[out->override_count++];
                 ov->source = p[3];
                 ov->gsi = *(const uint32_t *)(p + 4);
                 ov->flags = *(const uint16_t *)(p + 8);
             }
-        } else if (type == 5 && len >= 12) { /* Local APIC Address Override */
+        } else if (type == 5 && len >= 12) {
             out->lapic_base = *(const uint64_t *)(p + 4);
         }
         p += len;

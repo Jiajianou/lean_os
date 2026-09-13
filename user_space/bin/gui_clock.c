@@ -1,11 +1,3 @@
-/* user_space/bin/gui_clock.c
- *
- * M21 demo GUI app #1: a window that updates itself with no input at
- * all, driven by sys_uptime_ms() instead - proves the compositor's
- * periodic (not just on-input) redraw actually reaches a client whose
- * content changes purely on a timer, and exercises user_space/lib/gfx.h
- * text rendering (font8x16.c) end to end through wmclient.h.
- */
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
@@ -15,9 +7,6 @@
 #define TEXT_COLOR 0x00FFFFFFu
 #define REDRAW_INTERVAL_MS 250
 
-/* No itoa in this project's tiny str.h (M11's hello.c hit the exact
- * same gap and formatted its pid by hand) - writes decimal digits into
- * buf and returns how many. */
 static int format_uint(uint32_t v, char *buf) {
     char tmp[10];
     int n = 0;
@@ -42,10 +31,6 @@ int main(void) {
         sys_exit(1);
     }
 
-    /* Static caption, drawn once: kernel_main's M21 self-test checks
-     * specific pixels of this exact text (deterministic, unlike the
-     * live uptime line below) to prove gfx_draw_text actually landed
-     * glyph pixels, not just that it compiled. */
     gfx_fill_rect(&win.gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
     gfx_draw_text(&win.gfx, 10, 10, "CLOCK", TEXT_COLOR);
 
@@ -54,17 +39,14 @@ int main(void) {
         wm_event_t ev;
         int expose = 0;
         while (wm_poll_event(&win, &ev)) {
-            /* This app doesn't act on input - just drain the pipe so it
-             * never fills while the compositor keeps routing events to
-             * whichever window is focused, including this one. */
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
-                expose = 1; /* M55 - see WM_EVENT_EXPOSE */
+                expose = 1;
             }
         }
 
         long now = sys_uptime_ms();
         if (now < next_redraw && !expose) {
-            wm_wait_ms(&win, NULL, 0, (int)(next_redraw - now)); /* M117: block until an event, a deadline, or the liveness cap - see wm_wait_ms */
+            wm_wait_ms(&win, NULL, 0, (int)(next_redraw - now));
             continue;
         }
         next_redraw = now + REDRAW_INTERVAL_MS;

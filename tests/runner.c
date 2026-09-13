@@ -1,4 +1,3 @@
-/* tests/runner.c - Q2: the registry, the reporting and main(). */
 #include "check.h"
 
 void fake_spinlock_release_all(void);
@@ -22,9 +21,6 @@ int test_panic_armed;
 char test_panic_msg[256];
 
 void test_register(test_case_t *tc) {
-    /* Appended rather than pushed, so tests run in the order the linker
-     * lists their translation units - which is stable, and means a
-     * failure list reads the same way twice. */
     tc->next = NULL;
     if (tail) {
         tail->next = tc;
@@ -49,26 +45,11 @@ void test_abandon(void) {
     if (abandon_armed) {
         longjmp(abandon_jmp, 1);
     }
-    /* A REQUIRE outside a running test is a bug in the harness itself,
-     * not in the code under test - say so rather than longjmping into a
-     * buffer nobody set. */
     fprintf(stderr, "    (test_abandon outside a test - harness bug)\n");
     exit(2);
 }
 
 int main(int argc, char **argv) {
-    /* ---- The slow tier, and why it is opt-in ------------------------
-     *
-     * A few tests here genuinely need to exhaust something: 131,072
-     * inodes, or two gigabytes of data blocks. Those are among the most
-     * valuable tests in the file - they are the branches a booted machine
-     * cannot reach - and they take tens of seconds, which would destroy
-     * the property the fast tier exists for.
-     *
-     * So a test whose name begins with "slow_" runs only when asked for:
-     * `--slow`, or a filter that names it. They are NOT excluded from the
-     * graded run - tools/run-tests.sh --full passes --slow. The split is
-     * about the edit-compile-test loop, not about what gets checked. */
     const char *filter = NULL;
     int run_slow = 0;
     for (int i = 1; i < argc; i++) {
@@ -102,14 +83,7 @@ int main(int argc, char **argv) {
             tc->fn();
         }
         abandon_armed = 0;
-        /* A test that armed a panic catch and then returned without
-         * disarming would leave fake_panic longjmping into a dead frame
-         * on the *next* test's panic. Cheap to prevent, very expensive to
-         * debug. */
         test_panic_armed = 0;
-        /* And any lock the abandoned frame was holding. See
-         * tests/fakes/fake_spinlock.c for why this is required rather
-         * than tidy. */
         fake_spinlock_release_all();
 
         if (current_failures == 0) {
@@ -133,9 +107,6 @@ int main(int argc, char **argv) {
     printf("\n");
 
     if (total_tests == 0) {
-        /* An empty run is a failure, not a pass. A filter that matches
-         * nothing, or a test file that silently stopped being linked in,
-         * would otherwise report success. */
         fprintf(stderr, "no tests ran%s%s\n", filter ? " matching " : "",
                 filter ? filter : "");
         return 2;

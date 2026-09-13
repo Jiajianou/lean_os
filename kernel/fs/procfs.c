@@ -1,25 +1,7 @@
-/* kernel/fs/procfs.c - M87
- *
- * `/proc`, for programs that have never heard of this operating system.
- *
- * SYS_taskinfo (M45) already answers "what is running" better than this
- * does - one snapshot, taken under the scheduler's own lock, with a
- * typed record per task. It stays, and `task_manager` keeps using it,
- * because a lean_os program should use the lean_os interface. This is
- * for the other kind of caller: the one that was written against Linux
- * and reads `/proc/self/exe` to find out where it lives.
- *
- * The contents are generated when a file is opened, into a per-handle
- * buffer, and read out of that buffer afterwards. Not generated per
- * read, and the difference matters: a program that reads `/proc/uptime`
- * in two calls must not see two different uptimes and a byte offset
- * that means nothing between them. A snapshot at open is what makes the
- * file behave like a file.
- */
 #include "vfsops.h"
-#include "vfs.h" /* M89: vfs_mount_info, for /proc/mounts */
-#include "arch/x86_64/ioapic.h" /* M103: the per-vector counters */
-#include "arch/x86_64/smp.h"    /* M103: smp_cpu_count */
+#include "vfs.h"
+#include "arch/x86_64/ioapic.h"
+#include "arch/x86_64/smp.h"
 
 #include "drivers/pit.h"
 #include "lib/libk.h"
@@ -29,39 +11,17 @@
 #include "profile/syscount.h"
 #include "sched/sched.h"
 
-/* How many /proc files may be open at once.
- *
- * Small on purpose. A cap that is visibly enough for what the directory
- * contains is better than one sized for a filesystem this is not.
- *
- * M101: this cap used to be permanent rather than concurrent, and that
- * was a bug. `used` was set in proc_open and cleared nowhere, so the
- * seventeenth open of any /proc file on a given boot failed and every
- * one after it failed too. It survived six milestones because nothing
- * opened these files in a loop until /bin/profile did. The fix is a
- * close hook in vfs_ops_t and openfile_unref calling it - see
- * proc_close, and M101's notes for why the whole VFS had no close path
- * at all. */
 #define PROC_MAX_OPEN 16
 
-/* What every file here needed until M101: a status block, an uptime, a
- * path. None of them is close to this. */
 #define PROC_BUF_SMALL 512
 
-/* M101's two files are the first here whose length is a function of a
- * table rather than of one process. /proc/syscalls is one line per
- * syscall number that was actually called - SYSCALL_COUNT of them at
- * about forty bytes - and /proc/profile is a header plus the hottest
- * addresses. Sized from those two numbers rather than rounded up to
- * something comfortable, which is the near-duplicate-cap habit M52
- * named. */
 #define PROC_BUF_LARGE 8192
 
 typedef struct {
     int used;
     uint32_t len;
     uint32_t cap;
-    char *buf; /* heap, sized by kind at open - see proc_open */
+    char *buf;
 } proc_file_t;
 
 static proc_file_t proc_files[PROC_MAX_OPEN];
@@ -69,8 +29,6 @@ static proc_file_t proc_files[PROC_MAX_OPEN];
 void procfs_init(void) {
     k_memset(proc_files, 0, sizeof(proc_files));
 }
-
-/* ---- a tiny formatter, because there is no snprintf in the kernel ---- */
 
 static uint32_t put_str(char *dst, uint32_t at, uint32_t cap, const char *s) {
     while (*s && at < cap - 1) {
@@ -95,44 +53,29 @@ static uint32_t put_dec(char *dst, uint32_t at, uint32_t cap, uint64_t v) {
     return at;
 }
 
-/* ---- what each path is ------------------------------------------------
- *
- * Parsed rather than tabulated, because half of these paths contain a
- * process id and a table cannot hold those. */
-/* M89: see devfs.c's DEVFS_INO_BASE - one number space, partitioned. */
 #define PROCFS_INO_BASE 0x50000000u
 
 enum {
     P_NONE = 0,
-    P_ROOT,       /* /proc */
-    P_UPTIME,     /* /proc/uptime */
-    P_MEMINFO,    /* /proc/meminfo */
-    P_MOUNTS,     /* /proc/mounts - M89 */
-    P_INTERRUPTS, /* /proc/interrupts - M103 */
-    P_PIDDIR,     /* /proc/N or /proc/self */
-    P_STATUS,     /* /proc/N/status */
-    P_CMDLINE,    /* /proc/N/cmdline */
-    P_EXE,        /* /proc/N/exe */
-    P_PROFILE,    /* /proc/profile  - M101 */
-    P_SYSCALLS,   /* /proc/syscalls - M101 */
+    P_ROOT,
+    P_UPTIME,
+    P_MEMINFO,
+    P_MOUNTS,
+    P_INTERRUPTS,
+    P_PIDDIR,
+    P_STATUS,
+    P_CMDLINE,
+    P_EXE,
+    P_PROFILE,
+    P_SYSCALLS,
 };
 
-/* How big a buffer this file kind needs. A table rather than one
- * constant because the difference is a factor of sixteen and there are
- * PROC_MAX_OPEN of them: giving /proc/self/status the profile's buffer
- * would cost 128 KiB of heap to hold six lines. */
 static uint32_t buf_cap_for(int kind) {
-    /* M103: /proc/interrupts joins the large ones. A row per live vector
-     * across up to eight CPUs is more than the small buffer holds, and a
-     * truncated interrupt table is a table with a device missing from
-     * the bottom of it. */
     return (kind == P_PROFILE || kind == P_SYSCALLS || kind == P_INTERRUPTS)
                ? PROC_BUF_LARGE
                : PROC_BUF_SMALL;
 }
 
-/* Splits "/self/status" into kind=P_STATUS, pid=<caller>. Returns P_NONE
- * for anything this filesystem does not have. */
 static int classify(const char *rel, int *out_pid) {
     if (!rel || rel[0] != '/') {
         return P_NONE;
@@ -148,30 +91,12 @@ static int classify(const char *rel, int *out_pid) {
     if (k_strcmp(p, "meminfo") == 0) {
         return P_MEMINFO;
     }
-    /* M89. Every ported program that wants to know what is mounted reads
-     * this file - toybox's df and mount both do, through <mntent.h> -
-     * and the mount table it reports has been real since M87 with no way
-     * to see it from outside the kernel. */
     if (k_strcmp(p, "mounts") == 0) {
         return P_MOUNTS;
     }
-    /* M103. The file exists because "an interrupt that stops arriving is
-     * otherwise indistinguishable from a device that has nothing to
-     * say" - which is the milestone's own bullet, and is the difference
-     * between an idle disk and a line routed to a CPU that is not
-     * listening. */
     if (k_strcmp(p, "interrupts") == 0) {
         return P_INTERRUPTS;
     }
-    /* M101. Readable by anyone who can open the file, unlike SYS_profile
-     * which is gated on CAP_PROCESS_LIST - and that difference is
-     * deliberate rather than an oversight. What crosses this boundary is
-     * a *rendered report*: the profile's own summary lines and the top
-     * addresses by count. What SYS_profile hands back is the raw sample
-     * list, with a pid on every entry, which is the part that says what
-     * some other program is doing. The report is the machine describing
-     * itself; the sample list is the machine describing everybody on it,
-     * and only the second one is authority. */
     if (k_strcmp(p, "profile") == 0) {
         return P_PROFILE;
     }
@@ -179,7 +104,6 @@ static int classify(const char *rel, int *out_pid) {
         return P_SYSCALLS;
     }
 
-    /* A pid, or "self". */
     int pid = -1;
     const char *rest = p;
     if (p[0] == 's' && p[1] == 'e' && p[2] == 'l' && p[3] == 'f' &&
@@ -200,14 +124,14 @@ static int classify(const char *rel, int *out_pid) {
         pid = v;
     }
     if (!sched_task_by_id(pid)) {
-        return P_NONE; /* a pid that is not running is not a directory */
+        return P_NONE;
     }
     *out_pid = pid;
 
     if (*rest == '\0') {
         return P_PIDDIR;
     }
-    rest++; /* past the '/' */
+    rest++;
     if (k_strcmp(rest, "status") == 0) {
         return P_STATUS;
     }
@@ -231,7 +155,6 @@ static const char *state_name(int state) {
     }
 }
 
-/* Fills `f` with the contents of the file `kind` names. */
 static void generate(proc_file_t *f, int kind, int pid) {
     uint32_t at = 0;
     uint32_t cap = f->cap;
@@ -244,8 +167,6 @@ static void generate(proc_file_t *f, int kind, int pid) {
         at = put_str(f->buf, at, cap, "\n");
         break;
     case P_MEMINFO: {
-        /* In kibibytes, and named the way every /proc/meminfo names them,
-         * because a program that reads this is matching on the label. */
         uint64_t free_kb = pmm_free_frame_count() * 4;
         at = put_str(f->buf, at, cap, "MemFree:        ");
         at = put_dec(f->buf, at, cap, free_kb);
@@ -253,13 +174,6 @@ static void generate(proc_file_t *f, int kind, int pid) {
         break;
     }
     case P_MOUNTS: {
-        /* fstab's five fields after the device, in fstab's order,
-         * because that is what a program parsing this file splits on.
-         * The device column is the filesystem's own name rather than a
-         * block-device path: there is no /dev/sda here, and inventing
-         * one would be a lie a program could act on. The last two are 0
-         * and 0, which is what "not dumped, not fsck'd at boot" means
-         * and is true of every one of these. */
         const char *prefix;
         const char *type;
         for (int i = 0; vfs_mount_info(i, &prefix, &type); i++) {
@@ -273,11 +187,6 @@ static void generate(proc_file_t *f, int kind, int pid) {
         break;
     }
     case P_INTERRUPTS: {
-        /* One row per vector that has ever fired, one column per CPU -
-         * the shape /proc/interrupts has everywhere, because a program
-         * that reads it splits on whitespace and counts columns. Only
-         * vectors with a nonzero total are listed: 256 rows of zeros
-         * would bury the four that matter. */
         at = put_str(f->buf, at, cap, "     ");
         for (int c = 0; c < smp_cpu_count && c < MAX_CPUS; c++) {
             at = put_str(f->buf, at, cap, "     CPU");
@@ -298,8 +207,6 @@ static void generate(proc_file_t *f, int kind, int pid) {
                 at = put_str(f->buf, at, cap, " ");
                 at = put_dec(f->buf, at, cap, ioapic_irq_count((uint8_t)v, c));
             }
-            /* The controller, so a reader can tell which world this
-             * machine is in without a second file. */
             at = put_str(f->buf, at, cap,
                          ioapic_available() ? "  IO-APIC\n" : "  XT-PIC\n");
         }
@@ -328,11 +235,6 @@ static void generate(proc_file_t *f, int kind, int pid) {
     case P_CMDLINE: {
         task_t *t = sched_task_by_id(pid);
         if (t) {
-            /* The name, not the full vector. The argument region belongs
-             * to the process's own address space and this kernel does not
-             * keep a copy - so reporting the name is the whole of what is
-             * actually known here, and inventing a plausible command line
-             * out of it would be exactly the fiction M65 declined. */
             at = put_str(f->buf, at, cap, t->name);
         }
         break;
@@ -340,22 +242,12 @@ static void generate(proc_file_t *f, int kind, int pid) {
     case P_EXE: {
         task_t *t = sched_task_by_id(pid);
         if (t) {
-            /* Every program on this machine lives in /bin, and the task's
-             * name is its filename - so this is a real answer rather than
-             * a guess, and it stops being one the day something runs from
-             * somewhere else. Said here so that day is visible. */
             at = put_str(f->buf, at, cap, "/bin/");
             at = put_str(f->buf, at, cap, t->name);
         }
         break;
     }
     case P_PROFILE: {
-        /* The rendered report, not the sample list - see classify() for
-         * why that distinction is what makes this file ungated. Raw
-         * addresses in hex: resolving them needs /etc/kernel.syms and a
-         * binary search, and doing that here would put string handling
-         * and a file read inside a filesystem read. /bin/profile does
-         * it, with a stack. */
         prof_stats_t st;
         profile_get_stats(&st);
         at = put_str(f->buf, at, cap, "running: ");
@@ -376,11 +268,6 @@ static void generate(proc_file_t *f, int kind, int pid) {
         break;
     }
     case P_SYSCALLS: {
-        /* One line per syscall that was actually called: number, name,
-         * calls, cycles. The numbers with no calls are omitted rather
-         * than printed as zero - ninety-nine lines of which sixty are
-         * zero is a worse answer to "what does this machine call" than
-         * thirty-nine lines that are all true. */
         at = put_str(f->buf, at, cap, "# num calls cycles\n");
         for (int i = 0; i < SYSCALL_COUNT; i++) {
             syscount_entry_t e;
@@ -424,19 +311,11 @@ static int proc_stat(const char *rel, leanfs_stat_t *out) {
     out->mtime = 0;
     out->is_dir = (k == P_ROOT || k == P_PIDDIR) ? 1 : 0;
     out->is_link = 0;
-    /* M89: a number no leanfs inode and no devfs entry can collide with -
-     * see devfs.c's DEVFS_INO_BASE for the whole argument. The kind and
-     * the pid together are what make two /proc files distinguishable,
-     * which is what a program comparing st_ino is asking. */
     out->inode = PROCFS_INO_BASE + ((uint32_t)pid << 8) + (uint32_t)k;
     if (out->is_dir) {
         out->size = 0;
         return 0;
     }
-    /* Generated to find out how long it is, which is the only way to
-     * know - and thrown away, because the value a later read returns has
-     * to be the one taken when that read's handle was opened. A stat and
-     * a read are two different questions about a file that changes. */
     static char probe_buf[PROC_BUF_LARGE];
     static proc_file_t probe;
     probe.buf = probe_buf;
@@ -458,10 +337,6 @@ static int proc_open(const char *rel, int create) {
             uint32_t cap = buf_cap_for(k);
             char *buf = (char *)kmalloc(cap);
             if (!buf) {
-                /* Out of heap is a failed open, not a panic and not a
-                 * silently smaller file. M102 is where the rest of this
-                 * kernel learns to say that; this is one call site that
-                 * already could. */
                 return -1;
             }
             proc_files[i].used = 1;
@@ -471,10 +346,9 @@ static int proc_open(const char *rel, int create) {
             return i;
         }
     }
-    return -1; /* every slot is genuinely open right now - see PROC_MAX_OPEN */
+    return -1;
 }
 
-/* M101: the hook vfs_ops_t grew, and the whole reason it grew. */
 static void proc_close(int handle) {
     if (handle < 0 || handle >= PROC_MAX_OPEN || !proc_files[handle].used) {
         return;
@@ -505,10 +379,6 @@ static int64_t proc_write(int handle, const void *buf, size_t len, uint32_t off)
     (void)buf;
     (void)len;
     (void)off;
-    /* Nothing here is writable, and refusing is the honest answer rather
-     * than accepting and discarding: a program that writes to
-     * /proc/self/status has misunderstood something, and telling it so is
-     * more useful than pretending. */
     return -1;
 }
 
@@ -527,17 +397,10 @@ static int proc_handle_stat(int handle, leanfs_stat_t *out) {
     out->mtime = 0;
     out->is_dir = 0;
     out->is_link = 0;
-    /* M89: distinct per open file rather than per path, which is the
-     * honest number here - two opens of /proc/self/status are two
-     * snapshots with different contents, so calling them the same file
-     * would be a stronger claim than this filesystem can make. */
     out->inode = PROCFS_INO_BASE + 0x00800000u + (uint32_t)handle;
     return 0;
 }
 
-/* The root lists the machine-wide files and then one directory per live
- * task; a pid directory lists its three files. The cookie is an index
- * into whichever of those two lists applies. */
 static const char *const PID_FILES[] = {"status", "cmdline", "exe"};
 static const char *const ROOT_FILES[] = {"uptime", "meminfo", "mounts",
                                          "interrupts", "profile", "syscalls"};
@@ -554,7 +417,7 @@ static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *o
         }
         out->inode = 0;
         out->is_dir = 0;
-        out->is_link = 0; /* M89 */
+        out->is_link = 0;
         k_strlcpy(out->name, PID_FILES[i], sizeof(out->name));
         *cookie = i + 1;
         return 1;
@@ -565,16 +428,11 @@ static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *o
     if (i < ROOT_FILE_COUNT) {
         out->inode = 0;
         out->is_dir = 0;
-        out->is_link = 0; /* M89 */
+        out->is_link = 0;
         k_strlcpy(out->name, ROOT_FILES[i], sizeof(out->name));
         *cookie = i + 1;
         return 1;
     }
-    /* Then the live tasks, by slot, skipping the dead - the same walk
-     * SYS_taskinfo does and for the same reason: a pid is not an index. */
-    /* M101: derived from the array rather than repeating its length,
-     * which is what made adding two files here a two-line change with a
-     * third line nobody would have remembered. */
     uint32_t slot = i - ROOT_FILE_COUNT;
     int total = sched_task_count();
     while ((int)slot < total) {
@@ -582,7 +440,7 @@ static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *o
         if (t && t->state != TASK_TERMINATED) {
             out->inode = (uint32_t)t->id;
             out->is_dir = 1;
-            out->is_link = 0; /* M89 */
+            out->is_link = 0;
             char name[16];
             uint32_t at = put_dec(name, 0, sizeof(name), (uint64_t)t->id);
             name[at] = '\0';

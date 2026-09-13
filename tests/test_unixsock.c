@@ -1,36 +1,9 @@
-/* tests/test_unixsock.c - M118: AF_UNIX and SCM_RIGHTS, off the machine.
- *
- * kernel/ipc/unixsock.c is a ring buffer, a queue of records and a
- * refcount, and every interesting thing about it is a boundary: what
- * happens when a message is longer than the buffer, when the record queue
- * fills before the byte buffer does, when a descriptor arrives that the
- * receiver has no room for, when the peer dies with a message still
- * queued. A booted machine reaches none of those - two processes passing
- * a descriptor back and forth would pass against an implementation that
- * got every one of them wrong.
- *
- * ---- the instrument this file is really built around ------------------
- *
- * A passed descriptor is an fd_slot_t, and the reference counting on the
- * thing behind it is the part that cannot be eyeballed: one reference too
- * few and a process is left holding a freed pipe, one too many and
- * nothing on this machine ever closes. tests/fakes/fake_kernel_objects.c
- * counts exactly that - it is what Q13 built to grade the scheduler's
- * descriptor bookkeeping - so here "the receiver got a reference and the
- * sender's own is untouched" and "a message nobody read gave its
- * descriptors back" are assertions with a number in them rather than
- * arguments. Every test below ends at zero.
- */
 #include "check.h"
 
 #include "fakes/fakes.h"
 #include "ipc/unixsock.h"
 #include "sched/sched.h"
 
-/* A descriptor to pass: a pipe read end, which the fake counts. The
- * pointer is never dereferenced by anything in this tier - the fake's
- * ref/unref take it and ignore it - so a distinct non-null value is
- * enough to tell two of them apart. */
 static fd_slot_t a_pipe(int which) {
     fd_slot_t s;
     memset(&s, 0, sizeof(s));
@@ -45,9 +18,6 @@ static void clean(void) {
     CHECK_EQ(unixsock_in_use(), 0);
 }
 
-/* Every test ends here, and the two numbers are different claims: no
- * socket survived, and no descriptor any socket was carrying survived
- * either. */
 static void expect_nothing_left(void) {
     CHECK_EQ(unixsock_in_use(), 0);
     CHECK_EQ(unixsock_queued_fds(), 0);
@@ -63,8 +33,6 @@ TEST(unixsock, a_pair_carries_bytes_both_ways) {
 
     uint8_t out[64];
     int nfds = 0, flags = 0;
-    /* Nothing queued is 0 - "not yet" - and not -1, which is end of
-     * stream. The two answers are the whole of why a reader can wait. */
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, &nfds, &flags), 0);
 
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"hello", 5, NULL, 0), 5);
@@ -89,9 +57,6 @@ TEST(unixsock, a_stream_coalesces_and_a_message_does_not) {
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"ab", 2, NULL, 0), 2);
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"cd", 2, NULL, 0), 2);
     uint8_t out[64];
-    /* One read, both writes: that is what a byte stream means, and it is
-     * also the coalescing that keeps a thousand small writes from
-     * exhausting sixteen records. */
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 4);
     CHECK_MEMEQ(out, "abcd", 4);
     unixsock_unref(a);
@@ -120,9 +85,6 @@ TEST(unixsock, a_short_read_of_a_message_discards_the_rest) {
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, &flags), 4);
     CHECK_MEMEQ(out, "0123", 4);
     CHECK_EQ(flags & UNIX_RECV_TRUNC, UNIX_RECV_TRUNC);
-    /* And the remaining six bytes are GONE rather than waiting, which is
-     * what POSIX requires of a message socket and the reason MSG_TRUNC
-     * has to be reported rather than inferred. */
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 0);
     unixsock_unref(a);
     unixsock_unref(b);
@@ -135,10 +97,7 @@ TEST(unixsock, a_full_buffer_is_a_wait_and_an_oversized_message_is_a_refusal) {
     REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &a, &b) == 0);
     static uint8_t big[UNIX_BUF_SIZE + 64];
     memset(big, 'x', sizeof(big));
-    /* A stream takes what fits and says how much - the short count every
-     * caller loops on. */
     CHECK_EQ(unixsock_send(a, big, sizeof(big), NULL, 0), UNIX_BUF_SIZE);
-    /* And then takes nothing, which is "would block" and not an error. */
     CHECK_EQ(unixsock_send(a, big, 1, NULL, 0), 0);
     uint8_t out[128];
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 128);
@@ -148,8 +107,6 @@ TEST(unixsock, a_full_buffer_is_a_wait_and_an_oversized_message_is_a_refusal) {
 
     struct unixsock *c = NULL, *d = NULL;
     REQUIRE(unixsock_pair(UNIX_SOCK_SEQPACKET, &c, &d) == 0);
-    /* A message that can never fit is refused rather than waited on:
-     * waiting for space that will never be enough is a hang. */
     CHECK_EQ(unixsock_send(c, big, sizeof(big), NULL, 0), -1);
     CHECK_EQ(unixsock_send(c, big, UNIX_BUF_SIZE, NULL, 0), UNIX_BUF_SIZE);
     unixsock_unref(c);
@@ -164,9 +121,6 @@ TEST(unixsock, the_record_queue_fills_before_the_buffer_does) {
     for (int i = 0; i < UNIX_MAX_SEGS; i++) {
         CHECK_EQ(unixsock_send(a, (const uint8_t *)"m", 1, NULL, 0), 1);
     }
-    /* Sixteen one-byte messages in a 4 KiB buffer: what ran out is the
-     * record queue, and it has to read as "would block" rather than as an
-     * error, or a sender loops forever on a refusal it cannot fix. */
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"m", 1, NULL, 0), 0);
     uint8_t out[8];
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 1);
@@ -182,9 +136,6 @@ TEST(unixsock, a_descriptor_crosses_and_its_refcount_is_exact) {
     REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &a, &b) == 0);
     fd_slot_t send_me = a_pipe(1);
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"fd", 2, &send_me, 1), 2);
-    /* One reference taken by the send, held by the queue. The sender's own
-     * descriptor is untouched - it may close it right now, which is what
-     * every program that passes one does. */
     CHECK_EQ(fake_objects_pipe_read_refs(), 1);
     CHECK_EQ(unixsock_queued_fds(), 1);
 
@@ -196,13 +147,11 @@ TEST(unixsock, a_descriptor_crosses_and_its_refcount_is_exact) {
     CHECK_EQ(nfds, 1);
     CHECK_EQ(flags, 0);
     CHECK_EQ(unixsock_queued_fds(), 0);
-    /* Still exactly one: the reference moved, it was not duplicated. The
-     * receiver owns it now and the socket no longer does. */
     CHECK_EQ(fake_objects_pipe_read_refs(), 1);
     CHECK(got[0].type == FD_PIPE_READ);
     CHECK(got[0].pipe == send_me.pipe);
 
-    fd_release(&got[0]); /* what installing it into a table and closing it would do */
+    fd_release(&got[0]);
     CHECK_EQ(fake_objects_pipe_read_refs(), 0);
     unixsock_unref(a);
     unixsock_unref(b);
@@ -221,17 +170,11 @@ TEST(unixsock, a_stream_read_stops_at_the_record_that_carries_descriptors) {
     uint8_t out[64];
     fd_slot_t got[UNIX_MAX_FDS];
     int nfds = 0;
-    /* Six bytes are queued and there is room for all six, but the read
-     * stops after the first two: the next record carries a descriptor,
-     * and the bytes that arrived with it have to be returned WITH it.
-     * Every IPC layer in docs/browser.md depends on exactly this. */
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), got, UNIX_MAX_FDS, &nfds, NULL), 2);
     CHECK_MEMEQ(out, "AA", 2);
     CHECK_EQ(nfds, 0);
 
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), got, UNIX_MAX_FDS, &nfds, NULL), 4);
-    /* "BB" and then "CC": once the descriptors have been taken, the read
-     * coalesces forward again. */
     CHECK_MEMEQ(out, "BBCC", 4);
     CHECK_EQ(nfds, 1);
     fd_release(&got[0]);
@@ -254,8 +197,6 @@ TEST(unixsock, descriptors_with_nowhere_to_go_are_closed_and_reported) {
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), got, 1, &nfds, &flags), 1);
     CHECK_EQ(nfds, 1);
     CHECK_EQ(flags & UNIX_RECV_CTRUNC, UNIX_RECV_CTRUNC);
-    /* The two that did not fit are closed here and now - not left queued
-     * for a later recvmsg that would never be told they existed. */
     CHECK_EQ(fake_objects_pipe_read_refs(), 1);
     fd_release(&got[0]);
     unixsock_unref(a);
@@ -270,9 +211,6 @@ TEST(unixsock, a_read_that_cannot_carry_descriptors_drops_them) {
     fd_slot_t one = a_pipe(1);
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"y", 1, &one, 1), 1);
     uint8_t out[8];
-    /* This is read(2) on the socket: no array to put a descriptor in. It
-     * is closed, which is Linux's answer and the only one that does not
-     * leave a reference nothing can release. */
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 1);
     CHECK_EQ(fake_objects_pipe_read_refs(), 0);
     unixsock_unref(a);
@@ -287,8 +225,6 @@ TEST(unixsock, a_message_nobody_reads_gives_its_descriptors_back) {
     fd_slot_t two[2] = {a_pipe(1), a_pipe(2)};
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"z", 1, two, 2), 1);
     CHECK_EQ(fake_objects_pipe_read_refs(), 2);
-    /* The receiver dies with the message still queued, which is the
-     * ordinary case for a crashed process and the one a leak hides in. */
     unixsock_unref(b);
     CHECK_EQ(fake_objects_pipe_read_refs(), 0);
     CHECK_EQ(unixsock_queued_fds(), 0);
@@ -302,25 +238,16 @@ TEST(unixsock, a_socket_passed_over_a_socket_is_released_too) {
     REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &a, &b) == 0);
     REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &c, &d) == 0);
     CHECK_EQ(unixsock_in_use(), 4);
-    /* Passing a channel over a channel is what Mojo does to make a second
-     * one, and it is the case that found a deadlock in the first draft of
-     * unixsock_send: fd_retain on this slot re-enters the file's own lock.
-     * The test that proves the fix is this one - it would hang, not fail. */
     fd_slot_t pass;
     memset(&pass, 0, sizeof(pass));
     pass.type = FD_UNIX;
     pass.un = c;
-    /* unixsock_pair's reference IS the sender's descriptor, so there is no
-     * second one to take here - and getting that wrong is how this test
-     * failed first time round, with one socket left alive at the end. */
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"s", 1, &pass, 1), 1);
-    unixsock_unref(c); /* the sender closes its copy immediately, as every passer does */
+    unixsock_unref(c);
 
-    /* Nobody reads it; everything goes away. c survives until the queue
-     * holding it does, and then does not survive. */
     unixsock_unref(a);
     unixsock_unref(d);
-    CHECK_EQ(unixsock_in_use(), 2); /* b still holds the queued c */
+    CHECK_EQ(unixsock_in_use(), 2);
     unixsock_unref(b);
     expect_nothing_left();
 }
@@ -329,14 +256,14 @@ TEST(unixsock, bind_connect_accept_and_the_names_that_are_refused) {
     clean();
     struct unixsock *srv = unixsock_alloc(UNIX_SOCK_STREAM);
     REQUIRE(srv != NULL);
-    CHECK_EQ(unixsock_listen(srv), -1); /* not bound yet: a listener needs a name */
+    CHECK_EQ(unixsock_listen(srv), -1);
     CHECK_EQ(unixsock_bind(srv, "/tmp/s", 6), 0);
-    CHECK_EQ(unixsock_bind(srv, "/tmp/other", 10), -1); /* one socket, one name */
+    CHECK_EQ(unixsock_bind(srv, "/tmp/other", 10), -1);
     CHECK_EQ(unixsock_listen(srv), 0);
 
     struct unixsock *other = unixsock_alloc(UNIX_SOCK_STREAM);
     REQUIRE(other != NULL);
-    CHECK_EQ(unixsock_bind(other, "/tmp/s", 6), -1); /* EADDRINUSE */
+    CHECK_EQ(unixsock_bind(other, "/tmp/s", 6), -1);
 
     struct unixsock *cli = unixsock_alloc(UNIX_SOCK_STREAM);
     REQUIRE(cli != NULL);
@@ -349,9 +276,6 @@ TEST(unixsock, bind_connect_accept_and_the_names_that_are_refused) {
     CHECK_EQ(unixsock_pending(srv), 0);
     CHECK(unixsock_accept(srv) == NULL);
 
-    /* The accepted socket is a DIFFERENT one from the listener, which is
-     * what lets the listener take a second connection - and it is peered
-     * with the client rather than with the name. */
     uint8_t out[16];
     CHECK_EQ(unixsock_send(cli, (const uint8_t *)"hi", 2, NULL, 0), 2);
     CHECK_EQ(unixsock_recv(conn, out, sizeof(out), NULL, 0, NULL, NULL), 2);
@@ -361,7 +285,6 @@ TEST(unixsock, bind_connect_accept_and_the_names_that_are_refused) {
     unixsock_unref(cli);
     unixsock_unref(other);
     unixsock_unref(srv);
-    /* And the name went with it: the next program may claim it. */
     struct unixsock *again = unixsock_alloc(UNIX_SOCK_STREAM);
     REQUIRE(again != NULL);
     CHECK_EQ(unixsock_bind(again, "/tmp/s", 6), 0);
@@ -373,9 +296,6 @@ TEST(unixsock, an_abstract_name_is_not_a_path_and_a_leading_nul_is_kept) {
     clean();
     struct unixsock *srv = unixsock_alloc(UNIX_SOCK_SEQPACKET);
     REQUIRE(srv != NULL);
-    /* Two names that every string function in this kernel would call
-     * equal, because both are the empty string: this is the whole reason
-     * a bound name is bytes and a length rather than a char*. */
     const char abstract_a[] = {0, 'm', 'o', 'j', 'o'};
     const char abstract_b[] = {0, 'i', 'p', 'c'};
     CHECK_EQ(unixsock_bind(srv, abstract_a, 5), 0);
@@ -401,8 +321,6 @@ TEST(unixsock, a_connect_of_the_wrong_type_is_refused) {
     CHECK_EQ(unixsock_listen(srv), 0);
     struct unixsock *cli = unixsock_alloc(UNIX_SOCK_SEQPACKET);
     REQUIRE(cli != NULL);
-    /* A message socket connected to a byte-stream listener would give
-     * both sides a channel whose boundaries only one of them believes in. */
     CHECK_EQ(unixsock_connect(cli, "/tmp/t", 6), -1);
     unixsock_unref(cli);
     unixsock_unref(srv);
@@ -422,8 +340,6 @@ TEST(unixsock, a_full_backlog_refuses_and_recovers) {
         long rc = unixsock_connect(clients[i], "/tmp/b", 6);
         CHECK_EQ(rc, i < UNIX_BACKLOG ? 0 : -1);
     }
-    /* Q9's rule, on a new table: a resource that refuses when full and
-     * never works again passes an exhaustion test and is broken. */
     struct unixsock *conn = unixsock_accept(srv);
     REQUIRE(conn != NULL);
     CHECK_EQ(unixsock_connect(clients[UNIX_BACKLOG], "/tmp/b", 6), 0);
@@ -442,12 +358,9 @@ TEST(unixsock, a_peer_that_goes_away_is_end_of_stream_and_then_EPIPE) {
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"last", 4, NULL, 0), 4);
     unixsock_unref(a);
     uint8_t out[16];
-    /* The bytes already sent are still there - a reader does not lose
-     * data because the writer exited - and only once they are drained
-     * does the read report the end. */
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 4);
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), -1);
-    CHECK_EQ(unixsock_pending(b), 1); /* and the end of stream is READABLE, or a waiter hangs on it */
+    CHECK_EQ(unixsock_pending(b), 1);
     CHECK_EQ(unixsock_send(b, (const uint8_t *)"?", 1, NULL, 0), -1);
     unixsock_unref(b);
     expect_nothing_left();
@@ -458,15 +371,13 @@ TEST(unixsock, shutdown_says_I_am_finished_without_closing) {
     struct unixsock *a = NULL, *b = NULL;
     REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &a, &b) == 0);
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"bye", 3, NULL, 0), 3);
-    CHECK_EQ(unixsock_shutdown(a, 1), 0); /* SHUT_WR */
+    CHECK_EQ(unixsock_shutdown(a, 1), 0);
     uint8_t out[16];
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 3);
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), -1);
-    /* And the other direction still works, which is the entire point of a
-     * half-close: the descriptor is open, the peer can still answer. */
     CHECK_EQ(unixsock_send(b, (const uint8_t *)"ok", 2, NULL, 0), 2);
     CHECK_EQ(unixsock_recv(a, out, sizeof(out), NULL, 0, NULL, NULL), 2);
-    CHECK_EQ(unixsock_send(a, (const uint8_t *)"?", 1, NULL, 0), -1); /* this side promised not to */
+    CHECK_EQ(unixsock_send(a, (const uint8_t *)"?", 1, NULL, 0), -1);
     unixsock_unref(a);
     unixsock_unref(b);
     expect_nothing_left();
@@ -476,7 +387,7 @@ TEST(unixsock, shut_rd_makes_the_senders_writes_fail) {
     clean();
     struct unixsock *a = NULL, *b = NULL;
     REQUIRE(unixsock_pair(UNIX_SOCK_SEQPACKET, &a, &b) == 0);
-    CHECK_EQ(unixsock_shutdown(b, 0), 0); /* SHUT_RD on the receiver */
+    CHECK_EQ(unixsock_shutdown(b, 0), 0);
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"x", 1, NULL, 0), -1);
     CHECK_EQ(unixsock_recv(b, NULL, 0, NULL, 0, NULL, NULL), -1);
     unixsock_unref(a);
@@ -492,9 +403,6 @@ TEST(unixsock, running_out_of_sockets_refuses_and_recovers) {
         REQUIRE(all[i] != NULL);
     }
     CHECK(unixsock_alloc(UNIX_SOCK_STREAM) == NULL);
-    /* A pair needs two and takes neither when it cannot have both - the
-     * case that would otherwise leave a socket whose peer nothing can
-     * name. */
     struct unixsock *x = NULL, *y = NULL;
     unixsock_unref(all[0]);
     CHECK_EQ(unixsock_pair(UNIX_SOCK_STREAM, &x, &y), -1);
@@ -532,9 +440,6 @@ TEST(unixsock, a_zero_length_message_carrying_a_descriptor_is_a_message) {
     struct unixsock *a = NULL, *b = NULL;
     REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &a, &b) == 0);
     fd_slot_t one = a_pipe(1);
-    /* Handing over a handle with no payload. It has to be deliverable:
-     * an IPC layer that must send a byte to send a descriptor is an IPC
-     * layer with a protocol quirk nobody asked for. */
     CHECK_EQ(unixsock_send(a, NULL, 0, &one, 1), 0);
     CHECK_EQ(unixsock_pending(b), 1);
     fd_slot_t got[UNIX_MAX_FDS];
@@ -543,8 +448,6 @@ TEST(unixsock, a_zero_length_message_carrying_a_descriptor_is_a_message) {
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), got, UNIX_MAX_FDS, &nfds, NULL), 0);
     CHECK_EQ(nfds, 1);
     fd_release(&got[0]);
-    /* And a zero-length send with nothing attached is a no-op rather than
-     * a record, which is what write(fd, buf, 0) means. */
     CHECK_EQ(unixsock_send(a, NULL, 0, NULL, 0), 0);
     CHECK_EQ(unixsock_pending(b), 0);
     unixsock_unref(a);
@@ -561,8 +464,6 @@ TEST(unixsock, too_many_descriptors_is_refused_before_anything_moves) {
         many[i] = a_pipe(i);
     }
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"x", 1, many, UNIX_MAX_FDS + 1), -1);
-    /* Nothing was retained and no byte was queued: a refusal that had
-     * already taken references would leak every one of them. */
     CHECK_EQ(fake_objects_pipe_read_refs(), 0);
     CHECK_EQ(unixsock_pending(b), 0);
     unixsock_unref(a);
@@ -570,30 +471,15 @@ TEST(unixsock, too_many_descriptors_is_refused_before_anything_moves) {
     expect_nothing_left();
 }
 
-/* ---- the mutation harness's findings ---------------------------------
- *
- * Everything above was written from the header's claims. `make mutate
- * FILE=kernel/ipc/unixsock.c` then broke the file on purpose forty times
- * and fifteen of those went unnoticed, which is the only instrument here
- * that grades the tests rather than the code (Q8's own lesson: the first
- * file it examined had full line coverage and a mutation score of zero).
- * Each test below was written against a specific survivor, and each one
- * is a claim the header already made and nothing checked.
- */
-
 TEST(unixsock, a_type_that_does_not_exist_is_refused) {
     clean();
-    /* AF_UNIX SOCK_DGRAM is the one a program is most likely to ask for -
-     * it is what <sys/socket.h>'s SOCK_DGRAM is - and it is not built.
-     * Refused, rather than quietly given a stream whose boundaries the
-     * caller does not expect. */
     CHECK(unixsock_alloc(2) == NULL);
     CHECK(unixsock_alloc(0) == NULL);
     CHECK(unixsock_alloc(99) == NULL);
     struct unixsock *x = NULL, *y = NULL;
     CHECK_EQ(unixsock_pair(2, &x, &y), -1);
     CHECK(x == NULL && y == NULL);
-    CHECK_EQ(unixsock_in_use(), 0); /* and a refusal allocates nothing */
+    CHECK_EQ(unixsock_in_use(), 0);
     expect_nothing_left();
 }
 
@@ -601,9 +487,6 @@ TEST(unixsock, a_socket_reports_its_own_type) {
     clean();
     struct unixsock *s = unixsock_alloc(UNIX_SOCK_SEQPACKET);
     REQUIRE(s != NULL);
-    /* The syscall layer asks this to decide whether an oversized send is
-     * a short write or an EMSGSIZE, so a wrong answer here is a silently
-     * truncated message. */
     CHECK_EQ(unixsock_type(s), UNIX_SOCK_SEQPACKET);
     unixsock_unref(s);
     struct unixsock *t = unixsock_alloc(UNIX_SOCK_STREAM);
@@ -618,15 +501,12 @@ TEST(unixsock, a_name_of_every_legal_length_and_none_that_is_not) {
     clean();
     struct unixsock *s = unixsock_alloc(UNIX_SOCK_STREAM);
     REQUIRE(s != NULL);
-    CHECK_EQ(unixsock_bind(s, "x", 0), -1);                  /* no name at all */
+    CHECK_EQ(unixsock_bind(s, "x", 0), -1);
     CHECK_EQ(unixsock_bind(s, "x", -1), -1);
     CHECK_EQ(unixsock_bind(s, NULL, 4), -1);
     char full[UNIX_PATH_MAX + 1];
     memset(full, 'n', sizeof(full));
-    CHECK_EQ(unixsock_bind(s, full, UNIX_PATH_MAX + 1), -1); /* one byte too long */
-    /* And the boundary itself, which is the length sizeof(sun_path) allows
-     * and the one an off-by-one in the copy would run past - under ASan,
-     * that is a report rather than a guess. */
+    CHECK_EQ(unixsock_bind(s, full, UNIX_PATH_MAX + 1), -1);
     CHECK_EQ(unixsock_bind(s, full, UNIX_PATH_MAX), 0);
     struct unixsock *c = unixsock_alloc(UNIX_SOCK_STREAM);
     REQUIRE(c != NULL);
@@ -649,9 +529,6 @@ TEST(unixsock, a_message_that_does_not_fit_right_now_waits_whole) {
     static uint8_t buf[UNIX_BUF_SIZE];
     memset(buf, 'a', sizeof(buf));
     CHECK_EQ(unixsock_send(a, buf, UNIX_BUF_SIZE - 8, NULL, 0), UNIX_BUF_SIZE - 8);
-    /* Sixteen bytes offered into eight bytes of space. A stream would take
-     * eight; a message socket must take NONE - a receiver that got eight
-     * bytes of a sixteen-byte message would have no way to know. */
     CHECK_EQ(unixsock_send(a, buf, 16, NULL, 0), 0);
     uint8_t out[UNIX_BUF_SIZE];
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), UNIX_BUF_SIZE - 8);
@@ -665,10 +542,6 @@ TEST(unixsock, a_stream_of_small_writes_does_not_exhaust_the_record_queue) {
     clean();
     struct unixsock *a = NULL, *b = NULL;
     REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &a, &b) == 0);
-    /* Four times as many writes as there are records. Coalescing is what
-     * makes this work, and without it a program doing putc() into a socket
-     * would stall after sixteen bytes - which is the bug this asserts
-     * against, not a property of the arithmetic. */
     for (int i = 0; i < UNIX_MAX_SEGS * 4; i++) {
         CHECK_EQ(unixsock_send(a, (const uint8_t *)"s", 1, NULL, 0), 1);
     }
@@ -686,17 +559,11 @@ TEST(unixsock, recv_clears_what_it_is_about_to_report) {
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"plain", 5, NULL, 0), 5);
     uint8_t out[16];
     fd_slot_t got[UNIX_MAX_FDS];
-    /* A caller's variables, deliberately dirty. A recv that returns bytes
-     * and no descriptors has to SAY no descriptors - leaving the previous
-     * call's count there would have the caller install a descriptor number
-     * it was never given. */
     int nfds = 7;
     int flags = 0xFF;
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), got, UNIX_MAX_FDS, &nfds, &flags), 5);
     CHECK_EQ(nfds, 0);
     CHECK_EQ(flags, 0);
-    /* And the same on the paths that return nothing at all, which is where
-     * a caller is least likely to look. */
     nfds = 7;
     flags = 0xFF;
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), got, UNIX_MAX_FDS, &nfds, &flags), 0);
@@ -721,10 +588,6 @@ TEST(unixsock, descriptors_are_delivered_once_even_when_the_record_survives) {
     uint8_t out[4];
     fd_slot_t got[UNIX_MAX_FDS];
     int nfds = 0;
-    /* Four bytes of a ten-byte record, so the record is still there
-     * afterwards with its bytes and - this is the claim - without its
-     * descriptor. Handing it over twice would give the receiver two
-     * references to something the sender granted once. */
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), got, UNIX_MAX_FDS, &nfds, NULL), 4);
     CHECK_EQ(nfds, 1);
     fd_release(&got[0]);
@@ -749,9 +612,6 @@ TEST(unixsock, a_truncated_message_does_not_take_the_next_one_with_it) {
     CHECK_EQ(unixsock_recv(b, out, 4, NULL, 0, NULL, &flags), 4);
     CHECK_MEMEQ(out, "firs", 4);
     CHECK_EQ(flags & UNIX_RECV_TRUNC, UNIX_RECV_TRUNC);
-    /* The second message is intact and next. Discarding the first one's
-     * tail must discard exactly that - a queue that skipped a record here
-     * would lose a whole message and look like a dropped packet. */
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 6);
     CHECK_MEMEQ(out, "second", 6);
     unixsock_unref(a);
@@ -766,8 +626,6 @@ TEST(unixsock, shutdown_refuses_a_how_it_does_not_have) {
     CHECK_EQ(unixsock_shutdown(a, 3), -1);
     CHECK_EQ(unixsock_shutdown(a, -1), -1);
     CHECK_EQ(unixsock_shutdown(NULL, 1), -1);
-    /* And SHUT_RDWR does both halves, which is the one of the three that
-     * is two claims rather than one. */
     CHECK_EQ(unixsock_shutdown(a, 2), 0);
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"x", 1, NULL, 0), -1);
     uint8_t out[8];
@@ -777,16 +635,6 @@ TEST(unixsock, shutdown_refuses_a_how_it_does_not_have) {
     expect_nothing_left();
 }
 
-/* ---- M119: the three questions epoll asks -----------------------------
- *
- * `unixsock_pending` folds readability, a queued connection and end of
- * stream into one bit, because SYS_waitfds returns one bit. epoll has to
- * tell them apart - a pump that cannot distinguish "there are bytes" from
- * "the peer is gone" spins on the second forever - so M119 added three
- * accessors, and this is where they are graded. They are called only from
- * syscall.c's epoll mask in the kernel, which is exactly why they need a
- * test here: nothing else would notice if one of them answered backwards.
- */
 TEST(unixsock, writable_is_true_until_the_buffer_is_full) {
     clean();
     struct unixsock *a = NULL, *b = NULL;
@@ -795,17 +643,10 @@ TEST(unixsock, writable_is_true_until_the_buffer_is_full) {
     static uint8_t big[UNIX_BUF_SIZE];
     memset(big, 'w', sizeof(big));
     CHECK_EQ(unixsock_send(a, big, UNIX_BUF_SIZE, NULL, 0), UNIX_BUF_SIZE);
-    /* The peer's buffer is full, so a send would report "would block" - and
-     * EPOLLOUT has to agree with that, or a pump registers for writability
-     * and is woken immediately, forever. */
     CHECK_EQ(unixsock_writable(a), 0);
     uint8_t out[64];
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 64);
     CHECK_EQ(unixsock_writable(a), 1);
-    /* And a socket whose peer is GONE is writable in the only sense that
-     * matters to a waiter: the send will fail rather than wait. Reporting
-     * it as not-writable would park a writer on a channel that can never
-     * take another byte. */
     unixsock_unref(b);
     CHECK_EQ(unixsock_writable(a), 1);
     CHECK_EQ(unixsock_send(a, big, 1, NULL, 0), -1);
@@ -820,9 +661,6 @@ TEST(unixsock, a_record_queue_that_is_full_is_not_writable) {
     for (int i = 0; i < UNIX_MAX_SEGS; i++) {
         CHECK_EQ(unixsock_send(a, (const uint8_t *)"m", 1, NULL, 0), 1);
     }
-    /* Sixteen bytes in a 4 KiB buffer: there is room for bytes and nowhere
-     * to record them. "Writable" has to mean "a send would get somewhere",
-     * not "there are free bytes", or this is the case a pump spins on. */
     CHECK_EQ(unixsock_writable(a), 0);
     uint8_t out[8];
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 1);
@@ -839,35 +677,20 @@ TEST(unixsock, hup_waits_for_the_queue_to_drain_and_rdhup_does_not) {
     CHECK_EQ(unixsock_hup(b), 0);
     CHECK_EQ(unixsock_rdhup(b), 0);
     CHECK_EQ(unixsock_send(a, (const uint8_t *)"request", 7, NULL, 0), 7);
-    CHECK_EQ(unixsock_shutdown(a, 1), 0); /* SHUT_WR: "that is all I am sending" */
-    /* The difference between the two, and it is the difference between a
-     * working request/response protocol and a broken one: RDHUP says the
-     * peer has finished writing - which is how a server knows the request
-     * is complete - while HUP must stay false until the bytes it already
-     * sent have been read. A pump told HUP here would close a connection
-     * with an unread request in it. */
+    CHECK_EQ(unixsock_shutdown(a, 1), 0);
     CHECK_EQ(unixsock_rdhup(b), 1);
     CHECK_EQ(unixsock_hup(b), 0);
     uint8_t out[16];
     CHECK_EQ(unixsock_recv(b, out, sizeof(out), NULL, 0, NULL, NULL), 7);
     CHECK_EQ(unixsock_hup(b), 1);
-    /* And the other direction still works, which is what the half-close is
-     * for - so `a` is neither hung up nor read-hung-up. */
     CHECK_EQ(unixsock_hup(a), 0);
     CHECK_EQ(unixsock_rdhup(a), 0);
     CHECK_EQ(unixsock_send(b, (const uint8_t *)"reply", 5, NULL, 0), 5);
     unixsock_unref(a);
-    /* Now the peer object is gone and this end's queue is empty, so it is
-     * hung up both ways. (The reply went into *a's* buffer, not b's -
-     * getting that backwards is how this test failed when it was first
-     * written, and the note is worth more than the correction.) */
     CHECK_EQ(unixsock_hup(b), 1);
     CHECK_EQ(unixsock_rdhup(b), 1);
     unixsock_unref(b);
 
-    /* And the case that claim is really about: a peer that died with bytes
-     * still queued here. HUP must stay false until they are read, or a pump
-     * discards the last thing a crashed process said. */
     struct unixsock *c = NULL, *d = NULL;
     REQUIRE(unixsock_pair(UNIX_SOCK_STREAM, &c, &d) == 0);
     CHECK_EQ(unixsock_send(c, (const uint8_t *)"last words", 10, NULL, 0), 10);
@@ -883,9 +706,6 @@ TEST(unixsock, hup_waits_for_the_queue_to_drain_and_rdhup_does_not) {
 
 TEST(unixsock, the_epoll_accessors_refuse_a_null_socket) {
     clean();
-    /* Answering "not writable, hung up" for a socket that does not exist is
-     * the safe direction: a caller that somehow holds one learns the
-     * channel is dead rather than writing into nothing. */
     CHECK_EQ(unixsock_writable(NULL), 0);
     CHECK_EQ(unixsock_hup(NULL), 1);
     CHECK_EQ(unixsock_rdhup(NULL), 1);

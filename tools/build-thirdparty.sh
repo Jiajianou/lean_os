@@ -332,7 +332,7 @@ echo "build-thirdparty: libjpeg $JPEG_VER -> $OUT/djpeg, $OUT/cjpeg, $OUT/jpegtr
 # and for the same reason: somebody else's build asked for it.
 if ! command -v pkgconf >/dev/null 2>&1; then
   echo "build-thirdparty: no pkgconf on this host - freetype's configure needs one" >&2
-  echo "                  (brew install pkgconf; see docs/toolchain.md)" >&2
+  echo "                  (brew install pkgconf)" >&2
   exit 1
 fi
 cat > "$PREFIX/bin/x86_64-lean_os-pkg-config" <<EOF

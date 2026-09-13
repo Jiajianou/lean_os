@@ -1,72 +1,11 @@
-/* user_space/bin/desktop_shell.c
- *
- * The taskbar: a chrome-less panel client (system_api/include/wm.h's
- * wm_create_request_t.panel, compositor.c's M22 addition), docked to the
- * bottom of the screen and laid out left to right the way a Windows
- * taskbar is - a Start button, then one button per *running* window, then
- * a system tray with the clock at the far right.
- *
- * M42 put this back to being the system bar. M41 had split it in two (a
- * macOS-style menu bar along the top holding the clock and the focused
- * app's menus, this reduced to just the running-app list); direct design
- * feedback settled the question the other way - this project is a
- * deliberate Windows/macOS hybrid, and the bar belongs at the bottom with
- * each app's own menus drawn inside its own window. So menu_bar.c is
- * gone, format_clock came back here with the clock, and the Start button
- * is the new piece: it sends WM_ACTION_TOGGLE_LAUNCHER, the one action in
- * the protocol that acts on the compositor rather than on a window, which
- * opens the launcher overlay (M43).
- *
- * The running-window list itself is unchanged, and deliberately so: it is
- * labeled rectangles carrying each app's own title (wm_create_request_t.
- * title, threaded through to wm_window_info_t.title via the WM_QUERY_PIPE
- * snapshot), skipping this panel and the desktop background via
- * wm_window_info_t.is_panel/is_desktop. Clicking an unfocused/minimized
- * button focuses it; clicking the already-focused one minimizes it - one
- * click doing both jobs depending on current state, same as Windows.
- *
- * Hover highlighting is new here and needed one compositor change to be
- * possible at all (M42): a panel now receives WM_EVENT_MOUSE_MOVE while
- * the cursor is over it even though it never holds focus, and a click on
- * it no longer takes focus away from the app you were using.
- *
- * No launcher *row*: this used to also list every file on disk
- * (SYS_listfiles) as a spawnable slot, which meant every coreutil this
- * project ships (hello, cat, ls, ...) showed up as taskbar clutter with
- * no relation to "what's currently running". That job is the Start
- * button's now (and desktop_icons.c's double-click before it); this row
- * only ever reflects what's actually open. An empty desktop means an
- * empty running-app list.
- */
 #include "syscall_wrappers.h"
 #include "wmclient.h"
 
 #define PANEL_HEIGHT      32
 
-/* M45: the bar can now raise a context menu *out* of itself. A panel is
- * clipped to its own buffer and 32px tall, and a three-item menu is
- * ~72px, so this window allocates PANEL_OVERHANG_MAX extra rows above
- * the docked strip and asks the compositor to composite and click-route
- * as many of them as the menu currently needs
- * (WM_ACTION_SET_PANEL_OVERHANG / wm_set_panel_overhang). M41 built that
- * mechanism for its top-bar dropdowns and M42 deleted it with the bar;
- * this brings it back rather than inventing a second one.
- *
- * The buffer's layout is: rows [0, PANEL_OVERHANG_MAX) are the overhang,
- * rows [PANEL_OVERHANG_MAX, PANEL_OVERHANG_MAX + PANEL_HEIGHT) are the
- * bar itself. `bar_gfx` below is a gfx_ctx_t over just that second
- * region, which is why not one coordinate in the bar's own drawing had
- * to move for any of this. */
 #define PANEL_OVERHANG_MAX 96
 #define PANEL_BUF_H       (PANEL_OVERHANG_MAX + PANEL_HEIGHT)
 
-/* The right-click menu on a running-app button. Its three verbs are the
- * same ones (and in the same order) the compositor draws for a
- * right-click on the window's own titlebar - they act on another
- * client's window, which is exactly the "the app defines the menu, the
- * system only draws it" split this milestone kept. Every row ends at
- * wm_send_action, so all three ways to close a window are literally one
- * code path. */
 #define CTX_W        124
 #define CTX_ITEM_H   22
 #define CTX_COUNT    3
@@ -75,11 +14,9 @@
 #define CTX_BORDER   0x00506070u
 #define CTX_TEXT     0x00FFFFFFu
 #define BTN_H             24
-#define BTN_Y             4  /* (PANEL_HEIGHT - BTN_H) / 2 */
+#define BTN_Y             4
 #define EDGE_PAD          4
 
-/* Start button: a 2x2 tile glyph (this project has no icon-image format -
- * see desktop_icons.c's own note) followed by the word "Start". */
 #define START_X       EDGE_PAD
 #define START_W       72
 #define START_GLYPH_X (START_X + 8)
@@ -91,32 +28,18 @@
 #define SLOT_H            BTN_H
 #define SLOT_GAP          4
 #define SLOTS_X           (START_X + START_W + 8)
-#define LABEL_PAD         6  /* M44: was 2 - rounded corners need the label held further off the edge, and 6 lines it up with the Start button's own glyph inset */
-#define LABEL_MAX         10 /* (SLOT_W - LABEL_PAD either side) / 8px per glyph, rounded down */
+#define LABEL_PAD         6
+#define LABEL_MAX         10
 #define MAX_RUNNING_SLOTS  WM_MAX_ROUTABLE_WINDOWS
 
-/* System tray, right-aligned: a separator, a couple of status indicators,
- * then the clock. The indicators are static by design - there is nothing
- * in this OS that changes state in a way a tray icon would report (no
- * volume, no battery, and the NIC is either present at boot or isn't), so
- * drawing them as live would be drawing a lie. They are the tray's shape,
- * and what a real status indicator would slot into. */
-#define CLOCK_CHARS   5 /* "MM:SS" */
+#define CLOCK_CHARS   5
 #define TRAY_PAD      10
-/* M63: four virtual-desktop dots where M42's two decorative tray icons
- * were. Same footprint, and unlike those this one is telling the truth
- * about something. */
 #define WS_DOT      8
 #define WS_DOT_GAP  5
 #define WS_DOT_ON   0x004C99E6u
 #define WS_DOT_OFF  0x00506070u
 #define TRAY_ICONS_W  (TRAY_PAD + WM_WORKSPACE_COUNT * WS_DOT + (WM_WORKSPACE_COUNT - 1) * WS_DOT_GAP + TRAY_PAD)
 
-/* M57: the clock's width is measured, not multiplied. The digits share
- * one advance (tools/gen-font.c gives every face tabular figures, for
- * exactly this reason), so this is a constant in practice - but it is a
- * constant of the *font*, and reading it off any five-character sample
- * is how it stays right when the font changes. */
 static int32_t clock_text_w(void) {
     return gfx_text_width(gfx_ui_font(), "00:00");
 }
@@ -126,18 +49,18 @@ static int32_t tray_w(void) {
 }
 
 #define REFRESH_INTERVAL_MS 300
-#define PRESS_FLASH_MS      150 /* how long the Start button stays lit after a click - see start_pressed_until_ms */
+#define PRESS_FLASH_MS      150
 
 #define PANEL_BG            0x00181828u
-#define PANEL_BORDER_COLOR  0x00445566u /* 1px top edge - the panel's only visual separation from the desktop above it otherwise */
-#define PANEL_BEVEL_COLOR   0x00223349u /* faint 1px highlight just under the top edge - a cheap two-tone "lit from above" bevel, the only depth cue available without alpha blending */
-#define SLOT_BORDER_COLOR   0x00445566u /* every slot is outlined so it reads as a button, not a flat color swatch */
+#define PANEL_BORDER_COLOR  0x00445566u
+#define PANEL_BEVEL_COLOR   0x00223349u
+#define SLOT_BORDER_COLOR   0x00445566u
 #define RUNNING_SLOT_BG            0x00263447u
 #define RUNNING_SLOT_HOVER_BG      0x00365070u
 #define RUNNING_SLOT_FOCUS_BG      0x002E4A63u
-#define RUNNING_SLOT_FOCUS_BORDER  0x004C99E6u /* same blue as compositor.c's TITLEBAR_FOCUS_COLOR - the focused window's titlebar and its taskbar slot read as the same "this one" accent */
-#define RUNNING_SLOT_MIN_BG        0x00352A20u /* dim, warm - visually distinct from both normal and focused so a minimized app doesn't look like it just quietly vanished */
-#define RUNNING_SLOT_FRONT_BORDER  0x002E5C86u /* M51: half-lit accent - the window on top when nothing holds focus, see running_slot_t.frontmost */
+#define RUNNING_SLOT_FOCUS_BORDER  0x004C99E6u
+#define RUNNING_SLOT_MIN_BG        0x00352A20u
+#define RUNNING_SLOT_FRONT_BORDER  0x002E5C86u
 #define LABEL_COLOR         0x00FFFFFFu
 
 #define START_BG        0x00243447u
@@ -148,10 +71,6 @@ static int32_t tray_w(void) {
 #define TRAY_SEP_COLOR  0x00303C4Eu
 #define CLOCK_FG        0x00C8D4E4u
 
-/* What the cursor is currently over. Ordinary running-app slots are their
- * own index; the two negative values are "nothing" and "the Start
- * button", which keeps hover state a single int instead of a flag plus an
- * index that could disagree with each other. */
 #define HOVER_NONE  (-1)
 #define HOVER_START (-2)
 
@@ -159,22 +78,8 @@ typedef struct {
     int32_t x, w;
     int32_t window_id;
     uint8_t focused;
-    /* M51: this is the window at the top of the compositor's z-order -
-     * which is almost always also the focused one, since focusing raises.
-     * The case worth drawing is the one where it isn't: minimizing the
-     * focused window leaves nothing focused at all, and the bar can still
-     * say which of the remaining windows is in front. Read from
-     * wm_window_info_t.z_index rather than from the order the query
-     * returned, deliberately: the buttons stay in window_id order for the
-     * whole life of a window so they can be found by muscle memory, which
-     * is the Windows behavior and the reason the query does not simply
-     * hand them back in z-order. */
     uint8_t frontmost;
     uint8_t minimized;
-    /* M61: what this slot last told the compositor about itself, so a
-     * layout that has not changed sends nothing. Slots are reused as
-     * windows come and go, so the window id is part of the comparison -
-     * a different window at the same x is a different button. */
     int32_t reported_id;
     int32_t reported_x;
     char name[LABEL_MAX + 1];
@@ -185,39 +90,15 @@ static int running_count;
 static int hovered = HOVER_NONE;
 static long start_pressed_until_ms;
 
-/* M45: the context menu's state. `ctx_slot` is an index into
- * running_slots (not a window id) so the menu re-reads that slot's live
- * focused/minimized state on every redraw - the label on its first row
- * follows it. -1 = closed. `ctx_x`/`ctx_y` are in the *bar's* coordinate
- * space (y negative: the menu is above the bar's own top edge), the same
- * space every event the compositor routes here arrives in. */
 static int ctx_slot = -1;
 static int32_t ctx_x, ctx_y;
 static int ctx_hover = -1;
-static int32_t ctx_overhang; /* what the compositor was last told to raise - only re-sent when it changes */
+static int32_t ctx_overhang;
 
-/* A gfx_ctx_t over just the docked strip of this window's buffer. Every
- * function that draws the bar takes this, so the bar's own coordinates
- * are unchanged by the overhang rows sitting above it. */
 static gfx_ctx_t bar_gfx;
 
-/* M63: which virtual desktop the compositor last said is on screen.
- * Read in refresh_running_slots, drawn in draw_tray - the query already
- * happens once per refresh and this rides along on it rather than asking
- * again. */
 static int shown_workspace;
 
-/* M59: the time, at last. This read "MM:SS of uptime" for seventeen
- * milestones, and the reason was never that a clock was hard - it was
- * that uptime was the only thing this machine could know. A hundred
- * lines of CMOS RTC (kernel/drivers/rtc.c) changed that, and this is the
- * most visible place it shows.
- *
- * Falls back to uptime on a machine with no readable clock rather than
- * drawing an empty field or a lie: "how long has this been on" is still
- * true there, and it is what this bar has always shown. Five characters
- * either way, which is what keeps the tray's width one measurement (see
- * clock_text_w) rather than two cases. */
 static void format_clock(long now_ms, char *out) {
     os_datetime_t t;
     if (sys_time(&t) > 0 && t.valid) {
@@ -240,10 +121,6 @@ static void format_clock(long now_ms, char *out) {
     out[5] = '\0';
 }
 
-/* Bounded copy of a window's title into a slot label, falling back to a
- * generic name for the (currently theoretical - every GUI client sets a
- * title) case of a client that connects without one, so a slot never
- * renders as blank. */
 static void copy_label(char *dst, const char *src) {
     int i = 0;
     if (src && src[0]) {
@@ -259,11 +136,6 @@ static void copy_label(char *dst, const char *src) {
     dst[i] = '\0';
 }
 
-/* Lays out one slot per non-panel/non-desktop window left to right from
- * just past the Start button, stopping (rather than overlapping) once the
- * next slot would collide with the tray - an honest "ran out of room"
- * past MAX_RUNNING_SLOTS or on a narrow display, same as this file's old
- * launcher row did for the same reason. */
 static void refresh_running_slots(wm_window_t *self) {
     wm_query_response_t q;
     if (wm_query_windows(&q) != 0) {
@@ -279,12 +151,6 @@ static void refresh_running_slots(wm_window_t *self) {
         if (info->is_panel || info->is_desktop || info->window_id == self->window_id) {
             continue;
         }
-        /* M63: only what is on the desktop you are looking at. A taskbar
-         * that listed every window on every virtual desktop would be a
-         * taskbar that says nothing about the screen in front of you,
-         * which is the one thing it is for. (The task manager
-         * deliberately does the opposite - a process you cannot see is
-         * exactly the one you might be hunting.) */
         if (info->workspace >= 0 && info->workspace != q.current_workspace) {
             continue;
         }
@@ -296,22 +162,12 @@ static void refresh_running_slots(wm_window_t *self) {
         slot->w = SLOT_W;
         slot->window_id = info->window_id;
         slot->focused = info->focused;
-        slot->frontmost = 0; /* filled in below - it is a property of the whole set, not of one row */
+        slot->frontmost = 0;
         slot->minimized = info->minimized;
         copy_label(slot->name, info->title);
         x += SLOT_W + SLOT_GAP;
         running_count++;
     }
-    /* M61: tell the compositor where each button ended up, so a
-     * minimize can animate toward the one it is going to. Sent from
-     * here rather than from redraw because this is where the *layout*
-     * changes - a redraw happens several times a second and the layout
-     * does not. Only when it actually moved: an unchanged slot is a
-     * message nobody needs.
-     *
-     * The compositor is told rather than working it out, because this
-     * geometry is the taskbar's - a second copy of it over there would
-     * be a second thing to keep in step. */
     for (int i = 0; i < running_count; i++) {
         running_slot_t *slot = &running_slots[i];
         if (slot->window_id != slot->reported_id || slot->x != slot->reported_x) {
@@ -321,10 +177,6 @@ static void refresh_running_slots(wm_window_t *self) {
         }
     }
 
-    /* M51: whichever listed window sits highest in the z-order, ignoring
-     * minimized ones (a minimized window is not in front of anything -
-     * it isn't on screen at all). One pass over what was just laid out,
-     * so the marker follows the same slots the loop above kept. */
     {
         int front = -1;
         int32_t best_z = -1;
@@ -347,7 +199,6 @@ static void refresh_running_slots(wm_window_t *self) {
             running_slots[front].frontmost = 1;
         }
     }
-    /* A slot that scrolled out from under the cursor must not stay lit. */
     if (hovered >= running_count) {
         hovered = HOVER_NONE;
     }
@@ -376,12 +227,6 @@ static void draw_tray(wm_window_t *self) {
     int32_t tray_x = (int32_t)self->width - tray_w();
     gfx_draw_line(&bar_gfx, tray_x, BTN_Y + 2, tray_x, BTN_Y + BTN_H - 3, TRAY_SEP_COLOR);
 
-    /* M63: the two static indicators M42 drew here are gone, and what
-     * replaced them is the one thing in the tray that has ever had
-     * something to say - which virtual desktop you are on. That entry's
-     * own note said drawing an indicator that never changes is drawing a
-     * lie; this one changes, and it is the only cue that a window has not
-     * vanished but merely moved. */
     int32_t dot_y = (PANEL_HEIGHT - WS_DOT) / 2;
     for (int i = 0; i < WM_WORKSPACE_COUNT; i++) {
         int32_t dx = tray_x + TRAY_PAD + i * (WS_DOT + WS_DOT_GAP);
@@ -398,12 +243,6 @@ static void draw_tray(wm_window_t *self) {
                   (PANEL_HEIGHT - (int32_t)gfx_ui_font()->height) / 2, clock_text, CLOCK_FG);
 }
 
-/* M45: how tall the raised region has to be for the menu as currently
- * positioned. The menu's top edge is at ctx_y (negative - above the
- * bar), so this is simply how far above the bar's own top edge it
- * reaches. Sent to the compositor only when it changes; the compositor
- * clamps it to the buffer it actually allocated, so an over-tall answer
- * degrades to "as much as exists" rather than reading past the buffer. */
 static int32_t ctx_needed_overhang(void) {
     if (ctx_slot < 0) {
         return 0;
@@ -411,9 +250,6 @@ static int32_t ctx_needed_overhang(void) {
     return ctx_y < 0 ? -ctx_y : 0;
 }
 
-/* The first row's verb follows the target window's live state - the same
- * choice the compositor's titlebar version of this menu makes from the
- * same field, which is why both read it rather than hardcoding a label. */
 static const char *ctx_label(int i) {
     if (i == 0) {
         return running_slots[ctx_slot].minimized ? "Restore" : "Minimize";
@@ -421,9 +257,6 @@ static const char *ctx_label(int i) {
     return i == 1 ? "Close" : "Force Quit";
 }
 
-/* Drawn into the *window's* full buffer, not bar_gfx: the whole point is
- * that it is above the bar. Buffer y is PANEL_OVERHANG_MAX + the menu's
- * own (negative) bar-space y. */
 static void draw_ctx_menu(wm_window_t *self) {
     int32_t by = PANEL_OVERHANG_MAX + ctx_y;
     int32_t h = CTX_ITEM_H * CTX_COUNT;
@@ -438,8 +271,6 @@ static void draw_ctx_menu(wm_window_t *self) {
     }
 }
 
-/* Which menu row is at (x, y) in bar space, or -1 if the point is
- * outside the menu. */
 static int ctx_row_at(int32_t x, int32_t y) {
     if (ctx_slot < 0 ||
         !gfx_point_in_rect(x, y, ctx_x, ctx_y, CTX_W, CTX_ITEM_H * CTX_COUNT)) {
@@ -448,19 +279,6 @@ static int ctx_row_at(int32_t x, int32_t y) {
     return (y - ctx_y) / CTX_ITEM_H;
 }
 
-/* bar_gfx is *derived* from the window - its pixels are a row offset into
- * the window's buffer and its width is the window's width - so it has to
- * be re-derived whenever either can have changed, which is every time the
- * client is handed a new buffer.
- *
- * It used to be computed once, right after wm_connect_panel. That was a
- * latent bug from M55 (a client that reconnects to a replacement
- * compositor gets a different segment) that M58 turned into a certain
- * one: after a resolution change the panel's buffer is both somewhere
- * else *and* a different width, so drawing through the old context wrote
- * into memory this process had just unmapped. Deriving it here, at the
- * top of the one function that draws, means there is no moment where a
- * stale copy can be used. */
 static void bar_gfx_bind(const wm_window_t *self) {
     bar_gfx.pixels = self->gfx.pixels + (int32_t)self->width * PANEL_OVERHANG_MAX;
     bar_gfx.width = (int32_t)self->width;
@@ -470,11 +288,6 @@ static void bar_gfx_bind(const wm_window_t *self) {
 static void redraw(wm_window_t *self) {
     bar_gfx_bind(self);
     gfx_fill_rect(&bar_gfx, 0, 0, (int32_t)self->width, PANEL_HEIGHT, PANEL_BG);
-    /* Top edge is otherwise the only thing telling this panel apart from
-     * the desktop it's docked to - one line makes it read as a distinct
-     * bar rather than the desktop background bleeding into it. The
-     * second, fainter line right under it is a one-pixel bevel highlight
-     * - together they read as a lit top edge instead of a flat outline. */
     gfx_draw_line(&bar_gfx, 0, 0, (int32_t)self->width - 1, 0, PANEL_BORDER_COLOR);
     gfx_draw_line(&bar_gfx, 0, 1, (int32_t)self->width - 1, 1, PANEL_BEVEL_COLOR);
 
@@ -494,20 +307,12 @@ static void redraw(wm_window_t *self) {
 
     draw_tray(self);
 
-    /* M45: the overhang rows are cleared on every redraw and repainted
-     * only if the menu is up. The compositor stops compositing them the
-     * moment the overhang goes back to 0, so this is belt-and-braces -
-     * but a stale menu surviving in a buffer that gets raised again is
-     * exactly the kind of thing that would show up once, confusingly. */
     gfx_fill_rect(&self->gfx, 0, 0, (int32_t)self->width, PANEL_OVERHANG_MAX, PANEL_BG);
     if (ctx_slot >= 0) {
         draw_ctx_menu(self);
     }
 }
 
-/* Which button (if any) is at (x, y) - HOVER_START, a running-slot index,
- * or HOVER_NONE. One function so the hover highlight and the click
- * handler can't disagree about where a button's edges are. */
 static int button_at(int32_t x, int32_t y) {
     if (y < BTN_Y || y >= BTN_Y + BTN_H) {
         return HOVER_NONE;
@@ -523,9 +328,6 @@ static int button_at(int32_t x, int32_t y) {
     return HOVER_NONE;
 }
 
-/* Raises the menu above the slot that was right-clicked, clamped so it
- * cannot be drawn off the bar's own left/right edges or ask for more
- * overhang than exists. */
 static void ctx_open_on(int slot, int32_t x, int32_t win_w) {
     ctx_slot = slot;
     ctx_hover = -1;
@@ -544,11 +346,6 @@ static void ctx_close(void) {
     ctx_hover = -1;
 }
 
-/* Both menu rows that end a window drive wm_send_action, exactly as the
- * bar's own left-click already does - Close is the polite verb
- * (WM_ACTION_CLOSE, which honors an app's confirm_close opt-in) and
- * Force Quit is the one that always works (WM_ACTION_KILL, which
- * deliberately does not). */
 static void ctx_activate(int row) {
     if (ctx_slot < 0 || ctx_slot >= running_count) {
         ctx_close();
@@ -580,22 +377,16 @@ static void handle_click(int32_t x, int32_t y) {
 
 int main(void) {
     wm_window_t win;
-    /* M45: the window is PANEL_BUF_H tall, but only PANEL_HEIGHT of it
-     * docks - see PANEL_OVERHANG_MAX. */
     if (wm_connect_panel(PANEL_BUF_H, PANEL_HEIGHT, &win) != 0) {
-        /* M56: loud - see desktop_icons.c's own note. */
         const char msg[] = "desktop_shell: no window from the compositor - exiting so init restarts the session\n";
         sys_write(1, msg, sizeof(msg) - 1);
         sys_exit(1);
     }
-    /* The bar's own drawing surface: the bottom PANEL_HEIGHT rows of the
-     * buffer, which is where the compositor docks them. Re-derived on
-     * every redraw - see bar_gfx_bind. */
     bar_gfx_bind(&win);
 
     refresh_running_slots(&win);
     redraw(&win);
-    wm_present(&win); /* M117: the first frame, like every other one */
+    wm_present(&win);
 
     long next_refresh = 0;
     for (;;) {
@@ -603,12 +394,8 @@ int main(void) {
         int changed = 0;
         while (wm_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
-                changed = 1; /* M55 - see WM_EVENT_EXPOSE */
+                changed = 1;
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
-                /* M45: right-click a running-app button -> its context
-                 * menu. Anywhere else on the bar just dismisses one that
-                 * is already up; there is nothing a right-click on the
-                 * Start button or the tray would sensibly offer. */
                 int hit = button_at(ev.x, ev.y);
                 if (hit >= 0) {
                     ctx_open_on(hit, running_slots[hit].x, (int32_t)win.width);
@@ -617,10 +404,6 @@ int main(void) {
                 }
                 changed = 1;
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ctx_slot >= 0) {
-                /* An open menu owns the next left-click outright - it
-                 * either picks a row or dismisses, and never also reaches
-                 * the taskbar button underneath it. Same rule every other
-                 * menu in this project follows. */
                 int row = ctx_row_at(ev.x, ev.y);
                 if (row >= 0) {
                     ctx_activate(row);
@@ -634,11 +417,6 @@ int main(void) {
                 refresh_running_slots(&win);
                 changed = 1;
             } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
-                /* M42: a panel gets these even unfocused, and gets one
-                 * final event as the cursor leaves it - see compositor.c's
-                 * routing block. Redrawing only when the answer actually
-                 * changes keeps a moving cursor from repainting the whole
-                 * bar on every single event. */
                 if (ctx_slot >= 0) {
                     int row = ctx_row_at(ev.x, ev.y);
                     if (row != ctx_hover) {
@@ -660,9 +438,6 @@ int main(void) {
             next_refresh = now + REFRESH_INTERVAL_MS;
             changed = 1;
         }
-        /* The Start button's press flash expires on a timer, with no
-         * event to announce it - so the tick that crosses that deadline
-         * has to repaint even if nothing else changed. */
         static int was_pressed;
         int pressed = now < start_pressed_until_ms;
         if (pressed != was_pressed) {
@@ -673,19 +448,11 @@ int main(void) {
             redraw(&win);
             wm_present(&win);
         }
-        /* M45: tell the compositor how far out of the bar to draw, after
-         * the pixels are already there - raising the overhang first would
-         * composite one frame of whatever the buffer last held. Only on a
-         * change: this is a pipe write, and it runs every loop. */
         int32_t want = ctx_needed_overhang();
         if (want != ctx_overhang) {
             ctx_overhang = want;
             wm_set_panel_overhang(win.window_id, want);
         }
-        /* M117: a pressed Start button and an open context menu are the
-         * two things here that change with time rather than with input,
-         * and both are short; everything else waits for the next refresh
-         * or an event. */
         wm_wait_ms(&win, NULL, 0, (pressed || ctx_overhang) ? 50 : (int)(next_refresh - now));
     }
 }

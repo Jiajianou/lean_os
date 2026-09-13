@@ -5,7 +5,7 @@
 #define VGA_MEM    ((volatile uint16_t *)0xB8000)
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
-#define VGA_ATTR   0x0F  /* white on black */
+#define VGA_ATTR   0x0F
 
 static size_t vga_row = 0;
 static size_t vga_col = 0;
@@ -52,4 +52,3 @@ void vga_putc(char c) {
         vga_scroll();
     }
 }
-

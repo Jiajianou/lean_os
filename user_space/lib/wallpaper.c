@@ -1,16 +1,5 @@
 #include "wallpaper.h"
 
-/* Each style is a pair of percentages applied to the chosen background
- * color - what the top row and the bottom row scale it to - and the rows
- * in between are the straight-line interpolation of those two. Deriving
- * both ends from one color is what keeps every style in the set
- * recognizably the *same* desktop rather than four unrelated palettes,
- * and it is why the color picker and this picker compose instead of
- * competing.
- *
- * WALLPAPER_FLAT is 100/100 on purpose: it is exactly the flat fill
- * every desktop before M44 had, kept as a real choice rather than
- * removed, so "I don't want a gradient" stays available. */
 typedef struct {
     const char *name;
     int32_t top_pct;
@@ -21,18 +10,16 @@ static const wallpaper_style_t STYLES[WALLPAPER_COUNT] = {
     {"Flat",     100, 100},
     {"Gradient", 155,  60},
     {"Deep",      95,  25},
-    {"Grid",     155,  60}, /* the same ramp as Gradient, plus the lines below */
+    {"Grid",     155,  60},
 };
 
 #define GRID_STEP 64
-#define GRID_PCT  190 /* the grid lines, brighter than the ramp's own top */
+#define GRID_PCT  190
 
 static int style_index(int id) {
     return (id < 0 || id >= WALLPAPER_COUNT) ? WALLPAPER_FLAT : id;
 }
 
-/* base * pct / 100 per channel, clamped - the one place a style's
- * percentages turn into a real color. */
 static uint32_t scale_color(uint32_t c, int32_t pct) {
     uint32_t out = 0;
     for (int shift = 16; shift >= 0; shift -= 8) {
@@ -49,10 +36,6 @@ const char *wallpaper_name(int id) {
     return STYLES[style_index(id)].name;
 }
 
-/* The color of row `row` of a `height`-tall wallpaper - the whole of the
- * gradient math. Internal: the only caller is wallpaper_fill just below,
- * and the interpolation is checked end to end from real framebuffer
- * pixels by kernel.c's [m44] self-test rather than by calling this. */
 static uint32_t wallpaper_row_color(int id, uint32_t base, int32_t row, int32_t height) {
     const wallpaper_style_t *style = &STYLES[style_index(id)];
     uint32_t top = scale_color(base, style->top_pct);
@@ -76,9 +59,6 @@ static uint32_t wallpaper_row_color(int id, uint32_t base, int32_t row, int32_t 
 }
 
 void wallpaper_fill(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, int id, uint32_t base) {
-    /* One gfx_fill_rect per row rather than a per-pixel loop - M44's own
-     * perf pass made that a clipped row-store, so a full-screen wallpaper
-     * is `height` tight row fills and nothing else. */
     for (int32_t row = 0; row < h; row++) {
         gfx_fill_rect(ctx, x, y + row, w, 1, wallpaper_row_color(id, base, row, h));
     }

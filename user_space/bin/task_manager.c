@@ -1,40 +1,6 @@
-/* user_space/bin/task_manager.c
- *
- * M45: the thing this OS had no version of - somewhere to *see* what is
- * running, and a way to stop it. Everything underneath already existed
- * (SYS_kill since M14, M29's crash-reclaim path, M42's fix for
- * signalling a task blocked inside a syscall); what was missing was
- * entirely above the kernel.
- *
- * One SYS_taskinfo call (system_api/include/proc.h) per refresh gives a
- * whole snapshot of the task table - pid, name, state, parent, plus the
- * open-fd and shm-segment counts that make a resource leak visible from
- * user space for the first time. Refreshed on a timer exactly the way
- * file_manager.c already refreshes its listing, and driven with the same
- * interaction file_manager.c uses (Up/Down + Enter, or click to select)
- * rather than inventing a third one.
- *
- * End Task sends SIGTERM, Force Quit sends SIGKILL. The distinction
- * matters here for the same reason it does in the window manager
- * (WM_ACTION_CLOSE vs WM_ACTION_KILL): a GUI client that opted into
- * M36's confirm-close is allowed to ignore a polite request forever.
- *
- * The four processes that *are* the desktop are listed but refused, and
- * say so rather than silently ignoring the click. That guard lives here,
- * not in sys_kill: the kernel stays exactly as permissive as it has
- * always been, because a real rule there needs a permission model this
- * project doesn't have - and inventing one for four hardcoded names
- * would be the first fake permission check in the project.
- */
-/* M57: two sizes in one window, and the split is the point. Chrome -
- * the title strip, the status line, the two buttons - is the 16-row UI
- * face, the same one every other window in this desktop uses. The list
- * itself is the 12-row face: a process table is exactly the "dense
- * list" that smaller size exists for, and it buys four more visible
- * rows out of the same window. */
 #define LIST_FONT   ui_font_small
 #define LIST_FONT_H UI_FONT_SMALL_HEIGHT
-#include "signal.h"   /* system_api/include/signal.h - SIGTERM/SIGKILL */
+#include "signal.h"
 #include "str.h"
 #include "syscall_wrappers.h"
 #include "wmclient.h"
@@ -43,8 +9,8 @@
 #define WIN_H 360
 #define ROW_H (LIST_FONT_H + 4)
 #define HEADER_H 22
-#define COLS_H   18 /* the column-label strip under the header */
-#define FOOTER_H 34 /* the two action buttons plus the status line above them */
+#define COLS_H   18
+#define FOOTER_H 34
 #define LIST_Y   (HEADER_H + COLS_H)
 #define SCROLLBAR_W 8
 #define LIST_W (WIN_W - SCROLLBAR_W)
@@ -67,57 +33,20 @@
 #define STATUS_OK       0x0090C0A0u
 #define STATUS_ERR      0x00E08878u
 
-/* Column x offsets. Fixed rather than measured: every field here has a
- * known maximum width (a pid is at most a few digits at MAX_TASKS = 64,
- * a state is one of three fixed words, and a name is bounded by
- * TASK_INFO_NAME_MAX), so laying them out by hand is honest and a
- * measure-then-place pass would be pretending otherwise. */
 #define COL_PID   6
 #define COL_NAME  56
 #define COL_STATE 232
 #define COL_PPID  308
 #define COL_RES   356
 
-/* M50: TASK_INFO_MAX (system_api/include/proc.h) *is* the scheduler's
- * MAX_TASKS - one definition on both sides of the syscall, not two.
- *
- * This used to be a private 64 with a comment arguing that a constant
- * "at least as large" was fine, in the style file_manager.c uses for
- * leanfs's name length. It was fine until M48 raised the kernel's to 128,
- * at which point this window silently listed only the first 64 processes:
- * End Task acted on a long-dead task from the boot self-tests and the
- * live one you were looking at wasn't on screen at all. A cap you have to
- * remember to raise in two places is a cap that will be wrong. */
 #define MAX_ENTRIES TASK_INFO_MAX
 
-/* The processes that must not be ended from here. Matched by name
- * because that is what SYS_taskinfo reports and what a person reading the
- * list sees; a pid would be no safer (they are not fixed) and much less
- * obvious here.
- *
- * M55 rewrites this list in both directions, and the reasoning is the
- * point of the milestone:
- *
- *  - "kernel" and "cpu-idle" are *added*, and their absence was a real
- *    hazard nobody had noticed. SYS_taskinfo reports every task including
- *    the scheduler's own, so End Task on the first row of this window
- *    would have sent SIGKILL to task 0 - which is not an app crashing,
- *    it is the machine stopping. Killing the kernel's own idle task is
- *    the one thing on this screen with no recovery at all.
- *
- *  - "compositor", "desktop_shell" and "desktop_icons" are *removed*.
- *    They were here because killing one took the screen away and nothing
- *    brought it back; M55 makes init supervise all three and restart the
- *    session, and makes every client reconnect to a replacement
- *    compositor, so ending one of them is now a flicker. A guard against
- *    something that no longer happens is a guard that is lying. */
 static const char *const PROTECTED[] = {"init", "kernel", "cpu-idle"};
 #define PROTECTED_COUNT ((int)(sizeof(PROTECTED) / sizeof(PROTECTED[0])))
 
 #define REFRESH_MS 1000
 #define DOUBLE_CLICK_MS 500
 
-/* The two action buttons, laid out from the window's right edge. */
 #define BTN_W 96
 #define BTN_H 22
 #define BTN_Y (WIN_H - BTN_H - 6)
@@ -130,10 +59,6 @@ static int selected = -1;
 static int scroll_top;
 static const char *status_text = "";
 static uint32_t status_color = STATUS_OK;
-/* M46: which action button is being held (0 = End Task, 1 = Force Quit,
- * -1 = neither) - the pressed look gfx_draw_button_state draws. Cleared
- * on button-up and on the pointer leaving the button while held, so a
- * click that slides off doesn't leave one stuck down. */
 static int pressed_btn = -1;
 
 static int is_protected(const char *name) {
@@ -152,10 +77,6 @@ static const char *state_name(int32_t state) {
     return state == TASK_INFO_RUNNING ? "running" : "ready";
 }
 
-
-/* Small unsigned decimal into a caller-supplied buffer (>= 12 bytes) -
- * this project's str.h has no itoa, and every number on this screen is a
- * pid, a count or an exit code, all comfortably small. */
 static void format_int(int32_t v, char *out) {
     if (v < 0) {
         out[0] = '-';
@@ -174,9 +95,6 @@ static void format_int(int32_t v, char *out) {
     out[n] = '\0';
 }
 
-/* "fds/shm" as one short field - two numbers that are only ever read
- * together (is anything leaking?) and would otherwise cost two columns
- * to say the same thing. */
 static void format_resources(const task_info_t *t, char *out) {
     char a[12], b[12];
     format_int(t->open_fds, a);
@@ -215,9 +133,6 @@ static void clamp_scroll(void) {
     }
 }
 
-/* Both buttons funnel through here - the only difference between End
- * Task and Force Quit is which signal, which is exactly the distinction
- * worth having and not worth duplicating a function over. */
 static void signal_selected(int sig) {
     if (selected < 0 || selected >= task_count) {
         status_text = "Nothing selected.";
@@ -247,10 +162,6 @@ static void signal_selected(int sig) {
 
 static void draw_row(wm_window_t *win, int i, int32_t y) {
     const task_info_t *t = &tasks[i];
-    /* A terminated task is dimmed rather than dropped: its slot is never
-     * recycled (the scheduler never reuses an id), and seeing what just
-     * exited - and with what code - is most of the value of watching this
-     * list while something dies. */
     int dead = (t->state == TASK_INFO_TERMINATED);
     uint32_t fg = dead ? DIM_TEXT_COLOR : TEXT_COLOR;
     if (i == selected) {
@@ -292,9 +203,6 @@ static void redraw(wm_window_t *win) {
                         task_count, ROWS_VISIBLE, scroll_top,
                         SCROLLBAR_TRACK, SCROLLBAR_THUMB);
 
-    /* The status line sits directly above the buttons that write to it -
-     * an in-window message about the window you are looking at, which is
-     * the right place for it. */
     gfx_draw_text(&win->gfx, 8, BTN_Y - (int32_t)gfx_ui_font()->height - 2, status_text, status_color);
     gfx_draw_button_state(&win->gfx, END_BTN_X, BTN_Y, BTN_W, BTN_H, BTN_BG, BTN_BORDER,
                            "End Task", BTN_TEXT, pressed_btn == 0);
@@ -311,7 +219,7 @@ int main(void) {
     refresh_tasks();
     redraw(&win);
 
-    wm_present(&win); /* M117: the first frame, like every other one */
+    wm_present(&win);
     long next_refresh = sys_uptime_ms() + REFRESH_MS;
     long last_click_ms = -1;
     int last_click_row = -1;
@@ -321,7 +229,7 @@ int main(void) {
         wm_event_t ev;
         while (wm_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
-                changed = 1; /* M55: a replacement compositor handed this client a blank buffer - see WM_EVENT_EXPOSE */
+                changed = 1;
             } else if (ev.type == WM_EVENT_KEY) {
                 if (ev.ch == KBD_KEY_UP && selected > 0) {
                     selected--;
@@ -332,16 +240,10 @@ int main(void) {
                     clamp_scroll();
                     changed = 1;
                 } else if (ev.ch == '\n' || ev.ch == '\r') {
-                    /* Enter is the polite verb, matching the leftmost
-                     * button - Force Quit stays a deliberate click. */
                     signal_selected(SIGTERM);
                     changed = 1;
                 }
             } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
-                /* M49: same one-row-per-detent, view-only scroll the file
-                 * manager uses - and for the same reason: End Task acts
-                 * on the selection, so a wheel that moved it would be a
-                 * gesture that can kill the wrong process. */
                 int max_top = task_count - ROWS_VISIBLE;
                 if (max_top < 0) {
                     max_top = 0;
@@ -409,6 +311,6 @@ int main(void) {
             redraw(&win);
             wm_present(&win);
         }
-        wm_wait_ms(&win, NULL, 0, (int)(next_refresh - now)); /* M117: block until an event, a deadline, or the liveness cap - see wm_wait_ms */
+        wm_wait_ms(&win, NULL, 0, (int)(next_refresh - now));
     }
 }

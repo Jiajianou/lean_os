@@ -1,29 +1,3 @@
-/* tests/gcc/hello.c - M94's fixture.
- *
- * Compiled by x86_64-lean_os-gcc with **no flag supplied by hand** -
- * which is the milestone, because every flag invented by hand is a flag
- * someone else's build system will not pass. See tools/gcc-test.sh,
- * which is the one place the compile line is written and where you can
- * check that it is `$CC hello.c -o gcctest` and nothing else.
- *
- * What it exercises, and why each line is here rather than a printf:
- *
- *   - a CONSTRUCTOR, which proves crti.o/crtbegin.o/crtend.o/crtn.o were
- *     linked in the right order and that .init_array is walked. A
- *     constructor that silently does not run is the failure mode a
- *     startup-file mistake actually has, and it is invisible to a
- *     program that only prints.
- *   - atexit, which proves the other end of the same machinery.
- *   - malloc and free, which reach this project's own allocator through
- *     libc.a out of the sysroot rather than through a link line.
- *   - a float, which pulls in libgcc (the compiler's own runtime, built
- *     for this target by the port) and SSE state (M63).
- *   - a struct returned by value and a varargs call, which are the two
- *     places a hand-written ABI usually diverges.
- *
- * It prints one line per check, and the boot self-test greps for the
- * last one - which only appears if every earlier line did.
- */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,9 +12,6 @@ static void ran_before_main(void) {
 }
 
 static void ran_after_main(void) {
-    /* Nothing can observe this from inside the program, so it writes to
-     * stdout - which the kernel's self-test reads. An atexit handler
-     * that did not run would simply be a line that is not there. */
     if (destructed_ok) {
         printf("gcctest: atexit ran\n");
     }
@@ -100,8 +71,6 @@ int main(void) {
     }
     printf("gcctest: struct return and varargs\n");
 
-    /* A division the compiler cannot fold, so it is really SSE at run
-     * time rather than a constant in .rodata. */
     volatile double a = 355.0;
     volatile double b = 113.0;
     double pi = a / b;

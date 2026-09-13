@@ -1,21 +1,3 @@
-/* user_space/bin/nettime.c
- *
- * M64: asks a time server what time it is, and can set the clock to the
- * answer - "SNTP as the second way to know the time", which is how the
- * stretch-goal entry put it, next to M59's CMOS RTC as the first.
- *
- *   nettime            - ask the gateway (which, on QEMU, will not answer)
- *   nettime 1.2.3.4    - ask that server
- *   nettime -s 1.2.3.4 - ...and set the clock to what it says
- *
- * The default is the gateway rather than a name like pool.ntp.org
- * because there is no resolver in this OS yet, and rather than a
- * hardcoded public address because a program that silently reaches out
- * to somebody else's server is a thing a person should have to type.
- * On the one network this project boots on, the gateway does not run
- * NTP - so the default run prints a clean "no reply", which is exactly
- * the outcome worth being sure is clean.
- */
 #include <stdio.h>
 #include <string.h>
 

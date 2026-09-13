@@ -1,21 +1,3 @@
-/* tests/fakes/fake_kernel_objects.c - Q13
- *
- * The refcounted things a task's descriptor table points at, and the two
- * calls a dying task makes into subsystems that are not the scheduler.
- *
- * kernel/sched/sched.c holds pointers to pipes, open files and sockets
- * and does exactly one thing with them - takes a reference when a task
- * inherits a descriptor and drops it when the task dies. That is
- * ownership bookkeeping, and it is testable *as* bookkeeping: this file
- * counts the references outstanding, so "a task that forked and exited
- * left every descriptor's refcount where it found it" becomes an
- * assertion rather than an argument.
- *
- * Linking the real pipe.c, openfile.c and socket.c instead would test
- * three more subsystems at once and make a scheduler failure read as a
- * pipe failure. Counting is the whole of what the scheduler is
- * responsible for here.
- */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -46,11 +28,6 @@ void pipe_unref_write(struct pipe *p) { (void)p; refs_pipe_write--; }
 
 void openfile_ref(struct openfile *f) { (void)f; refs_file++; }
 void openfile_unref(struct openfile *f) { (void)f; refs_file--; }
-/* M100: the record-lock table (kernel/fs/flock.c) is NOT faked. It is
- * pure logic with no scheduler in it, it is a real unit in this tier
- * (test_flock.c), and the scheduler's one call into it - releasing a
- * dead task's locks - is best graded against the real table: a test can
- * take a lock as a task and assert flock_count() after the task exits. */
 
 void socket_ref(struct socket *s) { (void)s; refs_socket++; }
 void socket_unref(struct socket *s) { (void)s; refs_socket--; }
@@ -62,11 +39,6 @@ void process_destroy_address_space(uint64_t pml4_phys) {
     destroyed_spaces++;
 }
 
-/* The demand-paging seam. sched_fault_fill reaches these for a
- * file-backed mapping; nothing in the scheduler tests maps a file, and a
- * fake that answered would be inventing a filesystem. Both refuse, which
- * is the answer for "there is no file behind this address" and is a path
- * the scheduler has to handle either way. */
 int64_t vfs_handle_read(int handle, void *buf, size_t len, uint32_t off) {
     (void)handle; (void)buf; (void)len; (void)off;
     return -1;

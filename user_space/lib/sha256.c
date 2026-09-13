@@ -1,22 +1,5 @@
-/* user_space/lib/sha256.c - M111
- *
- * FIPS 180-4 section 6.2, written from the specification. See sha256.h
- * for why this project has one at all rather than reusing mbedtls's.
- *
- * Nothing clever is attempted here. The message schedule is the full
- * 64-word array rather than the 16-word rolling window, because the
- * rolling version is the same arithmetic with an index trick and this
- * one can be read against the standard line by line - and the whole
- * value of a hash written here is that somebody can check it against
- * the document. The one measurement: 1 MiB costs 11 ms on this machine's
- * QEMU target, which is under a tenth of what reading that megabyte off
- * a cold virtio disk costs (see tests/budgets.tsv), so the hash is not
- * what an install waits for.
- */
 #include "sha256.h"
 
-/* The first thirty-two bits of the fractional parts of the cube roots of
- * the first sixty-four primes - FIPS 180-4 table 4.2.3. */
 static const uint32_t K[64] = {
     0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
     0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
@@ -73,8 +56,6 @@ static void sha256_block(sha256_t *s, const uint8_t *p) {
 }
 
 void sha256_init(sha256_t *s) {
-    /* The first thirty-two bits of the fractional parts of the square
-     * roots of the first eight primes - FIPS 180-4 section 5.3.3. */
     s->h[0] = 0x6a09e667u; s->h[1] = 0xbb67ae85u;
     s->h[2] = 0x3c6ef372u; s->h[3] = 0xa54ff53au;
     s->h[4] = 0x510e527fu; s->h[5] = 0x9b05688cu;
@@ -118,14 +99,9 @@ void sha256_update(sha256_t *s, const void *data, size_t len) {
 void sha256_final(sha256_t *s, uint8_t out[SHA256_DIGEST_BYTES]) {
     uint64_t bits = s->bits;
 
-    /* 0x80, then zeros, then the length as a 64-bit big-endian count of
-     * BITS. The bit count and not the byte count is the part that is
-     * easy to get wrong and impossible to notice without a vector: a
-     * hash over the byte count agrees with itself perfectly and with
-     * nothing else in the world. */
     uint8_t pad = 0x80;
     sha256_update(s, &pad, 1);
-    s->bits = bits; /* padding is not message; undo update's accounting */
+    s->bits = bits;
 
     uint8_t zero = 0;
     while (s->buffered != 56) {
@@ -182,9 +158,6 @@ int sha256_unhex(const char *hex, uint8_t out[SHA256_DIGEST_BYTES]) {
             out[i / 2] = (uint8_t)(v << 4);
         }
     }
-    /* Exactly 64 digits. A 65-character string whose first 64 are hex is
-     * not a digest, and accepting it would mean "a3f...9c junk" verified
-     * a package. */
     return hex[SHA256_DIGEST_BYTES * 2] == '\0' ? 0 : -1;
 }
 

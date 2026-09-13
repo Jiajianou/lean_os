@@ -1,7 +1,7 @@
 #include "lapic.h"
 
 #include "drivers/klog.h"
-#include "isr.h" /* LAPIC_SPURIOUS_VECTOR - shared with idt.c's gate install */
+#include "isr.h"
 #include "mm/vmm.h"
 
 #define LAPIC_REG_ID       0x020u
@@ -24,11 +24,6 @@ static inline void lapic_write(uint32_t reg, uint32_t value) {
 }
 
 void lapic_init(uint64_t phys_base) {
-    /* virt == phys: simplest choice, and nothing else in this kernel's
-     * address space ever wants this physical range (it's hardware MMIO,
-     * not real memory - see vmm.c's own note on why an arbitrary 1:1
-     * mapping outside the identity range is safe: it's just a page-table
-     * entry, not a pmm-tracked frame). */
     vmm_map_page(phys_base, phys_base, VMM_FLAG_WRITABLE);
     lapic_mmio = (volatile uint32_t *)(uintptr_t)phys_base;
 

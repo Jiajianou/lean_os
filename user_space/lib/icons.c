@@ -1,6 +1,6 @@
 #include "icons.h"
 
-#include "icon.h" /* system_api/include/icon.h - the format these blobs are in */
+#include "icon.h"
 
 void icon_draw(gfx_ctx_t *ctx, int32_t x, int32_t y, const uint8_t *blob, int32_t scale) {
     if (!icon_valid(blob) || scale < 1) {
@@ -15,10 +15,10 @@ void icon_draw(gfx_ctx_t *ctx, int32_t x, int32_t y, const uint8_t *blob, int32_
             int i = row * w + col;
             int idx = (i & 1) ? (px[i >> 1] & 0x0F) : (px[i >> 1] >> 4);
             if (idx == 0) {
-                continue; /* transparent - see icon.h on why index 0 is reserved */
+                continue;
             }
             if (idx >= icon_palette_count(blob)) {
-                continue; /* a malformed blob draws nothing rather than reading past its own palette */
+                continue;
             }
             uint32_t color = ((uint32_t)pal[idx * 3] << 16) |
                               ((uint32_t)pal[idx * 3 + 1] << 8) |
@@ -27,17 +27,6 @@ void icon_draw(gfx_ctx_t *ctx, int32_t x, int32_t y, const uint8_t *blob, int32_
         }
     }
 }
-
-/* ---- the icons -------------------------------------------------------
- *
- * 24x24, generated rather than typed - each one is a handful of
- * rectangles, discs and lines composed into an index grid and then
- * packed into the format icon.h describes. They are checked in as bytes
- * because that is what the loader reads and what the format *is*; the
- * shapes behind them are simple enough to redraw from the picture, and a
- * build-time generator for seven small constants would be more machinery
- * than the machinery it replaced.
- */
 
 const uint8_t ICON_TERMINAL[] = {
     0x4C, 0x49, 0x43, 0x31, 0x18, 0x18, 0x04, 0x00, 0x00, 0x00, 0x00, 0x16,
@@ -213,11 +202,6 @@ const uint8_t ICON_PAINT[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-/* M100: the browser. A globe, which is what every browser icon on every
- * desktop has been since 1994 - the one icon in this set whose meaning
- * is a convention rather than a picture of the thing. Five colours
- * rather than the usual four: the meridians need a light blue that is
- * distinct from the fill, or a 24x24 sphere reads as a plain disc. */
 const uint8_t ICON_BROWSER[] = {
     0x4C, 0x49, 0x43, 0x31, 0x18, 0x18, 0x05, 0x00, 0x00, 0x00, 0x00, 0x1E,
     0x5A, 0x96, 0x4C, 0x99, 0xE6, 0xCC, 0xE8, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,

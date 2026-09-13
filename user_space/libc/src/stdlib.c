@@ -1,18 +1,15 @@
 #include <stdlib.h>
-#include <errno.h>     /* M89: mkstemp/mkdtemp report why they gave up */
-#include <fcntl.h>     /* M89: O_CREAT|O_EXCL, which is what makes mkstemp safe */
-#include <unistd.h>    /* M98: access/F_OK, which is all mktemp can honestly do */
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <string.h>
-#include <sys/stat.h>  /* M89: mkdir, for mkdtemp */
+#include <sys/stat.h>
 
-#include "malloc.h"           /* user_space/lib - malloc/free, M19 */
-#include "syscall_wrappers.h" /* sys_exit */
+#include "malloc.h"
+#include "syscall_wrappers.h"
 
 void *calloc(size_t count, size_t size) {
     size_t total = count * size;
-    /* Overflow is the one thing calloc is *for* checking - a caller that
-     * multiplied itself would have allocated a small buffer and written
-     * a large one. */
     if (count != 0 && total / count != size) {
         return (void *)0;
     }
@@ -23,12 +20,6 @@ void *calloc(size_t count, size_t size) {
     return p;
 }
 
-/* No size header to consult, so this cannot know the old block's length -
- * see malloc.c, whose free list keeps that privately. Copying `size`
- * bytes is safe when growing and correct when shrinking; the case it
- * cannot serve is growing *from* a block smaller than the new size,
- * where it would read past the old allocation. malloc.c's header is
- * right there, so this asks it. */
 void *realloc(void *ptr, size_t size) {
     if (!ptr) {
         return malloc(size);
@@ -47,16 +38,7 @@ void *realloc(void *ptr, size_t size) {
     return p;
 }
 
-/* M94: exit runs what was registered; _exit does not. See
- * __lean_run_exit_handlers in env.c, and <unistd.h>'s note on _exit,
- * which predicted this distinction becoming real. */
 extern void __lean_run_exit_handlers(void);
-/* M98: stdio buffers its writes now, so a program that printf'd and
- * returned from main must have those bytes flushed before the process
- * ends - which is what every C library does at exit and what C requires
- * ("all open streams are flushed"). Declared here rather than in a
- * header because it is not part of the interface: nothing but exit()
- * has any business calling it. */
 extern void __lean_stdio_flush_all(void);
 
 void exit(int status) {
@@ -68,14 +50,6 @@ void exit(int status) {
 }
 
 void abort(void) {
-    /* Deliberately does NOT run the exit handlers, and since M98
-     * deliberately does not flush stdio either. abort() means the
-     * program has decided its own state is not trustworthy, and running
-     * a flush over a corrupt buffer is how a crash turns into a
-     * corrupted file. C says the same thing in more words. */
-    /* Nonzero and distinctive: a process that aborted did not finish, and
-     * a task manager row showing 134 (128 + SIGABRT, the convention
-     * everywhere) says which kind of not-finishing it was. */
     sys_exit(134);
     for (;;) {
     }
@@ -166,16 +140,13 @@ double strtod(const char *s, char **end) {
                 exp10 = exp10 * 10 + (*p - '0');
                 p++;
             }
-            /* Repeated multiplication rather than a pow() call: this is
-             * the one place in the library that must not depend on
-             * math.c, which is allowed to depend on this one. */
             double factor = 1.0;
             for (int i = 0; i < exp10; i++) {
                 factor *= 10.0;
             }
             value = eneg ? value / factor : value * factor;
         } else {
-            p = save; /* "1e" is a number followed by a letter, not a bad number */
+            p = save;
         }
     }
     if (end) {
@@ -204,10 +175,6 @@ long labs(long v) {
     return v < 0 ? -v : v;
 }
 
-/* The exact generator C89 prints in its own specification - chosen for
- * that reason rather than for its quality, so a ported program that was
- * written against "whatever rand() does" gets the behaviour its author
- * most likely saw. */
 static unsigned long rand_state = 1;
 
 int rand(void) {
@@ -219,14 +186,6 @@ void srand(unsigned int seed) {
     rand_state = seed;
 }
 
-/* ---- M80 groundwork ---------------------------------------------------
- *
- * The unsigned and long-long conversions, and the two search/sort
- * routines every C program eventually reaches for. Each shares the
- * digit-parsing shape strtol already had rather than reimplementing it,
- * because two parsers that disagree about what "0x" means is exactly the
- * kind of near-duplicate this project keeps out.
- */
 static unsigned long long strtoull_common(const char *s, char **end, int base, int *negated) {
     const char *p = s;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f' || *p == '\v') {
@@ -266,9 +225,6 @@ static unsigned long long strtoull_common(const char *s, char **end, int base, i
         acc = acc * (unsigned long long)base + (unsigned long long)d;
     }
     if (end) {
-        /* No digits at all means nothing was consumed, which the standard
-         * signals by handing back the ORIGINAL string rather than the
-         * point the sign or prefix reached. */
         *end = (char *)(p == digits_start ? s : p);
     }
     return acc;
@@ -292,16 +248,6 @@ long long strtoll(const char *s, char **end, int base) {
     return neg ? -(long long)v : (long long)v;
 }
 
-/* Insertion sort over a byte-wise swap. Not quicksort, and the reason is
- * this project's own measure-first rule: the callers here sort tens of
- * elements, where an insertion sort is genuinely faster than a
- * partitioning one and is a third of the code. The day something sorts
- * ten thousand elements and says so, this is the function to replace -
- * and its interface will not change when it is.
- *
- * Stable, which qsort is not required to be and which costs nothing
- * here; a caller that depended on it would be depending on an accident,
- * so this is a note rather than a promise. */
 void qsort(void *base, size_t count, size_t size, int (*cmp)(const void *, const void *)) {
     unsigned char *a = (unsigned char *)base;
     for (size_t i = 1; i < count; i++) {
@@ -339,13 +285,6 @@ void *bsearch(const void *key, const void *base, size_t count, size_t size,
     return (void *)0;
 }
 
-/* ---- M89: mkstemp/mkdtemp - see <stdlib.h> for the exclusion argument */
-
-/* The candidate name is built from three things that differ between two
- * processes racing here: the pid, the uptime in milliseconds, and a
- * counter that advances on every attempt. None of them is a random
- * number, and this is not a security boundary - O_EXCL is what makes the
- * result correct, and these only decide how many attempts it takes. */
 static int fill_template(char *template, unsigned int salt) {
     size_t n = 0;
     while (template[n]) {
@@ -364,7 +303,7 @@ static int fill_template(char *template, unsigned int salt) {
     for (size_t i = n - 6; i < n; i++) {
         template[i] = alphabet[salt % (sizeof(alphabet) - 1)];
         salt /= (sizeof(alphabet) - 1);
-        salt += 7919; /* so the six characters do not all collapse to one */
+        salt += 7919;
     }
     return 0;
 }
@@ -390,22 +329,6 @@ int mkstemp(char *template) {
     return -1;
 }
 
-/* M98's probe found this missing, and it is the one of the three that
- * cannot be made safe.
- *
- * `mktemp` picks a name that does not exist and RETURNS it, so between
- * the check and whatever the caller does with it anything may take the
- * name. mkstemp exists precisely because of that gap, and every modern
- * system marks this deprecated. It is here anyway, and the reason is the
- * same one <sys/mount.h> gives about refusing rather than stubbing: GNU
- * libiberty's choose-temp.c calls it by name, so absence is a build
- * failure in the first file of the first library of binutils - and a
- * caller that has decided it wants this behaviour is not made safer by
- * being unable to link.
- *
- * What IS done about it: the name is chosen with the same three inputs
- * mkstemp uses and is verified not to exist, and both headers say what
- * the race is. */
 char *mktemp(char *template) {
     if (!template) {
         errno = EINVAL;
@@ -422,8 +345,6 @@ char *mktemp(char *template) {
             return template;
         }
     }
-    /* POSIX: an empty string, not the untouched template - a caller that
-     * used it anyway would otherwise get a name ending in XXXXXX. */
     template[0] = '\0';
     errno = EEXIST;
     return template;
@@ -449,25 +370,11 @@ char *mkdtemp(char *template) {
     return (char *)0;
 }
 
-/* ---- M89: random()/srandom() ----------------------------------------
- *
- * The same linear congruential generator rand() uses, widened to
- * random()'s 31-bit range. BSD's random() is historically a trinomial
- * additive-feedback generator with a much longer period, and this is not
- * that - which is worth stating rather than implying, because the whole
- * reason a program calls random() instead of rand() is that it wants the
- * better one.
- *
- * What it is NOT is a source of unpredictability, and neither is BSD's:
- * both are deterministic from the seed. Nothing on this machine should
- * be using either for anything that needs to be unguessable, and nothing
- * does - `shuf` is what asked for it.
- */
 static unsigned int random_state = 1;
 
 long random(void) {
     random_state = random_state * 1103515245u + 12345u;
-    return (long)(random_state >> 1); /* 31 bits, which is random()'s range */
+    return (long)(random_state >> 1);
 }
 
 void srandom(unsigned int seed) {
@@ -475,22 +382,14 @@ void srandom(unsigned int seed) {
 }
 
 char *initstate(unsigned int seed, char *state, size_t n) {
-    /* The state array is not used: this generator's whole state is one
-     * 32-bit word (see above), so there is nothing to spread across the
-     * caller's buffer. Accepting the array and ignoring it is right -
-     * the caller's contract is that it owns the storage, not that the
-     * library must use all of it - and returning it back is what
-     * setstate() would be handed. */
     (void)n;
     random_state = seed;
     return state;
 }
 
 char *setstate(char *state) {
-    return state; /* see initstate: there is one state and it is not here */
+    return state;
 }
-
-/* ---- M89 - see <stdlib.h> and <string.h> for what each of these is -- */
 
 long double strtold(const char *s, char **end) {
     return (long double)strtod(s, end);
@@ -508,9 +407,6 @@ long long llabs(long long v) {
     return v < 0 ? -v : v;
 }
 
-/* M97: see <stdlib.h> for why these three exist at all. Written as one
- * division each so the compiler emits the single idiv that computes both
- * halves, which is the only argument these functions ever had. */
 div_t div(int num, int den) {
     div_t r;
     r.quot = num / den;
@@ -531,7 +427,3 @@ lldiv_t lldiv(long long num, long long den) {
     r.rem = num % den;
     return r;
 }
-
-/* M97 declared system() here and made it refuse, for want of a caller to
- * check it against. M100 found the caller (sqlite's shell) and it lives
- * in popen.c now, beside the two functions it shares a mechanism with. */

@@ -10,13 +10,10 @@
 #define HTTP_READ_MS    8000
 #define HTTP_HDR_MAX    2048
 
-/* Parses "http://host[:port]/path". Returns 0, or -1 for anything this
- * client cannot honestly do - which includes https, refused by name
- * rather than silently fetched in the clear. */
 static int split_url(const char *url, char *host, int host_cap,
                       uint16_t *port, char *path, int path_cap) {
     if (strncmp(url, "https://", 8) == 0) {
-        return -1; /* see http.h - not downgraded, refused */
+        return -1;
     }
     if (strncmp(url, "http://", 7) != 0) {
         return -1;
@@ -56,8 +53,6 @@ static int split_url(const char *url, char *host, int host_cap,
     return 0;
 }
 
-/* An IPv4 address in dotted form, so a URL can name one directly - which
- * is what the self-test does, because a loopback server has no name. */
 static int parse_dotted(const char *s, uint32_t *out) {
     uint32_t v = 0;
     int parts = 0;
@@ -93,7 +88,7 @@ static long read_until_closed(int fd, char *buf, long cap, long deadline) {
     while (sys_uptime_ms() < deadline) {
         long n = sys_recv(fd, buf + got, (uint32_t)(cap - got));
         if (n < 0) {
-            break; /* end of stream - the peer closed and the buffer is drained */
+            break;
         }
         if (n == 0) {
             sys_yield();
@@ -107,10 +102,6 @@ static long read_until_closed(int fd, char *buf, long cap, long deadline) {
     return got;
 }
 
-/* Chunked transfer coding, decoded in place. Every response that does not
- * carry a Content-Length uses it, so a client that skipped it would work
- * against some servers and not others - which is the worst of the three
- * possible states. */
 static long dechunk(char *buf, long len) {
     long in = 0, out = 0;
     while (in < len) {
@@ -136,7 +127,7 @@ static long dechunk(char *buf, long len) {
             in++;
         }
         if (size == 0) {
-            return out; /* the terminating zero-length chunk */
+            return out;
         }
         if (in + size > len) {
             return -1;
@@ -209,9 +200,6 @@ long http_get(const char *url, char *body, long cap, int *status_out) {
             return -3;
         }
 
-        /* HTTP/1.1 requires Host - it is what lets one address serve many
-         * names - and `Connection: close` is what lets this client know
-         * the body ended without having to trust a length it was given. */
         char req[768];
         int rn = 0;
         const char *parts[] = {"GET ", path, " HTTP/1.1\r\nHost: ", host,
@@ -241,7 +229,6 @@ long http_get(const char *url, char *body, long cap, int *status_out) {
             return -4;
         }
 
-        /* Split headers from body at the blank line. */
         long hdr_end = -1;
         for (long i = 0; i + 3 < got; i++) {
             if (body[i] == '\r' && body[i + 1] == '\n' &&
@@ -280,7 +267,7 @@ long http_get(const char *url, char *body, long cap, int *status_out) {
                 current[n++] = *loc++;
             }
             current[n] = '\0';
-            continue; /* bounded by the loop - see HTTP_MAX_REDIRECTS */
+            continue;
         }
 
         long blen = got - hdr_end;

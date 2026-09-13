@@ -1,8 +1,3 @@
-/* user_space/libc/src/syslog.c - M89
- *
- * syslog() over M70's kernel log. See <syslog.h> for why there is no
- * daemon and no second log.
- */
 #include <syslog.h>
 
 #include <stdio.h>
@@ -13,10 +8,10 @@
 
 static const char *log_ident;
 static int log_option;
-static int log_mask = 0xFF; /* everything, until setlogmask says otherwise */
+static int log_mask = 0xFF;
 
 void openlog(const char *ident, int option, int facility) {
-    (void)facility; /* one log, so a facility selects nothing */
+    (void)facility;
     log_ident = ident;
     log_option = option;
 }
@@ -55,23 +50,11 @@ void vsyslog(int priority, const char *format, va_list ap) {
         return;
     }
     size_t len = strlen(buf);
-    /* A trailing newline, because the kernel log is a stream of lines
-     * and syslog()'s callers conventionally do not supply one. */
     if (len + 1 < sizeof(buf) && (len == 0 || buf[len - 1] != '\n')) {
         buf[len++] = '\n';
         buf[len] = '\0';
     }
 
-    /* stderr, and only stderr - see <syslog.h>.
-     *
-     * The first version of this routed to M70's kernel log when the
-     * caller held CAP_SYSLOG. It does not, because there is no syscall
-     * that writes there: SYS_klog and SYS_klog_total are both readers,
-     * and the kernel log is written by the kernel. Writing this file
-     * against a call that does not exist was caught by the linker, which
-     * is the right place for it to be caught and is worth recording -
-     * the capability existing (`console` holds CAP_SYSLOG) made a write
-     * path look plausible when only a read path is there. */
     fputs(buf, stderr);
 }
 

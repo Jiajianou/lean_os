@@ -1,26 +1,3 @@
-/* tests/fakes/fake_pmm.c - Q2
- *
- * A physical frame allocator backed by host malloc.
- *
- * The frames it hands out are real, writable, 4 KiB-aligned host memory,
- * so code under test that maps a frame and writes through it does exactly
- * what it does on the machine. What is faked is where the addresses come
- * from - not what they are.
- *
- * Two things it adds that the real one cannot:
- *
- *   1. A settable failure point. fake_pmm_fail_after(n) makes the n+1'th
- *      allocation fail, which is how a test reaches "the machine ran out
- *      of memory" without a machine that has run out of memory. That is
- *      the branch Q9 is about and the one nothing has ever executed.
- *   2. A leak assertion. fake_pmm_outstanding() is the count of frames
- *      allocated and not freed, so a test can assert an operation is
- *      frame-neutral - the host-side version of the move M50 and M54
- *      already make on the machine.
- *
- * pmm_alloc_frame() keeps the real one's contract exactly: it panics
- * rather than returning 0. pmm_try_alloc_frame() is the one that returns
- * 0, and the difference between them is precisely what Q9 is about. */
 #include "mm/pmm.h"
 
 #include <stdint.h>
@@ -41,9 +18,8 @@ typedef struct {
 static frame_t frames[MAX_FRAMES];
 static uint64_t outstanding;
 static uint64_t total_allocs;
-static int64_t fail_after = -1;   /* -1: never fail */
+static int64_t fail_after = -1;
 
-/* Test-visible controls, declared in tests/fakes/fakes.h. */
 void fake_pmm_reset(void);
 void fake_pmm_fail_after(int64_t n);
 uint64_t fake_pmm_outstanding(void);
@@ -86,10 +62,6 @@ uint64_t pmm_try_alloc_frame(void) {
             if (posix_memalign(&p, FRAME_SIZE, FRAME_SIZE) != 0 || !p) {
                 return 0;
             }
-            /* Poisoned rather than zeroed, on purpose. The real allocator
-             * makes no promise about a fresh frame's contents, so code
-             * that depends on one being zero is wrong and should fail
-             * here rather than on hardware that happens to oblige. */
             memset(p, 0xCD, FRAME_SIZE);
             frames[i].base = p;
             frames[i].live = 1;
@@ -105,9 +77,6 @@ uint64_t pmm_try_alloc_frame(void) {
 uint64_t pmm_alloc_frame(void) {
     uint64_t f = pmm_try_alloc_frame();
     if (!f) {
-        /* The real contract, kept verbatim - including the wording, so a
-         * CHECK_PANIC in a test matches the same substring it would on
-         * the machine. */
         panic("pmm_alloc_frame: out of physical memory");
     }
     return f;
@@ -188,10 +157,6 @@ void pmm_free_contiguous(uint64_t phys_addr, uint64_t count) {
     pmm_free_frame(phys_addr);
 }
 
-/* Q13: the try_ form, which task_fork uses so its own out-of-memory
- * check is reachable. M102 found that check dead because it had been
- * written against the panicking variant; this tier is where "a fork that
- * cannot get a kernel stack returns NULL" gets executed at all. */
 uint64_t pmm_try_alloc_contiguous(uint64_t count) {
     if (fail_after >= 0 && (int64_t)total_allocs >= fail_after) {
         return 0;

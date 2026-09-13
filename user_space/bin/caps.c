@@ -1,16 +1,3 @@
-/* user_space/bin/caps.c
- *
- * M65: what this process is allowed to do.
- *
- * The counterpart to `netconf` and here for the same reason: a rule
- * nobody can see is a rule nobody can check. Run it from the shell and
- * you get the shell's descendants' set; run it under something more
- * restricted and you get that instead.
- *
- * `caps -a` lists every capability that exists, held or not, because
- * "what could I have been given" is a different question from "what do
- * I have" and the second one is much less useful on its own.
- */
 #include <stdio.h>
 #include <string.h>
 
