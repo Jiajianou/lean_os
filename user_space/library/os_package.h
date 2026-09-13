@@ -63,7 +63,7 @@ typedef struct {
 
 typedef struct {
     const uint8_t  *bytes;
-    size_t          len;
+    size_t          length;
     osp_header_t    header;
     osp_manifest_t  manifest;
     const osp_file_t *files;
@@ -87,15 +87,15 @@ enum {
     OSP_E_COUNT
 };
 
-const char *osp_strerror(int err);
+const char *osp_strerror(int error);
 
 int os_package_check_path(const char *path);
 
-int os_package_open(const uint8_t *bytes, size_t len, osp_t *out);
+int os_package_open(const uint8_t *bytes, size_t length, osp_t *out);
 
 const uint8_t *os_package_file_data(const osp_t *pkg, uint32_t i);
 
-int os_package_parse_manifest(const char *text, size_t len, osp_manifest_t *out);
+int os_package_parse_manifest(const char *text, size_t length, osp_manifest_t *out);
 
 uint32_t os_package_caps_from_names(const char *names, int *unknown_out);
 

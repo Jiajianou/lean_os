@@ -16,8 +16,8 @@ typedef enum {
     TCP_TIME_WAIT,
 } tcp_state_t;
 
-#define TCP_SEND_BUF   4096
-#define TCP_RECV_BUF   4096
+#define TCP_SEND_BUFFER   4096
+#define TCP_RECEIVE_BUFFER   4096
 #define TCP_MAX_TCBS   16
 #define TCP_DEFAULT_MSS 536
 #define TCP_MAX_MSS    1460
@@ -30,7 +30,7 @@ void tcp_init(void);
 
 void tcp_tick(void);
 
-void tcp_handle_packet(uint32_t source_ip, uint32_t destination_ip, const uint8_t *segment, uint16_t len);
+void tcp_handle_packet(uint32_t source_ip, uint32_t destination_ip, const uint8_t *segment, uint16_t length);
 
 struct tcpcb *tcp_open(void);
 void tcp_close(struct tcpcb *tcb);
@@ -46,7 +46,7 @@ struct tcpcb *tcp_accept(struct tcpcb *listener);
 
 int tcp_accept_pending(const struct tcpcb *listener);
 
-int tcp_send(struct tcpcb *tcb, const uint8_t *data, uint16_t len);
+int tcp_send(struct tcpcb *tcb, const uint8_t *data, uint16_t length);
 
 int tcp_receive(struct tcpcb *tcb, uint8_t *out, uint16_t max);
 

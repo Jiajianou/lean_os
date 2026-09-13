@@ -31,26 +31,26 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    char path[PATH_MAX_LEN];
+    char path[PATH_MAX_LENGTH];
     if (strchr(argv[i], '/')) {
         int n = 0;
-        for (; argv[i][n] && n < PATH_MAX_LEN - 1; n++) {
+        for (; argv[i][n] && n < PATH_MAX_LENGTH - 1; n++) {
             path[n] = argv[i][n];
         }
         path[n] = '\0';
     } else {
-        const char *dir = getenv("PATH");
-        if (!dir || !dir[0]) {
-            dir = PATH_BIN;
+        const char *directory = getenv("PATH");
+        if (!directory || !directory[0]) {
+            directory = PATH_BIN;
         }
         int n = 0;
-        for (; dir[n] && n < PATH_MAX_LEN - 2; n++) {
-            path[n] = dir[n];
+        for (; directory[n] && n < PATH_MAX_LENGTH - 2; n++) {
+            path[n] = directory[n];
         }
         if (n == 0 || path[n - 1] != '/') {
             path[n++] = '/';
         }
-        for (int k = 0; argv[i][k] && n < PATH_MAX_LEN - 1; k++) {
+        for (int k = 0; argv[i][k] && n < PATH_MAX_LENGTH - 1; k++) {
             path[n++] = argv[i][k];
         }
         path[n] = '\0';

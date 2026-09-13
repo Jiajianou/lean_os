@@ -63,12 +63,12 @@ void graphics_draw_scrollbar(graphics_context_t *context, int32_t x, int32_t y, 
                          int32_t total_items, int32_t visible_items, int32_t scroll_top,
                          uint32_t track_color, uint32_t thumb_color);
 
-#define GFX_CORNER_R 4
+#define GRAPHICS_CORNER_R 4
 int32_t graphics_corner_inset(int32_t row_from_edge);
 
-#define GFX_PAD 12
+#define GRAPHICS_PAD 12
 
-#define GFX_CIRCLE_D 14
+#define GRAPHICS_CIRCLE_D 14
 int32_t graphics_circle_inset(int32_t row_from_edge);
 
 void graphics_fill_rect_rounded(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);

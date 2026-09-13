@@ -36,18 +36,18 @@ int main(int argc, char **argv) {
         server = conf.gateway;
     }
 
-    char buf[16];
+    char buffer[16];
     uint32_t now = 0;
     sntp_result_t r = sntp_query(server, 1000, &now);
     if (r != SNTP_OK) {
-        printf("nettime: %s (%s)\n", os_ip_to_string(server, buf), sntp_strerror(r));
+        printf("nettime: %s (%s)\n", os_ip_to_string(server, buffer), sntp_strerror(r));
         return 1;
     }
 
     os_datetime_t t;
     os_civil_from_unix(now, &t);
     printf("%s says %04u-%02u-%02u %02u:%02u:%02u UTC\n",
-           os_ip_to_string(server, buf),
+           os_ip_to_string(server, buffer),
            t.year, t.month, t.day, t.hour, t.minute, t.second);
 
     if (set_clock) {

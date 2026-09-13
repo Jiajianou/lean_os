@@ -2,8 +2,8 @@
 #include "syscall_wrappers.h"
 
 int main(void) {
-    const char msg[] = "Hello, world from user_space!\n";
-    sys_write(1, msg, strlen(msg));
+    const char message[] = "Hello, world from user_space!\n";
+    sys_write(1, message, strlen(message));
 
     long pid = sys_getpid();
     char pid_message[] = "hello: my pid is 0x0000000000000000\n";

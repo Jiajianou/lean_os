@@ -67,7 +67,7 @@ int getgrouplist(const char *user, gid_t group, gid_t *groups, int *count) {
     return 1;
 }
 
-static int copy_gr(struct group *out, char *buf, size_t buflen,
+static int copy_gr(struct group *out, char *buffer, size_t buflen,
                    struct group **result) {
     size_t vec = 2 * sizeof(char *);
     size_t nlen = strlen(name_root) + 1;
@@ -76,42 +76,42 @@ static int copy_gr(struct group *out, char *buf, size_t buflen,
         *result = (struct group *)0;
         return ERANGE;
     }
-    char **mem = (char **)(void *)buf;
-    char *strs = buf + vec;
+    char **memory = (char **)(void *)buffer;
+    char *strs = buffer + vec;
     memcpy(strs, name_root, nlen);
     memcpy(strs + nlen, no_password, plen);
-    mem[0] = strs;
-    mem[1] = (char *)0;
+    memory[0] = strs;
+    memory[1] = (char *)0;
     out->gr_name = strs;
     out->gr_passwd = strs + nlen;
     out->gr_gid = 0;
-    out->gr_mem = mem;
+    out->gr_mem = memory;
     *result = out;
     return 0;
 }
 
-int getgrgid_r(gid_t gid, struct group *out, char *buf, size_t buflen,
+int getgrgid_r(gid_t gid, struct group *out, char *buffer, size_t buflen,
                struct group **result) {
-    if (!out || !buf || !result) {
+    if (!out || !buffer || !result) {
         return EINVAL;
     }
     if (gid != 0) {
         *result = (struct group *)0;
         return 0;
     }
-    return copy_gr(out, buf, buflen, result);
+    return copy_gr(out, buffer, buflen, result);
 }
 
-int getgrnam_r(const char *name, struct group *out, char *buf, size_t buflen,
+int getgrnam_r(const char *name, struct group *out, char *buffer, size_t buflen,
                struct group **result) {
-    if (!out || !buf || !result) {
+    if (!out || !buffer || !result) {
         return EINVAL;
     }
     if (!name || strcmp(name, name_root) != 0) {
         *result = (struct group *)0;
         return 0;
     }
-    return copy_gr(out, buf, buflen, result);
+    return copy_gr(out, buffer, buflen, result);
 }
 
 int initgroups(const char *user, gid_t group) {

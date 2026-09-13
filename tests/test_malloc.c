@@ -41,12 +41,12 @@ static void check_lists(void) {
 
     int free_in_bins = 0;
     for (int i = 0; i < NBINS; i++) {
-        block_header_t *prev = (block_header_t *)0;
+        block_header_t *previous = (block_header_t *)0;
         for (block_header_t *b = bins[i]; b; b = LINKS(b)->fnext) {
             CHECK(b->is_free);
             CHECK_EQ(bin_of(b->size), i);
-            CHECK_EQ(LINKS(b)->fprev, prev);
-            prev = b;
+            CHECK_EQ(LINKS(b)->fprev, previous);
+            previous = b;
             free_in_bins++;
             CHECK(free_in_bins < 100000);
         }
@@ -215,13 +215,13 @@ TEST(malloc, a_block_reused_after_a_free_is_still_aligned) {
     void *big = lean_malloc(4000);
     REQUIRE(big != NULL);
     lean_free(big);
-    void *prev = NULL;
+    void *previous = NULL;
     for (size_t size = 1; size <= 200; size += 7) {
         void *p = lean_malloc(size);
         REQUIRE(p != NULL);
         CHECK_EQ(((unsigned long)p) % 16, 0u);
-        CHECK(p != prev);
-        prev = p;
+        CHECK(p != previous);
+        previous = p;
     }
     check_lists();
 }

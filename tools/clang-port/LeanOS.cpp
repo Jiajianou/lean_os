@@ -13,8 +13,8 @@ using namespace clang::driver::toolchains;
 using namespace clang;
 using namespace llvm::opt;
 
-static bool isPositionIndependentRequest(const ArgList &Args) {
-  return Args.hasArg(options::OPT_shared, options::OPT_pie,
+static bool isPositionIndependentRequest(const ArgList &Arguments) {
+  return Arguments.hasArg(options::OPT_shared, options::OPT_pie,
                      options::OPT_fpic, options::OPT_fPIC,
                      options::OPT_fpie, options::OPT_fPIE);
 }
@@ -47,9 +47,9 @@ void LeanOS::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
     return;
 
   if (!DriverArgs.hasArg(options::OPT_nobuiltininc)) {
-    SmallString<128> Dir(D.ResourceDir);
-    llvm::sys::path::append(Dir, "include");
-    addSystemInclude(DriverArgs, CC1Args, Dir.str());
+    SmallString<128> Directory(D.ResourceDir);
+    llvm::sys::path::append(Directory, "include");
+    addSystemInclude(DriverArgs, CC1Args, Directory.string());
   }
 
   if (DriverArgs.hasArg(options::OPT_nostdlibinc))
@@ -75,18 +75,18 @@ void LeanOS::addLibStdCxxIncludePaths(const ArgList &DriverArgs,
     llvm::StringRef Version = llvm::sys::path::filename(LI->path());
     addSystemInclude(DriverArgs, CC1Args, LI->path());
     addSystemInclude(DriverArgs, CC1Args,
-                     Base + "/" + Version.str() + "/" +
-                         getTriple().getArchName().str() + "-" +
-                         getTriple().getOSName().str());
-    addSystemInclude(DriverArgs, CC1Args, Base + "/" + Version.str() +
+                     Base + "/" + Version.string() + "/" +
+                         getTriple().getArchName().string() + "-" +
+                         getTriple().getOSName().string());
+    addSystemInclude(DriverArgs, CC1Args, Base + "/" + Version.string() +
                                               "/backward");
     break;
   }
 }
 
-void LeanOS::AddCXXStdlibLibArgs(const ArgList &Args,
+void LeanOS::AddCXXStdlibLibArgs(const ArgList &Arguments,
                                  ArgStringList &CmdArgs) const {
-  switch (GetCXXStdlibType(Args)) {
+  switch (GetCXXStdlibType(Arguments)) {
   case ToolChain::CST_Libcxx:
     CmdArgs.push_back("-lc++");
     CmdArgs.push_back("-lc++abi");
@@ -99,12 +99,12 @@ void LeanOS::AddCXXStdlibLibArgs(const ArgList &Args,
 
 Tool *LeanOS::buildLinker() const { return new tools::leanos::Linker(*this); }
 
-LeanOS::LeanOS(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
-    : Generic_ELF(D, Triple, Args) {
-  GCCInstallation.init(Triple, Args);
+LeanOS::LeanOS(const Driver &D, const llvm::Triple &Triple, const ArgList &Arguments)
+    : Generic_ELF(D, Triple, Arguments) {
+  GCCInstallation.init(Triple, Arguments);
 
   if (GCCInstallation.isValid())
-    getFilePaths().push_back(GCCInstallation.getInstallPath().str());
+    getFilePaths().push_back(GCCInstallation.getInstallPath().string());
 
   getFilePaths().push_back(getTargetLibDir() + "/lib");
 
@@ -112,31 +112,31 @@ LeanOS::LeanOS(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
 }
 
 std::string LeanOS::getTargetLibDir() const {
-  return getDriver().Dir + "/../" + getTriple().getArchName().str() + "-" +
-         getTriple().getOSName().str();
+  return getDriver().Directory + "/../" + getTriple().getArchName().string() + "-" +
+         getTriple().getOSName().string();
 }
 
 void leanos::Linker::ConstructJob(Compilation &C, const JobAction &JA,
                                   const InputInfo &Output,
                                   const InputInfoList &Inputs,
-                                  const ArgList &Args,
+                                  const ArgList &Arguments,
                                   const char *LinkingOutput) const {
   const auto &ToolChain = static_cast<const LeanOS &>(getToolChain());
   const Driver &D = ToolChain.getDriver();
   ArgStringList CmdArgs;
 
-  const bool Shared = Args.hasArg(options::OPT_shared);
-  const bool Pie = Args.hasArg(options::OPT_pie) && !Shared;
+  const bool Shared = Arguments.hasArg(options::OPT_shared);
+  const bool Pie = Arguments.hasArg(options::OPT_pie) && !Shared;
   const bool Static = !Shared && !Pie;
 
-  Args.ClaimAllArgs(options::OPT_g_Group);
-  Args.ClaimAllArgs(options::OPT_emit_llvm);
-  Args.ClaimAllArgs(options::OPT_w);
-  Args.ClaimAllArgs(options::OPT_rdynamic);
-  Args.ClaimAllArgs(options::OPT_static);
+  Arguments.ClaimAllArgs(options::OPT_g_Group);
+  Arguments.ClaimAllArgs(options::OPT_emit_llvm);
+  Arguments.ClaimAllArgs(options::OPT_w);
+  Arguments.ClaimAllArgs(options::OPT_rdynamic);
+  Arguments.ClaimAllArgs(options::OPT_static);
 
   if (!D.SysRoot.empty())
-    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
+    CmdArgs.push_back(Arguments.MakeArgString("--sysroot=" + D.SysRoot));
 
   CmdArgs.push_back("-z");
   CmdArgs.push_back("noexecstack");
@@ -151,7 +151,7 @@ void leanos::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("-static");
     CmdArgs.push_back("--no-relax");
     CmdArgs.push_back("-T");
-    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("lean_os.ld")));
+    CmdArgs.push_back(Arguments.MakeArgString(ToolChain.GetFilePath("lean_os.ld")));
   }
 
   assert((Output.isFilename() || Output.isNothing()) && "Invalid output.");
@@ -160,18 +160,18 @@ void leanos::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back(Output.getFilename());
   }
 
-  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles,
+  if (!Arguments.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles,
                    options::OPT_r)) {
     if (!Shared)
-      CmdArgs.push_back(Args.MakeArgString(
+      CmdArgs.push_back(Arguments.MakeArgString(
           ToolChain.GetFilePath(Pie ? "Scrt1.o" : "crt1.o")));
-    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crti.o")));
-    CmdArgs.push_back(Args.MakeArgString(
+    CmdArgs.push_back(Arguments.MakeArgString(ToolChain.GetFilePath("crti.o")));
+    CmdArgs.push_back(Arguments.MakeArgString(
         ToolChain.GetFilePath(Static ? "crtbegin.o" : "crtbeginS.o")));
   }
 
-  Args.addAllArgs(CmdArgs, {options::OPT_L, options::OPT_u});
-  ToolChain.AddFilePathLibArgs(Args, CmdArgs);
+  Arguments.addAllArgs(CmdArgs, {options::OPT_L, options::OPT_u});
+  ToolChain.AddFilePathLibArgs(Arguments, CmdArgs);
 
   if (D.isUsingLTO()) {
     assert(!Inputs.empty() && "Must have at least one input.");
@@ -179,19 +179,19 @@ void leanos::Linker::ConstructJob(Compilation &C, const JobAction &JA,
         Inputs, [](const InputInfo &II) -> bool { return II.isFilename(); });
     if (Input == Inputs.end())
       Input = Inputs.begin();
-    addLTOOptions(ToolChain, Args, CmdArgs, Output, *Input,
+    addLTOOptions(ToolChain, Arguments, CmdArgs, Output, *Input,
                   D.getLTOMode() == LTOK_Thin);
   }
 
-  AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
+  AddLinkerInputs(ToolChain, Inputs, Arguments, CmdArgs, JA);
 
-  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs,
+  if (!Arguments.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs,
                    options::OPT_r)) {
-    if (D.CCCIsCXX() && ToolChain.ShouldLinkCXXStdlib(Args)) {
-      ToolChain.AddCXXStdlibLibArgs(Args, CmdArgs);
+    if (D.CCCIsCXX() && ToolChain.ShouldLinkCXXStdlib(Arguments)) {
+      ToolChain.AddCXXStdlibLibArgs(Arguments, CmdArgs);
       CmdArgs.push_back("-lm");
     }
-    Args.ClaimAllArgs(options::OPT_stdlib_EQ);
+    Arguments.ClaimAllArgs(options::OPT_stdlib_EQ);
 
     if (Pie)
       CmdArgs.push_back("-l:ld-lean.so");
@@ -208,16 +208,16 @@ void leanos::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("--end-group");
   }
 
-  Args.claimAllArgs(options::OPT_pthread, options::OPT_pthreads);
+  Arguments.claimAllArgs(options::OPT_pthread, options::OPT_pthreads);
 
-  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles,
+  if (!Arguments.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles,
                    options::OPT_r)) {
-    CmdArgs.push_back(Args.MakeArgString(
+    CmdArgs.push_back(Arguments.MakeArgString(
         ToolChain.GetFilePath(Static ? "crtend.o" : "crtendS.o")));
-    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crtn.o")));
+    CmdArgs.push_back(Arguments.MakeArgString(ToolChain.GetFilePath("crtn.o")));
   }
 
-  const char *Exec = Args.MakeArgString(ToolChain.GetLinkerPath());
+  const char *Exec = Arguments.MakeArgString(ToolChain.GetLinkerPath());
   C.addCommand(std::make_unique<Command>(JA, *this,
                                          ResponseFileSupport::AtFileCurCP(),
                                          Exec, CmdArgs, Inputs, Output));

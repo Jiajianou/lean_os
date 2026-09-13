@@ -8,9 +8,9 @@
 static spinlock_t unix_lock;
 
 typedef struct unixseg {
-    uint32_t len;
+    uint32_t length;
     int nfds;
-    file_descriptor_slot_t fds[UNIX_MAX_FDS];
+    file_descriptor_slot_t file_descriptors[UNIX_MAX_FILE_DESCRIPTORS];
 } unixseg_t;
 
 typedef struct unix_socket {
@@ -21,7 +21,7 @@ typedef struct unix_socket {
     int listening;
     int bound;
 
-    uint8_t buf[UNIX_BUF_SIZE];
+    uint8_t buffer[UNIX_BUFFER_SIZE];
     uint32_t head;
     uint32_t count;
     unixseg_t segs[UNIX_MAX_SEGS];
@@ -32,7 +32,7 @@ typedef struct unix_socket {
 } unix_socket_t;
 
 typedef struct {
-    int len;
+    int length;
     char name[UNIX_PATH_MAX];
     unix_socket_t *sock;
 } unixname_t;
@@ -44,7 +44,7 @@ static int queued_file_descriptor_count;
 void unix_socket_init(void) {
     uint64_t f = spin_lock_irqsave(&unix_lock);
     for (int i = 0; i < UNIX_MAX_NAMES; i++) {
-        names[i].len = 0;
+        names[i].length = 0;
         names[i].sock = (unix_socket_t *)0;
     }
     live_count = 0;
@@ -53,11 +53,11 @@ void unix_socket_init(void) {
 }
 
 static void unix_wake(void) {
-    scheduler_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
 }
 
 static unix_socket_t *unix_new(int type) {
-    if (type != UNIX_SOCK_STREAM && type != UNIX_SOCK_SEQPACKET) {
+    if (type != UNIX_SOCKET_STREAM && type != UNIX_SOCKET_SEQPACKET) {
         return (unix_socket_t *)0;
     }
     if (live_count >= UNIX_MAX_SOCKETS) {
@@ -119,7 +119,7 @@ static void unix_release_queued_file_descriptors(unix_socket_t *s) {
     for (int i = 0; i < s->seg_count; i++) {
         unixseg_t *seg = &s->segs[(s->seg_head + i) % UNIX_MAX_SEGS];
         for (int j = 0; j < seg->nfds; j++) {
-            file_descriptor_release(&seg->fds[j]);
+            file_descriptor_release(&seg->file_descriptors[j]);
         }
         seg->nfds = 0;
     }
@@ -137,7 +137,7 @@ void unix_socket_unref(struct unix_socket *s) {
     }
     for (int i = 0; i < UNIX_MAX_NAMES; i++) {
         if (names[i].sock == s) {
-            names[i].len = 0;
+            names[i].length = 0;
             names[i].sock = (unix_socket_t *)0;
         }
     }
@@ -166,11 +166,11 @@ void unix_socket_unref(struct unix_socket *s) {
     kfree(s);
 }
 
-static int name_eq(const unixname_t *e, const char *name, int len) {
-    if (e->len != len) {
+static int name_eq(const unixname_t *e, const char *name, int length) {
+    if (e->length != length) {
         return 0;
     }
-    for (int i = 0; i < len; i++) {
+    for (int i = 0; i < length; i++) {
         if (e->name[i] != name[i]) {
             return 0;
         }
@@ -178,17 +178,17 @@ static int name_eq(const unixname_t *e, const char *name, int len) {
     return 1;
 }
 
-static unix_socket_t *name_lookup(const char *name, int len) {
+static unix_socket_t *name_lookup(const char *name, int length) {
     for (int i = 0; i < UNIX_MAX_NAMES; i++) {
-        if (names[i].len && name_eq(&names[i], name, len)) {
+        if (names[i].length && name_eq(&names[i], name, length)) {
             return names[i].sock;
         }
     }
     return (unix_socket_t *)0;
 }
 
-int unix_socket_bind(struct unix_socket *s, const char *name, int len) {
-    if (!s || !name || len <= 0 || len > UNIX_PATH_MAX) {
+int unix_socket_bind(struct unix_socket *s, const char *name, int length) {
+    if (!s || !name || length <= 0 || length > UNIX_PATH_MAX) {
         return -1;
     }
     uint64_t f = spin_lock_irqsave(&unix_lock);
@@ -196,16 +196,16 @@ int unix_socket_bind(struct unix_socket *s, const char *name, int len) {
         spin_unlock_irqrestore(&unix_lock, f);
         return -1;
     }
-    if (name_lookup(name, len)) {
+    if (name_lookup(name, length)) {
         spin_unlock_irqrestore(&unix_lock, f);
         return -1;
     }
     for (int i = 0; i < UNIX_MAX_NAMES; i++) {
-        if (!names[i].len) {
-            for (int j = 0; j < len; j++) {
+        if (!names[i].length) {
+            for (int j = 0; j < length; j++) {
                 names[i].name[j] = name[j];
             }
-            names[i].len = len;
+            names[i].length = length;
             names[i].sock = s;
             s->bound = 1;
             spin_unlock_irqrestore(&unix_lock, f);
@@ -229,8 +229,8 @@ int unix_socket_listen(struct unix_socket *s) {
     return ok ? 0 : -1;
 }
 
-int unix_socket_connect(struct unix_socket *s, const char *name, int len) {
-    if (!s || !name || len <= 0 || len > UNIX_PATH_MAX) {
+int unix_socket_connect(struct unix_socket *s, const char *name, int length) {
+    if (!s || !name || length <= 0 || length > UNIX_PATH_MAX) {
         return -1;
     }
     uint64_t f = spin_lock_irqsave(&unix_lock);
@@ -238,7 +238,7 @@ int unix_socket_connect(struct unix_socket *s, const char *name, int len) {
         spin_unlock_irqrestore(&unix_lock, f);
         return -1;
     }
-    unix_socket_t *listener = name_lookup(name, len);
+    unix_socket_t *listener = name_lookup(name, length);
     if (!listener || !listener->listening || listener->type != s->type ||
         listener->backlog_count >= UNIX_BACKLOG) {
         spin_unlock_irqrestore(&unix_lock, f);
@@ -275,45 +275,45 @@ struct unix_socket *unix_socket_accept(struct unix_socket *listener) {
     return conn;
 }
 
-static void ring_write(unix_socket_t *d, const uint8_t *src, uint32_t len) {
-    uint32_t tail = (d->head + d->count) % UNIX_BUF_SIZE;
-    uint32_t first = UNIX_BUF_SIZE - tail;
-    if (first > len) {
-        first = len;
+static void ring_write(unix_socket_t *d, const uint8_t *source, uint32_t length) {
+    uint32_t tail = (d->head + d->count) % UNIX_BUFFER_SIZE;
+    uint32_t first = UNIX_BUFFER_SIZE - tail;
+    if (first > length) {
+        first = length;
     }
-    k_memcpy(&d->buf[tail], src, first);
-    if (len > first) {
-        k_memcpy(&d->buf[0], src + first, len - first);
+    k_memcpy(&d->buffer[tail], source, first);
+    if (length > first) {
+        k_memcpy(&d->buffer[0], source + first, length - first);
     }
-    d->count += len;
+    d->count += length;
 }
 
-static void ring_read(unix_socket_t *s, uint8_t *dst, uint32_t len) {
-    uint32_t first = UNIX_BUF_SIZE - s->head;
-    if (first > len) {
-        first = len;
+static void ring_read(unix_socket_t *s, uint8_t *destination, uint32_t length) {
+    uint32_t first = UNIX_BUFFER_SIZE - s->head;
+    if (first > length) {
+        first = length;
     }
-    k_memcpy(dst, &s->buf[s->head], first);
-    if (len > first) {
-        k_memcpy(dst + first, &s->buf[0], len - first);
+    k_memcpy(destination, &s->buffer[s->head], first);
+    if (length > first) {
+        k_memcpy(destination + first, &s->buffer[0], length - first);
     }
-    s->head = (s->head + len) % UNIX_BUF_SIZE;
-    s->count -= len;
+    s->head = (s->head + length) % UNIX_BUFFER_SIZE;
+    s->count -= length;
 }
 
-static void ring_discard(unix_socket_t *s, uint32_t len) {
-    s->head = (s->head + len) % UNIX_BUF_SIZE;
-    s->count -= len;
+static void ring_discard(unix_socket_t *s, uint32_t length) {
+    s->head = (s->head + length) % UNIX_BUFFER_SIZE;
+    s->count -= length;
 }
 
-long unix_socket_send(struct unix_socket *s, const uint8_t *data, uint32_t len,
-                   const file_descriptor_slot_t *fds, int nfds) {
-    if (!s || nfds < 0 || nfds > UNIX_MAX_FDS || (nfds > 0 && !fds)) {
+long unix_socket_send(struct unix_socket *s, const uint8_t *data, uint32_t length,
+                   const file_descriptor_slot_t *file_descriptors, int nfds) {
+    if (!s || nfds < 0 || nfds > UNIX_MAX_FILE_DESCRIPTORS || (nfds > 0 && !file_descriptors)) {
         return -1;
     }
-    file_descriptor_slot_t kept[UNIX_MAX_FDS];
+    file_descriptor_slot_t kept[UNIX_MAX_FILE_DESCRIPTORS];
     for (int i = 0; i < nfds; i++) {
-        kept[i] = fds[i];
+        kept[i] = file_descriptors[i];
         file_descriptor_retain(&kept[i]);
     }
     uint64_t f = spin_lock_irqsave(&unix_lock);
@@ -322,7 +322,7 @@ long unix_socket_send(struct unix_socket *s, const uint8_t *data, uint32_t len,
     int refuse = 0;
     if (!d || s->shut_wr || d->shut_rd) {
         refuse = 1;
-    } else if (s->type == UNIX_SOCK_SEQPACKET && len > UNIX_BUF_SIZE) {
+    } else if (s->type == UNIX_SOCKET_SEQPACKET && length > UNIX_BUFFER_SIZE) {
         refuse = 1;
     }
     if (refuse) {
@@ -332,15 +332,15 @@ long unix_socket_send(struct unix_socket *s, const uint8_t *data, uint32_t len,
         }
         return fail;
     }
-    uint32_t space = UNIX_BUF_SIZE - d->count;
-    uint32_t take = len > space ? space : len;
-    if (s->type == UNIX_SOCK_SEQPACKET && take < len) {
+    uint32_t space = UNIX_BUFFER_SIZE - d->count;
+    uint32_t take = length > space ? space : length;
+    if (s->type == UNIX_SOCKET_SEQPACKET && take < length) {
         take = 0;
     }
     unixseg_t *tail = d->seg_count ? &d->segs[(d->seg_head + d->seg_count - 1) % UNIX_MAX_SEGS]
                                    : (unixseg_t *)0;
-    int need_seg = (s->type == UNIX_SOCK_SEQPACKET) || nfds > 0 || !tail || tail->nfds > 0;
-    int would_block = (need_seg && d->seg_count >= UNIX_MAX_SEGS) || (len > 0 && take == 0);
+    int need_seg = (s->type == UNIX_SOCKET_SEQPACKET) || nfds > 0 || !tail || tail->nfds > 0;
+    int would_block = (need_seg && d->seg_count >= UNIX_MAX_SEGS) || (length > 0 && take == 0);
     if (would_block) {
         spin_unlock_irqrestore(&unix_lock, f);
         for (int i = 0; i < nfds; i++) {
@@ -348,21 +348,21 @@ long unix_socket_send(struct unix_socket *s, const uint8_t *data, uint32_t len,
         }
         return 0;
     }
-    if (len == 0 && nfds == 0) {
+    if (length == 0 && nfds == 0) {
         spin_unlock_irqrestore(&unix_lock, f);
         return 0;
     }
     if (need_seg) {
         unixseg_t *seg = &d->segs[(d->seg_head + d->seg_count) % UNIX_MAX_SEGS];
-        seg->len = take;
+        seg->length = take;
         seg->nfds = nfds;
         for (int i = 0; i < nfds; i++) {
-            seg->fds[i] = kept[i];
+            seg->file_descriptors[i] = kept[i];
         }
         d->seg_count++;
         queued_file_descriptor_count += nfds;
     } else {
-        tail->len += take;
+        tail->length += take;
     }
     if (take) {
         ring_write(d, data, take);
@@ -373,7 +373,7 @@ long unix_socket_send(struct unix_socket *s, const uint8_t *data, uint32_t len,
 }
 
 long unix_socket_receive(struct unix_socket *s, uint8_t *out, uint32_t max,
-                   file_descriptor_slot_t *file_descriptors_out, int max_fds, int *nfds_out,
+                   file_descriptor_slot_t *file_descriptors_out, int max_file_descriptors, int *nfds_out,
                    int *flags_out) {
     if (nfds_out) {
         *nfds_out = 0;
@@ -384,7 +384,7 @@ long unix_socket_receive(struct unix_socket *s, uint8_t *out, uint32_t max,
     if (!s) {
         return -1;
     }
-    file_descriptor_slot_t dropped[UNIX_MAX_FDS];
+    file_descriptor_slot_t dropped[UNIX_MAX_FILE_DESCRIPTORS];
     int ndropped = 0;
     uint64_t f = spin_lock_irqsave(&unix_lock);
     if (s->shut_rd) {
@@ -405,12 +405,12 @@ long unix_socket_receive(struct unix_socket *s, uint8_t *out, uint32_t max,
                 break;
             }
             int n = seg->nfds;
-            int keep = n < max_fds ? n : max_fds;
+            int keep = n < max_file_descriptors ? n : max_file_descriptors;
             for (int i = 0; i < keep; i++) {
-                file_descriptors_out[i] = seg->fds[i];
+                file_descriptors_out[i] = seg->file_descriptors[i];
             }
             for (int i = keep; i < n; i++) {
-                dropped[ndropped++] = seg->fds[i];
+                dropped[ndropped++] = seg->file_descriptors[i];
             }
             queued_file_descriptor_count -= n;
             seg->nfds = 0;
@@ -418,33 +418,33 @@ long unix_socket_receive(struct unix_socket *s, uint8_t *out, uint32_t max,
                 *nfds_out = keep;
             }
             if (keep < n && flags_out) {
-                *flags_out |= UNIX_RECV_CTRUNC;
+                *flags_out |= UNIX_RECEIVE_CTRUNC;
             }
             took_file_descriptors = 1;
         }
         uint32_t room = max - got;
-        if (room == 0 && seg->len > 0) {
+        if (room == 0 && seg->length > 0) {
             break;
         }
-        uint32_t n = seg->len < room ? seg->len : room;
+        uint32_t n = seg->length < room ? seg->length : room;
         if (n) {
             ring_read(s, out + got, n);
             got += n;
-            seg->len -= n;
+            seg->length -= n;
         }
-        if (seg->len == 0) {
+        if (seg->length == 0) {
             s->seg_head = (s->seg_head + 1) % UNIX_MAX_SEGS;
             s->seg_count--;
-        } else if (s->type == UNIX_SOCK_SEQPACKET) {
-            ring_discard(s, seg->len);
-            seg->len = 0;
+        } else if (s->type == UNIX_SOCKET_SEQPACKET) {
+            ring_discard(s, seg->length);
+            seg->length = 0;
             s->seg_head = (s->seg_head + 1) % UNIX_MAX_SEGS;
             s->seg_count--;
             if (flags_out) {
-                *flags_out |= UNIX_RECV_TRUNC;
+                *flags_out |= UNIX_RECEIVE_TRUNC;
             }
         }
-        if (s->type == UNIX_SOCK_SEQPACKET) {
+        if (s->type == UNIX_SOCKET_SEQPACKET) {
             break;
         }
         if (got >= max) {
@@ -495,8 +495,8 @@ int unix_socket_writable(const struct unix_socket *s) {
         unixseg_t *tail = d->seg_count
                               ? &d->segs[(d->seg_head + d->seg_count - 1) % UNIX_MAX_SEGS]
                               : (unixseg_t *)0;
-        int has_record = tail && tail->nfds == 0 && s->type != UNIX_SOCK_SEQPACKET;
-        w = d->count < UNIX_BUF_SIZE && (has_record || d->seg_count < UNIX_MAX_SEGS);
+        int has_record = tail && tail->nfds == 0 && s->type != UNIX_SOCKET_SEQPACKET;
+        w = d->count < UNIX_BUFFER_SIZE && (has_record || d->seg_count < UNIX_MAX_SEGS);
     }
     spin_unlock_irqrestore(&unix_lock, f);
     return w;

@@ -7,7 +7,7 @@ extern "C" {
 #define SYS_write      0
 #define SYS_exit       1
 #define SYS_getpid     2
-#define SPAWN_MAX_ARGS 256
+#define SPAWN_MAX_ARGUMENTS 256
 
 #define SYS_spawn      3
 #define SYS_wait       4
@@ -18,13 +18,13 @@ extern "C" {
 #define SYS_pipe       9
 #define SYS_getpgid   10
 #define SYS_sbrk      11
-#define SYS_shm_create 12
-#define SYS_shm_map   13
-#define SYS_fb_info   14
-#define SYS_fb_map    15
+#define SYS_shared_memory_create 12
+#define SYS_shared_memory_map   13
+#define SYS_framebuffer_info   14
+#define SYS_framebuffer_map    15
 #define SYS_mouse_read 16
 #define SYS_pipe_open 17
-#define SYS_kbd_read  18
+#define SYS_keyboard_read  18
 #define SYS_pipe_poll 19
 #define SYS_uptime_ms 20
 #define SYS_dup2      21
@@ -33,7 +33,7 @@ extern "C" {
 #define SYS_task_alive 24
 #define SYS_pipe_reset 25
 
-#define SYS_kbd_modifiers 26
+#define SYS_keyboard_modifiers 26
 #define SYS_clipboard_set 27
 #define SYS_clipboard_get 28
 #define SYS_writefile 29
@@ -44,11 +44,11 @@ extern "C" {
 
 #define SYS_close 32
 
-#define SYS_shm_free 33
+#define SYS_shared_memory_free 33
 
 #define SYS_mkdir 34
 
-#define SYS_shm_unmap 35
+#define SYS_shared_memory_unmap 35
 
 #define SYS_unlink 36
 #define SYS_rename 37
@@ -70,10 +70,10 @@ extern "C" {
 #define SYS_lseek  41
 #define SYS_stat   42
 
-#define OS_ERR_NOENT 2
-#define OS_ERR_FAULT 14
-#define OS_ERR_INTR  4
-#define OS_ERR_AGAIN 5
+#define OS_ERROR_NOENT 2
+#define OS_ERROR_FAULT 14
+#define OS_ERROR_INTR  4
+#define OS_ERROR_AGAIN 5
 #define SYS_rmdir  43
 #define SYS_time   44
 
@@ -99,15 +99,15 @@ extern "C" {
 #define SYS_connstat 61
 #define SYS_accept   62
 #define SYS_send     63
-#define SYS_recv     64
+#define SYS_receive     64
 
 #define SYS_getcaps  57
 #define SYS_dropcaps 58
 
 #define SYS_PIPE_CAPACITY 1024
 
-#define SYS_klog 65
-#define SYS_klog_total 66
+#define SYS_kernel_log 65
+#define SYS_kernel_log_total 66
 
 #define SYS_rename_replace 67
 
@@ -140,14 +140,14 @@ extern "C" {
 #define WUNTRACED 2
 #define SYS_waitpid    84
 
-#define F_GETFD_CMD 1
-#define F_SETFD_CMD 2
-#define F_GETFL_CMD 3
-#define FD_CLOEXEC_BIT 1
-#define F_GETLK_CMD  4
-#define F_SETLK_CMD  5
-#define F_SETLKW_CMD 6
-#define F_SETFL_CMD  7
+#define F_GETFD_COMMAND 1
+#define F_SETFD_COMMAND 2
+#define F_GETFL_COMMAND 3
+#define FILE_DESCRIPTOR_CLOEXEC_BIT 1
+#define F_GETLK_COMMAND  4
+#define F_SETLK_COMMAND  5
+#define F_SETLKW_COMMAND 6
+#define F_SETFL_COMMAND  7
 #define OS_NONBLOCK_BIT 0x800
 #define SYS_fcntl      85
 
@@ -165,7 +165,7 @@ extern "C" {
 
 #define OS_NAME_MAX 255
 #define OS_DT_UNKNOWN 0
-#define OS_DT_DIR     4
+#define OS_DT_DIRECTORY     4
 #define OS_DT_REG     8
 #define OS_DT_LNK     10
 
@@ -173,7 +173,7 @@ typedef struct {
     unsigned int   ino;
     unsigned short reclen;
     unsigned char  type;
-    unsigned char  name_len;
+    unsigned char  name_length;
     char           name[];
 } os_dirent_t;
 
@@ -217,7 +217,7 @@ typedef struct {
 #define SYS_pread  111
 #define SYS_pwrite 112
 
-#define OS_ERR_SPIPE 29
+#define OS_ERROR_SPIPE 29
 
 #define SYS_socketpair 113
 #define SYS_bindun     114
@@ -228,7 +228,7 @@ typedef struct {
 #define SYS_sockshut   118
 
 #define SYS_epoll_create    119
-#define SYS_epoll_ctl       120
+#define SYS_epoll_control       120
 #define SYS_epoll_wait      121
 #define SYS_eventfd         122
 #define SYS_timerfd_create  123

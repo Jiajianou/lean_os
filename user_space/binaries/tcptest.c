@@ -55,10 +55,10 @@ static void *posix_peer(void *arg) {
             return (void *)1;
         }
         for (long i = 0; i < n; i++) {
-            long pos = got + i;
-            if (chunk[i] != (char)('A' + (pos * 13 + pos / 97) % 26)) {
+            long position = got + i;
+            if (chunk[i] != (char)('A' + (position * 13 + position / 97) % 26)) {
                 printf("tcptest: posix peer: byte %ld arrived as 0x%02x, wanted 0x%02x\n",
-                       pos, (unsigned char)chunk[i], (unsigned char)('A' + (pos * 13 + pos / 97) % 26));
+                       position, (unsigned char)chunk[i], (unsigned char)('A' + (position * 13 + position / 97) % 26));
                 return (void *)1;
             }
         }
@@ -71,12 +71,12 @@ static void *posix_peer(void *arg) {
 }
 
 int main(void) {
-    int listener = (int)sys_socket(OS_SOCK_STREAM);
+    int listener = (int)sys_socket(OS_SOCKET_STREAM);
     check(listener >= 0, "could not create a stream socket");
     check(sys_bind(listener, PORT) == PORT, "bind did not return the port it bound");
     check(sys_listen(listener) == 0, "listen failed");
 
-    int client = (int)sys_socket(OS_SOCK_STREAM);
+    int client = (int)sys_socket(OS_SOCKET_STREAM);
     check(sys_connect(client, LOOPBACK, PORT) == 0, "connect did not start");
 
     check(wait_until(connected, client, 5000), "the handshake never settled");
@@ -93,20 +93,20 @@ int main(void) {
           "a short send did not take the whole message");
 
     check(wait_until(has_pending, server, 6000), "the server never received the message");
-    char buf[64];
-    memset(buf, 0, sizeof(buf));
-    long n = sys_recv(server, buf, sizeof(buf));
+    char buffer[64];
+    memset(buffer, 0, sizeof(buffer));
+    long n = sys_receive(server, buffer, sizeof(buffer));
     check(n == (long)strlen(hello), "the server read the wrong length");
-    check(memcmp(buf, hello, strlen(hello)) == 0, "the message changed in transit");
+    check(memcmp(buffer, hello, strlen(hello)) == 0, "the message changed in transit");
 
     const char *back = "and hello back";
     check(sys_send(server, back, (uint32_t)strlen(back)) == (long)strlen(back),
           "the reply did not send");
     check(wait_until(has_pending, client, 6000), "the client never received the reply");
-    memset(buf, 0, sizeof(buf));
-    n = sys_recv(client, buf, sizeof(buf));
+    memset(buffer, 0, sizeof(buffer));
+    n = sys_receive(client, buffer, sizeof(buffer));
     check(n == (long)strlen(back), "the client read the wrong length");
-    check(memcmp(buf, back, strlen(back)) == 0, "the reply changed in transit");
+    check(memcmp(buffer, back, strlen(back)) == 0, "the reply changed in transit");
 
     enum { BIG = 16384 };
     static char sent[BIG];
@@ -124,7 +124,7 @@ int main(void) {
                 off += (int)put;
             }
         }
-        long take = sys_recv(server, got + in, (uint32_t)(BIG - in));
+        long take = sys_receive(server, got + in, (uint32_t)(BIG - in));
         if (take > 0) {
             in += (int)take;
         }
@@ -138,7 +138,7 @@ int main(void) {
     long eof_deadline = sys_uptime_ms() + 3000;
     long r = 0;
     while (sys_uptime_ms() < eof_deadline) {
-        r = sys_recv(server, buf, sizeof(buf));
+        r = sys_receive(server, buffer, sizeof(buffer));
         if (r < 0) {
             break;
         }
@@ -148,7 +148,7 @@ int main(void) {
     sys_close(server);
     sys_close(listener);
 
-    int refused = (int)sys_socket(OS_SOCK_STREAM);
+    int refused = (int)sys_socket(OS_SOCKET_STREAM);
     check(sys_connect(refused, LOOPBACK, DEAD_PORT) == 0, "connect to a dead port did not start");
     long refuse_start = sys_uptime_ms();
     check(wait_until(connected, refused, 3000), "connect to a dead port never settled");
@@ -159,15 +159,15 @@ int main(void) {
 
     {
         int lis = socket(AF_INET, SOCK_STREAM, 0);
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(PORT + 1);
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        check(lis >= 0 && bind(lis, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
+        struct sockaddr_in address;
+        memset(&address, 0, sizeof(address));
+        address.sin_family = AF_INET;
+        address.sin_port = htons(PORT + 1);
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        check(lis >= 0 && bind(lis, (struct sockaddr *)&address, sizeof(address)) == 0 &&
               listen(lis, 1) == 0, "POSIX socket/bind/listen failed");
         int cli = socket(AF_INET, SOCK_STREAM, 0);
-        check(cli >= 0 && connect(cli, (struct sockaddr *)&addr, sizeof(addr)) == 0,
+        check(cli >= 0 && connect(cli, (struct sockaddr *)&address, sizeof(address)) == 0,
               "POSIX connect failed");
         check(wait_until(has_pending, lis, 2000), "the POSIX listener never saw the connection");
         int srv = accept(lis, 0, 0);
@@ -177,22 +177,22 @@ int main(void) {
         check(pthread_create(&peer, 0, posix_peer, &srv) == 0, "could not start the peer thread");
         printf("tcptest: posix: connected, waiting on a blocking read\n");
 
-        char buf[64];
-        memset(buf, 0, sizeof(buf));
+        char buffer[64];
+        memset(buffer, 0, sizeof(buffer));
         long t0 = sys_uptime_ms();
-        long n = read(cli, buf, sizeof(buf));
+        long n = read(cli, buffer, sizeof(buffer));
         long waited = sys_uptime_ms() - t0;
-        check(n == 4 && memcmp(buf, "late", 4) == 0, "a blocking read did not return the peer's message");
+        check(n == 4 && memcmp(buffer, "late", 4) == 0, "a blocking read did not return the peer's message");
         check(waited >= 100, "a blocking read returned before the peer had written");
         printf("tcptest: posix: the blocking read returned after %ld ms\n", waited);
 
         check(fcntl(cli, F_SETFL, O_NONBLOCK) == 0 && (fcntl(cli, F_GETFL) & O_NONBLOCK),
               "O_NONBLOCK could not be set on a socket");
         errno = 0;
-        check(read(cli, buf, sizeof(buf)) == -1 && errno == EAGAIN,
+        check(read(cli, buffer, sizeof(buffer)) == -1 && errno == EAGAIN,
               "a non-blocking read with nothing pending was not EAGAIN");
         errno = 0;
-        check(recv(cli, buf, sizeof(buf), MSG_DONTWAIT) == -1 && errno == EAGAIN,
+        check(recv(cli, buffer, sizeof(buffer), MSG_DONTWAIT) == -1 && errno == EAGAIN,
               "recv(MSG_DONTWAIT) with nothing pending was not EAGAIN");
         check(fcntl(cli, F_SETFL, 0) == 0, "O_NONBLOCK could not be cleared");
 
@@ -204,25 +204,25 @@ int main(void) {
         long put = write(cli, big, POSIX_BIG);
         check(put == POSIX_BIG, "one write() did not return every byte it was given");
         printf("tcptest: posix: write returned %ld, waiting for the peer's confirmation\n", put);
-        memset(buf, 0, sizeof(buf));
-        n = read(cli, buf, sizeof(buf));
-        check(n == 4 && memcmp(buf, "done", 4) == 0, "the peer did not confirm the transfer arrived intact");
+        memset(buffer, 0, sizeof(buffer));
+        n = read(cli, buffer, sizeof(buffer));
+        check(n == 4 && memcmp(buffer, "done", 4) == 0, "the peer did not confirm the transfer arrived intact");
 
         void *peer_result = (void *)1;
         check(pthread_join(peer, &peer_result) == 0 && peer_result == (void *)0,
               "the peer thread saw a byte out of place");
         close(srv);
-        n = read(cli, buf, sizeof(buf));
+        n = read(cli, buffer, sizeof(buffer));
         check(n == 0, "read() after the server closed was not 0");
         printf("tcptest: posix: end of stream seen\n");
         close(cli);
         close(lis);
     }
 
-    int dgram = (int)sys_socket(OS_SOCK_DGRAM);
+    int dgram = (int)sys_socket(OS_SOCKET_DGRAM);
     check(sys_listen(dgram) < 0, "listen on a datagram socket succeeded");
     check(sys_send(dgram, "x", 1) < 0, "send on a datagram socket succeeded");
-    check(sys_recv(dgram, buf, 1) < 0, "recv on a datagram socket succeeded");
+    check(sys_receive(dgram, buffer, 1) < 0, "recv on a datagram socket succeeded");
     check(sys_accept(dgram, 0) < 0, "accept on a datagram socket succeeded");
     sys_close(dgram);
 

@@ -7,7 +7,7 @@
 #define TEXT_COLOR 0x00FFFFFFu
 #define REDRAW_INTERVAL_MS 250
 
-static int format_uint(uint32_t v, char *buf) {
+static int format_uint(uint32_t v, char *buffer) {
     char temporary[10];
     int n = 0;
     if (v == 0) {
@@ -17,12 +17,12 @@ static int format_uint(uint32_t v, char *buf) {
         temporary[n++] = (char)('0' + (v % 10));
         v /= 10;
     }
-    int len = 0;
+    int length = 0;
     for (int i = n - 1; i >= 0; i--) {
-        buf[len++] = temporary[i];
+        buffer[length++] = temporary[i];
     }
-    buf[len] = '\0';
-    return len;
+    buffer[length] = '\0';
+    return length;
 }
 
 int main(void) {
@@ -36,10 +36,10 @@ int main(void) {
 
     long next_redraw = 0;
     for (;;) {
-        wm_event_t ev;
+        window_manager_event_t ev;
         int expose = 0;
         while (window_manager_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+            if (ev.type == WINDOW_MANAGER_EVENT_EXPOSE || ev.type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {
                 expose = 1;
             }
         }

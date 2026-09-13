@@ -90,7 +90,7 @@ static double kernel_cos(double r) {
     return sum;
 }
 
-#define TRIG_MAX_ARG 4503599627370496.0
+#define TRIG_MAX_ARGUMENT 4503599627370496.0
 
 static int quadrant(double x, double *r) {
     double nd = x / M_PI_2;
@@ -101,7 +101,7 @@ static int quadrant(double x, double *r) {
 }
 
 double sin(double x) {
-    if (!isfinite(x) || fabs(x) > TRIG_MAX_ARG) {
+    if (!isfinite(x) || fabs(x) > TRIG_MAX_ARGUMENT) {
         return NAN;
     }
     double r;
@@ -114,7 +114,7 @@ double sin(double x) {
 }
 
 double cos(double x) {
-    if (!isfinite(x) || fabs(x) > TRIG_MAX_ARG) {
+    if (!isfinite(x) || fabs(x) > TRIG_MAX_ARGUMENT) {
         return NAN;
     }
     double r;
@@ -127,7 +127,7 @@ double cos(double x) {
 }
 
 double tan(double x) {
-    if (!isfinite(x) || fabs(x) > TRIG_MAX_ARG) {
+    if (!isfinite(x) || fabs(x) > TRIG_MAX_ARGUMENT) {
         return NAN;
     }
     double c = cos(x);
@@ -658,8 +658,8 @@ static void two_product(double a, double b, double *hi, double *lo) {
     double p = a * b;
     double ca = FMA_SPLIT * a;
     double ah = ca - (ca - a), al = a - ah;
-    double cb = FMA_SPLIT * b;
-    double bh = cb - (cb - b), bl = b - bh;
+    double callback = FMA_SPLIT * b;
+    double bh = callback - (callback - b), bl = b - bh;
     *hi = p;
     *lo = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
 }

@@ -104,10 +104,10 @@ static void dump_regs(isr_regs_t *r) {
 
 void isr_handler(isr_regs_t *r) {
     if (r->vector == BREAKPOINT_VECTOR) {
-        uint64_t msg = kernel_log_begin();
+        uint64_t message = kernel_log_begin();
         kernel_log_puts("[isr] breakpoint (int3) hit - resuming\n");
         dump_regs(r);
-        kernel_log_end(msg);
+        kernel_log_end(message);
         return;
     }
 
@@ -154,7 +154,7 @@ void isr_handler(isr_regs_t *r) {
         if (signal_deliver_fault(r, fault_signo, fault_address)) {
             return;
         }
-        uint64_t msg = kernel_log_begin();
+        uint64_t message = kernel_log_begin();
         kernel_log_puts("\n[isr] ring-3 fault: ");
         kernel_log_puts(exception_name(r->vector));
         kernel_log_puts(" in task ");
@@ -163,16 +163,16 @@ void isr_handler(isr_regs_t *r) {
         kernel_log_put_hex32((uint32_t)(t ? t->id : -1));
         kernel_log_puts(" - terminating it, not the machine\n");
         dump_regs(r);
-        kernel_log_end(msg);
+        kernel_log_end(message);
         task_exit_with_signal(fault_signo);
     }
 
-    uint64_t msg = kernel_log_begin();
+    uint64_t message = kernel_log_begin();
     kernel_log_puts("\n*** UNHANDLED CPU EXCEPTION: ");
     kernel_log_puts(exception_name(r->vector));
     kernel_log_puts(" ***\n");
     dump_regs(r);
-    kernel_log_end(msg);
+    kernel_log_end(message);
     panic("unrecoverable CPU exception");
 }
 

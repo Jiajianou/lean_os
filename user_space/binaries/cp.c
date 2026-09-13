@@ -15,25 +15,25 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    long src = sys_open(argv[1], OPEN_READ);
-    if (src < 0) {
+    long source = sys_open(argv[1], OPEN_READ);
+    if (source < 0) {
         say("cp: cannot read ");
         say(argv[1]);
         say("\n");
         return 1;
     }
-    long dst = sys_open(argv[2], OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE);
-    if (dst < 0) {
+    long destination = sys_open(argv[2], OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE);
+    if (destination < 0) {
         say("cp: cannot write ");
         say(argv[2]);
         say("\n");
-        sys_close((int)src);
+        sys_close((int)source);
         return 1;
     }
 
     int rc = 0;
     for (;;) {
-        long n = sys_read((int)src, chunk, sizeof(chunk));
+        long n = sys_read((int)source, chunk, sizeof(chunk));
         if (n < 0) {
             say("cp: read failed\n");
             rc = 1;
@@ -42,13 +42,13 @@ int main(int argc, char **argv) {
         if (n == 0) {
             break;
         }
-        if (sys_write((int)dst, chunk, (size_t)n) != n) {
+        if (sys_write((int)destination, chunk, (size_t)n) != n) {
             say("cp: ran out of space\n");
             rc = 1;
             break;
         }
     }
-    sys_close((int)src);
-    sys_close((int)dst);
+    sys_close((int)source);
+    sys_close((int)destination);
     return rc;
 }

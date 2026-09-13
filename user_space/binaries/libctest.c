@@ -118,20 +118,20 @@ int main(void) {
     near("floor(-1.5)", floor(-1.5), -2.0);
     near("ceil(-1.5)", ceil(-1.5), -1.0);
 
-    char buf[128];
-    snprintf(buf, sizeof(buf), "%d %5d %-5d| %05d", 42, 42, 42, 42);
-    same("integer widths", buf, "42    42 42   | 00042");
-    snprintf(buf, sizeof(buf), "%x %X %o %u", 255u, 255u, 8u, 4000000000u);
-    same("bases", buf, "ff FF 10 4000000000");
-    snprintf(buf, sizeof(buf), "%s|%8s|%-8s|%.3s", "ab", "ab", "ab", "abcdef");
-    same("string widths", buf, "ab|      ab|ab      |abc");
-    snprintf(buf, sizeof(buf), "%.2f %.0f %.4f", 3.14159, 2.5, -0.00005);
-    same("fixed point", buf, "3.14 2 -0.0001");
-    snprintf(buf, sizeof(buf), "%e %.2e %12.4e", 1234.5, 0.000271828, 1234.5);
-    same("scientific", buf, "1.234500e+03 2.72e-04   1.2345e+03");
-    snprintf(buf, sizeof(buf), "%ld %c %%", 1234567890L, 'z');
-    same("long and char", buf, "1234567890 z %");
-    if (snprintf(buf, 4, "abcdef") != 6 || strcmp(buf, "abc") != 0) {
+    char buffer[128];
+    snprintf(buffer, sizeof(buffer), "%d %5d %-5d| %05d", 42, 42, 42, 42);
+    same("integer widths", buffer, "42    42 42   | 00042");
+    snprintf(buffer, sizeof(buffer), "%x %X %o %u", 255u, 255u, 8u, 4000000000u);
+    same("bases", buffer, "ff FF 10 4000000000");
+    snprintf(buffer, sizeof(buffer), "%s|%8s|%-8s|%.3s", "ab", "ab", "ab", "abcdef");
+    same("string widths", buffer, "ab|      ab|ab      |abc");
+    snprintf(buffer, sizeof(buffer), "%.2f %.0f %.4f", 3.14159, 2.5, -0.00005);
+    same("fixed point", buffer, "3.14 2 -0.0001");
+    snprintf(buffer, sizeof(buffer), "%e %.2e %12.4e", 1234.5, 0.000271828, 1234.5);
+    same("scientific", buffer, "1.234500e+03 2.72e-04   1.2345e+03");
+    snprintf(buffer, sizeof(buffer), "%ld %c %%", 1234567890L, 'z');
+    same("long and char", buffer, "1234567890 z %");
+    if (snprintf(buffer, 4, "abcdef") != 6 || strcmp(buffer, "abc") != 0) {
         fail("snprintf truncation");
     }
 
@@ -330,11 +330,11 @@ int main(void) {
         if (timegm(&tm) != t) {
             fail("timegm did not invert gmtime");
         }
-        char buf[64];
-        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %a", &tm);
-        same("strftime", buf, "2001-09-09 01:46:40 Sun");
-        strftime(buf, sizeof(buf), "%F %T", &tm);
-        same("strftime %F %T", buf, "2001-09-09 01:46:40");
+        char buffer[64];
+        strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S %a", &tm);
+        same("strftime", buffer, "2001-09-09 01:46:40 Sun");
+        strftime(buffer, sizeof(buffer), "%F %T", &tm);
+        same("strftime %F %T", buffer, "2001-09-09 01:46:40");
     }
 
     {
@@ -414,15 +414,15 @@ int main(void) {
         struct timeval w0, w1;
         clock_gettime(CLOCK_MONOTONIC, &m0);
         gettimeofday(&w0, 0);
-        long long prev = (long long)w0.tv_sec * 1000000 + w0.tv_usec;
+        long long previous = (long long)w0.tv_sec * 1000000 + w0.tv_usec;
         long long step_back = 0;
         for (;;) {
             gettimeofday(&w1, 0);
             long long now = (long long)w1.tv_sec * 1000000 + w1.tv_usec;
-            if (now < prev && prev - now > step_back) {
-                step_back = prev - now;
+            if (now < previous && previous - now > step_back) {
+                step_back = previous - now;
             }
-            prev = now;
+            previous = now;
             clock_gettime(CLOCK_MONOTONIC, &m1);
             long long mono_ms = ((long long)m1.tv_sec - m0.tv_sec) * 1000 +
                                 (m1.tv_nsec - m0.tv_nsec) / 1000000;
@@ -967,7 +967,7 @@ int main(void) {
 
     {
         int p[2];
-        char buf[4096];
+        char buffer[4096];
         if (pipe(p) != 0) {
             fail("pipe() failed");
         } else {
@@ -978,20 +978,20 @@ int main(void) {
                 fail("O_NONBLOCK could not be set on a pipe's read end, or did not read back");
             }
             errno = 0;
-            if (read(p[0], buf, 1) != -1 || errno != EAGAIN) {
+            if (read(p[0], buffer, 1) != -1 || errno != EAGAIN) {
                 fail("a non-blocking read of an empty pipe was not EAGAIN");
             }
-            if (write(p[1], "x", 1) != 1 || read(p[0], buf, 1) != 1 || buf[0] != 'x') {
+            if (write(p[1], "x", 1) != 1 || read(p[0], buffer, 1) != 1 || buffer[0] != 'x') {
                 fail("a byte did not cross a non-blocking pipe");
             }
             if (fcntl(p[1], F_SETFL, O_NONBLOCK) != 0) {
                 fail("O_NONBLOCK could not be set on the write end");
             }
-            memset(buf, 'y', sizeof(buf));
+            memset(buffer, 'y', sizeof(buffer));
             long total = 0, n;
             int rounds = 0;
             errno = 0;
-            while ((n = write(p[1], buf, sizeof(buf))) > 0 && rounds++ < 1000) {
+            while ((n = write(p[1], buffer, sizeof(buffer))) > 0 && rounds++ < 1000) {
                 total += n;
             }
             if (n != -1 || errno != EAGAIN || total <= 0) {
@@ -1000,7 +1000,7 @@ int main(void) {
                 fail("a non-blocking write did not fill the pipe and then say EAGAIN");
             }
             long drained = 0;
-            while ((n = read(p[0], buf, sizeof(buf))) > 0) {
+            while ((n = read(p[0], buffer, sizeof(buffer))) > 0) {
                 drained += n;
             }
             if (drained != total || n != -1 || errno != EAGAIN) {

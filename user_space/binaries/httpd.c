@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    int ls = (int)sys_socket(OS_SOCK_STREAM);
+    int ls = (int)sys_socket(OS_SOCKET_STREAM);
     if (ls < 0 || sys_bind(ls, port) <= 0 || sys_listen(ls) != 0) {
         printf("httpd: cannot listen on %d\n", (int)port);
         return 1;
@@ -40,10 +40,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    char req[512];
+    char request[512];
     long rdeadline = sys_uptime_ms() + 3000;
     while (sys_uptime_ms() < rdeadline) {
-        long n = sys_recv(cs, req, sizeof(req));
+        long n = sys_receive(cs, request, sizeof(request));
         if (n > 0) {
             break;
         }

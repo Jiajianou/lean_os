@@ -6,9 +6,9 @@
 int strcasecmp(const char *a, const char *b) {
     for (;; a++, b++) {
         int ca = tolower((unsigned char)*a);
-        int cb = tolower((unsigned char)*b);
-        if (ca != cb || !ca) {
-            return ca - cb;
+        int callback = tolower((unsigned char)*b);
+        if (ca != callback || !ca) {
+            return ca - callback;
         }
     }
 }
@@ -16,9 +16,9 @@ int strcasecmp(const char *a, const char *b) {
 int strncasecmp(const char *a, const char *b, size_t n) {
     for (size_t i = 0; i < n; i++) {
         int ca = tolower((unsigned char)a[i]);
-        int cb = tolower((unsigned char)b[i]);
-        if (ca != cb || !ca) {
-            return ca - cb;
+        int callback = tolower((unsigned char)b[i]);
+        if (ca != callback || !ca) {
+            return ca - callback;
         }
     }
     return 0;
@@ -37,12 +37,12 @@ char *strcasestr(const char *haystack, const char *needle) {
     return (char *)0;
 }
 
-void bzero(void *dst, size_t n) {
-    memset(dst, 0, n);
+void bzero(void *destination, size_t n) {
+    memset(destination, 0, n);
 }
 
-void bcopy(const void *src, void *dst, size_t n) {
-    memmove(dst, src, n);
+void bcopy(const void *source, void *destination, size_t n) {
+    memmove(destination, source, n);
 }
 
 int bcmp(const void *a, const void *b, size_t n) {

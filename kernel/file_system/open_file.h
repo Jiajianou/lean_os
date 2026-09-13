@@ -4,18 +4,18 @@
 
 #define MAX_OPEN_FILES 64
 
-#define OPENFILE_PATH_MAX 256
+#define OPEN_FILE_PATH_MAX 256
 
 typedef struct open_file {
     int handle;
     uint32_t offset;
     uint8_t writable;
     int refcount;
-    char path[OPENFILE_PATH_MAX];
-    uint8_t is_dir;
+    char path[OPEN_FILE_PATH_MAX];
+    uint8_t is_directory;
 } open_file_t;
 
-open_file_t *open_file_alloc(int handle, int writable, const char *path, int is_dir);
+open_file_t *open_file_alloc(int handle, int writable, const char *path, int is_directory);
 
 void open_file_reference(open_file_t *f);
 

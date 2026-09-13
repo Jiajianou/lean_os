@@ -564,11 +564,11 @@ TEST(readyfds, the_descriptor_table_refs_and_releases_all_three_kinds) {
     epoll_init();
     file_descriptor_slot_t slots[3];
     memset(slots, 0, sizeof(slots));
-    slots[0].type = FD_EVENT;
+    slots[0].type = FILE_DESCRIPTOR_EVENT;
     slots[0].event = eventfd_create(0, 0);
-    slots[1].type = FD_TIMER;
+    slots[1].type = FILE_DESCRIPTOR_TIMER;
     slots[1].timer = timerfd_create(TIMERFD_CLOCK_MONOTONIC);
-    slots[2].type = FD_EPOLL;
+    slots[2].type = FILE_DESCRIPTOR_EPOLL;
     slots[2].epoll = epoll_create_set();
     REQUIRE(slots[0].event != NULL);
     REQUIRE(slots[1].timer != NULL);
@@ -585,7 +585,7 @@ TEST(readyfds, the_descriptor_table_refs_and_releases_all_three_kinds) {
     memcpy(copies, slots, sizeof(copies));
     for (int i = 0; i < 3; i++) {
         file_descriptor_release(&copies[i]);
-        CHECK(copies[i].type == FD_NONE);
+        CHECK(copies[i].type == FILE_DESCRIPTOR_NONE);
     }
     CHECK_EQ(eventfd_in_use(), 1);
     CHECK_EQ(timerfd_in_use(), 1);

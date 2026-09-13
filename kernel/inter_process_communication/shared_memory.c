@@ -7,7 +7,7 @@
 #include "library/spinlock.h"
 
 #define PAGE_SIZE 4096ULL
-#define MAX_SHM_SEGMENTS 32
+#define MAX_SHARED_MEMORY_SEGMENTS 32
 
 typedef struct {
     int used;
@@ -17,12 +17,12 @@ typedef struct {
     uint64_t *frames;
 } shared_memory_segment_t;
 
-static shared_memory_segment_t segments[MAX_SHM_SEGMENTS];
+static shared_memory_segment_t segments[MAX_SHARED_MEMORY_SEGMENTS];
 
 static spinlock_t shared_memory_lock;
 
 static int find_free_slot(void) {
-    for (int i = 0; i < MAX_SHM_SEGMENTS; i++) {
+    for (int i = 0; i < MAX_SHARED_MEMORY_SEGMENTS; i++) {
         if (!segments[i].used) {
             return i;
         }
@@ -34,7 +34,7 @@ int shared_memory_create(size_t size, int owner_task_id) {
     if (size == 0) {
         return -1;
     }
-    if ((uint64_t)size > SHM_MAX_SEGMENT_BYTES) {
+    if ((uint64_t)size > SHARED_MEMORY_MAX_SEGMENT_BYTES) {
         return -1;
     }
     uint64_t flags = spin_lock_irqsave(&shared_memory_lock);
@@ -78,7 +78,7 @@ int shared_memory_create(size_t size, int owner_task_id) {
 
 void shared_memory_free_by_owner(int owner_task_id) {
     uint64_t flags = spin_lock_irqsave(&shared_memory_lock);
-    for (int i = 0; i < MAX_SHM_SEGMENTS; i++) {
+    for (int i = 0; i < MAX_SHARED_MEMORY_SEGMENTS; i++) {
         if (!segments[i].used || segments[i].owner_task_id != owner_task_id) {
             continue;
         }
@@ -94,7 +94,7 @@ void shared_memory_free_by_owner(int owner_task_id) {
 
 int shared_memory_free(int id, int owner_task_id) {
     uint64_t flags = spin_lock_irqsave(&shared_memory_lock);
-    if (id < 0 || id >= MAX_SHM_SEGMENTS || !segments[id].used) {
+    if (id < 0 || id >= MAX_SHARED_MEMORY_SEGMENTS || !segments[id].used) {
         spin_unlock_irqrestore(&shared_memory_lock, flags);
         return -1;
     }
@@ -115,7 +115,7 @@ int shared_memory_free(int id, int owner_task_id) {
 int64_t shared_memory_page_count(int id) {
     uint64_t flags = spin_lock_irqsave(&shared_memory_lock);
     int64_t r = -1;
-    if (id >= 0 && id < MAX_SHM_SEGMENTS && segments[id].used) {
+    if (id >= 0 && id < MAX_SHARED_MEMORY_SEGMENTS && segments[id].used) {
         r = (int64_t)segments[id].page_count;
     }
     spin_unlock_irqrestore(&shared_memory_lock, flags);
@@ -125,7 +125,7 @@ int64_t shared_memory_page_count(int id) {
 int shared_memory_count_by_owner(int owner_task_id) {
     uint64_t flags = spin_lock_irqsave(&shared_memory_lock);
     int n = 0;
-    for (int i = 0; i < MAX_SHM_SEGMENTS; i++) {
+    for (int i = 0; i < MAX_SHARED_MEMORY_SEGMENTS; i++) {
         if (segments[i].used && segments[i].owner_task_id == owner_task_id) {
             n++;
         }
@@ -137,7 +137,7 @@ int shared_memory_count_by_owner(int owner_task_id) {
 int64_t shared_memory_get_size(int id) {
     uint64_t flags = spin_lock_irqsave(&shared_memory_lock);
     int64_t r = -1;
-    if (id >= 0 && id < MAX_SHM_SEGMENTS && segments[id].used) {
+    if (id >= 0 && id < MAX_SHARED_MEMORY_SEGMENTS && segments[id].used) {
         r = (int64_t)segments[id].size;
     }
     spin_unlock_irqrestore(&shared_memory_lock, flags);
@@ -146,7 +146,7 @@ int64_t shared_memory_get_size(int id) {
 
 int shared_memory_map_into(int id, uint64_t pml4_phys, uint64_t vaddr, uint64_t flags) {
     uint64_t irqf = spin_lock_irqsave(&shared_memory_lock);
-    if (id < 0 || id >= MAX_SHM_SEGMENTS || !segments[id].used) {
+    if (id < 0 || id >= MAX_SHARED_MEMORY_SEGMENTS || !segments[id].used) {
         spin_unlock_irqrestore(&shared_memory_lock, irqf);
         return -1;
     }

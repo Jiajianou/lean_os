@@ -7,7 +7,7 @@
 #include <string.h>
 
 TEST(file_system_utilities, small_sizes_are_written_out_exactly) {
-    char out[FSUTIL_SIZE_MAX];
+    char out[FILE_SYSTEM_UTILITIES_SIZE_MAX];
     file_system_utilities_format_size(0, out);
     CHECK_STREQ(out, "0");
     file_system_utilities_format_size(1, out);
@@ -17,7 +17,7 @@ TEST(file_system_utilities, small_sizes_are_written_out_exactly) {
 }
 
 TEST(file_system_utilities, the_suffix_starts_at_a_thousand) {
-    char out[FSUTIL_SIZE_MAX];
+    char out[FILE_SYSTEM_UTILITIES_SIZE_MAX];
     file_system_utilities_format_size(999, out);
     CHECK_STREQ(out, "999");
     file_system_utilities_format_size(1000, out);
@@ -27,7 +27,7 @@ TEST(file_system_utilities, the_suffix_starts_at_a_thousand) {
 }
 
 TEST(file_system_utilities, a_decimal_below_ten_and_none_above) {
-    char out[FSUTIL_SIZE_MAX];
+    char out[FILE_SYSTEM_UTILITIES_SIZE_MAX];
     file_system_utilities_format_size(9 * 1024, out);
     CHECK_STREQ(out, "9.0K");
     file_system_utilities_format_size(10 * 1024, out);
@@ -37,7 +37,7 @@ TEST(file_system_utilities, a_decimal_below_ten_and_none_above) {
 }
 
 TEST(file_system_utilities, megabytes_and_gigabytes) {
-    char out[FSUTIL_SIZE_MAX];
+    char out[FILE_SYSTEM_UTILITIES_SIZE_MAX];
     file_system_utilities_format_size(1024u * 1024u, out);
     CHECK_STREQ(out, "1.0M");
     file_system_utilities_format_size(8u * 1024u * 1024u + 512u * 1024u, out);
@@ -47,15 +47,15 @@ TEST(file_system_utilities, megabytes_and_gigabytes) {
 }
 
 TEST(file_system_utilities, the_biggest_file_this_filesystem_can_hold_still_fits) {
-    char out[FSUTIL_SIZE_MAX];
+    char out[FILE_SYSTEM_UTILITIES_SIZE_MAX];
     memset(out, 0x7F, sizeof(out));
     file_system_utilities_format_size(0xFFFFFFFFu, out);
     CHECK_STREQ(out, "3.9G");
-    CHECK(strlen(out) < FSUTIL_SIZE_MAX);
+    CHECK(strlen(out) < FILE_SYSTEM_UTILITIES_SIZE_MAX);
 }
 
 TEST(file_system_utilities, exact_sizes_group_in_threes) {
-    char out[FSUTIL_EXACT_MAX];
+    char out[FILE_SYSTEM_UTILITIES_EXACT_MAX];
     file_system_utilities_format_exact(0, out);
     CHECK_STREQ(out, "0");
     file_system_utilities_format_exact(7, out);
@@ -67,7 +67,7 @@ TEST(file_system_utilities, exact_sizes_group_in_threes) {
 }
 
 TEST(file_system_utilities, no_leading_separator_and_one_per_group) {
-    char out[FSUTIL_EXACT_MAX];
+    char out[FILE_SYSTEM_UTILITIES_EXACT_MAX];
     file_system_utilities_format_exact(100, out);
     CHECK_STREQ(out, "100");
     file_system_utilities_format_exact(100000, out);
@@ -79,19 +79,19 @@ TEST(file_system_utilities, no_leading_separator_and_one_per_group) {
 }
 
 TEST(file_system_utilities, the_widest_exact_count_fits_its_buffer) {
-    char out[FSUTIL_EXACT_MAX];
+    char out[FILE_SYSTEM_UTILITIES_EXACT_MAX];
     file_system_utilities_format_exact(4294967295u, out);
-    CHECK(strlen(out) < FSUTIL_EXACT_MAX);
+    CHECK(strlen(out) < FILE_SYSTEM_UTILITIES_EXACT_MAX);
 }
 
 TEST(file_system_utilities, a_file_with_no_timestamp_shows_a_dash) {
-    char out[FSUTIL_DATE_MAX];
+    char out[FILE_SYSTEM_UTILITIES_DATE_MAX];
     file_system_utilities_format_date(0, out);
     CHECK_STREQ(out, "-");
 }
 
 TEST(file_system_utilities, a_timestamp_becomes_month_day_and_time) {
-    char out[FSUTIL_DATE_MAX];
+    char out[FILE_SYSTEM_UTILITIES_DATE_MAX];
     file_system_utilities_format_date(1788962580u, out);
     CHECK_STREQ(out, "09-09 14:03");
     file_system_utilities_format_date(1767323040u, out);
@@ -239,19 +239,19 @@ static void build_deep(int levels) {
 }
 
 TEST(file_system_utilities, a_tree_at_the_depth_limit_is_still_removed) {
-    build_deep(FSUTIL_MAX_DEPTH);
+    build_deep(FILE_SYSTEM_UTILITIES_MAX_DEPTH);
     CHECK_EQ(file_system_utilities_remove_tree("/d0"), 0);
     CHECK_EQ(fake_user_fs_exists("/d0"), 0);
 }
 
 TEST(file_system_utilities, a_tree_past_the_depth_limit_is_refused_rather_than_followed) {
-    build_deep(FSUTIL_MAX_DEPTH + 2);
+    build_deep(FILE_SYSTEM_UTILITIES_MAX_DEPTH + 2);
     CHECK_EQ(file_system_utilities_remove_tree("/d0"), -1);
     CHECK_EQ(fake_user_fs_exists("/d0"), 1);
 }
 
 TEST(file_system_utilities, counting_past_the_depth_limit_says_so_rather_than_lying) {
-    build_deep(FSUTIL_MAX_DEPTH + 2);
+    build_deep(FILE_SYSTEM_UTILITIES_MAX_DEPTH + 2);
     file_system_utilities_tree_t t;
     CHECK_EQ(file_system_utilities_count_tree("/d0", &t), 0);
     CHECK_EQ(t.deep, 1);

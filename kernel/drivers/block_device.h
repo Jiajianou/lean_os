@@ -2,14 +2,14 @@
 
 #include <stdint.h>
 
-#define BLK_SECTOR_SIZE 512
+#define BLOCK_DEVICE_SECTOR_SIZE 512
 
 void block_device_init(void);
 
 const char *block_device_backend_name(void);
 
-int block_device_read(uint32_t lba, uint32_t count, void *buf);
-int block_device_write(uint32_t lba, uint32_t count, const void *buf);
+int block_device_read(uint32_t lba, uint32_t count, void *buffer);
+int block_device_write(uint32_t lba, uint32_t count, const void *buffer);
 
 void block_device_fault_inject(int64_t fail_reads_after, int64_t fail_writes_after);
 uint64_t block_device_error_count(void);

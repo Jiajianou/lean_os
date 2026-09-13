@@ -7,9 +7,9 @@
 
 #define LEANFS_FNV1A_INIT 0x811C9DC5u
 
-static inline uint32_t leanfs_fnv1a(uint32_t h, const void *data, size_t len) {
+static inline uint32_t leanfs_fnv1a(uint32_t h, const void *data, size_t length) {
     const uint8_t *p = (const uint8_t *)data;
-    for (size_t i = 0; i < len; i++) {
+    for (size_t i = 0; i < length; i++) {
         h ^= p[i];
         h *= 0x01000193u;
     }
@@ -21,7 +21,7 @@ static inline uint32_t leanfs_fnv1a(uint32_t h, const void *data, size_t len) {
 
 #define LEANFS_TYPE_FREE 0
 #define LEANFS_TYPE_FILE 1
-#define LEANFS_TYPE_DIR  2
+#define LEANFS_TYPE_DIRECTORY  2
 #define LEANFS_TYPE_LINK 3
 
 #define ROOT_INODE 0
@@ -58,5 +58,5 @@ _Static_assert(LEANFS_BLOCK_SIZE % sizeof(leanfs_inode_t) == 0, "an inode must n
 #define INODE_TABLE_BLOCKS ((sizeof(leanfs_inode_t) * LEANFS_MAX_INODES + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE)
 #define BITMAP_BLOCKS       (LEANFS_DATA_BLOCKS / 8 / LEANFS_BLOCK_SIZE)
 
-_Static_assert(sizeof(leanfs_dirent_t) == LEANFS_DIRENT_HDR, "leanfs_dirent_t header must stay 8 bytes");
+_Static_assert(sizeof(leanfs_dirent_t) == LEANFS_DIRENT_HEADER, "leanfs_dirent_t header must stay 8 bytes");
 _Static_assert(LEANFS_DIRENT_NEED(LEANFS_MAX_NAME) <= LEANFS_BLOCK_SIZE, "the longest name must still fit in one block");

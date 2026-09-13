@@ -58,12 +58,12 @@ static void futex_wake(volatile unsigned int *p, int count) {
     sys_futex(p, FUTEX_WAKE, (unsigned int)count, 0);
 }
 
-int pthread_mutex_init(pthread_mutex_t *m, const void *attr) {
+int pthread_mutex_init(pthread_mutex_t *m, const void *attribute) {
     if (!m) {
         return 22;
     }
     m->state = 0;
-    m->type = attr ? (unsigned int)((const pthread_mutexattr_t *)attr)->type
+    m->type = attribute ? (unsigned int)((const pthread_mutexattr_t *)attribute)->type
                    : PTHREAD_MUTEX_NORMAL;
     m->owner = 0;
     m->count = 0;
@@ -181,8 +181,8 @@ int pthread_once(pthread_once_t *once, void (*init)(void)) {
     return 0;
 }
 
-int pthread_cond_init(pthread_cond_t *c, const void *attr) {
-    (void)attr;
+int pthread_cond_init(pthread_cond_t *c, const void *attribute) {
+    (void)attribute;
     if (!c) {
         return 22;
     }
@@ -251,8 +251,8 @@ int pthread_cond_broadcast(pthread_cond_t *c) {
     return cond_wake(c, MAX_THREADS);
 }
 
-int pthread_rwlock_init(pthread_rwlock_t *rw, const void *attr) {
-    (void)attr;
+int pthread_rwlock_init(pthread_rwlock_t *rw, const void *attribute) {
+    (void)attribute;
     if (!rw) {
         return 22;
     }
@@ -339,9 +339,9 @@ int pthread_rwlock_unlock(pthread_rwlock_t *rw) {
     }
 }
 
-int pthread_barrier_init(pthread_barrier_t *b, const void *attr,
+int pthread_barrier_init(pthread_barrier_t *b, const void *attribute,
                          unsigned int count) {
-    (void)attr;
+    (void)attribute;
     if (!b || count == 0) {
         return 22;
     }
@@ -380,19 +380,19 @@ int pthread_barrier_wait(pthread_barrier_t *b) {
     return 0;
 }
 
-int pthread_attr_init(pthread_attr_t *attr) {
-    if (!attr) {
+int pthread_attr_init(pthread_attr_t *attribute) {
+    if (!attribute) {
         return 22;
     }
-    attr->stack_size = 0;
+    attribute->stack_size = 0;
     return 0;
 }
 
-int pthread_attr_setstacksize(pthread_attr_t *attr, size_t size) {
-    if (!attr) {
+int pthread_attr_setstacksize(pthread_attr_t *attribute, size_t size) {
+    if (!attribute) {
         return 22;
     }
-    attr->stack_size = size;
+    attribute->stack_size = size;
     return 0;
 }
 
@@ -414,25 +414,25 @@ static void thread_trampoline(thread_block_t *tb) {
     }
 }
 
-int pthread_create(pthread_t *out, const pthread_attr_t *attr,
+int pthread_create(pthread_t *out, const pthread_attr_t *attribute,
                     void *(*start)(void *), void *arg) {
     if (!out || !start) {
         return 22;
     }
-    size_t want = (attr && attr->stack_size) ? attr->stack_size : PTHREAD_STACK_DEFAULT;
+    size_t want = (attribute && attribute->stack_size) ? attribute->stack_size : PTHREAD_STACK_DEFAULT;
     size_t bytes = (want + sizeof(thread_block_t) + 4095u) & ~(size_t)4095u;
-    void *mem = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (mem == MAP_FAILED) {
+    void *memory = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (memory == MAP_FAILED) {
         return 11;
     }
 
-    unsigned char *top = (unsigned char *)mem + bytes;
+    unsigned char *top = (unsigned char *)memory + bytes;
     thread_block_t *tb = (thread_block_t *)(top - sizeof(thread_block_t));
     tb->start = start;
     tb->arg = arg;
     tb->retval = 0;
     tb->finished = 0;
-    tb->stack_base = mem;
+    tb->stack_base = memory;
     tb->stack_bytes = bytes;
     tb->tls = 0;
 
@@ -440,7 +440,7 @@ int pthread_create(pthread_t *out, const pthread_attr_t *attr,
 
     long tid = sys_thread_create((void *)thread_trampoline, tb, stack_top);
     if (tid < 0) {
-        munmap(mem, bytes);
+        munmap(memory, bytes);
         return 11;
     }
 
@@ -627,62 +627,62 @@ int pthread_kill(pthread_t thread, int sig) {
     return sys_kill((int)thread, sig) == 0 ? 0 : 3  ;
 }
 
-int pthread_attr_destroy(pthread_attr_t *attr) {
-    (void)attr;
+int pthread_attr_destroy(pthread_attr_t *attribute) {
+    (void)attribute;
     return 0;
 }
 
-int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *out) {
-    if (!attr || !out) {
+int pthread_attr_getstacksize(const pthread_attr_t *attribute, size_t *out) {
+    if (!attribute || !out) {
         return 22;
     }
-    *out = attr->stack_size ? attr->stack_size : PTHREAD_STACK_DEFAULT;
+    *out = attribute->stack_size ? attribute->stack_size : PTHREAD_STACK_DEFAULT;
     return 0;
 }
 
-int pthread_mutexattr_init(pthread_mutexattr_t *attr) {
-    if (!attr) {
+int pthread_mutexattr_init(pthread_mutexattr_t *attribute) {
+    if (!attribute) {
         return 22;
     }
-    attr->type = PTHREAD_MUTEX_DEFAULT;
+    attribute->type = PTHREAD_MUTEX_DEFAULT;
     return 0;
 }
 
-int pthread_mutexattr_destroy(pthread_mutexattr_t *attr) {
-    (void)attr;
+int pthread_mutexattr_destroy(pthread_mutexattr_t *attribute) {
+    (void)attribute;
     return 0;
 }
 
-int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
-    if (!attr) {
+int pthread_mutexattr_settype(pthread_mutexattr_t *attribute, int type) {
+    if (!attribute) {
         return 22;
     }
     if (type != PTHREAD_MUTEX_NORMAL && type != PTHREAD_MUTEX_RECURSIVE &&
         type != PTHREAD_MUTEX_ERRORCHECK) {
         return 22;
     }
-    attr->type = type;
+    attribute->type = type;
     return 0;
 }
 
-int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *out) {
-    if (!attr || !out) {
+int pthread_mutexattr_gettype(const pthread_mutexattr_t *attribute, int *out) {
+    if (!attribute || !out) {
         return 22;
     }
-    *out = attr->type;
+    *out = attribute->type;
     return 0;
 }
 
-int pthread_condattr_init(pthread_condattr_t *attr) {
-    if (!attr) {
+int pthread_condattr_init(pthread_condattr_t *attribute) {
+    if (!attribute) {
         return 22;
     }
-    attr->unused = 0;
+    attribute->unused = 0;
     return 0;
 }
 
-int pthread_condattr_destroy(pthread_condattr_t *attr) {
-    (void)attr;
+int pthread_condattr_destroy(pthread_condattr_t *attribute) {
+    (void)attribute;
     return 0;
 }
 

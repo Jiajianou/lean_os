@@ -84,10 +84,10 @@ static nsfb_event_t pending_event;
 
 static enum nsfb_key_code_e translate_key(char ch) {
     switch ((unsigned char)ch) {
-    case KBD_KEY_UP:    return NSFB_KEY_UP;
-    case KBD_KEY_DOWN:  return NSFB_KEY_DOWN;
-    case KBD_KEY_LEFT:  return NSFB_KEY_LEFT;
-    case KBD_KEY_RIGHT: return NSFB_KEY_RIGHT;
+    case KEYBOARD_KEY_UP:    return NSFB_KEY_UP;
+    case KEYBOARD_KEY_DOWN:  return NSFB_KEY_DOWN;
+    case KEYBOARD_KEY_LEFT:  return NSFB_KEY_LEFT;
+    case KEYBOARD_KEY_RIGHT: return NSFB_KEY_RIGHT;
     case '\b':          return NSFB_KEY_BACKSPACE;
     case '\t':          return NSFB_KEY_TAB;
     case '\n':
@@ -96,9 +96,9 @@ static enum nsfb_key_code_e translate_key(char ch) {
     default:
         break;
     }
-    if ((unsigned char)ch >= KBD_KEY_F1 && (unsigned char)ch <= KBD_KEY_F12) {
+    if ((unsigned char)ch >= KEYBOARD_KEY_F1 && (unsigned char)ch <= KEYBOARD_KEY_F12) {
         return (enum nsfb_key_code_e)(NSFB_KEY_F1 +
-                                      ((unsigned char)ch - KBD_KEY_F1));
+                                      ((unsigned char)ch - KEYBOARD_KEY_F1));
     }
     if ((unsigned char)ch >= 32 && (unsigned char)ch < 127) {
         return (enum nsfb_key_code_e)(unsigned char)ch;
@@ -119,10 +119,10 @@ static void resync(nsfb_t *nsfb, struct leanos_priv *p) {
     select_plotters(nsfb);
 }
 
-static int convert(struct leanos_priv *p, const wm_event_t *in,
+static int convert(struct leanos_priv *p, const window_manager_event_t *in,
                    nsfb_event_t *event) {
     switch (in->type) {
-    case WM_EVENT_KEY: {
+    case WINDOW_MANAGER_EVENT_KEY: {
         enum nsfb_key_code_e code = translate_key(in->ch);
         if (code == NSFB_KEY_UNKNOWN) {
             return 0;
@@ -134,8 +134,8 @@ static int convert(struct leanos_priv *p, const wm_event_t *in,
         pending_valid = 1;
         return 1;
     }
-    case WM_EVENT_MOUSE_MOVE:
-    case WM_EVENT_MOUSE_BUTTON: {
+    case WINDOW_MANAGER_EVENT_MOUSE_MOVE:
+    case WINDOW_MANAGER_EVENT_MOUSE_BUTTON: {
         uint8_t was = p->buttons, now = in->buttons;
         p->buttons = now;
         event->type = NSFB_EVENT_MOVE_ABSOLUTE;
@@ -162,7 +162,7 @@ static int convert(struct leanos_priv *p, const wm_event_t *in,
         }
         return 1;
     }
-    case WM_EVENT_MOUSE_WHEEL:
+    case WINDOW_MANAGER_EVENT_MOUSE_WHEEL:
         event->type = NSFB_EVENT_KEY_DOWN;
         event->value.keycode = in->wheel < 0 ? NSFB_KEY_MOUSE_4
                                              : NSFB_KEY_MOUSE_5;
@@ -170,13 +170,13 @@ static int convert(struct leanos_priv *p, const wm_event_t *in,
         pending_event.value.keycode = event->value.keycode;
         pending_valid = 1;
         return 1;
-    case WM_EVENT_EXPOSE:
-    case WM_EVENT_DISPLAY_CHANGED:
+    case WINDOW_MANAGER_EVENT_EXPOSE:
+    case WINDOW_MANAGER_EVENT_DISPLAY_CHANGED:
         event->type = NSFB_EVENT_RESIZE;
         event->value.resize.w = p->win.graphics.width;
         event->value.resize.h = p->win.graphics.height;
         return 1;
-    case WM_EVENT_CLOSE_REQUEST:
+    case WINDOW_MANAGER_EVENT_CLOSE_REQUEST:
         event->type = NSFB_EVENT_CONTROL;
         event->value.controlcode = NSFB_CONTROL_QUIT;
         return 1;
@@ -203,7 +203,7 @@ static bool leanos_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout) {
 
     long started = sys_uptime_ms();
     for (;;) {
-        wm_event_t in;
+        window_manager_event_t in;
         while (window_manager_poll_event(&p->win, &in) == 1) {
             resync(nsfb, p);
             if (convert(p, &in, event)) {

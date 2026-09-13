@@ -10,21 +10,21 @@ static size_t clipboard_length;
 
 static spinlock_t clipboard_lock;
 
-void clipboard_set(const void *buf, size_t len) {
-    if (len > CLIPBOARD_MAX) {
-        len = CLIPBOARD_MAX;
+void clipboard_set(const void *buffer, size_t length) {
+    if (length > CLIPBOARD_MAX) {
+        length = CLIPBOARD_MAX;
     }
     uint64_t flags = spin_lock_irqsave(&clipboard_lock);
-    k_memcpy(clipboard_buffer, buf, len);
-    clipboard_length = len;
+    k_memcpy(clipboard_buffer, buffer, length);
+    clipboard_length = length;
     spin_unlock_irqrestore(&clipboard_lock, flags);
 }
 
-size_t clipboard_get(void *buf, size_t maxlen) {
+size_t clipboard_get(void *buffer, size_t maxlen) {
     uint64_t flags = spin_lock_irqsave(&clipboard_lock);
     size_t real_length = clipboard_length;
     size_t to_copy = real_length < maxlen ? real_length : maxlen;
-    k_memcpy(buf, clipboard_buffer, to_copy);
+    k_memcpy(buffer, clipboard_buffer, to_copy);
     spin_unlock_irqrestore(&clipboard_lock, flags);
     return real_length;
 }

@@ -31,22 +31,22 @@
 #define TEXT_COLOR     0x00D8D8D8u
 #define SELECT_COLOR   0x004C6699u
 #define LABEL_COLOR    0x0090A0C0u
-#define DIR_MARK_COLOR 0x0078A8E0u
+#define DIRECTORY_MARK_COLOR 0x0078A8E0u
 #define SCROLLBAR_TRACK 0x00141820u
 #define SCROLLBAR_THUMB 0x00506080u
 #define COLS_BG        0x00262C3Au
 #define STATUS_BG      0x00141820u
-#define STATUS_ERR_FG  0x00E08878u
+#define STATUS_ERROR_FG  0x00E08878u
 
 #define MAX_FILES    512
-#define MAX_NAME_LEN 256
-#define LIST_BUF_SIZE 2048
+#define MAX_NAME_LENGTH 256
+#define LIST_BUFFER_SIZE 2048
 #define DOUBLE_CLICK_MS 500
 
-static char names[MAX_FILES][MAX_NAME_LEN];
+static char names[MAX_FILES][MAX_NAME_LENGTH];
 static uint32_t sizes[MAX_FILES];
 static uint32_t mtimes[MAX_FILES];
-static uint8_t is_dir[MAX_FILES];
+static uint8_t is_directory[MAX_FILES];
 static int file_count;
 static int selected = -1;
 static int scroll_top;
@@ -56,18 +56,18 @@ static fm_sort_t sort_key = SORT_NAME;
 static int sort_descriptor;
 static const char *status_text = "";
 
-static char cwd[PATH_MAX_LEN] = PATH_HOME;
+static char cwd[PATH_MAX_LENGTH] = PATH_HOME;
 
 #define RECENT_BTN_W 62
 #define RECENT_BTN_X (LIST_W - RECENT_BTN_W - 6)
 static int recent_mode;
-static char recent_full[RECENT_MAX][PATH_MAX_LEN];
-static char recent_return[PATH_MAX_LEN];
+static char recent_full[RECENT_MAX][PATH_MAX_LENGTH];
+static char recent_return[PATH_MAX_LENGTH];
 
 static int path_in_cwd(const char *name, char *out) {
     int n = 0;
     for (const char *s = cwd; *s; s++) {
-        if (n >= PATH_MAX_LEN - 2) {
+        if (n >= PATH_MAX_LENGTH - 2) {
             return -1;
         }
         out[n++] = *s;
@@ -76,7 +76,7 @@ static int path_in_cwd(const char *name, char *out) {
         out[n++] = '/';
     }
     for (const char *s = name; *s; s++) {
-        if (n >= PATH_MAX_LEN - 1) {
+        if (n >= PATH_MAX_LENGTH - 1) {
             return -1;
         }
         out[n++] = *s;
@@ -87,7 +87,7 @@ static int path_in_cwd(const char *name, char *out) {
 
 #define PROMPT_W 260
 #define PROMPT_H 72
-#define PROMPT_MAX_LEN 48
+#define PROMPT_MAX_LENGTH 48
 #define PROMPT_BG      0x00243040u
 #define PROMPT_BORDER  0x004C6699u
 #define PROMPT_TEXT    0x00E8E8E8u
@@ -106,7 +106,7 @@ typedef enum {
 } fm_prompt_t;
 
 static fm_prompt_t prompt_kind;
-static char prompt_buffer[PROMPT_MAX_LEN + 1];
+static char prompt_buffer[PROMPT_MAX_LENGTH + 1];
 static int prompt_length;
 
 #define INFO_W 300
@@ -116,26 +116,26 @@ static os_stat_t info_stat;
 static file_system_utilities_tree_t info_tree;
 static int info_is_directory;
 static int info_tree_valid;
-static char info_path[PATH_MAX_LEN];
+static char info_path[PATH_MAX_LENGTH];
 
-#define CTX_ITEM_W 124
-#define CTX_ITEM_H (UI_FONT_UI_HEIGHT + 4)
-#define CTX_MENU_BG     0x00243040u
-#define CTX_MENU_HOVER  0x003A5A80u
-#define CTX_MENU_BORDER 0x00506070u
-#define CTX_MENU_TEXT   0x00FFFFFFu
+#define CONTEXT_ITEM_W 124
+#define CONTEXT_ITEM_H (UI_FONT_UI_HEIGHT + 4)
+#define CONTEXT_MENU_BG     0x00243040u
+#define CONTEXT_MENU_HOVER  0x003A5A80u
+#define CONTEXT_MENU_BORDER 0x00506070u
+#define CONTEXT_MENU_TEXT   0x00FFFFFFu
 
 typedef enum {
-    CTX_NEW_FILE = 0,
-    CTX_NEW_FOLDER,
-    CTX_RENAME,
-    CTX_COPY,
-    CTX_DELETE,
-    CTX_INFO,
-    CTX_COUNT,
+    CONTEXT_NEW_FILE = 0,
+    CONTEXT_NEW_FOLDER,
+    CONTEXT_RENAME,
+    CONTEXT_COPY,
+    CONTEXT_DELETE,
+    CONTEXT_INFO,
+    CONTEXT_COUNT,
 } fm_context_item_t;
 
-static const char *const CTX_ITEMS[CTX_COUNT] = {
+static const char *const CONTEXT_ITEMS[CONTEXT_COUNT] = {
     "New File (N)",
     "New Folder (F)",
     "Rename (R)",
@@ -171,13 +171,13 @@ static int sb_puts(char *out, int n, int cap, const char *t) {
 }
 
 static int sb_number(char *out, int n, int cap, uint32_t v) {
-    char temporary[FSUTIL_EXACT_MAX];
+    char temporary[FILE_SYSTEM_UTILITIES_EXACT_MAX];
     file_system_utilities_format_exact(v, temporary);
     return sb_puts(out, n, cap, temporary);
 }
 
-static void status_say(const char *msg, int is_error) {
-    status_text = msg;
+static void status_say(const char *message, int is_error) {
+    status_text = message;
     status_error = is_error;
     status_expires_ms = sys_uptime_ms() + STATUS_MS;
 }
@@ -192,10 +192,10 @@ static void status_describe(void) {
                      names[selected][0] == '.' && names[selected][1] == '.' &&
                      names[selected][2] == '\0');
     if (selected >= 0 && selected < file_count && !is_up_row) {
-        char cell[FSUTIL_EXACT_MAX];
+        char cell[FILE_SYSTEM_UTILITIES_EXACT_MAX];
         n = sb_puts(status_buffer, n, (int)sizeof(status_buffer), names[selected]);
         n = sb_puts(status_buffer, n, (int)sizeof(status_buffer), "   ");
-        if (is_dir[selected]) {
+        if (is_directory[selected]) {
             n = sb_puts(status_buffer, n, (int)sizeof(status_buffer), "folder");
         } else {
             n = sb_number(status_buffer, n, (int)sizeof(status_buffer), sizes[selected]);
@@ -214,7 +214,7 @@ static void status_describe(void) {
             items--;
             continue;
         }
-        if (!is_dir[i]) {
+        if (!is_directory[i]) {
             here += sizes[i];
         }
     }
@@ -224,7 +224,7 @@ static void status_describe(void) {
         return;
     }
     {
-        char cell[FSUTIL_SIZE_MAX];
+        char cell[FILE_SYSTEM_UTILITIES_SIZE_MAX];
         file_system_utilities_format_size(here, cell);
         n = sb_puts(status_buffer, n, (int)sizeof(status_buffer), ", ");
         n = sb_puts(status_buffer, n, (int)sizeof(status_buffer), cell);
@@ -240,7 +240,7 @@ static void status_describe(void) {
         if (freeb > 0xFFFFFFFFu) {
             freeb = 0xFFFFFFFFu;
         }
-        char cell[FSUTIL_SIZE_MAX];
+        char cell[FILE_SYSTEM_UTILITIES_SIZE_MAX];
         file_system_utilities_format_size((uint32_t)freeb, cell);
         n = sb_puts(status_buffer, n, (int)sizeof(status_buffer), "   ");
         n = sb_puts(status_buffer, n, (int)sizeof(status_buffer), cell);
@@ -264,8 +264,8 @@ static int32_t drag_press_x, drag_press_y;
 static int dragging;
 
 static int sort_before(int a, int b) {
-    if (is_dir[a] != is_dir[b]) {
-        return is_dir[a];
+    if (is_directory[a] != is_directory[b]) {
+        return is_directory[a];
     }
     long cmp;
     if (sort_key == SORT_SIZE) {
@@ -282,12 +282,12 @@ static int sort_before(int a, int b) {
 }
 
 static void swap_rows(int a, int b) {
-    char nm[MAX_NAME_LEN];
-    memcpy(nm, names[a], MAX_NAME_LEN);
-    memcpy(names[a], names[b], MAX_NAME_LEN);
-    memcpy(names[b], nm, MAX_NAME_LEN);
-    uint8_t d = is_dir[a]; is_dir[a] = is_dir[b]; is_dir[b] = d;
-    uint32_t sz = sizes[a]; sizes[a] = sizes[b]; sizes[b] = sz;
+    char nm[MAX_NAME_LENGTH];
+    memcpy(nm, names[a], MAX_NAME_LENGTH);
+    memcpy(names[a], names[b], MAX_NAME_LENGTH);
+    memcpy(names[b], nm, MAX_NAME_LENGTH);
+    uint8_t d = is_directory[a]; is_directory[a] = is_directory[b]; is_directory[b] = d;
+    uint32_t size = sizes[a]; sizes[a] = sizes[b]; sizes[b] = size;
     uint32_t mt = mtimes[a]; mtimes[a] = mtimes[b]; mtimes[b] = mt;
 }
 
@@ -304,14 +304,14 @@ static void sort_list(void) {
 }
 
 static void rebuild_list(void) {
-    static char buf[LIST_BUF_SIZE];
+    static char buffer[LIST_BUFFER_SIZE];
     file_count = 0;
 
     if (recent_mode) {
         names[0][0] = '.';
         names[0][1] = '.';
         names[0][2] = '\0';
-        is_dir[0] = 1;
+        is_directory[0] = 1;
         sizes[0] = 0;
         mtimes[0] = 0;
         file_count = 1;
@@ -324,11 +324,11 @@ static void rebuild_list(void) {
                 }
             }
             int col = 0;
-            for (; base[col] && col < MAX_NAME_LEN - 1; col++) {
+            for (; base[col] && col < MAX_NAME_LENGTH - 1; col++) {
                 names[file_count][col] = base[col];
             }
             names[file_count][col] = '\0';
-            is_dir[file_count] = 0;
+            is_directory[file_count] = 0;
             os_stat_t st;
             sizes[file_count] = 0;
             mtimes[file_count] = 0;
@@ -348,28 +348,28 @@ static void rebuild_list(void) {
         names[0][0] = '.';
         names[0][1] = '.';
         names[0][2] = '\0';
-        is_dir[0] = 1;
+        is_directory[0] = 1;
         file_count = 1;
     }
 
-    long n = sys_listdir(cwd, buf, sizeof(buf));
+    long n = sys_listdir(cwd, buffer, sizeof(buffer));
     if (n > 0) {
-        if (n > (long)sizeof(buf)) {
-            n = (long)sizeof(buf);
+        if (n > (long)sizeof(buffer)) {
+            n = (long)sizeof(buffer);
         }
         int col = 0;
         for (long i = 0; i < n && file_count < MAX_FILES; i++) {
-            char c = buf[i];
+            char c = buffer[i];
             if (c == '\n') {
-                int dir = (col > 0 && names[file_count][col - 1] == '/');
-                if (dir) {
+                int directory = (col > 0 && names[file_count][col - 1] == '/');
+                if (directory) {
                     col--;
                 }
                 names[file_count][col] = '\0';
-                is_dir[file_count] = (uint8_t)dir;
+                is_directory[file_count] = (uint8_t)directory;
                 file_count++;
                 col = 0;
-            } else if (col < MAX_NAME_LEN - 1) {
+            } else if (col < MAX_NAME_LENGTH - 1) {
                 names[file_count][col++] = c;
             }
         }
@@ -378,7 +378,7 @@ static void rebuild_list(void) {
     for (int i = 0; i < file_count; i++) {
         sizes[i] = 0;
         mtimes[i] = 0;
-        char full[PATH_MAX_LEN];
+        char full[PATH_MAX_LENGTH];
         if (names[i][0] == '.' && names[i][1] == '.' && names[i][2] == '\0') {
             continue;
         }
@@ -408,10 +408,10 @@ static void clamp_scroll(void) {
 }
 
 static void refresh_list(void) {
-    char keep[MAX_NAME_LEN];
+    char keep[MAX_NAME_LENGTH];
     int had = (selected >= 0 && selected < file_count);
     if (had) {
-        memcpy(keep, names[selected], MAX_NAME_LEN);
+        memcpy(keep, names[selected], MAX_NAME_LENGTH);
     }
     rebuild_list();
     if (had) {
@@ -448,7 +448,7 @@ static void go_up(void) {
 static void leave_directory(void) {
     if (recent_mode) {
         recent_mode = 0;
-        for (int i = 0; i < PATH_MAX_LEN; i++) {
+        for (int i = 0; i < PATH_MAX_LENGTH; i++) {
             cwd[i] = recent_return[i];
         }
     } else if (cwd[0] == '/' && cwd[1] == '\0') {
@@ -468,11 +468,11 @@ static void open_selected(void) {
         return;
     }
     if (recent_mode) {
-        if (is_dir[selected]) {
+        if (is_directory[selected]) {
             leave_directory();
             return;
         }
-        long rc = sys_spawn(PATH_BIN_DIR "text_editor", recent_full[selected - 1]);
+        long rc = sys_spawn(PATH_BIN_DIRECTORY "text_editor", recent_full[selected - 1]);
         if (rc < 0) {
             status_say(spawn_error_message(rc), 1);
         }
@@ -481,17 +481,17 @@ static void open_selected(void) {
         }
         return;
     }
-    if (is_dir[selected]) {
+    if (is_directory[selected]) {
         if (names[selected][0] == '.' && names[selected][1] == '.') {
             leave_directory();
             return;
         }
-        char next[PATH_MAX_LEN];
+        char next[PATH_MAX_LENGTH];
         if (path_in_cwd(names[selected], next) != 0) {
             status_say("Path too long.", 1);
             return;
         }
-        for (int i = 0; i < PATH_MAX_LEN; i++) {
+        for (int i = 0; i < PATH_MAX_LENGTH; i++) {
             cwd[i] = next[i];
         }
         selected = -1;
@@ -501,12 +501,12 @@ static void open_selected(void) {
         refresh_list();
         return;
     }
-    char full[PATH_MAX_LEN];
+    char full[PATH_MAX_LENGTH];
     if (path_in_cwd(names[selected], full) != 0) {
         status_say("Path too long.", 1);
         return;
     }
-    long rc = sys_spawn(PATH_BIN_DIR "text_editor", full);
+    long rc = sys_spawn(PATH_BIN_DIRECTORY "text_editor", full);
     if (rc < 0) {
         status_say(spawn_error_message(rc), 1);
     }
@@ -543,7 +543,7 @@ static void prompt_open_info(void) {
         status_say("Select a file first.", 1);
         return;
     }
-    info_is_directory = selected >= 0 && is_dir[selected];
+    info_is_directory = selected >= 0 && is_directory[selected];
     info_tree_valid = 0;
     if (sys_stat(info_path, &info_stat) != 0) {
         status_say("Could not read that.", 1);
@@ -556,16 +556,16 @@ static void prompt_open_info(void) {
 }
 
 static void prompt_open(fm_prompt_t kind) {
-    char scratch[PATH_MAX_LEN];
+    char scratch[PATH_MAX_LENGTH];
     if (selected_file_path(scratch) != 0) {
         status_say("Select a file first.", 1);
         return;
     }
-    if (kind == FM_PROMPT_COPY && selected >= 0 && is_dir[selected]) {
+    if (kind == FM_PROMPT_COPY && selected >= 0 && is_directory[selected]) {
         status_say("Folders cannot be copied.", 1);
         return;
     }
-    if (kind == FM_PROMPT_CONFIRM_DELETE && selected >= 0 && is_dir[selected]) {
+    if (kind == FM_PROMPT_CONFIRM_DELETE && selected >= 0 && is_directory[selected]) {
         info_tree_valid = (file_system_utilities_count_tree(scratch, &info_tree) == 0);
     } else {
         info_tree_valid = 0;
@@ -573,7 +573,7 @@ static void prompt_open(fm_prompt_t kind) {
     prompt_kind = kind;
     prompt_length = 0;
     if (kind != FM_PROMPT_CONFIRM_DELETE) {
-        for (int i = 0; names[selected][i] && i < PROMPT_MAX_LEN; i++) {
+        for (int i = 0; names[selected][i] && i < PROMPT_MAX_LENGTH; i++) {
             prompt_buffer[prompt_length++] = names[selected][i];
         }
     }
@@ -585,7 +585,7 @@ static const char *create_file(const char *name, int *failed) {
     if (!file_system_utilities_name_ok(name)) {
         return "That name cannot be used.";
     }
-    char full[PATH_MAX_LEN];
+    char full[PATH_MAX_LENGTH];
     if (path_in_cwd(name, full) != 0) {
         return "Name too long.";
     }
@@ -603,7 +603,7 @@ static const char *create_folder(const char *name, int *failed) {
     if (!file_system_utilities_name_ok(name)) {
         return "That name cannot be used.";
     }
-    char full[PATH_MAX_LEN];
+    char full[PATH_MAX_LENGTH];
     if (path_in_cwd(name, full) != 0) {
         return "Name too long.";
     }
@@ -626,20 +626,20 @@ static void select_named(const char *name) {
 
 static const char *copy_file(const char *from, const char *to, int *failed) {
     *failed = 1;
-    long src = sys_open(from, OPEN_READ);
-    if (src < 0) {
+    long source = sys_open(from, OPEN_READ);
+    if (source < 0) {
         return "Could not read that file.";
     }
-    long dst = sys_open(to, OPEN_WRITE | OPEN_CREATE | OPEN_EXCL);
-    if (dst < 0) {
-        sys_close((int)src);
+    long destination = sys_open(to, OPEN_WRITE | OPEN_CREATE | OPEN_EXCL);
+    if (destination < 0) {
+        sys_close((int)source);
         return "That name is already taken, or the disk is full.";
     }
     static char chunk[FM_COPY_CHUNK];
     const char *result = "Copied.";
     *failed = 0;
     for (;;) {
-        long n = sys_read((int)src, chunk, sizeof(chunk));
+        long n = sys_read((int)source, chunk, sizeof(chunk));
         if (n < 0) {
             result = "Could not read that file.";
             *failed = 1;
@@ -648,14 +648,14 @@ static const char *copy_file(const char *from, const char *to, int *failed) {
         if (n == 0) {
             break;
         }
-        if (sys_write((int)dst, chunk, (size_t)n) != n) {
+        if (sys_write((int)destination, chunk, (size_t)n) != n) {
             result = "Ran out of space part way through.";
             *failed = 1;
             break;
         }
     }
-    sys_close((int)src);
-    sys_close((int)dst);
+    sys_close((int)source);
+    sys_close((int)destination);
     return result;
 }
 
@@ -664,10 +664,10 @@ static void prompt_confirm(void) {
         prompt_buffer[prompt_length] = '\0';
         if (prompt_length > 0) {
             int failed = 1;
-            const char *msg = (prompt_kind == FM_PROMPT_NEW_FILE)
+            const char *message = (prompt_kind == FM_PROMPT_NEW_FILE)
                                   ? create_file(prompt_buffer, &failed)
                                   : create_folder(prompt_buffer, &failed);
-            status_say(msg, failed);
+            status_say(message, failed);
             prompt_kind = FM_PROMPT_NONE;
             statvfs_invalidate();
             refresh_list();
@@ -680,13 +680,13 @@ static void prompt_confirm(void) {
         return;
     }
 
-    char from[PATH_MAX_LEN];
+    char from[PATH_MAX_LENGTH];
     if (selected_file_path(from) != 0) {
         prompt_kind = FM_PROMPT_NONE;
         return;
     }
     if (prompt_kind == FM_PROMPT_CONFIRM_DELETE) {
-        if (is_dir[selected]) {
+        if (is_directory[selected]) {
             int empty = info_tree_valid && info_tree.entries == 0;
             int ok = empty ? (sys_rmdir(from) == 0) : (file_system_utilities_remove_tree(from) == 0);
             if (ok) {
@@ -708,7 +708,7 @@ static void prompt_confirm(void) {
             prompt_kind = FM_PROMPT_NONE;
             return;
         }
-        char to[PATH_MAX_LEN];
+        char to[PATH_MAX_LENGTH];
         if (path_in_cwd(prompt_buffer, to) != 0) {
             status_say("Name too long.", 1);
             prompt_kind = FM_PROMPT_NONE;
@@ -722,8 +722,8 @@ static void prompt_confirm(void) {
             }
         } else {
             int failed = 0;
-            const char *msg = copy_file(from, to, &failed);
-            status_say(msg, failed);
+            const char *message = copy_file(from, to, &failed);
+            status_say(message, failed);
         }
     }
     prompt_kind = FM_PROMPT_NONE;
@@ -782,11 +782,11 @@ static void redraw(window_manager_window_t *win) {
             graphics_fill_rect(&win->graphics, 0, y, LIST_W, ROW_H, SELECT_COLOR);
         }
         int32_t name_x = COL_NAME_X + graphics_char_advance(&LIST_FONT, UI_G_ARROW_RIGHT) + 3;
-        if (is_dir[i]) {
-            graphics_draw_text_font(&win->graphics, COL_NAME_X, y + 2, UI_S_ARROW_RIGHT, DIR_MARK_COLOR, &LIST_FONT, 0);
+        if (is_directory[i]) {
+            graphics_draw_text_font(&win->graphics, COL_NAME_X, y + 2, UI_S_ARROW_RIGHT, DIRECTORY_MARK_COLOR, &LIST_FONT, 0);
         }
         {
-            char shown_name[MAX_NAME_LEN + 2];
+            char shown_name[MAX_NAME_LENGTH + 2];
             int32_t avail = COL_NAME_W;
             if (graphics_text_width(&LIST_FONT, names[i]) > avail) {
                 int32_t fit = graphics_text_fit(&LIST_FONT, names[i],
@@ -795,14 +795,14 @@ static void redraw(window_manager_window_t *win) {
                 shown_name[fit] = UI_G_ELLIPSIS;
                 shown_name[fit + 1] = '\0';
             } else {
-                memcpy(shown_name, names[i], MAX_NAME_LEN);
-                shown_name[MAX_NAME_LEN] = '\0';
+                memcpy(shown_name, names[i], MAX_NAME_LENGTH);
+                shown_name[MAX_NAME_LENGTH] = '\0';
             }
             graphics_draw_text_font(&win->graphics, name_x, y + 2, shown_name, TEXT_COLOR, &LIST_FONT, 0);
         }
 
         char cell[20];
-        if (!is_dir[i]) {
+        if (!is_directory[i]) {
             file_system_utilities_format_size(sizes[i], cell);
             graphics_draw_text_font(&win->graphics, COL_SIZE_R - graphics_text_width(&LIST_FONT, cell), y + 2,
                                 cell, LABEL_COLOR, &LIST_FONT, 0);
@@ -817,12 +817,12 @@ static void redraw(window_manager_window_t *win) {
 
     graphics_fill_rect(&win->graphics, 0, WIN_H - STATUS_H, WIN_W, STATUS_H, STATUS_BG);
     graphics_draw_text(&win->graphics, 6, WIN_H - STATUS_H + 2, status_text,
-                  status_error ? STATUS_ERR_FG : LABEL_COLOR);
+                  status_error ? STATUS_ERROR_FG : LABEL_COLOR);
 
     if (context_open) {
-        graphics_draw_menu(&win->graphics, context_x, context_y, CTX_ITEM_W, CTX_ITEM_H,
-                      CTX_ITEMS, CTX_COUNT, -1,
-                      CTX_MENU_BG, CTX_MENU_HOVER, CTX_MENU_BORDER, CTX_MENU_TEXT);
+        graphics_draw_menu(&win->graphics, context_x, context_y, CONTEXT_ITEM_W, CONTEXT_ITEM_H,
+                      CONTEXT_ITEMS, CONTEXT_COUNT, -1,
+                      CONTEXT_MENU_BG, CONTEXT_MENU_HOVER, CONTEXT_MENU_BORDER, CONTEXT_MENU_TEXT);
     }
 
     if (prompt_kind == FM_PROMPT_INFO) {
@@ -830,10 +830,10 @@ static void redraw(window_manager_window_t *win) {
         int32_t y = (WIN_H - INFO_H) / 2;
         graphics_fill_rect_rounded(&win->graphics, x, y, INFO_W, INFO_H, PROMPT_BG);
         graphics_draw_rect_rounded(&win->graphics, x, y, INFO_W, INFO_H, PROMPT_BORDER);
-        int32_t tx = x + GFX_PAD;
+        int32_t tx = x + GRAPHICS_PAD;
         int32_t ty = y + 8;
         int32_t line = UI_FONT_UI_HEIGHT + 4;
-        int32_t avail = INFO_W - 2 * GFX_PAD;
+        int32_t avail = INFO_W - 2 * GRAPHICS_PAD;
 
         {
             const char *shown = info_path;
@@ -853,7 +853,7 @@ static void redraw(window_manager_window_t *win) {
         graphics_draw_text(&win->graphics, tx, ty, info_is_directory ? "Folder" : "File", LABEL_COLOR);
         ty += line;
 
-        char cell[FSUTIL_EXACT_MAX];
+        char cell[FILE_SYSTEM_UTILITIES_EXACT_MAX];
         char row[80];
         int n = 0;
         if (info_is_directory) {
@@ -875,7 +875,7 @@ static void redraw(window_manager_window_t *win) {
         ty += line;
 
         if (info_is_directory && info_tree_valid && info_tree.deep) {
-            graphics_draw_text(&win->graphics, tx, ty, "(deeper than this can count)", STATUS_ERR_FG);
+            graphics_draw_text(&win->graphics, tx, ty, "(deeper than this can count)", STATUS_ERROR_FG);
         } else {
             file_system_utilities_format_date(info_stat.mtime, cell);
             n = sb_puts(row, 0, (int)sizeof(row), "Modified  ");
@@ -892,7 +892,7 @@ static void redraw(window_manager_window_t *win) {
         if (prompt_kind == FM_PROMPT_CONFIRM_DELETE) {
             const char *question = "Delete this file?";
             char counted[64];
-            if (selected >= 0 && selected < file_count && is_dir[selected]) {
+            if (selected >= 0 && selected < file_count && is_directory[selected]) {
                 if (info_tree_valid && info_tree.entries > 0) {
                     int n = sb_puts(counted, 0, (int)sizeof(counted), "Delete folder and ");
                     n = sb_number(counted, n, (int)sizeof(counted), info_tree.entries);
@@ -903,19 +903,19 @@ static void redraw(window_manager_window_t *win) {
                     question = "Delete this empty folder?";
                 }
             }
-            graphics_draw_text(&win->graphics, x + GFX_PAD, y + 8, question, PROMPT_TEXT);
-            graphics_draw_text(&win->graphics, x + GFX_PAD, y + 32, "Y = delete   any key = cancel", PROMPT_TEXT);
+            graphics_draw_text(&win->graphics, x + GRAPHICS_PAD, y + 8, question, PROMPT_TEXT);
+            graphics_draw_text(&win->graphics, x + GRAPHICS_PAD, y + 32, "Y = delete   any key = cancel", PROMPT_TEXT);
         } else {
             static const char *const TITLES[] = {
                 "", "Rename to:", "Copy to:", "", "New file named:", "New folder named:",
             };
-            graphics_draw_text(&win->graphics, x + GFX_PAD, y + 8, TITLES[prompt_kind], PROMPT_TEXT);
-            graphics_fill_rect_rounded(&win->graphics, x + GFX_PAD, y + 28, PROMPT_W - 2 * GFX_PAD, UI_FONT_UI_HEIGHT + 4, PROMPT_INPUT_BG);
-            char buf[PROMPT_MAX_LEN + 1];
-            memcpy(buf, prompt_buffer, (size_t)prompt_length);
-            buf[prompt_length] = '\0';
-            graphics_draw_text(&win->graphics, x + GFX_PAD + 4, y + 30, buf, PROMPT_TEXT);
-            graphics_fill_rect(&win->graphics, x + GFX_PAD + 4 + graphics_text_width(graphics_ui_font(), buf), y + 30,
+            graphics_draw_text(&win->graphics, x + GRAPHICS_PAD, y + 8, TITLES[prompt_kind], PROMPT_TEXT);
+            graphics_fill_rect_rounded(&win->graphics, x + GRAPHICS_PAD, y + 28, PROMPT_W - 2 * GRAPHICS_PAD, UI_FONT_UI_HEIGHT + 4, PROMPT_INPUT_BG);
+            char buffer[PROMPT_MAX_LENGTH + 1];
+            memcpy(buffer, prompt_buffer, (size_t)prompt_length);
+            buffer[prompt_length] = '\0';
+            graphics_draw_text(&win->graphics, x + GRAPHICS_PAD + 4, y + 30, buffer, PROMPT_TEXT);
+            graphics_fill_rect(&win->graphics, x + GRAPHICS_PAD + 4 + graphics_text_width(graphics_ui_font(), buffer), y + 30,
                           2, (int32_t)graphics_ui_font()->height, PROMPT_TEXT);
         }
     }
@@ -938,17 +938,17 @@ int main(void) {
 
     for (;;) {
         int changed = 0;
-        wm_event_t ev;
+        window_manager_event_t ev;
         while (window_manager_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+            if (ev.type == WINDOW_MANAGER_EVENT_EXPOSE || ev.type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {
                 changed = 1;
             } else if (prompt_kind != FM_PROMPT_NONE &&
-                       (ev.type == WM_EVENT_MOUSE_BUTTON ||
-                        ev.type == WM_EVENT_MOUSE_WHEEL ||
-                        ev.type == WM_EVENT_MOUSE_MOVE)) {
+                       (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON ||
+                        ev.type == WINDOW_MANAGER_EVENT_MOUSE_WHEEL ||
+                        ev.type == WINDOW_MANAGER_EVENT_MOUSE_MOVE)) {
                 drag_armed_row = -1;
                 dragging = 0;
-            } else if (ev.type == WM_EVENT_KEY && prompt_kind != FM_PROMPT_NONE) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_KEY && prompt_kind != FM_PROMPT_NONE) {
                 changed = 1;
                 if (prompt_kind == FM_PROMPT_INFO) {
                     prompt_kind = FM_PROMPT_NONE;
@@ -966,10 +966,10 @@ int main(void) {
                     if (prompt_length > 0) {
                         prompt_length--;
                     }
-                } else if (ev.ch >= 0x20 && ev.ch < 0x7F && prompt_length < PROMPT_MAX_LEN) {
+                } else if (ev.ch >= 0x20 && ev.ch < 0x7F && prompt_length < PROMPT_MAX_LENGTH) {
                     prompt_buffer[prompt_length++] = ev.ch;
                 }
-            } else if (ev.type == WM_EVENT_KEY) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_KEY) {
                 context_open = 0;
                 if (ev.ch == 'r' || ev.ch == 'R') {
                     prompt_open(FM_PROMPT_RENAME);
@@ -989,24 +989,24 @@ int main(void) {
                 } else if (ev.ch == 0x7F || ev.ch == '\b') {
                     prompt_open(FM_PROMPT_CONFIRM_DELETE);
                     changed = 1;
-                } else if (ev.ch == KBD_KEY_UP && selected > 0) {
+                } else if (ev.ch == KEYBOARD_KEY_UP && selected > 0) {
                     selected--;
                     clamp_scroll();
                     status_refresh();
                     changed = 1;
-                } else if (ev.ch == KBD_KEY_DOWN && selected + 1 < file_count) {
+                } else if (ev.ch == KEYBOARD_KEY_DOWN && selected + 1 < file_count) {
                     selected++;
                     clamp_scroll();
                     status_refresh();
                     changed = 1;
-                } else if (ev.ch == KBD_KEY_LEFT) {
+                } else if (ev.ch == KEYBOARD_KEY_LEFT) {
                     leave_directory();
                     changed = 1;
-                } else if (ev.ch == KBD_KEY_RIGHT || ev.ch == '\n' || ev.ch == '\r') {
+                } else if (ev.ch == KEYBOARD_KEY_RIGHT || ev.ch == '\n' || ev.ch == '\r') {
                     open_selected();
                     changed = 1;
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_MOVE) {
                 if (drag_armed_row >= 0 && !dragging && (ev.buttons & 1)) {
                     int32_t dx = ev.x - drag_press_x;
                     int32_t dy = ev.y - drag_press_y;
@@ -1019,7 +1019,7 @@ int main(void) {
                     if (dx + dy >= DRAG_THRESHOLD) {
                         dragging = 1;
                         {
-                            char full[PATH_MAX_LEN];
+                            char full[PATH_MAX_LENGTH];
                             if (path_in_cwd(names[drag_armed_row], full) == 0) {
                                 window_manager_drag_begin(full);
                             }
@@ -1033,7 +1033,7 @@ int main(void) {
                     drag_armed_row = -1;
                     dragging = 0;
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
                 if (ev.y >= LIST_Y && ev.y < LIST_Y + LIST_H) {
                     int row = scroll_top + (ev.y - LIST_Y) / ROW_H;
                     if (row < file_count) {
@@ -1044,8 +1044,8 @@ int main(void) {
                 context_open = 1;
                 context_x = ev.x;
                 context_y = ev.y;
-                int32_t max_x = LIST_W - CTX_ITEM_W;
-                int32_t max_y = (WIN_H - STATUS_H) - CTX_ITEM_H * CTX_COUNT;
+                int32_t max_x = LIST_W - CONTEXT_ITEM_W;
+                int32_t max_y = (WIN_H - STATUS_H) - CONTEXT_ITEM_H * CONTEXT_COUNT;
                 if (context_x > max_x) {
                     context_x = max_x;
                 }
@@ -1059,10 +1059,10 @@ int main(void) {
                     context_y = 0;
                 }
                 changed = 1;
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && !(ev.buttons & 1)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && !(ev.buttons & 1)) {
                 drag_armed_row = -1;
                 dragging = 0;
-            } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_WHEEL) {
                 int max_top = file_count - ROWS_VISIBLE;
                 if (max_top < 0) {
                     max_top = 0;
@@ -1078,35 +1078,35 @@ int main(void) {
                     scroll_top = want;
                     changed = 1;
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && context_open) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && context_open) {
                 int idx = graphics_menu_hit_test(ev.x, ev.y, context_x, context_y,
-                                             CTX_ITEM_W, CTX_ITEM_H, CTX_COUNT);
+                                             CONTEXT_ITEM_W, CONTEXT_ITEM_H, CONTEXT_COUNT);
                 context_open = 0;
                 changed = 1;
-                if (idx == CTX_NEW_FILE) {
+                if (idx == CONTEXT_NEW_FILE) {
                     prompt_open_new(FM_PROMPT_NEW_FILE);
-                } else if (idx == CTX_NEW_FOLDER) {
+                } else if (idx == CONTEXT_NEW_FOLDER) {
                     prompt_open_new(FM_PROMPT_NEW_FOLDER);
-                } else if (idx == CTX_RENAME) {
+                } else if (idx == CONTEXT_RENAME) {
                     prompt_open(FM_PROMPT_RENAME);
-                } else if (idx == CTX_COPY) {
+                } else if (idx == CONTEXT_COPY) {
                     prompt_open(FM_PROMPT_COPY);
-                } else if (idx == CTX_DELETE) {
+                } else if (idx == CONTEXT_DELETE) {
                     prompt_open(FM_PROMPT_CONFIRM_DELETE);
-                } else if (idx == CTX_INFO) {
+                } else if (idx == CONTEXT_INFO) {
                     prompt_open_info();
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 if (ev.y < HEADER_H) {
                     if (ev.x >= RECENT_BTN_X && ev.x < RECENT_BTN_X + RECENT_BTN_W) {
                         if (!recent_mode) {
-                            for (int i = 0; i < PATH_MAX_LEN; i++) {
+                            for (int i = 0; i < PATH_MAX_LENGTH; i++) {
                                 recent_return[i] = cwd[i];
                             }
                             recent_mode = 1;
                         } else {
                             recent_mode = 0;
-                            for (int i = 0; i < PATH_MAX_LEN; i++) {
+                            for (int i = 0; i < PATH_MAX_LENGTH; i++) {
                                 cwd[i] = recent_return[i];
                             }
                         }

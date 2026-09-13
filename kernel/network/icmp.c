@@ -7,7 +7,7 @@
 #define ICMP_TYPE_ECHO_REPLY   0
 #define ICMP_TYPE_ECHO_REQUEST 8
 
-#define ICMP_HEADER_LEN 8
+#define ICMP_HEADER_LENGTH 8
 #define ICMP_MAX_PAYLOAD 1024
 
 static volatile uint16_t last_reply_id;
@@ -15,7 +15,7 @@ static volatile uint16_t last_reply_sequence;
 static volatile int last_reply_valid;
 
 static void send_icmp(uint32_t destination_ip, uint8_t type, uint16_t id, uint16_t seq, const uint8_t *payload, uint16_t payload_length) {
-    static uint8_t packet[ICMP_HEADER_LEN + ICMP_MAX_PAYLOAD];
+    static uint8_t packet[ICMP_HEADER_LENGTH + ICMP_MAX_PAYLOAD];
     if (payload_length > ICMP_MAX_PAYLOAD) {
         payload_length = ICMP_MAX_PAYLOAD;
     }
@@ -29,10 +29,10 @@ static void send_icmp(uint32_t destination_ip, uint8_t type, uint16_t id, uint16
     packet[6] = (uint8_t)(seq >> 8);
     packet[7] = (uint8_t)(seq & 0xFF);
     if (payload_length > 0) {
-        k_memcpy(packet + ICMP_HEADER_LEN, payload, payload_length);
+        k_memcpy(packet + ICMP_HEADER_LENGTH, payload, payload_length);
     }
 
-    uint16_t total_length = (uint16_t)(ICMP_HEADER_LEN + payload_length);
+    uint16_t total_length = (uint16_t)(ICMP_HEADER_LENGTH + payload_length);
     uint16_t csum = net_checksum16(packet, total_length);
     packet[2] = (uint8_t)(csum >> 8);
     packet[3] = (uint8_t)(csum & 0xFF);
@@ -52,8 +52,8 @@ int icmp_echo_reply_seen(uint16_t id, uint16_t seq) {
     return 0;
 }
 
-void icmp_handle_packet(uint32_t source_ip, const uint8_t *payload, uint16_t len) {
-    if (len < ICMP_HEADER_LEN) {
+void icmp_handle_packet(uint32_t source_ip, const uint8_t *payload, uint16_t length) {
+    if (length < ICMP_HEADER_LENGTH) {
         return;
     }
     uint8_t type = payload[0];
@@ -61,7 +61,7 @@ void icmp_handle_packet(uint32_t source_ip, const uint8_t *payload, uint16_t len
     uint16_t seq = (uint16_t)((payload[6] << 8) | payload[7]);
 
     if (type == ICMP_TYPE_ECHO_REQUEST) {
-        send_icmp(source_ip, ICMP_TYPE_ECHO_REPLY, id, seq, payload + ICMP_HEADER_LEN, (uint16_t)(len - ICMP_HEADER_LEN));
+        send_icmp(source_ip, ICMP_TYPE_ECHO_REPLY, id, seq, payload + ICMP_HEADER_LENGTH, (uint16_t)(length - ICMP_HEADER_LENGTH));
     } else if (type == ICMP_TYPE_ECHO_REPLY) {
         last_reply_id = id;
         last_reply_sequence = seq;

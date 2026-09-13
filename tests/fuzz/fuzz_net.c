@@ -22,31 +22,31 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     }
     uint8_t which = data[0];
     const uint8_t *frame = data + 1;
-    size_t len = size - 1;
+    size_t length = size - 1;
 
-    if (len > 65535) {
-        len = 65535;
+    if (length > 65535) {
+        length = 65535;
     }
 
-    uint8_t *buf = (uint8_t *)malloc(len ? len : 1);
-    if (!buf) {
+    uint8_t *buffer = (uint8_t *)malloc(length ? length : 1);
+    if (!buffer) {
         return 0;
     }
-    memcpy(buf, frame, len);
+    memcpy(buffer, frame, length);
 
     fake_net_reset();
     fake_socket_reset();
 
     switch (which % 6) {
-        case 0: eth_receive(buf, (uint16_t)len); break;
-        case 1: arp_handle_packet(buf, (uint16_t)len); break;
-        case 2: ip_handle_packet(source_mac, buf, (uint16_t)len); break;
-        case 3: icmp_handle_packet(0x0A000202u, buf, (uint16_t)len); break;
-        case 4: udp_handle_packet(0x0A000202u, 0x0A00020Fu, buf, (uint16_t)len); break;
-        case 5: tcp_handle_packet(0x0A000202u, 0x0A00020Fu, buf, (uint16_t)len); break;
+        case 0: eth_receive(buffer, (uint16_t)length); break;
+        case 1: arp_handle_packet(buffer, (uint16_t)length); break;
+        case 2: ip_handle_packet(source_mac, buffer, (uint16_t)length); break;
+        case 3: icmp_handle_packet(0x0A000202u, buffer, (uint16_t)length); break;
+        case 4: udp_handle_packet(0x0A000202u, 0x0A00020Fu, buffer, (uint16_t)length); break;
+        case 5: tcp_handle_packet(0x0A000202u, 0x0A00020Fu, buffer, (uint16_t)length); break;
         default: break;
     }
 
-    free(buf);
+    free(buffer);
     return 0;
 }

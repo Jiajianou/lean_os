@@ -8,7 +8,7 @@
 
 #define DNS_PORT        53
 #define DNS_TIMEOUT_MS  3000
-#define DNS_MAX_MSG     512
+#define DNS_MAX_MESSAGE     512
 #define DNS_MAX_CNAME   4
 
 #define DNS_TYPE_A      1
@@ -23,12 +23,12 @@ static int encode_name(const char *name, uint8_t *out, int cap) {
         while (*dot && *dot != '.') {
             dot++;
         }
-        int len = (int)(dot - p);
-        if (len == 0 || len > 63 || n + len + 1 >= cap) {
+        int length = (int)(dot - p);
+        if (length == 0 || length > 63 || n + length + 1 >= cap) {
             return -1;
         }
-        out[n++] = (uint8_t)len;
-        for (int i = 0; i < len; i++) {
+        out[n++] = (uint8_t)length;
+        for (int i = 0; i < length; i++) {
             out[n++] = (uint8_t)p[i];
         }
         p = *dot ? dot + 1 : dot;
@@ -40,16 +40,16 @@ static int encode_name(const char *name, uint8_t *out, int cap) {
     return n;
 }
 
-static int decode_name(const uint8_t *msg, int len, int pos, char *out, int out_cap) {
+static int decode_name(const uint8_t *message, int length, int position, char *out, int out_cap) {
     int consumed = 0;
     int jumps = 0;
     int written = 0;
     int followed = 0;
 
-    while (pos >= 0 && pos < len) {
-        uint8_t l = msg[pos];
+    while (position >= 0 && position < length) {
+        uint8_t l = message[position];
         if ((l & 0xC0) == 0xC0) {
-            if (pos + 1 >= len) {
+            if (position + 1 >= length) {
                 return -1;
             }
             if (!followed) {
@@ -59,7 +59,7 @@ static int decode_name(const uint8_t *msg, int len, int pos, char *out, int out_
             if (++jumps > 16) {
                 return -1;
             }
-            pos = ((l & 0x3F) << 8) | msg[pos + 1];
+            position = ((l & 0x3F) << 8) | message[position + 1];
             continue;
         }
         if (l == 0) {
@@ -73,7 +73,7 @@ static int decode_name(const uint8_t *msg, int len, int pos, char *out, int out_
             }
             return consumed;
         }
-        if (l > 63 || pos + 1 + l > len) {
+        if (l > 63 || position + 1 + l > length) {
             return -1;
         }
         if (!followed) {
@@ -87,20 +87,20 @@ static int decode_name(const uint8_t *msg, int len, int pos, char *out, int out_
                 return -1;
             }
             for (int i = 0; i < l; i++) {
-                out[written++] = (char)msg[pos + 1 + i];
+                out[written++] = (char)message[position + 1 + i];
             }
         }
-        pos += 1 + l;
+        position += 1 + l;
     }
     return -1;
 }
 
 static int name_eq(const char *a, const char *b) {
     while (*a && *b) {
-        char ca = *a, cb = *b;
+        char ca = *a, callback = *b;
         if (ca >= 'A' && ca <= 'Z') { ca = (char)(ca - 'A' + 'a'); }
-        if (cb >= 'A' && cb <= 'Z') { cb = (char)(cb - 'A' + 'a'); }
-        if (ca != cb) {
+        if (callback >= 'A' && callback <= 'Z') { callback = (char)(callback - 'A' + 'a'); }
+        if (ca != callback) {
             return 0;
         }
         a++;
@@ -109,61 +109,61 @@ static int name_eq(const char *a, const char *b) {
     return !*a && !*b;
 }
 
-int dns_build_query(const char *name, uint16_t id, uint8_t *buf, int cap) {
-    if (!name || !buf || cap < 18) {
+int dns_build_query(const char *name, uint16_t id, uint8_t *buffer, int cap) {
+    if (!name || !buffer || cap < 18) {
         return -1;
     }
-    buf[0] = (uint8_t)(id >> 8);
-    buf[1] = (uint8_t)id;
-    buf[2] = 0x01;
-    buf[3] = 0x00;
-    buf[4] = 0; buf[5] = 1;
-    buf[6] = 0; buf[7] = 0;
-    buf[8] = 0; buf[9] = 0;
-    buf[10] = 0; buf[11] = 0;
-    int n = encode_name(name, buf + 12, cap - 12);
+    buffer[0] = (uint8_t)(id >> 8);
+    buffer[1] = (uint8_t)id;
+    buffer[2] = 0x01;
+    buffer[3] = 0x00;
+    buffer[4] = 0; buffer[5] = 1;
+    buffer[6] = 0; buffer[7] = 0;
+    buffer[8] = 0; buffer[9] = 0;
+    buffer[10] = 0; buffer[11] = 0;
+    int n = encode_name(name, buffer + 12, cap - 12);
     if (n < 0 || 12 + n + 4 > cap) {
         return -1;
     }
     int p = 12 + n;
-    buf[p++] = 0; buf[p++] = DNS_TYPE_A;
-    buf[p++] = 0; buf[p++] = DNS_CLASS_IN;
+    buffer[p++] = 0; buffer[p++] = DNS_TYPE_A;
+    buffer[p++] = 0; buffer[p++] = DNS_CLASS_IN;
     return p;
 }
 
-int dns_parse_response(const uint8_t *msg, int len, uint16_t expect_id,
+int dns_parse_response(const uint8_t *message, int length, uint16_t expect_id,
                         const char *expect_name, uint32_t *out) {
-    if (!msg || len < 12 || !out) {
+    if (!message || length < 12 || !out) {
         return -4;
     }
-    uint16_t id = (uint16_t)((msg[0] << 8) | msg[1]);
+    uint16_t id = (uint16_t)((message[0] << 8) | message[1]);
     if (id != expect_id) {
         return -4;
     }
-    if (!(msg[2] & 0x80)) {
+    if (!(message[2] & 0x80)) {
         return -4;
     }
-    int rcode = msg[3] & 0x0F;
+    int rcode = message[3] & 0x0F;
     if (rcode != 0) {
         return -3;
     }
-    int qdcount = (msg[4] << 8) | msg[5];
-    int ancount = (msg[6] << 8) | msg[7];
+    int qdcount = (message[4] << 8) | message[5];
+    int ancount = (message[6] << 8) | message[7];
     if (qdcount != 1 || ancount < 1) {
         return -4;
     }
 
-    int pos = 12;
+    int position = 12;
     char qname[DNS_MAX_NAME + 1];
-    int n = decode_name(msg, len, pos, qname, sizeof(qname));
+    int n = decode_name(message, length, position, qname, sizeof(qname));
     if (n < 0) {
         return -4;
     }
-    pos += n;
-    if (pos + 4 > len) {
+    position += n;
+    if (position + 4 > length) {
         return -4;
     }
-    pos += 4;
+    position += 4;
     if (expect_name && !name_eq(qname, expect_name)) {
         return -4;
     }
@@ -175,36 +175,36 @@ int dns_parse_response(const uint8_t *msg, int len, uint16_t expect_id,
 
     for (int i = 0; i < ancount; i++) {
         char rname[DNS_MAX_NAME + 1];
-        int rn = decode_name(msg, len, pos, rname, sizeof(rname));
+        int rn = decode_name(message, length, position, rname, sizeof(rname));
         if (rn < 0) {
             return -4;
         }
-        pos += rn;
-        if (pos + 10 > len) {
+        position += rn;
+        if (position + 10 > length) {
             return -4;
         }
-        int rtype = (msg[pos] << 8) | msg[pos + 1];
-        int rclass = (msg[pos + 2] << 8) | msg[pos + 3];
-        int rdlen = (msg[pos + 8] << 8) | msg[pos + 9];
-        pos += 10;
-        if (pos + rdlen > len) {
+        int rtype = (message[position] << 8) | message[position + 1];
+        int rclass = (message[position + 2] << 8) | message[position + 3];
+        int rdlen = (message[position + 8] << 8) | message[position + 9];
+        position += 10;
+        if (position + rdlen > length) {
             return -4;
         }
         if (rclass == DNS_CLASS_IN && rtype == DNS_TYPE_A && rdlen == 4 &&
             name_eq(rname, want)) {
-            *out = ((uint32_t)msg[pos] << 24) | ((uint32_t)msg[pos + 1] << 16) |
-                   ((uint32_t)msg[pos + 2] << 8) | (uint32_t)msg[pos + 3];
+            *out = ((uint32_t)message[position] << 24) | ((uint32_t)message[position + 1] << 16) |
+                   ((uint32_t)message[position + 2] << 8) | (uint32_t)message[position + 3];
             return 0;
         }
         if (rclass == DNS_CLASS_IN && rtype == DNS_TYPE_CNAME && name_eq(rname, want)) {
             if (++cnames > DNS_MAX_CNAME) {
                 return -4;
             }
-            if (decode_name(msg, len, pos, want, sizeof(want)) < 0) {
+            if (decode_name(message, length, position, want, sizeof(want)) < 0) {
                 return -4;
             }
         }
-        pos += rdlen;
+        position += rdlen;
     }
     return -4;
 }
@@ -280,19 +280,19 @@ static int parse_dotted_quad(const char *p, const char *end, uint32_t *out) {
     return 1;
 }
 
-int dns_parse_resolv_conf(const char *text, int len, uint32_t *out, int max) {
+int dns_parse_resolv_conf(const char *text, int length, uint32_t *out, int max) {
     if (!text || !out || max <= 0) {
         return 0;
     }
     int n = 0;
     int i = 0;
-    while (i < len && n < max) {
+    while (i < length && n < max) {
         int start = i;
-        while (i < len && text[i] != '\n') {
+        while (i < length && text[i] != '\n') {
             i++;
         }
         int end = i;
-        if (i < len) {
+        if (i < length) {
             i++;
         }
         for (int k = start; k < end; k++) {
@@ -400,7 +400,7 @@ int dns_resolve(const char *name, uint32_t *out) {
         return -1;
     }
 
-    int fd = (int)sys_socket(OS_SOCK_DGRAM);
+    int fd = (int)sys_socket(OS_SOCKET_DGRAM);
     if (fd < 0) {
         return -1;
     }
@@ -411,7 +411,7 @@ int dns_resolve(const char *name, uint32_t *out) {
 
     uint16_t id = (uint16_t)(sys_uptime_ms() ^ (sys_getpid() << 8));
 
-    uint8_t query[DNS_MAX_MSG];
+    uint8_t query[DNS_MAX_MESSAGE];
     int qlen = dns_build_query(name, id, query, sizeof(query));
     if (qlen < 0) {
         sys_close(fd);
@@ -420,7 +420,7 @@ int dns_resolve(const char *name, uint32_t *out) {
 
     long deadline = sys_uptime_ms() + DNS_TIMEOUT_MS;
     long next_send = 0;
-    uint8_t reply[DNS_MAX_MSG];
+    uint8_t reply[DNS_MAX_MESSAGE];
 
     while (sys_uptime_ms() < deadline) {
         if (sys_uptime_ms() >= next_send) {

@@ -13,11 +13,11 @@ typedef struct {
 
 static flock_entry_t table[FLOCK_MAX];
 
-static uint64_t range_end(uint64_t start, uint64_t len) {
-    if (len == 0 || start > FLOCK_EOF - len) {
+static uint64_t range_end(uint64_t start, uint64_t length) {
+    if (length == 0 || start > FLOCK_EOF - length) {
         return FLOCK_EOF;
     }
-    return start + len;
+    return start + length;
 }
 
 static int overlaps(const flock_entry_t *e, uint64_t start, uint64_t end) {
@@ -64,27 +64,27 @@ static const flock_entry_t *conflict(uint32_t ino, int pid, int type,
     return (const flock_entry_t *)0;
 }
 
-int flock_test(uint32_t ino, int pid, int type, uint64_t start, uint64_t len,
+int flock_test(uint32_t ino, int pid, int type, uint64_t start, uint64_t length,
                os_flock_t *out) {
-    uint64_t end = range_end(start, len);
+    uint64_t end = range_end(start, length);
     const flock_entry_t *e = conflict(ino, pid, type, start, end);
     out->whence = 0;
     if (!e) {
         out->type = OS_FLOCK_UNLCK;
         out->start = 0;
-        out->len = 0;
+        out->length = 0;
         out->pid = 0;
         return 0;
     }
     out->type = e->type;
     out->start = (int64_t)e->start;
-    out->len = e->end == FLOCK_EOF ? 0 : (int64_t)(e->end - e->start);
+    out->length = e->end == FLOCK_EOF ? 0 : (int64_t)(e->end - e->start);
     out->pid = e->pid;
     return 1;
 }
 
-int flock_set(uint32_t ino, int pid, int type, uint64_t start, uint64_t len) {
-    uint64_t end = range_end(start, len);
+int flock_set(uint32_t ino, int pid, int type, uint64_t start, uint64_t length) {
+    uint64_t end = range_end(start, length);
     if (type != OS_FLOCK_UNLCK && conflict(ino, pid, type, start, end)) {
         return FLOCK_CONFLICT;
     }

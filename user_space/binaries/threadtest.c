@@ -90,8 +90,8 @@ static volatile int sse_ok;
 
 static void *sse_alignment_probe(void *arg) {
     (void)arg;
-    double buf[2] __attribute__((aligned(16)));
-    __asm__ volatile("movaps %%xmm0, %0" : "=m"(buf) : : "memory");
+    double buffer[2] __attribute__((aligned(16)));
+    __asm__ volatile("movaps %%xmm0, %0" : "=m"(buffer) : : "memory");
     sse_ok = 1;
     return (void *)0xC;
 }

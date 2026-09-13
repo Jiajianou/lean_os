@@ -3,7 +3,7 @@
 #include "string_utilities.h"
 #include "syscall_wrappers.h"
 
-#define SETTINGS_BUF 256
+#define SETTINGS_BUFFER 256
 
 static int parse_uint(const char *s, uint32_t *out) {
     uint32_t value = 0;
@@ -34,18 +34,18 @@ static int parse_uint(const char *s, uint32_t *out) {
     return 1;
 }
 
-static void append_key(char *buf, int *len, const char *key, uint32_t value) {
+static void append_key(char *buffer, int *length, const char *key, uint32_t value) {
     for (int i = 0; key[i]; i++) {
-        buf[(*len)++] = key[i];
+        buffer[(*length)++] = key[i];
     }
-    buf[(*len)++] = '=';
-    buf[(*len)++] = '0';
-    buf[(*len)++] = 'x';
+    buffer[(*length)++] = '=';
+    buffer[(*length)++] = '0';
+    buffer[(*length)++] = 'x';
     for (int shift = 28; shift >= 0; shift -= 4) {
         uint32_t nibble = (value >> shift) & 0xF;
-        buf[(*len)++] = (char)(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
+        buffer[(*length)++] = (char)(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
     }
-    buf[(*len)++] = '\n';
+    buffer[(*length)++] = '\n';
 }
 
 typedef struct {
@@ -54,18 +54,18 @@ typedef struct {
 } settings_all_t;
 
 static void parse_all(settings_all_t *out) {
-    char buf[SETTINGS_BUF];
+    char buffer[SETTINGS_BUFFER];
     for (int i = 0; i < (int)sizeof(*out); i++) {
         ((char *)out)[i] = 0;
     }
-    long n = sys_readfile(SETTINGS_FILE_NAME, buf, sizeof(buf) - 1);
-    if (n <= 0 || n >= (long)sizeof(buf)) {
+    long n = sys_readfile(SETTINGS_FILE_NAME, buffer, sizeof(buffer) - 1);
+    if (n <= 0 || n >= (long)sizeof(buffer)) {
         return;
     }
-    buf[n] = '\0';
+    buffer[n] = '\0';
 
     int have_w = 0, have_h = 0;
-    char *line = buf;
+    char *line = buffer;
     while (*line) {
         char *end = line;
         while (*end && *end != '\n') {
@@ -115,21 +115,21 @@ static void parse_all(settings_all_t *out) {
 }
 
 static int write_all(const settings_all_t *all) {
-    char buf[SETTINGS_BUF];
-    int len = 0;
-    append_key(buf, &len, "bg", all->bg);
-    append_key(buf, &len, "accent", all->accent);
-    append_key(buf, &len, "wallpaper", all->wallpaper);
-    append_key(buf, &len, "animations", all->animations);
-    append_key(buf, &len, "volume", all->volume);
+    char buffer[SETTINGS_BUFFER];
+    int length = 0;
+    append_key(buffer, &length, "bg", all->bg);
+    append_key(buffer, &length, "accent", all->accent);
+    append_key(buffer, &length, "wallpaper", all->wallpaper);
+    append_key(buffer, &length, "animations", all->animations);
+    append_key(buffer, &length, "volume", all->volume);
     if (all->have_display) {
-        append_key(buf, &len, "display_w", all->display_w);
-        append_key(buf, &len, "display_h", all->display_h);
+        append_key(buffer, &length, "display_w", all->display_w);
+        append_key(buffer, &length, "display_h", all->display_h);
     }
-    return sys_writefile(SETTINGS_FILE_NAME, buf, (size_t)len) == 0 ? 0 : -1;
+    return sys_writefile(SETTINGS_FILE_NAME, buffer, (size_t)length) == 0 ? 0 : -1;
 }
 
-int settings_file_load(wm_settings_request_t *out) {
+int settings_file_load(window_manager_settings_request_t *out) {
     settings_all_t all;
     parse_all(&all);
     if (!all.have_bg || !all.have_accent || !all.have_wallpaper) {
@@ -158,7 +158,7 @@ int settings_file_load_display(uint32_t *w, uint32_t *h) {
     return 1;
 }
 
-int settings_file_save(const wm_settings_request_t *in) {
+int settings_file_save(const window_manager_settings_request_t *in) {
     settings_all_t all;
     parse_all(&all);
     all.bg = in->bg_color;

@@ -21,7 +21,7 @@ static void virtual_memory_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64
 #define PTE_HUGE      (1ULL << 7)
 #define PTE_COW       (1ULL << 9)
 #define PTE_NX        (1ULL << 63)
-#define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
+#define PTE_ADDRESS_MASK 0x000FFFFFFFFFF000ULL
 
 #define PML4_INDEX(v) (((v) >> 39) & 0x1FF)
 #define PDPT_INDEX(v) (((v) >> 30) & 0x1FF)
@@ -61,7 +61,7 @@ int virtual_memory_nx_enabled(void) {
 
 static uint64_t leaf_flags(uint64_t flags) {
     uint64_t e = (flags & (PTE_WRITABLE | PTE_USER | PTE_PCD)) | PTE_PRESENT;
-    if (nx_enabled && !(flags & VMM_FLAG_EXEC)) {
+    if (nx_enabled && !(flags & VIRTUAL_MEMORY_FLAG_EXEC)) {
         e |= PTE_NX;
     }
     return e;
@@ -74,7 +74,7 @@ static inline uint64_t *phys_to_table(uint64_t phys) {
     return (uint64_t *)phys;
 }
 
-#define VMM_RSS_SLOTS 144
+#define VIRTUAL_MEMORY_RSS_SLOTS 144
 
 typedef struct {
     uint64_t pml4_phys;
@@ -82,7 +82,7 @@ typedef struct {
     uint64_t peak;
 } virtual_memory_rss_slot_t;
 
-static virtual_memory_rss_slot_t rss_slots[VMM_RSS_SLOTS];
+static virtual_memory_rss_slot_t rss_slots[VIRTUAL_MEMORY_RSS_SLOTS];
 
 static int rss_recent;
 
@@ -90,7 +90,7 @@ static virtual_memory_rss_slot_t *rss_find(uint64_t pml4_phys) {
     if (rss_slots[rss_recent].pml4_phys == pml4_phys && pml4_phys != 0) {
         return &rss_slots[rss_recent];
     }
-    for (int i = 0; i < VMM_RSS_SLOTS; i++) {
+    for (int i = 0; i < VIRTUAL_MEMORY_RSS_SLOTS; i++) {
         if (rss_slots[i].pml4_phys == pml4_phys) {
             rss_recent = i;
             return &rss_slots[i];
@@ -103,7 +103,7 @@ static void rss_claim(uint64_t pml4_phys) {
     if (pml4_phys == kernel_pml4_phys || rss_find(pml4_phys)) {
         return;
     }
-    for (int i = 0; i < VMM_RSS_SLOTS; i++) {
+    for (int i = 0; i < VIRTUAL_MEMORY_RSS_SLOTS; i++) {
         if (rss_slots[i].pml4_phys == 0) {
             rss_slots[i].pml4_phys = pml4_phys;
             rss_slots[i].pages = 0;
@@ -179,7 +179,7 @@ static uint64_t *table_walk(uint64_t *table, uint64_t index, int allocate, uint6
         table[index] = phys | PTE_PRESENT | PTE_WRITABLE | extra_flags;
         return phys_to_table(phys);
     }
-    return phys_to_table(table[index] & PTE_ADDR_MASK);
+    return phys_to_table(table[index] & PTE_ADDRESS_MASK);
 }
 
 static uint64_t identity_map_pages;
@@ -243,11 +243,11 @@ void virtual_memory_init(const uint32_t *e820_map) {
     kernel_log_puts(")\n");
 }
 
-int virtual_memory_identity_covers(uint64_t phys, uint64_t len) {
-    if (len == 0) {
+int virtual_memory_identity_covers(uint64_t phys, uint64_t length) {
+    if (length == 0) {
         return 1;
     }
-    uint64_t end = phys + len;
+    uint64_t end = phys + length;
     if (end < phys) {
         return 0;
     }
@@ -308,7 +308,7 @@ uint64_t virtual_memory_unmap_page_take(uint64_t pml4_phys, uint64_t virt) {
         spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
         return 0;
     }
-    uint64_t phys = pt[PT_INDEX(virt)] & PTE_ADDR_MASK;
+    uint64_t phys = pt[PT_INDEX(virt)] & PTE_ADDRESS_MASK;
     pt[PT_INDEX(virt)] = 0;
     rss_charge(pml4_phys, -1);
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
@@ -339,7 +339,7 @@ int virtual_memory_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t p
     if (!(pt[PT_INDEX(virt)] & PTE_PRESENT)) {
         rss_charge(pml4_phys, 1);
     }
-    pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | leaf_flags(flags);
+    pt[PT_INDEX(virt)] = (phys & PTE_ADDRESS_MASK) | leaf_flags(flags);
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
     return 0;
@@ -374,7 +374,7 @@ uint64_t virtual_memory_protect_range_in(uint64_t pml4_phys, uint64_t start, uin
         if (e & PTE_COW) {
             want = (want & ~PTE_WRITABLE) | PTE_COW;
         }
-        pt[PT_INDEX(virt)] = (e & PTE_ADDR_MASK) | want;
+        pt[PT_INDEX(virt)] = (e & PTE_ADDRESS_MASK) | want;
         __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
         changed++;
     }
@@ -388,13 +388,13 @@ void virtual_memory_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
 
 static uint64_t mmio_next = KERNEL_MMIO_VIRT_BASE;
 
-void *virtual_memory_map_mmio(uint64_t phys, uint64_t len) {
-    if (len == 0) {
+void *virtual_memory_map_mmio(uint64_t phys, uint64_t length) {
+    if (length == 0) {
         return (void *)0;
     }
     uint64_t start = phys & ~(PAGE_SIZE - 1);
     uint64_t offset = phys - start;
-    uint64_t end = (phys + len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    uint64_t end = (phys + length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     if (end <= start) {
         return (void *)0;
     }
@@ -412,7 +412,7 @@ void *virtual_memory_map_mmio(uint64_t phys, uint64_t len) {
 
     for (uint64_t i = 0; i < span; i += PAGE_SIZE) {
         if (virtual_memory_try_map_page_in(kernel_pml4_phys, virt + i, start + i,
-                                VMM_FLAG_WRITABLE | VMM_FLAG_NOCACHE) != 0) {
+                                VIRTUAL_MEMORY_FLAG_WRITABLE | VIRTUAL_MEMORY_FLAG_NOCACHE) != 0) {
             return (void *)0;
         }
     }
@@ -436,11 +436,11 @@ void virtual_memory_unmap_page(uint64_t virt) {
     spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
 }
 
-int virtual_memory_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_write) {
-    if (len == 0) {
+int virtual_memory_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t length, int need_write) {
+    if (length == 0) {
         return 1;
     }
-    uint64_t end = virt + len;
+    uint64_t end = virt + length;
     if (end < virt) {
         return 0;
     }
@@ -454,19 +454,19 @@ int virtual_memory_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len
             spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
             return 0;
         }
-        uint64_t *pdpt = phys_to_table(e & PTE_ADDR_MASK);
+        uint64_t *pdpt = phys_to_table(e & PTE_ADDRESS_MASK);
         e = pdpt[PDPT_INDEX(page)];
         if ((e & need) != need || (e & PTE_HUGE)) {
             spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
             return 0;
         }
-        uint64_t *pd = phys_to_table(e & PTE_ADDR_MASK);
+        uint64_t *pd = phys_to_table(e & PTE_ADDRESS_MASK);
         e = pd[PD_INDEX(page)];
         if ((e & need) != need || (e & PTE_HUGE)) {
             spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
             return 0;
         }
-        uint64_t *pt = phys_to_table(e & PTE_ADDR_MASK);
+        uint64_t *pt = phys_to_table(e & PTE_ADDRESS_MASK);
         if ((pt[PT_INDEX(page)] & need) != need) {
             spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
             return 0;
@@ -493,34 +493,34 @@ void virtual_memory_destroy_address_space(uint64_t pml4_phys, const virtual_memo
         if (!(pml4[i] & PTE_PRESENT)) {
             continue;
         }
-        uint64_t *pdpt = phys_to_table(pml4[i] & PTE_ADDR_MASK);
+        uint64_t *pdpt = phys_to_table(pml4[i] & PTE_ADDRESS_MASK);
         for (uint64_t j = 0; j < ENTRIES_PER_TABLE; j++) {
             if (!(pdpt[j] & PTE_PRESENT) || (pdpt[j] & PTE_HUGE)) {
                 continue;
             }
-            uint64_t *pd = phys_to_table(pdpt[j] & PTE_ADDR_MASK);
+            uint64_t *pd = phys_to_table(pdpt[j] & PTE_ADDRESS_MASK);
             for (uint64_t k = 0; k < ENTRIES_PER_TABLE; k++) {
                 if (!(pd[k] & PTE_PRESENT) || (pd[k] & PTE_HUGE)) {
                     continue;
                 }
-                uint64_t *pt = phys_to_table(pd[k] & PTE_ADDR_MASK);
+                uint64_t *pt = phys_to_table(pd[k] & PTE_ADDRESS_MASK);
                 for (uint64_t l = 0; l < ENTRIES_PER_TABLE; l++) {
                     if (!(pt[l] & PTE_PRESENT)) {
                         continue;
                     }
                     uint64_t virt = (i << 39) | (j << 30) | (k << 21) | (l << 12);
                     if (address_in_owned(virt, owned, owned_count)) {
-                        physical_memory_free_frame(pt[l] & PTE_ADDR_MASK);
+                        physical_memory_free_frame(pt[l] & PTE_ADDRESS_MASK);
                     }
                     pt[l] = 0;
                 }
-                physical_memory_free_frame(pd[k] & PTE_ADDR_MASK);
+                physical_memory_free_frame(pd[k] & PTE_ADDRESS_MASK);
                 pd[k] = 0;
             }
-            physical_memory_free_frame(pdpt[j] & PTE_ADDR_MASK);
+            physical_memory_free_frame(pdpt[j] & PTE_ADDRESS_MASK);
             pdpt[j] = 0;
         }
-        physical_memory_free_frame(pml4[i] & PTE_ADDR_MASK);
+        physical_memory_free_frame(pml4[i] & PTE_ADDRESS_MASK);
         pml4[i] = 0;
     }
     physical_memory_free_frame(pml4_phys);
@@ -532,38 +532,38 @@ uint64_t virtual_memory_unmap_range_free(uint64_t pml4_phys, uint64_t start, uin
     uint64_t *pml4 = phys_to_table(pml4_phys);
     uint64_t freed = 0;
 
-    for (uint64_t addr = start; addr < end; ) {
-        uint64_t *pdpt = table_walk(pml4, PML4_INDEX(addr), 0, 0);
+    for (uint64_t address = start; address < end; ) {
+        uint64_t *pdpt = table_walk(pml4, PML4_INDEX(address), 0, 0);
         if (!pdpt) {
-            addr = (addr + (1ULL << 39)) & ~((1ULL << 39) - 1);
+            address = (address + (1ULL << 39)) & ~((1ULL << 39) - 1);
             continue;
         }
-        uint64_t *pd = table_walk(pdpt, PDPT_INDEX(addr), 0, 0);
+        uint64_t *pd = table_walk(pdpt, PDPT_INDEX(address), 0, 0);
         if (!pd) {
-            addr = (addr + (1ULL << 30)) & ~((1ULL << 30) - 1);
+            address = (address + (1ULL << 30)) & ~((1ULL << 30) - 1);
             continue;
         }
-        if (pd[PD_INDEX(addr)] & PTE_HUGE) {
-            addr = (addr + (1ULL << 21)) & ~((1ULL << 21) - 1);
+        if (pd[PD_INDEX(address)] & PTE_HUGE) {
+            address = (address + (1ULL << 21)) & ~((1ULL << 21) - 1);
             continue;
         }
-        uint64_t *pt = table_walk(pd, PD_INDEX(addr), 0, 0);
+        uint64_t *pt = table_walk(pd, PD_INDEX(address), 0, 0);
         if (!pt) {
-            addr = (addr + (1ULL << 21)) & ~((1ULL << 21) - 1);
+            address = (address + (1ULL << 21)) & ~((1ULL << 21) - 1);
             continue;
         }
-        uint64_t pt_end = (addr + (1ULL << 21)) & ~((1ULL << 21) - 1);
+        uint64_t pt_end = (address + (1ULL << 21)) & ~((1ULL << 21) - 1);
         if (pt_end > end) {
             pt_end = end;
         }
-        for (; addr < pt_end; addr += PAGE_SIZE) {
-            uint64_t entry = pt[PT_INDEX(addr)];
+        for (; address < pt_end; address += PAGE_SIZE) {
+            uint64_t entry = pt[PT_INDEX(address)];
             if (!(entry & PTE_PRESENT)) {
                 continue;
             }
-            pt[PT_INDEX(addr)] = 0;
-            __asm__ volatile("invlpg (%0)" : : "r"(addr) : "memory");
-            physical_memory_free_frame(entry & PTE_ADDR_MASK);
+            pt[PT_INDEX(address)] = 0;
+            __asm__ volatile("invlpg (%0)" : : "r"(address) : "memory");
+            physical_memory_free_frame(entry & PTE_ADDRESS_MASK);
             freed++;
         }
     }
@@ -575,36 +575,36 @@ uint64_t virtual_memory_unmap_range_free(uint64_t pml4_phys, uint64_t start, uin
 
 uint64_t virtual_memory_fork_address_space(uint64_t source_pml4_phys, const virtual_memory_range_t *owned, int owned_count) {
     uint64_t irq_flags = spin_lock_irqsave(&virtual_memory_lock);
-    uint64_t *src = phys_to_table(source_pml4_phys);
+    uint64_t *source = phys_to_table(source_pml4_phys);
 
     uint64_t destination_phys = physical_memory_try_alloc_frame();
     if (destination_phys == 0) {
         spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
         return 0;
     }
-    uint64_t *dst = phys_to_table(destination_phys);
+    uint64_t *destination = phys_to_table(destination_phys);
     for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++) {
-        dst[i] = 0;
+        destination[i] = 0;
     }
-    dst[0] = src[0];
+    destination[0] = source[0];
     rss_claim(destination_phys);
 
     int ok = 1;
     for (uint64_t i = 1; ok && i < ENTRIES_PER_TABLE; i++) {
-        if (!(src[i] & PTE_PRESENT)) {
+        if (!(source[i] & PTE_PRESENT)) {
             continue;
         }
-        uint64_t *s_pdpt = phys_to_table(src[i] & PTE_ADDR_MASK);
+        uint64_t *s_pdpt = phys_to_table(source[i] & PTE_ADDRESS_MASK);
         for (uint64_t j = 0; ok && j < ENTRIES_PER_TABLE; j++) {
             if (!(s_pdpt[j] & PTE_PRESENT) || (s_pdpt[j] & PTE_HUGE)) {
                 continue;
             }
-            uint64_t *s_pd = phys_to_table(s_pdpt[j] & PTE_ADDR_MASK);
+            uint64_t *s_pd = phys_to_table(s_pdpt[j] & PTE_ADDRESS_MASK);
             for (uint64_t k = 0; ok && k < ENTRIES_PER_TABLE; k++) {
                 if (!(s_pd[k] & PTE_PRESENT) || (s_pd[k] & PTE_HUGE)) {
                     continue;
                 }
-                uint64_t *s_pt = phys_to_table(s_pd[k] & PTE_ADDR_MASK);
+                uint64_t *s_pt = phys_to_table(s_pd[k] & PTE_ADDRESS_MASK);
                 for (uint64_t l = 0; ok && l < ENTRIES_PER_TABLE; l++) {
                     if (!(s_pt[l] & PTE_PRESENT)) {
                         continue;
@@ -613,9 +613,9 @@ uint64_t virtual_memory_fork_address_space(uint64_t source_pml4_phys, const virt
                     if (!address_in_owned(virt, owned, owned_count)) {
                         continue;
                     }
-                    uint64_t phys = s_pt[l] & PTE_ADDR_MASK;
+                    uint64_t phys = s_pt[l] & PTE_ADDRESS_MASK;
 
-                    uint64_t *d_pdpt = table_walk(dst, i, 1, PTE_USER);
+                    uint64_t *d_pdpt = table_walk(destination, i, 1, PTE_USER);
                     uint64_t *d_pd = d_pdpt ? table_walk(d_pdpt, j, 1, PTE_USER) : (uint64_t *)0;
                     uint64_t *d_pt = d_pd ? table_walk(d_pd, k, 1, PTE_USER) : (uint64_t *)0;
                     if (!d_pt) {
@@ -665,7 +665,7 @@ int virtual_memory_cow_break(uint64_t pml4_phys, uint64_t virt) {
         return 0;
     }
 
-    uint64_t old_phys = entry & PTE_ADDR_MASK;
+    uint64_t old_phys = entry & PTE_ADDRESS_MASK;
     if (physical_memory_frame_refs(old_phys) <= 1) {
         pt[PT_INDEX(virt)] = (entry & ~PTE_COW) | PTE_WRITABLE;
         __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");

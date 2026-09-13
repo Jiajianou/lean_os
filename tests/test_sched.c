@@ -49,9 +49,9 @@ void q13_kill(task_t *t) {
 
 static void q13_tick(int cpu) {
     fake_arch_set_cpu(cpu);
-    task_t *cur = scheduler_current();
-    fake_arch_stand_on(cur && cur->kernel_stack_top
-                           ? cur->kernel_stack_top - 64
+    task_t *current = scheduler_current();
+    fake_arch_stand_on(current && current->kernel_stack_top
+                           ? current->kernel_stack_top - 64
                            : 0);
     scheduler_tick_cpu(cpu);
 }
@@ -59,7 +59,7 @@ static void q13_tick(int cpu) {
 TEST(scheduler, the_constants_are_the_kernels_own) {
     CHECK_EQ(MAX_TASKS, 128);
     CHECK_EQ(MAX_CPUS, 8);
-    CHECK(MAX_FDS >= 128);
+    CHECK(MAX_FILE_DESCRIPTORS >= 128);
     q13_boot();
     task_t *a = q13_spawn("q-a");
     task_t *b = q13_spawn("q-b");
@@ -93,9 +93,9 @@ TEST(scheduler, every_runnable_task_gets_a_turn) {
     memset(seen, 0, sizeof(seen));
     for (int i = 0; i < 6 * Q13_QUANTUM * 4; i++) {
         q13_tick(0);
-        task_t *cur = scheduler_current();
+        task_t *current = scheduler_current();
         for (int j = 0; j < 6; j++) {
-            if (cur == t[j]) {
+            if (current == t[j]) {
                 seen[j]++;
             }
         }
@@ -121,9 +121,9 @@ TEST(scheduler, slow_shares_within_one_quantum_at_every_task_count) {
         memset(seen, 0, sizeof(seen));
         for (int i = 0; i < n * quanta * Q13_QUANTUM; i++) {
             q13_tick(0);
-            task_t *cur = scheduler_current();
+            task_t *current = scheduler_current();
             for (int j = 0; j < n; j++) {
-                if (cur == t[j]) {
+                if (current == t[j]) {
                     seen[j]++;
                 }
             }
@@ -196,7 +196,7 @@ TEST(scheduler, a_stopped_task_is_not_woken_by_anything_but_a_resume) {
     CHECK_EQ(s->pending_stop, 0);
 
     scheduler_wake_task(s);
-    scheduler_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
     CHECK_EQ(s->state, TASK_STOPPED);
     for (int i = 0; i < 40 * Q13_QUANTUM; i++) {
         q13_tick(0);
@@ -532,22 +532,22 @@ TEST(scheduler, a_dying_task_gives_back_every_descriptor_it_held) {
     REQUIRE(t != NULL);
     fake_objects_reset();
 
-    t->fds[3].type = FD_PIPE_READ;
-    t->fds[3].pipe = (struct pipe *)0x1000;
-    t->fds[4].type = FD_PIPE_WRITE;
-    t->fds[4].pipe = (struct pipe *)0x1000;
-    t->fds[5].type = FD_FILE;
-    t->fds[5].file = (struct open_file *)0x2000;
-    t->fds[6].type = FD_SOCKET;
-    t->fds[6].sock = (struct socket *)0x3000;
+    t->file_descriptors[3].type = FILE_DESCRIPTOR_PIPE_READ;
+    t->file_descriptors[3].pipe = (struct pipe *)0x1000;
+    t->file_descriptors[4].type = FILE_DESCRIPTOR_PIPE_WRITE;
+    t->file_descriptors[4].pipe = (struct pipe *)0x1000;
+    t->file_descriptors[5].type = FILE_DESCRIPTOR_FILE;
+    t->file_descriptors[5].file = (struct open_file *)0x2000;
+    t->file_descriptors[6].type = FILE_DESCRIPTOR_SOCKET;
+    t->file_descriptors[6].sock = (struct socket *)0x3000;
 
     scheduler_release_file_descriptors(t);
     CHECK_EQ(fake_objects_pipe_read_refs(), -1);
     CHECK_EQ(fake_objects_pipe_write_refs(), -1);
     CHECK_EQ(fake_objects_file_refs(), -1);
     CHECK_EQ(fake_objects_socket_refs(), -1);
-    CHECK_EQ(t->fds[3].type, FD_NONE);
-    CHECK_EQ(t->fds[6].type, FD_NONE);
+    CHECK_EQ(t->file_descriptors[3].type, FILE_DESCRIPTOR_NONE);
+    CHECK_EQ(t->file_descriptors[6].type, FILE_DESCRIPTOR_NONE);
     scheduler_release_file_descriptors(t);
     CHECK_EQ(fake_objects_pipe_read_refs(), -1);
     CHECK_EQ(fake_objects_socket_refs(), -1);
@@ -733,11 +733,11 @@ TEST(scheduler, a_woken_task_still_current_on_another_cpu_is_not_picked) {
     }
     for (int i = 0; i < 4 * Q13_QUANTUM; i++) {
         fake_arch_set_cpu(1);
-        task_t *cur = scheduler_current();
-        if (!cur || cur->is_idle) {
+        task_t *current = scheduler_current();
+        if (!current || current->is_idle) {
             break;
         }
-        cur->state = TASK_BLOCKED;
+        current->state = TASK_BLOCKED;
         q13_tick(1);
     }
     q13_kill(w);
@@ -756,10 +756,10 @@ TEST(scheduler, a_switch_loads_the_incoming_tasks_thread_pointer) {
 
     for (int i = 0; i < 400 * Q13_QUANTUM; i++) {
         q13_tick(0);
-        task_t *cur = scheduler_current();
-        if (cur == a) {
+        task_t *current = scheduler_current();
+        if (current == a) {
             CHECK_EQ(fake_cpu_last_msr(MSR_FS_BASE), 0xAAAA0000u);
-        } else if (cur == b) {
+        } else if (current == b) {
             CHECK_EQ(fake_cpu_last_msr(MSR_FS_BASE), 0xBBBB0000u);
         }
     }

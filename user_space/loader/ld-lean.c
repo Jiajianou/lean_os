@@ -38,14 +38,14 @@ static void dl_write(const char *s) {
 
 static void dl_hex(u64 v) {
     static const char digits[] = "0123456789abcdef";
-    char buf[19];
-    buf[0] = '0';
-    buf[1] = 'x';
+    char buffer[19];
+    buffer[0] = '0';
+    buffer[1] = 'x';
     for (int i = 0; i < 16; i++) {
-        buf[2 + i] = digits[(v >> ((15 - i) * 4)) & 0xf];
+        buffer[2 + i] = digits[(v >> ((15 - i) * 4)) & 0xf];
     }
-    buf[18] = 0;
-    dl_write(buf);
+    buffer[18] = 0;
+    dl_write(buffer);
 }
 
 static u64 dl_recover[8];
@@ -69,8 +69,8 @@ static void dl_fail_record(const char *what, const char *detail) {
     dl_fail_text[n] = 0;
 }
 
-void _dl_longjmp(u64 *buf, int val) __attribute__((noreturn));
-int _dl_setjmp(u64 *buf);
+void _dl_longjmp(u64 *buffer, int val) __attribute__((noreturn));
+int _dl_setjmp(u64 *buffer);
 
 __attribute__((noreturn))
 static void dl_fail(const char *what, const char *detail) {
@@ -132,7 +132,7 @@ static u64 dl_strlen(const char *s) {
 #define DT_PLTRELSZ 2
 #define DT_HASH     4
 #define DT_STRTAB   5
-#define DT_SYMTAB   6
+#define DT_SYMBOL_TABLE   6
 #define DT_RELA     7
 #define DT_RELASZ   8
 #define DT_RELAENT  9
@@ -202,7 +202,7 @@ typedef struct {
     u16 st_shndx;
     u64 st_value;
     u64 st_size;
-} Sym;
+} Symbol;
 
 typedef struct {
     u64 r_offset;
@@ -210,7 +210,7 @@ typedef struct {
     i64 r_addend;
 } Rela;
 
-#define ELF64_R_SYM(i)  ((u32)((i) >> 32))
+#define ELF64_R_SYMBOL(i)  ((u32)((i) >> 32))
 #define ELF64_R_TYPE(i) ((u32)((i) & 0xffffffffu))
 #define ELF64_ST_BIND(i) ((i) >> 4)
 
@@ -225,7 +225,7 @@ typedef struct {
     const char *name;
     const Dyn *dyn;
     const char *strtab;
-    const Sym *symbol_table;
+    const Symbol *symbol_table;
     const u32 *gnu_hash;
     const u32 *elf_hash;
     const Rela *rela;
@@ -284,7 +284,7 @@ static u64 lookup(const char *name, const Object *skip, int *found) {
             continue;
         }
         for (u32 s = 0; ; s++) {
-            const Sym *symbol = &o->symbol_table[s];
+            const Symbol *symbol = &o->symbol_table[s];
             if ((const char *)symbol >= o->strtab) {
                 break;
             }
@@ -304,7 +304,7 @@ static u64 lookup(const char *name, const Object *skip, int *found) {
 static void apply_rela(Object *o, const Rela *r, u64 count) {
     for (u64 i = 0; i < count; i++) {
         u32 type = ELF64_R_TYPE(r[i].r_info);
-        u32 symi = ELF64_R_SYM(r[i].r_info);
+        u32 symi = ELF64_R_SYMBOL(r[i].r_info);
         u64 *where = (u64 *)(o->base + r[i].r_offset);
 
         if (type == R_X86_64_RELATIVE) {
@@ -315,7 +315,7 @@ static void apply_rela(Object *o, const Rela *r, u64 count) {
             continue;
         }
 
-        const Sym *symbol = &o->symbol_table[symi];
+        const Symbol *symbol = &o->symbol_table[symi];
         const char *name = o->strtab + symbol->st_name;
 
         if (symi == 0 && type == R_X86_64_TPOFF64) {
@@ -348,11 +348,11 @@ static void apply_rela(Object *o, const Rela *r, u64 count) {
         case R_X86_64_COPY:
             {
                 int source_found = 0;
-                u64 src = lookup(name, &objects[0], &source_found);
+                u64 source = lookup(name, &objects[0], &source_found);
                 if (!source_found) {
                     dl_fail("undefined symbol for a copy relocation", name);
                 }
-                dl_memcpy(where, (const void *)src, symbol->st_size);
+                dl_memcpy(where, (const void *)source, symbol->st_size);
             }
             break;
         case R_X86_64_TPOFF64: {
@@ -362,7 +362,7 @@ static void apply_rela(Object *o, const Rela *r, u64 count) {
                     continue;
                 }
                 for (u32 t = 0; ; t++) {
-                    const Sym *cand = &objects[k].symbol_table[t];
+                    const Symbol *cand = &objects[k].symbol_table[t];
                     if ((const char *)cand >= objects[k].strtab) {
                         break;
                     }
@@ -401,7 +401,7 @@ static void scan_dynamic(Object *o) {
     for (const Dyn *d = o->dyn; d->d_tag != DT_NULL; d++) {
         switch (d->d_tag) {
         case DT_STRTAB: o->strtab = (const char *)(o->base + d->d_value); break;
-        case DT_SYMTAB: o->symbol_table = (const Sym *)(o->base + d->d_value); break;
+        case DT_SYMBOL_TABLE: o->symbol_table = (const Symbol *)(o->base + d->d_value); break;
         case DT_RELA:   o->rela = (const Rela *)(o->base + d->d_value); break;
         case DT_RELASZ: relasz = d->d_value; break;
         case DT_JMPREL: o->jmprel = (const Rela *)(o->base + d->d_value); break;
@@ -557,7 +557,7 @@ static Object *load_object(const char *soname) {
         }
         u64 va = (base + ph[i].p_vaddr) & ~4095ull;
         u64 off = ph[i].p_vaddr & 4095ull;
-        u64 len = (ph[i].p_memsz + off + 4095ull) & ~4095ull;
+        u64 length = (ph[i].p_memsz + off + 4095ull) & ~4095ull;
         int writable = (ph[i].p_flags & 2) != 0;
         int prot = 1  ;
         if (writable) {
@@ -568,12 +568,12 @@ static Object *load_object(const char *soname) {
         }
         int flags = MAP_FIXED | (writable ? MAP_PRIVATE : MAP_SHARED);
         u64 file_off = (ph[i].p_offset - off) & ~4095ull;
-        i64 r = sys6(SYS_mmap, (long)va, (long)len, prot, flags, fd, (long)file_off);
+        i64 r = sys6(SYS_mmap, (long)va, (long)length, prot, flags, fd, (long)file_off);
         if (r < 0) {
             dl_write("ld-lean: mmap va=");
             dl_hex(va);
             dl_write(" len=");
-            dl_hex(len);
+            dl_hex(length);
             dl_write(" off=");
             dl_hex(file_off);
             dl_write(" prot=");
@@ -715,12 +715,12 @@ u64 _dl_entry(u64 *arguments) {
         }
         if (total > 0) {
             u64 want = (total + 15u + 64u) & ~15ull;
-            i64 mem = sys6(SYS_mmap, 0, (long)want, 3  ,
+            i64 memory = sys6(SYS_mmap, 0, (long)want, 3  ,
                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (mem < 0) {
+            if (memory < 0) {
                 dl_fail("no memory for the thread-local block", 0);
             }
-            u64 tp = (u64)mem + total;
+            u64 tp = (u64)memory + total;
             for (int k = 0; k < object_count; k++) {
                 if (objects[k].tls_memsz == 0 || !objects[k].tls_image) {
                     continue;
@@ -846,7 +846,7 @@ void *dlsym(void *handle, const char *name) {
         return 0;
     }
     for (u32 s = 0; ; s++) {
-        const Sym *symbol = &o->symbol_table[s];
+        const Symbol *symbol = &o->symbol_table[s];
         if ((const char *)symbol >= o->strtab) {
             break;
         }

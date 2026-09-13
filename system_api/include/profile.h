@@ -24,17 +24,17 @@ typedef struct {
     uint64_t distinct;
     int32_t running;
     int32_t _pad;
-} prof_stats_t;
+} prof_statistics_t;
 
 typedef struct {
     uint64_t calls;
     uint64_t cycles;
-} prof_syscount_t;
+} prof_syscall_counters_t;
 
 #define PROFILE_OP_START     0
 #define PROFILE_OP_STOP      1
 #define PROFILE_OP_RESET     2
-#define PROFILE_OP_STATS     3
+#define PROFILE_OP_STATISTICS     3
 #define PROFILE_OP_SAMPLES   4
 #define PROFILE_OP_SYSCALLS  5
 #define PROFILE_OP_SYSRESET  6

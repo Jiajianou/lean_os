@@ -2,22 +2,22 @@
 
 #include <stddef.h>
 
-#define VGA_MEM    ((volatile uint16_t *)0xB8000)
+#define VGA_MEMORY    ((volatile uint16_t *)0xB8000)
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
-#define VGA_ATTR   0x0F
+#define VGA_ATTRIBUTE   0x0F
 
 static size_t vga_row = 0;
 static size_t vga_col = 0;
 
 static void vga_put_entry_at(char c, size_t x, size_t y) {
-    VGA_MEM[y * VGA_WIDTH + x] = ((uint16_t)VGA_ATTR << 8) | (uint8_t)c;
+    VGA_MEMORY[y * VGA_WIDTH + x] = ((uint16_t)VGA_ATTRIBUTE << 8) | (uint8_t)c;
 }
 
 static void vga_scroll(void) {
     for (size_t y = 1; y < VGA_HEIGHT; y++) {
         for (size_t x = 0; x < VGA_WIDTH; x++) {
-            VGA_MEM[(y - 1) * VGA_WIDTH + x] = VGA_MEM[y * VGA_WIDTH + x];
+            VGA_MEMORY[(y - 1) * VGA_WIDTH + x] = VGA_MEMORY[y * VGA_WIDTH + x];
         }
     }
     for (size_t x = 0; x < VGA_WIDTH; x++) {

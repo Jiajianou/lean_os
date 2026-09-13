@@ -2,9 +2,9 @@
 
 #include <stdint.h>
 
-void *memcpy(void *dst, const void *src, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
+void *memcpy(void *destination, const void *source, size_t n) {
+    unsigned char *d = (unsigned char *)destination;
+    const unsigned char *s = (const unsigned char *)source;
 
     if (n >= sizeof(uint64_t) && ((uintptr_t)d % sizeof(uint64_t)) == ((uintptr_t)s % sizeof(uint64_t))) {
         while (((uintptr_t)d % sizeof(uint64_t)) != 0) {
@@ -25,15 +25,15 @@ void *memcpy(void *dst, const void *src, size_t n) {
         *d++ = *s++;
         n--;
     }
-    return dst;
+    return destination;
 }
 
-void *memset(void *dst, int c, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
+void *memset(void *destination, int c, size_t n) {
+    unsigned char *d = (unsigned char *)destination;
     for (size_t i = 0; i < n; i++) {
         d[i] = (unsigned char)c;
     }
-    return dst;
+    return destination;
 }
 
 size_t strlen(const char *s) {

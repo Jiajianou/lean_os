@@ -164,10 +164,10 @@ int elf_interp(const uint8_t *image, size_t image_size, char *out, size_t cap) {
             ph[i].p_filesz == 0 || ph[i].p_filesz > cap) {
             return 0;
         }
-        const char *src = (const char *)(image + ph[i].p_offset);
+        const char *source = (const char *)(image + ph[i].p_offset);
         size_t n = 0;
-        while (n < ph[i].p_filesz - 1 && src[n]) {
-            out[n] = src[n];
+        while (n < ph[i].p_filesz - 1 && source[n]) {
+            out[n] = source[n];
             n++;
         }
         out[n] = '\0';
@@ -244,12 +244,12 @@ uint64_t elf_load_at(uint64_t pml4_phys, const uint8_t *image, size_t image_size
                 k_memcpy((void *)(phys + page_off), image + file_off, overlap_end - overlap_start);
             }
 
-            uint64_t seg_flags = VMM_FLAG_USER;
+            uint64_t seg_flags = VIRTUAL_MEMORY_FLAG_USER;
             if (ph[i].p_flags & PF_W) {
-                seg_flags |= VMM_FLAG_WRITABLE;
+                seg_flags |= VIRTUAL_MEMORY_FLAG_WRITABLE;
             }
             if (ph[i].p_flags & PF_X) {
-                seg_flags |= VMM_FLAG_EXEC;
+                seg_flags |= VIRTUAL_MEMORY_FLAG_EXEC;
             }
             if (virtual_memory_try_map_page_in(pml4_phys, page_va, phys, seg_flags) != 0) {
                 kernel_log_debug("[elf] out of page tables mapping a segment\n");
@@ -259,7 +259,7 @@ uint64_t elf_load_at(uint64_t pml4_phys, const uint8_t *image, size_t image_size
     }
 
     kernel_log_debug("[elf] loaded, entry = 0x");
-    kernel_log_log_hex64(KLOG_DEBUG, eh->e_entry + bias);
+    kernel_log_log_hex64(KERNEL_LOG_DEBUG, eh->e_entry + bias);
     kernel_log_debug("\n");
 
     return eh->e_entry + bias;

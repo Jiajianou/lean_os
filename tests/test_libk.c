@@ -7,16 +7,16 @@
 typedef struct {
     unsigned char raw[PAD + 256 + PAD];
     unsigned char *usable;
-    size_t len;
+    size_t length;
 } guarded_t;
 
-static void guard_init(guarded_t *g, size_t len) {
-    REQUIRE(len <= 256);
+static void guard_init(guarded_t *g, size_t length) {
+    REQUIRE(length <= 256);
     for (size_t i = 0; i < sizeof(g->raw); i++) {
         g->raw[i] = CANARY;
     }
     g->usable = g->raw + PAD;
-    g->len = len;
+    g->length = length;
 }
 
 static int guard_intact(const guarded_t *g) {
@@ -24,7 +24,7 @@ static int guard_intact(const guarded_t *g) {
         if (g->raw[i] != CANARY) {
             return 0;
         }
-        if (g->raw[PAD + g->len + i] != CANARY) {
+        if (g->raw[PAD + g->length + i] != CANARY) {
             return 0;
         }
     }
@@ -54,39 +54,39 @@ TEST(kernel_library, memset_truncates_its_value_to_a_byte) {
 }
 
 TEST(kernel_library, memcpy_copies_exactly_its_range) {
-    guarded_t dst;
-    unsigned char src[64];
-    for (size_t i = 0; i < sizeof(src); i++) {
-        src[i] = (unsigned char)(i * 7 + 1);
+    guarded_t destination;
+    unsigned char source[64];
+    for (size_t i = 0; i < sizeof(source); i++) {
+        source[i] = (unsigned char)(i * 7 + 1);
     }
     for (size_t n = 0; n <= 64; n++) {
-        guard_init(&dst, n);
-        CHECK(k_memcpy(dst.usable, src, n) == dst.usable);
-        CHECK_MEMEQ(dst.usable, src, n);
-        CHECK(guard_intact(&dst));
+        guard_init(&destination, n);
+        CHECK(k_memcpy(destination.usable, source, n) == destination.usable);
+        CHECK_MEMEQ(destination.usable, source, n);
+        CHECK(guard_intact(&destination));
     }
 }
 
 TEST(kernel_library, memmove_handles_every_overlap_direction) {
     for (int shift = -16; shift <= 16; shift++) {
-        unsigned char buf[64];
+        unsigned char buffer[64];
         unsigned char expect[64];
         const size_t n = 32;
         const size_t base = 16;
 
-        for (size_t i = 0; i < sizeof(buf); i++) {
-            buf[i] = (unsigned char)(i + 100);
+        for (size_t i = 0; i < sizeof(buffer); i++) {
+            buffer[i] = (unsigned char)(i + 100);
             expect[i] = (unsigned char)(i + 100);
         }
 
-        unsigned char *dst = buf + base + shift;
-        const unsigned char *src = buf + base;
+        unsigned char *destination = buffer + base + shift;
+        const unsigned char *source = buffer + base;
         for (size_t i = 0; i < n; i++) {
             expect[(base + shift) + i] = (unsigned char)(base + i + 100);
         }
 
-        CHECK(k_memmove(dst, src, n) == dst);
-        CHECK_MEMEQ(buf, expect, sizeof(buf));
+        CHECK(k_memmove(destination, source, n) == destination);
+        CHECK_MEMEQ(buffer, expect, sizeof(buffer));
     }
 }
 
@@ -105,13 +105,13 @@ TEST(kernel_library, memmove_of_zero_bytes_and_onto_itself_touch_nothing) {
 }
 
 TEST(kernel_library, memmove_boundary_where_ranges_just_touch) {
-    unsigned char buf[32];
-    for (size_t i = 0; i < sizeof(buf); i++) {
-        buf[i] = (unsigned char)i;
+    unsigned char buffer[32];
+    for (size_t i = 0; i < sizeof(buffer); i++) {
+        buffer[i] = (unsigned char)i;
     }
-    k_memmove(buf + 8, buf, 8);
+    k_memmove(buffer + 8, buffer, 8);
     for (int i = 0; i < 8; i++) {
-        CHECK_EQ(buf[8 + i], i);
+        CHECK_EQ(buffer[8 + i], i);
     }
 }
 
@@ -172,47 +172,47 @@ TEST(kernel_library, strstr_finds_at_every_position_and_refuses_the_rest) {
 }
 
 TEST(kernel_library, memmove_at_exactly_one_byte_of_overlap) {
-    for (int dir = 0; dir < 2; dir++) {
-        unsigned char buf[32], expect[32];
+    for (int directory = 0; directory < 2; directory++) {
+        unsigned char buffer[32], expect[32];
         for (int i = 0; i < 32; i++) {
-            buf[i] = expect[i] = (unsigned char)(i + 1);
+            buffer[i] = expect[i] = (unsigned char)(i + 1);
         }
         const size_t n = 8;
-        size_t source_off = dir ? 8 : 15;
-        size_t destination_off = dir ? 15 : 8;
+        size_t source_off = directory ? 8 : 15;
+        size_t destination_off = directory ? 15 : 8;
         for (size_t i = 0; i < n; i++) {
             expect[destination_off + i] = (unsigned char)(source_off + i + 1);
         }
-        k_memmove(buf + destination_off, buf + source_off, n);
-        CHECK_MEMEQ(buf, expect, sizeof(buf));
+        k_memmove(buffer + destination_off, buffer + source_off, n);
+        CHECK_MEMEQ(buffer, expect, sizeof(buffer));
     }
 }
 
 TEST(kernel_library, memmove_of_a_single_byte_in_both_directions) {
-    unsigned char buf[4] = {1, 2, 3, 4};
-    k_memmove(buf + 1, buf, 1);
-    CHECK_EQ(buf[1], 1);
+    unsigned char buffer[4] = {1, 2, 3, 4};
+    k_memmove(buffer + 1, buffer, 1);
+    CHECK_EQ(buffer[1], 1);
     unsigned char buf2[4] = {1, 2, 3, 4};
     k_memmove(buf2, buf2 + 3, 1);
     CHECK_EQ(buf2[0], 4);
 }
 
 TEST(kernel_library, memmove_backwards_copies_the_first_byte_too) {
-    unsigned char buf[16];
+    unsigned char buffer[16];
     for (int i = 0; i < 16; i++) {
-        buf[i] = (unsigned char)(0xA0 + i);
+        buffer[i] = (unsigned char)(0xA0 + i);
     }
-    k_memmove(buf + 1, buf, 15);
-    CHECK_EQ(buf[1], 0xA0);
+    k_memmove(buffer + 1, buffer, 15);
+    CHECK_EQ(buffer[1], 0xA0);
     for (int i = 0; i < 15; i++) {
-        CHECK_EQ(buf[1 + i], 0xA0 + i);
+        CHECK_EQ(buffer[1 + i], 0xA0 + i);
     }
 }
 
 TEST(kernel_library, strlcpy_at_exactly_the_length_of_the_source) {
-    char dst[6];
-    k_strlcpy(dst, "hello", sizeof(dst));
-    CHECK_STREQ(dst, "hello");
+    char destination[6];
+    k_strlcpy(destination, "hello", sizeof(destination));
+    CHECK_STREQ(destination, "hello");
 
     char dst2[5];
     k_strlcpy(dst2, "hello", sizeof(dst2));

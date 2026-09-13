@@ -20,7 +20,7 @@
 #define MENU_BORDER   0x00484848u
 #define MENU_TEXT     0x00E0E0E0u
 
-#define MAX_LINE_LEN (COLS)
+#define MAX_LINE_LENGTH (COLS)
 #define MAX_LINES    600
 #define STATUS_ROWS 1
 #define MENU_ROWS 1
@@ -42,9 +42,9 @@ typedef enum { PENDING_NONE = 0, PENDING_NEW, PENDING_QUIT, PENDING_DROP } pendi
 #define PROMPT_BORDER   0x00606060u
 #define PROMPT_TEXT     0x00E0E0E0u
 #define PROMPT_INPUT_BG 0x00101010u
-#define PROMPT_MAX_LEN  48
+#define PROMPT_MAX_LENGTH  48
 
-static char lines[MAX_LINES][MAX_LINE_LEN];
+static char lines[MAX_LINES][MAX_LINE_LENGTH];
 static int line_length[MAX_LINES];
 static int line_count = 1;
 
@@ -54,13 +54,13 @@ static int dirty;
 static int truncated;
 static int menu_open;
 
-static char filename[PATH_MAX_LEN];
+static char filename[PATH_MAX_LENGTH];
 static char pending_drop[64];
 static char status[COLS + 1];
 
 static prompt_kind_t prompt_kind;
 static pending_action_t pending_action;
-static char prompt_buffer[PROMPT_MAX_LEN + 1];
+static char prompt_buffer[PROMPT_MAX_LENGTH + 1];
 static int prompt_length;
 
 static int sel_dragging, sel_active;
@@ -91,7 +91,7 @@ static void load_file(const char *name) {
                 }
                 line_length[line_count++] = col;
                 col = 0;
-            } else if (col < MAX_LINE_LEN - 1) {
+            } else if (col < MAX_LINE_LENGTH - 1) {
                 if (line_count >= MAX_LINES) {
                     truncated = 1;
                     break;
@@ -119,13 +119,13 @@ static void save_file(void) {
                sizeof("File is longer than this editor holds - use Save As."));
         return;
     }
-    char tmpname[PATH_MAX_LEN];
+    char tmpname[PATH_MAX_LENGTH];
     int t = 0;
-    for (; filename[t] && t < PATH_MAX_LEN - 8; t++) {
+    for (; filename[t] && t < PATH_MAX_LENGTH - 8; t++) {
         tmpname[t] = filename[t];
     }
     static const char suffix[] = ".tmp~";
-    for (int k = 0; suffix[k] && t < PATH_MAX_LEN - 1; k++, t++) {
+    for (int k = 0; suffix[k] && t < PATH_MAX_LENGTH - 1; k++, t++) {
         tmpname[t] = suffix[k];
     }
     tmpname[t] = '\0';
@@ -235,15 +235,15 @@ static void undo_reset(void) {
 }
 
 static void insert_char(char c) {
-    int *len = &line_length[current_row];
-    if (*len >= MAX_LINE_LEN - 1) {
+    int *length = &line_length[current_row];
+    if (*length >= MAX_LINE_LENGTH - 1) {
         return;
     }
-    for (int i = *len; i > current_col; i--) {
+    for (int i = *length; i > current_col; i--) {
         lines[current_row][i] = lines[current_row][i - 1];
     }
     lines[current_row][current_col] = c;
-    (*len)++;
+    (*length)++;
     undo_record(EDIT_INSERT, current_row, current_col, c);
     current_col++;
     dirty = 1;
@@ -269,7 +269,7 @@ static int join_line(int row) {
     if (row + 1 >= line_count) {
         return 0;
     }
-    if (line_length[row] + line_length[row + 1] > MAX_LINE_LEN - 1) {
+    if (line_length[row] + line_length[row + 1] > MAX_LINE_LENGTH - 1) {
         return 0;
     }
     memcpy(lines[row] + line_length[row], lines[row + 1], (size_t)line_length[row + 1]);
@@ -307,12 +307,12 @@ static void backspace(void) {
         dirty = 1;
         return;
     }
-    int *len = &line_length[current_row];
+    int *length = &line_length[current_row];
     undo_record(EDIT_DELETE, current_row, current_col - 1, lines[current_row][current_col - 1]);
-    for (int i = current_col - 1; i < *len - 1; i++) {
+    for (int i = current_col - 1; i < *length - 1; i++) {
         lines[current_row][i] = lines[current_row][i + 1];
     }
-    (*len)--;
+    (*length)--;
     current_col--;
     dirty = 1;
 }
@@ -322,13 +322,13 @@ static void handle_char(char ch) {
         split_at_cursor();
     } else if (ch == '\b' || ch == 0x7F) {
         backspace();
-    } else if (ch == KBD_KEY_UP) {
+    } else if (ch == KEYBOARD_KEY_UP) {
         current_row--;
-    } else if (ch == KBD_KEY_DOWN) {
+    } else if (ch == KEYBOARD_KEY_DOWN) {
         current_row++;
-    } else if (ch == KBD_KEY_LEFT) {
+    } else if (ch == KEYBOARD_KEY_LEFT) {
         current_col--;
-    } else if (ch == KBD_KEY_RIGHT) {
+    } else if (ch == KEYBOARD_KEY_RIGHT) {
         current_col++;
     } else if (ch >= 0x20 && ch < 0x7F) {
         insert_char(ch);
@@ -349,7 +349,7 @@ static void reset_to_new_file(void) {
     current_row = 0;
     current_col = 0;
     scroll_top = 0;
-    memcpy(filename, PATH_HOME_DIR "untitled", sizeof(PATH_HOME_DIR "untitled"));
+    memcpy(filename, PATH_HOME_DIRECTORY "untitled", sizeof(PATH_HOME_DIRECTORY "untitled"));
     dirty = 0;
     undo_reset();
     status[0] = '\0';
@@ -363,7 +363,7 @@ static void quit_now(void) {
 static void begin_save_as(void) {
     prompt_kind = PROMPT_SAVE_AS;
     prompt_length = 0;
-    for (; filename[prompt_length] && prompt_length < PROMPT_MAX_LEN; prompt_length++) {
+    for (; filename[prompt_length] && prompt_length < PROMPT_MAX_LENGTH; prompt_length++) {
         prompt_buffer[prompt_length] = filename[prompt_length];
     }
 }
@@ -456,7 +456,7 @@ static void normalized_selection(int *sr, int *sc, int *er, int *ec) {
     }
 }
 
-static char find_needle[PROMPT_MAX_LEN + 1];
+static char find_needle[PROMPT_MAX_LENGTH + 1];
 
 static int line_has_at(int row, int col, const char *needle) {
     int n = 0;
@@ -504,9 +504,9 @@ static void find_next(void) {
         status[0] = '\0';
     } else {
         int i = 0;
-        static const char msg[] = "Not found: ";
-        for (; msg[i]; i++) {
-            status[i] = msg[i];
+        static const char message[] = "Not found: ";
+        for (; message[i]; i++) {
+            status[i] = message[i];
         }
         for (int j = 0; find_needle[j] && i < COLS - 1; j++, i++) {
             status[i] = find_needle[j];
@@ -607,20 +607,20 @@ static void redo_next_group(void) {
 }
 
 static void paste_from_clipboard(void) {
-    static char buf[1024];
-    long n = sys_clipboard_get(buf, sizeof(buf));
+    static char buffer[1024];
+    long n = sys_clipboard_get(buffer, sizeof(buffer));
     if (n <= 0) {
         return;
     }
-    if (n > (long)sizeof(buf)) {
-        n = (long)sizeof(buf);
+    if (n > (long)sizeof(buffer)) {
+        n = (long)sizeof(buffer);
     }
     undo_begin_group();
     for (long i = 0; i < n; i++) {
-        if (buf[i] == '\n' || buf[i] == '\r') {
+        if (buffer[i] == '\n' || buffer[i] == '\r') {
             split_at_cursor();
-        } else if (buf[i] >= 0x20 && buf[i] < 0x7F) {
-            insert_char(buf[i]);
+        } else if (buffer[i] >= 0x20 && buffer[i] < 0x7F) {
+            insert_char(buffer[i]);
         }
     }
     clamp_cursor();
@@ -629,19 +629,19 @@ static void paste_from_clipboard(void) {
 static void copy_selection_to_clipboard(void) {
     int sr, sc, er, ec;
     normalized_selection(&sr, &sc, &er, &ec);
-    static char buf[1024];
+    static char buffer[1024];
     size_t n = 0;
-    for (int r = sr; r <= er && n < sizeof(buf); r++) {
+    for (int r = sr; r <= er && n < sizeof(buffer); r++) {
         int col_start = (r == sr) ? sc : 0;
         int col_end = (r == er) ? ec : line_length[r];
-        for (int c = col_start; c < col_end && n < sizeof(buf); c++) {
-            buf[n++] = lines[r][c];
+        for (int c = col_start; c < col_end && n < sizeof(buffer); c++) {
+            buffer[n++] = lines[r][c];
         }
-        if (r != er && n < sizeof(buf)) {
-            buf[n++] = '\n';
+        if (r != er && n < sizeof(buffer)) {
+            buffer[n++] = '\n';
         }
     }
-    sys_clipboard_set(buf, n);
+    sys_clipboard_set(buffer, n);
 }
 
 static void redraw(window_manager_window_t *win) {
@@ -668,13 +668,13 @@ static void redraw(window_manager_window_t *win) {
     graphics_draw_text(&win->graphics, FILE_MENU_X, 2, "File", MENU_TEXT);
 
     for (int r = 0; r < TEXT_ROWS; r++) {
-        int src = scroll_top + r;
-        if (src >= line_count) {
+        int source = scroll_top + r;
+        if (source >= line_count) {
             break;
         }
-        char row_buffer[MAX_LINE_LEN + 1];
-        memcpy(row_buffer, lines[src], (size_t)line_length[src]);
-        row_buffer[line_length[src]] = '\0';
+        char row_buffer[MAX_LINE_LENGTH + 1];
+        memcpy(row_buffer, lines[source], (size_t)line_length[source]);
+        row_buffer[line_length[source]] = '\0';
         graphics_draw_text_mono(&win->graphics, 0, CONTENT_Y0 + r * FONT_HEIGHT, row_buffer, TEXT_COLOR);
     }
     graphics_fill_rect(&win->graphics, (current_col) * FONT_WIDTH,
@@ -701,20 +701,20 @@ static void redraw(window_manager_window_t *win) {
         graphics_fill_rect_rounded(&win->graphics, x, y, PROMPT_W, PROMPT_H, PROMPT_BG);
         graphics_draw_rect_rounded(&win->graphics, x, y, PROMPT_W, PROMPT_H, PROMPT_BORDER);
         if (prompt_kind == PROMPT_SAVE_AS || prompt_kind == PROMPT_FIND) {
-            graphics_draw_text(&win->graphics, x + GFX_PAD, y + 8,
+            graphics_draw_text(&win->graphics, x + GRAPHICS_PAD, y + 8,
                           prompt_kind == PROMPT_FIND ? "Find (Enter=search, click=cancel):"
                                                      : "Save as (Enter=save, click=cancel):",
                           PROMPT_TEXT);
-            graphics_fill_rect_rounded(&win->graphics, x + GFX_PAD, y + 28, PROMPT_W - 2 * GFX_PAD, UI_FONT_UI_HEIGHT + 4, PROMPT_INPUT_BG);
-            char buf[PROMPT_MAX_LEN + 1];
-            memcpy(buf, prompt_buffer, (size_t)prompt_length);
-            buf[prompt_length] = '\0';
-            graphics_draw_text(&win->graphics, x + GFX_PAD + 4, y + 30, buf, PROMPT_TEXT);
-            graphics_fill_rect(&win->graphics, x + GFX_PAD + 4 + graphics_text_width(graphics_ui_font(), buf), y + 30,
+            graphics_fill_rect_rounded(&win->graphics, x + GRAPHICS_PAD, y + 28, PROMPT_W - 2 * GRAPHICS_PAD, UI_FONT_UI_HEIGHT + 4, PROMPT_INPUT_BG);
+            char buffer[PROMPT_MAX_LENGTH + 1];
+            memcpy(buffer, prompt_buffer, (size_t)prompt_length);
+            buffer[prompt_length] = '\0';
+            graphics_draw_text(&win->graphics, x + GRAPHICS_PAD + 4, y + 30, buffer, PROMPT_TEXT);
+            graphics_fill_rect(&win->graphics, x + GRAPHICS_PAD + 4 + graphics_text_width(graphics_ui_font(), buffer), y + 30,
                           2, (int32_t)graphics_ui_font()->height, CURSOR_COLOR);
         } else {
-            graphics_draw_text(&win->graphics, x + GFX_PAD, y + 8, "Discard unsaved changes?", PROMPT_TEXT);
-            graphics_draw_text(&win->graphics, x + GFX_PAD, y + 32, "Y = discard      N / click = cancel", PROMPT_TEXT);
+            graphics_draw_text(&win->graphics, x + GRAPHICS_PAD, y + 8, "Discard unsaved changes?", PROMPT_TEXT);
+            graphics_draw_text(&win->graphics, x + GRAPHICS_PAD, y + 32, "Y = discard      N / click = cancel", PROMPT_TEXT);
         }
     }
 }
@@ -727,7 +727,7 @@ int main(int argc, char **argv) {
     }
     filename[i] = '\0';
     if (filename[0] == '\0') {
-        memcpy(filename, PATH_HOME_DIR "untitled", sizeof(PATH_HOME_DIR "untitled"));
+        memcpy(filename, PATH_HOME_DIRECTORY "untitled", sizeof(PATH_HOME_DIRECTORY "untitled"));
     }
 
     line_length[0] = 0;
@@ -745,16 +745,16 @@ int main(int argc, char **argv) {
 
     for (;;) {
         int changed = 0;
-        wm_event_t ev;
+        window_manager_event_t ev;
         while (window_manager_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+            if (ev.type == WINDOW_MANAGER_EVENT_EXPOSE || ev.type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {
                 changed = 1;
                 continue;
             }
             if (prompt_kind == PROMPT_SAVE_AS || prompt_kind == PROMPT_FIND) {
-                if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+                if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                     prompt_kind = PROMPT_NONE;
-                } else if (ev.type == WM_EVENT_KEY) {
+                } else if (ev.type == WINDOW_MANAGER_EVENT_KEY) {
                     if (ev.ch == '\n' || ev.ch == '\r') {
                         if (prompt_kind == PROMPT_FIND) {
                             prompt_buffer[prompt_length] = '\0';
@@ -771,7 +771,7 @@ int main(int argc, char **argv) {
                         if (prompt_length > 0) {
                             prompt_length--;
                         }
-                    } else if (ev.ch >= 0x20 && ev.ch < 0x7F && prompt_length < PROMPT_MAX_LEN) {
+                    } else if (ev.ch >= 0x20 && ev.ch < 0x7F && prompt_length < PROMPT_MAX_LENGTH) {
                         prompt_buffer[prompt_length++] = ev.ch;
                     }
                 }
@@ -779,18 +779,18 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (prompt_kind == PROMPT_CONFIRM_DISCARD) {
-                if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+                if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                     confirm_discard(0);
-                } else if (ev.type == WM_EVENT_KEY && (ev.ch == 'y' || ev.ch == 'Y')) {
+                } else if (ev.type == WINDOW_MANAGER_EVENT_KEY && (ev.ch == 'y' || ev.ch == 'Y')) {
                     confirm_discard(1);
-                } else if (ev.type == WM_EVENT_KEY && (ev.ch == 'n' || ev.ch == 'N')) {
+                } else if (ev.type == WINDOW_MANAGER_EVENT_KEY && (ev.ch == 'n' || ev.ch == 'N')) {
                     confirm_discard(0);
                 }
                 changed = 1;
                 continue;
             }
 
-            if (ev.type == WM_EVENT_DROP) {
+            if (ev.type == WINDOW_MANAGER_EVENT_DROP) {
                 char dropped[sizeof(pending_drop)];
                 if (window_manager_drag_payload(dropped, sizeof(dropped)) == 0 && dropped[0]) {
                     if (dirty) {
@@ -805,13 +805,13 @@ int main(int argc, char **argv) {
                         load_file(dropped);
                     }
                 }
-            } else if (ev.type == WM_EVENT_CLOSE_REQUEST) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_CLOSE_REQUEST) {
                 request_action(PENDING_QUIT);
-            } else if (ev.type == WM_EVENT_QUERY_SHUTDOWN) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_QUERY_SHUTDOWN) {
                 if (dirty) {
                     window_manager_veto_shutdown(win.window_id);
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_WHEEL) {
                 int max_top = line_count - TEXT_ROWS;
                 if (max_top < 0) {
                     max_top = 0;
@@ -824,12 +824,12 @@ int main(int argc, char **argv) {
                     want = max_top;
                 }
                 scroll_top = want;
-            } else if (ev.type == WM_EVENT_MOUSE_MOVE && sel_dragging) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_MOVE && sel_dragging) {
                 pixel_to_grid(ev.x, ev.y, &sel_end_row, &sel_end_col);
                 current_row = sel_end_row;
                 current_col = sel_end_col;
                 clamp_cursor();
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 if (graphics_point_in_rect(ev.x, ev.y, 0, 0,
                                       FILE_MENU_X + graphics_text_width(graphics_ui_font(), "File") + 8, CONTENT_Y0)) {
                     menu_open = !menu_open;
@@ -850,38 +850,38 @@ int main(int argc, char **argv) {
                     current_col = sel_anchor_col;
                     clamp_cursor();
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && !(ev.buttons & 1) && sel_dragging) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && !(ev.buttons & 1) && sel_dragging) {
                 sel_dragging = 0;
                 sel_active = (sel_anchor_row != sel_end_row || sel_anchor_col != sel_end_col);
-            } else if (ev.type == WM_EVENT_KEY) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_KEY) {
                 long mods = ev.mods;
-                if ((mods & KBD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
+                if ((mods & KEYBOARD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
                     if (sel_active) {
                         copy_selection_to_clipboard();
                     }
-                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'v' || ev.ch == 'V')) {
+                } else if ((mods & KEYBOARD_MOD_CTRL) && (ev.ch == 'v' || ev.ch == 'V')) {
                     status[0] = '\0';
                     clear_selection();
                     paste_from_clipboard();
-                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'z' || ev.ch == 'Z')) {
+                } else if ((mods & KEYBOARD_MOD_CTRL) && (ev.ch == 'z' || ev.ch == 'Z')) {
                     status[0] = '\0';
                     clear_selection();
                     undo_last_group();
-                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'y' || ev.ch == 'Y')) {
+                } else if ((mods & KEYBOARD_MOD_CTRL) && (ev.ch == 'y' || ev.ch == 'Y')) {
                     status[0] = '\0';
                     clear_selection();
                     redo_next_group();
-                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'f' || ev.ch == 'F')) {
+                } else if ((mods & KEYBOARD_MOD_CTRL) && (ev.ch == 'f' || ev.ch == 'F')) {
                     prompt_kind = PROMPT_FIND;
                     prompt_length = 0;
-                    for (; find_needle[prompt_length] && prompt_length < PROMPT_MAX_LEN; prompt_length++) {
+                    for (; find_needle[prompt_length] && prompt_length < PROMPT_MAX_LENGTH; prompt_length++) {
                         prompt_buffer[prompt_length] = find_needle[prompt_length];
                     }
                     prompt_buffer[prompt_length] = '\0';
-                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'g' || ev.ch == 'G')) {
+                } else if ((mods & KEYBOARD_MOD_CTRL) && (ev.ch == 'g' || ev.ch == 'G')) {
                     clear_selection();
                     find_next();
-                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 's' || ev.ch == 'S')) {
+                } else if ((mods & KEYBOARD_MOD_CTRL) && (ev.ch == 's' || ev.ch == 'S')) {
                     save_file();
                 } else {
                     status[0] = '\0';

@@ -27,16 +27,16 @@
 #define OPT_REQUESTED_IP  50
 #define OPT_MESSAGE_TYPE  53
 #define OPT_SERVER_ID     54
-#define OPT_PARAM_LIST    55
+#define OPT_PARAMETER_LIST    55
 #define OPT_END          255
 
-#define BOOTP_FIXED_LEN 236
-#define DHCP_MIN_LEN    (BOOTP_FIXED_LEN + 4)
+#define BOOTP_FIXED_LENGTH 236
+#define DHCP_MIN_LENGTH    (BOOTP_FIXED_LENGTH + 4)
 
-static const uint8_t *find_option(const uint8_t *msg, uint16_t len, uint8_t code, uint8_t *len_out) {
-    uint16_t i = DHCP_MIN_LEN;
-    while (i < len) {
-        uint8_t opt = msg[i];
+static const uint8_t *find_option(const uint8_t *message, uint16_t length, uint8_t code, uint8_t *length_out) {
+    uint16_t i = DHCP_MIN_LENGTH;
+    while (i < length) {
+        uint8_t opt = message[i];
         if (opt == OPT_END) {
             return (const uint8_t *)0;
         }
@@ -44,16 +44,16 @@ static const uint8_t *find_option(const uint8_t *msg, uint16_t len, uint8_t code
             i++;
             continue;
         }
-        if ((uint16_t)(i + 2) > len) {
+        if ((uint16_t)(i + 2) > length) {
             return (const uint8_t *)0;
         }
-        uint8_t opt_length = msg[i + 1];
-        if ((uint32_t)i + 2 + opt_length > len) {
+        uint8_t opt_length = message[i + 1];
+        if ((uint32_t)i + 2 + opt_length > length) {
             return (const uint8_t *)0;
         }
         if (opt == code) {
-            *len_out = opt_length;
-            return msg + i + 2;
+            *length_out = opt_length;
+            return message + i + 2;
         }
         i = (uint16_t)(i + 2 + opt_length);
     }
@@ -66,62 +66,62 @@ static volatile uint16_t reply_length;
 static uint8_t reply[DHCP_MAX_MESSAGE];
 static uint32_t our_xid;
 
-static void dhcp_receive(uint32_t source_ip, uint16_t source_port, const uint8_t *data, uint16_t len) {
+static void dhcp_receive(uint32_t source_ip, uint16_t source_port, const uint8_t *data, uint16_t length) {
     (void)source_ip;
     (void)source_port;
-    if (have_reply || len < DHCP_MIN_LEN || len > sizeof(reply)) {
+    if (have_reply || length < DHCP_MIN_LENGTH || length > sizeof(reply)) {
         return;
     }
     if (data[0] != BOOTREPLY || net_read_be32(data + 4) != our_xid) {
         return;
     }
-    k_memcpy(reply, data, len);
-    reply_length = len;
+    k_memcpy(reply, data, length);
+    reply_length = length;
     have_reply = 1;
 }
 
-static uint16_t build_message(uint8_t *msg, uint8_t type, uint32_t requested, uint32_t server) {
-    k_memset(msg, 0, DHCP_MIN_LEN);
-    msg[0] = BOOTREQUEST;
-    msg[1] = 1;
-    msg[2] = ETH_ADDR_LEN;
-    msg[3] = 0;
-    net_write_be32(msg + 4, our_xid);
-    msg[10] = 0x80;
-    k_memcpy(msg + 28, net_local_mac(), ETH_ADDR_LEN);
-    net_write_be32(msg + BOOTP_FIXED_LEN, 0x63825363u);
+static uint16_t build_message(uint8_t *message, uint8_t type, uint32_t requested, uint32_t server) {
+    k_memset(message, 0, DHCP_MIN_LENGTH);
+    message[0] = BOOTREQUEST;
+    message[1] = 1;
+    message[2] = ETH_ADDRESS_LENGTH;
+    message[3] = 0;
+    net_write_be32(message + 4, our_xid);
+    message[10] = 0x80;
+    k_memcpy(message + 28, net_local_mac(), ETH_ADDRESS_LENGTH);
+    net_write_be32(message + BOOTP_FIXED_LENGTH, 0x63825363u);
 
-    uint16_t i = DHCP_MIN_LEN;
-    msg[i++] = OPT_MESSAGE_TYPE;
-    msg[i++] = 1;
-    msg[i++] = type;
+    uint16_t i = DHCP_MIN_LENGTH;
+    message[i++] = OPT_MESSAGE_TYPE;
+    message[i++] = 1;
+    message[i++] = type;
 
     if (requested) {
-        msg[i++] = OPT_REQUESTED_IP;
-        msg[i++] = 4;
-        net_write_be32(msg + i, requested);
+        message[i++] = OPT_REQUESTED_IP;
+        message[i++] = 4;
+        net_write_be32(message + i, requested);
         i = (uint16_t)(i + 4);
     }
     if (server) {
-        msg[i++] = OPT_SERVER_ID;
-        msg[i++] = 4;
-        net_write_be32(msg + i, server);
+        message[i++] = OPT_SERVER_ID;
+        message[i++] = 4;
+        net_write_be32(message + i, server);
         i = (uint16_t)(i + 4);
     }
 
-    msg[i++] = OPT_PARAM_LIST;
-    msg[i++] = 3;
-    msg[i++] = OPT_SUBNET_MASK;
-    msg[i++] = OPT_ROUTER;
-    msg[i++] = OPT_DNS;
+    message[i++] = OPT_PARAMETER_LIST;
+    message[i++] = 3;
+    message[i++] = OPT_SUBNET_MASK;
+    message[i++] = OPT_ROUTER;
+    message[i++] = OPT_DNS;
 
-    msg[i++] = OPT_END;
+    message[i++] = OPT_END;
     return i;
 }
 
-static int exchange(const uint8_t *msg, uint16_t len, uint8_t want, uint32_t ms) {
+static int exchange(const uint8_t *message, uint16_t length, uint8_t want, uint32_t ms) {
     have_reply = 0;
-    if (udp_send_from(0, NET_BROADCAST_IP, DHCP_SERVER_PORT, DHCP_CLIENT_PORT, msg, len) < 0) {
+    if (udp_send_from(0, NET_BROADCAST_IP, DHCP_SERVER_PORT, DHCP_CLIENT_PORT, message, length) < 0) {
         return 0;
     }
     uint64_t deadline = pit_get_ticks() + (uint64_t)ms * PIT_HZ / 1000;
@@ -140,9 +140,9 @@ static int exchange(const uint8_t *msg, uint16_t len, uint8_t want, uint32_t ms)
 }
 
 static uint32_t option_ip(uint8_t code) {
-    uint8_t len = 0;
-    const uint8_t *v = find_option(reply, reply_length, code, &len);
-    return (v && len >= 4) ? net_read_be32(v) : 0;
+    uint8_t length = 0;
+    const uint8_t *v = find_option(reply, reply_length, code, &length);
+    return (v && length >= 4) ? net_read_be32(v) : 0;
 }
 
 int dhcp_configure(void) {
@@ -151,16 +151,16 @@ int dhcp_configure(void) {
 
     socket_set_raw_handler(DHCP_CLIENT_PORT, dhcp_receive);
 
-    static uint8_t msg[DHCP_MIN_LEN + 32];
+    static uint8_t message[DHCP_MIN_LENGTH + 32];
     int ok = 0;
 
-    uint16_t len = build_message(msg, DHCP_DISCOVER, 0, 0);
-    if (exchange(msg, len, DHCP_OFFER, 2000)) {
+    uint16_t length = build_message(message, DHCP_DISCOVER, 0, 0);
+    if (exchange(message, length, DHCP_OFFER, 2000)) {
         uint32_t offered = net_read_be32(reply + 16);
         uint32_t server = option_ip(OPT_SERVER_ID);
         if (offered) {
-            len = build_message(msg, DHCP_REQUEST, offered, server);
-            if (exchange(msg, len, DHCP_ACK, 2000)) {
+            length = build_message(message, DHCP_REQUEST, offered, server);
+            if (exchange(message, length, DHCP_ACK, 2000)) {
                 uint32_t acked = net_read_be32(reply + 16);
                 net_set_config(acked ? acked : offered,
                                option_ip(OPT_SUBNET_MASK),

@@ -15,7 +15,7 @@
 
 long sys_raw(long num, long a1, long a2, long a3);
 
-long sys_write(int fd, const void *buf, size_t len);
+long sys_write(int fd, const void *buffer, size_t length);
 void sys_exit(int code) __attribute__((noreturn));
 long sys_getpid(void);
 
@@ -29,56 +29,56 @@ long sys_thread_create(void *entry, void *arg, unsigned long stack_top);
 void sys_thread_exit(int value) __attribute__((noreturn));
 long sys_gettid(void);
 
-long sys_mmap(void *addr, unsigned long len, int prot, int flags, int fd,
+long sys_mmap(void *address, unsigned long length, int prot, int flags, int fd,
               unsigned long offset);
-long sys_munmap(void *addr, unsigned long len);
+long sys_munmap(void *address, unsigned long length);
 long sys_link(const char *old_path, const char *new_path);
 long sys_fsync(int fd);
-long sys_mprotect(void *addr, unsigned long len, int prot);
-long sys_madvise(void *addr, unsigned long len, int advice);
+long sys_mprotect(void *address, unsigned long length, int prot);
+long sys_madvise(void *address, unsigned long length, int advice);
 
 long sys_chdir(const char *path);
-long sys_getcwd(char *buf, size_t maxlen);
+long sys_getcwd(char *buffer, size_t maxlen);
 
 long sys_sigaction(int signo, void *handler, void (*restorer)(void),
                    unsigned int flags);
 long sys_sigprocmask(int how, unsigned int mask, unsigned int *old_out);
 long sys_wait(long pid);
 
-long sys_read(int fd, void *buf, size_t len);
+long sys_read(int fd, void *buffer, size_t length);
 
-long sys_readfile(const char *name, void *buf, size_t maxlen);
+long sys_readfile(const char *name, void *buffer, size_t maxlen);
 
-long sys_listdir(const char *path, void *buf, size_t maxlen);
-long sys_getdents(const char *path, unsigned int *cookie, void *buf, size_t buflen);
+long sys_listdir(const char *path, void *buffer, size_t maxlen);
+long sys_getdents(const char *path, unsigned int *cookie, void *buffer, size_t buflen);
 long sys_fork(void);
 long sys_execve(const char *path, char *const argv[], char *const envp[]);
 long sys_waitpid(long pid, int *status, long options);
-long sys_fcntl(int fd, int cmd, long arg);
+long sys_fcntl(int fd, int command, long arg);
 long sys_setpgid(long pid, long pgid);
 long sys_setsid(void);
 long sys_getsid(long pid);
-long sys_ioctl(int fd, unsigned long cmd, void *arg);
+long sys_ioctl(int fd, unsigned long command, void *arg);
 long sys_ftruncate(int fd, long length);
 long sys_symlink(const char *target, const char *path);
-long sys_readlink(const char *path, char *buf, size_t len);
+long sys_readlink(const char *path, char *buffer, size_t length);
 long sys_lstat(const char *path, void *out);
 
 long sys_rusage(int who, void *out);
 long sys_statvfs(const char *path, void *out);
 long sys_utime(const char *path, unsigned int mtime);
-long sys_fdpath(int fd, char *out, unsigned long out_len);
+long sys_fdpath(int fd, char *out, unsigned long out_length);
 long sys_getppid(void);
 long sys_sync(void);
 long sys_meminfo(void *out);
 long sys_alarm(unsigned int seconds);
-long sys_msync(void *addr, unsigned long len, int flags);
-long sys_arch_prctl(int code, unsigned long addr);
-long sys_futex(volatile unsigned int *addr, int op, unsigned int val,
+long sys_msync(void *address, unsigned long length, int flags);
+long sys_arch_prctl(int code, unsigned long address);
+long sys_futex(volatile unsigned int *address, int op, unsigned int val,
                unsigned int timeout_ms);
-long sys_getrandom(void *buf, unsigned long len, unsigned int flags);
-long sys_pread(int fd, void *buf, unsigned long len, long offset);
-long sys_pwrite(int fd, const void *buf, unsigned long len, long offset);
+long sys_getrandom(void *buffer, unsigned long length, unsigned int flags);
+long sys_pread(int fd, void *buffer, unsigned long length, long offset);
+long sys_pwrite(int fd, const void *buffer, unsigned long length, long offset);
 
 long sys_mkdir(const char *path);
 
@@ -100,7 +100,7 @@ long sys_shared_memory_create(size_t size);
 
 long sys_shared_memory_map(long id);
 
-long sys_framebuffer_info(wm_fb_info_t *out);
+long sys_framebuffer_info(window_manager_framebuffer_info_t *out);
 
 long sys_framebuffer_map(void);
 
@@ -127,23 +127,23 @@ long sys_listen(int fd);
 long sys_connect(int fd, uint32_t ip, uint16_t port);
 long sys_connstat(int fd);
 long sys_accept(int fd, os_sockaddr_t *from);
-long sys_send(int fd, const void *data, uint32_t len);
-long sys_recv(int fd, void *data, uint32_t max);
+long sys_send(int fd, const void *data, uint32_t length);
+long sys_receive(int fd, void *data, uint32_t max);
 long sys_bind(int fd, uint16_t port);
-long sys_sendto(int fd, uint32_t ip, uint16_t port, const void *data, uint32_t len);
+long sys_sendto(int fd, uint32_t ip, uint16_t port, const void *data, uint32_t length);
 long sys_recvfrom(int fd, void *data, uint32_t max, os_sockaddr_t *from);
 long sys_sockpoll(int fd);
 long sys_netconf(os_netconf_t *out);
 
 long sys_socketpair(int type, int file_descriptors_out[2]);
-long sys_bindun(int fd, const char *name, int len);
-long sys_connectun(int fd, const char *name, int len);
-long sys_sendmsg(int fd, const os_msg_t *msg, int flags);
-long sys_recvmsg(int fd, os_msg_t *msg, int flags);
+long sys_bindun(int fd, const char *name, int length);
+long sys_connectun(int fd, const char *name, int length);
+long sys_sendmsg(int fd, const os_message_t *message, int flags);
+long sys_recvmsg(int fd, os_message_t *message, int flags);
 long sys_sockshut(int fd, int how);
 
 long sys_epoll_create(int flags);
-long sys_epoll_ctl(int epfd, int op, int fd, const os_epoll_event_t *ev);
+long sys_epoll_control(int epfd, int op, int fd, const os_epoll_event_t *ev);
 long sys_epoll_wait(int epfd, os_epoll_event_t *out, int maxevents, int timeout_ms);
 long sys_eventfd(uint64_t initval, int flags);
 long sys_timerfd_create(int clockid, int flags);
@@ -171,12 +171,12 @@ long sys_pipe_poll(int fd);
 
 long sys_uptime_ms(void);
 
-long sys_klog(uint64_t from, char *buf, size_t max, uint64_t *next_out);
+long sys_kernel_log(uint64_t from, char *buffer, size_t max, uint64_t *next_out);
 
-long sys_klog_total(void);
+long sys_kernel_log_total(void);
 
 long sys_rename_replace(const char *old_path, const char *new_path);
-long sys_waitfds(const int *fds, int count, int timeout_ms);
+long sys_waitfds(const int *file_descriptors, int count, int timeout_ms);
 
 long sys_idle_ticks(int cpu);
 
@@ -192,12 +192,12 @@ long sys_pipe_reset(int fd);
 
 long sys_keyboard_modifiers(void);
 
-long sys_clipboard_set(const void *buf, size_t len);
-long sys_clipboard_get(void *buf, size_t maxlen);
+long sys_clipboard_set(const void *buffer, size_t length);
+long sys_clipboard_get(void *buffer, size_t maxlen);
 
-long sys_writefile(const char *name, const void *buf, size_t len);
+long sys_writefile(const char *name, const void *buffer, size_t length);
 
-long sys_taskinfo(task_info_t *buf, long max_entries);
+long sys_taskinfo(task_info_t *buffer, long max_entries);
 
 long sys_profile(long op, void *arg, long count);
 

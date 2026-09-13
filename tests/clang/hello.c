@@ -85,17 +85,17 @@ int main(void) {
     }
     printf("clangtest: constructor ran\n");
 
-    char *buf = malloc(256);
-    if (!buf) {
+    char *buffer = malloc(256);
+    if (!buffer) {
         printf("clangtest: FAIL malloc\n");
         return 2;
     }
-    strcpy(buf, "allocated");
-    if (strcmp(buf, "allocated") != 0) {
+    strcpy(buffer, "allocated");
+    if (strcmp(buffer, "allocated") != 0) {
         printf("clangtest: FAIL string round trip\n");
         return 3;
     }
-    free(buf);
+    free(buffer);
     printf("clangtest: malloc and string round trip\n");
 
     struct point p = make_point(3, 4);
@@ -167,9 +167,9 @@ int main(void) {
     printf("clangtest: a thread-local in a static program\n");
 
     static int atomic_slot;
-    int prev = __atomic_fetch_add(&atomic_slot, 5, __ATOMIC_SEQ_CST);
+    int previous = __atomic_fetch_add(&atomic_slot, 5, __ATOMIC_SEQ_CST);
     int now = __atomic_load_n(&atomic_slot, __ATOMIC_SEQ_CST);
-    if (prev != 0 || now != 5) {
+    if (previous != 0 || now != 5) {
         printf("clangtest: FAIL an atomic read-modify-write\n");
         return 14;
     }

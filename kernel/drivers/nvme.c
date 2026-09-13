@@ -116,9 +116,9 @@ static void ring_cq(const nvme_queue_t *q, uint16_t head) {
 
 #define SPIN_LIMIT 100000000u
 
-static uint16_t submit_sync(nvme_queue_t *q, const nvme_sqe_t *cmd) {
+static uint16_t submit_sync(nvme_queue_t *q, const nvme_sqe_t *command) {
     volatile nvme_sqe_t *slot = &q->sq[q->sq_tail];
-    k_memcpy((void *)slot, cmd, sizeof(*cmd));
+    k_memcpy((void *)slot, command, sizeof(*command));
     slot->cid = next_cid++;
 
     q->sq_tail = (uint16_t)((q->sq_tail + 1) % QUEUE_DEPTH);
@@ -179,32 +179,32 @@ static int wait_ready(int want) {
 }
 
 static int identify(uint32_t cns, uint32_t id, uint64_t dest_phys) {
-    nvme_sqe_t cmd;
-    k_memset(&cmd, 0, sizeof(cmd));
-    cmd.opcode = OPC_ADMIN_IDENTIFY;
-    cmd.nsid = id;
-    cmd.prp1 = dest_phys;
-    cmd.cdw10 = cns;
-    return submit_sync(&admin_q, &cmd) == 0 ? 0 : -1;
+    nvme_sqe_t command;
+    k_memset(&command, 0, sizeof(command));
+    command.opcode = OPC_ADMIN_IDENTIFY;
+    command.nsid = id;
+    command.prp1 = dest_phys;
+    command.cdw10 = cns;
+    return submit_sync(&admin_q, &command) == 0 ? 0 : -1;
 }
 
 static int create_io_queues(void) {
-    nvme_sqe_t cmd;
-    k_memset(&cmd, 0, sizeof(cmd));
-    cmd.opcode = OPC_ADMIN_CREATE_CQ;
-    cmd.prp1 = io_q.cq_phys;
-    cmd.cdw10 = (uint32_t)IO_QID | ((QUEUE_DEPTH - 1) << 16);
-    cmd.cdw11 = 1;
-    if (submit_sync(&admin_q, &cmd) != 0) {
+    nvme_sqe_t command;
+    k_memset(&command, 0, sizeof(command));
+    command.opcode = OPC_ADMIN_CREATE_CQ;
+    command.prp1 = io_q.cq_phys;
+    command.cdw10 = (uint32_t)IO_QID | ((QUEUE_DEPTH - 1) << 16);
+    command.cdw11 = 1;
+    if (submit_sync(&admin_q, &command) != 0) {
         return -1;
     }
 
-    k_memset(&cmd, 0, sizeof(cmd));
-    cmd.opcode = OPC_ADMIN_CREATE_SQ;
-    cmd.prp1 = io_q.sq_phys;
-    cmd.cdw10 = (uint32_t)IO_QID | ((QUEUE_DEPTH - 1) << 16);
-    cmd.cdw11 = 1u | ((uint32_t)IO_QID << 16);
-    if (submit_sync(&admin_q, &cmd) != 0) {
+    k_memset(&command, 0, sizeof(command));
+    command.opcode = OPC_ADMIN_CREATE_SQ;
+    command.prp1 = io_q.sq_phys;
+    command.cdw10 = (uint32_t)IO_QID | ((QUEUE_DEPTH - 1) << 16);
+    command.cdw11 = 1u | ((uint32_t)IO_QID << 16);
+    if (submit_sync(&admin_q, &command) != 0) {
         return -1;
     }
     return 0;
@@ -332,21 +332,21 @@ int nvme_init(void) {
 
 static int io_command(int write, uint64_t block, uint32_t blocks, uint32_t bytes,
                       uint64_t data_phys) {
-    nvme_sqe_t cmd;
-    k_memset(&cmd, 0, sizeof(cmd));
-    cmd.opcode = write ? OPC_IO_WRITE : OPC_IO_READ;
-    cmd.nsid = nsid;
-    cmd.prp1 = data_phys;
+    nvme_sqe_t command;
+    k_memset(&command, 0, sizeof(command));
+    command.opcode = write ? OPC_IO_WRITE : OPC_IO_READ;
+    command.nsid = nsid;
+    command.prp1 = data_phys;
     if (bytes > 4096) {
-        cmd.prp2 = (bytes <= 8192 && data_phys == bounce_phys)
+        command.prp2 = (bytes <= 8192 && data_phys == bounce_phys)
                        ? bounce_phys + 4096
                        : prp_list_phys;
     }
-    cmd.cdw10 = (uint32_t)(block & 0xFFFFFFFFu);
-    cmd.cdw11 = (uint32_t)(block >> 32);
-    cmd.cdw12 = blocks - 1;
+    command.cdw10 = (uint32_t)(block & 0xFFFFFFFFu);
+    command.cdw11 = (uint32_t)(block >> 32);
+    command.cdw12 = blocks - 1;
 
-    uint16_t status = submit_sync(&io_q, &cmd);
+    uint16_t status = submit_sync(&io_q, &command);
     if (status != 0) {
         kernel_log_puts("[nvme] ");
         kernel_log_puts(write ? "write" : "read");
@@ -360,7 +360,7 @@ static int io_command(int write, uint64_t block, uint32_t blocks, uint32_t bytes
     return 0;
 }
 
-static int transfer(uint64_t lba, uint32_t count, uint8_t *buf, int write) {
+static int transfer(uint64_t lba, uint32_t count, uint8_t *buffer, int write) {
     if (!present) {
         return -1;
     }
@@ -371,36 +371,36 @@ static int transfer(uint64_t lba, uint32_t count, uint8_t *buf, int write) {
                 return -1;
             }
             if (write) {
-                k_memcpy(scratch + c.offset * SECTOR_SIZE, buf, c.sectors * SECTOR_SIZE);
+                k_memcpy(scratch + c.offset * SECTOR_SIZE, buffer, c.sectors * SECTOR_SIZE);
                 if (io_command(1, c.block, 1, ns_block_size, scratch_phys) != 0) {
                     return -1;
                 }
             } else {
-                k_memcpy(buf, scratch + c.offset * SECTOR_SIZE, c.sectors * SECTOR_SIZE);
+                k_memcpy(buffer, scratch + c.offset * SECTOR_SIZE, c.sectors * SECTOR_SIZE);
             }
         } else {
             uint32_t bytes = c.sectors * SECTOR_SIZE;
             if (write) {
-                k_memcpy(bounce, buf, bytes);
+                k_memcpy(bounce, buffer, bytes);
             }
             if (io_command(write, c.block, c.blocks, bytes, bounce_phys) != 0) {
                 return -1;
             }
             if (!write) {
-                k_memcpy(buf, bounce, bytes);
+                k_memcpy(buffer, bounce, bytes);
             }
         }
-        buf += c.sectors * SECTOR_SIZE;
+        buffer += c.sectors * SECTOR_SIZE;
         lba += c.sectors;
         count -= c.sectors;
     }
     return 0;
 }
 
-int nvme_read(uint64_t lba, uint32_t count, void *buf) {
-    return transfer(lba, count, (uint8_t *)buf, 0);
+int nvme_read(uint64_t lba, uint32_t count, void *buffer) {
+    return transfer(lba, count, (uint8_t *)buffer, 0);
 }
 
-int nvme_write(uint64_t lba, uint32_t count, const void *buf) {
-    return transfer(lba, count, (uint8_t *)(uintptr_t)buf, 1);
+int nvme_write(uint64_t lba, uint32_t count, const void *buffer) {
+    return transfer(lba, count, (uint8_t *)(uintptr_t)buffer, 1);
 }

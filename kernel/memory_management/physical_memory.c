@@ -11,7 +11,7 @@
 
 #define LOW_MEMORY_LIMIT 0x100000ULL
 
-#define KERNEL_LOAD_ADDR 0x100000ULL
+#define KERNEL_LOAD_ADDRESS 0x100000ULL
 
 extern uint8_t __kernel_end[];
 
@@ -111,8 +111,8 @@ void physical_memory_init(const uint32_t *e820_map) {
 
     total_frames = highest_usable_end / PAGE_SIZE;
     dma_frames = total_frames;
-    if (dma_frames > PMM_DMA_LIMIT / PAGE_SIZE) {
-        dma_frames = PMM_DMA_LIMIT / PAGE_SIZE;
+    if (dma_frames > PHYSICAL_MEMORY_DMA_LIMIT / PAGE_SIZE) {
+        dma_frames = PHYSICAL_MEMORY_DMA_LIMIT / PAGE_SIZE;
     }
 
     bitmap_bytes = (total_frames + 7) / 8;
@@ -122,7 +122,7 @@ void physical_memory_init(const uint32_t *e820_map) {
     exclusion_t excl[3];
     excl[0].base = 0;
     excl[0].end = LOW_MEMORY_LIMIT;
-    excl[1].base = KERNEL_LOAD_ADDR;
+    excl[1].base = KERNEL_LOAD_ADDRESS;
     excl[1].end = align_up((uint64_t)(uintptr_t)__kernel_end, PAGE_SIZE);
     excl[2].base = (uint64_t)(uintptr_t)e820_map;
     excl[2].end = align_up(excl[2].base + 8 + (uint64_t)count * sizeof(e820_entry_t), PAGE_SIZE);

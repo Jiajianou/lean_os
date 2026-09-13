@@ -25,20 +25,20 @@
 #define WALL_BTN_W  68
 #define WALL_BTN_H  22
 #define WALL_BTN_GAP 6
-#define WALL_BTN_X(i) (GFX_PAD + (i) * (WALL_BTN_W + WALL_BTN_GAP))
+#define WALL_BTN_X(i) (GRAPHICS_PAD + (i) * (WALL_BTN_W + WALL_BTN_GAP))
 
 #define VOL_STEPS   5
 #define VOL_BTN_W   22
 #define VOL_BTN_H   20
 #define VOL_BTN_GAP 4
-#define VOL_X(i)    (GFX_PAD + 58 + (i) * (VOL_BTN_W + VOL_BTN_GAP))
+#define VOL_X(i)    (GRAPHICS_PAD + 58 + (i) * (VOL_BTN_W + VOL_BTN_GAP))
 #define VOL_Y       288
 #define VOL_LABEL_Y 290
 
 #define MOTION_LABEL_Y 290
 #define MOTION_BTN_W   50
 #define MOTION_BTN_H   20
-#define MOTION_BTN_X   (WIN_W - GFX_PAD - MOTION_BTN_W)
+#define MOTION_BTN_X   (WIN_W - GRAPHICS_PAD - MOTION_BTN_W)
 
 #define MODE_LABEL_Y  316
 #define MODE_BTN_Y    340
@@ -46,19 +46,19 @@
 #define MODE_BTN_H    20
 #define MODE_BTN_GAP  6
 #define MODE_COLS     3
-#define MODE_BTN_X(i) (GFX_PAD + ((i) % MODE_COLS) * (MODE_BTN_W + MODE_BTN_GAP))
+#define MODE_BTN_X(i) (GRAPHICS_PAD + ((i) % MODE_COLS) * (MODE_BTN_W + MODE_BTN_GAP))
 #define MODE_ROW_Y(i) (MODE_BTN_Y + ((i) / MODE_COLS) * (MODE_BTN_H + 4))
 #define MODE_ROWS     3
 #define CONFIRM_Y     (MODE_BTN_Y + MODE_ROWS * (MODE_BTN_H + 4) + 6)
 #define CONFIRM_H     20
 #define KEEP_BTN_W    64
-#define KEEP_BTN_X    (WIN_W - GFX_PAD - KEEP_BTN_W)
+#define KEEP_BTN_X    (WIN_W - GRAPHICS_PAD - KEEP_BTN_W)
 
 #define SHORTCUT_LABEL_Y 452
 #define SHORTCUT_ROW_Y   474
 #define SHORTCUT_ROW_H   15
 #define SHORTCUT_FONT    ui_font_small
-#define SHORTCUT_DESC_X  (GFX_PAD + 124)
+#define SHORTCUT_DESCRIPTOR_X  (GRAPHICS_PAD + 124)
 
 #define DEFAULT_BG_COLOR     0x001A1A2Eu
 #define DEFAULT_ACCENT_COLOR 0x004C99E6u
@@ -98,12 +98,12 @@ static int vol_step_percent(int i) {
     return i == 0 ? 0 : 100 * i / (VOL_STEPS - 1);
 }
 
-#define CLEAR_BTN_X (WIN_W - GFX_PAD - CLEAR_BTN_W)
+#define CLEAR_BTN_X (WIN_W - GRAPHICS_PAD - CLEAR_BTN_W)
 #define CLEAR_BTN_Y 100
 #define CLEAR_BTN_W 80
 #define CLEAR_BTN_H 20
 
-static int format_uint(uint32_t v, char *buf) {
+static int format_uint(uint32_t v, char *buffer) {
     char temporary[10];
     int n = 0;
     if (v == 0) {
@@ -113,16 +113,16 @@ static int format_uint(uint32_t v, char *buf) {
         temporary[n++] = (char)('0' + (v % 10));
         v /= 10;
     }
-    int len = 0;
+    int length = 0;
     for (int i = n - 1; i >= 0; i--) {
-        buf[len++] = temporary[i];
+        buffer[length++] = temporary[i];
     }
-    buf[len] = '\0';
-    return len;
+    buffer[length] = '\0';
+    return length;
 }
 
 static void apply_theme(void) {
-    wm_settings_request_t settings;
+    window_manager_settings_request_t settings;
     settings.volume = current_volume;
     settings.animations = current_animations;
     settings.bg_color = current_bg;
@@ -146,10 +146,10 @@ static void draw_selected_mark(window_manager_window_t *win, int32_t x, int32_t 
 static void redraw(window_manager_window_t *win, int clear_hover, int clear_pressed) {
     graphics_fill_rect(&win->graphics, 0, 0, WIN_W, WIN_H, BG_COLOR);
 
-    graphics_draw_text(&win->graphics, GFX_PAD, 10, "System", LABEL_COLOR);
-    graphics_draw_line(&win->graphics, GFX_PAD, 26, WIN_W - GFX_PAD, 26, BORDER_COLOR);
+    graphics_draw_text(&win->graphics, GRAPHICS_PAD, 10, "System", LABEL_COLOR);
+    graphics_draw_line(&win->graphics, GRAPHICS_PAD, 26, WIN_W - GRAPHICS_PAD, 26, BORDER_COLOR);
 
-    wm_fb_info_t framebuffer_info;
+    window_manager_framebuffer_info_t framebuffer_info;
     uint32_t framebuffer_w = 0, framebuffer_h = 0;
     char line[64];
     if (sys_framebuffer_info(&framebuffer_info) == 0) {
@@ -164,7 +164,7 @@ static void redraw(window_manager_window_t *win, int clear_hover, int clear_pres
         line[i++] = 'x';
         i += format_uint(framebuffer_info.height, line + i);
         line[i] = '\0';
-        graphics_draw_text(&win->graphics, GFX_PAD, 36, line, TEXT_COLOR);
+        graphics_draw_text(&win->graphics, GRAPHICS_PAD, 36, line, TEXT_COLOR);
     }
 
     {
@@ -197,11 +197,11 @@ static void redraw(window_manager_window_t *win, int clear_hover, int clear_pres
             line[i++] = 's';
         }
         line[i] = '\0';
-        graphics_draw_text(&win->graphics, GFX_PAD, 52, line, TEXT_COLOR);
+        graphics_draw_text(&win->graphics, GRAPHICS_PAD, 52, line, TEXT_COLOR);
     }
 
-    graphics_draw_text(&win->graphics, GFX_PAD, 76, "Clipboard", LABEL_COLOR);
-    graphics_draw_line(&win->graphics, GFX_PAD, 92, WIN_W - GFX_PAD, 92, BORDER_COLOR);
+    graphics_draw_text(&win->graphics, GRAPHICS_PAD, 76, "Clipboard", LABEL_COLOR);
+    graphics_draw_line(&win->graphics, GRAPHICS_PAD, 92, WIN_W - GRAPHICS_PAD, 92, BORDER_COLOR);
 
     char clip_buffer[40];
     long clip_length = sys_clipboard_get(clip_buffer, sizeof(clip_buffer) - 1);
@@ -214,34 +214,34 @@ static void redraw(window_manager_window_t *win, int clear_hover, int clear_pres
         }
         clip_buffer[clip_length] = '\0';
     }
-    graphics_draw_text(&win->graphics, GFX_PAD, 102, clip_buffer, TEXT_COLOR);
+    graphics_draw_text(&win->graphics, GRAPHICS_PAD, 102, clip_buffer, TEXT_COLOR);
 
     graphics_draw_button_state(&win->graphics, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H,
                            clear_hover ? BTN_HOVER : BTN_COLOR, BORDER_COLOR, "Clear", TEXT_COLOR,
                            clear_pressed);
 
-    graphics_draw_text(&win->graphics, GFX_PAD, 130, "Desktop color", LABEL_COLOR);
-    graphics_draw_line(&win->graphics, GFX_PAD, 146, WIN_W - GFX_PAD, 146, BORDER_COLOR);
+    graphics_draw_text(&win->graphics, GRAPHICS_PAD, 130, "Desktop color", LABEL_COLOR);
+    graphics_draw_line(&win->graphics, GRAPHICS_PAD, 146, WIN_W - GRAPHICS_PAD, 146, BORDER_COLOR);
     for (int i = 0; i < BG_SWATCH_COUNT; i++) {
-        int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
+        int32_t x = GRAPHICS_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
         graphics_fill_rect_rounded(&win->graphics, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, BG_SWATCHES[i]);
         graphics_draw_rect_rounded(&win->graphics, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE,
                               BG_SWATCHES[i] == current_bg ? TEXT_COLOR : BORDER_COLOR);
         draw_selected_mark(win, x, BG_SWATCH_Y, BG_SWATCHES[i] == current_bg);
     }
 
-    graphics_draw_text(&win->graphics, GFX_PAD, 184, "Accent color", LABEL_COLOR);
-    graphics_draw_line(&win->graphics, GFX_PAD, 200, WIN_W - GFX_PAD, 200, BORDER_COLOR);
+    graphics_draw_text(&win->graphics, GRAPHICS_PAD, 184, "Accent color", LABEL_COLOR);
+    graphics_draw_line(&win->graphics, GRAPHICS_PAD, 200, WIN_W - GRAPHICS_PAD, 200, BORDER_COLOR);
     for (int i = 0; i < ACCENT_SWATCH_COUNT; i++) {
-        int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
+        int32_t x = GRAPHICS_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
         graphics_fill_rect_rounded(&win->graphics, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE, ACCENT_SWATCHES[i]);
         graphics_draw_rect_rounded(&win->graphics, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE,
                               ACCENT_SWATCHES[i] == current_accent ? TEXT_COLOR : BORDER_COLOR);
         draw_selected_mark(win, x, ACCENT_SWATCH_Y, ACCENT_SWATCHES[i] == current_accent);
     }
 
-    graphics_draw_text(&win->graphics, GFX_PAD, 238, "Wallpaper", LABEL_COLOR);
-    graphics_draw_line(&win->graphics, GFX_PAD, 254, WIN_W - GFX_PAD, 254, BORDER_COLOR);
+    graphics_draw_text(&win->graphics, GRAPHICS_PAD, 238, "Wallpaper", LABEL_COLOR);
+    graphics_draw_line(&win->graphics, GRAPHICS_PAD, 254, WIN_W - GRAPHICS_PAD, 254, BORDER_COLOR);
     for (int i = 0; i < WALLPAPER_COUNT; i++) {
         int32_t x = WALL_BTN_X(i);
         wallpaper_fill(&win->graphics, x, WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H, i, current_bg);
@@ -253,12 +253,12 @@ static void redraw(window_manager_window_t *win, int clear_hover, int clear_pres
                       WALL_BTN_Y + (WALL_BTN_H - (int32_t)graphics_ui_font()->height) / 2, name, TEXT_COLOR);
     }
 
-    graphics_draw_text(&win->graphics, GFX_PAD, MODE_LABEL_Y, "Resolution", LABEL_COLOR);
-    graphics_draw_line(&win->graphics, GFX_PAD, MODE_LABEL_Y + 16, WIN_W - GFX_PAD, MODE_LABEL_Y + 16, BORDER_COLOR);
+    graphics_draw_text(&win->graphics, GRAPHICS_PAD, MODE_LABEL_Y, "Resolution", LABEL_COLOR);
+    graphics_draw_line(&win->graphics, GRAPHICS_PAD, MODE_LABEL_Y + 16, WIN_W - GRAPHICS_PAD, MODE_LABEL_Y + 16, BORDER_COLOR);
     if (mode_count == 0) {
-        graphics_draw_text(&win->graphics, GFX_PAD, MODE_BTN_Y,
+        graphics_draw_text(&win->graphics, GRAPHICS_PAD, MODE_BTN_Y,
                        "This display cannot be", LABEL_COLOR);
-        graphics_draw_text(&win->graphics, GFX_PAD, MODE_BTN_Y + 16,
+        graphics_draw_text(&win->graphics, GRAPHICS_PAD, MODE_BTN_Y + 16,
                        "resized after boot.", LABEL_COLOR);
     } else {
         for (int i = 0; i < mode_count; i++) {
@@ -287,13 +287,13 @@ static void redraw(window_manager_window_t *win, int clear_hover, int clear_pres
             i += format_uint((uint32_t)(left_ms / 1000) + 1, line + i);
             line[i++] = 's';
             line[i] = '\0';
-            graphics_draw_text(&win->graphics, GFX_PAD, CONFIRM_Y + 2, line, TEXT_COLOR);
+            graphics_draw_text(&win->graphics, GRAPHICS_PAD, CONFIRM_Y + 2, line, TEXT_COLOR);
             graphics_draw_button(&win->graphics, KEEP_BTN_X, CONFIRM_Y, KEEP_BTN_W, CONFIRM_H,
                              BTN_COLOR, BORDER_COLOR, "Keep", TEXT_COLOR);
         }
     }
 
-    graphics_draw_text(&win->graphics, GFX_PAD, VOL_LABEL_Y, "Volume", LABEL_COLOR);
+    graphics_draw_text(&win->graphics, GRAPHICS_PAD, VOL_LABEL_Y, "Volume", LABEL_COLOR);
     for (int i = 0; i < VOL_STEPS; i++) {
         int filled = (int)current_volume >= vol_step_percent(i) && current_volume > 0;
         if (i == 0) {
@@ -313,12 +313,12 @@ static void redraw(window_manager_window_t *win, int clear_hover, int clear_pres
                      current_animations ? BTN_HOVER : BTN_COLOR, BORDER_COLOR,
                      current_animations ? "On" : "Off", TEXT_COLOR);
 
-    graphics_draw_text(&win->graphics, GFX_PAD, SHORTCUT_LABEL_Y, "Shortcuts", LABEL_COLOR);
-    graphics_draw_line(&win->graphics, GFX_PAD, SHORTCUT_LABEL_Y + 16, WIN_W - GFX_PAD, SHORTCUT_LABEL_Y + 16, BORDER_COLOR);
+    graphics_draw_text(&win->graphics, GRAPHICS_PAD, SHORTCUT_LABEL_Y, "Shortcuts", LABEL_COLOR);
+    graphics_draw_line(&win->graphics, GRAPHICS_PAD, SHORTCUT_LABEL_Y + 16, WIN_W - GRAPHICS_PAD, SHORTCUT_LABEL_Y + 16, BORDER_COLOR);
     for (int i = 0; i < SHORTCUT_COUNT; i++) {
         int32_t y = SHORTCUT_ROW_Y + i * SHORTCUT_ROW_H;
-        graphics_draw_text_font(&win->graphics, GFX_PAD, y, SHORTCUTS[i].chord, TEXT_COLOR, &SHORTCUT_FONT, 0);
-        graphics_draw_text_font(&win->graphics, SHORTCUT_DESC_X, y, SHORTCUTS[i].what, LABEL_COLOR, &SHORTCUT_FONT, 0);
+        graphics_draw_text_font(&win->graphics, GRAPHICS_PAD, y, SHORTCUTS[i].chord, TEXT_COLOR, &SHORTCUT_FONT, 0);
+        graphics_draw_text_font(&win->graphics, SHORTCUT_DESCRIPTOR_X, y, SHORTCUTS[i].what, LABEL_COLOR, &SHORTCUT_FONT, 0);
     }
 }
 
@@ -329,7 +329,7 @@ int main(void) {
     }
 
     {
-        wm_settings_request_t settings;
+        window_manager_settings_request_t settings;
         if (window_manager_query_settings(&settings) == 0) {
             current_bg = settings.bg_color;
             current_accent = settings.accent_color;
@@ -351,11 +351,11 @@ int main(void) {
 
     for (;;) {
         int changed = 0;
-        wm_event_t ev;
+        window_manager_event_t ev;
         while (window_manager_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+            if (ev.type == WINDOW_MANAGER_EVENT_EXPOSE || ev.type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {
                 changed = 1;
-            } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_MOVE) {
                 int hover = graphics_point_in_rect(ev.x, ev.y, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H);
                 if (hover != clear_hover) {
                     clear_hover = hover;
@@ -365,19 +365,19 @@ int main(void) {
                     clear_pressed = 0;
                     changed = 1;
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && !(ev.buttons & 1)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && !(ev.buttons & 1)) {
                 if (clear_pressed) {
                     clear_pressed = 0;
                     changed = 1;
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 if (graphics_point_in_rect(ev.x, ev.y, CLEAR_BTN_X, CLEAR_BTN_Y, CLEAR_BTN_W, CLEAR_BTN_H)) {
                     clear_pressed = 1;
                     sys_clipboard_set("", 0);
                     changed = 1;
                 }
                 for (int i = 0; i < BG_SWATCH_COUNT; i++) {
-                    int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
+                    int32_t x = GRAPHICS_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
                     if (graphics_point_in_rect(ev.x, ev.y, x, BG_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
                         current_bg = BG_SWATCHES[i];
                         apply_theme();
@@ -386,7 +386,7 @@ int main(void) {
                     }
                 }
                 for (int i = 0; i < ACCENT_SWATCH_COUNT; i++) {
-                    int32_t x = GFX_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
+                    int32_t x = GRAPHICS_PAD + i * (SWATCH_SIZE + SWATCH_GAP);
                     if (graphics_point_in_rect(ev.x, ev.y, x, ACCENT_SWATCH_Y, SWATCH_SIZE, SWATCH_SIZE)) {
                         current_accent = ACCENT_SWATCHES[i];
                         apply_theme();
@@ -420,7 +420,7 @@ int main(void) {
                     graphics_point_in_rect(ev.x, ev.y, KEEP_BTN_X, CONFIRM_Y, KEEP_BTN_W, CONFIRM_H)) {
                     window_manager_confirm_display_mode();
                     confirm_until_ms = 0;
-                    wm_fb_info_t now_framebuffer;
+                    window_manager_framebuffer_info_t now_framebuffer;
                     if (sys_framebuffer_info(&now_framebuffer) == 0) {
                         settings_file_save_display(now_framebuffer.width, now_framebuffer.height);
                     }
@@ -429,7 +429,7 @@ int main(void) {
                     for (int i = 0; i < mode_count; i++) {
                         if (graphics_point_in_rect(ev.x, ev.y, MODE_BTN_X(i), MODE_ROW_Y(i), MODE_BTN_W, MODE_BTN_H)) {
                             window_manager_set_display_mode(modes[i].width, modes[i].height);
-                            confirm_until_ms = sys_uptime_ms() + WM_MODE_REVERT_MS;
+                            confirm_until_ms = sys_uptime_ms() + WINDOW_MANAGER_MODE_REVERT_MS;
                             changed = 1;
                             break;
                         }

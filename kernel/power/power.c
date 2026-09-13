@@ -22,12 +22,12 @@ static uint8_t s5_slp_a, s5_slp_b;
 #define PM1_SLP_EN        (1u << 13)
 #define PM1_SCI_EN        1
 
-#define QEMU_PM1A_CNT      0x604
-#define BOCHS_PM1A_CNT     0xB004
+#define QEMU_PM1A_COUNT      0x604
+#define BOCHS_PM1A_COUNT     0xB004
 
-#define KBD_STATUS_PORT  0x64
-#define KBD_CMD_RESET    0xFE
-#define KBD_INPUT_FULL   2
+#define KEYBOARD_STATUS_PORT  0x64
+#define KEYBOARD_COMMAND_RESET    0xFE
+#define KEYBOARD_INPUT_FULL   2
 
 void power_init(void) {
     power_info_valid = acpi_find_power(&power_info);
@@ -88,9 +88,9 @@ static void power_off_now(void) {
 
     kernel_log_puts("[power] the FADT path did not power the machine off - falling back to "
               "QEMU's documented PM base (0x604), then Bochs's (0xB004).\n");
-    write_sleep(QEMU_PM1A_CNT, 0);
+    write_sleep(QEMU_PM1A_COUNT, 0);
     pit_sleep_ms(50);
-    write_sleep(BOCHS_PM1A_CNT, 0);
+    write_sleep(BOCHS_PM1A_COUNT, 0);
     pit_sleep_ms(50);
 }
 
@@ -104,9 +104,9 @@ static void reboot_now(void) {
     }
 
     kernel_log_puts("[power] falling back to the 8042 reset pulse (0xFE to port 0x64).\n");
-    for (int i = 0; i < 1000 && (inb(KBD_STATUS_PORT) & KBD_INPUT_FULL); i++) {
+    for (int i = 0; i < 1000 && (inb(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL); i++) {
     }
-    outb(KBD_STATUS_PORT, KBD_CMD_RESET);
+    outb(KEYBOARD_STATUS_PORT, KEYBOARD_COMMAND_RESET);
     pit_sleep_ms(50);
 
     kernel_log_puts("[power] falling back to a triple fault.\n");

@@ -27,13 +27,13 @@ const char usb_hid_ascii_shift[104] = {
 static int mods_from_report(uint8_t raw) {
     int mods = 0;
     if (raw & 0x22) {
-        mods |= KBD_MOD_SHIFT;
+        mods |= KEYBOARD_MOD_SHIFT;
     }
     if (raw & 0x11) {
-        mods |= KBD_MOD_CTRL;
+        mods |= KEYBOARD_MOD_CTRL;
     }
     if (raw & 0x44) {
-        mods |= KBD_MOD_ALT;
+        mods |= KEYBOARD_MOD_ALT;
     }
     return mods;
 }
@@ -60,7 +60,7 @@ void usb_hid_decode_keyboard(usb_hid_state_t *state, const uint8_t report[8],
         if (was_held) {
             continue;
         }
-        char ch = (mods & KBD_MOD_SHIFT) ? usb_hid_ascii_shift[usage] : usb_hid_ascii[usage];
+        char ch = (mods & KEYBOARD_MOD_SHIFT) ? usb_hid_ascii_shift[usage] : usb_hid_ascii[usage];
         if (ch == 0) {
             continue;
         }

@@ -4,7 +4,7 @@
 #include "kernel_log.h"
 #include "architecture/x86_64/timestamp_counter.h"
 
-#define CMOS_ADDR 0x70
+#define CMOS_ADDRESS 0x70
 #define CMOS_DATA 0x71
 
 #define CMOS_SECONDS 0x00
@@ -24,7 +24,7 @@
 static int available;
 
 static uint8_t cmos_read(uint8_t reg) {
-    outb(CMOS_ADDR, reg);
+    outb(CMOS_ADDRESS, reg);
     return inb(CMOS_DATA);
 }
 

@@ -4,7 +4,7 @@
 
 #include "fakes/fakes.h"
 
-void panic(const char *msg);
+void panic(const char *message);
 
 static int current_cpu;
 

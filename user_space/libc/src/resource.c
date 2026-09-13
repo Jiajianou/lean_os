@@ -12,18 +12,18 @@ static long tick_hz(void) {
     return hz > 0 ? hz : 100;
 }
 
-clock_t times(struct tms *buf) {
+clock_t times(struct tms *buffer) {
     os_rusage_t self, kids;
     if (sys_rusage(OS_RUSAGE_SELF, &self) != 0 ||
         sys_rusage(OS_RUSAGE_CHILDREN, &kids) != 0) {
         errno = EINVAL;
         return (clock_t)-1;
     }
-    if (buf) {
-        buf->tms_utime = (clock_t)self.user_ticks;
-        buf->tms_stime = (clock_t)self.sys_ticks;
-        buf->tms_cutime = (clock_t)kids.user_ticks;
-        buf->tms_cstime = (clock_t)kids.sys_ticks;
+    if (buffer) {
+        buffer->tms_utime = (clock_t)self.user_ticks;
+        buffer->tms_stime = (clock_t)self.sys_ticks;
+        buffer->tms_cutime = (clock_t)kids.user_ticks;
+        buffer->tms_cstime = (clock_t)kids.sys_ticks;
     }
     return (clock_t)((unsigned long)sys_uptime_ms() * (unsigned long)tick_hz() / 1000u);
 }

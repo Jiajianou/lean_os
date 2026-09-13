@@ -11,7 +11,7 @@ struct FILE {
     int fd;
     int eof;
     int used;
-    int err;
+    int error;
     int unget;
     wint_t wunget;
     char wbuf[BUFSIZ];
@@ -20,16 +20,16 @@ struct FILE {
 };
 
 static FILE std_files[3] = {
-    {.fd = 0, .eof = 0, .used = 1, .err = 0, .unget = -1,
+    {.fd = 0, .eof = 0, .used = 1, .error = 0, .unget = -1,
      .wunget = (wint_t)-1, .wbuf = {0}, .wlen = 0, .mode = _IOLBF},
-    {.fd = 1, .eof = 0, .used = 1, .err = 0, .unget = -1,
+    {.fd = 1, .eof = 0, .used = 1, .error = 0, .unget = -1,
      .wunget = (wint_t)-1, .wbuf = {0}, .wlen = 0, .mode = _IOLBF},
-    {.fd = 2, .eof = 0, .used = 1, .err = 0, .unget = -1,
+    {.fd = 2, .eof = 0, .used = 1, .error = 0, .unget = -1,
      .wunget = (wint_t)-1, .wbuf = {0}, .wlen = 0, .mode = _IOLBF},
 };
 FILE *stdin = &std_files[0];
 FILE *stdout = &std_files[1];
-static FILE stderr_file = {.fd = 1, .eof = 0, .used = 1, .err = 0,
+static FILE stderr_file = {.fd = 1, .eof = 0, .used = 1, .error = 0,
                            .unget = -1, .wunget = (wint_t)-1, .wbuf = {0},
                            .wlen = 0, .mode = _IONBF};
 FILE *stderr = &stderr_file;
@@ -41,27 +41,27 @@ static int stream_flush(FILE *f) {
     if (!f || f->wlen == 0) {
         return 0;
     }
-    int len = f->wlen;
+    int length = f->wlen;
     f->wlen = 0;
-    long n = sys_write(f->fd, f->wbuf, (size_t)len);
-    if (n != (long)len) {
-        f->err = 1;
+    long n = sys_write(f->fd, f->wbuf, (size_t)length);
+    if (n != (long)length) {
+        f->error = 1;
         return EOF;
     }
     return 0;
 }
 
-static int stream_write(FILE *f, const char *p, size_t len) {
-    if (!f || len == 0) {
+static int stream_write(FILE *f, const char *p, size_t length) {
+    if (!f || length == 0) {
         return 0;
     }
     if (f->mode == _IONBF) {
         if (stream_flush(f) != 0) {
             return EOF;
         }
-        return sys_write(f->fd, p, len) == (long)len ? 0 : EOF;
+        return sys_write(f->fd, p, length) == (long)length ? 0 : EOF;
     }
-    for (size_t i = 0; i < len; i++) {
+    for (size_t i = 0; i < length; i++) {
         if (f->wlen == (int)sizeof(f->wbuf)) {
             if (stream_flush(f) != 0) {
                 return EOF;
@@ -110,7 +110,7 @@ FILE *fopen(const char *path, const char *mode) {
         if (!open_files[i].used) {
             open_files[i].fd = (int)fd;
             open_files[i].eof = 0;
-            open_files[i].err = 0;
+            open_files[i].error = 0;
             open_files[i].unget = -1;
             open_files[i].wlen = 0;
             open_files[i].mode = _IOFBF;
@@ -135,7 +135,7 @@ int fclose(FILE *f) {
     return 0;
 }
 
-size_t fread(void *buf, size_t size, size_t count, FILE *f) {
+size_t fread(void *buffer, size_t size, size_t count, FILE *f) {
     if (f) {
         stream_flush(f);
     }
@@ -145,12 +145,12 @@ size_t fread(void *buf, size_t size, size_t count, FILE *f) {
     size_t want = size * count;
     size_t got = 0;
     if (f->unget >= 0) {
-        ((char *)buf)[0] = (char)f->unget;
+        ((char *)buffer)[0] = (char)f->unget;
         f->unget = -1;
         got = 1;
     }
     if (got < want) {
-        long n = sys_read(f->fd, (char *)buf + got, want - got);
+        long n = sys_read(f->fd, (char *)buffer + got, want - got);
         if (n > 0) {
             got += (size_t)n;
         } else if (got == 0) {
@@ -161,7 +161,7 @@ size_t fread(void *buf, size_t size, size_t count, FILE *f) {
     return got / size;
 }
 
-size_t fwrite(const void *buf, size_t size, size_t count, FILE *f) {
+size_t fwrite(const void *buffer, size_t size, size_t count, FILE *f) {
     if (!f || size == 0 || count == 0) {
         return 0;
     }
@@ -170,14 +170,14 @@ size_t fwrite(const void *buf, size_t size, size_t count, FILE *f) {
         if (stream_flush(f) != 0) {
             return 0;
         }
-        long n = sys_write(f->fd, buf, bytes);
+        long n = sys_write(f->fd, buffer, bytes);
         if (n <= 0) {
-            f->err = 1;
+            f->error = 1;
             return 0;
         }
         return (size_t)n / size;
     }
-    if (stream_write(f, (const char *)buf, bytes) != 0) {
+    if (stream_write(f, (const char *)buffer, bytes) != 0) {
         return 0;
     }
     return count;
@@ -203,11 +203,11 @@ long ftell(FILE *f) {
         return -1;
     }
     stream_flush(f);
-    long pos = sys_lseek(f->fd, 0, SEEK_CUR);
-    if (pos > 0 && f->unget >= 0) {
-        pos -= 1;
+    long position = sys_lseek(f->fd, 0, SEEK_CUR);
+    if (position > 0 && f->unget >= 0) {
+        position -= 1;
     }
-    return pos;
+    return position;
 }
 
 int fflush(FILE *f) {
@@ -223,13 +223,13 @@ int feof(FILE *f) {
 }
 
 int ferror(FILE *f) {
-    return f ? f->err : 1;
+    return f ? f->error : 1;
 }
 
 void clearerr(FILE *f) {
     if (f) {
         f->eof = 0;
-        f->err = 0;
+        f->error = 0;
     }
 }
 
@@ -241,14 +241,14 @@ void rewind(FILE *f) {
     if (f) {
         sys_lseek(f->fd, 0, SEEK_SET);
         f->eof = 0;
-        f->err = 0;
+        f->error = 0;
         f->unget = -1;
         f->wunget = (wint_t)-1;
     }
 }
 
-int setvbuf(FILE *f, char *buf, int mode, size_t size) {
-    (void)buf;
+int setvbuf(FILE *f, char *buffer, int mode, size_t size) {
+    (void)buffer;
     (void)size;
     if (!f || (mode != _IOFBF && mode != _IOLBF && mode != _IONBF)) {
         return -1;
@@ -258,8 +258,8 @@ int setvbuf(FILE *f, char *buf, int mode, size_t size) {
     return 0;
 }
 
-void setbuf(FILE *f, char *buf) {
-    setvbuf(f, buf, buf ? _IOFBF : _IONBF, BUFSIZ);
+void setbuf(FILE *f, char *buffer) {
+    setvbuf(f, buffer, buffer ? _IOFBF : _IONBF, BUFSIZ);
 }
 
 wint_t fgetwc(FILE *f) {
@@ -362,7 +362,7 @@ int fgetc(FILE *f) {
     return (unsigned char)c;
 }
 
-char *fgets(char *buf, int n, FILE *f) {
+char *fgets(char *buffer, int n, FILE *f) {
     if (n <= 0) {
         return (char *)0;
     }
@@ -372,7 +372,7 @@ char *fgets(char *buf, int n, FILE *f) {
         if (c == EOF) {
             break;
         }
-        buf[i++] = (char)c;
+        buffer[i++] = (char)c;
         if (c == '\n') {
             break;
         }
@@ -380,8 +380,8 @@ char *fgets(char *buf, int n, FILE *f) {
     if (i == 0) {
         return (char *)0;
     }
-    buf[i] = '\0';
-    return buf;
+    buffer[i] = '\0';
+    return buffer;
 }
 
 int fputc(int c, FILE *f) {
@@ -411,21 +411,21 @@ int puts(const char *s) {
 }
 
 typedef struct {
-    char *buf;
+    char *buffer;
     size_t cap;
-    size_t len;
+    size_t length;
 } sink_t;
 
 static void emit(sink_t *s, char c) {
-    if (s->buf && s->len + 1 < s->cap) {
-        s->buf[s->len] = c;
+    if (s->buffer && s->length + 1 < s->cap) {
+        s->buffer[s->length] = c;
     }
-    s->len++;
+    s->length++;
 }
 
-static void emit_str(sink_t *s, const char *str, int len) {
-    for (int i = 0; i < len; i++) {
-        emit(s, str[i]);
+static void emit_string(sink_t *s, const char *string, int length) {
+    for (int i = 0; i < length; i++) {
+        emit(s, string[i]);
     }
 }
 
@@ -452,13 +452,13 @@ static int format_uint(unsigned long long v, int base, int upper, char *out) {
     return n;
 }
 
-static double two_prod_err(double a, double b, double p) {
+static double two_prod_error(double a, double b, double p) {
     const double split = 134217729.0;
     double ca = split * a;
     double ah = ca - (ca - a);
     double al = a - ah;
-    double cb = split * b;
-    double bh = cb - (cb - b);
+    double callback = split * b;
+    double bh = callback - (callback - b);
     double bl = b - bh;
     return ((ah * bh - p) + ah * bl + al * bh) + al * bl;
 }
@@ -470,7 +470,7 @@ static int format_frac(double v, int prec, char *out, int ipart_odd) {
             pow10 *= 10.0;
         }
         double scaled = v * pow10;
-        double err = two_prod_err(v, pow10, scaled);
+        double error = two_prod_error(v, pow10, scaled);
         unsigned long long d = (unsigned long long)scaled;
         double r = scaled - (double)d;
         int odd = prec ? (int)(d & 1) : ipart_odd;
@@ -480,7 +480,7 @@ static int format_frac(double v, int prec, char *out, int ipart_odd) {
         } else if (r < 0.5) {
             up = 0;
         } else {
-            up = err > 0.0 || (err == 0.0 && odd);
+            up = error > 0.0 || (error == 0.0 && odd);
         }
         if (up) {
             d++;
@@ -519,7 +519,7 @@ static int is_inf(double v) { return v != 0.0 && v * 0.5 == v; }
 static void emit_double(sink_t *s, double v, int prec, int sci, int upper,
                         int alt) {
     if (is_nan(v)) {
-        emit_str(s, upper ? "NAN" : "nan", 3);
+        emit_string(s, upper ? "NAN" : "nan", 3);
         return;
     }
     if (v < 0.0 || (v == 0.0 && 1.0 / v < 0.0)) {
@@ -527,7 +527,7 @@ static void emit_double(sink_t *s, double v, int prec, int sci, int upper,
         v = -v;
     }
     if (is_inf(v)) {
-        emit_str(s, upper ? "INF" : "inf", 3);
+        emit_string(s, upper ? "INF" : "inf", 3);
         return;
     }
     if (prec < 0) {
@@ -563,10 +563,10 @@ static void emit_double(sink_t *s, double v, int prec, int sci, int upper,
 
     char ibuf[24];
     int ilen = format_uint(ipart, 10, 0, ibuf);
-    emit_str(s, ibuf, ilen);
+    emit_string(s, ibuf, ilen);
     if (prec > 0) {
         emit(s, '.');
-        emit_str(s, frac, prec);
+        emit_string(s, frac, prec);
     } else if (alt) {
         emit(s, '.');
     }
@@ -579,22 +579,22 @@ static void emit_double(sink_t *s, double v, int prec, int sci, int upper,
         if (elen < 2) {
             emit(s, '0');
         }
-        emit_str(s, ebuf, elen);
+        emit_string(s, ebuf, elen);
     }
 }
 
 static void trim_g_zeros(sink_t *b, size_t start) {
-    size_t stored = b->len < b->cap ? b->len : b->cap;
+    size_t stored = b->length < b->cap ? b->length : b->cap;
     size_t mant = stored;
     for (size_t i = start; i < stored; i++) {
-        if (b->buf[i] == 'e' || b->buf[i] == 'E') {
+        if (b->buffer[i] == 'e' || b->buffer[i] == 'E') {
             mant = i;
             break;
         }
     }
     int has_dot = 0;
     for (size_t i = start; i < mant; i++) {
-        if (b->buf[i] == '.') {
+        if (b->buffer[i] == '.') {
             has_dot = 1;
             break;
         }
@@ -603,19 +603,19 @@ static void trim_g_zeros(sink_t *b, size_t start) {
         return;
     }
     size_t last = mant;
-    while (last > start && b->buf[last - 1] == '0') {
+    while (last > start && b->buffer[last - 1] == '0') {
         last--;
     }
-    if (last > start && b->buf[last - 1] == '.') {
+    if (last > start && b->buffer[last - 1] == '.') {
         last--;
     }
     if (last == mant) {
         return;
     }
     for (size_t i = mant; i < stored; i++) {
-        b->buf[last + (i - mant)] = b->buf[i];
+        b->buffer[last + (i - mant)] = b->buffer[i];
     }
-    b->len = stored - (mant - last);
+    b->length = stored - (mant - last);
 }
 
 int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
@@ -695,7 +695,7 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
             if (prec > nlen) {
                 emit_pad(&b, '0', prec - nlen);
             }
-            emit_str(&b, nbuf, nlen);
+            emit_string(&b, nbuf, nlen);
         } else if (conv == 'u' || conv == 'x' || conv == 'X' || conv == 'o') {
             unsigned long long v = lng ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int);
             if (sht == 1)      v = (unsigned short)v;
@@ -711,25 +711,25 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
                 prec = nlen + 1;
             }
             if (alt_prefix) {
-                emit_str(&b, conv == 'X' ? "0X" : "0x", 2);
+                emit_string(&b, conv == 'X' ? "0X" : "0x", 2);
             }
             if (prec > nlen) {
                 emit_pad(&b, '0', prec - nlen);
             }
-            emit_str(&b, nbuf, nlen);
+            emit_string(&b, nbuf, nlen);
         } else if (conv == 'p') {
             unsigned long long v = (unsigned long long)va_arg(ap, void *);
             char nbuf[24];
             int nlen = format_uint(v, 16, 0, nbuf);
-            emit_str(&b, "0x", 2);
-            emit_str(&b, nbuf, nlen);
+            emit_string(&b, "0x", 2);
+            emit_string(&b, nbuf, nlen);
         } else if (conv == 'c') {
             if (lng) {
                 char mb[8];
                 int mn = (int)wcrtomb(mb, (wchar_t)va_arg(ap, unsigned int),
                                       (mbstate_t *)0);
                 if (mn > 0) {
-                    emit_str(&b, mb, mn);
+                    emit_string(&b, mb, mn);
                 }
             } else {
                 emit(&b, (char)va_arg(ap, int));
@@ -737,7 +737,7 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
         } else if (conv == 's' && lng) {
             const wchar_t *ws = va_arg(ap, const wchar_t *);
             if (!ws) {
-                emit_str(&b, "(null)", 6);
+                emit_string(&b, "(null)", 6);
             } else {
                 for (int i = 0; ws[i]; i++) {
                     char mb[8];
@@ -745,22 +745,22 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
                     if (mn <= 0) {
                         break;
                     }
-                    if (prec >= 0 && (int)b.len + mn > prec) {
+                    if (prec >= 0 && (int)b.length + mn > prec) {
                         break;
                     }
-                    emit_str(&b, mb, mn);
+                    emit_string(&b, mb, mn);
                 }
             }
         } else if (conv == 's') {
-            const char *str = va_arg(ap, const char *);
-            if (!str) {
-                str = "(null)";
+            const char *string = va_arg(ap, const char *);
+            if (!string) {
+                string = "(null)";
             }
-            int len = (int)strlen(str);
-            if (prec >= 0 && prec < len) {
-                len = prec;
+            int length = (int)strlen(string);
+            if (prec >= 0 && prec < length) {
+                length = prec;
             }
-            emit_str(&b, str, len);
+            emit_string(&b, string, length);
         } else if (conv == 'f' || conv == 'F') {
             emit_double(&b, va_arg(ap, double), prec, 0, conv == 'F', alt);
         } else if (conv == 'e' || conv == 'E') {
@@ -785,7 +785,7 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
                     X++;
                 }
             }
-            size_t start = b.len;
+            size_t start = b.length;
             if (X >= -4 && X < P) {
                 emit_double(&b, v, P - 1 - X, 0, 0, alt);
             } else {
@@ -801,7 +801,7 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
             emit(&b, conv);
         }
 
-        int blen = (int)(b.len < sizeof(body) ? b.len : sizeof(body) - 1);
+        int blen = (int)(b.length < sizeof(body) ? b.length : sizeof(body) - 1);
         int pad = width - blen;
         int isfloat = conv == 'f' || conv == 'F' || conv == 'e' ||
                       conv == 'E' || conv == 'g' || conv == 'G';
@@ -816,15 +816,15 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
         }
         if (pad > 0 && !left) {
             if (keep) {
-                emit_str(&s, body, keep);
+                emit_string(&s, body, keep);
                 emit_pad(&s, '0', pad);
-                emit_str(&s, body + keep, blen - keep);
+                emit_string(&s, body + keep, blen - keep);
             } else {
                 emit_pad(&s, zpad ? '0' : ' ', pad);
-                emit_str(&s, body, blen);
+                emit_string(&s, body, blen);
             }
         } else {
-            emit_str(&s, body, blen);
+            emit_string(&s, body, blen);
             if (pad > 0 && left) {
                 emit_pad(&s, ' ', pad);
             }
@@ -832,17 +832,17 @@ int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
     }
 
     if (out && n > 0) {
-        out[s.len < n ? s.len : n - 1] = '\0';
+        out[s.length < n ? s.length : n - 1] = '\0';
     }
-    return (int)s.len;
+    return (int)s.length;
 }
 
 int vfprintf(FILE *f, const char *fmt, va_list ap) {
     static char line[1024];
     int n = vsnprintf(line, sizeof(line), fmt, ap);
-    int len = n < (int)sizeof(line) - 1 ? n : (int)sizeof(line) - 1;
-    if (len > 0) {
-        stream_write(f, line, (size_t)len);
+    int length = n < (int)sizeof(line) - 1 ? n : (int)sizeof(line) - 1;
+    if (length > 0) {
+        stream_write(f, line, (size_t)length);
     }
     return n;
 }
@@ -891,18 +891,18 @@ int vasprintf(char **out, const char *fmt, va_list ap) {
         *out = (char *)0;
         return -1;
     }
-    char *buf = (char *)malloc((size_t)needed + 1);
-    if (!buf) {
+    char *buffer = (char *)malloc((size_t)needed + 1);
+    if (!buffer) {
         *out = (char *)0;
         return -1;
     }
-    int written = vsnprintf(buf, (size_t)needed + 1, fmt, ap);
+    int written = vsnprintf(buffer, (size_t)needed + 1, fmt, ap);
     if (written < 0) {
-        free(buf);
+        free(buffer);
         *out = (char *)0;
         return -1;
     }
-    *out = buf;
+    *out = buffer;
     return written;
 }
 
@@ -954,7 +954,7 @@ FILE *fdopen(int fd, const char *mode) {
         if (!open_files[i].used) {
             open_files[i].fd = fd;
             open_files[i].eof = 0;
-            open_files[i].err = 0;
+            open_files[i].error = 0;
             open_files[i].unget = -1;
             open_files[i].wlen = 0;
             open_files[i].mode = _IOFBF;
@@ -968,9 +968,9 @@ FILE *fdopen(int fd, const char *mode) {
 int vdprintf(int fd, const char *fmt, va_list ap) {
     static char line[1024];
     int n = vsnprintf(line, sizeof(line), fmt, ap);
-    int len = n < (int)sizeof(line) - 1 ? n : (int)sizeof(line) - 1;
-    if (len > 0) {
-        sys_write(fd, line, (size_t)len);
+    int length = n < (int)sizeof(line) - 1 ? n : (int)sizeof(line) - 1;
+    if (length > 0) {
+        sys_write(fd, line, (size_t)length);
     }
     return n;
 }
@@ -1000,16 +1000,16 @@ long getdelim(char **lineptr, size_t *n, int delim, FILE *f) {
         *lineptr = p;
         *n = want;
     }
-    size_t len = 0;
+    size_t length = 0;
     for (;;) {
         int c = fgetc(f);
         if (c == EOF) {
-            if (len == 0) {
+            if (length == 0) {
                 return -1;
             }
             break;
         }
-        if (len + 2 > *n) {
+        if (length + 2 > *n) {
             size_t want = *n * 2;
             char *p = (char *)realloc(*lineptr, want);
             if (!p) {
@@ -1018,13 +1018,13 @@ long getdelim(char **lineptr, size_t *n, int delim, FILE *f) {
             *lineptr = p;
             *n = want;
         }
-        (*lineptr)[len++] = (char)c;
+        (*lineptr)[length++] = (char)c;
         if (c == delim) {
             break;
         }
     }
-    (*lineptr)[len] = '\0';
-    return (long)len;
+    (*lineptr)[length] = '\0';
+    return (long)length;
 }
 
 long getline(char **lineptr, size_t *n, FILE *f) {
@@ -1039,23 +1039,23 @@ size_t __fpending(FILE *f) {
     return f ? (size_t)f->wlen : 0;
 }
 
-int fgetpos(FILE *f, fpos_t *pos) {
-    if (!f || !pos) {
+int fgetpos(FILE *f, fpos_t *position) {
+    if (!f || !position) {
         return -1;
     }
     long where = ftell(f);
     if (where < 0) {
         return -1;
     }
-    pos->__pos = where;
+    position->__pos = where;
     return 0;
 }
 
-int fsetpos(FILE *f, const fpos_t *pos) {
-    if (!f || !pos) {
+int fsetpos(FILE *f, const fpos_t *position) {
+    if (!f || !position) {
         return -1;
     }
-    return fseek(f, pos->__pos, SEEK_SET);
+    return fseek(f, position->__pos, SEEK_SET);
 }
 
 FILE *freopen(const char *path, const char *mode, FILE *f) {
@@ -1081,7 +1081,7 @@ FILE *freopen(const char *path, const char *mode, FILE *f) {
     }
     f->fd = (int)fd;
     f->eof = 0;
-    f->err = 0;
+    f->error = 0;
     f->unget = -1;
     f->wunget = (wint_t)-1;
     f->used = 1;
@@ -1093,9 +1093,9 @@ FILE *tmpfile(void) {
     char name[64];
     long pid = sys_getpid();
     int n = 0;
-    const char *dir = "/tmp/tmpf";
-    while (dir[n] && n < 32) {
-        name[n] = dir[n];
+    const char *directory = "/tmp/tmpf";
+    while (directory[n] && n < 32) {
+        name[n] = directory[n];
         n++;
     }
     long v = pid * 1000 + (++counter);

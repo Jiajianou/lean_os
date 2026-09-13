@@ -8,7 +8,7 @@
 #include "library/kernel_library.h"
 
 enum {
-    DEV_DIR = 0,
+    DEV_DIRECTORY = 0,
     DEV_NULL,
     DEV_ZERO,
     DEV_FULL,
@@ -24,7 +24,7 @@ static const char *const DEV_NAMES[DEV_COUNT] = {
     "", "null", "zero", "full", "random", "urandom", "tty", "console", "ptmx",
 };
 
-#define DEV_PTS_DIR  0x100
+#define DEV_PTS_DIRECTORY  0x100
 #define DEV_PTS_BASE 0x200
 #define DEV_PTM_BASE 0x300
 
@@ -39,7 +39,7 @@ static int lookup(const char *rel) {
         return -1;
     }
     if (rel[1] == '\0') {
-        return DEV_DIR;
+        return DEV_DIRECTORY;
     }
     for (int i = 1; i < DEV_COUNT; i++) {
         if (k_strcmp(rel + 1, DEV_NAMES[i]) == 0) {
@@ -47,7 +47,7 @@ static int lookup(const char *rel) {
         }
     }
     if (k_strcmp(rel + 1, "pts") == 0) {
-        return DEV_PTS_DIR;
+        return DEV_PTS_DIRECTORY;
     }
     if (rel[1] == 'p' && rel[2] == 't' && rel[3] == 's' && rel[4] == '/') {
         const char *d = rel + 5;
@@ -75,7 +75,7 @@ static int dev_exists(const char *rel) {
 
 static int dev_is_directory(const char *rel) {
     int c = lookup(rel);
-    return (c == DEV_DIR || c == DEV_PTS_DIR);
+    return (c == DEV_DIRECTORY || c == DEV_PTS_DIRECTORY);
 }
 
 #define DEVFS_INO_BASE 0x40000000u
@@ -87,7 +87,7 @@ static int dev_stat(const char *rel, leanfs_stat_t *out) {
     }
     out->size = 0;
     out->mtime = 0;
-    out->is_dir = (d == DEV_DIR || d == DEV_PTS_DIR) ? 1 : 0;
+    out->is_directory = (d == DEV_DIRECTORY || d == DEV_PTS_DIRECTORY) ? 1 : 0;
     out->is_link = 0;
     out->inode = DEVFS_INO_BASE + (uint32_t)d;
     return 0;
@@ -96,7 +96,7 @@ static int dev_stat(const char *rel, leanfs_stat_t *out) {
 static int dev_open(const char *rel, int create) {
     (void)create;
     int d = lookup(rel);
-    if (d < 0 || d == DEV_DIR || d == DEV_PTS_DIR) {
+    if (d < 0 || d == DEV_DIRECTORY || d == DEV_PTS_DIRECTORY) {
         return -1;
     }
     if (d == DEV_PTMX) {
@@ -124,34 +124,34 @@ static int dev_handle_stat(int handle, leanfs_stat_t *out) {
     }
     out->size = 0;
     out->mtime = 0;
-    out->is_dir = 0;
+    out->is_directory = 0;
     out->is_link = 0;
     out->inode = DEVFS_INO_BASE + (uint32_t)handle;
     return 0;
 }
 
-static int64_t dev_read(int handle, void *buf, size_t len, uint32_t off) {
+static int64_t dev_read(int handle, void *buffer, size_t length, uint32_t off) {
     (void)off;
-    uint8_t *b = (uint8_t *)buf;
+    uint8_t *b = (uint8_t *)buffer;
     if (DEV_IS_PTM(handle)) {
-        return pty_master_read(handle - DEV_PTM_BASE, (char *)b, (uint32_t)len);
+        return pty_master_read(handle - DEV_PTM_BASE, (char *)b, (uint32_t)length);
     }
     if (DEV_IS_PTS(handle)) {
-        return pty_slave_read(handle - DEV_PTS_BASE, (char *)b, (uint32_t)len);
+        return pty_slave_read(handle - DEV_PTS_BASE, (char *)b, (uint32_t)length);
     }
     switch (handle) {
     case DEV_NULL:
         return 0;
     case DEV_ZERO:
     case DEV_FULL:
-        k_memset(b, 0, len);
-        return (int64_t)len;
+        k_memset(b, 0, length);
+        return (int64_t)length;
     case DEV_RANDOM:
     case DEV_URANDOM:
-        random_bytes(b, len);
-        return (int64_t)len;
+        random_bytes(b, length);
+        return (int64_t)length;
     case DEV_TTY: {
-        uint32_t n = tty_read(tty_console(), (char *)b, (uint32_t)len);
+        uint32_t n = tty_read(tty_console(), (char *)b, (uint32_t)length);
         return (int64_t)n;
     }
     case DEV_CONSOLE:
@@ -161,31 +161,31 @@ static int64_t dev_read(int handle, void *buf, size_t len, uint32_t off) {
     }
 }
 
-static int64_t dev_write(int handle, const void *buf, size_t len, uint32_t off) {
+static int64_t dev_write(int handle, const void *buffer, size_t length, uint32_t off) {
     (void)off;
-    const char *b = (const char *)buf;
+    const char *b = (const char *)buffer;
     if (DEV_IS_PTM(handle)) {
-        return pty_master_write(handle - DEV_PTM_BASE, b, (uint32_t)len);
+        return pty_master_write(handle - DEV_PTM_BASE, b, (uint32_t)length);
     }
     if (DEV_IS_PTS(handle)) {
-        return pty_slave_write(handle - DEV_PTS_BASE, b, (uint32_t)len);
+        return pty_slave_write(handle - DEV_PTS_BASE, b, (uint32_t)length);
     }
     switch (handle) {
     case DEV_NULL:
     case DEV_ZERO:
-        return (int64_t)len;
+        return (int64_t)length;
     case DEV_FULL:
         return -1;
     case DEV_RANDOM:
     case DEV_URANDOM:
-        random_feed(b, len);
-        return (int64_t)len;
+        random_feed(b, length);
+        return (int64_t)length;
     case DEV_TTY:
     case DEV_CONSOLE:
-        for (size_t i = 0; i < len; i++) {
+        for (size_t i = 0; i < length; i++) {
             kernel_log_putc(b[i]);
         }
-        return (int64_t)len;
+        return (int64_t)length;
     default:
         return -1;
     }
@@ -230,13 +230,13 @@ static struct tty *dev_tty_of(int handle, int *pty_number) {
 
 static int dev_readdir(const char *rel, uint32_t *cookie, leanfs_directory_entry_t *out) {
     int c = lookup(rel);
-    if (c == DEV_PTS_DIR) {
+    if (c == DEV_PTS_DIRECTORY) {
         for (uint32_t n = *cookie; n < PTY_MAX; n++) {
             if (!pty_valid((int)n)) {
                 continue;
             }
             out->inode = DEV_PTS_BASE + n;
-            out->is_dir = 0;
+            out->is_directory = 0;
             out->is_link = 0;
             out->name[0] = (char)('0' + (n % 10));
             out->name[1] = '\0';
@@ -245,7 +245,7 @@ static int dev_readdir(const char *rel, uint32_t *cookie, leanfs_directory_entry
         }
         return 0;
     }
-    if (c != DEV_DIR) {
+    if (c != DEV_DIRECTORY) {
         return -1;
     }
     uint32_t i = *cookie;
@@ -253,8 +253,8 @@ static int dev_readdir(const char *rel, uint32_t *cookie, leanfs_directory_entry
         i = 1;
     }
     if (i == DEV_COUNT) {
-        out->inode = DEV_PTS_DIR;
-        out->is_dir = 1;
+        out->inode = DEV_PTS_DIRECTORY;
+        out->is_directory = 1;
         out->is_link = 0;
         k_strlcpy(out->name, "pts", sizeof(out->name));
         *cookie = i + 1;
@@ -264,7 +264,7 @@ static int dev_readdir(const char *rel, uint32_t *cookie, leanfs_directory_entry
         return 0;
     }
     out->inode = i;
-    out->is_dir = 0;
+    out->is_directory = 0;
     out->is_link = 0;
     k_strlcpy(out->name, DEV_NAMES[i], sizeof(out->name));
     *cookie = i + 1;
@@ -273,7 +273,7 @@ static int dev_readdir(const char *rel, uint32_t *cookie, leanfs_directory_entry
 
 static const virtual_file_system_ops_t DEVFS_OPS = {
     .stat = dev_stat,
-    .is_dir = dev_is_directory,
+    .is_directory = dev_is_directory,
     .exists = dev_exists,
     .open = dev_open,
     .read = dev_read,

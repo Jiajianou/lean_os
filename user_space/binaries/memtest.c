@@ -3,24 +3,24 @@
 #include "string_utilities.h"
 #include "syscall_wrappers.h"
 
-#define SHM_TEST_SIZE 4096
+#define SHARED_MEMORY_TEST_SIZE 4096
 #define PATTERN_BYTE  0x5A
 
 static void write_string(const char *s) {
     sys_write(1, s, strlen(s));
 }
 
-static void fail(const char *msg) {
+static void fail(const char *message) {
     write_string("[memtest] FAIL: ");
-    write_string(msg);
+    write_string(message);
     write_string("\n");
     sys_exit(1);
 }
 
-static void itoa_dec(long v, char *buf) {
+static void itoa_dec(long v, char *buffer) {
     if (v == 0) {
-        buf[0] = '0';
-        buf[1] = 0;
+        buffer[0] = '0';
+        buffer[1] = 0;
         return;
     }
     char temporary[24];
@@ -32,9 +32,9 @@ static void itoa_dec(long v, char *buf) {
     }
     int j = 0;
     while (i > 0) {
-        buf[j++] = temporary[--i];
+        buffer[j++] = temporary[--i];
     }
-    buf[j] = 0;
+    buffer[j] = 0;
 }
 
 static long atoi_dec(const char *s) {
@@ -93,7 +93,7 @@ static void malloc_self_test(void) {
 }
 
 static int run_as_creator(void) {
-    long id = sys_shared_memory_create(SHM_TEST_SIZE);
+    long id = sys_shared_memory_create(SHARED_MEMORY_TEST_SIZE);
     if (id < 0) {
         fail("sys_shm_create failed");
     }
@@ -101,11 +101,11 @@ static int run_as_creator(void) {
     if (vaddr < 0) {
         fail("sys_shm_map failed (creator)");
     }
-    memset((void *)vaddr, PATTERN_BYTE, SHM_TEST_SIZE);
+    memset((void *)vaddr, PATTERN_BYTE, SHARED_MEMORY_TEST_SIZE);
 
     char id_string[24];
     itoa_dec(id, id_string);
-    long child_pid = sys_spawn(PATH_BIN_DIR "memtest", id_string);
+    long child_pid = sys_spawn(PATH_BIN_DIRECTORY "memtest", id_string);
     if (child_pid < 0) {
         fail("sys_spawn(memtest, <id>) failed");
     }
@@ -124,9 +124,9 @@ static int run_as_shared_memory_reader(const char *arg) {
     if (vaddr < 0) {
         fail("sys_shm_map failed (reader)");
     }
-    const unsigned char *buf = (const unsigned char *)vaddr;
-    for (int i = 0; i < SHM_TEST_SIZE; i++) {
-        if (buf[i] != PATTERN_BYTE) {
+    const unsigned char *buffer = (const unsigned char *)vaddr;
+    for (int i = 0; i < SHARED_MEMORY_TEST_SIZE; i++) {
+        if (buffer[i] != PATTERN_BYTE) {
             fail("shm pattern mismatch - not really shared");
         }
     }

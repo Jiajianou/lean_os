@@ -64,9 +64,9 @@ void kernel_log_enter_panic(void) {
     kernel_log_panicking = 1;
 }
 
-#define KLOG_RING_SIZE 65536u
+#define KERNEL_LOG_RING_SIZE 65536u
 
-static char kernel_log_ring[KLOG_RING_SIZE];
+static char kernel_log_ring[KERNEL_LOG_RING_SIZE];
 static uint64_t kernel_log_written;
 
 static void kernel_log_emit_locked(char c, int also_console) {
@@ -78,7 +78,7 @@ static void kernel_log_emit_locked(char c, int also_console) {
         }
     }
     serial_putc(c);
-    kernel_log_ring[kernel_log_written % KLOG_RING_SIZE] = c;
+    kernel_log_ring[kernel_log_written % KERNEL_LOG_RING_SIZE] = c;
     kernel_log_written++;
 }
 
@@ -121,17 +121,17 @@ static char hex_digit(uint8_t nibble) {
 }
 
 void kernel_log_put_dec_pad(uint32_t value, int width) {
-    char buf[10];
+    char buffer[10];
     int n = 0;
     do {
-        buf[n++] = (char)('0' + (value % 10u));
+        buffer[n++] = (char)('0' + (value % 10u));
         value /= 10u;
-    } while (value && n < (int)sizeof(buf));
+    } while (value && n < (int)sizeof(buffer));
     for (int pad = n; pad < width; pad++) {
         kernel_log_putc('0');
     }
     while (n > 0) {
-        kernel_log_putc(buf[--n]);
+        kernel_log_putc(buffer[--n]);
     }
 }
 
@@ -151,7 +151,7 @@ void kernel_log_put_hex64(uint64_t value) {
     }
 }
 
-static kernel_log_level_t current_level = KLOG_INFO;
+static kernel_log_level_t current_level = KERNEL_LOG_INFO;
 
 static void kernel_log_log_putc(kernel_log_level_t level, char c) {
     kernel_log_emit(c, level >= current_level);
@@ -179,13 +179,13 @@ size_t kernel_log_read(uint64_t from, char *out, size_t max, uint64_t *next) {
     spin_lock(&kernel_log_lock);
 
     uint64_t total = kernel_log_written;
-    uint64_t oldest = total > KLOG_RING_SIZE ? total - KLOG_RING_SIZE : 0;
+    uint64_t oldest = total > KERNEL_LOG_RING_SIZE ? total - KERNEL_LOG_RING_SIZE : 0;
     if (from < oldest) {
         from = oldest;
     }
     size_t n = 0;
     while (from + n < total && n < max) {
-        out[n] = kernel_log_ring[(from + n) % KLOG_RING_SIZE];
+        out[n] = kernel_log_ring[(from + n) % KERNEL_LOG_RING_SIZE];
         n++;
     }
     if (next) {

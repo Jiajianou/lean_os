@@ -21,8 +21,8 @@ typedef struct {
     int32_t pgid;
     int32_t state;
     int32_t exit_code;
-    int32_t open_fds;
-    int32_t shm_segments;
+    int32_t open_file_descriptors;
+    int32_t shared_memory_segments;
     char name[TASK_INFO_NAME_MAX];
 } task_info_t;
 

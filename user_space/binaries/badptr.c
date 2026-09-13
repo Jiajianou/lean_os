@@ -3,8 +3,8 @@
 
 #define PAGE_SIZE 4096ULL
 
-#define P_PTR 0xF0F0F0F0F0F0F001ULL
-#define P_LEN 0xF0F0F0F0F0F0F002ULL
+#define P_POINTER 0xF0F0F0F0F0F0F001ULL
+#define P_LENGTH 0xF0F0F0F0F0F0F002ULL
 
 typedef enum {
     BAD_NULL = 0,
@@ -30,22 +30,22 @@ static const struct {
     long nr;
     unsigned long long a[3];
 } ROWS[] = {
-    {"SYS_write",         SYS_write,         {1, P_PTR, P_LEN}},
-    {"SYS_read",          SYS_read,          {0, P_PTR, P_LEN}},
-    {"SYS_spawn(path)",   SYS_spawn,         {P_PTR, 0, 0}},
-    {"SYS_readfile(name)",SYS_readfile,      {P_PTR, 0, 0}},
-    {"SYS_writefile(name)",SYS_writefile,    {P_PTR, 0, 0}},
-    {"SYS_listdir(path)", SYS_listdir,       {P_PTR, 0, 0}},
-    {"SYS_listdir(buf)",  SYS_listdir,       {(unsigned long long)(unsigned long)"/", P_PTR, P_LEN}},
-    {"SYS_mkdir(path)",   SYS_mkdir,         {P_PTR, 0, 0}},
-    {"SYS_pipe",          SYS_pipe,          {P_PTR, 0, 0}},
-    {"SYS_fb_info",       SYS_fb_info,       {P_PTR, 0, 0}},
-    {"SYS_mouse_read",    SYS_mouse_read,    {P_PTR, 0, 0}},
-    {"SYS_pipe_open(name)",SYS_pipe_open,    {P_PTR, 0, 0}},
-    {"SYS_kbd_read",      SYS_kbd_read,      {P_PTR, 0, 0}},
-    {"SYS_taskinfo",      SYS_taskinfo,      {P_PTR, 4, 0}},
-    {"SYS_clipboard_set", SYS_clipboard_set, {P_PTR, P_LEN, 0}},
-    {"SYS_clipboard_get", SYS_clipboard_get, {P_PTR, P_LEN, 0}},
+    {"SYS_write",         SYS_write,         {1, P_POINTER, P_LENGTH}},
+    {"SYS_read",          SYS_read,          {0, P_POINTER, P_LENGTH}},
+    {"SYS_spawn(path)",   SYS_spawn,         {P_POINTER, 0, 0}},
+    {"SYS_readfile(name)",SYS_readfile,      {P_POINTER, 0, 0}},
+    {"SYS_writefile(name)",SYS_writefile,    {P_POINTER, 0, 0}},
+    {"SYS_listdir(path)", SYS_listdir,       {P_POINTER, 0, 0}},
+    {"SYS_listdir(buf)",  SYS_listdir,       {(unsigned long long)(unsigned long)"/", P_POINTER, P_LENGTH}},
+    {"SYS_mkdir(path)",   SYS_mkdir,         {P_POINTER, 0, 0}},
+    {"SYS_pipe",          SYS_pipe,          {P_POINTER, 0, 0}},
+    {"SYS_fb_info",       SYS_framebuffer_info,       {P_POINTER, 0, 0}},
+    {"SYS_mouse_read",    SYS_mouse_read,    {P_POINTER, 0, 0}},
+    {"SYS_pipe_open(name)",SYS_pipe_open,    {P_POINTER, 0, 0}},
+    {"SYS_kbd_read",      SYS_keyboard_read,      {P_POINTER, 0, 0}},
+    {"SYS_taskinfo",      SYS_taskinfo,      {P_POINTER, 4, 0}},
+    {"SYS_clipboard_set", SYS_clipboard_set, {P_POINTER, P_LENGTH, 0}},
+    {"SYS_clipboard_get", SYS_clipboard_get, {P_POINTER, P_LENGTH, 0}},
 };
 #define ROW_COUNT ((int)(sizeof(ROWS) / sizeof(ROWS[0])))
 
@@ -57,25 +57,25 @@ static void put(const char *s) {
     sys_write(1, s, (unsigned long)n);
 }
 
-static void put_num(long v) {
-    char buf[24];
+static void put_number(long v) {
+    char buffer[24];
     int i = 0;
     int neg = v < 0;
     unsigned long u = neg ? (unsigned long)(-v) : (unsigned long)v;
     if (u == 0) {
-        buf[i++] = '0';
+        buffer[i++] = '0';
     }
     while (u > 0) {
-        buf[i++] = (char)('0' + (u % 10));
+        buffer[i++] = (char)('0' + (u % 10));
         u /= 10;
     }
     if (neg) {
-        buf[i++] = '-';
+        buffer[i++] = '-';
     }
     char out[24];
     int o = 0;
     while (i > 0) {
-        out[o++] = buf[--i];
+        out[o++] = buffer[--i];
     }
     out[o] = '\0';
     put(out);
@@ -86,10 +86,10 @@ int main(int argc, char **argv) {
     unsigned long long here = (unsigned long long)(void *)&main;
     unsigned long long region_base = here & ~((1ULL << 39) - 1ULL);
 
-    const unsigned long long ARG_REGION_PAGES = 2;
+    const unsigned long long ARGUMENT_REGION_PAGES = 2;
     unsigned long long argument_page =
         (unsigned long long)(void *)argv & ~(unsigned long long)(PAGE_SIZE - 1);
-    unsigned long long argument_region_last_page = argument_page + (ARG_REGION_PAGES - 1) * PAGE_SIZE;
+    unsigned long long argument_region_last_page = argument_page + (ARGUMENT_REGION_PAGES - 1) * PAGE_SIZE;
 
     unsigned long long bad_pointer[BAD_COUNT];
     unsigned long long bad_length[BAD_COUNT];
@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
         for (int k = 0; k < BAD_COUNT; k++) {
             int has_length = 0;
             for (int i = 0; i < 3; i++) {
-                if (ROWS[r].a[i] == P_LEN) {
+                if (ROWS[r].a[i] == P_LENGTH) {
                     has_length = 1;
                 }
             }
@@ -116,9 +116,9 @@ int main(int argc, char **argv) {
 
             unsigned long long a[3];
             for (int i = 0; i < 3; i++) {
-                if (ROWS[r].a[i] == P_PTR) {
+                if (ROWS[r].a[i] == P_POINTER) {
                     a[i] = bad_pointer[k];
-                } else if (ROWS[r].a[i] == P_LEN) {
+                } else if (ROWS[r].a[i] == P_LENGTH) {
                     a[i] = bad_length[k];
                 } else {
                     a[i] = ROWS[r].a[i];
@@ -132,16 +132,16 @@ int main(int argc, char **argv) {
                 put(" accepted ");
                 put(BAD_NAME[k]);
                 put(" and returned ");
-                put_num(ret);
+                put_number(ret);
                 put("\n");
             }
         }
     }
 
     put("[badptr] ");
-    put_num(ROW_COUNT);
+    put_number(ROW_COUNT);
     put(" syscalls x every applicable bad-pointer shape: ");
-    put_num(failures);
+    put_number(failures);
     put(" accepted.\n");
     return failures;
 }

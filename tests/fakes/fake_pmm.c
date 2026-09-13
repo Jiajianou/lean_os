@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-void panic(const char *msg);
+void panic(const char *message);
 
 #define MAX_FRAMES 8192
 #define FRAME_SIZE 4096

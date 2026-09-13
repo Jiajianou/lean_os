@@ -120,11 +120,11 @@ locale_t newlocale(int category_mask, const char *locale, locale_t base) {
 }
 
 locale_t uselocale(locale_t loc) {
-    locale_t prev = current_locale ? current_locale : LC_GLOBAL_LOCALE;
+    locale_t previous = current_locale ? current_locale : LC_GLOBAL_LOCALE;
     if (loc) {
         current_locale = (loc == LC_GLOBAL_LOCALE) ? (locale_t)0 : loc;
     }
-    return prev;
+    return previous;
 }
 
 locale_t duplocale(locale_t loc) {

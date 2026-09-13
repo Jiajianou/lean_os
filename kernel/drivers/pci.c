@@ -13,7 +13,7 @@
 #define PCI_REG_HEADER_TYPE   0x0C
 #define PCI_REG_BAR0          0x10
 #define PCI_REG_BAR1          0x14
-#define PCI_REG_CAP_PTR       0x34
+#define PCI_REG_CAP_POINTER       0x34
 #define PCI_REG_INTERRUPT     0x3C
 
 #define PCI_STATUS_CAP_LIST   (1u << 4)
@@ -194,7 +194,7 @@ uint8_t pci_find_capability(const pci_device_t *dev, uint8_t cap_id) {
     if (!((status >> 16) & PCI_STATUS_CAP_LIST)) {
         return 0;
     }
-    uint8_t off = (uint8_t)(config_read32(dev->bus, dev->slot, dev->func, PCI_REG_CAP_PTR) & 0xFC);
+    uint8_t off = (uint8_t)(config_read32(dev->bus, dev->slot, dev->func, PCI_REG_CAP_POINTER) & 0xFC);
     for (int hops = 0; hops < 48 && off >= 0x40; hops++) {
         uint32_t cap = config_read32(dev->bus, dev->slot, dev->func, off);
         if ((cap & 0xFF) == cap_id) {

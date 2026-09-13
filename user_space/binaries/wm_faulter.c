@@ -5,7 +5,7 @@
 #define WIN_H 120
 #define FILL_COLOR 0x0020C0A0u
 
-#define OWNED_SHM_BYTES (64 * 1024)
+#define OWNED_SHARED_MEMORY_BYTES (64 * 1024)
 
 #define ALIVE_MS 1200
 
@@ -14,13 +14,13 @@ int main(void) {
     if (window_manager_connect(WIN_W, WIN_H, "Faulter", &win) != 0) {
         sys_exit(1);
     }
-    sys_shared_memory_create(OWNED_SHM_BYTES);
+    sys_shared_memory_create(OWNED_SHARED_MEMORY_BYTES);
     graphics_fill_rect(&win.graphics, 0, 0, (int32_t)win.width, (int32_t)win.height, FILL_COLOR);
     window_manager_present(&win);
 
     long deadline = sys_uptime_ms() + ALIVE_MS;
     while (sys_uptime_ms() < deadline) {
-        wm_event_t ev;
+        window_manager_event_t ev;
         while (window_manager_poll_event(&win, &ev)) {
         }
         window_manager_wait_ms(&win, NULL, 0, (int)(deadline - sys_uptime_ms()));

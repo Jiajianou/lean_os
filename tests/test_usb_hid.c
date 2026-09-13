@@ -106,7 +106,7 @@ TEST(usb_hid, shift_selects_the_shifted_table) {
     usb_hid_decode_keyboard(&st, r, &keys);
     CHECK_EQ(keys.count, 1);
     CHECK_EQ(keys.ch[0], 'A');
-    CHECK_EQ(keys.mods[0] & KBD_MOD_SHIFT, KBD_MOD_SHIFT);
+    CHECK_EQ(keys.mods[0] & KEYBOARD_MOD_SHIFT, KEYBOARD_MOD_SHIFT);
 }
 
 TEST(usb_hid, right_hand_modifiers_count) {
@@ -118,7 +118,7 @@ TEST(usb_hid, right_hand_modifiers_count) {
     usb_hid_decode_keyboard(&st, r, &keys);
     CHECK_EQ(keys.count, 1);
     CHECK_EQ(keys.ch[0], 'A');
-    CHECK_EQ(keys.mods[0] & KBD_MOD_SHIFT, KBD_MOD_SHIFT);
+    CHECK_EQ(keys.mods[0] & KEYBOARD_MOD_SHIFT, KEYBOARD_MOD_SHIFT);
 }
 
 TEST(usb_hid, ctrl_and_alt_travel_with_the_character) {
@@ -130,14 +130,14 @@ TEST(usb_hid, ctrl_and_alt_travel_with_the_character) {
     usb_hid_decode_keyboard(&st, r, &keys);
     CHECK_EQ(keys.count, 1);
     CHECK_EQ(keys.ch[0], 'c');
-    CHECK_EQ(keys.mods[0] & KBD_MOD_CTRL, KBD_MOD_CTRL);
-    CHECK_EQ(keys.mods[0] & KBD_MOD_SHIFT, 0);
+    CHECK_EQ(keys.mods[0] & KEYBOARD_MOD_CTRL, KEYBOARD_MOD_CTRL);
+    CHECK_EQ(keys.mods[0] & KEYBOARD_MOD_SHIFT, 0);
 
     usb_hid_state_t st2 = {{0}, 0, 0};
     report(r, MOD_LALT, K_A, 0, 0);
     usb_hid_decode_keyboard(&st2, r, &keys);
     CHECK_EQ(keys.count, 1);
-    CHECK_EQ(keys.mods[0] & KBD_MOD_ALT, KBD_MOD_ALT);
+    CHECK_EQ(keys.mods[0] & KEYBOARD_MOD_ALT, KEYBOARD_MOD_ALT);
 }
 
 TEST(usb_hid, error_rollover_is_not_a_key) {

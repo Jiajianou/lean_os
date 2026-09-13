@@ -22,7 +22,7 @@
 #define PO_SR    0x16
 #define PO_PICB  0x18
 #define PO_CR    0x1B
-#define GLOB_CNT 0x2C
+#define GLOB_COUNT 0x2C
 #define GLOB_STA 0x30
 
 #define CR_RPBM  0x01
@@ -34,13 +34,13 @@
 #define SR_BCIS  0x08
 #define SR_FIFOE 0x10
 
-#define GLOB_CNT_COLD_RESET 0x02
+#define GLOB_COUNT_COLD_RESET 0x02
 
 #define BDL_ENTRIES 32
 #define BDL_IOC (1u << 31)
 
 typedef struct __attribute__((packed)) {
-    uint32_t addr;
+    uint32_t address;
     uint16_t samples;
     uint16_t control;
 } bdl_entry_t;
@@ -81,7 +81,7 @@ void ac97_init(void) {
         return;
     }
 
-    outl((uint16_t)(bm_base + GLOB_CNT), GLOB_CNT_COLD_RESET);
+    outl((uint16_t)(bm_base + GLOB_COUNT), GLOB_COUNT_COLD_RESET);
     outw((uint16_t)(mixer_base + MIXER_RESET), 0);
 
     ac97_set_volume(100);
@@ -168,7 +168,7 @@ int ac97_play(const int16_t *samples, uint32_t frames) {
 
     k_memcpy(pcm, samples, (size_t)frames * 2 * sizeof(int16_t));
 
-    bdl[0].addr = (uint32_t)pcm_phys;
+    bdl[0].address = (uint32_t)pcm_phys;
     bdl[0].samples = (uint16_t)(frames * 2);
     bdl[0].control = (uint16_t)(BDL_IOC >> 16);
 

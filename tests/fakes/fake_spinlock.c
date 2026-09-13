@@ -2,7 +2,7 @@
 
 #include <stddef.h>
 
-void panic(const char *msg);
+void panic(const char *message);
 
 #define MAX_HELD 32
 static spinlock_t *held[MAX_HELD];

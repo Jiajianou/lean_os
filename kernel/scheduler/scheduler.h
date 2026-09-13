@@ -28,21 +28,21 @@ typedef enum {
 } task_state_t;
 
 typedef enum {
-    FD_NONE = 0,
-    FD_STDIN,
-    FD_STDOUT,
-    FD_PIPE_READ,
-    FD_PIPE_WRITE,
-    FD_FILE,
-    FD_SOCKET,
-    FD_UNIX,
-    FD_EVENT,
-    FD_TIMER,
-    FD_EPOLL,
-    FD_MEMFD,
+    FILE_DESCRIPTOR_NONE = 0,
+    FILE_DESCRIPTOR_STDIN,
+    FILE_DESCRIPTOR_STDOUT,
+    FILE_DESCRIPTOR_PIPE_READ,
+    FILE_DESCRIPTOR_PIPE_WRITE,
+    FILE_DESCRIPTOR_FILE,
+    FILE_DESCRIPTOR_SOCKET,
+    FILE_DESCRIPTOR_UNIX,
+    FILE_DESCRIPTOR_EVENT,
+    FILE_DESCRIPTOR_TIMER,
+    FILE_DESCRIPTOR_EPOLL,
+    FILE_DESCRIPTOR_MEMFD,
 } file_descriptor_type_t;
 
-#define MAX_FDS 128
+#define MAX_FILE_DESCRIPTORS 128
 
 #define MAX_MMAP_REGIONS 128
 
@@ -88,8 +88,8 @@ typedef enum {
     PRIO_BATCH = 1,
 } prio_class_t;
 
-#define SCHED_BATCH_THRESHOLD 10
-#define SCHED_AGING_TICKS     100
+#define SCHEDULER_BATCH_THRESHOLD 10
+#define SCHEDULER_AGING_TICKS     100
 
 typedef struct task {
     uint64_t rsp;
@@ -107,7 +107,7 @@ typedef struct task {
     int stopped_sig;
     uint8_t stop_reported;
     uint8_t fpu_state[FPU_STATE_SIZE] __attribute__((aligned(FPU_STATE_ALIGN)));
-    file_descriptor_slot_t fds[MAX_FDS];
+    file_descriptor_slot_t file_descriptors[MAX_FILE_DESCRIPTORS];
     int parent_id;
     uint32_t caps;
     int pgid;
@@ -132,7 +132,7 @@ typedef struct task {
     uint64_t max_rss_pages;
     uint64_t child_max_rss_pages;
     uint8_t idle_wait_depth;
-    char cwd[PATH_MAX_LEN];
+    char cwd[PATH_MAX_LENGTH];
     char *env_block;
     uint32_t env_length;
     uint32_t env_count;
@@ -143,7 +143,7 @@ typedef struct task {
     uint32_t sig_siginfo;
     int32_t  si_pid;
     int32_t  si_status;
-    uint64_t si_addr;
+    uint64_t si_address;
     mmap_region_t mmaps[MAX_MMAP_REGIONS];
     int tgid;
     uint8_t is_thread;
@@ -168,11 +168,11 @@ uint64_t scheduler_event_sequence(void);
 void scheduler_block_on_sequence(const void *chan, uint64_t deadline_ms, uint64_t expected_sequence);
 
 extern const int scheduler_poll_channel;
-#define SCHED_POLL_CHAN (&scheduler_poll_channel)
+#define SCHEDULER_POLL_CHAN (&scheduler_poll_channel)
 
 extern const int scheduler_keyboard_channel;
-#define SCHED_SLEEP_CHAN (&scheduler_sleep_channel)
-#define SCHED_KEYBOARD_CHAN (&scheduler_keyboard_channel)
+#define SCHEDULER_SLEEP_CHAN (&scheduler_sleep_channel)
+#define SCHEDULER_KEYBOARD_CHAN (&scheduler_keyboard_channel)
 
 void scheduler_spawn_idle_tasks(int cpus);
 
@@ -208,7 +208,7 @@ task_t *scheduler_current(void);
 
 task_t *scheduler_task_by_id(int pid);
 
-int scheduler_set_env(task_t *t, const char *block, uint32_t len, uint32_t count);
+int scheduler_set_env(task_t *t, const char *block, uint32_t length, uint32_t count);
 
 void scheduler_set_task_name(task_t *t, const char *name);
 
@@ -239,9 +239,9 @@ void scheduler_raise_signal_group(int pgid, int sig);
 task_t *scheduler_vm_owner(task_t *t);
 
 #define FILL_NO_MEMORY (-1)
-int scheduler_fault_fill(uint64_t addr, uint64_t error_code, uint64_t user_rsp);
+int scheduler_fault_fill(uint64_t address, uint64_t error_code, uint64_t user_rsp);
 
-void scheduler_prefault_range(uint64_t addr, uint64_t len, int for_write);
+void scheduler_prefault_range(uint64_t address, uint64_t length, int for_write);
 
 task_t *task_spawn_thread(const char *name, task_t *leader, void (*entry)(void *arg), void *arg);
 

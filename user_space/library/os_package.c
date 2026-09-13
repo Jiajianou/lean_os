@@ -19,11 +19,11 @@ static uint64_t rd64(const uint8_t *p) {
     return (uint64_t)rd32(p) | ((uint64_t)rd32(p + 4) << 32);
 }
 
-const char *osp_strerror(int err) {
-    if (err < 0) {
-        err = -err;
+const char *osp_strerror(int error) {
+    if (error < 0) {
+        error = -error;
     }
-    switch (err) {
+    switch (error) {
     case OSP_OK:          return "ok";
     case OSP_E_SHORT:     return "the file ends before the format says it should";
     case OSP_E_MAGIC:     return "not a lean_os package";
@@ -77,12 +77,12 @@ int os_package_check_path(const char *path) {
     return OSP_OK;
 }
 
-static void copy_field(char *dst, size_t cap, const char *src, size_t len) {
+static void copy_field(char *destination, size_t cap, const char *source, size_t length) {
     size_t i = 0;
-    for (; i < len && i < cap - 1; i++) {
-        dst[i] = src[i];
+    for (; i < length && i < cap - 1; i++) {
+        destination[i] = source[i];
     }
-    dst[i] = '\0';
+    destination[i] = '\0';
 }
 
 static int field_matches(const char *key, size_t keylen, const char *name) {
@@ -98,19 +98,19 @@ static int field_matches(const char *key, size_t keylen, const char *name) {
     return 1;
 }
 
-int os_package_parse_manifest(const char *text, size_t len, osp_manifest_t *out) {
+int os_package_parse_manifest(const char *text, size_t length, osp_manifest_t *out) {
     for (size_t i = 0; i < sizeof(*out); i++) {
         ((char *)out)[i] = '\0';
     }
 
     size_t i = 0;
-    while (i < len) {
+    while (i < length) {
         size_t start = i;
-        while (i < len && text[i] != '\n') {
+        while (i < length && text[i] != '\n') {
             i++;
         }
         size_t end = i;
-        if (i < len) {
+        if (i < length) {
             i++;
         }
         if (end > start && text[end - 1] == '\r') {
@@ -182,8 +182,8 @@ int os_package_parse_manifest(const char *text, size_t len, osp_manifest_t *out)
     return OSP_OK;
 }
 
-int os_package_open(const uint8_t *bytes, size_t len, osp_t *out) {
-    if (len < OSP_HEADER_BYTES) {
+int os_package_open(const uint8_t *bytes, size_t length, osp_t *out) {
+    if (length < OSP_HEADER_BYTES) {
         return -OSP_E_SHORT;
     }
     static const uint8_t want[8] = {OSP_MAGIC0, OSP_MAGIC1, OSP_MAGIC2, OSP_MAGIC3,
@@ -227,7 +227,7 @@ int os_package_open(const uint8_t *bytes, size_t len, osp_t *out) {
     uint64_t table_bytes = (uint64_t)h.file_count * (uint64_t)OSP_FILE_BYTES;
     uint64_t need = (uint64_t)OSP_HEADER_BYTES + (uint64_t)h.meta_bytes +
                     table_bytes + h.payload_bytes;
-    if (need > (uint64_t)len) {
+    if (need > (uint64_t)length) {
         return -OSP_E_SHORT;
     }
 
@@ -255,9 +255,9 @@ int os_package_open(const uint8_t *bytes, size_t len, osp_t *out) {
             return -OSP_E_PATH;
         }
         uint64_t off = f->offset;
-        uint64_t sz = f->size;
-        if (off > h.payload_bytes || sz > h.payload_bytes ||
-            off + sz > h.payload_bytes) {
+        uint64_t size = f->size;
+        if (off > h.payload_bytes || size > h.payload_bytes ||
+            off + size > h.payload_bytes) {
             return -OSP_E_OVERLAP;
         }
         for (uint32_t j = 0; j < i; j++) {
@@ -271,14 +271,14 @@ int os_package_open(const uint8_t *bytes, size_t len, osp_t *out) {
             }
         }
         uint8_t fd[SHA256_DIGEST_BYTES];
-        sha256(payload + off, (size_t)sz, fd);
+        sha256(payload + off, (size_t)size, fd);
         if (!sha256_equal(fd, f->sha256)) {
             return -OSP_E_FILE_HASH;
         }
     }
 
     out->bytes = bytes;
-    out->len = len;
+    out->length = length;
     out->header = h;
     out->manifest = man;
     out->files = files;

@@ -7,7 +7,7 @@
 int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
            struct timeval *timeout) {
     struct pollfd pfd[FD_SETSIZE];
-    int fds[FD_SETSIZE];
+    int file_descriptors[FD_SETSIZE];
     int n = 0;
 
     if (nfds < 0 || nfds > FD_SETSIZE) {
@@ -29,7 +29,7 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
         pfd[n].fd = fd;
         pfd[n].events = ev;
         pfd[n].revents = 0;
-        fds[n] = fd;
+        file_descriptors[n] = fd;
         n++;
     }
 
@@ -58,11 +58,11 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
     for (int i = 0; i < n; i++) {
         int counted = 0;
         if (readfds && (pfd[i].revents & POLLIN)) {
-            FD_SET(fds[i], &rout);
+            FD_SET(file_descriptors[i], &rout);
             counted = 1;
         }
         if (writefds && (pfd[i].revents & POLLOUT)) {
-            FD_SET(fds[i], &wout);
+            FD_SET(file_descriptors[i], &wout);
             counted = 1;
         }
         if (pfd[i].revents & POLLNVAL) {
@@ -70,8 +70,8 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
             return -1;
         }
         if (counted) {
-            ready += (readfds && FD_ISSET(fds[i], &rout)) ? 1 : 0;
-            ready += (writefds && FD_ISSET(fds[i], &wout)) ? 1 : 0;
+            ready += (readfds && FD_ISSET(file_descriptors[i], &rout)) ? 1 : 0;
+            ready += (writefds && FD_ISSET(file_descriptors[i], &wout)) ? 1 : 0;
         }
     }
 

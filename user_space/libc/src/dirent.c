@@ -8,19 +8,19 @@
 #include "syscall.h"
 #include "syscall_wrappers.h"
 
-#define DIR_BUF 4096
+#define DIRECTORY_BUFFER 4096
 
-_Static_assert(DIR_BUF >= OS_DIRENT_MAX, "a fetch buffer must hold the longest single record");
+_Static_assert(DIRECTORY_BUFFER >= OS_DIRENT_MAX, "a fetch buffer must hold the longest single record");
 
 struct DIR {
     unsigned int cookie;
     int fd;
-    long len;
-    long pos;
+    long length;
+    long position;
     int at_end;
-    char path[PATH_MAX_LEN];
+    char path[PATH_MAX_LENGTH];
     struct dirent entry;
-    char buf[DIR_BUF] __attribute__((aligned(8)));
+    char buffer[DIRECTORY_BUFFER] __attribute__((aligned(8)));
 };
 
 DIR *opendir(const char *path) {
@@ -28,7 +28,7 @@ DIR *opendir(const char *path) {
         return 0;
     }
     size_t plen = strlen(path);
-    if (plen >= PATH_MAX_LEN) {
+    if (plen >= PATH_MAX_LENGTH) {
         return 0;
     }
 
@@ -39,16 +39,16 @@ DIR *opendir(const char *path) {
     memcpy(d->path, path, plen + 1);
     d->fd = -1;
     d->cookie = 0;
-    d->len = 0;
-    d->pos = 0;
+    d->length = 0;
+    d->position = 0;
     d->at_end = 0;
 
-    long n = sys_getdents(d->path, &d->cookie, d->buf, sizeof(d->buf));
+    long n = sys_getdents(d->path, &d->cookie, d->buffer, sizeof(d->buffer));
     if (n < 0) {
         free(d);
         return 0;
     }
-    d->len = n;
+    d->length = n;
     d->at_end = (n == 0);
     return d;
 }
@@ -58,12 +58,12 @@ struct dirent *readdir(DIR *d) {
         return 0;
     }
     for (;;) {
-        if (d->pos < d->len) {
-            const os_dirent_t *r = (const os_dirent_t *)(const void *)(d->buf + d->pos);
-            if (r->reclen < sizeof(os_dirent_t) || d->pos + r->reclen > d->len) {
+        if (d->position < d->length) {
+            const os_dirent_t *r = (const os_dirent_t *)(const void *)(d->buffer + d->position);
+            if (r->reclen < sizeof(os_dirent_t) || d->position + r->reclen > d->length) {
                 return 0;
             }
-            size_t n = r->name_len;
+            size_t n = r->name_length;
             if (n > NAME_MAX) {
                 n = NAME_MAX;
             }
@@ -71,19 +71,19 @@ struct dirent *readdir(DIR *d) {
             d->entry.d_name[n] = '\0';
             d->entry.d_type = r->type;
             d->entry.d_ino = r->ino;
-            d->pos += r->reclen;
+            d->position += r->reclen;
             return &d->entry;
         }
         if (d->at_end) {
             return 0;
         }
-        long n = sys_getdents(d->path, &d->cookie, d->buf, sizeof(d->buf));
+        long n = sys_getdents(d->path, &d->cookie, d->buffer, sizeof(d->buffer));
         if (n <= 0) {
             d->at_end = 1;
             return 0;
         }
-        d->len = n;
-        d->pos = 0;
+        d->length = n;
+        d->position = 0;
     }
 }
 
@@ -92,12 +92,12 @@ void rewinddir(DIR *d) {
         return;
     }
     d->cookie = 0;
-    d->len = 0;
-    d->pos = 0;
+    d->length = 0;
+    d->position = 0;
     d->at_end = 0;
-    long n = sys_getdents(d->path, &d->cookie, d->buf, sizeof(d->buf));
+    long n = sys_getdents(d->path, &d->cookie, d->buffer, sizeof(d->buffer));
     if (n > 0) {
-        d->len = n;
+        d->length = n;
     } else {
         d->at_end = 1;
     }
@@ -115,7 +115,7 @@ int closedir(DIR *d) {
 }
 
 DIR *fdopendir(int fd) {
-    char path[PATH_MAX_LEN];
+    char path[PATH_MAX_LENGTH];
     if (fd < 0 || sys_fdpath(fd, path, sizeof(path)) < 0) {
         errno = EBADF;
         return 0;
@@ -162,10 +162,10 @@ int scandir(const char *path, struct dirent ***namelist,
 
     struct dirent **list = 0;
     size_t used = 0, cap = 0;
-    struct dirent *ent;
+    struct dirent *entry;
 
-    while ((ent = readdir(d)) != 0) {
-        if (filter && !filter(ent)) {
+    while ((entry = readdir(d)) != 0) {
+        if (filter && !filter(entry)) {
             continue;
         }
         if (used == cap) {
@@ -181,7 +181,7 @@ int scandir(const char *path, struct dirent ***namelist,
         if (!copy) {
             goto nomem;
         }
-        *copy = *ent;
+        *copy = *entry;
         list[used++] = copy;
     }
 

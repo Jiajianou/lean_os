@@ -6,12 +6,12 @@
 #include <string.h>
 
 #define FWCFG_SIGNATURE 0x0000
-#define FWCFG_FILE_DIR  0x0019
+#define FWCFG_FILE_DIRECTORY  0x0019
 
 static void directory_begin(uint32_t count) {
     uint8_t header[4] = {(uint8_t)(count >> 24), (uint8_t)(count >> 16),
                       (uint8_t)(count >> 8), (uint8_t)count};
-    fake_fwcfg_set_item(FWCFG_FILE_DIR, header, sizeof(header));
+    fake_fwcfg_set_item(FWCFG_FILE_DIRECTORY, header, sizeof(header));
 }
 
 static void directory_add(const char *name, uint32_t size, uint16_t selector) {
@@ -26,7 +26,7 @@ static void directory_add(const char *name, uint32_t size, uint16_t selector) {
     size_t n = strlen(name);
     if (n > 56) { n = 56; }
     memcpy(entry + 8, name, n);
-    fake_fwcfg_append_item(FWCFG_FILE_DIR, entry, sizeof(entry));
+    fake_fwcfg_append_item(FWCFG_FILE_DIRECTORY, entry, sizeof(entry));
 }
 
 static void with_signature(void) {
@@ -166,9 +166,9 @@ TEST(fwcfg, an_absurd_directory_count_is_refused_rather_than_walked) {
     directory_add("opt/leanos/selftest", 1, 0x0100);
     fake_fwcfg_set_item(0x0100, (const uint8_t *)"1", 1);
     fwcfg_init();
-    char buf[8];
-    CHECK_NO_PANIC(fwcfg_read_file("opt/leanos/selftest", buf, sizeof(buf)));
-    CHECK_EQ(fwcfg_read_file("opt/leanos/selftest", buf, sizeof(buf)), -1);
+    char buffer[8];
+    CHECK_NO_PANIC(fwcfg_read_file("opt/leanos/selftest", buffer, sizeof(buffer)));
+    CHECK_EQ(fwcfg_read_file("opt/leanos/selftest", buffer, sizeof(buffer)), -1);
     CHECK_EQ(boot_selftests_enabled(), 0);
 }
 
@@ -181,10 +181,10 @@ TEST(fwcfg, a_blob_larger_than_the_buffer_is_truncated_not_overrun) {
     fake_fwcfg_set_item(0x0100, big, sizeof(big));
     fwcfg_init();
 
-    struct { uint8_t pad0[8]; char buf[16]; uint8_t pad1[8]; } g;
+    struct { uint8_t pad0[8]; char buffer[16]; uint8_t pad1[8]; } g;
     memset(&g, 0xA5, sizeof(g));
-    int n = fwcfg_read_file("opt/leanos/big", g.buf, sizeof(g.buf));
-    CHECK_EQ(n, (int)sizeof(g.buf));
+    int n = fwcfg_read_file("opt/leanos/big", g.buffer, sizeof(g.buffer));
+    CHECK_EQ(n, (int)sizeof(g.buffer));
     for (int i = 0; i < 8; i++) {
         CHECK_EQ(g.pad0[i], 0xA5);
         CHECK_EQ(g.pad1[i], 0xA5);
@@ -208,8 +208,8 @@ TEST(fwcfg, reading_a_file_twice_gives_the_same_answer) {
 TEST(fwcfg, reading_before_init_is_refused) {
     fake_fwcfg_reset();
     fwcfg_init();
-    char buf[8];
-    CHECK_EQ(fwcfg_read_file("opt/leanos/selftest", buf, sizeof(buf)), -1);
-    CHECK_EQ(fwcfg_read_file(NULL, buf, sizeof(buf)), -1);
+    char buffer[8];
+    CHECK_EQ(fwcfg_read_file("opt/leanos/selftest", buffer, sizeof(buffer)), -1);
+    CHECK_EQ(fwcfg_read_file(NULL, buffer, sizeof(buffer)), -1);
     CHECK_EQ(fwcfg_read_file("x", NULL, 8), -1);
 }

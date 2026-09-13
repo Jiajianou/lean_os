@@ -30,17 +30,17 @@ int unlockpt(int fd) {
     return 0;
 }
 
-int ptsname_r(int fd, char *buf, size_t len) {
+int ptsname_r(int fd, char *buffer, size_t length) {
     int n = 0;
     if (ioctl(fd, TIOCGPTN, &n) != 0) {
         errno = ENOTTY;
         return ENOTTY;
     }
-    if (len < sizeof("/dev/pts/") + 2) {
+    if (length < sizeof("/dev/pts/") + 2) {
         errno = ERANGE;
         return ERANGE;
     }
-    snprintf(buf, len, "/dev/pts/%d", n);
+    snprintf(buffer, length, "/dev/pts/%d", n);
     return 0;
 }
 

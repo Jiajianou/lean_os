@@ -57,11 +57,11 @@ wctrans_t wctrans(const char *name) {
     return 0;
 }
 
-wint_t towctrans(wint_t c, wctrans_t desc) {
-    if (desc == 1) {
+wint_t towctrans(wint_t c, wctrans_t descriptor) {
+    if (descriptor == 1) {
         return towupper(c);
     }
-    if (desc == 2) {
+    if (descriptor == 2) {
         return towlower(c);
     }
     return c;

@@ -28,13 +28,13 @@ typedef struct __attribute__((packed)) {
     uint32_t creator_revision;
 } acpi_sdt_header_t;
 
-static int acpi_address_readable(uint64_t phys, uint64_t len) {
-    return phys != 0 && virtual_memory_identity_covers(phys, len);
+static int acpi_address_readable(uint64_t phys, uint64_t length) {
+    return phys != 0 && virtual_memory_identity_covers(phys, length);
 }
 
-static int sig_eq(const void *a, const char *b, int len) {
+static int sig_eq(const void *a, const char *b, int length) {
     const uint8_t *pa = (const uint8_t *)a;
-    for (int i = 0; i < len; i++) {
+    for (int i = 0; i < length; i++) {
         if (pa[i] != (uint8_t)b[i]) {
             return 0;
         }
@@ -57,15 +57,15 @@ static const acpi_rsdp_t *find_rsdp(void) {
     uint16_t ebda_seg = *(const uint16_t *)(uintptr_t)0x40EUL;
     uint64_t ebda_address = (uint64_t)ebda_seg << 4;
     if (ebda_address != 0) {
-        for (uint64_t addr = ebda_address; addr < ebda_address + 1024; addr += 16) {
-            if (sig_eq((const void *)(uintptr_t)addr, "RSD PTR ", 8)) {
-                return (const acpi_rsdp_t *)(uintptr_t)addr;
+        for (uint64_t address = ebda_address; address < ebda_address + 1024; address += 16) {
+            if (sig_eq((const void *)(uintptr_t)address, "RSD PTR ", 8)) {
+                return (const acpi_rsdp_t *)(uintptr_t)address;
             }
         }
     }
-    for (uint64_t addr = 0xE0000UL; addr < 0x100000UL; addr += 16) {
-        if (sig_eq((const void *)(uintptr_t)addr, "RSD PTR ", 8)) {
-            return (const acpi_rsdp_t *)(uintptr_t)addr;
+    for (uint64_t address = 0xE0000UL; address < 0x100000UL; address += 16) {
+        if (sig_eq((const void *)(uintptr_t)address, "RSD PTR ", 8)) {
+            return (const acpi_rsdp_t *)(uintptr_t)address;
         }
     }
     return (const acpi_rsdp_t *)0;
@@ -102,10 +102,10 @@ static const acpi_sdt_header_t *find_table(const char *sig) {
     return (const acpi_sdt_header_t *)0;
 }
 
-#define FADT_SMI_CMD      48
+#define FADT_SMI_COMMAND      48
 #define FADT_ACPI_ENABLE  52
-#define FADT_PM1A_CNT_BLK 64
-#define FADT_PM1B_CNT_BLK 68
+#define FADT_PM1A_COUNT_BLOCK_DEVICE 64
+#define FADT_PM1B_COUNT_BLOCK_DEVICE 68
 #define FADT_FLAGS        112
 #define FADT_RESET_REG    116
 #define FADT_RESET_VALUE  128
@@ -126,23 +126,23 @@ int acpi_find_power(acpi_power_info_t *out) {
     out->reset_port = 0;
     out->reset_value = 0;
 
-    if (fadt->length > FADT_PM1A_CNT_BLK + 4) {
-        out->pm1a_count = *(const uint32_t *)(t + FADT_PM1A_CNT_BLK);
+    if (fadt->length > FADT_PM1A_COUNT_BLOCK_DEVICE + 4) {
+        out->pm1a_count = *(const uint32_t *)(t + FADT_PM1A_COUNT_BLOCK_DEVICE);
     }
-    if (fadt->length > FADT_PM1B_CNT_BLK + 4) {
-        out->pm1b_count = *(const uint32_t *)(t + FADT_PM1B_CNT_BLK);
+    if (fadt->length > FADT_PM1B_COUNT_BLOCK_DEVICE + 4) {
+        out->pm1b_count = *(const uint32_t *)(t + FADT_PM1B_COUNT_BLOCK_DEVICE);
     }
     if (fadt->length > FADT_ACPI_ENABLE) {
-        out->smi_command = *(const uint32_t *)(t + FADT_SMI_CMD);
+        out->smi_command = *(const uint32_t *)(t + FADT_SMI_COMMAND);
         out->acpi_enable = t[FADT_ACPI_ENABLE];
     }
     if (fadt->length > FADT_RESET_VALUE) {
         uint32_t flags = *(const uint32_t *)(t + FADT_FLAGS);
         const uint8_t *gas = t + FADT_RESET_REG;
-        uint64_t addr = *(const uint64_t *)(gas + 4);
+        uint64_t address = *(const uint64_t *)(gas + 4);
         if ((flags & FADT_FLAG_RESET_REG_SUP) && gas[0] == GAS_SPACE_SYSTEM_IO &&
-            addr != 0 && addr <= 0xFFFF) {
-            out->reset_port = (uint32_t)addr;
+            address != 0 && address <= 0xFFFF) {
+            out->reset_port = (uint32_t)address;
             out->reset_value = t[FADT_RESET_VALUE];
         }
     }
@@ -168,8 +168,8 @@ int acpi_find_power(acpi_power_info_t *out) {
 #define FADT_DSDT   40
 #define FADT_X_DSDT 140
 
-static int aml_read_int(const uint8_t *p, uint32_t len, uint32_t *at, uint8_t *out) {
-    if (*at >= len) {
+static int aml_read_int(const uint8_t *p, uint32_t length, uint32_t *at, uint8_t *out) {
+    if (*at >= length) {
         return 0;
     }
     uint8_t op = p[(*at)++];
@@ -181,11 +181,11 @@ static int aml_read_int(const uint8_t *p, uint32_t len, uint32_t *at, uint8_t *o
         *out = 1;
         return 1;
     }
-    if (op == AML_BYTE_PREFIX && *at < len) {
+    if (op == AML_BYTE_PREFIX && *at < length) {
         *out = p[(*at)++];
         return 1;
     }
-    if (op == AML_WORD_PREFIX && *at + 1 < len) {
+    if (op == AML_WORD_PREFIX && *at + 1 < length) {
         *out = p[*at];
         *at += 2;
         return 1;
@@ -213,9 +213,9 @@ int acpi_find_s5(uint8_t *slp_a, uint8_t *slp_b) {
     }
 
     const uint8_t *aml = (const uint8_t *)dsdt + sizeof(acpi_sdt_header_t);
-    uint32_t len = dsdt->length - (uint32_t)sizeof(acpi_sdt_header_t);
+    uint32_t length = dsdt->length - (uint32_t)sizeof(acpi_sdt_header_t);
 
-    for (uint32_t i = 0; i + 6 < len; i++) {
+    for (uint32_t i = 0; i + 6 < length; i++) {
         if (aml[i] != AML_NAME_OP) {
             continue;
         }
@@ -223,20 +223,20 @@ int acpi_find_s5(uint8_t *slp_a, uint8_t *slp_b) {
         if (aml[n] == AML_ROOT_CHAR) {
             n++;
         }
-        if (n + 4 > len || aml[n] != '_' || aml[n + 1] != 'S' ||
+        if (n + 4 > length || aml[n] != '_' || aml[n + 1] != 'S' ||
             aml[n + 2] != '5' || aml[n + 3] != '_') {
             continue;
         }
         n += 4;
-        if (n >= len || aml[n++] != AML_PACKAGE_OP) {
+        if (n >= length || aml[n++] != AML_PACKAGE_OP) {
             continue;
         }
-        if (n >= len) {
+        if (n >= length) {
             continue;
         }
         uint32_t extra = (uint32_t)(aml[n] >> 6);
         n += 1 + extra;
-        if (n >= len) {
+        if (n >= length) {
             continue;
         }
         uint8_t count = aml[n++];
@@ -244,10 +244,10 @@ int acpi_find_s5(uint8_t *slp_a, uint8_t *slp_b) {
             continue;
         }
         uint8_t a = 0, b = 0;
-        if (!aml_read_int(aml, len, &n, &a)) {
+        if (!aml_read_int(aml, length, &n, &a)) {
             continue;
         }
-        if (count < 2 || !aml_read_int(aml, len, &n, &b)) {
+        if (count < 2 || !aml_read_int(aml, length, &n, &b)) {
             b = a;
         }
         *slp_a = (uint8_t)(a & 0x07);
@@ -280,34 +280,34 @@ int acpi_find_madt(acpi_madt_info_t *out) {
     const uint8_t *end = (const uint8_t *)madt + madt->length;
     while (p + 2 <= end) {
         uint8_t type = p[0];
-        uint8_t len = p[1];
-        if (len < 2 || p + len > end) {
+        uint8_t length = p[1];
+        if (length < 2 || p + length > end) {
             break;
         }
-        if (type == 0 && len >= 8) {
+        if (type == 0 && length >= 8) {
             uint8_t apic_id = p[3];
             uint32_t flags = *(const uint32_t *)(p + 4);
             if ((flags & 1) && out->cpu_count < MAX_CPUS) {
                 out->cpu_apic_ids[out->cpu_count++] = apic_id;
             }
-        } else if (type == 1 && len >= 12) {
+        } else if (type == 1 && length >= 12) {
             if (out->ioapic_count < MAX_IOAPICS) {
                 acpi_ioapic_t *io = &out->ioapics[out->ioapic_count++];
                 io->id = p[2];
                 io->address = *(const uint32_t *)(p + 4);
                 io->gsi_base = *(const uint32_t *)(p + 8);
             }
-        } else if (type == 2 && len >= 10) {
+        } else if (type == 2 && length >= 10) {
             if (out->override_count < MAX_IRQ_OVERRIDES) {
                 acpi_irq_override_t *ov = &out->overrides[out->override_count++];
                 ov->source = p[3];
                 ov->gsi = *(const uint32_t *)(p + 4);
                 ov->flags = *(const uint16_t *)(p + 8);
             }
-        } else if (type == 5 && len >= 12) {
+        } else if (type == 5 && length >= 12) {
             out->lapic_base = *(const uint64_t *)(p + 4);
         }
-        p += len;
+        p += length;
     }
 
     kernel_log_puts("[acpi] MADT found: lapic_base=0x");

@@ -9,15 +9,15 @@
 static int readable[16];
 static int bad[16];
 
-long sys_waitfds(const int *fds, int count, int timeout_ms) {
+long sys_waitfds(const int *file_descriptors, int count, int timeout_ms) {
     (void)timeout_ms;
     for (int i = 0; i < count; i++) {
-        if (fds[i] >= 0 && fds[i] < 16 && bad[fds[i]]) {
+        if (file_descriptors[i] >= 0 && file_descriptors[i] < 16 && bad[file_descriptors[i]]) {
             return -1;
         }
     }
     for (int i = 0; i < count; i++) {
-        if (fds[i] >= 0 && fds[i] < 16 && readable[fds[i]]) {
+        if (file_descriptors[i] >= 0 && file_descriptors[i] < 16 && readable[file_descriptors[i]]) {
             return i;
         }
     }

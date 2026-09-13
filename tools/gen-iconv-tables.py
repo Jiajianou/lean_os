@@ -61,7 +61,7 @@ def main():
             row.append(cp)
         ident = name.replace("-", "_")
         names.append((name, ident))
-        body.append("static const uint16_t tbl_%s[128] = {\n" % ident)
+        body.append("static const uint16_t table_%s[128] = {\n" % ident)
         for i in range(0, 128, 8):
             body.append("    " + " ".join("0x%04X," % v for v in row[i:i + 8])
                         + "\n")
@@ -70,7 +70,7 @@ def main():
 
     body.append("const struct iconv_sb_charset __iconv_sb_charsets[] = {\n")
     for name, ident in names:
-        body.append('    {"%s", tbl_%s},\n' % (name, ident))
+        body.append('    {"%s", table_%s},\n' % (name, ident))
     body.append("};\n\n")
     body.append("const size_t __iconv_sb_charset_count =\n"
                 "    sizeof(__iconv_sb_charsets) / sizeof(__iconv_sb_charsets[0]);\n")

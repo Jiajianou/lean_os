@@ -36,7 +36,7 @@ struct Bag {
     std::string describe() const {
         std::ostringstream out;
         out << items.size() << ':' << buckets.size() << ':' << unique.size();
-        return out.str();
+        return out.string();
     }
 
     T fold() const {

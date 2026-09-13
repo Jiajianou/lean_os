@@ -1,19 +1,19 @@
 #include "kernel_library.h"
 
-void *k_memcpy(void *dst, const void *src, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
+void *k_memcpy(void *destination, const void *source, size_t n) {
+    unsigned char *d = (unsigned char *)destination;
+    const unsigned char *s = (const unsigned char *)source;
     for (size_t i = 0; i < n; i++) {
         d[i] = s[i];
     }
-    return dst;
+    return destination;
 }
 
-void *k_memmove(void *dst, const void *src, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
+void *k_memmove(void *destination, const void *source, size_t n) {
+    unsigned char *d = (unsigned char *)destination;
+    const unsigned char *s = (const unsigned char *)source;
     if (d == s || n == 0) {
-        return dst;
+        return destination;
     }
     if (d > s && d < s + n) {
         for (size_t i = n; i > 0; i--) {
@@ -24,15 +24,15 @@ void *k_memmove(void *dst, const void *src, size_t n) {
             d[i] = s[i];
         }
     }
-    return dst;
+    return destination;
 }
 
-void *k_memset(void *dst, int c, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
+void *k_memset(void *destination, int c, size_t n) {
+    unsigned char *d = (unsigned char *)destination;
     for (size_t i = 0; i < n; i++) {
         d[i] = (unsigned char)c;
     }
-    return dst;
+    return destination;
 }
 
 size_t k_strlen(const char *s) {
@@ -62,15 +62,15 @@ int k_strcmp(const char *a, const char *b) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
-void k_strlcpy(char *dst, const char *src, size_t n) {
+void k_strlcpy(char *destination, const char *source, size_t n) {
     if (n == 0) {
         return;
     }
     size_t i = 0;
-    for (; i < n - 1 && src[i]; i++) {
-        dst[i] = src[i];
+    for (; i < n - 1 && source[i]; i++) {
+        destination[i] = source[i];
     }
-    dst[i] = '\0';
+    destination[i] = '\0';
 }
 
 const char *k_strstr(const char *haystack, const char *needle) {

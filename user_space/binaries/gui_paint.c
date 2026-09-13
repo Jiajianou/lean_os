@@ -30,20 +30,20 @@ int main(void) {
     draw_chrome(&win.graphics);
 
     for (;;) {
-        wm_event_t ev;
+        window_manager_event_t ev;
         window_manager_wait_event(&win, &ev);
 
-        if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+        if (ev.type == WINDOW_MANAGER_EVENT_EXPOSE || ev.type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {
             draw_chrome(&win.graphics);
             continue;
         }
 
-        if (ev.type == WM_EVENT_KEY && (ev.ch == 'c' || ev.ch == 'C')) {
+        if (ev.type == WINDOW_MANAGER_EVENT_KEY && (ev.ch == 'c' || ev.ch == 'C')) {
             clear_canvas(&win.graphics);
             continue;
         }
 
-        if ((ev.type == WM_EVENT_MOUSE_MOVE || ev.type == WM_EVENT_MOUSE_BUTTON) &&
+        if ((ev.type == WINDOW_MANAGER_EVENT_MOUSE_MOVE || ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON) &&
             (ev.buttons & 1) && ev.y > SEPARATOR_Y) {
             graphics_fill_rect(&win.graphics, ev.x - STROKE_SIZE / 2, ev.y - STROKE_SIZE / 2,
                           STROKE_SIZE, STROKE_SIZE, STROKE_COLOR);

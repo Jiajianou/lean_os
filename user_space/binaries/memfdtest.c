@@ -15,7 +15,7 @@
 
 union cmsg_one {
     struct cmsghdr align;
-    char buf[CMSG_SPACE(sizeof(int))];
+    char buffer[CMSG_SPACE(sizeof(int))];
 };
 
 static int send_file_descriptor(int sock, int fd) {
@@ -23,18 +23,18 @@ static int send_file_descriptor(int sock, int fd) {
     struct iovec iov = {&byte, 1};
     union cmsg_one c;
     memset(&c, 0, sizeof(c));
-    struct msghdr msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = c.buf;
-    msg.msg_controllen = sizeof(c.buf);
-    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+    struct msghdr message;
+    memset(&message, 0, sizeof(message));
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_control = c.buffer;
+    message.msg_controllen = sizeof(c.buffer);
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&message);
     cm->cmsg_level = SOL_SOCKET;
     cm->cmsg_type = SCM_RIGHTS;
     cm->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(cm), &fd, sizeof(int));
-    return sendmsg(sock, &msg, 0) < 0 ? -1 : 0;
+    return sendmsg(sock, &message, 0) < 0 ? -1 : 0;
 }
 
 static int receive_file_descriptor(int sock) {
@@ -42,16 +42,16 @@ static int receive_file_descriptor(int sock) {
     struct iovec iov = {&byte, 1};
     union cmsg_one c;
     memset(&c, 0, sizeof(c));
-    struct msghdr msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = c.buf;
-    msg.msg_controllen = sizeof(c.buf);
-    if (recvmsg(sock, &msg, 0) < 0) {
+    struct msghdr message;
+    memset(&message, 0, sizeof(message));
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_control = c.buffer;
+    message.msg_controllen = sizeof(c.buffer);
+    if (recvmsg(sock, &message, 0) < 0) {
         return -1;
     }
-    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&message);
     if (!cm || cm->cmsg_type != SCM_RIGHTS) {
         return -1;
     }
@@ -327,7 +327,7 @@ static int test_no_capabilities(void) {
 }
 
 static int test_exhaustion(void) {
-    int fds[64];
+    int file_descriptors[64];
     int n = 0;
     while (n < 64) {
         int fd = memfd_create("many", 0);
@@ -338,13 +338,13 @@ static int test_exhaustion(void) {
             close(fd);
             break;
         }
-        fds[n++] = fd;
+        file_descriptors[n++] = fd;
     }
     if (n == 0) {
         FAIL(18);
     }
     for (int i = 0; i < n; i++) {
-        close(fds[i]);
+        close(file_descriptors[i]);
     }
     int again = memfd_create("after", 0);
     if (again < 0 || ftruncate(again, 4096) != 0) {

@@ -19,9 +19,9 @@ typedef enum {
     SHORTCUT_SNAP_RIGHT,
     SHORTCUT_MAXIMIZE,
     SHORTCUT_MINIMIZE,
-    SHORTCUT_WORKSPACE_PREV,
+    SHORTCUT_WORKSPACE_PREVIOUS,
     SHORTCUT_WORKSPACE_NEXT,
-    SHORTCUT_WINDOW_TO_PREV,
+    SHORTCUT_WINDOW_TO_PREVIOUS,
     SHORTCUT_WINDOW_TO_NEXT,
 } shortcut_id_t;
 
@@ -35,19 +35,19 @@ typedef struct {
 } shortcut_t;
 
 static const shortcut_t SHORTCUTS[] = {
-    {SHORTCUT_CYCLE_BACKWARD, KBD_MOD_ALT | KBD_MOD_SHIFT, 0,            '\t',                 "Shift+Alt+Tab",  "Previous window"},
-    {SHORTCUT_CYCLE_FORWARD,  KBD_MOD_ALT,                 KBD_MOD_SHIFT, '\t',                "Alt+Tab",        "Next window"},
-    {SHORTCUT_LAUNCHER,       KBD_MOD_CTRL,                0,            ' ',                  "Ctrl+Space",     "Open the launcher"},
-    {SHORTCUT_TASK_MANAGER,   KBD_MOD_CTRL | KBD_MOD_SHIFT, 0,           27,                   "Ctrl+Shift+Esc", "Task manager"},
-    {SHORTCUT_CLOSE_WINDOW,   KBD_MOD_ALT,                 0,            (char)KBD_KEY_FN(4),  "Alt+F4",         "Close window"},
-    {SHORTCUT_WINDOW_TO_PREV, KBD_MOD_CTRL | KBD_MOD_SHIFT | KBD_MOD_ALT, 0, (char)KBD_KEY_LEFT,  "Ctrl+Shift+Alt+Left",  "Window to previous desktop"},
-    {SHORTCUT_WINDOW_TO_NEXT, KBD_MOD_CTRL | KBD_MOD_SHIFT | KBD_MOD_ALT, 0, (char)KBD_KEY_RIGHT, "Ctrl+Shift+Alt+Right", "Window to next desktop"},
-    {SHORTCUT_WORKSPACE_PREV, KBD_MOD_CTRL | KBD_MOD_SHIFT, KBD_MOD_ALT,   (char)KBD_KEY_LEFT,  "Ctrl+Shift+Left",      "Previous desktop"},
-    {SHORTCUT_WORKSPACE_NEXT, KBD_MOD_CTRL | KBD_MOD_SHIFT, KBD_MOD_ALT,   (char)KBD_KEY_RIGHT, "Ctrl+Shift+Right",     "Next desktop"},
-    {SHORTCUT_SNAP_LEFT,      KBD_MOD_CTRL | KBD_MOD_ALT,  KBD_MOD_SHIFT, (char)KBD_KEY_LEFT,   "Ctrl+Alt+Left",  "Snap left"},
-    {SHORTCUT_SNAP_RIGHT,     KBD_MOD_CTRL | KBD_MOD_ALT,  KBD_MOD_SHIFT, (char)KBD_KEY_RIGHT,  "Ctrl+Alt+Right", "Snap right"},
-    {SHORTCUT_MAXIMIZE,       KBD_MOD_CTRL | KBD_MOD_ALT,  KBD_MOD_SHIFT, (char)KBD_KEY_UP,     "Ctrl+Alt+Up",    "Maximize"},
-    {SHORTCUT_MINIMIZE,       KBD_MOD_CTRL | KBD_MOD_ALT,  KBD_MOD_SHIFT, (char)KBD_KEY_DOWN,   "Ctrl+Alt+Down",  "Minimize"},
+    {SHORTCUT_CYCLE_BACKWARD, KEYBOARD_MOD_ALT | KEYBOARD_MOD_SHIFT, 0,            '\t',                 "Shift+Alt+Tab",  "Previous window"},
+    {SHORTCUT_CYCLE_FORWARD,  KEYBOARD_MOD_ALT,                 KEYBOARD_MOD_SHIFT, '\t',                "Alt+Tab",        "Next window"},
+    {SHORTCUT_LAUNCHER,       KEYBOARD_MOD_CTRL,                0,            ' ',                  "Ctrl+Space",     "Open the launcher"},
+    {SHORTCUT_TASK_MANAGER,   KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT, 0,           27,                   "Ctrl+Shift+Esc", "Task manager"},
+    {SHORTCUT_CLOSE_WINDOW,   KEYBOARD_MOD_ALT,                 0,            (char)KEYBOARD_KEY_FUNCTION(4),  "Alt+F4",         "Close window"},
+    {SHORTCUT_WINDOW_TO_PREVIOUS, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT | KEYBOARD_MOD_ALT, 0, (char)KEYBOARD_KEY_LEFT,  "Ctrl+Shift+Alt+Left",  "Window to previous desktop"},
+    {SHORTCUT_WINDOW_TO_NEXT, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT | KEYBOARD_MOD_ALT, 0, (char)KEYBOARD_KEY_RIGHT, "Ctrl+Shift+Alt+Right", "Window to next desktop"},
+    {SHORTCUT_WORKSPACE_PREVIOUS, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT, KEYBOARD_MOD_ALT,   (char)KEYBOARD_KEY_LEFT,  "Ctrl+Shift+Left",      "Previous desktop"},
+    {SHORTCUT_WORKSPACE_NEXT, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT, KEYBOARD_MOD_ALT,   (char)KEYBOARD_KEY_RIGHT, "Ctrl+Shift+Right",     "Next desktop"},
+    {SHORTCUT_SNAP_LEFT,      KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT,  KEYBOARD_MOD_SHIFT, (char)KEYBOARD_KEY_LEFT,   "Ctrl+Alt+Left",  "Snap left"},
+    {SHORTCUT_SNAP_RIGHT,     KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT,  KEYBOARD_MOD_SHIFT, (char)KEYBOARD_KEY_RIGHT,  "Ctrl+Alt+Right", "Snap right"},
+    {SHORTCUT_MAXIMIZE,       KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT,  KEYBOARD_MOD_SHIFT, (char)KEYBOARD_KEY_UP,     "Ctrl+Alt+Up",    "Maximize"},
+    {SHORTCUT_MINIMIZE,       KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT,  KEYBOARD_MOD_SHIFT, (char)KEYBOARD_KEY_DOWN,   "Ctrl+Alt+Down",  "Minimize"},
 };
 
 #define SHORTCUT_COUNT ((int)(sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0])))

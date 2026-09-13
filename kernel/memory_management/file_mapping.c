@@ -14,7 +14,7 @@ typedef struct {
     uint8_t dirty;
 } file_mapping_page_t;
 
-static file_mapping_page_t table[FILEMAP_MAX_PAGES];
+static file_mapping_page_t table[FILE_MAPPING_MAX_PAGES];
 static int initialized;
 
 static spinlock_t file_mapping_lock;
@@ -23,14 +23,14 @@ static void ensure_init(void) {
     if (initialized) {
         return;
     }
-    for (int i = 0; i < FILEMAP_MAX_PAGES; i++) {
+    for (int i = 0; i < FILE_MAPPING_MAX_PAGES; i++) {
         table[i].handle = -1;
     }
     initialized = 1;
 }
 
 static int find_slot(int handle, uint32_t index) {
-    for (int i = 0; i < FILEMAP_MAX_PAGES; i++) {
+    for (int i = 0; i < FILE_MAPPING_MAX_PAGES; i++) {
         if (table[i].handle == handle && table[i].index == index) {
             return i;
         }
@@ -80,7 +80,7 @@ uint64_t file_mapping_get(int handle, uint32_t index, int writable) {
         physical_memory_free_frame(phys);
         return theirs;
     }
-    for (int i = 0; i < FILEMAP_MAX_PAGES; i++) {
+    for (int i = 0; i < FILE_MAPPING_MAX_PAGES; i++) {
         if (table[i].handle < 0) {
             table[i].handle = handle;
             table[i].index = index;
@@ -127,7 +127,7 @@ void file_mapping_sync(int handle) {
     if (handle < 0) {
         return;
     }
-    for (int i = 0; i < FILEMAP_MAX_PAGES; i++) {
+    for (int i = 0; i < FILE_MAPPING_MAX_PAGES; i++) {
         uint64_t flags = spin_lock_irqsave(&file_mapping_lock);
         ensure_init();
         int dirty = (table[i].handle == handle && table[i].dirty);
@@ -148,7 +148,7 @@ int file_mapping_in_use(void) {
     uint64_t flags = spin_lock_irqsave(&file_mapping_lock);
     ensure_init();
     int n = 0;
-    for (int i = 0; i < FILEMAP_MAX_PAGES; i++) {
+    for (int i = 0; i < FILE_MAPPING_MAX_PAGES; i++) {
         if (table[i].handle >= 0) {
             n++;
         }

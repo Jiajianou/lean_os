@@ -27,51 +27,51 @@ static void done_pty(int n) {
 
 TEST(pty, a_line_is_delivered_whole_only_on_enter) {
     int n = fresh_pty();
-    char buf[64];
+    char buffer[64];
 
     pty_master_write(n, "abX\177c", 5);
-    CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 0);
+    CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 0);
     CHECK_EQ(pty_slave_readable(n), 0);
 
     pty_master_write(n, "\n", 1);
     CHECK_EQ(pty_slave_readable(n), 1);
-    memset(buf, 0, sizeof(buf));
-    CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 4);
-    CHECK(strcmp(buf, "abc\n") == 0);
+    memset(buffer, 0, sizeof(buffer));
+    CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 4);
+    CHECK(strcmp(buffer, "abc\n") == 0);
     done_pty(n);
 }
 
 TEST(pty, the_echo_goes_to_the_master_not_to_the_slave) {
     int n = fresh_pty();
-    char buf[64];
+    char buffer[64];
 
     pty_master_write(n, "hi\n", 3);
-    memset(buf, 0, sizeof(buf));
-    CHECK_EQ(pty_master_read(n, buf, sizeof(buf)), 4);
-    CHECK(strcmp(buf, "hi\r\n") == 0);
+    memset(buffer, 0, sizeof(buffer));
+    CHECK_EQ(pty_master_read(n, buffer, sizeof(buffer)), 4);
+    CHECK(strcmp(buffer, "hi\r\n") == 0);
 
-    memset(buf, 0, sizeof(buf));
-    CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 3);
-    CHECK(strcmp(buf, "hi\n") == 0);
+    memset(buffer, 0, sizeof(buffer));
+    CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 3);
+    CHECK(strcmp(buffer, "hi\n") == 0);
     done_pty(n);
 }
 
 TEST(pty, onlcr_applies_to_the_slaves_output) {
     int n = fresh_pty();
-    char buf[64];
+    char buffer[64];
 
     pty_slave_write(n, "a\nb", 3);
-    memset(buf, 0, sizeof(buf));
-    CHECK_EQ(pty_master_read(n, buf, sizeof(buf)), 4);
-    CHECK(strcmp(buf, "a\r\nb") == 0);
+    memset(buffer, 0, sizeof(buffer));
+    CHECK_EQ(pty_master_read(n, buffer, sizeof(buffer)), 4);
+    CHECK(strcmp(buffer, "a\r\nb") == 0);
 
     tty_t *t = pty_tty(n);
     REQUIRE(t != NULL);
     t->tio.c_oflag = 0;
     pty_slave_write(n, "a\nb", 3);
-    memset(buf, 0, sizeof(buf));
-    CHECK_EQ(pty_master_read(n, buf, sizeof(buf)), 3);
-    CHECK(strcmp(buf, "a\nb") == 0);
+    memset(buffer, 0, sizeof(buffer));
+    CHECK_EQ(pty_master_read(n, buffer, sizeof(buffer)), 3);
+    CHECK(strcmp(buffer, "a\nb") == 0);
     done_pty(n);
 }
 
@@ -99,8 +99,8 @@ TEST(pty, control_c_at_the_master_signals_the_foreground_group) {
     CHECK_EQ(fg->pending_stop, SIGTSTP);
     CHECK_EQ(bg->pending_stop, 0);
 
-    char buf[8];
-    CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 0);
+    char buffer[8];
+    CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 0);
 
     q13_kill(fg);
     q13_kill(bg);
@@ -124,11 +124,11 @@ TEST(pty, closing_the_master_hangs_the_slave_up) {
     REQUIRE(n >= 0);
     pty_slave_opened(n);
 
-    char buf[8];
+    char buffer[8];
     CHECK_EQ(pty_slave_readable(n), 0);
     pty_master_closed(n);
     CHECK_EQ(pty_slave_readable(n), 1);
-    CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 0);
+    CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 0);
     pty_slave_closed(n);
     CHECK(!pty_valid(n));
 }
@@ -140,11 +140,11 @@ TEST(pty, a_hung_up_slave_still_reads_what_was_already_typed) {
 
     pty_master_write(n, "last\n", 5);
     pty_master_closed(n);
-    char buf[16];
-    memset(buf, 0, sizeof(buf));
-    CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 5);
-    CHECK(strcmp(buf, "last\n") == 0);
-    CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 0);
+    char buffer[16];
+    memset(buffer, 0, sizeof(buffer));
+    CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 5);
+    CHECK(strcmp(buffer, "last\n") == 0);
+    CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 0);
     pty_slave_closed(n);
 }
 
@@ -224,21 +224,21 @@ TEST(pty, the_output_queue_drops_rather_than_overwriting) {
 
 TEST(pty, the_input_queue_wraps_without_losing_a_byte) {
     int n = fresh_pty();
-    char buf[64];
+    char buffer[64];
     for (int round = 0; round < 400; round++) {
         char line[8];
-        int len = 0;
-        line[len++] = (char)('0' + (round % 10));
-        line[len++] = (char)('a' + (round % 26));
-        line[len++] = '\n';
-        pty_master_write(n, line, (uint32_t)len);
-        memset(buf, 0, sizeof(buf));
-        CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 3);
-        CHECK_EQ(buf[0], '0' + (round % 10));
-        CHECK_EQ(buf[1], 'a' + (round % 26));
-        CHECK_EQ(buf[2], '\n');
+        int length = 0;
+        line[length++] = (char)('0' + (round % 10));
+        line[length++] = (char)('a' + (round % 26));
+        line[length++] = '\n';
+        pty_master_write(n, line, (uint32_t)length);
+        memset(buffer, 0, sizeof(buffer));
+        CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 3);
+        CHECK_EQ(buffer[0], '0' + (round % 10));
+        CHECK_EQ(buffer[1], 'a' + (round % 26));
+        CHECK_EQ(buffer[2], '\n');
         while (tty_out_readable(pty_tty(n)) > 0) {
-            pty_master_read(n, buf, sizeof(buf));
+            pty_master_read(n, buffer, sizeof(buffer));
         }
     }
     done_pty(n);
@@ -262,13 +262,13 @@ TEST(pty, a_line_longer_than_the_buffer_stops_accepting_rather_than_truncating) 
 }
 
 TEST(pty, every_operation_refuses_a_number_that_names_no_pair) {
-    char buf[8];
+    char buffer[8];
     CHECK_EQ(pty_tty(-1), NULL);
     CHECK_EQ(pty_tty(PTY_MAX), NULL);
     CHECK_EQ(pty_valid(0), 0);
-    CHECK_EQ(pty_master_read(0, buf, sizeof(buf)), -1);
+    CHECK_EQ(pty_master_read(0, buffer, sizeof(buffer)), -1);
     CHECK_EQ(pty_master_write(0, "x", 1), -1);
-    CHECK_EQ(pty_slave_read(0, buf, sizeof(buf)), -1);
+    CHECK_EQ(pty_slave_read(0, buffer, sizeof(buffer)), -1);
     CHECK_EQ(pty_slave_write(0, "x", 1), -1);
     CHECK_EQ(pty_master_readable(0), 1);
     CHECK_EQ(pty_slave_readable(0), 1);
@@ -280,22 +280,22 @@ TEST(pty, every_operation_refuses_a_number_that_names_no_pair) {
 
 TEST(pty, kill_discards_the_line_being_edited_and_nothing_else) {
     int n = fresh_pty();
-    char buf[64];
+    char buffer[64];
 
     pty_master_write(n, "keep\n", 5);
     pty_master_write(n, "throwaway", 9);
     pty_master_write(n, "\025", 1);
     pty_master_write(n, "\n", 1);
 
-    memset(buf, 0, sizeof(buf));
-    CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 6);
-    CHECK(strcmp(buf, "keep\n\n") == 0);
+    memset(buffer, 0, sizeof(buffer));
+    CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 6);
+    CHECK(strcmp(buffer, "keep\n\n") == 0);
     done_pty(n);
 }
 
 TEST(pty, erase_and_kill_on_an_empty_line_do_nothing_at_all) {
     int n = fresh_pty();
-    char buf[64];
+    char buffer[64];
 
     pty_master_write(n, "\177\177\177", 3);
     CHECK_EQ(tty_out_readable(pty_tty(n)), 0);
@@ -303,26 +303,26 @@ TEST(pty, erase_and_kill_on_an_empty_line_do_nothing_at_all) {
     CHECK_EQ(tty_out_readable(pty_tty(n)), 0);
 
     pty_master_write(n, "ok\n", 3);
-    memset(buf, 0, sizeof(buf));
-    CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 3);
-    CHECK(strcmp(buf, "ok\n") == 0);
+    memset(buffer, 0, sizeof(buffer));
+    CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 3);
+    CHECK(strcmp(buffer, "ok\n") == 0);
     done_pty(n);
 }
 
 TEST(pty, with_echoe_off_an_erase_still_edits_but_does_not_unprint) {
     int n = fresh_pty();
-    char buf[64];
+    char buffer[64];
     tty_t *t = pty_tty(n);
     REQUIRE(t != NULL);
     t->tio.c_lflag &= ~(tcflag_t)ECHOE;
 
     pty_master_write(n, "ab\177c\n", 5);
-    memset(buf, 0, sizeof(buf));
-    CHECK_EQ(pty_slave_read(n, buf, sizeof(buf)), 3);
-    CHECK(strcmp(buf, "ac\n") == 0);
-    memset(buf, 0, sizeof(buf));
-    CHECK_EQ(pty_master_read(n, buf, sizeof(buf)), 5);
-    CHECK(strcmp(buf, "abc\r\n") == 0);
+    memset(buffer, 0, sizeof(buffer));
+    CHECK_EQ(pty_slave_read(n, buffer, sizeof(buffer)), 3);
+    CHECK(strcmp(buffer, "ac\n") == 0);
+    memset(buffer, 0, sizeof(buffer));
+    CHECK_EQ(pty_master_read(n, buffer, sizeof(buffer)), 5);
+    CHECK(strcmp(buffer, "abc\r\n") == 0);
     done_pty(n);
 }
 
@@ -385,6 +385,6 @@ TEST(pty, the_console_is_not_a_pty_and_queues_no_output) {
     tty_input_char(c, '\n');
     CHECK_EQ(tty_out_readable(c), 0);
     CHECK_EQ(tty_readable(c), 2);
-    char buf[8];
-    CHECK_EQ(tty_read(c, buf, sizeof(buf)), 2);
+    char buffer[8];
+    CHECK_EQ(tty_read(c, buffer, sizeof(buffer)), 2);
 }

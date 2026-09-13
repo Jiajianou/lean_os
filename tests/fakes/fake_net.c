@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 
-void panic(const char *msg);
+void panic(const char *message);
 
 #define MAX_TX 64
 #define MAX_FRAME 2048
@@ -21,7 +21,7 @@ static uint32_t dns_ip     = 0x0A000203u;
 
 void fake_net_reset(void);
 int fake_net_tx_count(void);
-const uint8_t *fake_net_tx_frame(int i, uint32_t *len_out);
+const uint8_t *fake_net_tx_frame(int i, uint32_t *length_out);
 
 void fake_net_reset(void) {
     tx_count = 0;
@@ -30,25 +30,25 @@ void fake_net_reset(void) {
 
 int fake_net_tx_count(void) { return tx_count; }
 
-const uint8_t *fake_net_tx_frame(int i, uint32_t *len_out) {
+const uint8_t *fake_net_tx_frame(int i, uint32_t *length_out) {
     if (i < 0 || i >= tx_count) {
         return NULL;
     }
-    if (len_out) {
-        *len_out = tx_length[i];
+    if (length_out) {
+        *length_out = tx_length[i];
     }
     return tx[i];
 }
 
-int rtl8139_send(const uint8_t *frame, uint16_t len) {
+int rtl8139_send(const uint8_t *frame, uint16_t length) {
     if (tx_count >= MAX_TX) {
         panic("fake_net: transmit queue overflow - the stack is replying far too much");
     }
-    if (len > MAX_FRAME) {
+    if (length > MAX_FRAME) {
         panic("fake_net: a frame longer than the fake can hold");
     }
-    memcpy(tx[tx_count], frame, len);
-    tx_length[tx_count] = len;
+    memcpy(tx[tx_count], frame, length);
+    tx_length[tx_count] = length;
     tx_count++;
     return 0;
 }

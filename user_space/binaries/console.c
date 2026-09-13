@@ -26,9 +26,9 @@ static int line_length[ROWS];
 static int line_count;
 static int line_head;
 
-static void push_line(const char *src, int len) {
-    if (len > MAX_COL) {
-        len = MAX_COL;
+static void push_line(const char *source, int length) {
+    if (length > MAX_COL) {
+        length = MAX_COL;
     }
     int slot = (line_head + line_count) % ROWS;
     if (line_count == ROWS) {
@@ -37,19 +37,19 @@ static void push_line(const char *src, int len) {
     } else {
         line_count++;
     }
-    for (int i = 0; i < len; i++) {
-        lines[slot][i] = src[i];
+    for (int i = 0; i < length; i++) {
+        lines[slot][i] = source[i];
     }
-    lines[slot][len] = '\0';
-    line_length[slot] = len;
+    lines[slot][length] = '\0';
+    line_length[slot] = length;
 }
 
 static char pending[MAX_COL + 1];
 static int pending_length;
 
-static void feed(const char *buf, long n) {
+static void feed(const char *buffer, long n) {
     for (long i = 0; i < n; i++) {
-        char c = buf[i];
+        char c = buffer[i];
         if (c == '\n') {
             push_line(pending, pending_length);
             pending_length = 0;
@@ -115,17 +115,17 @@ int main(void) {
     int fell_behind = 0;
     int dirty = 1;
 
-    static char buf[2048];
+    static char buffer[2048];
     for (;;) {
-        wm_event_t ev;
+        window_manager_event_t ev;
         while (window_manager_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+            if (ev.type == WINDOW_MANAGER_EVENT_EXPOSE || ev.type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {
                 dirty = 1;
             }
         }
 
         uint64_t next = cursor;
-        long n = sys_klog(cursor, buf, sizeof(buf), &next);
+        long n = sys_kernel_log(cursor, buffer, sizeof(buffer), &next);
         if (n < 0) {
             graphics_fill_rect(&win.graphics, 0, 0, WIN_W, WIN_H, BG_COLOR);
             graphics_draw_text_font(&win.graphics, TEXT_X, HEADER_H,
@@ -137,7 +137,7 @@ int main(void) {
             if (expected != 0 && cursor > expected) {
                 fell_behind = 1;
             }
-            feed(buf, n);
+            feed(buffer, n);
             cursor = next;
             expected = next;
             dirty = 1;

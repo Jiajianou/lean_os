@@ -4,10 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-void panic(const char *msg);
+void panic(const char *message);
 
-void panic(const char *msg) {
-    snprintf(test_panic_message, sizeof(test_panic_message), "%s", msg ? msg : "(null)");
+void panic(const char *message) {
+    snprintf(test_panic_message, sizeof(test_panic_message), "%s", message ? message : "(null)");
     if (test_panic_armed) {
         longjmp(test_panic_jmp, 1);
     }

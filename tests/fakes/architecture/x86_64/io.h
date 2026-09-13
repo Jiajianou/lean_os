@@ -14,11 +14,11 @@ void fake_port_outl(uint16_t port, uint32_t value);
 
 static inline void outl(uint16_t port, uint32_t val) { fake_port_outl(port, val); }
 static inline uint32_t inl(uint16_t port) { return fake_port_inl(port); }
-static inline void insw(uint16_t port, void *dst, uint32_t words) {
-    (void)port; (void)dst; (void)words;
+static inline void insw(uint16_t port, void *destination, uint32_t words) {
+    (void)port; (void)destination; (void)words;
 }
-static inline void outsw(uint16_t port, const void *src, uint32_t words) {
-    (void)port; (void)src; (void)words;
+static inline void outsw(uint16_t port, const void *source, uint32_t words) {
+    (void)port; (void)source; (void)words;
 }
 
 static inline uint64_t irq_save_disable(void) { return 0; }

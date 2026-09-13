@@ -10,7 +10,7 @@
 
 #define PS2_DATA_PORT   0x60
 #define PS2_STATUS_PORT 0x64
-#define PS2_CMD_PORT    0x64
+#define PS2_COMMAND_PORT    0x64
 
 #define PS2_STATUS_OUTPUT_FULL 0x01u
 #define PS2_STATUS_INPUT_FULL  0x02u
@@ -36,9 +36,9 @@ static void ps2_wait_output_full(void) {
     }
 }
 
-static void ps2_write_command(uint8_t cmd) {
+static void ps2_write_command(uint8_t command) {
     ps2_wait_input_clear();
-    outb(PS2_CMD_PORT, cmd);
+    outb(PS2_COMMAND_PORT, command);
 }
 
 static void ps2_write_data(uint8_t data) {
@@ -83,7 +83,7 @@ static void push_event(mouse_event_t ev) {
     }
     event_buffer[buffer_head] = ev;
     buffer_head = next;
-    scheduler_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
 }
 
 static void mouse_irq(isr_regs_t *regs) {

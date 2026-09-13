@@ -55,7 +55,7 @@ void pty_slave_closed(int n) {
         pairs[n].slave_open--;
     }
     if (pairs[n].slave_open == 0 && pairs[n].master_open) {
-        scheduler_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(SCHEDULER_POLL_CHAN);
     }
     maybe_free(n);
 }
@@ -66,7 +66,7 @@ void pty_master_closed(int n) {
     }
     pairs[n].master_open = 0;
     pairs[n].tty.hup = 1;
-    scheduler_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
     maybe_free(n);
 }
 
@@ -78,42 +78,42 @@ void pty_release_session(int sid) {
     }
 }
 
-int64_t pty_master_write(int n, const char *buf, uint32_t len) {
+int64_t pty_master_write(int n, const char *buffer, uint32_t length) {
     if (!pty_valid(n)) {
         return -1;
     }
-    for (uint32_t i = 0; i < len; i++) {
-        tty_input_char(&pairs[n].tty, buf[i]);
+    for (uint32_t i = 0; i < length; i++) {
+        tty_input_char(&pairs[n].tty, buffer[i]);
     }
-    scheduler_wake_all(SCHED_POLL_CHAN);
-    return (int64_t)len;
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
+    return (int64_t)length;
 }
 
-int64_t pty_slave_read(int n, char *buf, uint32_t len) {
+int64_t pty_slave_read(int n, char *buffer, uint32_t length) {
     if (!pty_valid(n)) {
         return -1;
     }
-    uint32_t got = tty_read(&pairs[n].tty, buf, len);
+    uint32_t got = tty_read(&pairs[n].tty, buffer, length);
     if (got == 0 && pairs[n].tty.hup) {
         return 0;
     }
     return (int64_t)got;
 }
 
-int64_t pty_slave_write(int n, const char *buf, uint32_t len) {
+int64_t pty_slave_write(int n, const char *buffer, uint32_t length) {
     if (!pty_valid(n)) {
         return -1;
     }
-    tty_write(&pairs[n].tty, buf, len);
-    scheduler_wake_all(SCHED_POLL_CHAN);
-    return (int64_t)len;
+    tty_write(&pairs[n].tty, buffer, length);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
+    return (int64_t)length;
 }
 
-int64_t pty_master_read(int n, char *buf, uint32_t len) {
+int64_t pty_master_read(int n, char *buffer, uint32_t length) {
     if (!pty_valid(n)) {
         return -1;
     }
-    return (int64_t)tty_out_read(&pairs[n].tty, buf, len);
+    return (int64_t)tty_out_read(&pairs[n].tty, buffer, length);
 }
 
 int pty_master_readable(int n) {

@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     const char *label = argv[argi];
-    char **cmd = &argv[argi + 1];
+    char **command = &argv[argi + 1];
 
     long started = ms_now();
     pid_t pid = fork();
@@ -39,8 +39,8 @@ int main(int argc, char **argv) {
         if (limit_s > 0) {
             setpgid(0, 0);
         }
-        execvp(cmd[0], cmd);
-        fprintf(stderr, "measure: cannot run %s\n", cmd[0]);
+        execvp(command[0], command);
+        fprintf(stderr, "measure: cannot run %s\n", command[0]);
         _exit(127);
     }
 

@@ -11,13 +11,13 @@ static unsigned long total_bytes;
 static unsigned long file_count;
 static unsigned long directory_count;
 
-static void join(char *out, const char *dir, const char *name) {
-    size_t n = strlen(dir);
+static void join(char *out, const char *directory, const char *name) {
+    size_t n = strlen(directory);
     if (n >= PATHBUF - 2) {
         out[0] = '\0';
         return;
     }
-    memcpy(out, dir, n);
+    memcpy(out, directory, n);
     if (n == 0 || out[n - 1] != '/') {
         out[n++] = '/';
     }

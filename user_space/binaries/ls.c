@@ -1,9 +1,9 @@
 #include "paths.h"
 #include "syscall_wrappers.h"
 
-#define BUF_SIZE 2048
+#define BUFFER_SIZE 2048
 
-static char buf[BUF_SIZE];
+static char buffer[BUFFER_SIZE];
 
 static void put(const char *s) {
     long n = 0;
@@ -19,13 +19,13 @@ int main(int argc, char **argv) {
     if (arg && arg[0]) {
         path = arg;
     }
-    long n = sys_listdir(path, buf, BUF_SIZE);
+    long n = sys_listdir(path, buffer, BUFFER_SIZE);
     if (n < 0) {
         put("ls: ");
         put(path);
         put(": not a directory\n");
         return 1;
     }
-    sys_write(1, buf, (size_t)n);
+    sys_write(1, buffer, (size_t)n);
     return 0;
 }

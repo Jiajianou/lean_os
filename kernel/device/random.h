@@ -6,11 +6,11 @@
 void chacha20_block(const uint8_t key[32], const uint8_t nonce[12],
                     uint32_t counter, uint8_t out[64]);
 
-void random_init(const void *seed, size_t len);
+void random_init(const void *seed, size_t length);
 
-void random_feed(const void *data, size_t len);
+void random_feed(const void *data, size_t length);
 
-void random_bytes(void *out, size_t len);
+void random_bytes(void *out, size_t length);
 
 uint64_t random_events(void);
 

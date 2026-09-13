@@ -39,8 +39,8 @@ void process_destroy_address_space(uint64_t pml4_phys) {
     destroyed_spaces++;
 }
 
-int64_t virtual_file_system_handle_read(int handle, void *buf, size_t len, uint32_t off) {
-    (void)handle; (void)buf; (void)len; (void)off;
+int64_t virtual_file_system_handle_read(int handle, void *buffer, size_t length, uint32_t off) {
+    (void)handle; (void)buffer; (void)length; (void)off;
     return -1;
 }
 uint64_t file_mapping_get(int handle, uint32_t index, int writable) {

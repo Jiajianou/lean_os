@@ -10,26 +10,26 @@
 #include "proc.h"
 #include "syscall_wrappers.h"
 
-static void field(char *dst, const char *src) {
+static void field(char *destination, const char *source) {
     size_t i = 0;
-    for (; src[i] && i < _UTSNAME_LENGTH - 1; i++) {
-        dst[i] = src[i];
+    for (; source[i] && i < _UTSNAME_LENGTH - 1; i++) {
+        destination[i] = source[i];
     }
-    dst[i] = '\0';
+    destination[i] = '\0';
 }
 
-int uname(struct utsname *buf) {
-    if (!buf) {
+int uname(struct utsname *buffer) {
+    if (!buffer) {
         errno = EFAULT;
         return -1;
     }
-    memset(buf, 0, sizeof(*buf));
-    field(buf->sysname, "lean_os");
-    field(buf->nodename, "");
-    field(buf->release, "0.89");
-    field(buf->version, "lean_os M89");
-    field(buf->machine, "x86_64");
-    field(buf->domainname, "");
+    memset(buffer, 0, sizeof(*buffer));
+    field(buffer->sysname, "lean_os");
+    field(buffer->nodename, "");
+    field(buffer->release, "0.89");
+    field(buffer->version, "lean_os M89");
+    field(buffer->machine, "x86_64");
+    field(buffer->domainname, "");
     return 0;
 }
 
@@ -38,10 +38,10 @@ int sched_yield(void) {
     return 0;
 }
 
-int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param) {
+int sched_setscheduler(pid_t pid, int policy, const struct sched_param *parameter) {
     (void)pid;
     (void)policy;
-    (void)param;
+    (void)parameter;
     errno = ENOSYS;
     return -1;
 }

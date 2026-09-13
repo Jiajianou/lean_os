@@ -7,9 +7,9 @@
 #define PIT_COMMAND       0x43
 #define PIT_BASE_FREQ     1193182u
 
-#define PIT_CMD_CHANNEL2     0x80
-#define PIT_CMD_LOHI         0x30
-#define PIT_CMD_MODE3_SQUARE 0x06
+#define PIT_COMMAND_CHANNEL2     0x80
+#define PIT_COMMAND_LOHI         0x30
+#define PIT_COMMAND_MODE3_SQUARE 0x06
 
 #define SPEAKER_PORT       0x61
 #define SPEAKER_GATE_BITS  0x03
@@ -48,7 +48,7 @@ void pc_speaker_tone(uint32_t freq_hz, uint32_t ms) {
         divisor = 0xFFFFu;
     }
 
-    outb(PIT_COMMAND, PIT_CMD_CHANNEL2 | PIT_CMD_LOHI | PIT_CMD_MODE3_SQUARE);
+    outb(PIT_COMMAND, PIT_COMMAND_CHANNEL2 | PIT_COMMAND_LOHI | PIT_COMMAND_MODE3_SQUARE);
     outb(PIT_CHANNEL2_DATA, (uint8_t)(divisor & 0xFF));
     outb(PIT_CHANNEL2_DATA, (uint8_t)((divisor >> 8) & 0xFF));
 

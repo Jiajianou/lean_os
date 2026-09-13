@@ -19,9 +19,9 @@ static int mode_child(int cloexec_file_descriptor, int plain_file_descriptor) {
     if (fcntl(plain_file_descriptor, F_GETFD) < 0) {
         return CHILD_MISSING;
     }
-    char buf[8];
-    memset(buf, 0, sizeof(buf));
-    if (read(plain_file_descriptor, buf, 4) != 4 || memcmp(buf, "keep", 4) != 0) {
+    char buffer[8];
+    memset(buffer, 0, sizeof(buffer));
+    if (read(plain_file_descriptor, buffer, 4) != 4 || memcmp(buffer, "keep", 4) != 0) {
         return CHILD_MISSING;
     }
     return CHILD_OK;

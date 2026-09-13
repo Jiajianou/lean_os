@@ -42,7 +42,7 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
         ev.events = event->events;
         memcpy(&ev.data, &event->data, sizeof(ev.data));
     }
-    if (sys_epoll_ctl(epfd, op, fd, &ev) != 0) {
+    if (sys_epoll_control(epfd, op, fd, &ev) != 0) {
         errno = EINVAL;
         return -1;
     }
@@ -55,7 +55,7 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
         return -1;
     }
     long n = sys_epoll_wait(epfd, (os_epoll_event_t *)events, maxevents, timeout);
-    if (n == -OS_ERR_INTR) {
+    if (n == -OS_ERROR_INTR) {
         errno = EINTR;
         return -1;
     }
@@ -149,8 +149,8 @@ int timerfd_settime(int fd, int flags, const struct itimerspec *new_value,
     return 0;
 }
 
-int timerfd_gettime(int fd, struct itimerspec *curr_value) {
-    if (!curr_value) {
+int timerfd_gettime(int fd, struct itimerspec *current_value) {
+    if (!current_value) {
         errno = EFAULT;
         return -1;
     }
@@ -159,7 +159,7 @@ int timerfd_gettime(int fd, struct itimerspec *curr_value) {
         errno = EINVAL;
         return -1;
     }
-    from_ns(&curr_value->it_value, out.value_ns);
-    from_ns(&curr_value->it_interval, out.interval_ns);
+    from_ns(&current_value->it_value, out.value_ns);
+    from_ns(&current_value->it_interval, out.interval_ns);
     return 0;
 }

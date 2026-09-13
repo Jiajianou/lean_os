@@ -10,8 +10,8 @@
 #include "drivers/pit.h"
 #include "memory_management/physical_memory.h"
 
-#define BLK_PER_LINE 8
-#define LINE_BYTES   (BLK_PER_LINE * BLK_SECTOR_SIZE)
+#define BLOCK_DEVICE_PER_LINE 8
+#define LINE_BYTES   (BLOCK_DEVICE_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE)
 
 #define CACHE_LINES 2048
 
@@ -22,7 +22,7 @@ typedef struct {
     uint64_t dirty_tick;
 } cache_tag_t;
 
-#define BLK_FLUSH_DEADLINE_MS 5000
+#define BLOCK_DEVICE_FLUSH_DEADLINE_MS 5000
 
 static cache_tag_t tags[CACHE_LINES];
 static uint8_t *line_pointer[CACHE_LINES];
@@ -58,82 +58,82 @@ uint64_t block_device_error_count(void) {
     return io_errors;
 }
 
-static int device_read(uint32_t lba, uint32_t count, void *buf) {
+static int device_read(uint32_t lba, uint32_t count, void *buffer) {
     statistics.device_reads += count;
     if (fault_reads_after >= 0 && (int64_t)reads_issued++ >= fault_reads_after) {
         io_errors++;
         return -1;
     }
     if (backend == BACKEND_NVME) {
-        if (nvme_read(lba, count, buf) != 0) {
+        if (nvme_read(lba, count, buffer) != 0) {
             io_errors++;
             return -1;
         }
         return 0;
     }
     if (backend == BACKEND_AHCI) {
-        if (ahci_read(lba, count, buf) != 0) {
+        if (ahci_read(lba, count, buffer) != 0) {
             io_errors++;
             return -1;
         }
         return 0;
     }
     if (backend == BACKEND_VIRTIO) {
-        if (virtio_block_device_read(lba, count, buf) != 0) {
+        if (virtio_block_device_read(lba, count, buffer) != 0) {
             io_errors++;
             return -1;
         }
         return 0;
     }
-    uint8_t *dst = (uint8_t *)buf;
+    uint8_t *destination = (uint8_t *)buffer;
     while (count > 0) {
         uint32_t n = count > 255 ? 255 : count;
-        if (ata_read_sectors(lba, (uint8_t)n, dst) != 0) {
+        if (ata_read_sectors(lba, (uint8_t)n, destination) != 0) {
             io_errors++;
             return -1;
         }
-        dst += n * BLK_SECTOR_SIZE;
+        destination += n * BLOCK_DEVICE_SECTOR_SIZE;
         lba += n;
         count -= n;
     }
     return 0;
 }
 
-static int device_write(uint32_t lba, uint32_t count, const void *buf) {
+static int device_write(uint32_t lba, uint32_t count, const void *buffer) {
     statistics.device_writes += count;
     if (fault_writes_after >= 0 && (int64_t)writes_issued++ >= fault_writes_after) {
         io_errors++;
         return -1;
     }
     if (backend == BACKEND_NVME) {
-        if (nvme_write(lba, count, buf) != 0) {
+        if (nvme_write(lba, count, buffer) != 0) {
             io_errors++;
             return -1;
         }
         return 0;
     }
     if (backend == BACKEND_AHCI) {
-        if (ahci_write(lba, count, buf) != 0) {
+        if (ahci_write(lba, count, buffer) != 0) {
             io_errors++;
             return -1;
         }
         return 0;
     }
     if (backend == BACKEND_VIRTIO) {
-        if (virtio_block_device_write(lba, count, buf) != 0) {
+        if (virtio_block_device_write(lba, count, buffer) != 0) {
             io_errors++;
             return -1;
         }
         return 0;
     }
-    const uint8_t *src = (const uint8_t *)buf;
+    const uint8_t *source = (const uint8_t *)buffer;
     while (count > 0) {
         uint32_t n = count > 255 ? 255 : count;
-        if (ata_write_sectors(lba, (uint8_t)n, src) != 0) {
+        if (ata_write_sectors(lba, (uint8_t)n, source) != 0) {
             io_errors++;
             return -1;
         }
-        src += n * BLK_SECTOR_SIZE;
+        source += n * BLOCK_DEVICE_SECTOR_SIZE;
         lba += n;
         count -= n;
     }
@@ -220,38 +220,38 @@ void block_device_set_readahead(uint32_t lines) {
     spin_unlock_irqrestore(&block_device_lock, irq);
 }
 
-int block_device_read(uint32_t lba, uint32_t count, void *buf) {
+int block_device_read(uint32_t lba, uint32_t count, void *buffer) {
     uint64_t irq = spin_lock_irqsave(&block_device_lock);
     flush_if_overdue_locked();
     int sequential = (lba == last_read_end);
     last_read_end = lba + count;
     statistics.reads++;
-    uint8_t *dst = (uint8_t *)buf;
-    uint32_t first_line = lba / BLK_PER_LINE;
-    uint32_t last_line = (lba + count - 1) / BLK_PER_LINE;
+    uint8_t *destination = (uint8_t *)buffer;
+    uint32_t first_line = lba / BLOCK_DEVICE_PER_LINE;
+    uint32_t last_line = (lba + count - 1) / BLOCK_DEVICE_PER_LINE;
 
     if (all_lines_resident(first_line, last_line)) {
         statistics.hits++;
         for (uint32_t i = 0; i < count; i++) {
-            uint32_t s = slot_of((lba + i) / BLK_PER_LINE);
-            uint32_t within = (lba + i) % BLK_PER_LINE;
-            k_memcpy(dst + (uint64_t)i * BLK_SECTOR_SIZE,
-                     line_pointer[s] + (uint64_t)within * BLK_SECTOR_SIZE,
-                     BLK_SECTOR_SIZE);
+            uint32_t s = slot_of((lba + i) / BLOCK_DEVICE_PER_LINE);
+            uint32_t within = (lba + i) % BLOCK_DEVICE_PER_LINE;
+            k_memcpy(destination + (uint64_t)i * BLOCK_DEVICE_SECTOR_SIZE,
+                     line_pointer[s] + (uint64_t)within * BLOCK_DEVICE_SECTOR_SIZE,
+                     BLOCK_DEVICE_SECTOR_SIZE);
         }
         spin_unlock_irqrestore(&block_device_lock, irq);
         return 0;
     }
 
-    if (device_read(lba, count, dst) != 0) {
-        k_memset(dst, 0, (uint64_t)count * BLK_SECTOR_SIZE);
+    if (device_read(lba, count, destination) != 0) {
+        k_memset(destination, 0, (uint64_t)count * BLOCK_DEVICE_SECTOR_SIZE);
         spin_unlock_irqrestore(&block_device_lock, irq);
         return -1;
     }
 
     for (uint32_t ln = first_line; ln <= last_line; ln++) {
-        uint32_t line_lba = ln * BLK_PER_LINE;
-        if (line_lba < lba || line_lba + BLK_PER_LINE > lba + count) {
+        uint32_t line_lba = ln * BLOCK_DEVICE_PER_LINE;
+        if (line_lba < lba || line_lba + BLOCK_DEVICE_PER_LINE > lba + count) {
             continue;
         }
         uint32_t s = slot_of(ln);
@@ -261,7 +261,7 @@ int block_device_read(uint32_t lba, uint32_t count, void *buf) {
         if (tags[s].dirty && tags[s].line_no != ln) {
             flush_line(s);
         }
-        k_memcpy(line_pointer[s], dst + (uint64_t)(line_lba - lba) * BLK_SECTOR_SIZE, LINE_BYTES);
+        k_memcpy(line_pointer[s], destination + (uint64_t)(line_lba - lba) * BLOCK_DEVICE_SECTOR_SIZE, LINE_BYTES);
         tags[s].line_no = ln;
         tags[s].valid = 1;
         tags[s].dirty = 0;
@@ -277,7 +277,7 @@ int block_device_read(uint32_t lba, uint32_t count, void *buf) {
             if (tags[s].dirty) {
                 break;
             }
-            if (device_read(ln * BLK_PER_LINE, BLK_PER_LINE, line_pointer[s]) != 0) {
+            if (device_read(ln * BLOCK_DEVICE_PER_LINE, BLOCK_DEVICE_PER_LINE, line_pointer[s]) != 0) {
                 break;
             }
             if (!tags[s].valid) {
@@ -297,7 +297,7 @@ static int flush_line(uint32_t s) {
     if (!tags[s].valid || !tags[s].dirty) {
         return 0;
     }
-    if (device_write(tags[s].line_no * BLK_PER_LINE, BLK_PER_LINE, line_pointer[s]) != 0) {
+    if (device_write(tags[s].line_no * BLOCK_DEVICE_PER_LINE, BLOCK_DEVICE_PER_LINE, line_pointer[s]) != 0) {
         return -1;
     }
     tags[s].dirty = 0;
@@ -324,40 +324,40 @@ static void flush_if_overdue_locked(void) {
         return;
     }
     uint64_t now = pit_get_ticks() * (1000 / PIT_HZ);
-    if (now >= oldest_dirty_ms + BLK_FLUSH_DEADLINE_MS) {
+    if (now >= oldest_dirty_ms + BLOCK_DEVICE_FLUSH_DEADLINE_MS) {
         flush_all_locked();
     }
 }
 
-int block_device_write(uint32_t lba, uint32_t count, const void *buf) {
+int block_device_write(uint32_t lba, uint32_t count, const void *buffer) {
     int failed = 0;
     uint64_t irq = spin_lock_irqsave(&block_device_lock);
     flush_if_overdue_locked();
-    const uint8_t *src = (const uint8_t *)buf;
+    const uint8_t *source = (const uint8_t *)buffer;
 
     uint32_t i = 0;
     while (i < count) {
-        uint32_t line_no = (lba + i) / BLK_PER_LINE;
-        uint32_t within = (lba + i) % BLK_PER_LINE;
+        uint32_t line_no = (lba + i) / BLOCK_DEVICE_PER_LINE;
+        uint32_t within = (lba + i) % BLOCK_DEVICE_PER_LINE;
         uint32_t remaining = count - i;
-        int whole_line = (within == 0 && remaining >= BLK_PER_LINE);
+        int whole_line = (within == 0 && remaining >= BLOCK_DEVICE_PER_LINE);
 
         if (whole_line) {
             uint32_t s = slot_of(line_no);
             if (tags[s].valid && tags[s].dirty && tags[s].line_no != line_no) {
                 if (flush_line(s) != 0) {
-                    if (device_write(lba + i, BLK_PER_LINE,
-                                     src + (uint64_t)i * BLK_SECTOR_SIZE) != 0) {
+                    if (device_write(lba + i, BLOCK_DEVICE_PER_LINE,
+                                     source + (uint64_t)i * BLOCK_DEVICE_SECTOR_SIZE) != 0) {
                         failed = 1;
                     }
-                    i += BLK_PER_LINE;
+                    i += BLOCK_DEVICE_PER_LINE;
                     continue;
                 }
             }
             if (!tags[s].valid) {
                 statistics.resident++;
             }
-            k_memcpy(line_pointer[s], src + (uint64_t)i * BLK_SECTOR_SIZE, LINE_BYTES);
+            k_memcpy(line_pointer[s], source + (uint64_t)i * BLOCK_DEVICE_SECTOR_SIZE, LINE_BYTES);
             if (!tags[s].dirty) {
                 if (statistics.dirty == 0) {
                     oldest_dirty_ms = pit_get_ticks() * (1000 / PIT_HZ);
@@ -368,17 +368,17 @@ int block_device_write(uint32_t lba, uint32_t count, const void *buf) {
             tags[s].valid = 1;
             tags[s].line_no = line_no;
             tags[s].dirty = 1;
-            i += BLK_PER_LINE;
+            i += BLOCK_DEVICE_PER_LINE;
             continue;
         }
 
-        if (device_write(lba + i, 1, src + (uint64_t)i * BLK_SECTOR_SIZE) != 0) {
+        if (device_write(lba + i, 1, source + (uint64_t)i * BLOCK_DEVICE_SECTOR_SIZE) != 0) {
             failed = 1;
         }
         uint32_t s = slot_of(line_no);
         if (tags[s].valid && tags[s].line_no == line_no) {
-            k_memcpy(line_pointer[s] + (uint64_t)within * BLK_SECTOR_SIZE,
-                     src + (uint64_t)i * BLK_SECTOR_SIZE, BLK_SECTOR_SIZE);
+            k_memcpy(line_pointer[s] + (uint64_t)within * BLOCK_DEVICE_SECTOR_SIZE,
+                     source + (uint64_t)i * BLOCK_DEVICE_SECTOR_SIZE, BLOCK_DEVICE_SECTOR_SIZE);
         }
         i++;
     }

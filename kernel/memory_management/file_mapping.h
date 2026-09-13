@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#define FILEMAP_MAX_PAGES 8192
+#define FILE_MAPPING_MAX_PAGES 8192
 
 uint64_t file_mapping_get(int handle, uint32_t index, int writable);
 

@@ -63,7 +63,7 @@ static acpi_ioapic_t *ioapic_for_gsi(uint32_t gsi, uint32_t *out_index) {
     for (int i = 0; i < madt.ioapic_count; i++) {
         acpi_ioapic_t *io = &madt.ioapics[i];
         virtual_memory_map_page((uint64_t)io->address & ~0xFFFull,
-                     (uint64_t)io->address & ~0xFFFull, VMM_FLAG_WRITABLE);
+                     (uint64_t)io->address & ~0xFFFull, VIRTUAL_MEMORY_FLAG_WRITABLE);
         uint32_t count = ioapic_entries(io);
         if (gsi >= io->gsi_base && gsi < io->gsi_base + count) {
             *out_index = gsi - io->gsi_base;
@@ -92,7 +92,7 @@ void ioapic_init(void) {
     for (int i = 0; i < madt.ioapic_count; i++) {
         acpi_ioapic_t *io = &madt.ioapics[i];
         virtual_memory_map_page((uint64_t)io->address & ~0xFFFull,
-                     (uint64_t)io->address & ~0xFFFull, VMM_FLAG_WRITABLE);
+                     (uint64_t)io->address & ~0xFFFull, VIRTUAL_MEMORY_FLAG_WRITABLE);
         uint32_t count = ioapic_entries(io);
         for (uint32_t e = 0; e < count; e++) {
             ioapic_write(io, IOAPIC_REG_REDTBL + 2 * e, REDIR_MASKED);

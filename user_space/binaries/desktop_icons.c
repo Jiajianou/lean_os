@@ -20,16 +20,16 @@
 #define PANEL_MARGIN 40
 #define DOUBLE_CLICK_MS 500
 
-#define CTX_MENU_ITEM_W 120
-#define CTX_MENU_ITEM_H (LABEL_H + 4)
-#define CTX_MENU_BG     0x00243040u
-#define CTX_MENU_HOVER  0x003A5A80u
-#define CTX_MENU_BORDER 0x00506070u
-#define CTX_MENU_TEXT   0x00FFFFFFu
+#define CONTEXT_MENU_ITEM_W 120
+#define CONTEXT_MENU_ITEM_H (LABEL_H + 4)
+#define CONTEXT_MENU_BG     0x00243040u
+#define CONTEXT_MENU_HOVER  0x003A5A80u
+#define CONTEXT_MENU_BORDER 0x00506070u
+#define CONTEXT_MENU_TEXT   0x00FFFFFFu
 
-static const char *const CTX_MENU_ITEMS[] = {"Terminal", "Settings"};
-static const char *const CTX_MENU_PROGRAMS[] = {PATH_BIN_DIR "gui_terminal", PATH_BIN_DIR "settings"};
-#define CTX_MENU_COUNT ((int)(sizeof(CTX_MENU_ITEMS) / sizeof(CTX_MENU_ITEMS[0])))
+static const char *const CONTEXT_MENU_ITEMS[] = {"Terminal", "Settings"};
+static const char *const CONTEXT_MENU_PROGRAMS[] = {PATH_BIN_DIRECTORY "gui_terminal", PATH_BIN_DIRECTORY "settings"};
+#define CONTEXT_MENU_COUNT ((int)(sizeof(CONTEXT_MENU_ITEMS) / sizeof(CONTEXT_MENU_ITEMS[0])))
 
 static int context_menu_open;
 static int32_t context_menu_x, context_menu_y;
@@ -41,7 +41,7 @@ static uint32_t theme_bg = DEFAULT_BG_COLOR;
 static int theme_wallpaper = WALLPAPER_GRADIENT;
 
 static int refresh_theme(void) {
-    wm_settings_request_t settings;
+    window_manager_settings_request_t settings;
     if (window_manager_query_settings(&settings) != 0) {
         return 0;
     }
@@ -56,7 +56,7 @@ static int refresh_theme(void) {
 static void launch_with(const char *label, const char *program, const char *arg) {
     long rc = sys_spawn(program, arg ? arg : "");
     if (rc < 0) {
-        window_manager_notify(WM_NOTIFY_ERROR, label, spawn_error_message(rc));
+        window_manager_notify(WINDOW_MANAGER_NOTIFY_ERROR, label, spawn_error_message(rc));
     }
     child_track(rc);
 }
@@ -75,15 +75,15 @@ typedef struct {
 } icon_def_t;
 
 static const icon_def_t ICONS[] = {
-    {"Terminal", PATH_BIN_DIR "gui_terminal", "", ICON_TERMINAL},
-    {"Editor",   PATH_BIN_DIR "text_editor",  "", ICON_EDITOR},
-    {"Files",    PATH_BIN_DIR "file_manager", "", ICON_FILES},
-    {"Settings", PATH_BIN_DIR "settings",     "", ICON_SETTINGS},
-    {"Clock",    PATH_BIN_DIR "gui_clock",    "", ICON_CLOCK},
-    {"Paint",    PATH_BIN_DIR "gui_paint",    "", ICON_PAINT},
-    {"Tasks",    PATH_BIN_DIR "task_manager", "", ICON_TASKS},
-    {"README",   PATH_BIN_DIR "text_editor",  PATH_HOME_DIR "readme.txt", ICON_EDITOR},
-    {"Browser",  PATH_BIN_DIR "netsurf",      "", ICON_BROWSER},
+    {"Terminal", PATH_BIN_DIRECTORY "gui_terminal", "", ICON_TERMINAL},
+    {"Editor",   PATH_BIN_DIRECTORY "text_editor",  "", ICON_EDITOR},
+    {"Files",    PATH_BIN_DIRECTORY "file_manager", "", ICON_FILES},
+    {"Settings", PATH_BIN_DIRECTORY "settings",     "", ICON_SETTINGS},
+    {"Clock",    PATH_BIN_DIRECTORY "gui_clock",    "", ICON_CLOCK},
+    {"Paint",    PATH_BIN_DIRECTORY "gui_paint",    "", ICON_PAINT},
+    {"Tasks",    PATH_BIN_DIRECTORY "task_manager", "", ICON_TASKS},
+    {"README",   PATH_BIN_DIRECTORY "text_editor",  PATH_HOME_DIRECTORY "readme.txt", ICON_EDITOR},
+    {"Browser",  PATH_BIN_DIRECTORY "netsurf",      "", ICON_BROWSER},
 };
 #define ICON_COUNT ((int)(sizeof(ICONS) / sizeof(ICONS[0])))
 
@@ -95,11 +95,11 @@ static const uint8_t *icon_image[ICON_COUNT];
 
 static int icon_path_for(int i, char *out) {
     int n = 0;
-    for (const char *s = PATH_ICONS_DIR; *s; s++) {
+    for (const char *s = PATH_ICONS_DIRECTORY; *s; s++) {
         out[n++] = *s;
     }
     for (const char *s = ICONS[i].label; *s; s++) {
-        if (n >= PATH_MAX_LEN - 5) {
+        if (n >= PATH_MAX_LENGTH - 5) {
             return -1;
         }
         out[n++] = *s;
@@ -119,7 +119,7 @@ static void load_icons(void) {
     }
     for (int i = 0; i < ICON_COUNT; i++) {
         icon_image[i] = ICONS[i].image;
-        char path[PATH_MAX_LEN];
+        char path[PATH_MAX_LENGTH];
         if (icon_path_for(i, path) != 0) {
             continue;
         }
@@ -177,9 +177,9 @@ static void redraw(window_manager_window_t *self, int pressed_icon) {
         redraw_icon(self, i, i == pressed_icon);
     }
     if (context_menu_open) {
-        graphics_draw_menu(&self->graphics, context_menu_x, context_menu_y, CTX_MENU_ITEM_W, CTX_MENU_ITEM_H,
-                      CTX_MENU_ITEMS, CTX_MENU_COUNT, -1,
-                      CTX_MENU_BG, CTX_MENU_HOVER, CTX_MENU_BORDER, CTX_MENU_TEXT);
+        graphics_draw_menu(&self->graphics, context_menu_x, context_menu_y, CONTEXT_MENU_ITEM_W, CONTEXT_MENU_ITEM_H,
+                      CONTEXT_MENU_ITEMS, CONTEXT_MENU_COUNT, -1,
+                      CONTEXT_MENU_BG, CONTEXT_MENU_HOVER, CONTEXT_MENU_BORDER, CONTEXT_MENU_TEXT);
     }
 }
 
@@ -188,8 +188,8 @@ int main(void) {
 
     window_manager_window_t win;
     if (window_manager_connect_desktop(&win) != 0) {
-        const char msg[] = "desktop_icons: no window from the compositor - exiting so init restarts the session\n";
-        sys_write(1, msg, sizeof(msg) - 1);
+        const char message[] = "desktop_icons: no window from the compositor - exiting so init restarts the session\n";
+        sys_write(1, message, sizeof(message) - 1);
         sys_exit(1);
     }
 
@@ -207,26 +207,26 @@ int main(void) {
 
     for (;;) {
         child_reap();
-        wm_event_t ev;
+        window_manager_event_t ev;
         int changed = 0;
         while (window_manager_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+            if (ev.type == WINDOW_MANAGER_EVENT_EXPOSE || ev.type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {
                 changed = 1;
-            } else if (ev.type == WM_EVENT_DROP) {
-                char dropped[WM_DRAG_PAYLOAD_MAX];
+            } else if (ev.type == WINDOW_MANAGER_EVENT_DROP) {
+                char dropped[WINDOW_MANAGER_DRAG_PAYLOAD_MAX];
                 if (window_manager_drag_payload(dropped, sizeof(dropped)) == 0 && dropped[0]) {
-                    long rc = sys_spawn(PATH_BIN_DIR "text_editor", dropped);
+                    long rc = sys_spawn(PATH_BIN_DIRECTORY "text_editor", dropped);
                     if (rc < 0) {
-                        window_manager_notify(WM_NOTIFY_ERROR, dropped, spawn_error_message(rc));
+                        window_manager_notify(WINDOW_MANAGER_NOTIFY_ERROR, dropped, spawn_error_message(rc));
                     }
                     child_track(rc);
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
                 context_menu_open = 1;
                 context_menu_x = ev.x;
                 context_menu_y = ev.y;
-                int32_t max_x = (int32_t)win.width - CTX_MENU_ITEM_W;
-                int32_t max_y = (int32_t)win.height - CTX_MENU_ITEM_H * CTX_MENU_COUNT;
+                int32_t max_x = (int32_t)win.width - CONTEXT_MENU_ITEM_W;
+                int32_t max_y = (int32_t)win.height - CONTEXT_MENU_ITEM_H * CONTEXT_MENU_COUNT;
                 if (context_menu_x > max_x) {
                     context_menu_x = max_x;
                 }
@@ -234,15 +234,15 @@ int main(void) {
                     context_menu_y = max_y;
                 }
                 changed = 1;
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && context_menu_open) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && context_menu_open) {
                 int idx = graphics_menu_hit_test(ev.x, ev.y, context_menu_x, context_menu_y,
-                                             CTX_MENU_ITEM_W, CTX_MENU_ITEM_H, CTX_MENU_COUNT);
+                                             CONTEXT_MENU_ITEM_W, CONTEXT_MENU_ITEM_H, CONTEXT_MENU_COUNT);
                 context_menu_open = 0;
                 if (idx >= 0) {
-                    launch(CTX_MENU_ITEMS[idx], CTX_MENU_PROGRAMS[idx]);
+                    launch(CONTEXT_MENU_ITEMS[idx], CONTEXT_MENU_PROGRAMS[idx]);
                 }
                 changed = 1;
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 for (int i = 0; i < ICON_COUNT; i++) {
                     if (!point_in_icon(i, ev.x, ev.y)) {
                         continue;

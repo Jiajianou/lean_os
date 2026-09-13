@@ -110,9 +110,9 @@ static int last_sent(sent_t *out) {
     if (n == 0) {
         return 0;
     }
-    uint32_t len = 0;
-    const uint8_t *frame = fake_net_tx_frame(n - 1, &len);
-    if (!frame || len < 14 + 20 + 20) {
+    uint32_t length = 0;
+    const uint8_t *frame = fake_net_tx_frame(n - 1, &length);
+    if (!frame || length < 14 + 20 + 20) {
         return 0;
     }
     const uint8_t *ip = frame + 14;
@@ -134,9 +134,9 @@ static int last_sent(sent_t *out) {
 static int sent_count_with(uint8_t flags) {
     int n = 0;
     for (int i = 0; i < fake_net_tx_count(); i++) {
-        uint32_t len = 0;
-        const uint8_t *frame = fake_net_tx_frame(i, &len);
-        if (!frame || len < 14 + 40) { continue; }
+        uint32_t length = 0;
+        const uint8_t *frame = fake_net_tx_frame(i, &length);
+        if (!frame || length < 14 + 40) { continue; }
         const uint8_t *ip = frame + 14;
         const uint8_t *tcp = ip + (ip[0] & 0x0F) * 4;
         if ((tcp[13] & flags) == flags) { n++; }
@@ -418,11 +418,11 @@ TEST(tcp_state, a_FIN_behind_data_that_did_not_fit_is_not_taken) {
     uint8_t chunk[100];
     memset(chunk, 'x', sizeof(chunk));
     uint32_t seq = pseq;
-    while (tcp_bytes_available(c) + 100 <= TCP_RECV_BUF - 2) {
+    while (tcp_bytes_available(c) + 100 <= TCP_RECEIVE_BUFFER - 2) {
         from_peer(OUR_PORT, PEER_PORT, seq, oseq, F_ACK, chunk, 100);
         seq += 100;
     }
-    int room = TCP_RECV_BUF - tcp_bytes_available(c);
+    int room = TCP_RECEIVE_BUFFER - tcp_bytes_available(c);
     REQUIRE(room > 0 && room < 100);
 
     from_peer(OUR_PORT, PEER_PORT, seq, oseq, F_ACK | F_FIN, chunk, 100);

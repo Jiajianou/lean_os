@@ -22,12 +22,12 @@ static inline void net_write_be32(uint8_t *p, uint32_t v) {
     p[3] = (uint8_t)v;
 }
 
-static inline uint32_t net_sum16(uint32_t sum, const uint8_t *data, uint16_t len) {
-    for (uint16_t i = 0; i + 1 < len; i += 2) {
+static inline uint32_t net_sum16(uint32_t sum, const uint8_t *data, uint16_t length) {
+    for (uint16_t i = 0; i + 1 < length; i += 2) {
         sum += (uint32_t)((data[i] << 8) | data[i + 1]);
     }
-    if (len & 1) {
-        sum += (uint32_t)data[len - 1] << 8;
+    if (length & 1) {
+        sum += (uint32_t)data[length - 1] << 8;
     }
     return sum;
 }
@@ -39,6 +39,6 @@ static inline uint16_t net_fold16(uint32_t sum) {
     return (uint16_t)~sum;
 }
 
-static inline uint16_t net_checksum16(const uint8_t *data, uint16_t len) {
-    return net_fold16(net_sum16(0, data, len));
+static inline uint16_t net_checksum16(const uint8_t *data, uint16_t length) {
+    return net_fold16(net_sum16(0, data, length));
 }

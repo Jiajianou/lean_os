@@ -7,7 +7,7 @@
 #define MNT_LINE 512
 
 static struct mntent shared;
-static char shared_buf[MNT_LINE];
+static char shared_buffer[MNT_LINE];
 
 FILE *setmntent(const char *path, const char *mode) {
     if (!path || !mode) {
@@ -47,13 +47,13 @@ static int split(char *line, char **fields, int max) {
     return n;
 }
 
-struct mntent *getmntent_r(FILE *f, struct mntent *out, char *buf, int buflen) {
-    if (!f || !out || !buf || buflen <= 0) {
+struct mntent *getmntent_r(FILE *f, struct mntent *out, char *buffer, int buflen) {
+    if (!f || !out || !buffer || buflen <= 0) {
         return 0;
     }
-    while (fgets(buf, buflen, f)) {
+    while (fgets(buffer, buflen, f)) {
         char *fields[6];
-        if (split(buf, fields, 6) != 6) {
+        if (split(buffer, fields, 6) != 6) {
             continue;
         }
         out->mnt_fsname = fields[0];
@@ -68,7 +68,7 @@ struct mntent *getmntent_r(FILE *f, struct mntent *out, char *buf, int buflen) {
 }
 
 struct mntent *getmntent(FILE *f) {
-    return getmntent_r(f, &shared, shared_buf, (int)sizeof(shared_buf));
+    return getmntent_r(f, &shared, shared_buffer, (int)sizeof(shared_buffer));
 }
 
 char *hasmntopt(const struct mntent *me, const char *opt) {

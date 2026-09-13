@@ -34,7 +34,7 @@ static void panic_draw_text(uint32_t x, uint32_t y, const char *s, uint32_t rgb)
     }
 }
 
-void panic_render(const char *msg) {
+void panic_render(const char *message) {
     uint32_t w = framebuffer_width();
     uint32_t h = framebuffer_height();
     if (w == 0 || h == 0) {
@@ -51,18 +51,18 @@ void panic_render(const char *msg) {
     uint32_t x = 16, y = band_y + FONT_HEIGHT;
     panic_draw_text(x, y, "*** KERNEL PANIC ***", 0x00FFFFFFu);
     y += FONT_HEIGHT * 2;
-    panic_draw_text(x, y, msg, 0x00FFE0E0u);
+    panic_draw_text(x, y, message, 0x00FFE0E0u);
     y += FONT_HEIGHT * 2;
     panic_draw_text(x, y, "The machine has stopped. Nothing was written to disk after this.",
                      0x00FFC0C0u);
 }
 
-void panic(const char *msg) {
+void panic(const char *message) {
     kernel_log_enter_panic();
     kernel_log_puts("\n*** KERNEL PANIC: ");
-    kernel_log_puts(msg);
+    kernel_log_puts(message);
     kernel_log_puts(" ***\n");
-    panic_render(msg);
+    panic_render(message);
     if (smp_is_initialized() && __atomic_exchange_n(&panic_broadcast_sent, 1, __ATOMIC_ACQ_REL) == 0) {
         smp_halt_other_cpus();
     }

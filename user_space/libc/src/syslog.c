@@ -33,29 +33,29 @@ void vsyslog(int priority, const char *format, va_list ap) {
     if (!(log_mask & LOG_MASK(LOG_PRI(priority)))) {
         return;
     }
-    char buf[512];
+    char buffer[512];
     int n = 0;
     if (log_ident) {
-        n = snprintf(buf, sizeof(buf), "%s", log_ident);
+        n = snprintf(buffer, sizeof(buffer), "%s", log_ident);
         if (log_option & LOG_PID) {
-            n += snprintf(buf + n, sizeof(buf) - (size_t)n, "[%d]", (int)sys_getpid());
+            n += snprintf(buffer + n, sizeof(buffer) - (size_t)n, "[%d]", (int)sys_getpid());
         }
-        n += snprintf(buf + n, sizeof(buf) - (size_t)n, ": ");
+        n += snprintf(buffer + n, sizeof(buffer) - (size_t)n, ": ");
     }
-    if (n < 0 || (size_t)n >= sizeof(buf)) {
+    if (n < 0 || (size_t)n >= sizeof(buffer)) {
         return;
     }
-    int m = vsnprintf(buf + n, sizeof(buf) - (size_t)n, format, ap);
+    int m = vsnprintf(buffer + n, sizeof(buffer) - (size_t)n, format, ap);
     if (m < 0) {
         return;
     }
-    size_t len = strlen(buf);
-    if (len + 1 < sizeof(buf) && (len == 0 || buf[len - 1] != '\n')) {
-        buf[len++] = '\n';
-        buf[len] = '\0';
+    size_t length = strlen(buffer);
+    if (length + 1 < sizeof(buffer) && (length == 0 || buffer[length - 1] != '\n')) {
+        buffer[length++] = '\n';
+        buffer[length] = '\0';
     }
 
-    fputs(buf, stderr);
+    fputs(buffer, stderr);
 }
 
 void syslog(int priority, const char *format, ...) {

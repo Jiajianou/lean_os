@@ -58,39 +58,39 @@ in_addr_t inet_addr(const char *s) {
     return a.s_addr;
 }
 
-char *inet_ntoa(struct in_addr addr) {
-    static char buf[INET_ADDRSTRLEN];
-    uint32_t h = ntohl(addr.s_addr);
-    snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+char *inet_ntoa(struct in_addr address) {
+    static char buffer[INET_ADDRSTRLEN];
+    uint32_t h = ntohl(address.s_addr);
+    snprintf(buffer, sizeof(buffer), "%u.%u.%u.%u",
              (unsigned)(h >> 24) & 0xFF, (unsigned)(h >> 16) & 0xFF,
              (unsigned)(h >> 8) & 0xFF, (unsigned)h & 0xFF);
-    return buf;
+    return buffer;
 }
 
-const char *inet_ntop(int af, const void *src, char *dst, socklen_t size) {
-    if (af != AF_INET || !src || !dst) {
+const char *inet_ntop(int af, const void *source, char *destination, socklen_t size) {
+    if (af != AF_INET || !source || !destination) {
         errno = EAFNOSUPPORT;
         return (const char *)0;
     }
-    uint32_t h = ntohl(((const struct in_addr *)src)->s_addr);
-    char buf[INET_ADDRSTRLEN];
-    int n = snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+    uint32_t h = ntohl(((const struct in_addr *)source)->s_addr);
+    char buffer[INET_ADDRSTRLEN];
+    int n = snprintf(buffer, sizeof(buffer), "%u.%u.%u.%u",
                      (unsigned)(h >> 24) & 0xFF, (unsigned)(h >> 16) & 0xFF,
                      (unsigned)(h >> 8) & 0xFF, (unsigned)h & 0xFF);
     if (n < 0 || (socklen_t)n >= size) {
         errno = ENOSPC;
         return (const char *)0;
     }
-    memcpy(dst, buf, (size_t)n + 1);
-    return dst;
+    memcpy(destination, buffer, (size_t)n + 1);
+    return destination;
 }
 
-int inet_pton(int af, const char *src, void *dst) {
+int inet_pton(int af, const char *source, void *destination) {
     if (af != AF_INET) {
         errno = EAFNOSUPPORT;
         return -1;
     }
-    return inet_aton(src, (struct in_addr *)dst) ? 1 : 0;
+    return inet_aton(source, (struct in_addr *)destination) ? 1 : 0;
 }
 
 static int service_port(const char *name, int *out) {
@@ -202,14 +202,14 @@ const char *gai_strerror(int errcode) {
     }
 }
 
-int getnameinfo(const struct sockaddr *addr, socklen_t addrlen,
+int getnameinfo(const struct sockaddr *address, socklen_t addrlen,
                 char *host, socklen_t hostlen,
                 char *serv, socklen_t servlen, int flags) {
     (void)flags;
-    if (!addr || addrlen < (socklen_t)sizeof(struct sockaddr_in)) {
+    if (!address || addrlen < (socklen_t)sizeof(struct sockaddr_in)) {
         return EAI_FAMILY;
     }
-    const struct sockaddr_in *in = (const struct sockaddr_in *)(const void *)addr;
+    const struct sockaddr_in *in = (const struct sockaddr_in *)(const void *)address;
     if (host && hostlen) {
         if (!inet_ntop(AF_INET, &in->sin_addr, host, hostlen)) {
             return EAI_MEMORY;
@@ -223,8 +223,8 @@ int getnameinfo(const struct sockaddr *addr, socklen_t addrlen,
 
 struct hostent *gethostbyname(const char *name) {
     static struct hostent he;
-    static struct in_addr addr;
-    static char *addr_list[2];
+    static struct in_addr address;
+    static char *address_list[2];
     static char *aliases[1];
     static char namebuf[256];
 
@@ -241,15 +241,15 @@ struct hostent *gethostbyname(const char *name) {
         return (struct hostent *)0;
     }
     snprintf(namebuf, sizeof(namebuf), "%s", name);
-    addr.s_addr = htonl(ip);
-    addr_list[0] = (char *)&addr;
-    addr_list[1] = (char *)0;
+    address.s_addr = htonl(ip);
+    address_list[0] = (char *)&address;
+    address_list[1] = (char *)0;
     aliases[0] = (char *)0;
     he.h_name = namebuf;
     he.h_aliases = aliases;
     he.h_addrtype = AF_INET;
     he.h_length = (int)sizeof(struct in_addr);
-    he.h_addr_list = addr_list;
+    he.h_addr_list = address_list;
     return &he;
 }
 
@@ -267,8 +267,8 @@ char *if_indextoname(unsigned int index, char *name) {
     return name;
 }
 
-const char *hstrerror(int err) {
-    switch (err) {
+const char *hstrerror(int error) {
+    switch (error) {
     case 0:              return "Resolver Error 0 (no error)";
     case HOST_NOT_FOUND: return "Unknown host";
     case TRY_AGAIN:      return "Host name lookup failure";

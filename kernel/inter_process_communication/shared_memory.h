@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SHM_MAX_SEGMENT_BYTES (256ULL * 1024 * 1024)
+#define SHARED_MEMORY_MAX_SEGMENT_BYTES (256ULL * 1024 * 1024)
 
 int shared_memory_create(size_t size, int owner_task_id);
 

@@ -13,9 +13,9 @@
 #define PIT_COMMAND       0x43
 #define PIT_BASE_FREQ     1193182u
 
-#define PIT_CMD_CHANNEL0     0x00
-#define PIT_CMD_LOHI         0x30
-#define PIT_CMD_MODE3_SQUARE 0x06
+#define PIT_COMMAND_CHANNEL0     0x00
+#define PIT_COMMAND_LOHI         0x30
+#define PIT_COMMAND_MODE3_SQUARE 0x06
 #define PIT_IRQ 0
 
 static volatile uint64_t ticks;
@@ -35,7 +35,7 @@ static void pit_irq(isr_regs_t *regs) {
 void pit_init(void) {
     uint16_t divisor = (uint16_t)(PIT_BASE_FREQ / PIT_HZ);
 
-    outb(PIT_COMMAND, PIT_CMD_CHANNEL0 | PIT_CMD_LOHI | PIT_CMD_MODE3_SQUARE);
+    outb(PIT_COMMAND, PIT_COMMAND_CHANNEL0 | PIT_COMMAND_LOHI | PIT_COMMAND_MODE3_SQUARE);
     outb(PIT_CHANNEL0_DATA, divisor & 0xFF);
     outb(PIT_CHANNEL0_DATA, (divisor >> 8) & 0xFF);
 

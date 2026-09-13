@@ -2,11 +2,11 @@
 #include <errno.h>
 #include <stdlib.h>
 
-void *memmove(void *dst, const void *src, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
+void *memmove(void *destination, const void *source, size_t n) {
+    unsigned char *d = (unsigned char *)destination;
+    const unsigned char *s = (const unsigned char *)source;
     if (d == s || n == 0) {
-        return dst;
+        return destination;
     }
     if (d < s) {
         for (size_t i = 0; i < n; i++) {
@@ -17,7 +17,7 @@ void *memmove(void *dst, const void *src, size_t n) {
             d[i - 1] = s[i - 1];
         }
     }
-    return dst;
+    return destination;
 }
 
 int memcmp(const void *a, const void *b, size_t n) {
@@ -54,44 +54,44 @@ int strncmp(const char *a, const char *b, size_t n) {
     return 0;
 }
 
-char *strcpy(char *dst, const char *src) {
-    char *out = dst;
-    while ((*dst++ = *src++)) {
+char *strcpy(char *destination, const char *source) {
+    char *out = destination;
+    while ((*destination++ = *source++)) {
     }
     return out;
 }
 
-char *strncpy(char *dst, const char *src, size_t n) {
+char *strncpy(char *destination, const char *source, size_t n) {
     size_t i = 0;
-    for (; i < n && src[i]; i++) {
-        dst[i] = src[i];
+    for (; i < n && source[i]; i++) {
+        destination[i] = source[i];
     }
     for (; i < n; i++) {
-        dst[i] = '\0';
+        destination[i] = '\0';
     }
-    return dst;
+    return destination;
 }
 
-char *strcat(char *dst, const char *src) {
-    char *out = dst;
-    while (*dst) {
-        dst++;
+char *strcat(char *destination, const char *source) {
+    char *out = destination;
+    while (*destination) {
+        destination++;
     }
-    while ((*dst++ = *src++)) {
+    while ((*destination++ = *source++)) {
     }
     return out;
 }
 
-char *strncat(char *dst, const char *src, size_t n) {
-    char *out = dst;
-    while (*dst) {
-        dst++;
+char *strncat(char *destination, const char *source, size_t n) {
+    char *out = destination;
+    while (*destination) {
+        destination++;
     }
     size_t i = 0;
-    for (; i < n && src[i]; i++) {
-        dst[i] = src[i];
+    for (; i < n && source[i]; i++) {
+        destination[i] = source[i];
     }
-    dst[i] = '\0';
+    destination[i] = '\0';
     return out;
 }
 
@@ -175,21 +175,21 @@ char *strerror(int errnum) {
     return (char *)"error";
 }
 
-int strerror_r(int errnum, char *buf, size_t buflen) {
-    if (!buf || buflen == 0) {
+int strerror_r(int errnum, char *buffer, size_t buflen) {
+    if (!buffer || buflen == 0) {
         return ERANGE;
     }
     const char *name = strerror(errnum);
-    size_t len = strlen(name);
-    if (len + 1 > buflen) {
+    size_t length = strlen(name);
+    if (length + 1 > buflen) {
         for (size_t i = 0; i + 1 < buflen; i++) {
-            buf[i] = name[i];
+            buffer[i] = name[i];
         }
-        buf[buflen - 1] = '\0';
+        buffer[buflen - 1] = '\0';
         return ERANGE;
     }
-    for (size_t i = 0; i <= len; i++) {
-        buf[i] = name[i];
+    for (size_t i = 0; i <= length; i++) {
+        buffer[i] = name[i];
     }
     return 0;
 }
@@ -222,36 +222,36 @@ char *strndup(const char *s, size_t n) {
     if (!s) {
         return (char *)0;
     }
-    size_t len = 0;
-    while (len < n && s[len]) {
-        len++;
+    size_t length = 0;
+    while (length < n && s[length]) {
+        length++;
     }
-    char *p = (char *)malloc(len + 1);
+    char *p = (char *)malloc(length + 1);
     if (!p) {
         return (char *)0;
     }
-    memcpy(p, s, len);
-    p[len] = '\0';
+    memcpy(p, s, length);
+    p[length] = '\0';
     return p;
 }
 
-char *stpcpy(char *dst, const char *src) {
-    while ((*dst = *src) != '\0') {
-        dst++;
-        src++;
+char *stpcpy(char *destination, const char *source) {
+    while ((*destination = *source) != '\0') {
+        destination++;
+        source++;
     }
-    return dst;
+    return destination;
 }
 
-char *stpncpy(char *dst, const char *src, size_t n) {
+char *stpncpy(char *destination, const char *source, size_t n) {
     size_t i = 0;
-    while (i < n && src[i]) {
-        dst[i] = src[i];
+    while (i < n && source[i]) {
+        destination[i] = source[i];
         i++;
     }
-    char *end = dst + i;
+    char *end = destination + i;
     while (i < n) {
-        dst[i++] = '\0';
+        destination[i++] = '\0';
     }
     return end;
 }
@@ -274,9 +274,9 @@ void *memmem(const void *haystack, size_t hlen, const void *needle,
     return (void *)0;
 }
 
-void *memccpy(void *dst, const void *src, int c, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
+void *memccpy(void *destination, const void *source, int c, size_t n) {
+    unsigned char *d = (unsigned char *)destination;
+    const unsigned char *s = (const unsigned char *)source;
     unsigned char stop = (unsigned char)c;
     for (size_t i = 0; i < n; i++) {
         d[i] = s[i];
@@ -331,14 +331,14 @@ int strcoll(const char *a, const char *b) {
     return strcmp(a, b);
 }
 
-size_t strxfrm(char *dst, const char *src, size_t n) {
-    size_t len = strlen(src);
+size_t strxfrm(char *destination, const char *source, size_t n) {
+    size_t length = strlen(source);
     if (n > 0) {
-        size_t copy = len < n - 1 ? len : n - 1;
+        size_t copy = length < n - 1 ? length : n - 1;
         for (size_t i = 0; i < copy; i++) {
-            dst[i] = src[i];
+            destination[i] = source[i];
         }
-        dst[copy] = '\0';
+        destination[copy] = '\0';
     }
-    return len;
+    return length;
 }

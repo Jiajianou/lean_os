@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 typedef struct __attribute__((packed)) {
-    uint64_t param;
+    uint64_t parameter;
     uint32_t status;
     uint32_t control;
 } xhci_trb_t;
@@ -22,6 +22,6 @@ typedef struct {
     uint8_t cycle;
 } xhci_ring_t;
 
-void xhci_ring_reset(xhci_ring_t *r, void *buf, uint64_t phys);
+void xhci_ring_reset(xhci_ring_t *r, void *buffer, uint64_t phys);
 
-void xhci_ring_push(xhci_ring_t *r, uint64_t param, uint32_t status, uint32_t control);
+void xhci_ring_push(xhci_ring_t *r, uint64_t parameter, uint32_t status, uint32_t control);

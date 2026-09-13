@@ -2,17 +2,17 @@
 
 #include <stdint.h>
 
-#define VMM_FLAG_WRITABLE (1ULL << 1)
-#define VMM_FLAG_USER     (1ULL << 2)
-#define VMM_FLAG_EXEC     (1ULL << 3)
+#define VIRTUAL_MEMORY_FLAG_WRITABLE (1ULL << 1)
+#define VIRTUAL_MEMORY_FLAG_USER     (1ULL << 2)
+#define VIRTUAL_MEMORY_FLAG_EXEC     (1ULL << 3)
 
-#define VMM_FLAG_NOCACHE  (1ULL << 4)
+#define VIRTUAL_MEMORY_FLAG_NOCACHE  (1ULL << 4)
 
 #define KERNEL_HEAP_VIRT_BASE 0x0000004000000000ULL
 
 void virtual_memory_init(const uint32_t *e820_map);
 
-int virtual_memory_identity_covers(uint64_t phys, uint64_t len);
+int virtual_memory_identity_covers(uint64_t phys, uint64_t length);
 
 void virtual_memory_enable_nx_this_cpu(void);
 int virtual_memory_nx_enabled(void);
@@ -24,7 +24,7 @@ void virtual_memory_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 
 #define KERNEL_MMIO_VIRT_BASE 0x0000006000000000ULL
 #define KERNEL_MMIO_VIRT_SIZE 0x0000002000000000ULL
-void *virtual_memory_map_mmio(uint64_t phys, uint64_t len);
+void *virtual_memory_map_mmio(uint64_t phys, uint64_t length);
 void virtual_memory_unmap_page(uint64_t virt);
 uint64_t virtual_memory_kernel_pml4_phys(void);
 
@@ -37,7 +37,7 @@ int virtual_memory_unmap_page_in(uint64_t pml4_phys, uint64_t virt);
 
 uint64_t virtual_memory_unmap_page_take(uint64_t pml4_phys, uint64_t virt);
 
-int virtual_memory_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_write);
+int virtual_memory_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t length, int need_write);
 
 typedef struct {
     uint64_t lo, hi;

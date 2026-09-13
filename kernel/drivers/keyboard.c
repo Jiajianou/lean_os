@@ -62,13 +62,13 @@ static volatile int extended_prefix;
 static int current_modifiers(void) {
     int mods = 0;
     if (ctrl_held) {
-        mods |= KBD_MOD_CTRL;
+        mods |= KEYBOARD_MOD_CTRL;
     }
     if (alt_held) {
-        mods |= KBD_MOD_ALT;
+        mods |= KEYBOARD_MOD_ALT;
     }
     if (shift_held) {
-        mods |= KBD_MOD_SHIFT;
+        mods |= KEYBOARD_MOD_SHIFT;
     }
     return mods;
 }
@@ -81,8 +81,8 @@ static void buffer_push(char c) {
     buffer[buffer_head] = c;
     mods_buffer[buffer_head] = (uint8_t)current_modifiers();
     buffer_head = next;
-    scheduler_wake_all(SCHED_KEYBOARD_CHAN);
-    scheduler_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHEDULER_KEYBOARD_CHAN);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
 }
 
 static void keyboard_irq(isr_regs_t *regs) {
@@ -100,16 +100,16 @@ static void keyboard_irq(isr_regs_t *regs) {
         if (!ext_released) {
             switch (ext_code) {
                 case SCANCODE_EXT_UP:
-                    buffer_push((char)KBD_KEY_UP);
+                    buffer_push((char)KEYBOARD_KEY_UP);
                     break;
                 case SCANCODE_EXT_DOWN:
-                    buffer_push((char)KBD_KEY_DOWN);
+                    buffer_push((char)KEYBOARD_KEY_DOWN);
                     break;
                 case SCANCODE_EXT_LEFT:
-                    buffer_push((char)KBD_KEY_LEFT);
+                    buffer_push((char)KEYBOARD_KEY_LEFT);
                     break;
                 case SCANCODE_EXT_RIGHT:
-                    buffer_push((char)KBD_KEY_RIGHT);
+                    buffer_push((char)KEYBOARD_KEY_RIGHT);
                     break;
                 default:
                     break;
@@ -135,15 +135,15 @@ static void keyboard_irq(isr_regs_t *regs) {
     }
     if (!released) {
         if (code >= SCANCODE_F1 && code <= SCANCODE_F10) {
-            buffer_push((char)KBD_KEY_FN(1 + (code - SCANCODE_F1)));
+            buffer_push((char)KEYBOARD_KEY_FUNCTION(1 + (code - SCANCODE_F1)));
             return;
         }
         if (code == SCANCODE_F11) {
-            buffer_push((char)KBD_KEY_FN(11));
+            buffer_push((char)KEYBOARD_KEY_FUNCTION(11));
             return;
         }
         if (code == SCANCODE_F12) {
-            buffer_push((char)KBD_KEY_FN(12));
+            buffer_push((char)KEYBOARD_KEY_FUNCTION(12));
             return;
         }
     }
@@ -182,8 +182,8 @@ void keyboard_inject(char ch, int mods) {
     buffer[buffer_head] = ch;
     mods_buffer[buffer_head] = (uint8_t)mods;
     buffer_head = next;
-    scheduler_wake_all(SCHED_KEYBOARD_CHAN);
-    scheduler_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHEDULER_KEYBOARD_CHAN);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
 }
 
 int keyboard_peek(void) {

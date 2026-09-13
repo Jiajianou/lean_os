@@ -16,9 +16,9 @@ void graphics_fill_rect(graphics_context_t *context, int32_t x, int32_t y, int32
     int32_t x1 = x + w > context->width ? context->width : x + w;
     int32_t y1 = y + h > context->height ? context->height : y + h;
     for (int32_t row = y0; row < y1; row++) {
-        uint32_t *dst = context->pixels + row * context->width;
+        uint32_t *destination = context->pixels + row * context->width;
         for (int32_t col = x0; col < x1; col++) {
-            dst[col] = color;
+            destination[col] = color;
         }
     }
 }
@@ -41,20 +41,20 @@ void graphics_draw_line(graphics_context_t *context, int32_t x0, int32_t y0, int
     int32_t dy = y1 - y0;
     dy = dy < 0 ? dy : -dy;
     int32_t sy = y0 < y1 ? 1 : -1;
-    int32_t err = dx + dy;
+    int32_t error = dx + dy;
 
     for (;;) {
         graphics_put_pixel(context, x0, y0, color);
         if (x0 == x1 && y0 == y1) {
             break;
         }
-        int32_t e2 = 2 * err;
+        int32_t e2 = 2 * error;
         if (e2 >= dy) {
-            err += dy;
+            error += dy;
             x0 += sx;
         }
         if (e2 <= dx) {
-            err += dx;
+            error += dx;
             y0 += sy;
         }
     }
@@ -72,7 +72,7 @@ const ui_font_t *graphics_ui_font(void) {
     return ui_font_current;
 }
 
-#define GFX_REPLACEMENT 0xFFFDu
+#define GRAPHICS_REPLACEMENT 0xFFFDu
 
 static int32_t utf8_step(const char *p, uint32_t *out) {
     uint8_t b0 = (uint8_t)p[0];
@@ -92,13 +92,13 @@ static int32_t utf8_step(const char *p, uint32_t *out) {
         need = 3;
         wc = b0 & 0x07u;
     } else {
-        *out = GFX_REPLACEMENT;
+        *out = GRAPHICS_REPLACEMENT;
         return 1;
     }
     for (int32_t i = 1; i <= need; i++) {
         uint8_t b = (uint8_t)p[i];
         if ((b & 0xC0u) != 0x80u) {
-            *out = GFX_REPLACEMENT;
+            *out = GRAPHICS_REPLACEMENT;
             return 1;
         }
         wc = (wc << 6) | (b & 0x3Fu);
@@ -363,42 +363,42 @@ void graphics_draw_scrollbar(graphics_context_t *context, int32_t x, int32_t y, 
     graphics_fill_rect(context, x, thumb_y, w, thumb_h, thumb_color);
 }
 
-static const int32_t CORNER_INSET[GFX_CORNER_R] = {2, 1, 0, 0};
+static const int32_t CORNER_INSET[GRAPHICS_CORNER_R] = {2, 1, 0, 0};
 
 int32_t graphics_corner_inset(int32_t row_from_edge) {
-    if (row_from_edge < 0 || row_from_edge >= GFX_CORNER_R) {
+    if (row_from_edge < 0 || row_from_edge >= GRAPHICS_CORNER_R) {
         return 0;
     }
     return CORNER_INSET[row_from_edge];
 }
 
-static const int32_t CIRCLE_INSET[GFX_CIRCLE_D / 2] = {4, 3, 2, 1, 0, 0, 0};
+static const int32_t CIRCLE_INSET[GRAPHICS_CIRCLE_D / 2] = {4, 3, 2, 1, 0, 0, 0};
 
 int32_t graphics_circle_inset(int32_t row_from_edge) {
     if (row_from_edge < 0) {
-        return GFX_CIRCLE_D / 2;
+        return GRAPHICS_CIRCLE_D / 2;
     }
-    if (row_from_edge >= GFX_CIRCLE_D / 2) {
-        row_from_edge = GFX_CIRCLE_D - 1 - row_from_edge;
+    if (row_from_edge >= GRAPHICS_CIRCLE_D / 2) {
+        row_from_edge = GRAPHICS_CIRCLE_D - 1 - row_from_edge;
     }
-    if (row_from_edge < 0 || row_from_edge >= GFX_CIRCLE_D / 2) {
-        return GFX_CIRCLE_D / 2;
+    if (row_from_edge < 0 || row_from_edge >= GRAPHICS_CIRCLE_D / 2) {
+        return GRAPHICS_CIRCLE_D / 2;
     }
     return CIRCLE_INSET[row_from_edge];
 }
 
 static int32_t row_inset(int32_t row, int32_t h) {
-    if (row < GFX_CORNER_R) {
+    if (row < GRAPHICS_CORNER_R) {
         return graphics_corner_inset(row);
     }
-    if (row >= h - GFX_CORNER_R) {
+    if (row >= h - GRAPHICS_CORNER_R) {
         return graphics_corner_inset(h - 1 - row);
     }
     return 0;
 }
 
 void graphics_fill_rect_rounded(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
-    if (w < 2 * GFX_CORNER_R || h < 2 * GFX_CORNER_R) {
+    if (w < 2 * GRAPHICS_CORNER_R || h < 2 * GRAPHICS_CORNER_R) {
         graphics_fill_rect(context, x, y, w, h, color);
         return;
     }
@@ -421,7 +421,7 @@ static int32_t outline_run(int32_t row, int32_t w, int32_t h) {
 }
 
 void graphics_draw_rect_rounded(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
-    if (w < 2 * GFX_CORNER_R || h < 2 * GFX_CORNER_R) {
+    if (w < 2 * GRAPHICS_CORNER_R || h < 2 * GRAPHICS_CORNER_R) {
         graphics_draw_rect(context, x, y, w, h, color);
         return;
     }

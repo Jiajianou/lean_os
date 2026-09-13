@@ -5,8 +5,8 @@
 #include "power_mode.h"
 #include "syscall_wrappers.h"
 
-int reboot(int cmd) {
-    switch ((unsigned int)cmd) {
+int reboot(int command) {
+    switch ((unsigned int)command) {
     case RB_AUTOBOOT:
         sys_shutdown(POWER_REBOOT);
         break;

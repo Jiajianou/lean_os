@@ -12,25 +12,25 @@ typedef struct {
     uint16_t reserved;
 } os_sockaddr_t;
 
-#define OS_SOCK_DGRAM  0
-#define OS_SOCK_STREAM 1
+#define OS_SOCKET_DGRAM  0
+#define OS_SOCKET_STREAM 1
 
 #define OS_AF_INET 0
 #define OS_AF_UNIX 1
 
 typedef struct {
     uint64_t data;
-    uint32_t len;
+    uint32_t length;
     uint32_t nfds;
-    uint64_t fds;
+    uint64_t file_descriptors;
     uint32_t flags;
     uint32_t reserved;
-} os_msg_t;
+} os_message_t;
 
-#define OS_MSG_MAX_FDS 8
+#define OS_MESSAGE_MAX_FILE_DESCRIPTORS 8
 
-#define OS_MSG_TRUNC  1
-#define OS_MSG_CTRUNC 2
+#define OS_MESSAGE_TRUNC  1
+#define OS_MESSAGE_CTRUNC 2
 
 typedef struct {
     uint32_t ip;

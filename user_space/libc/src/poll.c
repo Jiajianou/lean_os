@@ -2,8 +2,8 @@
 
 #include "syscall_wrappers.h"
 
-int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
-    if (!fds && nfds > 0) {
+int poll(struct pollfd *file_descriptors, nfds_t nfds, int timeout) {
+    if (!file_descriptors && nfds > 0) {
         return -1;
     }
 
@@ -11,11 +11,11 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
     unsigned int map[64];
     unsigned int n = 0;
     for (unsigned int i = 0; i < nfds; i++) {
-        fds[i].revents = 0;
-        if (fds[i].fd < 0 || n >= 64) {
+        file_descriptors[i].revents = 0;
+        if (file_descriptors[i].fd < 0 || n >= 64) {
             continue;
         }
-        watch[n] = fds[i].fd;
+        watch[n] = file_descriptors[i].fd;
         map[n] = i;
         n++;
     }
@@ -28,7 +28,7 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
 
     int wants_write = 0;
     for (unsigned int i = 0; i < n; i++) {
-        if (fds[map[i]].events & POLLOUT) {
+        if (file_descriptors[map[i]].events & POLLOUT) {
             wants_write = 1;
             break;
         }
@@ -50,20 +50,20 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         int one = watch[i];
         long r = ((long)i == first) ? 0 : sys_waitfds(&one, 1, 0);
         if (r == 0) {
-            fds[map[i]].revents |= (short)(fds[map[i]].events & (POLLIN | POLLOUT));
-            if (fds[map[i]].revents == 0) {
+            file_descriptors[map[i]].revents |= (short)(file_descriptors[map[i]].events & (POLLIN | POLLOUT));
+            if (file_descriptors[map[i]].revents == 0) {
                 continue;
             }
             ready++;
             continue;
         }
         if (r == -1) {
-            fds[map[i]].revents = POLLNVAL;
+            file_descriptors[map[i]].revents = POLLNVAL;
             ready++;
             continue;
         }
-        if (fds[map[i]].events & POLLOUT) {
-            fds[map[i]].revents = POLLOUT;
+        if (file_descriptors[map[i]].events & POLLOUT) {
+            file_descriptors[map[i]].revents = POLLOUT;
             ready++;
         }
     }

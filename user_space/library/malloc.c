@@ -120,10 +120,10 @@ void *malloc(size_t size) {
 
     if (size >= MMAP_THRESHOLD) {
         size_t total = align_up(sizeof(block_header_t) + size, PAGE_SIZE);
-        long addr = sys_mmap(0, total, PROT_READ | PROT_WRITE,
+        long address = sys_mmap(0, total, PROT_READ | PROT_WRITE,
                               MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-        if (addr >= 0) {
-            block_header_t *m = (block_header_t *)(unsigned long)addr;
+        if (address >= 0) {
+            block_header_t *m = (block_header_t *)(unsigned long)address;
             m->size = total - sizeof(block_header_t);
             m->is_free = 0;
             m->next = (block_header_t *)0;

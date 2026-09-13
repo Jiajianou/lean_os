@@ -32,7 +32,7 @@ typedef EFI_STATUS(EFIAPI *EFI_LOCATE_PROTOCOL)(EFI_GUID *Protocol, void *Regist
 typedef EFI_STATUS(EFIAPI *EFI_EXIT_BOOT_SERVICES)(EFI_HANDLE ImageHandle, UINTN MapKey);
 
 typedef struct {
-    EFI_TABLE_HEADER Hdr;
+    EFI_TABLE_HEADER Header;
 
     void *RaiseTPL;
     void *RestoreTPL;
@@ -96,7 +96,7 @@ typedef struct {
 } EFI_CONFIGURATION_TABLE;
 
 typedef struct {
-    EFI_TABLE_HEADER Hdr;
+    EFI_TABLE_HEADER Header;
     CHAR16 *FirmwareVendor;
     UINT32 FirmwareRevision;
     EFI_HANDLE ConsoleInHandle;

@@ -65,8 +65,8 @@ int main(int argc, char **argv) {
     arena[0] = 'P';
     arena[2 * PAGE] = 'P';
 
-    int fds[2];
-    if (pipe(fds) != 0) {
+    int file_descriptors[2];
+    if (pipe(file_descriptors) != 0) {
         return 2;
     }
 
@@ -88,8 +88,8 @@ int main(int argc, char **argv) {
             heap_marker[0] = 'C';
             arena[0] = 'C';
             arena[2 * PAGE] = 'C';
-            const char msg[] = "child";
-            if (write(fds[1], msg, sizeof(msg)) != (long)sizeof(msg)) {
+            const char message[] = "child";
+            if (write(file_descriptors[1], message, sizeof(message)) != (long)sizeof(message)) {
                 rc = 7;
             }
         }
@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
 
     char got[16];
     memset(got, 0, sizeof(got));
-    if (read(fds[0], got, sizeof(got)) <= 0 || strcmp(got, "child") != 0) {
+    if (read(file_descriptors[0], got, sizeof(got)) <= 0 || strcmp(got, "child") != 0) {
         return 7;
     }
 
@@ -121,8 +121,8 @@ int main(int argc, char **argv) {
         return 5;
     }
 
-    close(fds[0]);
-    close(fds[1]);
+    close(file_descriptors[0]);
+    close(file_descriptors[1]);
     munmap((void *)arena, 4 * PAGE);
 
     for (int round = 0; round < 100; round++) {

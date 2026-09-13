@@ -29,15 +29,15 @@ int udp_send_from(uint32_t source_ip, uint32_t destination_ip, uint16_t destinat
         return -1;
     }
 
-    static uint8_t datagram[UDP_HEADER_LEN + UDP_MAX_PAYLOAD];
-    uint16_t udp_length = (uint16_t)(UDP_HEADER_LEN + payload_length);
+    static uint8_t datagram[UDP_HEADER_LENGTH + UDP_MAX_PAYLOAD];
+    uint16_t udp_length = (uint16_t)(UDP_HEADER_LENGTH + payload_length);
 
     net_write_be16(datagram + 0, source_port);
     net_write_be16(datagram + 2, destination_port);
     net_write_be16(datagram + 4, udp_length);
     datagram[6] = 0;
     datagram[7] = 0;
-    k_memcpy(datagram + UDP_HEADER_LEN, payload, payload_length);
+    k_memcpy(datagram + UDP_HEADER_LENGTH, payload, payload_length);
 
     uint32_t sum = pseudo_header_sum(source_ip, destination_ip, udp_length);
     uint16_t csum = net_fold16(net_sum16(sum, datagram, udp_length));
@@ -49,12 +49,12 @@ int udp_send_from(uint32_t source_ip, uint32_t destination_ip, uint16_t destinat
     return ip_send_from(source_ip, destination_ip, IP_PROTO_UDP, datagram, udp_length);
 }
 
-void udp_handle_packet(uint32_t source_ip, uint32_t destination_ip, const uint8_t *payload, uint16_t len) {
-    if (len < UDP_HEADER_LEN) {
+void udp_handle_packet(uint32_t source_ip, uint32_t destination_ip, const uint8_t *payload, uint16_t length) {
+    if (length < UDP_HEADER_LENGTH) {
         return;
     }
     uint16_t udp_length = net_read_be16(payload + 4);
-    if (udp_length < UDP_HEADER_LEN || udp_length > len) {
+    if (udp_length < UDP_HEADER_LENGTH || udp_length > length) {
         return;
     }
 
@@ -69,5 +69,5 @@ void udp_handle_packet(uint32_t source_ip, uint32_t destination_ip, const uint8_
     uint16_t source_port = net_read_be16(payload + 0);
     uint16_t destination_port = net_read_be16(payload + 2);
     socket_deliver(destination_port, source_ip, source_port,
-                   payload + UDP_HEADER_LEN, (uint16_t)(udp_length - UDP_HEADER_LEN));
+                   payload + UDP_HEADER_LENGTH, (uint16_t)(udp_length - UDP_HEADER_LENGTH));
 }

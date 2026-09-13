@@ -9,7 +9,7 @@
 
 #include "syscall_wrappers.h"
 
-#define DIR_PATH  "/tmp/m100bt"
+#define DIRECTORY_PATH  "/tmp/m100bt"
 #define FILE_PATH "/tmp/m100bt/positional"
 
 static int fail(int code) {
@@ -17,7 +17,7 @@ static int fail(int code) {
 }
 
 static int check_positional(void) {
-    (void)sys_mkdir(DIR_PATH);
+    (void)sys_mkdir(DIRECTORY_PATH);
     int fd = open(FILE_PATH, O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
         return fail(2);
@@ -30,12 +30,12 @@ static int check_positional(void) {
         return fail(4);
     }
 
-    char buf[8];
-    memset(buf, 0, sizeof(buf));
-    if (pread(fd, buf, 4, 4) != 4) {
+    char buffer[8];
+    memset(buffer, 0, sizeof(buffer));
+    if (pread(fd, buffer, 4, 4) != 4) {
         return fail(5);
     }
-    if (memcmp(buf, "4567", 4) != 0) {
+    if (memcmp(buffer, "4567", 4) != 0) {
         return fail(6);
     }
     if (lseek(fd, 0, SEEK_CUR) != 16) {
@@ -48,28 +48,28 @@ static int check_positional(void) {
     if (lseek(fd, 0, SEEK_CUR) != 16) {
         return fail(9);
     }
-    memset(buf, 0, sizeof(buf));
-    if (pread(fd, buf, 4, 8) != 4) {
+    memset(buffer, 0, sizeof(buffer));
+    if (pread(fd, buffer, 4, 8) != 4) {
         return fail(10);
     }
-    if (memcmp(buf, "89xy", 4) != 0) {
+    if (memcmp(buffer, "89xy", 4) != 0) {
         return fail(11);
     }
     if (lseek(fd, 2, SEEK_SET) != 2) {
         return fail(12);
     }
-    memset(buf, 0, sizeof(buf));
-    if (read(fd, buf, 3) != 3 || memcmp(buf, "234", 3) != 0) {
+    memset(buffer, 0, sizeof(buffer));
+    if (read(fd, buffer, 3) != 3 || memcmp(buffer, "234", 3) != 0) {
         return fail(13);
     }
     if (lseek(fd, 0, SEEK_CUR) != 5) {
         return fail(14);
     }
 
-    if (pread(fd, buf, 4, 1000) != 0) {
+    if (pread(fd, buffer, 4, 1000) != 0) {
         return fail(15);
     }
-    if (pread(fd, buf, 4, -1) != -1) {
+    if (pread(fd, buffer, 4, -1) != -1) {
         return fail(16);
     }
     close(fd);
@@ -79,7 +79,7 @@ static int check_positional(void) {
         return fail(17);
     }
     errno = 0;
-    if (pread(pipefd[0], buf, 4, 0) != -1 || errno != ESPIPE) {
+    if (pread(pipefd[0], buffer, 4, 0) != -1 || errno != ESPIPE) {
         return fail(18);
     }
     close(pipefd[0]);
@@ -97,7 +97,7 @@ static int check_scandir(void) {
                                         "charlie.dat", "bravo.dat"};
     for (int i = 0; i < 4; i++) {
         char path[128];
-        strcpy(path, DIR_PATH "/");
+        strcpy(path, DIRECTORY_PATH "/");
         strcat(path, names[i]);
         int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) {
@@ -105,14 +105,14 @@ static int check_scandir(void) {
         }
         close(fd);
     }
-    int fd = open(DIR_PATH "/ignore.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(DIRECTORY_PATH "/ignore.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
         return fail(21);
     }
     close(fd);
 
     struct dirent **list = NULL;
-    int n = scandir(DIR_PATH, &list, only_dat, alphasort);
+    int n = scandir(DIRECTORY_PATH, &list, only_dat, alphasort);
     if (n != 4) {
         return fail(22);
     }
@@ -129,7 +129,7 @@ static int check_scandir(void) {
     free(list);
 
     list = NULL;
-    if (scandir(DIR_PATH "/alpha.dat", &list, NULL, alphasort) != -1) {
+    if (scandir(DIRECTORY_PATH "/alpha.dat", &list, NULL, alphasort) != -1) {
         return fail(24);
     }
     if (scandir("/no/such/place", &list, NULL, alphasort) != -1) {

@@ -21,19 +21,19 @@ void kernel_log_put_dec_pad(uint32_t value, int width);
 void kernel_log_put_hex64(uint64_t value);
 
 typedef enum {
-    KLOG_DEBUG = 0,
-    KLOG_INFO,
-    KLOG_WARN,
-    KLOG_ERROR,
+    KERNEL_LOG_DEBUG = 0,
+    KERNEL_LOG_INFO,
+    KERNEL_LOG_WARN,
+    KERNEL_LOG_ERROR,
 } kernel_log_level_t;
 
 void kernel_log_log(kernel_log_level_t level, const char *s);
 void kernel_log_log_hex64(kernel_log_level_t level, uint64_t value);
 
-static inline void kernel_log_debug(const char *s) { kernel_log_log(KLOG_DEBUG, s); }
-static inline void kernel_log_info(const char *s) { kernel_log_log(KLOG_INFO, s); }
-static inline void kernel_log_warn(const char *s) { kernel_log_log(KLOG_WARN, s); }
-static inline void kernel_log_error(const char *s) { kernel_log_log(KLOG_ERROR, s); }
+static inline void kernel_log_debug(const char *s) { kernel_log_log(KERNEL_LOG_DEBUG, s); }
+static inline void kernel_log_info(const char *s) { kernel_log_log(KERNEL_LOG_INFO, s); }
+static inline void kernel_log_warn(const char *s) { kernel_log_log(KERNEL_LOG_WARN, s); }
+static inline void kernel_log_error(const char *s) { kernel_log_log(KERNEL_LOG_ERROR, s); }
 
 void kernel_log_use_console(void);
 

@@ -24,7 +24,7 @@ static inline void lapic_write(uint32_t reg, uint32_t value) {
 }
 
 void lapic_init(uint64_t phys_base) {
-    virtual_memory_map_page(phys_base, phys_base, VMM_FLAG_WRITABLE);
+    virtual_memory_map_page(phys_base, phys_base, VIRTUAL_MEMORY_FLAG_WRITABLE);
     lapic_mmio = (volatile uint32_t *)(uintptr_t)phys_base;
 
     kernel_log_puts("[lapic] mapped at 0x");

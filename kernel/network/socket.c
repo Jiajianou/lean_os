@@ -7,7 +7,7 @@
 typedef struct {
     uint32_t source_ip;
     uint16_t source_port;
-    uint16_t len;
+    uint16_t length;
     uint8_t data[SOCKET_MAX_DATAGRAM];
 } datagram_t;
 
@@ -156,17 +156,17 @@ int socket_bind(struct socket *s, uint16_t port) {
 }
 
 int socket_sendto(struct socket *s, uint32_t destination_ip, uint16_t destination_port,
-                  const uint8_t *data, uint16_t len) {
-    if (!s || !s->in_use || s->type != SOCK_DGRAM || len > UDP_MAX_PAYLOAD) {
+                  const uint8_t *data, uint16_t length) {
+    if (!s || !s->in_use || s->type != SOCK_DGRAM || length > UDP_MAX_PAYLOAD) {
         return -1;
     }
     if (!s->bound && bind_ephemeral(s) < 0) {
         return -1;
     }
-    if (udp_send(destination_ip, destination_port, s->port, data, len) < 0) {
+    if (udp_send(destination_ip, destination_port, s->port, data, length) < 0) {
         return -1;
     }
-    return len;
+    return length;
 }
 
 int socket_recvfrom(struct socket *s, uint8_t *out, uint16_t max,
@@ -175,7 +175,7 @@ int socket_recvfrom(struct socket *s, uint8_t *out, uint16_t max,
         return -1;
     }
     datagram_t *d = &s->queue[s->tail];
-    uint16_t n = d->len < max ? d->len : max;
+    uint16_t n = d->length < max ? d->length : max;
     k_memcpy(out, d->data, n);
     if (source_ip_out) {
         *source_ip_out = d->source_ip;
@@ -249,9 +249,9 @@ struct socket *socket_accept(struct socket *s) {
 }
 
 void socket_deliver(uint16_t destination_port, uint32_t source_ip, uint16_t source_port,
-                    const uint8_t *data, uint16_t len) {
+                    const uint8_t *data, uint16_t length) {
     if (raw_port && destination_port == raw_port && raw_handler) {
-        raw_handler(source_ip, source_port, data, len);
+        raw_handler(source_ip, source_port, data, length);
         return;
     }
     for (int i = 0; i < MAX_SOCKETS; i++) {
@@ -265,12 +265,12 @@ void socket_deliver(uint16_t destination_port, uint32_t source_ip, uint16_t sour
         datagram_t *d = &s->queue[s->head];
         d->source_ip = source_ip;
         d->source_port = source_port;
-        d->len = len < SOCKET_MAX_DATAGRAM ? len : SOCKET_MAX_DATAGRAM;
-        k_memcpy(d->data, data, d->len);
+        d->length = length < SOCKET_MAX_DATAGRAM ? length : SOCKET_MAX_DATAGRAM;
+        k_memcpy(d->data, data, d->length);
         s->head = (uint16_t)((s->head + 1) % SOCKET_QUEUE_DEPTH);
         s->count++;
         return;
     }
-    scheduler_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
 
 }

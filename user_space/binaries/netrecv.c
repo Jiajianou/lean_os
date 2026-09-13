@@ -24,27 +24,27 @@ int main(int argc, char **argv) {
     }
     unsigned long expect = strtoul(argv[3], NULL, 10);
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((unsigned short)atoi(argv[2]));
-    if (inet_pton(AF_INET, argv[1], &addr.sin_addr) != 1) {
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons((unsigned short)atoi(argv[2]));
+    if (inet_pton(AF_INET, argv[1], &address.sin_addr) != 1) {
         printf("netrecv: '%s' is not an IPv4 address\n", argv[1]);
         return 2;
     }
 
     long started = now_ms();
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0 || connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    if (fd < 0 || connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
         printf("netrecv: could not connect to %s:%s\n", argv[1], argv[2]);
         return 1;
     }
     long connected = now_ms();
 
-    static unsigned char buf[8192];
+    static unsigned char buffer[8192];
     unsigned long got = 0, wrong = 0, first_wrong = 0;
     for (;;) {
-        long n = read(fd, buf, sizeof(buf));
+        long n = read(fd, buffer, sizeof(buffer));
         if (n < 0) {
             printf("netrecv: read failed after %lu bytes\n", got);
             close(fd);
@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
             break;
         }
         for (long k = 0; k < n; k++) {
-            if (buf[k] != pattern(got + (unsigned long)k)) {
+            if (buffer[k] != pattern(got + (unsigned long)k)) {
                 if (!wrong) {
                     first_wrong = got + (unsigned long)k;
                 }

@@ -57,12 +57,12 @@
 #define TRB_SETUP_STAGE   2
 #define TRB_DATA_STAGE    3
 #define TRB_STATUS_STAGE  4
-#define TRB_CMD_ENABLE_SLOT     9
-#define TRB_CMD_ADDRESS_DEVICE  11
-#define TRB_CMD_CONFIGURE_EP    12
-#define TRB_CMD_EVALUATE_CTX    13
+#define TRB_COMMAND_ENABLE_SLOT     9
+#define TRB_COMMAND_ADDRESS_DEVICE  11
+#define TRB_COMMAND_CONFIGURE_EP    12
+#define TRB_COMMAND_EVALUATE_CONTEXT    13
 #define TRB_EVENT_TRANSFER      32
-#define TRB_EVENT_CMD_COMPLETE  33
+#define TRB_EVENT_COMMAND_COMPLETE  33
 #define TRB_EVENT_PORT_CHANGE   34
 
 #define CC_SUCCESS       1
@@ -73,12 +73,12 @@
 #define SPEED_HIGH  3
 #define SPEED_SUPER 4
 
-#define USB_REQ_GET_DESCRIPTOR    0x06
-#define USB_REQ_SET_CONFIGURATION 0x09
+#define USB_REQUEST_GET_DESCRIPTOR    0x06
+#define USB_REQUEST_SET_CONFIGURATION 0x09
 #define USB_HID_SET_PROTOCOL      0x0B
 #define USB_HID_SET_IDLE          0x0A
-#define USB_DESC_DEVICE 1
-#define USB_DESC_CONFIG 2
+#define USB_DESCRIPTOR_DEVICE 1
+#define USB_DESCRIPTOR_CONFIG 2
 
 #define HID_CLASS          3
 #define HID_SUBCLASS_BOOT  1
@@ -172,8 +172,8 @@ static int event_wait(xhci_trb_t *out) {
     return -1;
 }
 
-static int command_sync(uint64_t param, uint32_t status, uint32_t control, uint8_t *slot_out) {
-    xhci_ring_push(&command_ring, param, status, control);
+static int command_sync(uint64_t parameter, uint32_t status, uint32_t control, uint8_t *slot_out) {
+    xhci_ring_push(&command_ring, parameter, status, control);
     doorbell(0, 0);
 
     xhci_trb_t ev;
@@ -185,7 +185,7 @@ static int command_sync(uint64_t param, uint32_t status, uint32_t control, uint8
         if (type == TRB_EVENT_PORT_CHANGE) {
             continue;
         }
-        if (type != TRB_EVENT_CMD_COMPLETE) {
+        if (type != TRB_EVENT_COMMAND_COMPLETE) {
             continue;
         }
         if (slot_out) {
@@ -211,19 +211,19 @@ static uint32_t ep0_max_packet(uint32_t speed) {
 }
 
 static int control_transfer(uint8_t slot, xhci_ring_t *ring, uint8_t bm_request_type,
-                            uint8_t request, uint16_t value, uint16_t index, uint16_t len) {
+                            uint8_t request, uint16_t value, uint16_t index, uint16_t length) {
     uint64_t setup = (uint64_t)bm_request_type | ((uint64_t)request << 8) |
                      ((uint64_t)value << 16) | ((uint64_t)index << 32) |
-                     ((uint64_t)len << 48);
-    uint32_t trt = len == 0 ? 0 : ((bm_request_type & 0x80) ? 3 : 2);
+                     ((uint64_t)length << 48);
+    uint32_t trt = length == 0 ? 0 : ((bm_request_type & 0x80) ? 3 : 2);
     xhci_ring_push(ring, setup, 8, (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | (trt << 16));
 
-    if (len > 0) {
-        xhci_ring_push(ring, enum_buffer_phys, len,
+    if (length > 0) {
+        xhci_ring_push(ring, enum_buffer_phys, length,
                   (TRB_DATA_STAGE << TRB_TYPE_SHIFT) |
                       ((bm_request_type & 0x80) ? (1u << 16) : 0));
     }
-    uint32_t status_directory = (len > 0 && (bm_request_type & 0x80)) ? 0 : (1u << 16);
+    uint32_t status_directory = (length > 0 && (bm_request_type & 0x80)) ? 0 : (1u << 16);
     xhci_ring_push(ring, 0, 0, (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_IOC | status_directory);
 
     doorbell(slot, 1);
@@ -272,7 +272,7 @@ static int enumerate_port(uint32_t port) {
     uint32_t speed = (portsc >> PORTSC_SPEED_SHIFT) & 0x0F;
 
     uint8_t slot = 0;
-    if (command_sync(0, 0, TRB_CMD_ENABLE_SLOT << TRB_TYPE_SHIFT, &slot) != CC_SUCCESS || slot == 0) {
+    if (command_sync(0, 0, TRB_COMMAND_ENABLE_SLOT << TRB_TYPE_SHIFT, &slot) != CC_SUCCESS || slot == 0) {
         return 0;
     }
 
@@ -302,14 +302,14 @@ static int enumerate_port(uint32_t port) {
     *(uint64_t *)&ep0_context[2] = ep0.phys | 1;
     ep0_context[4] = 8;
 
-    if (command_sync(in_context, 0, (TRB_CMD_ADDRESS_DEVICE << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24),
+    if (command_sync(in_context, 0, (TRB_COMMAND_ADDRESS_DEVICE << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24),
                      0) != CC_SUCCESS) {
         return 0;
     }
 
     k_memset(enum_buffer, 0, 64);
-    if (control_transfer(slot, &ep0, 0x80, USB_REQ_GET_DESCRIPTOR,
-                         (USB_DESC_DEVICE << 8), 0, 8) != 0) {
+    if (control_transfer(slot, &ep0, 0x80, USB_REQUEST_GET_DESCRIPTOR,
+                         (USB_DESCRIPTOR_DEVICE << 8), 0, 8) != 0) {
         return 0;
     }
     uint32_t real_mps = enum_buffer[7];
@@ -322,12 +322,12 @@ static int enumerate_port(uint32_t port) {
         *(uint64_t *)&ep0_context[2] = ep0.phys | ep0.cycle;
         ep0_context[4] = 8;
         command_sync(in_context, 0,
-                     (TRB_CMD_EVALUATE_CTX << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24), 0);
+                     (TRB_COMMAND_EVALUATE_CONTEXT << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24), 0);
     }
 
     k_memset(enum_buffer, 0, 256);
-    if (control_transfer(slot, &ep0, 0x80, USB_REQ_GET_DESCRIPTOR,
-                         (USB_DESC_CONFIG << 8), 0, 255) != 0) {
+    if (control_transfer(slot, &ep0, 0x80, USB_REQUEST_GET_DESCRIPTOR,
+                         (USB_DESCRIPTOR_CONFIG << 8), 0, 255) != 0) {
         return 0;
     }
 
@@ -355,10 +355,10 @@ static int enumerate_port(uint32_t port) {
                 interface_number = -1;
             }
         } else if (dtype == 5 && proto != 0 && ep_address < 0 && off + 6 < total) {
-            uint8_t addr = enum_buffer[off + 2];
-            uint8_t attr = enum_buffer[off + 3];
-            if ((addr & 0x80) && (attr & 0x03) == 3) {
-                ep_address = addr;
+            uint8_t address = enum_buffer[off + 2];
+            uint8_t attribute = enum_buffer[off + 3];
+            if ((address & 0x80) && (attribute & 0x03) == 3) {
+                ep_address = address;
                 ep_mps = (uint16_t)(enum_buffer[off + 4] | (enum_buffer[off + 5] << 8));
                 ep_interval = enum_buffer[off + 6];
             }
@@ -373,7 +373,7 @@ static int enumerate_port(uint32_t port) {
         return 0;
     }
 
-    if (control_transfer(slot, &ep0, 0x00, USB_REQ_SET_CONFIGURATION, config_value, 0, 0) != 0) {
+    if (control_transfer(slot, &ep0, 0x00, USB_REQUEST_SET_CONFIGURATION, config_value, 0, 0) != 0) {
         return 0;
     }
 
@@ -415,7 +415,7 @@ static int enumerate_port(uint32_t port) {
     ep_context[4] = ep_mps | ((uint32_t)ep_mps << 16);
 
     if (command_sync(in_context, 0,
-                     (TRB_CMD_CONFIGURE_EP << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24),
+                     (TRB_COMMAND_CONFIGURE_EP << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24),
                      0) != CC_SUCCESS) {
         return 0;
     }

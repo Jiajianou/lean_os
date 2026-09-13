@@ -29,9 +29,9 @@ static const char *CHARSETS[] = {
 
 struct result {
     int ok;
-    int err;
+    int error;
     unsigned char b[16];
-    size_t len;
+    size_t length;
 };
 
 static struct result host_conv(const char *to, const char *from,
@@ -48,8 +48,8 @@ static struct result host_conv(const char *to, const char *from,
     errno = 0;
     size_t rc = iconv(cd, &ip, &il, &op, &ol);
     r.ok = (rc != (size_t)-1 && il == 0);
-    r.err = errno;
-    r.len = sizeof(r.b) - ol;
+    r.error = errno;
+    r.length = sizeof(r.b) - ol;
     iconv_close(cd);
     return r;
 }
@@ -68,8 +68,8 @@ static struct result lean_conv(const char *to, const char *from,
     errno = 0;
     size_t rc = lean_iconv(cd, &ip, &il, &op, &ol);
     r.ok = (rc != (size_t)-1 && il == 0);
-    r.err = errno;
-    r.len = sizeof(r.b) - ol;
+    r.error = errno;
+    r.length = sizeof(r.b) - ol;
     lean_iconv_close(cd);
     return r;
 }
@@ -104,18 +104,18 @@ static void compare(const char *what, const char *to, const char *from,
     if (!h.ok) {
         return;
     }
-    if (l.len != h.len || memcmp(l.b, h.b, h.len) != 0) {
+    if (l.length != h.length || memcmp(l.b, h.b, h.length) != 0) {
         if (failures++ < 20) {
             printf("FAIL %s %s->%s in=", what, from, to);
             for (size_t i = 0; i < inlen; i++) {
                 printf("%02X", in[i]);
             }
             printf(" ours=");
-            for (size_t i = 0; i < l.len; i++) {
+            for (size_t i = 0; i < l.length; i++) {
                 printf("%02X", l.b[i]);
             }
             printf(" host=");
-            for (size_t i = 0; i < h.len; i++) {
+            for (size_t i = 0; i < h.length; i++) {
                 printf("%02X", h.b[i]);
             }
             printf("\n");
@@ -192,7 +192,7 @@ int main(void) {
                 break;
             }
             have_host = 1;
-            if (!h.ok || h.len != 4) {
+            if (!h.ok || h.length != 4) {
                 continue;
             }
             uint32_t cp = (uint32_t)h.b[0] | ((uint32_t)h.b[1] << 8) |
@@ -215,7 +215,7 @@ int main(void) {
             checks++;
             if (from_cp[cp] == -1) {
                 if (l.ok) {
-                    if (diverges(CHARSETS[c], l.len == 1 ? l.b[0] : -1)) {
+                    if (diverges(CHARSETS[c], l.length == 1 ? l.b[0] : -1)) {
                         continue;
                     }
                     if (failures++ < 20) {
@@ -237,16 +237,16 @@ int main(void) {
                 }
                 continue;
             }
-            if (l.len != 1) {
+            if (l.length != 1) {
                 if (failures++ < 20) {
                     printf("FAIL encode %s U+%04X: %zu bytes from a "
-                           "single-byte charset\n", CHARSETS[c], cp, l.len);
+                           "single-byte charset\n", CHARSETS[c], cp, l.length);
                 }
                 continue;
             }
             unsigned char got = l.b[0];
             struct result back = host_conv("UTF-32LE", CHARSETS[c], &got, 1);
-            uint32_t rt = back.ok && back.len == 4
+            uint32_t rt = back.ok && back.length == 4
                               ? ((uint32_t)back.b[0] |
                                  ((uint32_t)back.b[1] << 8) |
                                  ((uint32_t)back.b[2] << 16) |
@@ -285,7 +285,7 @@ int main(void) {
     }
 
     {
-        struct { const char *name; const unsigned char bytes[8]; size_t len; }
+        struct { const char *name; const unsigned char bytes[8]; size_t length; }
         cases[] = {
             {"UTF-16", {0xFE, 0xFF, 0x00, 0x41}, 4},
             {"UTF-16", {0xFF, 0xFE, 0x41, 0x00}, 4},
@@ -296,7 +296,7 @@ int main(void) {
         };
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
             compare("bom", "UTF-8", cases[i].name, cases[i].bytes,
-                    cases[i].len);
+                    cases[i].length);
         }
         static const unsigned char aa[] = {'A', 'B'};
         compare("bom-out", "UTF-16", "UTF-8", aa, 2);

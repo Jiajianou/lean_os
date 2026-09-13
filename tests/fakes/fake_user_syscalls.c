@@ -45,14 +45,14 @@ long sys_sbrk(long increment) {
     return (long)(uintptr_t)p;
 }
 
-long sys_mmap(long addr, unsigned long len, int prot, int flags, int fd,
+long sys_mmap(long address, unsigned long length, int prot, int flags, int fd,
               unsigned long offset) {
-    (void)addr;
+    (void)address;
     (void)prot;
     (void)flags;
     (void)fd;
     (void)offset;
-    void *p = mmap(NULL, len, PROT_READ | PROT_WRITE,
+    void *p = mmap(NULL, length, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
         return -1;
@@ -60,8 +60,8 @@ long sys_mmap(long addr, unsigned long len, int prot, int flags, int fd,
     return (long)(uintptr_t)p;
 }
 
-long sys_munmap(void *addr, unsigned long len) {
-    return munmap(addr, len) == 0 ? 0 : -1;
+long sys_munmap(void *address, unsigned long length) {
+    return munmap(address, length) == 0 ? 0 : -1;
 }
 
 long sys_yield(void) { return 0; }

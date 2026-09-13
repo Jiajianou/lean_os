@@ -52,12 +52,12 @@ typedef struct {
     int si_errno;
     int si_pid;
     unsigned int si_uid;
-    void *si_addr;
+    void *si_address;
     int si_status;
     long si_band;
     union {
         int sival_int;
-        void *sival_ptr;
+        void *sival_pointer;
     } si_value;
 } siginfo_t;
 

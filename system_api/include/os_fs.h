@@ -24,7 +24,7 @@ typedef struct {
     int16_t whence;
     int32_t pid;
     int64_t start;
-    int64_t len;
+    int64_t length;
 } os_flock_t;
 
 #ifdef __cplusplus

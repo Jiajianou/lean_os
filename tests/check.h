@@ -11,7 +11,7 @@ typedef void (*test_function_t)(void);
 typedef struct test_case {
     const char *suite;
     const char *name;
-    test_function_t fn;
+    test_function_t function;
     struct test_case *next;
 } test_case_t;
 

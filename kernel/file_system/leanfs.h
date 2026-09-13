@@ -27,19 +27,19 @@
 typedef struct __attribute__((packed)) {
     uint32_t inode;
     uint16_t rec_length;
-    uint8_t  name_len;
+    uint8_t  name_length;
     uint8_t  type;
 } leanfs_dirent_t;
 
-#define LEANFS_DIRENT_HDR   8u
+#define LEANFS_DIRENT_HEADER   8u
 #define LEANFS_DIRENT_ALIGN 4u
 
-#define LEANFS_DIRENT_NEED(name_len) \
-    ((LEANFS_DIRENT_HDR + (uint32_t)(name_len) + LEANFS_DIRENT_ALIGN - 1u) & ~(LEANFS_DIRENT_ALIGN - 1u))
+#define LEANFS_DIRENT_NEED(name_length) \
+    ((LEANFS_DIRENT_HEADER + (uint32_t)(name_length) + LEANFS_DIRENT_ALIGN - 1u) & ~(LEANFS_DIRENT_ALIGN - 1u))
 
 typedef struct {
     uint32_t inode;
-    uint8_t  is_dir;
+    uint8_t  is_directory;
     uint8_t  is_link;
     char     name[LEANFS_MAX_NAME + 1];
 } leanfs_directory_entry_t;
@@ -51,9 +51,9 @@ int leanfs_readdir_at(int handle, uint32_t *cookie, leanfs_directory_entry_t *ou
 
 void leanfs_init(void);
 
-int64_t leanfs_read(const char *path, void *buf, size_t maxlen);
+int64_t leanfs_read(const char *path, void *buffer, size_t maxlen);
 
-int leanfs_write(const char *path, const void *buf, size_t len);
+int leanfs_write(const char *path, const void *buffer, size_t length);
 
 int leanfs_exists(const char *path);
 
@@ -75,14 +75,14 @@ int leanfs_unlink(const char *path);
 
 int leanfs_rename(const char *old_path, const char *new_path);
 
-size_t leanfs_list(const char *path, char *buf, size_t maxlen);
+size_t leanfs_list(const char *path, char *buffer, size_t maxlen);
 
 int leanfs_rmdir(const char *path);
 
 typedef struct {
     uint32_t size;
     uint32_t mtime;
-    uint8_t is_dir;
+    uint8_t is_directory;
     uint8_t is_link;
     uint32_t inode;
 } leanfs_stat_t;
@@ -94,7 +94,7 @@ int leanfs_symlink(const char *path, const char *target);
 int leanfs_link(const char *old_path, const char *new_path);
 
 uint32_t leanfs_nlink(const char *path);
-int64_t leanfs_readlink(const char *path, char *buf, size_t maxlen);
+int64_t leanfs_readlink(const char *path, char *buffer, size_t maxlen);
 int leanfs_lstat(const char *path, leanfs_stat_t *out);
 
 int leanfs_handle_stat(int handle, leanfs_stat_t *out);
@@ -103,14 +103,14 @@ int leanfs_handle_stat(int handle, leanfs_stat_t *out);
 #define LEANFS_OPEN_EXCL   2
 int leanfs_open(const char *path, int create);
 
-int64_t leanfs_handle_read(int handle, void *buf, size_t len, uint32_t off);
-int64_t leanfs_handle_write(int handle, const void *buf, size_t len, uint32_t off);
+int64_t leanfs_handle_read(int handle, void *buffer, size_t length, uint32_t off);
+int64_t leanfs_handle_write(int handle, const void *buffer, size_t length, uint32_t off);
 
 uint32_t leanfs_handle_size(int handle);
 
 int leanfs_handle_truncate(int handle);
 
-int leanfs_handle_truncate_to(int handle, uint32_t len);
+int leanfs_handle_truncate_to(int handle, uint32_t length);
 
 uint32_t leanfs_meta_writes(void);
 

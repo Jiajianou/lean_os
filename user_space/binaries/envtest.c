@@ -15,7 +15,7 @@ int main(void) {
         return 4;
     }
 
-    char cwd[PATH_MAX_LEN];
+    char cwd[PATH_MAX_LENGTH];
     if (!getcwd(cwd, sizeof(cwd)) || cwd[0] != '/') {
         return 3;
     }
@@ -24,7 +24,7 @@ int main(void) {
     if (fd < 0) {
         return 5;
     }
-    char line[PATH_MAX_LEN + 64];
+    char line[PATH_MAX_LENGTH + 64];
     int n = 0;
     for (const char *s = cwd; *s && n < (int)sizeof(line) - 2; s++) {
         line[n++] = *s;

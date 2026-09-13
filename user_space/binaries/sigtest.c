@@ -68,7 +68,7 @@ int main(void) {
         return 7;
     }
 
-    long child = sys_spawn(PATH_BIN_DIR "hello", "");
+    long child = sys_spawn(PATH_BIN_DIRECTORY "hello", "");
     if (child >= 0) {
         long deadline = sys_uptime_ms() + 4000;
         while (chld_count == 0 && sys_uptime_ms() < deadline) {
@@ -80,7 +80,7 @@ int main(void) {
         return 6;
     }
 
-    long fd = sys_open(PATH_TMP_DIR "m76ready", OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE);
+    long fd = sys_open(PATH_TEMPORARY_DIRECTORY "m76ready", OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE);
     if (fd >= 0) {
         sys_write((int)fd, "r", 1);
         sys_close((int)fd);
@@ -94,16 +94,16 @@ int main(void) {
         return 8;
     }
 
-    fd = sys_open(PATH_TMP_DIR "m76alive", OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE);
+    fd = sys_open(PATH_TEMPORARY_DIRECTORY "m76alive", OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE);
     if (fd >= 0) {
-        char msg[64];
+        char message[64];
         int n = 0;
         const char *p = "handled-and-alive ";
         for (; *p; p++) {
-            msg[n++] = *p;
+            message[n++] = *p;
         }
-        msg[n++] = (char)('0' + (int_count % 10));
-        sys_write((int)fd, msg, (size_t)n);
+        message[n++] = (char)('0' + (int_count % 10));
+        sys_write((int)fd, message, (size_t)n);
         sys_close((int)fd);
     }
 

@@ -147,7 +147,7 @@ int main(int argc, char **argv) {
         values[8] = 1.7976931348623157e308;
 
         static const struct {
-            const char *fn; const char *at; const char *why;
+            const char *function; const char *at; const char *why;
         } DIVERGE[] = {
             {"sin", "huge", "no Payne-Hanek reduction past 2^52 - math.c refuses rather than guessing"},
             {"cos", "huge", "same"},
@@ -174,7 +174,7 @@ int main(int argc, char **argv) {
                 }
                 const char *why = 0;
                 for (size_t d = 0; d < sizeof(DIVERGE) / sizeof(DIVERGE[0]); d++) {
-                    if (strcmp(DIVERGE[d].fn, TABLE[i].name) == 0 &&
+                    if (strcmp(DIVERGE[d].function, TABLE[i].name) == 0 &&
                         strcmp(DIVERGE[d].at, SPECIALS[v].name) == 0) {
                         why = DIVERGE[d].why;
                         break;
@@ -259,9 +259,9 @@ int main(int argc, char **argv) {
             for (int i = 0; i < n; i++) {
                 float x = (float)(lo + step * (double)i);
                 double got = (double)e->oursf(x), want = (double)e->theirsf(x);
-                double err = error_of(got, want);
-                if (err > worst) {
-                    worst = err; worst_x = (double)x; worst_got = got; worst_want = want;
+                double error = error_of(got, want);
+                if (error > worst) {
+                    worst = error; worst_x = (double)x; worst_got = got; worst_want = want;
                 }
             }
         } else if (kind[0] == 'F') {
@@ -270,9 +270,9 @@ int main(int argc, char **argv) {
                 for (int j = 0; j < n; j++) {
                     float y = (float)(lo + step * (double)j);
                     double got = (double)e->oursF(x, y), want = (double)e->theirsF(x, y);
-                    double err = error_of(got, want);
-                    if (err > worst) {
-                        worst = err; worst_x = (double)x; worst_y = (double)y;
+                    double error = error_of(got, want);
+                    if (error > worst) {
+                        worst = error; worst_x = (double)x; worst_y = (double)y;
                         worst_got = got; worst_want = want;
                     }
                 }
@@ -301,9 +301,9 @@ int main(int argc, char **argv) {
             for (int i = 0; i < n; i++) {
                 double x = lo + step * (double)i;
                 double got = e->ours1(x), want = e->theirs1(x);
-                double err = error_of(got, want);
-                if (err > worst) {
-                    worst = err; worst_x = x; worst_got = got; worst_want = want;
+                double error = error_of(got, want);
+                if (error > worst) {
+                    worst = error; worst_x = x; worst_got = got; worst_want = want;
                 }
             }
         } else if (kind[0] == '2') {
@@ -312,9 +312,9 @@ int main(int argc, char **argv) {
                 for (int j = 0; j < n; j++) {
                     double y = lo + step * (double)j;
                     double got = e->ours2(x, y), want = e->theirs2(x, y);
-                    double err = error_of(got, want);
-                    if (err > worst) {
-                        worst = err; worst_x = x; worst_y = y;
+                    double error = error_of(got, want);
+                    if (error > worst) {
+                        worst = error; worst_x = x; worst_y = y;
                         worst_got = got; worst_want = want;
                     }
                 }
@@ -328,9 +328,9 @@ int main(int argc, char **argv) {
                         double z = lo + step * (double)k;
                         double got = e->ours3(x, y, z);
                         double want = e->theirs3(x, y, z);
-                        double err = error_of(got, want);
-                        if (err > worst) {
-                            worst = err; worst_x = x; worst_y = y;
+                        double error = error_of(got, want);
+                        if (error > worst) {
+                            worst = error; worst_x = x; worst_y = y;
                             worst_got = got; worst_want = want;
                         }
                     }

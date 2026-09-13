@@ -31,20 +31,20 @@ typedef struct {
     const char *p;
     int cflags;
     int ngroup;
-    int err;
+    int error;
     node_t **arena;
     size_t narena, arena_cap;
 } parser_t;
 
 static node_t *node_new(parser_t *ps, int type) {
-    if (ps->err) {
+    if (ps->error) {
         return (node_t *)0;
     }
     if (ps->narena == ps->arena_cap) {
         size_t cap = ps->arena_cap ? ps->arena_cap * 2 : 32;
         node_t **grown = realloc(ps->arena, cap * sizeof(node_t *));
         if (!grown) {
-            ps->err = REG_ESPACE;
+            ps->error = REG_ESPACE;
             return (node_t *)0;
         }
         ps->arena = grown;
@@ -52,7 +52,7 @@ static node_t *node_new(parser_t *ps, int type) {
     }
     node_t *nd = calloc(1, sizeof(node_t));
     if (!nd) {
-        ps->err = REG_ESPACE;
+        ps->error = REG_ESPACE;
         return (node_t *)0;
     }
     nd->type = type;
@@ -68,19 +68,19 @@ static int set_has(const node_t *nd, unsigned char c) {
     return (nd->set[c >> 3] >> (c & 7)) & 1;
 }
 
-static int add_named_class(node_t *nd, const char *name, size_t len) {
-    static const struct { const char *name; int (*fn)(int); } table[] = {
+static int add_named_class(node_t *nd, const char *name, size_t length) {
+    static const struct { const char *name; int (*function)(int); } table[] = {
         {"alpha", isalpha}, {"digit", isdigit},  {"alnum", isalnum},
         {"upper", isupper}, {"lower", islower},  {"space", isspace},
         {"blank", isblank}, {"punct", ispunct},  {"print", isprint},
         {"graph", isgraph}, {"cntrl", iscntrl},  {"xdigit", isxdigit},
     };
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
-        if (strlen(table[i].name) != len || strncmp(table[i].name, name, len) != 0) {
+        if (strlen(table[i].name) != length || strncmp(table[i].name, name, length) != 0) {
             continue;
         }
         for (int c = 0; c < 256; c++) {
-            if (table[i].fn(c)) {
+            if (table[i].function(c)) {
                 set_add(nd, (unsigned char)c);
             }
         }
@@ -106,11 +106,11 @@ static node_t *parse_class(parser_t *ps) {
             const char *start = ps->p + 2;
             const char *end = strstr(start, ":]");
             if (!end) {
-                ps->err = REG_ECTYPE;
+                ps->error = REG_ECTYPE;
                 return (node_t *)0;
             }
             if (!add_named_class(nd, start, (size_t)(end - start))) {
-                ps->err = REG_ECTYPE;
+                ps->error = REG_ECTYPE;
                 return (node_t *)0;
             }
             ps->p = end + 2;
@@ -133,7 +133,7 @@ static node_t *parse_class(parser_t *ps) {
                 hi = (unsigned char)*ps->p++;
             }
             if (hi < lo) {
-                ps->err = REG_ERANGE;
+                ps->error = REG_ERANGE;
                 return (node_t *)0;
             }
             for (int c = lo; c <= (int)hi; c++) {
@@ -144,7 +144,7 @@ static node_t *parse_class(parser_t *ps) {
         }
     }
     if (*ps->p != ']') {
-        ps->err = REG_EBRACK;
+        ps->error = REG_EBRACK;
         return (node_t *)0;
     }
     ps->p++;
@@ -177,7 +177,7 @@ static int is_op(parser_t *ps, const char *p, char op) {
 }
 
 static node_t *parse_atom(parser_t *ps) {
-    if (ps->err) {
+    if (ps->error) {
         return (node_t *)0;
     }
     const char *p = ps->p;
@@ -187,11 +187,11 @@ static node_t *parse_atom(parser_t *ps) {
         ps->p += w;
         int index = ++ps->ngroup;
         node_t *inner = parse_alt(ps);
-        if (ps->err) {
+        if (ps->error) {
             return (node_t *)0;
         }
         if ((w = is_op(ps, ps->p, ')')) == 0) {
-            ps->err = REG_EPAREN;
+            ps->error = REG_EPAREN;
             return (node_t *)0;
         }
         ps->p += w;
@@ -219,7 +219,7 @@ static node_t *parse_atom(parser_t *ps) {
         if (p[1] >= '1' && p[1] <= '9') {
             int index = p[1] - '0';
             if (index > ps->ngroup) {
-                ps->err = REG_ESUBREG;
+                ps->error = REG_ESUBREG;
                 return (node_t *)0;
             }
             ps->p += 2;
@@ -244,7 +244,7 @@ static node_t *parse_atom(parser_t *ps) {
     }
 
     if (*p == '\\' && !p[1]) {
-        ps->err = REG_EESCAPE;
+        ps->error = REG_EESCAPE;
         return (node_t *)0;
     }
 
@@ -295,7 +295,7 @@ static int parse_interval(parser_t *ps, int *min, int *max) {
 
 static node_t *parse_piece(parser_t *ps) {
     node_t *atom = parse_atom(ps);
-    if (ps->err) {
+    if (ps->error) {
         return (node_t *)0;
     }
     for (;;) {
@@ -315,7 +315,7 @@ static node_t *parse_piece(parser_t *ps) {
         } else if ((w = is_op(ps, ps->p, '{')) != 0 &&
                    !isdigit((unsigned char)ps->p[w]) &&
                    !(ps->cflags & REG_EXTENDED)) {
-            ps->err = REG_EBRACE;
+            ps->error = REG_EBRACE;
             return (node_t *)0;
         } else if ((w = is_op(ps, ps->p, '{')) != 0 &&
                    isdigit((unsigned char)ps->p[w])) {
@@ -323,12 +323,12 @@ static node_t *parse_piece(parser_t *ps) {
             ps->p += w;
             int e = parse_interval(ps, &min, &max);
             if (e) {
-                ps->err = e;
+                ps->error = e;
                 return (node_t *)0;
             }
             if ((w = is_op(ps, ps->p, '}')) == 0) {
                 ps->p = save;
-                ps->err = REG_EBRACE;
+                ps->error = REG_EBRACE;
                 return (node_t *)0;
             }
             ps->p += w;
@@ -336,7 +336,7 @@ static node_t *parse_piece(parser_t *ps) {
             return atom;
         }
         if (!atom) {
-            ps->err = REG_BADRPT;
+            ps->error = REG_BADRPT;
             return (node_t *)0;
         }
         node_t *rep = node_new(ps, N_REP);
@@ -359,11 +359,11 @@ static int at_branch_end(parser_t *ps) {
 
 static node_t *parse_branch(parser_t *ps) {
     node_t *left = (node_t *)0;
-    while (!ps->err && !at_branch_end(ps)) {
+    while (!ps->error && !at_branch_end(ps)) {
         node_t *piece;
         if (!left && (ps->cflags & REG_EXTENDED) &&
             (*ps->p == '*' || *ps->p == '+' || *ps->p == '?')) {
-            ps->err = REG_BADRPT;
+            ps->error = REG_BADRPT;
             return (node_t *)0;
         }
         if (*ps->p == '^' && !left) {
@@ -381,7 +381,7 @@ static node_t *parse_branch(parser_t *ps) {
         } else {
             piece = parse_piece(ps);
         }
-        if (ps->err) {
+        if (ps->error) {
             return (node_t *)0;
         }
         if (!left) {
@@ -405,10 +405,10 @@ static node_t *parse_branch(parser_t *ps) {
 static node_t *parse_alt(parser_t *ps) {
     node_t *left = parse_branch(ps);
     int w;
-    while (!ps->err && (w = is_op(ps, ps->p, '|')) != 0) {
+    while (!ps->error && (w = is_op(ps, ps->p, '|')) != 0) {
         ps->p += w;
         node_t *right = parse_branch(ps);
-        if (ps->err) {
+        if (ps->error) {
             return (node_t *)0;
         }
         node_t *alt = node_new(ps, N_ALT);
@@ -437,7 +437,7 @@ struct cont {
 
 typedef struct {
     const char *s;
-    size_t len;
+    size_t length;
     int cflags, eflags;
     regmatch_t *caps;
     regmatch_t *best_caps;
@@ -446,13 +446,13 @@ typedef struct {
     int want_longest;
 } matcher_t;
 
-static int m_node(matcher_t *m, const node_t *nd, const char *pos, const cont_t *k);
+static int m_node(matcher_t *m, const node_t *nd, const char *position, const cont_t *k);
 
-static int m_cont(matcher_t *m, const cont_t *k, const char *pos);
+static int m_cont(matcher_t *m, const cont_t *k, const char *position);
 
-static int m_accept(matcher_t *m, const char *pos) {
-    if (!m->best || pos > m->best) {
-        m->best = pos;
+static int m_accept(matcher_t *m, const char *position) {
+    if (!m->best || position > m->best) {
+        m->best = position;
         if (m->best_caps && m->caps) {
             for (int i = 0; i <= m->ncaps; i++) {
                 m->best_caps[i] = m->caps[i];
@@ -462,13 +462,13 @@ static int m_accept(matcher_t *m, const char *pos) {
     if (!m->want_longest) {
         return 1;
     }
-    return pos == m->s + m->len;
+    return position == m->s + m->length;
 }
 
-static int m_rep(matcher_t *m, const node_t *nd, const char *pos,
+static int m_rep(matcher_t *m, const node_t *nd, const char *position,
                  const cont_t *after, int count, const char *from) {
-    if (from && pos == from) {
-        return count <= nd->min ? m_cont(m, after, pos) : 0;
+    if (from && position == from) {
+        return count <= nd->min ? m_cont(m, after, position) : 0;
     }
     if (nd->max < 0 || count < nd->max) {
         cont_t again;
@@ -476,35 +476,35 @@ static int m_rep(matcher_t *m, const node_t *nd, const char *pos,
         again.node = nd;
         again.next = after;
         again.count = count + 1;
-        again.from = pos;
+        again.from = position;
         again.index = 0;
-        if (m_node(m, nd->a, pos, &again)) {
+        if (m_node(m, nd->a, position, &again)) {
             return 1;
         }
     }
     if (count >= nd->min) {
-        return m_cont(m, after, pos);
+        return m_cont(m, after, position);
     }
     return 0;
 }
 
-static int m_cont(matcher_t *m, const cont_t *k, const char *pos) {
+static int m_cont(matcher_t *m, const cont_t *k, const char *position) {
     if (!k) {
-        return m_accept(m, pos);
+        return m_accept(m, position);
     }
     switch (k->kind) {
     case K_NODE:
-        return m_node(m, k->node, pos, k->next);
+        return m_node(m, k->node, position, k->next);
     case K_REP:
-        return m_rep(m, k->node, pos, k->next, k->count, k->from);
+        return m_rep(m, k->node, position, k->next, k->count, k->from);
     case K_GEND: {
         int idx = k->index;
         if (!m->caps || idx > m->ncaps) {
-            return m_cont(m, k->next, pos);
+            return m_cont(m, k->next, position);
         }
         regmatch_t saved = m->caps[idx];
-        m->caps[idx].rm_eo = (regoff_t)(pos - m->s);
-        int stop = m_cont(m, k->next, pos);
+        m->caps[idx].rm_eo = (regoff_t)(position - m->s);
+        int stop = m_cont(m, k->next, position);
         if (!stop) {
             m->caps[idx] = saved;
         }
@@ -522,48 +522,48 @@ static int chr_eq(const matcher_t *m, unsigned char a, unsigned char b) {
     return (m->cflags & REG_ICASE) && tolower(a) == tolower(b);
 }
 
-static int m_node(matcher_t *m, const node_t *nd, const char *pos, const cont_t *k) {
-    const char *end = m->s + m->len;
+static int m_node(matcher_t *m, const node_t *nd, const char *position, const cont_t *k) {
+    const char *end = m->s + m->length;
     switch (nd->type) {
     case N_EMPTY:
-        return m_cont(m, k, pos);
+        return m_cont(m, k, position);
 
     case N_CHAR:
-        if (pos < end && chr_eq(m, (unsigned char)*pos, (unsigned char)nd->n)) {
-            return m_cont(m, k, pos + 1);
+        if (position < end && chr_eq(m, (unsigned char)*position, (unsigned char)nd->n)) {
+            return m_cont(m, k, position + 1);
         }
         return 0;
 
     case N_ANY:
-        if (pos < end) {
-            if ((m->cflags & REG_NEWLINE) && *pos == '\n') {
+        if (position < end) {
+            if ((m->cflags & REG_NEWLINE) && *position == '\n') {
                 return 0;
             }
-            return m_cont(m, k, pos + 1);
+            return m_cont(m, k, position + 1);
         }
         return 0;
 
     case N_CLASS:
-        if (pos < end && set_has(nd, (unsigned char)*pos)) {
-            return m_cont(m, k, pos + 1);
+        if (position < end && set_has(nd, (unsigned char)*position)) {
+            return m_cont(m, k, position + 1);
         }
         return 0;
 
     case N_BOL:
-        if (pos == m->s) {
-            return (m->eflags & REG_NOTBOL) ? 0 : m_cont(m, k, pos);
+        if (position == m->s) {
+            return (m->eflags & REG_NOTBOL) ? 0 : m_cont(m, k, position);
         }
-        if ((m->cflags & REG_NEWLINE) && pos[-1] == '\n') {
-            return m_cont(m, k, pos);
+        if ((m->cflags & REG_NEWLINE) && position[-1] == '\n') {
+            return m_cont(m, k, position);
         }
         return 0;
 
     case N_EOL:
-        if (pos == end) {
-            return (m->eflags & REG_NOTEOL) ? 0 : m_cont(m, k, pos);
+        if (position == end) {
+            return (m->eflags & REG_NOTEOL) ? 0 : m_cont(m, k, position);
         }
-        if ((m->cflags & REG_NEWLINE) && *pos == '\n') {
-            return m_cont(m, k, pos);
+        if ((m->cflags & REG_NEWLINE) && *position == '\n') {
+            return m_cont(m, k, position);
         }
         return 0;
 
@@ -575,14 +575,14 @@ static int m_node(matcher_t *m, const node_t *nd, const char *pos, const cont_t 
         k2.count = 0;
         k2.from = (const char *)0;
         k2.index = 0;
-        return m_node(m, nd->a, pos, &k2);
+        return m_node(m, nd->a, position, &k2);
     }
 
     case N_ALT:
-        if (m_node(m, nd->a, pos, k)) {
+        if (m_node(m, nd->a, position, k)) {
             return 1;
         }
-        return m_node(m, nd->b, pos, k);
+        return m_node(m, nd->b, position, k);
 
     case N_GROUP: {
         int idx = nd->n;
@@ -594,11 +594,11 @@ static int m_node(matcher_t *m, const node_t *nd, const char *pos, const cont_t 
         gend.from = (const char *)0;
         gend.index = idx;
         if (!m->caps || idx > m->ncaps) {
-            return m_node(m, nd->a, pos, &gend);
+            return m_node(m, nd->a, position, &gend);
         }
         regmatch_t saved = m->caps[idx];
-        m->caps[idx].rm_so = (regoff_t)(pos - m->s);
-        int stop = m_node(m, nd->a, pos, &gend);
+        m->caps[idx].rm_so = (regoff_t)(position - m->s);
+        int stop = m_node(m, nd->a, position, &gend);
         if (!stop) {
             m->caps[idx] = saved;
         }
@@ -615,19 +615,19 @@ static int m_node(matcher_t *m, const node_t *nd, const char *pos, const cont_t 
             return 0;
         }
         size_t n = (size_t)(eo - so);
-        if ((size_t)(end - pos) < n) {
+        if ((size_t)(end - position) < n) {
             return 0;
         }
         for (size_t i = 0; i < n; i++) {
-            if (!chr_eq(m, (unsigned char)pos[i], (unsigned char)m->s[so + i])) {
+            if (!chr_eq(m, (unsigned char)position[i], (unsigned char)m->s[so + i])) {
                 return 0;
             }
         }
-        return m_cont(m, k, pos + n);
+        return m_cont(m, k, position + n);
     }
 
     case N_REP:
-        return m_rep(m, nd, pos, k, 0, (const char *)0);
+        return m_rep(m, nd, position, k, 0, (const char *)0);
 
     default:
         return 0;
@@ -644,15 +644,15 @@ int regcomp(regex_t *preg, const char *pattern, int cflags) {
     ps.cflags = cflags;
 
     node_t *root = parse_alt(&ps);
-    if (!ps.err && *ps.p) {
-        ps.err = REG_EPAREN;
+    if (!ps.error && *ps.p) {
+        ps.error = REG_EPAREN;
     }
-    if (ps.err) {
+    if (ps.error) {
         for (size_t i = 0; i < ps.narena; i++) {
             free(ps.arena[i]);
         }
         free(ps.arena);
-        return ps.err;
+        return ps.error;
     }
     preg->re_nsub = (size_t)ps.ngroup;
     preg->re_cflags = cflags;
@@ -708,7 +708,7 @@ int regexec(const regex_t *preg, const char *string, size_t nmatch,
     matcher_t m;
     memset(&m, 0, sizeof(m));
     m.s = string;
-    m.len = strlen(string);
+    m.length = strlen(string);
     m.cflags = preg->re_cflags;
     m.eflags = eflags;
     m.ncaps = ngroups;
@@ -727,7 +727,7 @@ int regexec(const regex_t *preg, const char *string, size_t nmatch,
         m.best_caps = best;
     }
 
-    for (const char *start = string; start <= string + m.len; start++) {
+    for (const char *start = string; start <= string + m.length; start++) {
         if (live) {
             for (int i = 0; i <= ngroups; i++) {
                 live[i].rm_so = live[i].rm_eo = -1;
@@ -761,29 +761,29 @@ int regexec(const regex_t *preg, const char *string, size_t nmatch,
 
 size_t regerror(int errcode, const regex_t *preg, char *errbuf, size_t errbuf_size) {
     (void)preg;
-    const char *msg;
+    const char *message;
     switch (errcode) {
-    case 0:            msg = "success"; break;
-    case REG_NOMATCH:  msg = "no match"; break;
-    case REG_BADPAT:   msg = "invalid regular expression"; break;
-    case REG_ECOLLATE: msg = "invalid collating element"; break;
-    case REG_ECTYPE:   msg = "invalid character class"; break;
-    case REG_EESCAPE:  msg = "trailing backslash"; break;
-    case REG_ESUBREG:  msg = "invalid backreference"; break;
-    case REG_EBRACK:   msg = "unbalanced ["; break;
-    case REG_EPAREN:   msg = "unbalanced ("; break;
-    case REG_EBRACE:   msg = "unbalanced {"; break;
-    case REG_BADBR:    msg = "invalid repetition count"; break;
-    case REG_ERANGE:   msg = "invalid range endpoint"; break;
-    case REG_ESPACE:   msg = "out of memory"; break;
-    case REG_BADRPT:   msg = "repetition with nothing to repeat"; break;
-    default:           msg = "unknown error"; break;
+    case 0:            message = "success"; break;
+    case REG_NOMATCH:  message = "no match"; break;
+    case REG_BADPAT:   message = "invalid regular expression"; break;
+    case REG_ECOLLATE: message = "invalid collating element"; break;
+    case REG_ECTYPE:   message = "invalid character class"; break;
+    case REG_EESCAPE:  message = "trailing backslash"; break;
+    case REG_ESUBREG:  message = "invalid backreference"; break;
+    case REG_EBRACK:   message = "unbalanced ["; break;
+    case REG_EPAREN:   message = "unbalanced ("; break;
+    case REG_EBRACE:   message = "unbalanced {"; break;
+    case REG_BADBR:    message = "invalid repetition count"; break;
+    case REG_ERANGE:   message = "invalid range endpoint"; break;
+    case REG_ESPACE:   message = "out of memory"; break;
+    case REG_BADRPT:   message = "repetition with nothing to repeat"; break;
+    default:           message = "unknown error"; break;
     }
-    size_t len = strlen(msg);
+    size_t length = strlen(message);
     if (errbuf && errbuf_size > 0) {
-        size_t n = len < errbuf_size - 1 ? len : errbuf_size - 1;
-        memcpy(errbuf, msg, n);
+        size_t n = length < errbuf_size - 1 ? length : errbuf_size - 1;
+        memcpy(errbuf, message, n);
         errbuf[n] = '\0';
     }
-    return len + 1;
+    return length + 1;
 }

@@ -8,7 +8,7 @@
 #define FONT_CAP_TOP   2
 #define FONT_X_TOP     5
 #define FONT_BASELINE  12
-#define FONT_DESC_LAST 14
+#define FONT_DESCRIPTOR_LAST 14
 
 #define FONT_GLYPH_COLS 7
 

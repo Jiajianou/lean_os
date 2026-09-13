@@ -64,36 +64,36 @@ void sha256_init(sha256_t *s) {
     s->buffered = 0;
 }
 
-void sha256_update(sha256_t *s, const void *data, size_t len) {
+void sha256_update(sha256_t *s, const void *data, size_t length) {
     const uint8_t *p = (const uint8_t *)data;
-    s->bits += (uint64_t)len * 8u;
+    s->bits += (uint64_t)length * 8u;
 
     if (s->buffered) {
         size_t want = SHA256_BLOCK_BYTES - s->buffered;
-        size_t take = len < want ? len : want;
+        size_t take = length < want ? length : want;
         for (size_t i = 0; i < take; i++) {
-            s->buf[s->buffered + i] = p[i];
+            s->buffer[s->buffered + i] = p[i];
         }
         s->buffered += take;
         p += take;
-        len -= take;
+        length -= take;
         if (s->buffered < SHA256_BLOCK_BYTES) {
             return;
         }
-        sha256_block(s, s->buf);
+        sha256_block(s, s->buffer);
         s->buffered = 0;
     }
 
-    while (len >= SHA256_BLOCK_BYTES) {
+    while (length >= SHA256_BLOCK_BYTES) {
         sha256_block(s, p);
         p += SHA256_BLOCK_BYTES;
-        len -= SHA256_BLOCK_BYTES;
+        length -= SHA256_BLOCK_BYTES;
     }
 
-    for (size_t i = 0; i < len; i++) {
-        s->buf[i] = p[i];
+    for (size_t i = 0; i < length; i++) {
+        s->buffer[i] = p[i];
     }
-    s->buffered = len;
+    s->buffered = length;
 }
 
 void sha256_final(sha256_t *s, uint8_t out[SHA256_DIGEST_BYTES]) {
@@ -123,10 +123,10 @@ void sha256_final(sha256_t *s, uint8_t out[SHA256_DIGEST_BYTES]) {
     }
 }
 
-void sha256(const void *data, size_t len, uint8_t out[SHA256_DIGEST_BYTES]) {
+void sha256(const void *data, size_t length, uint8_t out[SHA256_DIGEST_BYTES]) {
     sha256_t s;
     sha256_init(&s);
-    sha256_update(&s, data, len);
+    sha256_update(&s, data, length);
     sha256_final(&s, out);
 }
 

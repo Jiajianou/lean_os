@@ -11,11 +11,11 @@ static int last_count;
 static int last_timeout;
 static long waitfds_answer;
 
-long window_manager_test_waitfds(const int *fds, int count, int timeout_ms) {
+long window_manager_test_waitfds(const int *file_descriptors, int count, int timeout_ms) {
     last_count = count;
     last_timeout = timeout_ms;
     for (int i = 0; i < count && i < 16; i++) {
-        last_file_descriptors[i] = fds[i];
+        last_file_descriptors[i] = file_descriptors[i];
     }
     return waitfds_answer;
 }
@@ -24,11 +24,11 @@ static unsigned char written[256];
 static size_t written_length;
 static int written_file_descriptor;
 
-long sys_write(int fd, const void *buf, size_t len) {
+long sys_write(int fd, const void *buffer, size_t length) {
     written_file_descriptor = fd;
-    written_length = len < sizeof(written) ? len : sizeof(written);
-    memcpy(written, buf, written_length);
-    return (long)len;
+    written_length = length < sizeof(written) ? length : sizeof(written);
+    memcpy(written, buffer, written_length);
+    return (long)length;
 }
 
 static int pipe_open_calls;
@@ -41,7 +41,7 @@ long sys_pipe_open(const char *name, int file_descriptors_out[2]) {
     return 0;
 }
 
-long sys_read(int fd, void *buf, size_t len) { (void)fd; (void)buf; (void)len; return -1; }
+long sys_read(int fd, void *buffer, size_t length) { (void)fd; (void)buffer; (void)length; return -1; }
 long sys_pipe_poll(int fd) { (void)fd; return 0; }
 long sys_task_alive(long pid) { (void)pid; return 1; }
 long sys_shared_memory_map(long id) { (void)id; return -1; }
@@ -81,11 +81,11 @@ TEST(window_manager_client, no_deadline_and_long_deadlines_are_capped_at_the_liv
     reset();
     window_manager_window_t w = window(12, 3);
     window_manager_wait_ms(&w, NULL, 0, -1);
-    CHECK_EQ(last_timeout, WM_WAIT_CAP_MS);
+    CHECK_EQ(last_timeout, WINDOW_MANAGER_WAIT_CAP_MS);
     window_manager_wait_ms(&w, NULL, 0, 10000);
-    CHECK_EQ(last_timeout, WM_WAIT_CAP_MS);
-    window_manager_wait_ms(&w, NULL, 0, WM_WAIT_CAP_MS);
-    CHECK_EQ(last_timeout, WM_WAIT_CAP_MS);
+    CHECK_EQ(last_timeout, WINDOW_MANAGER_WAIT_CAP_MS);
+    window_manager_wait_ms(&w, NULL, 0, WINDOW_MANAGER_WAIT_CAP_MS);
+    CHECK_EQ(last_timeout, WINDOW_MANAGER_WAIT_CAP_MS);
 }
 
 TEST(window_manager_client, zero_is_a_poll_not_a_sleep) {
@@ -146,12 +146,12 @@ TEST(window_manager_client, present_sends_one_action_naming_this_window) {
     CHECK_EQ(window_manager_present(&w), 0);
     CHECK_EQ(pipe_open_calls, 1);
     CHECK_EQ(written_file_descriptor, 41);
-    CHECK_EQ(written_length, sizeof(wm_action_request_t));
-    wm_action_request_t req;
-    memcpy(&req, written, sizeof(req));
-    CHECK_EQ(req.window_id, 3);
-    CHECK_EQ(req.action, WM_ACTION_PRESENT);
-    CHECK_EQ(req.value, 0);
+    CHECK_EQ(written_length, sizeof(window_manager_action_request_t));
+    window_manager_action_request_t request;
+    memcpy(&request, written, sizeof(request));
+    CHECK_EQ(request.window_id, 3);
+    CHECK_EQ(request.action, WINDOW_MANAGER_ACTION_PRESENT);
+    CHECK_EQ(request.value, 0);
 }
 
 TEST(window_manager_client, present_opens_the_action_pipe_once) {

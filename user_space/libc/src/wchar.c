@@ -13,30 +13,30 @@ size_t wcslen(const wchar_t *s) {
     return n;
 }
 
-wchar_t *wcscpy(wchar_t *dst, const wchar_t *src) {
-    wchar_t *out = dst;
-    while ((*dst++ = *src++) != 0) {
+wchar_t *wcscpy(wchar_t *destination, const wchar_t *source) {
+    wchar_t *out = destination;
+    while ((*destination++ = *source++) != 0) {
     }
     return out;
 }
 
-wchar_t *wcsncpy(wchar_t *dst, const wchar_t *src, size_t n) {
+wchar_t *wcsncpy(wchar_t *destination, const wchar_t *source, size_t n) {
     size_t i = 0;
-    for (; i < n && src[i]; i++) {
-        dst[i] = src[i];
+    for (; i < n && source[i]; i++) {
+        destination[i] = source[i];
     }
     for (; i < n; i++) {
-        dst[i] = 0;
+        destination[i] = 0;
     }
-    return dst;
+    return destination;
 }
 
-wchar_t *wcscat(wchar_t *dst, const wchar_t *src) {
-    wchar_t *out = dst;
-    while (*dst) {
-        dst++;
+wchar_t *wcscat(wchar_t *destination, const wchar_t *source) {
+    wchar_t *out = destination;
+    while (*destination) {
+        destination++;
     }
-    while ((*dst++ = *src++) != 0) {
+    while ((*destination++ = *source++) != 0) {
     }
     return out;
 }
@@ -80,24 +80,24 @@ wchar_t *wcsrchr(const wchar_t *s, wchar_t c) {
     return (wchar_t *)found;
 }
 
-wchar_t *wmemcpy(wchar_t *dst, const wchar_t *src, size_t n) {
+wchar_t *wmemcpy(wchar_t *destination, const wchar_t *source, size_t n) {
     for (size_t i = 0; i < n; i++) {
-        dst[i] = src[i];
+        destination[i] = source[i];
     }
-    return dst;
+    return destination;
 }
 
-wchar_t *wmemmove(wchar_t *dst, const wchar_t *src, size_t n) {
-    if (dst < src) {
+wchar_t *wmemmove(wchar_t *destination, const wchar_t *source, size_t n) {
+    if (destination < source) {
         for (size_t i = 0; i < n; i++) {
-            dst[i] = src[i];
+            destination[i] = source[i];
         }
     } else {
         for (size_t i = n; i > 0; i--) {
-            dst[i - 1] = src[i - 1];
+            destination[i - 1] = source[i - 1];
         }
     }
-    return dst;
+    return destination;
 }
 
 wchar_t *wmemset(wchar_t *s, wchar_t c, size_t n) {
@@ -187,14 +187,14 @@ int wcscoll(const wchar_t *a, const wchar_t *b) {
     return wcscmp(a, b);
 }
 
-size_t wcsxfrm(wchar_t *dst, const wchar_t *src, size_t n) {
-    size_t len = wcslen(src);
+size_t wcsxfrm(wchar_t *destination, const wchar_t *source, size_t n) {
+    size_t length = wcslen(source);
     if (n > 0) {
-        size_t copy = len < n - 1 ? len : n - 1;
-        wmemcpy(dst, src, copy);
-        dst[copy] = 0;
+        size_t copy = length < n - 1 ? length : n - 1;
+        wmemcpy(destination, source, copy);
+        destination[copy] = 0;
     }
-    return len;
+    return length;
 }
 
 static unsigned long wcs_to_ul(const wchar_t *s, wchar_t **end, int base,
@@ -312,46 +312,46 @@ static int wcs_numeric_byte(wchar_t c) {
            c == L'\t' || c == L'\n' || c == L'\r' || c == L'\f' || c == L'\v';
 }
 
-static size_t wcs_narrow_number(const wchar_t *s, char *buf, size_t cap) {
+static size_t wcs_narrow_number(const wchar_t *s, char *buffer, size_t cap) {
     size_t n = 0;
     while (n + 1 < cap && s[n] && wcs_numeric_byte(s[n])) {
-        buf[n] = (char)s[n];
+        buffer[n] = (char)s[n];
         n++;
     }
-    buf[n] = '\0';
+    buffer[n] = '\0';
     return n;
 }
 
 double wcstod(const wchar_t *s, wchar_t **end) {
-    char buf[WCSTOD_MAX];
-    size_t taken = wcs_narrow_number(s, buf, sizeof(buf));
-    char *nend = buf;
-    double v = strtod(buf, &nend);
+    char buffer[WCSTOD_MAX];
+    size_t taken = wcs_narrow_number(s, buffer, sizeof(buffer));
+    char *nend = buffer;
+    double v = strtod(buffer, &nend);
     if (end) {
-        *end = (wchar_t *)(s + (size_t)(nend - buf));
+        *end = (wchar_t *)(s + (size_t)(nend - buffer));
     }
     (void)taken;
     return v;
 }
 
 float wcstof(const wchar_t *s, wchar_t **end) {
-    char buf[WCSTOD_MAX];
-    wcs_narrow_number(s, buf, sizeof(buf));
-    char *nend = buf;
-    float v = strtof(buf, &nend);
+    char buffer[WCSTOD_MAX];
+    wcs_narrow_number(s, buffer, sizeof(buffer));
+    char *nend = buffer;
+    float v = strtof(buffer, &nend);
     if (end) {
-        *end = (wchar_t *)(s + (size_t)(nend - buf));
+        *end = (wchar_t *)(s + (size_t)(nend - buffer));
     }
     return v;
 }
 
 long double wcstold(const wchar_t *s, wchar_t **end) {
-    char buf[WCSTOD_MAX];
-    wcs_narrow_number(s, buf, sizeof(buf));
-    char *nend = buf;
-    long double v = strtold(buf, &nend);
+    char buffer[WCSTOD_MAX];
+    wcs_narrow_number(s, buffer, sizeof(buffer));
+    char *nend = buffer;
+    long double v = strtold(buffer, &nend);
     if (end) {
-        *end = (wchar_t *)(s + (size_t)(nend - buf));
+        *end = (wchar_t *)(s + (size_t)(nend - buffer));
     }
     return v;
 }
@@ -377,10 +377,10 @@ static int utf8_is_valid(unsigned int wc, unsigned char total) {
     return wc <= 0x10FFFFu;
 }
 
-static size_t utf8_decode(wchar_t *out, const char *src, size_t n, mbstate_t *st) {
+static size_t utf8_decode(wchar_t *out, const char *source, size_t n, mbstate_t *st) {
     size_t used = 0;
     while (used < n) {
-        unsigned char b = (unsigned char)src[used];
+        unsigned char b = (unsigned char)source[used];
         if (st->owed == 0) {
             used++;
             if (b < 0x80u) {
@@ -433,32 +433,32 @@ static size_t utf8_decode(wchar_t *out, const char *src, size_t n, mbstate_t *st
     return UTF8_INCOMPLETE;
 }
 
-static size_t utf8_encode(char *dst, wchar_t c) {
+static size_t utf8_encode(char *destination, wchar_t c) {
     unsigned int wc = (unsigned int)c;
     if (wc >= 0xD800u && wc <= 0xDFFFu) {
         errno = EILSEQ;
         return UTF8_INVALID;
     }
     if (wc < 0x80u) {
-        dst[0] = (char)wc;
+        destination[0] = (char)wc;
         return 1;
     }
     if (wc < 0x800u) {
-        dst[0] = (char)(0xC0u | (wc >> 6));
-        dst[1] = (char)(0x80u | (wc & 0x3Fu));
+        destination[0] = (char)(0xC0u | (wc >> 6));
+        destination[1] = (char)(0x80u | (wc & 0x3Fu));
         return 2;
     }
     if (wc < 0x10000u) {
-        dst[0] = (char)(0xE0u | (wc >> 12));
-        dst[1] = (char)(0x80u | ((wc >> 6) & 0x3Fu));
-        dst[2] = (char)(0x80u | (wc & 0x3Fu));
+        destination[0] = (char)(0xE0u | (wc >> 12));
+        destination[1] = (char)(0x80u | ((wc >> 6) & 0x3Fu));
+        destination[2] = (char)(0x80u | (wc & 0x3Fu));
         return 3;
     }
     if (wc <= 0x10FFFFu) {
-        dst[0] = (char)(0xF0u | (wc >> 18));
-        dst[1] = (char)(0x80u | ((wc >> 12) & 0x3Fu));
-        dst[2] = (char)(0x80u | ((wc >> 6) & 0x3Fu));
-        dst[3] = (char)(0x80u | (wc & 0x3Fu));
+        destination[0] = (char)(0xF0u | (wc >> 18));
+        destination[1] = (char)(0x80u | ((wc >> 12) & 0x3Fu));
+        destination[2] = (char)(0x80u | ((wc >> 6) & 0x3Fu));
+        destination[3] = (char)(0x80u | (wc & 0x3Fu));
         return 4;
     }
     errno = EILSEQ;
@@ -471,29 +471,29 @@ int mbsinit(const mbstate_t *ps) {
     return !ps || ps->owed == 0;
 }
 
-size_t mbrtowc(wchar_t *dst, const char *src, size_t n, mbstate_t *ps) {
+size_t mbrtowc(wchar_t *destination, const char *source, size_t n, mbstate_t *ps) {
     mbstate_t *st = ps ? ps : &internal_state;
-    if (!src) {
+    if (!source) {
         st->wc = 0;
         st->owed = 0;
         st->total = 0;
         return 0;
     }
     wchar_t wc = 0;
-    size_t r = utf8_decode(&wc, src, n, st);
+    size_t r = utf8_decode(&wc, source, n, st);
     if (r == UTF8_INVALID || r == UTF8_INCOMPLETE) {
         return r;
     }
-    if (dst) {
-        *dst = wc;
+    if (destination) {
+        *destination = wc;
     }
     return wc == 0 ? 0 : r;
 }
 
-size_t wcrtomb(char *dst, wchar_t c, mbstate_t *ps) {
+size_t wcrtomb(char *destination, wchar_t c, mbstate_t *ps) {
     (void)ps;
     char scratch[4];
-    if (!dst) {
+    if (!destination) {
         return 1;
     }
     size_t r = utf8_encode(scratch, c);
@@ -501,33 +501,33 @@ size_t wcrtomb(char *dst, wchar_t c, mbstate_t *ps) {
         return r;
     }
     for (size_t i = 0; i < r; i++) {
-        dst[i] = scratch[i];
+        destination[i] = scratch[i];
     }
     return r;
 }
 
-int mbtowc(wchar_t *dst, const char *src, size_t n) {
-    if (!src) {
+int mbtowc(wchar_t *destination, const char *source, size_t n) {
+    if (!source) {
         return 0;
     }
     mbstate_t st = {0, 0, 0};
     wchar_t wc = 0;
-    size_t r = utf8_decode(&wc, src, n, &st);
+    size_t r = utf8_decode(&wc, source, n, &st);
     if (r == UTF8_INVALID || r == UTF8_INCOMPLETE) {
         errno = EILSEQ;
         return -1;
     }
-    if (dst) {
-        *dst = wc;
+    if (destination) {
+        *destination = wc;
     }
     return wc == 0 ? 0 : (int)r;
 }
 
-int wctomb(char *dst, wchar_t c) {
-    if (!dst) {
+int wctomb(char *destination, wchar_t c) {
+    if (!destination) {
         return 0;
     }
-    size_t r = utf8_encode(dst, c);
+    size_t r = utf8_encode(destination, c);
     return r == UTF8_INVALID ? -1 : (int)r;
 }
 
@@ -535,10 +535,10 @@ int mblen(const char *s, size_t n) {
     return mbtowc((wchar_t *)0, s, n);
 }
 
-size_t mbstowcs(wchar_t *dst, const char *src, size_t n) {
+size_t mbstowcs(wchar_t *destination, const char *source, size_t n) {
     mbstate_t st = {0, 0, 0};
     size_t out = 0;
-    const char *p = src;
+    const char *p = source;
     for (;;) {
         wchar_t wc = 0;
         size_t r = utf8_decode(&wc, p, 4, &st);
@@ -547,57 +547,57 @@ size_t mbstowcs(wchar_t *dst, const char *src, size_t n) {
             return (size_t)-1;
         }
         if (wc == 0) {
-            if (dst && out < n) {
-                dst[out] = 0;
+            if (destination && out < n) {
+                destination[out] = 0;
             }
             return out;
         }
-        if (dst) {
+        if (destination) {
             if (out >= n) {
                 return out;
             }
-            dst[out] = wc;
+            destination[out] = wc;
         }
         out++;
         p += r;
     }
 }
 
-size_t wcstombs(char *dst, const wchar_t *src, size_t n) {
+size_t wcstombs(char *destination, const wchar_t *source, size_t n) {
     char scratch[4];
     size_t out = 0;
-    for (size_t i = 0; src[i]; i++) {
-        size_t r = utf8_encode(scratch, src[i]);
+    for (size_t i = 0; source[i]; i++) {
+        size_t r = utf8_encode(scratch, source[i]);
         if (r == UTF8_INVALID) {
             return (size_t)-1;
         }
-        if (dst) {
+        if (destination) {
             if (out + r > n) {
                 return out;
             }
             for (size_t k = 0; k < r; k++) {
-                dst[out + k] = scratch[k];
+                destination[out + k] = scratch[k];
             }
         }
         out += r;
     }
-    if (dst && out < n) {
-        dst[out] = 0;
+    if (destination && out < n) {
+        destination[out] = 0;
     }
     return out;
 }
 
-size_t mbsrtowcs(wchar_t *dst, const char **src, size_t n, mbstate_t *ps) {
-    if (!src || !*src) {
+size_t mbsrtowcs(wchar_t *destination, const char **source, size_t n, mbstate_t *ps) {
+    if (!source || !*source) {
         errno = EILSEQ;
         return (size_t)-1;
     }
     mbstate_t *st = ps ? ps : &internal_state;
-    const char *p = *src;
+    const char *p = *source;
     size_t out = 0;
     for (;;) {
-        if (dst && out >= n) {
-            *src = p;
+        if (destination && out >= n) {
+            *source = p;
             return out;
         }
         wchar_t wc = 0;
@@ -608,33 +608,33 @@ size_t mbsrtowcs(wchar_t *dst, const char **src, size_t n, mbstate_t *ps) {
         }
         p += r;
         if (wc == 0) {
-            if (dst) {
-                dst[out] = 0;
-                *src = (const char *)0;
+            if (destination) {
+                destination[out] = 0;
+                *source = (const char *)0;
             }
             return out;
         }
-        if (dst) {
-            dst[out] = wc;
+        if (destination) {
+            destination[out] = wc;
         }
         out++;
     }
 }
 
-size_t wcsrtombs(char *dst, const wchar_t **src, size_t n, mbstate_t *ps) {
+size_t wcsrtombs(char *destination, const wchar_t **source, size_t n, mbstate_t *ps) {
     (void)ps;
-    if (!src || !*src) {
+    if (!source || !*source) {
         errno = EILSEQ;
         return (size_t)-1;
     }
-    const wchar_t *p = *src;
+    const wchar_t *p = *source;
     char scratch[4];
     size_t out = 0;
     for (;;) {
         if (*p == 0) {
-            if (dst && out < n) {
-                dst[out] = 0;
-                *src = (const wchar_t *)0;
+            if (destination && out < n) {
+                destination[out] = 0;
+                *source = (const wchar_t *)0;
             }
             return out;
         }
@@ -642,13 +642,13 @@ size_t wcsrtombs(char *dst, const wchar_t **src, size_t n, mbstate_t *ps) {
         if (r == UTF8_INVALID) {
             return (size_t)-1;
         }
-        if (dst) {
+        if (destination) {
             if (out + r > n) {
-                *src = p;
+                *source = p;
                 return out;
             }
             for (size_t k = 0; k < r; k++) {
-                dst[out + k] = scratch[k];
+                destination[out + k] = scratch[k];
             }
         }
         out += r;
@@ -656,23 +656,23 @@ size_t wcsrtombs(char *dst, const wchar_t **src, size_t n, mbstate_t *ps) {
     }
 }
 
-size_t mbsnrtowcs(wchar_t *dst, const char **src, size_t nms, size_t len,
+size_t mbsnrtowcs(wchar_t *destination, const char **source, size_t nms, size_t length,
                   mbstate_t *ps) {
-    if (!src || !*src) {
+    if (!source || !*source) {
         errno = EILSEQ;
         return (size_t)-1;
     }
     mbstate_t *st = ps ? ps : &internal_state;
-    const char *p = *src;
+    const char *p = *source;
     size_t consumed = 0;
     size_t out = 0;
     for (;;) {
-        if (dst && out >= len) {
-            *src = p;
+        if (destination && out >= length) {
+            *source = p;
             return out;
         }
         if (consumed >= nms) {
-            *src = p;
+            *source = p;
             return out;
         }
         size_t avail = nms - consumed;
@@ -682,7 +682,7 @@ size_t mbsnrtowcs(wchar_t *dst, const char **src, size_t nms, size_t len,
         wchar_t wc = 0;
         size_t r = utf8_decode(&wc, p, avail, st);
         if (r == UTF8_INCOMPLETE) {
-            *src = p + avail;
+            *source = p + avail;
             return out;
         }
         if (r == UTF8_INVALID) {
@@ -692,44 +692,44 @@ size_t mbsnrtowcs(wchar_t *dst, const char **src, size_t nms, size_t len,
         p += r;
         consumed += r;
         if (wc == 0) {
-            if (dst) {
-                dst[out] = 0;
+            if (destination) {
+                destination[out] = 0;
             }
-            *src = (const char *)0;
+            *source = (const char *)0;
             return out;
         }
-        if (dst) {
-            dst[out] = wc;
+        if (destination) {
+            destination[out] = wc;
         }
         out++;
     }
 }
 
-size_t wcsnrtombs(char *dst, const wchar_t **src, size_t nwc, size_t len,
+size_t wcsnrtombs(char *destination, const wchar_t **source, size_t nwc, size_t length,
                   mbstate_t *ps) {
     (void)ps;
-    if (!src || !*src) {
+    if (!source || !*source) {
         errno = EILSEQ;
         return (size_t)-1;
     }
-    const wchar_t *p = *src;
+    const wchar_t *p = *source;
     char scratch[4];
     size_t seen = 0;
     size_t out = 0;
     for (;;) {
         if (seen >= nwc) {
-            *src = p;
+            *source = p;
             return out;
         }
         if (*p == 0) {
-            if (dst) {
-                if (out >= len) {
-                    *src = p;
+            if (destination) {
+                if (out >= length) {
+                    *source = p;
                     return out;
                 }
-                dst[out] = 0;
+                destination[out] = 0;
             }
-            *src = (const wchar_t *)0;
+            *source = (const wchar_t *)0;
             return out;
         }
         size_t r = utf8_encode(scratch, *p);
@@ -737,13 +737,13 @@ size_t wcsnrtombs(char *dst, const wchar_t **src, size_t nwc, size_t len,
             errno = EILSEQ;
             return (size_t)-1;
         }
-        if (dst) {
-            if (out + r > len) {
-                *src = p;
+        if (destination) {
+            if (out + r > length) {
+                *source = p;
                 return out;
             }
             for (size_t k = 0; k < r; k++) {
-                dst[out + k] = scratch[k];
+                destination[out + k] = scratch[k];
             }
         }
         out += r;
@@ -777,8 +777,8 @@ size_t wcsftime(wchar_t *out, size_t n, const wchar_t *fmt,
     if (n == 0) {
         return 0;
     }
-    size_t fmt_len = wcslen(fmt);
-    char *nfmt = (char *)malloc(fmt_len * 4 + 1);
+    size_t fmt_length = wcslen(fmt);
+    char *nfmt = (char *)malloc(fmt_length * 4 + 1);
     char *nout = (char *)malloc(n * 4 + 1);
     size_t produced = 0;
     if (nfmt && nout) {
@@ -787,7 +787,7 @@ size_t wcsftime(wchar_t *out, size_t n, const wchar_t *fmt,
         for (size_t i = 0; i < sizeof(st); i++) {
             ((unsigned char *)&st)[i] = 0;
         }
-        if (wcsrtombs(nfmt, &fp, fmt_len * 4 + 1, &st) != (size_t)-1) {
+        if (wcsrtombs(nfmt, &fp, fmt_length * 4 + 1, &st) != (size_t)-1) {
             size_t r = strftime(nout, n * 4 + 1, nfmt, tm);
             if (r > 0 || nout[0] == '\0') {
                 const char *np = nout;
@@ -908,13 +908,13 @@ int vswprintf(wchar_t *out, size_t n, const wchar_t *fmt, va_list ap) {
     }
     mbstate_t st;
     memset(&st, 0, sizeof(st));
-    const char *src = narrow_out;
-    size_t written = mbsrtowcs(out, &src, n - 1, &st);
+    const char *source = narrow_out;
+    size_t written = mbsrtowcs(out, &source, n - 1, &st);
     if (written == (size_t)-1) {
         return -1;
     }
     out[written] = L'\0';
-    return src ? -1 : (int)written;
+    return source ? -1 : (int)written;
 }
 
 int swprintf(wchar_t *out, size_t n, const wchar_t *fmt, ...) {

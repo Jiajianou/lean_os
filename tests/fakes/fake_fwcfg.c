@@ -2,7 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-void panic(const char *msg);
+void panic(const char *message);
 
 #define MAX_ITEMS 8
 #define MAX_BYTES 65536
@@ -10,17 +10,17 @@ void panic(const char *msg);
 typedef struct {
     uint16_t selector;
     uint8_t data[MAX_BYTES];
-    uint32_t len;
+    uint32_t length;
     int used;
 } item_t;
 
 static item_t items[MAX_ITEMS];
 static uint16_t selected;
-static uint32_t pos;
+static uint32_t position;
 
 void fake_fwcfg_reset(void);
-void fake_fwcfg_set_item(uint16_t selector, const uint8_t *data, uint32_t len);
-void fake_fwcfg_append_item(uint16_t selector, const uint8_t *data, uint32_t len);
+void fake_fwcfg_set_item(uint16_t selector, const uint8_t *data, uint32_t length);
+void fake_fwcfg_append_item(uint16_t selector, const uint8_t *data, uint32_t length);
 uint8_t fake_port_inb(uint16_t port);
 void fake_port_outw(uint16_t port, uint16_t value);
 
@@ -36,10 +36,10 @@ static item_t *find(uint16_t selector) {
 void fake_fwcfg_reset(void) {
     memset(items, 0, sizeof(items));
     selected = 0xFFFF;
-    pos = 0;
+    position = 0;
 }
 
-void fake_fwcfg_set_item(uint16_t selector, const uint8_t *data, uint32_t len) {
+void fake_fwcfg_set_item(uint16_t selector, const uint8_t *data, uint32_t length) {
     item_t *it = find(selector);
     if (!it) {
         for (int i = 0; i < MAX_ITEMS; i++) {
@@ -49,28 +49,28 @@ void fake_fwcfg_set_item(uint16_t selector, const uint8_t *data, uint32_t len) {
     if (!it) {
         panic("fake_fwcfg: out of item slots");
     }
-    if (len > MAX_BYTES) {
+    if (length > MAX_BYTES) {
         panic("fake_fwcfg: item larger than the fake can hold");
     }
     it->used = 1;
     it->selector = selector;
-    it->len = len;
-    if (len) {
-        memcpy(it->data, data, len);
+    it->length = length;
+    if (length) {
+        memcpy(it->data, data, length);
     }
 }
 
-void fake_fwcfg_append_item(uint16_t selector, const uint8_t *data, uint32_t len) {
+void fake_fwcfg_append_item(uint16_t selector, const uint8_t *data, uint32_t length) {
     item_t *it = find(selector);
     if (!it) {
-        fake_fwcfg_set_item(selector, data, len);
+        fake_fwcfg_set_item(selector, data, length);
         return;
     }
-    if (it->len + len > MAX_BYTES) {
+    if (it->length + length > MAX_BYTES) {
         panic("fake_fwcfg: item grew larger than the fake can hold");
     }
-    memcpy(it->data + it->len, data, len);
-    it->len += len;
+    memcpy(it->data + it->length, data, length);
+    it->length += length;
 }
 
 #define FWCFG_PORT_SEL  0x510
@@ -79,7 +79,7 @@ void fake_fwcfg_append_item(uint16_t selector, const uint8_t *data, uint32_t len
 void fake_port_outw(uint16_t port, uint16_t value) {
     if (port == FWCFG_PORT_SEL) {
         selected = value;
-        pos = 0;
+        position = 0;
     }
 }
 
@@ -88,8 +88,8 @@ uint8_t fake_port_inb(uint16_t port) {
         return 0xFF;
     }
     item_t *it = find(selected);
-    if (!it || pos >= it->len) {
+    if (!it || position >= it->length) {
         return 0xFF;
     }
-    return it->data[pos++];
+    return it->data[position++];
 }

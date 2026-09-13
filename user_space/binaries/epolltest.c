@@ -388,20 +388,20 @@ static int test_cross_process_wake(void) {
 }
 
 static int test_exhaustion(void) {
-    int fds[96];
+    int file_descriptors[96];
     int n = 0;
     while (n < 96) {
         int fd = eventfd(0, 0);
         if (fd < 0) {
             break;
         }
-        fds[n++] = fd;
+        file_descriptors[n++] = fd;
     }
     if (n == 0) {
         FAIL(19);
     }
     for (int i = 0; i < n; i++) {
-        close(fds[i]);
+        close(file_descriptors[i]);
     }
     int again = eventfd(0, 0);
     if (again < 0) {
@@ -415,13 +415,13 @@ static int test_exhaustion(void) {
         if (fd < 0) {
             break;
         }
-        fds[n++] = fd;
+        file_descriptors[n++] = fd;
     }
     if (n == 0) {
         FAIL(19);
     }
     for (int i = 0; i < n; i++) {
-        close(fds[i]);
+        close(file_descriptors[i]);
     }
     again = epoll_create1(0);
     if (again < 0) {

@@ -21,11 +21,11 @@ _Static_assert(offsetof(leanfs_inode_t, type) == 0, "");
 _Static_assert(offsetof(leanfs_inode_t, size) == 4, "");
 _Static_assert(offsetof(leanfs_inode_t, direct) == 12, "");
 
-_Static_assert(sizeof(leanfs_dirent_t) == LEANFS_DIRENT_HDR,
+_Static_assert(sizeof(leanfs_dirent_t) == LEANFS_DIRENT_HEADER,
                "the directory record header is eight bytes");
 _Static_assert(offsetof(leanfs_dirent_t, inode) == 0, "");
 _Static_assert(offsetof(leanfs_dirent_t, rec_length) == 4, "");
-_Static_assert(offsetof(leanfs_dirent_t, name_len) == 6, "");
+_Static_assert(offsetof(leanfs_dirent_t, name_length) == 6, "");
 _Static_assert(offsetof(leanfs_dirent_t, type) == 7, "");
 
 _Static_assert(LEANFS_BLOCK_SIZE == 4096, "M93's block size");
@@ -68,13 +68,13 @@ TEST(leanfs_format, the_layout_leaves_no_gaps_and_no_overlaps) {
 
 TEST(leanfs_format, a_directory_record_never_straddles_a_block) {
     CHECK(LEANFS_DIRENT_NEED(LEANFS_MAX_NAME) <= LEANFS_BLOCK_SIZE);
-    CHECK_EQ(LEANFS_DIRENT_NEED(0), LEANFS_DIRENT_HDR);
-    CHECK_EQ(LEANFS_DIRENT_NEED(1), LEANFS_DIRENT_HDR + LEANFS_DIRENT_ALIGN);
-    CHECK_EQ(LEANFS_DIRENT_NEED(4), LEANFS_DIRENT_HDR + LEANFS_DIRENT_ALIGN);
-    CHECK_EQ(LEANFS_DIRENT_NEED(5), LEANFS_DIRENT_HDR + 2 * LEANFS_DIRENT_ALIGN);
+    CHECK_EQ(LEANFS_DIRENT_NEED(0), LEANFS_DIRENT_HEADER);
+    CHECK_EQ(LEANFS_DIRENT_NEED(1), LEANFS_DIRENT_HEADER + LEANFS_DIRENT_ALIGN);
+    CHECK_EQ(LEANFS_DIRENT_NEED(4), LEANFS_DIRENT_HEADER + LEANFS_DIRENT_ALIGN);
+    CHECK_EQ(LEANFS_DIRENT_NEED(5), LEANFS_DIRENT_HEADER + 2 * LEANFS_DIRENT_ALIGN);
     for (unsigned n = 0; n <= LEANFS_MAX_NAME; n++) {
         CHECK_EQ(LEANFS_DIRENT_NEED(n) % LEANFS_DIRENT_ALIGN, 0);
-        CHECK(LEANFS_DIRENT_NEED(n) >= LEANFS_DIRENT_HDR + n);
+        CHECK(LEANFS_DIRENT_NEED(n) >= LEANFS_DIRENT_HEADER + n);
     }
 }
 

@@ -10,56 +10,56 @@ typedef struct {
     FILE *f;
     int pushback;
     long consumed;
-} src_t;
+} source_t;
 
-static int src_get(src_t *src) {
+static int source_get(source_t *source) {
     int c;
-    if (src->pushback >= 0) {
-        c = src->pushback;
-        src->pushback = -1;
-    } else if (src->s) {
-        c = (unsigned char)*src->s;
+    if (source->pushback >= 0) {
+        c = source->pushback;
+        source->pushback = -1;
+    } else if (source->s) {
+        c = (unsigned char)*source->s;
         if (c == 0) {
             return EOF;
         }
-        src->s++;
+        source->s++;
     } else {
-        c = fgetc(src->f);
+        c = fgetc(source->f);
     }
     if (c != EOF) {
-        src->consumed++;
+        source->consumed++;
     }
     return c;
 }
 
-static void src_unget(src_t *src, int c) {
+static void source_unget(source_t *source, int c) {
     if (c == EOF) {
         return;
     }
-    src->pushback = c;
-    src->consumed--;
+    source->pushback = c;
+    source->consumed--;
 }
 
-enum { LEN_INT, LEN_CHAR, LEN_SHORT, LEN_LONG, LEN_LLONG, LEN_SIZE };
+enum { LENGTH_INT, LENGTH_CHAR, LENGTH_SHORT, LENGTH_LONG, LENGTH_LLONG, LENGTH_SIZE };
 
-static void store_signed(void *p, int len, long long v) {
-    switch (len) {
-    case LEN_CHAR:  *(signed char *)p = (signed char)v; break;
-    case LEN_SHORT: *(short *)p = (short)v; break;
-    case LEN_LONG:  *(long *)p = (long)v; break;
-    case LEN_LLONG: *(long long *)p = v; break;
-    case LEN_SIZE:  *(size_t *)p = (size_t)v; break;
+static void store_signed(void *p, int length, long long v) {
+    switch (length) {
+    case LENGTH_CHAR:  *(signed char *)p = (signed char)v; break;
+    case LENGTH_SHORT: *(short *)p = (short)v; break;
+    case LENGTH_LONG:  *(long *)p = (long)v; break;
+    case LENGTH_LLONG: *(long long *)p = v; break;
+    case LENGTH_SIZE:  *(size_t *)p = (size_t)v; break;
     default:        *(int *)p = (int)v; break;
     }
 }
 
-static void store_unsigned(void *p, int len, unsigned long long v) {
-    switch (len) {
-    case LEN_CHAR:  *(unsigned char *)p = (unsigned char)v; break;
-    case LEN_SHORT: *(unsigned short *)p = (unsigned short)v; break;
-    case LEN_LONG:  *(unsigned long *)p = (unsigned long)v; break;
-    case LEN_LLONG: *(unsigned long long *)p = v; break;
-    case LEN_SIZE:  *(size_t *)p = (size_t)v; break;
+static void store_unsigned(void *p, int length, unsigned long long v) {
+    switch (length) {
+    case LENGTH_CHAR:  *(unsigned char *)p = (unsigned char)v; break;
+    case LENGTH_SHORT: *(unsigned short *)p = (unsigned short)v; break;
+    case LENGTH_LONG:  *(unsigned long *)p = (unsigned long)v; break;
+    case LENGTH_LLONG: *(unsigned long long *)p = v; break;
+    case LENGTH_SIZE:  *(size_t *)p = (size_t)v; break;
     default:        *(unsigned int *)p = (unsigned int)v; break;
     }
 }
@@ -78,18 +78,18 @@ static int digit_value(int c, int base) {
     return v < base ? v : -1;
 }
 
-static int scan_int(src_t *src, int base, int width, int is_signed,
+static int scan_int(source_t *source, int base, int width, int is_signed,
                     unsigned long long *out, int *negative) {
     int c;
     int any = 0;
     unsigned long long v = 0;
     *negative = 0;
 
-    c = src_get(src);
+    c = source_get(source);
     if (width > 0 && (c == '+' || c == '-')) {
         *negative = (c == '-');
         width--;
-        c = src_get(src);
+        c = source_get(source);
     }
     (void)is_signed;
 
@@ -97,11 +97,11 @@ static int scan_int(src_t *src, int base, int width, int is_signed,
         if (width > 0 && c == '0') {
             any = 1;
             width--;
-            c = src_get(src);
+            c = source_get(source);
             if (width > 0 && (c == 'x' || c == 'X')) {
                 base = 16;
                 width--;
-                c = src_get(src);
+                c = source_get(source);
                 any = 0;
             } else if (base == 0) {
                 base = 8;
@@ -119,23 +119,23 @@ static int scan_int(src_t *src, int base, int width, int is_signed,
         v = v * (unsigned long long)base + (unsigned long long)d;
         any = 1;
         width--;
-        c = src_get(src);
+        c = source_get(source);
     }
-    src_unget(src, c);
+    source_unget(source, c);
     *out = v;
     return any;
 }
 
-static int scan_float(src_t *src, int width, long double *out) {
-    char buf[64];
+static int scan_float(source_t *source, int width, long double *out) {
+    char buffer[64];
     int n = 0;
-    int c = src_get(src);
+    int c = source_get(source);
     int seen_digit = 0;
 
-    while (width > 0 && n < (int)sizeof(buf) - 1) {
+    while (width > 0 && n < (int)sizeof(buffer) - 1) {
         int keep = 0;
         if (c == '+' || c == '-') {
-            keep = (n == 0) || (buf[n - 1] == 'e' || buf[n - 1] == 'E');
+            keep = (n == 0) || (buffer[n - 1] == 'e' || buffer[n - 1] == 'E');
         } else if (c >= '0' && c <= '9') {
             keep = 1;
             seen_digit = 1;
@@ -147,60 +147,60 @@ static int scan_float(src_t *src, int width, long double *out) {
         if (!keep) {
             break;
         }
-        buf[n++] = (char)c;
+        buffer[n++] = (char)c;
         width--;
-        c = src_get(src);
+        c = source_get(source);
     }
-    src_unget(src, c);
-    buf[n] = '\0';
+    source_unget(source, c);
+    buffer[n] = '\0';
     if (!seen_digit) {
         return 0;
     }
     char *end = 0;
-    *out = (long double)strtod(buf, &end);
+    *out = (long double)strtod(buffer, &end);
     return 1;
 }
 
-int vsscanf_src(src_t *src, const char *fmt, va_list ap);
+int vsscanf_source(source_t *source, const char *fmt, va_list ap);
 
-static int fail_return(src_t *src, int assigned) {
+static int fail_return(source_t *source, int assigned) {
     if (assigned == 0) {
-        int c = src_get(src);
+        int c = source_get(source);
         if (c == EOF) {
             return EOF;
         }
-        src_unget(src, c);
+        source_unget(source, c);
     }
     return assigned;
 }
 
-int vsscanf_src(src_t *src, const char *fmt, va_list ap) {
+int vsscanf_source(source_t *source, const char *fmt, va_list ap) {
     int assigned = 0;
 
     for (const char *p = fmt; *p; p++) {
         if (isspace((unsigned char)*p)) {
             int c;
             do {
-                c = src_get(src);
+                c = source_get(source);
             } while (c != EOF && isspace(c));
-            src_unget(src, c);
+            source_unget(source, c);
             continue;
         }
         if (*p != '%') {
-            int c = src_get(src);
+            int c = source_get(source);
             if (c != (unsigned char)*p) {
-                src_unget(src, c);
-                return fail_return(src, assigned);
+                source_unget(source, c);
+                return fail_return(source, assigned);
             }
             continue;
         }
 
         p++;
         if (*p == '%') {
-            int c = src_get(src);
+            int c = source_get(source);
             if (c != '%') {
-                src_unget(src, c);
-                return fail_return(src, assigned);
+                source_unget(source, c);
+                return fail_return(source, assigned);
             }
             continue;
         }
@@ -218,27 +218,27 @@ int vsscanf_src(src_t *src, const char *fmt, va_list ap) {
         if (width == 0) {
             width = 0x7fffffff;
         }
-        int len = LEN_INT;
+        int length = LENGTH_INT;
         if (*p == 'h') {
             p++;
-            len = LEN_SHORT;
+            length = LENGTH_SHORT;
             if (*p == 'h') {
                 p++;
-                len = LEN_CHAR;
+                length = LENGTH_CHAR;
             }
         } else if (*p == 'l') {
             p++;
-            len = LEN_LONG;
+            length = LENGTH_LONG;
             if (*p == 'l') {
                 p++;
-                len = LEN_LLONG;
+                length = LENGTH_LLONG;
             }
         } else if (*p == 'z') {
             p++;
-            len = LEN_SIZE;
+            length = LENGTH_SIZE;
         } else if (*p == 'j' || *p == 't') {
             p++;
-            len = LEN_LLONG;
+            length = LENGTH_LLONG;
         }
 
         int conv = (unsigned char)*p;
@@ -249,9 +249,9 @@ int vsscanf_src(src_t *src, const char *fmt, va_list ap) {
         if (conv != 'c' && conv != '[' && conv != 'n') {
             int c;
             do {
-                c = src_get(src);
+                c = source_get(source);
             } while (c != EOF && isspace(c));
-            src_unget(src, c);
+            source_unget(source, c);
         }
 
         switch (conv) {
@@ -267,17 +267,17 @@ int vsscanf_src(src_t *src, const char *fmt, va_list ap) {
                                        : 10;
             unsigned long long v = 0;
             int neg = 0;
-            if (!scan_int(src, base, width, conv == 'd' || conv == 'i', &v,
+            if (!scan_int(source, base, width, conv == 'd' || conv == 'i', &v,
                           &neg)) {
-                return fail_return(src, assigned);
+                return fail_return(source, assigned);
             }
             if (!suppress) {
-                void *dst = va_arg(ap, void *);
+                void *destination = va_arg(ap, void *);
                 if (conv == 'd' || conv == 'i') {
                     long long sv = neg ? -(long long)v : (long long)v;
-                    store_signed(dst, len, sv);
+                    store_signed(destination, length, sv);
                 } else {
-                    store_unsigned(dst, len, neg ? (unsigned long long)0 - v : v);
+                    store_unsigned(destination, length, neg ? (unsigned long long)0 - v : v);
                 }
                 assigned++;
             }
@@ -290,15 +290,15 @@ int vsscanf_src(src_t *src, const char *fmt, va_list ap) {
         case 'g':
         case 'G': {
             long double v = 0;
-            if (!scan_float(src, width, &v)) {
-                return fail_return(src, assigned);
+            if (!scan_float(source, width, &v)) {
+                return fail_return(source, assigned);
             }
             if (!suppress) {
-                void *dst = va_arg(ap, void *);
-                if (len == LEN_LONG || len == LEN_LLONG) {
-                    *(double *)dst = (double)v;
+                void *destination = va_arg(ap, void *);
+                if (length == LENGTH_LONG || length == LENGTH_LLONG) {
+                    *(double *)destination = (double)v;
                 } else {
-                    *(float *)dst = (float)v;
+                    *(float *)destination = (float)v;
                 }
                 assigned++;
             }
@@ -306,43 +306,43 @@ int vsscanf_src(src_t *src, const char *fmt, va_list ap) {
         }
         case 'c': {
             int want = (width == 0x7fffffff) ? 1 : width;
-            char *dst = suppress ? 0 : va_arg(ap, char *);
+            char *destination = suppress ? 0 : va_arg(ap, char *);
             int got = 0;
             while (got < want) {
-                int c = src_get(src);
+                int c = source_get(source);
                 if (c == EOF) {
                     break;
                 }
-                if (dst) {
-                    dst[got] = (char)c;
+                if (destination) {
+                    destination[got] = (char)c;
                 }
                 got++;
             }
             if (got < want) {
-                return fail_return(src, assigned);
+                return fail_return(source, assigned);
             }
-            if (dst) {
+            if (destination) {
                 assigned++;
             }
             break;
         }
         case 's': {
-            char *dst = suppress ? 0 : va_arg(ap, char *);
+            char *destination = suppress ? 0 : va_arg(ap, char *);
             int got = 0;
-            int c = src_get(src);
+            int c = source_get(source);
             while (c != EOF && !isspace(c) && got < width) {
-                if (dst) {
-                    dst[got] = (char)c;
+                if (destination) {
+                    destination[got] = (char)c;
                 }
                 got++;
-                c = src_get(src);
+                c = source_get(source);
             }
-            src_unget(src, c);
+            source_unget(source, c);
             if (got == 0) {
-                return fail_return(src, assigned);
+                return fail_return(source, assigned);
             }
-            if (dst) {
-                dst[got] = '\0';
+            if (destination) {
+                destination[got] = '\0';
                 assigned++;
             }
             break;
@@ -375,31 +375,31 @@ int vsscanf_src(src_t *src, const char *fmt, va_list ap) {
             if (*p != ']') {
                 return assigned;
             }
-            char *dst = suppress ? 0 : va_arg(ap, char *);
+            char *destination = suppress ? 0 : va_arg(ap, char *);
             int got = 0;
-            int c = src_get(src);
+            int c = source_get(source);
             while (c != EOF && got < width &&
                    (set[(unsigned char)c] ? !invert : invert)) {
-                if (dst) {
-                    dst[got] = (char)c;
+                if (destination) {
+                    destination[got] = (char)c;
                 }
                 got++;
-                c = src_get(src);
+                c = source_get(source);
             }
-            src_unget(src, c);
+            source_unget(source, c);
             if (got == 0) {
-                return fail_return(src, assigned);
+                return fail_return(source, assigned);
             }
-            if (dst) {
-                dst[got] = '\0';
+            if (destination) {
+                destination[got] = '\0';
                 assigned++;
             }
             break;
         }
         case 'n': {
             if (!suppress) {
-                void *dst = va_arg(ap, void *);
-                store_signed(dst, len, src->consumed);
+                void *destination = va_arg(ap, void *);
+                store_signed(destination, length, source->consumed);
             }
             break;
         }
@@ -410,18 +410,18 @@ int vsscanf_src(src_t *src, const char *fmt, va_list ap) {
     return assigned;
 }
 
-int vsscanf(const char *str, const char *fmt, va_list ap) {
-    if (!str || !fmt) {
+int vsscanf(const char *string, const char *fmt, va_list ap) {
+    if (!string || !fmt) {
         return EOF;
     }
-    src_t src = {str, 0, -1, 0};
-    return vsscanf_src(&src, fmt, ap);
+    source_t source = {string, 0, -1, 0};
+    return vsscanf_source(&source, fmt, ap);
 }
 
-int sscanf(const char *str, const char *fmt, ...) {
+int sscanf(const char *string, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    int n = vsscanf(str, fmt, ap);
+    int n = vsscanf(string, fmt, ap);
     va_end(ap);
     return n;
 }
@@ -430,25 +430,25 @@ int fscanf(FILE *f, const char *fmt, ...) {
     if (!f || !fmt) {
         return EOF;
     }
-    src_t src = {0, f, -1, 0};
+    source_t source = {0, f, -1, 0};
     va_list ap;
     va_start(ap, fmt);
-    int n = vsscanf_src(&src, fmt, ap);
+    int n = vsscanf_source(&source, fmt, ap);
     va_end(ap);
-    if (src.pushback >= 0) {
-        ungetc(src.pushback, f);
+    if (source.pushback >= 0) {
+        ungetc(source.pushback, f);
     }
     return n;
 }
 
 int scanf(const char *fmt, ...) {
-    src_t src = {0, stdin, -1, 0};
+    source_t source = {0, stdin, -1, 0};
     va_list ap;
     va_start(ap, fmt);
-    int n = vsscanf_src(&src, fmt, ap);
+    int n = vsscanf_source(&source, fmt, ap);
     va_end(ap);
-    if (src.pushback >= 0) {
-        ungetc(src.pushback, stdin);
+    if (source.pushback >= 0) {
+        ungetc(source.pushback, stdin);
     }
     return n;
 }

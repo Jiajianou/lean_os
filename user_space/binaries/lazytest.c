@@ -62,16 +62,16 @@ static int ordinary(void) {
         }
     }
 
-    char *buf = (char *)mmap(0, 16 * PAGE, PROT_READ | PROT_WRITE,
+    char *buffer = (char *)mmap(0, 16 * PAGE, PROT_READ | PROT_WRITE,
                              MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (buf == MAP_FAILED) {
+    if (buffer == MAP_FAILED) {
         return 2;
     }
-    if (getcwd(buf, 16 * PAGE) == 0 || buf[0] != '/') {
+    if (getcwd(buffer, 16 * PAGE) == 0 || buffer[0] != '/') {
         printf("lazytest: an untouched mmap buffer was refused as a syscall argument\n");
         return 7;
     }
-    munmap(buf, 16 * PAGE);
+    munmap(buffer, 16 * PAGE);
 
     unsigned char *ro = (unsigned char *)mmap(0, 4 * PAGE, PROT_READ,
                                                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);

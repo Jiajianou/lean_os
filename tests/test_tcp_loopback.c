@@ -8,8 +8,8 @@
 #define LOOPBACK 0x7F000001u
 #define PORT     5555
 
-static uint8_t pattern(long pos) {
-    return (uint8_t)('A' + (pos * 13 + pos / 97) % 26);
+static uint8_t pattern(long position) {
+    return (uint8_t)('A' + (position * 13 + position / 97) % 26);
 }
 
 static void connect_pair(struct tcpcb **client, struct tcpcb **server, struct tcpcb **listener) {

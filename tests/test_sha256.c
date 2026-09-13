@@ -4,10 +4,10 @@
 
 #include <string.h>
 
-static const char *hex_of(const void *data, size_t len) {
+static const char *hex_of(const void *data, size_t length) {
     static char out[65];
     uint8_t d[SHA256_DIGEST_BYTES];
-    sha256(data, len, d);
+    sha256(data, length, d);
     sha256_hex(d, out);
     return out;
 }
@@ -32,38 +32,38 @@ TEST(sha256, two_block) {
 }
 
 TEST(sha256, block_boundaries) {
-    char buf[65];
-    memset(buf, 'a', sizeof(buf));
-    CHECK(strcmp(hex_of(buf, 55),
+    char buffer[65];
+    memset(buffer, 'a', sizeof(buffer));
+    CHECK(strcmp(hex_of(buffer, 55),
                  "9f4390f8d30c2dd92ec9f095b65e2b9a"
                  "e9b0a925a5258e241c9f1e910f734318") == 0);
-    CHECK(strcmp(hex_of(buf, 56),
+    CHECK(strcmp(hex_of(buffer, 56),
                  "b35439a4ac6f0948b6d6f9e3c6af0f5f"
                  "590ce20f1bde7090ef7970686ec6738a") == 0);
-    CHECK(strcmp(hex_of(buf, 63),
+    CHECK(strcmp(hex_of(buffer, 63),
                  "7d3e74a05d7db15bce4ad9ec0658ea98"
                  "e3f06eeecf16b4c6fff2da457ddc2f34") == 0);
-    CHECK(strcmp(hex_of(buf, 64),
+    CHECK(strcmp(hex_of(buffer, 64),
                  "ffe054fe7ae0cb6dc65c3af9b61d5209"
                  "f439851db43d0ba5997337df154668eb") == 0);
-    CHECK(strcmp(hex_of(buf, 65),
+    CHECK(strcmp(hex_of(buffer, 65),
                  "635361c48bb9eab14198e76ea8ab7f1a"
                  "41685d6ad62aa9146d301d4f17eb0ae0") == 0);
 }
 
 TEST(sha256, streaming_matches_one_shot) {
-    unsigned char msg[200];
+    unsigned char message[200];
     for (int i = 0; i < 200; i++) {
-        msg[i] = (unsigned char)(i * 7 + 3);
+        message[i] = (unsigned char)(i * 7 + 3);
     }
     uint8_t once[SHA256_DIGEST_BYTES];
-    sha256(msg, sizeof(msg), once);
+    sha256(message, sizeof(message), once);
 
-    for (size_t split = 0; split <= sizeof(msg); split++) {
+    for (size_t split = 0; split <= sizeof(message); split++) {
         sha256_t s;
         sha256_init(&s);
-        sha256_update(&s, msg, split);
-        sha256_update(&s, msg + split, sizeof(msg) - split);
+        sha256_update(&s, message, split);
+        sha256_update(&s, message + split, sizeof(message) - split);
         uint8_t twice[SHA256_DIGEST_BYTES];
         sha256_final(&s, twice);
         if (!sha256_equal(once, twice)) {
@@ -89,15 +89,15 @@ TEST(sha256, byte_at_a_time) {
 }
 
 TEST(sha256, every_byte_reaches_the_digest) {
-    unsigned char msg[130];
-    memset(msg, 0, sizeof(msg));
+    unsigned char message[130];
+    memset(message, 0, sizeof(message));
     uint8_t base[SHA256_DIGEST_BYTES];
-    sha256(msg, sizeof(msg), base);
-    for (size_t i = 0; i < sizeof(msg); i++) {
-        msg[i] = 1;
+    sha256(message, sizeof(message), base);
+    for (size_t i = 0; i < sizeof(message); i++) {
+        message[i] = 1;
         uint8_t d[SHA256_DIGEST_BYTES];
-        sha256(msg, sizeof(msg), d);
-        msg[i] = 0;
+        sha256(message, sizeof(message), d);
+        message[i] = 0;
         if (sha256_equal(base, d)) {
             test_fail(__FILE__, __LINE__, "byte %zu does not reach the digest", i);
             return;

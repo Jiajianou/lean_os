@@ -16,7 +16,7 @@ static int32_t tick_x(int i) {
 
 int main(int argc, char **argv) {
     const char *arg = argc > 1 ? argv[1] : "";
-    char title[WM_TITLE_MAX] = "ZOrder";
+    char title[WINDOW_MANAGER_TITLE_MAX] = "ZOrder";
     uint32_t fill = 0x00206040u;
 
     const char *p = arg;
@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
     }
     if (p && *p) {
         int i = 0;
-        for (; *p && *p != ' ' && i < WM_TITLE_MAX - 1; p++, i++) {
+        for (; *p && *p != ' ' && i < WINDOW_MANAGER_TITLE_MAX - 1; p++, i++) {
             title[i] = *p;
         }
         title[i] = '\0';
@@ -66,17 +66,17 @@ int main(int argc, char **argv) {
     window_manager_present(&win);
 
     for (;;) {
-        wm_event_t ev;
+        window_manager_event_t ev;
         int drew = 0;
         while (window_manager_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+            if (ev.type == WINDOW_MANAGER_EVENT_EXPOSE || ev.type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {
                 drew = 1;
                 graphics_fill_rect(&win.graphics, 0, 0, (int32_t)win.width, (int32_t)win.height, fill);
                 for (int t = 0; t < ticks; t++) {
                     graphics_fill_rect(&win.graphics, tick_x(t), WIN_H - TICK_INSET - TICK_SIZE,
                                    TICK_SIZE, TICK_SIZE, TICK_COLOR);
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ticks < TICK_MAX) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ticks < TICK_MAX) {
                 drew = 1;
                 graphics_fill_rect(&win.graphics, tick_x(ticks), WIN_H - TICK_INSET - TICK_SIZE,
                                TICK_SIZE, TICK_SIZE, TICK_COLOR);

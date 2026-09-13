@@ -144,33 +144,33 @@ static const char *const MON_LONG[12] = {"January", "February", "March", "April"
                                           "June", "July", "August", "September", "October",
                                           "November", "December"};
 
-static size_t put_str(char *out, size_t max, size_t at, const char *s) {
+static size_t put_string(char *out, size_t max, size_t at, const char *s) {
     while (*s && at + 1 < max) {
         out[at++] = *s++;
     }
     return at;
 }
 
-static size_t put_num(char *out, size_t max, size_t at, int v, int width) {
-    char buf[16];
+static size_t put_number(char *out, size_t max, size_t at, int v, int width) {
+    char buffer[16];
     int n = 0;
     int neg = v < 0;
     unsigned uv = (unsigned)(neg ? -v : v);
     if (uv == 0) {
-        buf[n++] = '0';
+        buffer[n++] = '0';
     }
     while (uv > 0) {
-        buf[n++] = (char)('0' + uv % 10);
+        buffer[n++] = (char)('0' + uv % 10);
         uv /= 10;
     }
     while (n < width) {
-        buf[n++] = '0';
+        buffer[n++] = '0';
     }
     if (neg) {
-        buf[n++] = '-';
+        buffer[n++] = '-';
     }
     while (n > 0 && at + 1 < max) {
-        out[at++] = buf[--n];
+        out[at++] = buffer[--n];
     }
     return at;
 }
@@ -187,34 +187,34 @@ size_t strftime(char *out, size_t max, const char *fmt, const struct tm *tm) {
         }
         p++;
         switch (*p) {
-        case 'Y': at = put_num(out, max, at, tm->tm_year + 1900, 1); break;
-        case 'y': at = put_num(out, max, at, (tm->tm_year + 1900) % 100, 2); break;
-        case 'm': at = put_num(out, max, at, tm->tm_mon + 1, 2); break;
-        case 'd': at = put_num(out, max, at, tm->tm_mday, 2); break;
-        case 'e': at = put_num(out, max, at, tm->tm_mday, 1); break;
-        case 'H': at = put_num(out, max, at, tm->tm_hour, 2); break;
-        case 'M': at = put_num(out, max, at, tm->tm_min, 2); break;
-        case 'S': at = put_num(out, max, at, tm->tm_sec, 2); break;
-        case 'j': at = put_num(out, max, at, tm->tm_yday + 1, 3); break;
-        case 'a': at = put_str(out, max, at, WDAY_SHORT[tm->tm_wday % 7]); break;
-        case 'A': at = put_str(out, max, at, WDAY_LONG[tm->tm_wday % 7]); break;
-        case 'b': case 'h': at = put_str(out, max, at, MON_SHORT[tm->tm_mon % 12]); break;
-        case 'B': at = put_str(out, max, at, MON_LONG[tm->tm_mon % 12]); break;
-        case 'p': at = put_str(out, max, at, tm->tm_hour < 12 ? "AM" : "PM"); break;
-        case 'Z': at = put_str(out, max, at, "UTC"); break;
+        case 'Y': at = put_number(out, max, at, tm->tm_year + 1900, 1); break;
+        case 'y': at = put_number(out, max, at, (tm->tm_year + 1900) % 100, 2); break;
+        case 'm': at = put_number(out, max, at, tm->tm_mon + 1, 2); break;
+        case 'd': at = put_number(out, max, at, tm->tm_mday, 2); break;
+        case 'e': at = put_number(out, max, at, tm->tm_mday, 1); break;
+        case 'H': at = put_number(out, max, at, tm->tm_hour, 2); break;
+        case 'M': at = put_number(out, max, at, tm->tm_min, 2); break;
+        case 'S': at = put_number(out, max, at, tm->tm_sec, 2); break;
+        case 'j': at = put_number(out, max, at, tm->tm_yday + 1, 3); break;
+        case 'a': at = put_string(out, max, at, WDAY_SHORT[tm->tm_wday % 7]); break;
+        case 'A': at = put_string(out, max, at, WDAY_LONG[tm->tm_wday % 7]); break;
+        case 'b': case 'h': at = put_string(out, max, at, MON_SHORT[tm->tm_mon % 12]); break;
+        case 'B': at = put_string(out, max, at, MON_LONG[tm->tm_mon % 12]); break;
+        case 'p': at = put_string(out, max, at, tm->tm_hour < 12 ? "AM" : "PM"); break;
+        case 'Z': at = put_string(out, max, at, "UTC"); break;
         case 'F':
-            at = put_num(out, max, at, tm->tm_year + 1900, 4);
-            at = put_str(out, max, at, "-");
-            at = put_num(out, max, at, tm->tm_mon + 1, 2);
-            at = put_str(out, max, at, "-");
-            at = put_num(out, max, at, tm->tm_mday, 2);
+            at = put_number(out, max, at, tm->tm_year + 1900, 4);
+            at = put_string(out, max, at, "-");
+            at = put_number(out, max, at, tm->tm_mon + 1, 2);
+            at = put_string(out, max, at, "-");
+            at = put_number(out, max, at, tm->tm_mday, 2);
             break;
         case 'T':
-            at = put_num(out, max, at, tm->tm_hour, 2);
-            at = put_str(out, max, at, ":");
-            at = put_num(out, max, at, tm->tm_min, 2);
-            at = put_str(out, max, at, ":");
-            at = put_num(out, max, at, tm->tm_sec, 2);
+            at = put_number(out, max, at, tm->tm_hour, 2);
+            at = put_string(out, max, at, ":");
+            at = put_number(out, max, at, tm->tm_min, 2);
+            at = put_string(out, max, at, ":");
+            at = put_number(out, max, at, tm->tm_sec, 2);
             break;
         case '%': out[at++] = '%'; break;
         case '\0': p--; break;
@@ -238,14 +238,14 @@ static void sleep_ms(long ms) {
     (void)sys_waitfds(&dummy, 0, (int)ms);
 }
 
-int nanosleep(const struct timespec *req, struct timespec *rem) {
-    if (!req || req->tv_nsec < 0 || req->tv_nsec >= 1000000000L ||
-        req->tv_sec < 0) {
+int nanosleep(const struct timespec *request, struct timespec *rem) {
+    if (!request || request->tv_nsec < 0 || request->tv_nsec >= 1000000000L ||
+        request->tv_sec < 0) {
         errno = EINVAL;
         return -1;
     }
-    long ms = req->tv_sec * 1000L + req->tv_nsec / 1000000L;
-    if (ms == 0 && (req->tv_sec != 0 || req->tv_nsec != 0)) {
+    long ms = request->tv_sec * 1000L + request->tv_nsec / 1000000L;
+    if (ms == 0 && (request->tv_sec != 0 || request->tv_nsec != 0)) {
         ms = 1;
     }
     sleep_ms(ms);
@@ -261,9 +261,9 @@ unsigned int sleep(unsigned int seconds) {
     return 0;
 }
 
-int usleep(unsigned int usec) {
-    long ms = (long)(usec / 1000u);
-    if (ms == 0 && usec != 0) {
+int usleep(unsigned int microseconds) {
+    long ms = (long)(microseconds / 1000u);
+    if (ms == 0 && microseconds != 0) {
         ms = 1;
     }
     sleep_ms(ms);
@@ -289,7 +289,7 @@ static const char *const DAY_FULL[7] = {"Sunday",   "Monday", "Tuesday",
                                         "Wednesday", "Thursday", "Friday",
                                         "Saturday"};
 
-static int ci_prefix(const char *s, const char *word, int abbrev_len) {
+static int ci_prefix(const char *s, const char *word, int abbrev_length) {
     int i = 0;
     while (word[i]) {
         char a = s[i];
@@ -308,10 +308,10 @@ static int ci_prefix(const char *s, const char *word, int abbrev_len) {
     if (!word[i]) {
         return i;
     }
-    return i >= abbrev_len ? abbrev_len : 0;
+    return i >= abbrev_length ? abbrev_length : 0;
 }
 
-static const char *scan_num(const char *s, int width, int *out) {
+static const char *scan_number(const char *s, int width, int *out) {
     int v = 0;
     int n = 0;
     while (*s == ' ') {
@@ -365,57 +365,57 @@ char *strptime(const char *s, const char *format, struct tm *tm) {
             }
             break;
         case 'Y':
-            if (!(s = scan_num(s, 4, &v))) {
+            if (!(s = scan_number(s, 4, &v))) {
                 return (char *)0;
             }
             tm->tm_year = v - 1900;
             break;
         case 'y':
-            if (!(s = scan_num(s, 2, &v))) {
+            if (!(s = scan_number(s, 2, &v))) {
                 return (char *)0;
             }
             tm->tm_year = v >= 69 ? v : v + 100;
             break;
         case 'm':
-            if (!(s = scan_num(s, 2, &v)) || v < 1 || v > 12) {
+            if (!(s = scan_number(s, 2, &v)) || v < 1 || v > 12) {
                 return (char *)0;
             }
             tm->tm_mon = v - 1;
             break;
         case 'd':
         case 'e':
-            if (!(s = scan_num(s, 2, &v)) || v < 1 || v > 31) {
+            if (!(s = scan_number(s, 2, &v)) || v < 1 || v > 31) {
                 return (char *)0;
             }
             tm->tm_mday = v;
             break;
         case 'H':
-            if (!(s = scan_num(s, 2, &v)) || v > 23) {
+            if (!(s = scan_number(s, 2, &v)) || v > 23) {
                 return (char *)0;
             }
             tm->tm_hour = v;
             break;
         case 'I':
-            if (!(s = scan_num(s, 2, &v)) || v < 1 || v > 12) {
+            if (!(s = scan_number(s, 2, &v)) || v < 1 || v > 12) {
                 return (char *)0;
             }
             tm->tm_hour = v % 12;
             twelve_hour = 1;
             break;
         case 'M':
-            if (!(s = scan_num(s, 2, &v)) || v > 59) {
+            if (!(s = scan_number(s, 2, &v)) || v > 59) {
                 return (char *)0;
             }
             tm->tm_min = v;
             break;
         case 'S':
-            if (!(s = scan_num(s, 2, &v)) || v > 60) {
+            if (!(s = scan_number(s, 2, &v)) || v > 60) {
                 return (char *)0;
             }
             tm->tm_sec = v;
             break;
         case 'j':
-            if (!(s = scan_num(s, 3, &v)) || v < 1 || v > 366) {
+            if (!(s = scan_number(s, 3, &v)) || v < 1 || v > 366) {
                 return (char *)0;
             }
             tm->tm_yday = v - 1;
@@ -521,8 +521,8 @@ static void two(char *out, int v, char pad) {
     out[1] = (char)('0' + v % 10);
 }
 
-char *asctime_r(const struct tm *tm, char *buf) {
-    if (!tm || !buf) {
+char *asctime_r(const struct tm *tm, char *buffer) {
+    if (!tm || !buffer) {
         return (char *)0;
     }
     int wday = (tm->tm_wday >= 0 && tm->tm_wday < 7) ? tm->tm_wday : 0;
@@ -532,44 +532,44 @@ char *asctime_r(const struct tm *tm, char *buf) {
         year = 0;
     }
     for (int i = 0; i < 3; i++) {
-        buf[i] = WDAY_ABBR[wday][i];
-        buf[4 + i] = MON_ABBR[mon][i];
+        buffer[i] = WDAY_ABBR[wday][i];
+        buffer[4 + i] = MON_ABBR[mon][i];
     }
-    buf[3] = ' ';
-    buf[7] = ' ';
-    two(buf + 8, tm->tm_mday, ' ');
-    buf[10] = ' ';
-    two(buf + 11, tm->tm_hour, '0');
-    buf[13] = ':';
-    two(buf + 14, tm->tm_min, '0');
-    buf[16] = ':';
-    two(buf + 17, tm->tm_sec, '0');
-    buf[19] = ' ';
-    buf[20] = (char)('0' + (year / 1000) % 10);
-    buf[21] = (char)('0' + (year / 100) % 10);
-    buf[22] = (char)('0' + (year / 10) % 10);
-    buf[23] = (char)('0' + year % 10);
-    buf[24] = '\n';
-    buf[25] = '\0';
-    return buf;
+    buffer[3] = ' ';
+    buffer[7] = ' ';
+    two(buffer + 8, tm->tm_mday, ' ');
+    buffer[10] = ' ';
+    two(buffer + 11, tm->tm_hour, '0');
+    buffer[13] = ':';
+    two(buffer + 14, tm->tm_min, '0');
+    buffer[16] = ':';
+    two(buffer + 17, tm->tm_sec, '0');
+    buffer[19] = ' ';
+    buffer[20] = (char)('0' + (year / 1000) % 10);
+    buffer[21] = (char)('0' + (year / 100) % 10);
+    buffer[22] = (char)('0' + (year / 10) % 10);
+    buffer[23] = (char)('0' + year % 10);
+    buffer[24] = '\n';
+    buffer[25] = '\0';
+    return buffer;
 }
 
-static char asctime_buf[26];
+static char asctime_buffer[26];
 
 char *asctime(const struct tm *tm) {
-    return asctime_r(tm, asctime_buf);
+    return asctime_r(tm, asctime_buffer);
 }
 
-char *ctime_r(const time_t *t, char *buf) {
+char *ctime_r(const time_t *t, char *buffer) {
     struct tm tm;
     if (!t || !gmtime_r(t, &tm)) {
         return (char *)0;
     }
-    return asctime_r(&tm, buf);
+    return asctime_r(&tm, buffer);
 }
 
 char *ctime(const time_t *t) {
-    return ctime_r(t, asctime_buf);
+    return ctime_r(t, asctime_buffer);
 }
 
 int settimeofday(const struct timeval *tv, const void *tz) {

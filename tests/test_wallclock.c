@@ -15,7 +15,7 @@ TEST(wallclock, monotonic_accurate_and_locked_at_every_phase) {
     for (long long phase = 0; phase < 1000; phase++) {
         wallclock_t w = {0, 0};
         long long boot = EPOCH_MS + phase;
-        long long prev = 0, old_previous = 0;
+        long long previous = 0, old_previous = 0;
         int seen_edge = 0;
         long long first_rtc = boot / 1000;
         for (long long up = 5000; up < 8000; up++) {
@@ -23,8 +23,8 @@ TEST(wallclock, monotonic_accurate_and_locked_at_every_phase) {
             long long rtc = truth / 1000;
             long long t = wallclock_ms(&w, rtc, up);
 
-            if (up > 5000 && t < prev) {
-                CHECK(t >= prev);
+            if (up > 5000 && t < previous) {
+                CHECK(t >= previous);
                 return;
             }
             CHECK(t <= truth);
@@ -35,7 +35,7 @@ TEST(wallclock, monotonic_accurate_and_locked_at_every_phase) {
             if (seen_edge) {
                 CHECK(truth - t <= 1);
             }
-            prev = t;
+            previous = t;
 
             long long o = old_formula(rtc, up);
             if (up > 5000 && o < old_previous) {
@@ -86,14 +86,14 @@ TEST(wallclock, the_clock_being_set_is_followed_both_ways) {
 TEST(wallclock, a_slow_millisecond_clock_is_pulled_forward_not_left_behind) {
     wallclock_t w = {0, 0};
     long long boot = EPOCH_MS + 555;
-    long long prev = 0;
+    long long previous = 0;
     for (long long truth_up = 0; truth_up < 20000; truth_up++) {
         long long up = truth_up * 9 / 10;
         long long truth = boot + truth_up;
         long long t = wallclock_ms(&w, truth / 1000, up);
-        CHECK(t >= prev);
+        CHECK(t >= previous);
         CHECK(t <= truth);
         CHECK(truth - t < 1000);
-        prev = t;
+        previous = t;
     }
 }

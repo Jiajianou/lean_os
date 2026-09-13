@@ -32,22 +32,22 @@ TEST(leanfs, a_blank_disk_is_formatted_and_says_so) {
 TEST(leanfs, write_read_roundtrip_at_every_interesting_size) {
     fs_fixture();
     const size_t sizes[] = {1, 4095, 4096, 4097, 8192, 40960, 4096 * 13};
-    char *buf = malloc(4096 * 16);
+    char *buffer = malloc(4096 * 16);
     char *back = malloc(4096 * 16);
-    REQUIRE(buf && back);
+    REQUIRE(buffer && back);
 
     for (unsigned s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
         size_t n = sizes[s];
         for (size_t i = 0; i < n; i++) {
-            buf[i] = (char)(i * 31 + s);
+            buffer[i] = (char)(i * 31 + s);
         }
-        CHECK_EQ(leanfs_write("/probe", buf, n), 0);
+        CHECK_EQ(leanfs_write("/probe", buffer, n), 0);
         memset(back, 0, n);
         int64_t got = leanfs_read("/probe", back, n);
         CHECK_EQ(got, (int64_t)n);
-        CHECK_MEMEQ(back, buf, n);
+        CHECK_MEMEQ(back, buffer, n);
     }
-    free(buf);
+    free(buffer);
     free(back);
     fake_block_device_free();
 }
@@ -265,9 +265,9 @@ TEST(leanfs, a_directory_grows_past_one_block_and_lists_every_entry) {
     }
     int found = 0;
     uint32_t cookie = 0;
-    leanfs_directory_entry_t ent;
+    leanfs_directory_entry_t entry;
     int r;
-    while ((r = leanfs_readdir("/many", &cookie, &ent)) == 1) {
+    while ((r = leanfs_readdir("/many", &cookie, &entry)) == 1) {
         found++;
     }
     CHECK_EQ(r, 0);
@@ -277,7 +277,7 @@ TEST(leanfs, a_directory_grows_past_one_block_and_lists_every_entry) {
     REQUIRE(h >= 0);
     int found_at = 0;
     cookie = 0;
-    while (leanfs_readdir_at(h, &cookie, &ent) == 1) {
+    while (leanfs_readdir_at(h, &cookie, &entry) == 1) {
         found_at++;
     }
     CHECK_EQ(found_at, N);

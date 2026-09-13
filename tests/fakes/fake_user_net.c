@@ -7,7 +7,7 @@
 #include "syscall_wrappers.h"
 
 #define MAX_SERVERS 8
-#define MAX_MSG 512
+#define MAX_MESSAGE 512
 
 typedef struct {
     uint32_t ip;
@@ -34,8 +34,8 @@ static int socket_ok = 1;
 static struct {
     int pending;
     uint32_t from_ip;
-    uint8_t data[MAX_MSG];
-    long len;
+    uint8_t data[MAX_MESSAGE];
+    long length;
 } inbox;
 
 void fake_user_net_reset(void) {
@@ -66,9 +66,9 @@ void fake_user_net_add_server(uint32_t ip, int behaviour, uint32_t answer) {
 void fake_user_net_set_dhcp_dns(uint32_t ip) { conf_dns = ip; }
 void fake_user_net_set_netconf_fails(int fails) { conf_ok = !fails; }
 
-void fake_user_net_set_resolv_conf(const char *text, long len) {
+void fake_user_net_set_resolv_conf(const char *text, long length) {
     resolv_text = text;
-    resolv_length = len;
+    resolv_length = length;
     resolv_present = 1;
 }
 
@@ -105,14 +105,14 @@ long sys_netconf(os_netconf_t *out) {
     return 0;
 }
 
-long sys_readfile(const char *name, void *buf, size_t maxlen) {
+long sys_readfile(const char *name, void *buffer, size_t maxlen) {
     (void)name;
     if (!resolv_present) {
         return -1;
     }
     size_t n = (size_t)resolv_length < maxlen ? (size_t)resolv_length : maxlen;
-    if (buf && n) {
-        memcpy(buf, resolv_text, n);
+    if (buffer && n) {
+        memcpy(buffer, resolv_text, n);
     }
     return resolv_length;
 }
@@ -148,11 +148,11 @@ static void answer_for(server_t *s, const uint8_t *query, long qlen) {
     if (s->behaviour == FAKE_DNS_GARBAGE) {
         inbox.pending = 1;
         inbox.from_ip = s->ip;
-        inbox.len = 4;
+        inbox.length = 4;
         memcpy(inbox.data, "\xde\xad\xbe\xef", 4);
         return;
     }
-    if (qlen < 12 || qlen > MAX_MSG) {
+    if (qlen < 12 || qlen > MAX_MESSAGE) {
         return;
     }
     uint8_t *r = inbox.data;
@@ -160,40 +160,40 @@ static void answer_for(server_t *s, const uint8_t *query, long qlen) {
     r[2] = 0x81;
     r[3] = (uint8_t)(s->behaviour == FAKE_DNS_NXDOMAIN ? 0x83 : 0x80);
     r[4] = 0; r[5] = 1;
-    long len = qlen;
+    long length = qlen;
     if (s->behaviour == FAKE_DNS_NXDOMAIN) {
         r[6] = 0; r[7] = 0;
     } else {
         r[6] = 0; r[7] = 1;
-        r[len++] = 0xC0; r[len++] = 0x0C;
-        r[len++] = 0x00; r[len++] = 0x01;
-        r[len++] = 0x00; r[len++] = 0x01;
-        r[len++] = 0x00; r[len++] = 0x00;
-        r[len++] = 0x00; r[len++] = 0x3C;
-        r[len++] = 0x00; r[len++] = 0x04;
-        r[len++] = (uint8_t)(s->answer >> 24);
-        r[len++] = (uint8_t)(s->answer >> 16);
-        r[len++] = (uint8_t)(s->answer >> 8);
-        r[len++] = (uint8_t)(s->answer);
+        r[length++] = 0xC0; r[length++] = 0x0C;
+        r[length++] = 0x00; r[length++] = 0x01;
+        r[length++] = 0x00; r[length++] = 0x01;
+        r[length++] = 0x00; r[length++] = 0x00;
+        r[length++] = 0x00; r[length++] = 0x3C;
+        r[length++] = 0x00; r[length++] = 0x04;
+        r[length++] = (uint8_t)(s->answer >> 24);
+        r[length++] = (uint8_t)(s->answer >> 16);
+        r[length++] = (uint8_t)(s->answer >> 8);
+        r[length++] = (uint8_t)(s->answer);
     }
     r[8] = 0; r[9] = 0; r[10] = 0; r[11] = 0;
     inbox.pending = 1;
     inbox.from_ip = s->ip;
-    inbox.len = len;
+    inbox.length = length;
 }
 
 long sys_sendto(int fd, uint32_t ip, uint16_t port, const void *data,
-                uint32_t len) {
+                uint32_t length) {
     (void)fd;
     (void)port;
     for (int i = 0; i < server_count; i++) {
         if (servers[i].ip == ip) {
             servers[i].queries_seen++;
-            answer_for(&servers[i], (const uint8_t *)data, (long)len);
-            return (long)len;
+            answer_for(&servers[i], (const uint8_t *)data, (long)length);
+            return (long)length;
         }
     }
-    return (long)len;
+    return (long)length;
 }
 
 long sys_sockpoll(int fd) {
@@ -207,7 +207,7 @@ long sys_recvfrom(int fd, void *data, uint32_t max, os_sockaddr_t *from) {
     if (!inbox.pending) {
         return -1;
     }
-    long n = inbox.len < (long)max ? inbox.len : (long)max;
+    long n = inbox.length < (long)max ? inbox.length : (long)max;
     if (data && n > 0) {
         memcpy(data, inbox.data, (size_t)n);
     }

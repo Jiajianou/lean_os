@@ -52,7 +52,7 @@ void pipe_unref_read(pipe_t *p) {
     }
     if (p->persistent) {
         scheduler_wake_all(PIPE_SPACE_CHAN(p));
-        scheduler_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(SCHEDULER_POLL_CHAN);
         return;
     }
     uint64_t f = spin_lock_irqsave(&pipe_lock);
@@ -64,7 +64,7 @@ void pipe_unref_read(pipe_t *p) {
     spin_unlock_irqrestore(&pipe_lock, f);
     if (closed) {
         scheduler_wake_all(PIPE_SPACE_CHAN(p));
-        scheduler_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(SCHEDULER_POLL_CHAN);
     }
 }
 
@@ -74,7 +74,7 @@ void pipe_unref_write(pipe_t *p) {
     }
     if (p->persistent) {
         scheduler_wake_all(PIPE_DATA_CHAN(p));
-        scheduler_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(SCHEDULER_POLL_CHAN);
         return;
     }
     uint64_t f = spin_lock_irqsave(&pipe_lock);
@@ -86,7 +86,7 @@ void pipe_unref_write(pipe_t *p) {
     spin_unlock_irqrestore(&pipe_lock, f);
     if (closed) {
         scheduler_wake_all(PIPE_DATA_CHAN(p));
-        scheduler_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(SCHEDULER_POLL_CHAN);
     }
 }
 
@@ -95,7 +95,7 @@ void pipe_close_write(pipe_t *p) {
     p->write_closed = 1;
     spin_unlock_irqrestore(&pipe_lock, f);
     scheduler_wake_all(PIPE_DATA_CHAN(p));
-    scheduler_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
 }
 
 void pipe_reset(pipe_t *p) {
@@ -133,7 +133,7 @@ int pipe_writable(pipe_t *p) {
         return 0;
     }
     uint64_t f = spin_lock_irqsave(&pipe_lock);
-    int w = p->read_closed || p->count < PIPE_BUF_SIZE;
+    int w = p->read_closed || p->count < PIPE_BUFFER_SIZE;
     spin_unlock_irqrestore(&pipe_lock, f);
     return w;
 }
@@ -151,7 +151,7 @@ int pipe_buffered(pipe_t *p) {
 #define MAX_NAMED_PIPES     32
 
 typedef struct {
-    char name[NAMED_PIPE_NAME_LEN];
+    char name[NAMED_PIPE_NAME_LENGTH];
     pipe_t *p;
 } named_pipe_t;
 
@@ -177,45 +177,45 @@ pipe_t *pipe_named(const char *name) {
         return (pipe_t *)0;
     }
     p->persistent = 1;
-    k_strlcpy(named_pipes[named_pipe_count].name, name, NAMED_PIPE_NAME_LEN);
+    k_strlcpy(named_pipes[named_pipe_count].name, name, NAMED_PIPE_NAME_LENGTH);
     named_pipes[named_pipe_count].p = p;
     named_pipe_count++;
     spin_unlock_irqrestore(&pipe_lock, f);
     return p;
 }
 
-long pipe_write(pipe_t *p, const void *buf, size_t len, int nonblock) {
-    const uint8_t *src = (const uint8_t *)buf;
+long pipe_write(pipe_t *p, const void *buffer, size_t length, int nonblock) {
+    const uint8_t *source = (const uint8_t *)buffer;
     size_t written = 0;
     uint64_t f = spin_lock_irqsave(&pipe_lock);
-    while (written < len) {
+    while (written < length) {
         if (p->read_closed) {
             spin_unlock_irqrestore(&pipe_lock, f);
             return written > 0 ? (long)written : -1;
         }
-        if (p->count == PIPE_BUF_SIZE) {
+        if (p->count == PIPE_BUFFER_SIZE) {
             scheduler_wake_all(PIPE_DATA_CHAN(p));
-            scheduler_wake_all(SCHED_POLL_CHAN);
+            scheduler_wake_all(SCHEDULER_POLL_CHAN);
             if (nonblock) {
                 spin_unlock_irqrestore(&pipe_lock, f);
-                return written ? (long)written : -OS_ERR_AGAIN;
+                return written ? (long)written : -OS_ERROR_AGAIN;
             }
             scheduler_block_on(PIPE_SPACE_CHAN(p), 0, &pipe_lock, &f);
             continue;
         }
-        p->buf[p->head] = src[written];
-        p->head = (p->head + 1) % PIPE_BUF_SIZE;
+        p->buffer[p->head] = source[written];
+        p->head = (p->head + 1) % PIPE_BUFFER_SIZE;
         p->count++;
         written++;
     }
     spin_unlock_irqrestore(&pipe_lock, f);
     scheduler_wake_all(PIPE_DATA_CHAN(p));
-    scheduler_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
     return (long)written;
 }
 
-long pipe_read(pipe_t *p, void *buf, size_t maxlen, int nonblock) {
-    uint8_t *dst = (uint8_t *)buf;
+long pipe_read(pipe_t *p, void *buffer, size_t maxlen, int nonblock) {
+    uint8_t *destination = (uint8_t *)buffer;
     size_t n = 0;
     uint64_t f = spin_lock_irqsave(&pipe_lock);
     while (n < maxlen) {
@@ -226,17 +226,17 @@ long pipe_read(pipe_t *p, void *buf, size_t maxlen, int nonblock) {
             }
             if (nonblock) {
                 spin_unlock_irqrestore(&pipe_lock, f);
-                return n ? (long)n : -OS_ERR_AGAIN;
+                return n ? (long)n : -OS_ERROR_AGAIN;
             }
             scheduler_block_on(PIPE_DATA_CHAN(p), 0, &pipe_lock, &f);
             if (scheduler_signal_pending()) {
                 spin_unlock_irqrestore(&pipe_lock, f);
-                return n ? (long)n : -OS_ERR_INTR;
+                return n ? (long)n : -OS_ERROR_INTR;
             }
             continue;
         }
-        dst[n] = p->buf[p->tail];
-        p->tail = (p->tail + 1) % PIPE_BUF_SIZE;
+        destination[n] = p->buffer[p->tail];
+        p->tail = (p->tail + 1) % PIPE_BUFFER_SIZE;
         p->count--;
         n++;
         if (p->count == 0) {

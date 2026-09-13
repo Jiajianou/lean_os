@@ -11,9 +11,9 @@
 #include "psa/crypto.h"
 
 static void say(const char *what, int ret) {
-    char msg[128];
-    mbedtls_strerror(ret, msg, sizeof(msg));
-    printf("httpsget: %s failed: -0x%04x %s\n", what, (unsigned)-ret, msg);
+    char message[128];
+    mbedtls_strerror(ret, message, sizeof(message));
+    printf("httpsget: %s failed: -0x%04x %s\n", what, (unsigned)-ret, message);
 }
 
 int main(int argc, char **argv) {
@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
     mbedtls_ssl_set_bio(&ssl, &net, mbedtls_net_send, mbedtls_net_receive, NULL);
 
     while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
-        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+        if (ret != MBEDTLS_ERROR_SSL_WANT_READ && ret != MBEDTLS_ERROR_SSL_WANT_WRITE) {
             say("handshake", ret);
             uint32_t flags = mbedtls_ssl_get_verify_result(&ssl);
             if (flags != 0) {
@@ -101,11 +101,11 @@ int main(int argc, char **argv) {
         }
     }
 
-    char req[512];
-    int len = snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\nHost: %s\r\n\r\n", path, host);
-    for (int off = 0; off < len;) {
-        ret = mbedtls_ssl_write(&ssl, (const unsigned char *)req + off, (size_t)(len - off));
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+    char request[512];
+    int length = snprintf(request, sizeof(request), "GET %s HTTP/1.0\r\nHost: %s\r\n\r\n", path, host);
+    for (int off = 0; off < length;) {
+        ret = mbedtls_ssl_write(&ssl, (const unsigned char *)request + off, (size_t)(length - off));
+        if (ret == MBEDTLS_ERROR_SSL_WANT_READ || ret == MBEDTLS_ERROR_SSL_WANT_WRITE) {
             continue;
         }
         if (ret <= 0) {
@@ -116,20 +116,20 @@ int main(int argc, char **argv) {
     }
     printf("httpsget: response:\n");
     for (;;) {
-        unsigned char buf[1024];
-        ret = mbedtls_ssl_read(&ssl, buf, sizeof(buf) - 1);
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+        unsigned char buffer[1024];
+        ret = mbedtls_ssl_read(&ssl, buffer, sizeof(buffer) - 1);
+        if (ret == MBEDTLS_ERROR_SSL_WANT_READ || ret == MBEDTLS_ERROR_SSL_WANT_WRITE) {
             continue;
         }
-        if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == 0) {
+        if (ret == MBEDTLS_ERROR_SSL_PEER_CLOSE_NOTIFY || ret == 0) {
             break;
         }
         if (ret < 0) {
             say("read", ret);
             goto out;
         }
-        buf[ret] = '\0';
-        fputs((const char *)buf, stdout);
+        buffer[ret] = '\0';
+        fputs((const char *)buffer, stdout);
     }
     mbedtls_ssl_close_notify(&ssl);
     printf("\nhttpsget: done\n");

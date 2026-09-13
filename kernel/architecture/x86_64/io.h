@@ -22,12 +22,12 @@ static inline uint16_t inw(uint16_t port) {
     return ret;
 }
 
-static inline void insw(uint16_t port, void *buf, uint32_t words) {
-    __asm__ volatile("rep insw" : "+D"(buf), "+c"(words) : "d"(port) : "memory");
+static inline void insw(uint16_t port, void *buffer, uint32_t words) {
+    __asm__ volatile("rep insw" : "+D"(buffer), "+c"(words) : "d"(port) : "memory");
 }
 
-static inline void outsw(uint16_t port, const void *buf, uint32_t words) {
-    __asm__ volatile("rep outsw" : "+S"(buf), "+c"(words) : "d"(port) : "memory");
+static inline void outsw(uint16_t port, const void *buffer, uint32_t words) {
+    __asm__ volatile("rep outsw" : "+S"(buffer), "+c"(words) : "d"(port) : "memory");
 }
 
 static inline void outl(uint16_t port, uint32_t val) {

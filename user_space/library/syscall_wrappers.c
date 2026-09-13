@@ -26,8 +26,8 @@ long sys_raw(long num, long a1, long a2, long a3) {
     return do_syscall(num, a1, a2, a3);
 }
 
-long sys_write(int fd, const void *buf, size_t len) {
-    return do_syscall(SYS_write, fd, (long)buf, (long)len);
+long sys_write(int fd, const void *buffer, size_t length) {
+    return do_syscall(SYS_write, fd, (long)buffer, (long)length);
 }
 
 void sys_exit(int code) {
@@ -77,9 +77,9 @@ long sys_gettid(void) {
     return do_syscall(SYS_gettid, 0, 0, 0);
 }
 
-long sys_mmap(void *addr, unsigned long len, int prot, int flags, int fd,
+long sys_mmap(void *address, unsigned long length, int prot, int flags, int fd,
               unsigned long offset) {
-    return do_syscall6(SYS_mmap, (long)addr, (long)len, prot, flags, fd, (long)offset);
+    return do_syscall6(SYS_mmap, (long)address, (long)length, prot, flags, fd, (long)offset);
 }
 
 long sys_link(const char *old_path, const char *new_path) {
@@ -90,24 +90,24 @@ long sys_fsync(int fd) {
     return do_syscall(SYS_fsync, fd, 0, 0);
 }
 
-long sys_mprotect(void *addr, unsigned long len, int prot) {
-    return do_syscall(SYS_mprotect, (long)addr, (long)len, prot);
+long sys_mprotect(void *address, unsigned long length, int prot) {
+    return do_syscall(SYS_mprotect, (long)address, (long)length, prot);
 }
 
-long sys_madvise(void *addr, unsigned long len, int advice) {
-    return do_syscall(SYS_madvise, (long)addr, (long)len, advice);
+long sys_madvise(void *address, unsigned long length, int advice) {
+    return do_syscall(SYS_madvise, (long)address, (long)length, advice);
 }
 
-long sys_munmap(void *addr, unsigned long len) {
-    return do_syscall(SYS_munmap, (long)addr, (long)len, 0);
+long sys_munmap(void *address, unsigned long length) {
+    return do_syscall(SYS_munmap, (long)address, (long)length, 0);
 }
 
 long sys_chdir(const char *path) {
     return do_syscall(SYS_chdir, (long)path, 0, 0);
 }
 
-long sys_getcwd(char *buf, size_t maxlen) {
-    return do_syscall(SYS_getcwd, (long)buf, (long)maxlen, 0);
+long sys_getcwd(char *buffer, size_t maxlen) {
+    return do_syscall(SYS_getcwd, (long)buffer, (long)maxlen, 0);
 }
 
 long sys_spawn(const char *path, const char *arg) {
@@ -124,20 +124,20 @@ long sys_wait(long pid) {
     return do_syscall(SYS_wait, pid, 0, 0);
 }
 
-long sys_read(int fd, void *buf, size_t len) {
-    return do_syscall(SYS_read, fd, (long)buf, (long)len);
+long sys_read(int fd, void *buffer, size_t length) {
+    return do_syscall(SYS_read, fd, (long)buffer, (long)length);
 }
 
-long sys_readfile(const char *name, void *buf, size_t maxlen) {
-    return do_syscall(SYS_readfile, (long)name, (long)buf, (long)maxlen);
+long sys_readfile(const char *name, void *buffer, size_t maxlen) {
+    return do_syscall(SYS_readfile, (long)name, (long)buffer, (long)maxlen);
 }
 
-long sys_listdir(const char *path, void *buf, size_t maxlen) {
-    return do_syscall(SYS_listdir, (long)path, (long)buf, (long)maxlen);
+long sys_listdir(const char *path, void *buffer, size_t maxlen) {
+    return do_syscall(SYS_listdir, (long)path, (long)buffer, (long)maxlen);
 }
 
-long sys_getdents(const char *path, unsigned int *cookie, void *buf, size_t buflen) {
-    return do_syscall6(SYS_getdents, (long)path, (long)cookie, (long)buf,
+long sys_getdents(const char *path, unsigned int *cookie, void *buffer, size_t buflen) {
+    return do_syscall6(SYS_getdents, (long)path, (long)cookie, (long)buffer,
                        (long)buflen, 0, 0);
 }
 
@@ -153,8 +153,8 @@ long sys_waitpid(long pid, int *status, long options) {
     return do_syscall6(SYS_waitpid, pid, (long)status, options, 0, 0, 0);
 }
 
-long sys_fcntl(int fd, int cmd, long arg) {
-    return do_syscall(SYS_fcntl, fd, cmd, arg);
+long sys_fcntl(int fd, int command, long arg) {
+    return do_syscall(SYS_fcntl, fd, command, arg);
 }
 
 long sys_setpgid(long pid, long pgid) {
@@ -169,8 +169,8 @@ long sys_getsid(long pid) {
     return do_syscall(SYS_getsid, pid, 0, 0);
 }
 
-long sys_ioctl(int fd, unsigned long cmd, void *arg) {
-    return do_syscall(SYS_ioctl, fd, (long)cmd, (long)arg);
+long sys_ioctl(int fd, unsigned long command, void *arg) {
+    return do_syscall(SYS_ioctl, fd, (long)command, (long)arg);
 }
 
 long sys_ftruncate(int fd, long length) {
@@ -181,8 +181,8 @@ long sys_symlink(const char *target, const char *path) {
     return do_syscall(SYS_symlink, (long)target, (long)path, 0);
 }
 
-long sys_readlink(const char *path, char *buf, size_t len) {
-    return do_syscall(SYS_readlink, (long)path, (long)buf, (long)len);
+long sys_readlink(const char *path, char *buffer, size_t length) {
+    return do_syscall(SYS_readlink, (long)path, (long)buffer, (long)length);
 }
 
 long sys_lstat(const char *path, void *out) {
@@ -197,8 +197,8 @@ long sys_statvfs(const char *path, void *out) {
     return do_syscall(SYS_statvfs, (long)path, (long)out, 0);
 }
 
-long sys_fdpath(int fd, char *out, unsigned long out_len) {
-    return do_syscall(SYS_fdpath, fd, (long)out, (long)out_len);
+long sys_fdpath(int fd, char *out, unsigned long out_length) {
+    return do_syscall(SYS_fdpath, fd, (long)out, (long)out_length);
 }
 
 long sys_getppid(void) {
@@ -217,29 +217,29 @@ long sys_alarm(unsigned int seconds) {
     return do_syscall(SYS_alarm, (long)seconds, 0, 0);
 }
 
-long sys_msync(void *addr, unsigned long len, int flags) {
-    return do_syscall(SYS_msync, (long)addr, (long)len, flags);
+long sys_msync(void *address, unsigned long length, int flags) {
+    return do_syscall(SYS_msync, (long)address, (long)length, flags);
 }
 
-long sys_arch_prctl(int code, unsigned long addr) {
-    return do_syscall(SYS_arch_prctl, code, (long)addr, 0);
+long sys_arch_prctl(int code, unsigned long address) {
+    return do_syscall(SYS_arch_prctl, code, (long)address, 0);
 }
 
-long sys_futex(volatile unsigned int *addr, int op, unsigned int val,
+long sys_futex(volatile unsigned int *address, int op, unsigned int val,
                unsigned int timeout_ms) {
-    return do_syscall6(SYS_futex, (long)addr, op, (long)val, (long)timeout_ms, 0, 0);
+    return do_syscall6(SYS_futex, (long)address, op, (long)val, (long)timeout_ms, 0, 0);
 }
 
-long sys_getrandom(void *buf, unsigned long len, unsigned int flags) {
-    return do_syscall(SYS_getrandom, (uint64_t)buf, len, flags);
+long sys_getrandom(void *buffer, unsigned long length, unsigned int flags) {
+    return do_syscall(SYS_getrandom, (uint64_t)buffer, length, flags);
 }
 
-long sys_pread(int fd, void *buf, unsigned long len, long offset) {
-    return do_syscall6(SYS_pread, (long)fd, (long)buf, (long)len, offset, 0, 0);
+long sys_pread(int fd, void *buffer, unsigned long length, long offset) {
+    return do_syscall6(SYS_pread, (long)fd, (long)buffer, (long)length, offset, 0, 0);
 }
 
-long sys_pwrite(int fd, const void *buf, unsigned long len, long offset) {
-    return do_syscall6(SYS_pwrite, (long)fd, (long)buf, (long)len, offset, 0, 0);
+long sys_pwrite(int fd, const void *buffer, unsigned long length, long offset) {
+    return do_syscall6(SYS_pwrite, (long)fd, (long)buffer, (long)length, offset, 0, 0);
 }
 
 long sys_utime(const char *path, unsigned int mtime) {
@@ -259,7 +259,7 @@ long sys_rename(const char *old_path, const char *new_path) {
 }
 
 long sys_shared_memory_unmap(void *vaddr, unsigned long bytes) {
-    return do_syscall(SYS_shm_unmap, (long)vaddr, (long)bytes, 0);
+    return do_syscall(SYS_shared_memory_unmap, (long)vaddr, (long)bytes, 0);
 }
 
 long sys_kill(long pid, int sig) {
@@ -279,19 +279,19 @@ long sys_sbrk(long increment) {
 }
 
 long sys_shared_memory_create(size_t size) {
-    return do_syscall(SYS_shm_create, (long)size, 0, 0);
+    return do_syscall(SYS_shared_memory_create, (long)size, 0, 0);
 }
 
 long sys_shared_memory_map(long id) {
-    return do_syscall(SYS_shm_map, id, 0, 0);
+    return do_syscall(SYS_shared_memory_map, id, 0, 0);
 }
 
-long sys_framebuffer_info(wm_fb_info_t *out) {
-    return do_syscall(SYS_fb_info, (long)out, 0, 0);
+long sys_framebuffer_info(window_manager_framebuffer_info_t *out) {
+    return do_syscall(SYS_framebuffer_info, (long)out, 0, 0);
 }
 
 long sys_framebuffer_map(void) {
-    return do_syscall(SYS_fb_map, 0, 0, 0);
+    return do_syscall(SYS_framebuffer_map, 0, 0, 0);
 }
 
 long sys_display_modes(display_mode_t *out, long max) {
@@ -354,20 +354,20 @@ long sys_accept(int fd, os_sockaddr_t *from) {
     return do_syscall(SYS_accept, fd, (long)from, 0);
 }
 
-long sys_send(int fd, const void *data, uint32_t len) {
-    return do_syscall(SYS_send, fd, (long)data, (long)len);
+long sys_send(int fd, const void *data, uint32_t length) {
+    return do_syscall(SYS_send, fd, (long)data, (long)length);
 }
 
-long sys_recv(int fd, void *data, uint32_t max) {
-    return do_syscall(SYS_recv, fd, (long)data, (long)max);
+long sys_receive(int fd, void *data, uint32_t max) {
+    return do_syscall(SYS_receive, fd, (long)data, (long)max);
 }
 
 long sys_bind(int fd, uint16_t port) {
     return do_syscall(SYS_bind, fd, port, 0);
 }
 
-long sys_sendto(int fd, uint32_t ip, uint16_t port, const void *data, uint32_t len) {
-    return do_syscall6(SYS_sendto, fd, (long)ip, port, (long)data, (long)len, 0);
+long sys_sendto(int fd, uint32_t ip, uint16_t port, const void *data, uint32_t length) {
+    return do_syscall6(SYS_sendto, fd, (long)ip, port, (long)data, (long)length, 0);
 }
 
 long sys_recvfrom(int fd, void *data, uint32_t max, os_sockaddr_t *from) {
@@ -386,20 +386,20 @@ long sys_socketpair(int type, int file_descriptors_out[2]) {
     return do_syscall(SYS_socketpair, type, (long)file_descriptors_out, 0);
 }
 
-long sys_bindun(int fd, const char *name, int len) {
-    return do_syscall(SYS_bindun, fd, (long)name, len);
+long sys_bindun(int fd, const char *name, int length) {
+    return do_syscall(SYS_bindun, fd, (long)name, length);
 }
 
-long sys_connectun(int fd, const char *name, int len) {
-    return do_syscall(SYS_connectun, fd, (long)name, len);
+long sys_connectun(int fd, const char *name, int length) {
+    return do_syscall(SYS_connectun, fd, (long)name, length);
 }
 
-long sys_sendmsg(int fd, const os_msg_t *msg, int flags) {
-    return do_syscall(SYS_sendmsg, fd, (long)msg, flags);
+long sys_sendmsg(int fd, const os_message_t *message, int flags) {
+    return do_syscall(SYS_sendmsg, fd, (long)message, flags);
 }
 
-long sys_recvmsg(int fd, os_msg_t *msg, int flags) {
-    return do_syscall(SYS_recvmsg, fd, (long)msg, flags);
+long sys_recvmsg(int fd, os_message_t *message, int flags) {
+    return do_syscall(SYS_recvmsg, fd, (long)message, flags);
 }
 
 long sys_sockshut(int fd, int how) {
@@ -410,8 +410,8 @@ long sys_epoll_create(int flags) {
     return do_syscall(SYS_epoll_create, flags, 0, 0);
 }
 
-long sys_epoll_ctl(int epfd, int op, int fd, const os_epoll_event_t *ev) {
-    return do_syscall6(SYS_epoll_ctl, epfd, op, fd, (long)ev, 0, 0);
+long sys_epoll_control(int epfd, int op, int fd, const os_epoll_event_t *ev) {
+    return do_syscall6(SYS_epoll_control, epfd, op, fd, (long)ev, 0, 0);
 }
 
 long sys_epoll_wait(int epfd, os_epoll_event_t *out, int maxevents, int timeout_ms) {
@@ -475,7 +475,7 @@ long sys_pipe_open(const char *name, int file_descriptors_out[2]) {
 }
 
 long sys_keyboard_read(char *out) {
-    return do_syscall(SYS_kbd_read, (long)out, 0, 0);
+    return do_syscall(SYS_keyboard_read, (long)out, 0, 0);
 }
 
 long sys_pipe_poll(int fd) {
@@ -486,20 +486,20 @@ long sys_uptime_ms(void) {
     return do_syscall(SYS_uptime_ms, 0, 0, 0);
 }
 
-long sys_klog(uint64_t from, char *buf, size_t max, uint64_t *next_out) {
-    return do_syscall6(SYS_klog, (long)from, (long)buf, (long)max, (long)next_out, 0, 0);
+long sys_kernel_log(uint64_t from, char *buffer, size_t max, uint64_t *next_out) {
+    return do_syscall6(SYS_kernel_log, (long)from, (long)buffer, (long)max, (long)next_out, 0, 0);
 }
 
-long sys_klog_total(void) {
-    return do_syscall(SYS_klog_total, 0, 0, 0);
+long sys_kernel_log_total(void) {
+    return do_syscall(SYS_kernel_log_total, 0, 0, 0);
 }
 
 long sys_rename_replace(const char *old_path, const char *new_path) {
     return do_syscall(SYS_rename_replace, (long)old_path, (long)new_path, 0);
 }
 
-long sys_waitfds(const int *fds, int count, int timeout_ms) {
-    return do_syscall(SYS_waitfds, (uint64_t)fds, (uint64_t)count, (uint64_t)(long)timeout_ms);
+long sys_waitfds(const int *file_descriptors, int count, int timeout_ms) {
+    return do_syscall(SYS_waitfds, (uint64_t)file_descriptors, (uint64_t)count, (uint64_t)(long)timeout_ms);
 }
 
 long sys_idle_ticks(int cpu) {
@@ -519,19 +519,19 @@ long sys_yield(void) {
 }
 
 long sys_keyboard_modifiers(void) {
-    return do_syscall(SYS_kbd_modifiers, 0, 0, 0);
+    return do_syscall(SYS_keyboard_modifiers, 0, 0, 0);
 }
 
-long sys_clipboard_set(const void *buf, size_t len) {
-    return do_syscall(SYS_clipboard_set, (long)buf, (long)len, 0);
+long sys_clipboard_set(const void *buffer, size_t length) {
+    return do_syscall(SYS_clipboard_set, (long)buffer, (long)length, 0);
 }
 
-long sys_clipboard_get(void *buf, size_t maxlen) {
-    return do_syscall(SYS_clipboard_get, (long)buf, (long)maxlen, 0);
+long sys_clipboard_get(void *buffer, size_t maxlen) {
+    return do_syscall(SYS_clipboard_get, (long)buffer, (long)maxlen, 0);
 }
 
-long sys_writefile(const char *name, const void *buf, size_t len) {
-    return do_syscall(SYS_writefile, (long)name, (long)buf, (long)len);
+long sys_writefile(const char *name, const void *buffer, size_t length) {
+    return do_syscall(SYS_writefile, (long)name, (long)buffer, (long)length);
 }
 
 long sys_task_alive(long pid) {
@@ -542,8 +542,8 @@ long sys_pipe_reset(int fd) {
     return do_syscall(SYS_pipe_reset, fd, 0, 0);
 }
 
-long sys_taskinfo(task_info_t *buf, long max_entries) {
-    return do_syscall(SYS_taskinfo, (long)buf, max_entries, 0);
+long sys_taskinfo(task_info_t *buffer, long max_entries) {
+    return do_syscall(SYS_taskinfo, (long)buffer, max_entries, 0);
 }
 
 long sys_profile(long op, void *arg, long count) {
@@ -559,5 +559,5 @@ long sys_close(int fd) {
 }
 
 long sys_shared_memory_free(long id, void *vaddr) {
-    return do_syscall(SYS_shm_free, id, (long)vaddr, 0);
+    return do_syscall(SYS_shared_memory_free, id, (long)vaddr, 0);
 }

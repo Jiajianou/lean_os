@@ -1,17 +1,17 @@
 #include "string_utilities.h"
 #include "syscall_wrappers.h"
 
-#define BUF_SIZE 4096
+#define BUFFER_SIZE 4096
 
-static char buf[BUF_SIZE];
+static char buffer[BUFFER_SIZE];
 
 static int drain(int fd) {
     for (;;) {
-        long n = sys_read(fd, buf, BUF_SIZE);
+        long n = sys_read(fd, buffer, BUFFER_SIZE);
         if (n <= 0) {
             return 0;
         }
-        if (sys_write(1, buf, (size_t)n) != n) {
+        if (sys_write(1, buffer, (size_t)n) != n) {
             return 1;
         }
     }
@@ -26,8 +26,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         long fd = sys_open(argv[i], OPEN_READ);
         if (fd < 0) {
-            const char msg[] = "cat: no such file: ";
-            sys_write(1, msg, sizeof(msg) - 1);
+            const char message[] = "cat: no such file: ";
+            sys_write(1, message, sizeof(message) - 1);
             sys_write(1, argv[i], strlen(argv[i]));
             sys_write(1, "\n", 1);
             failures = 1;

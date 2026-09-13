@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#define PMM_DMA_LIMIT 0x100000000ULL
+#define PHYSICAL_MEMORY_DMA_LIMIT 0x100000000ULL
 
 void physical_memory_init(const uint32_t *e820_map);
 

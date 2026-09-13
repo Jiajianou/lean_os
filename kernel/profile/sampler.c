@@ -6,7 +6,7 @@
 
 static spinlock_t prof_lock;
 static prof_sample_t buckets[PROF_BUCKETS];
-static prof_stats_t statistics;
+static prof_statistics_t statistics;
 
 static uint32_t hash_key(uint64_t rip, int32_t pid) {
     uint64_t h = rip * 0x9E3779B97F4A7C15ULL;
@@ -97,7 +97,7 @@ void profile_sample(isr_regs_t *regs) {
     spin_unlock_irqrestore(&prof_lock, flags);
 }
 
-void profile_get_statistics(prof_stats_t *out) {
+void profile_get_statistics(prof_statistics_t *out) {
     if (!out) {
         return;
     }

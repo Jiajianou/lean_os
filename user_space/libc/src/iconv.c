@@ -19,7 +19,7 @@ enum enc {
 
 struct iconv_cd {
     enum enc from, to;
-    const uint16_t *from_tbl, *to_tbl;
+    const uint16_t *from_table, *to_table;
     int from_has_bom, to_has_bom;
     int from_bom_pending, to_bom_pending;
     enum enc from_initial;
@@ -39,8 +39,8 @@ static int name_eq(const char *a, const char *b) {
             break;
         }
         char ca = *a >= 'A' && *a <= 'Z' ? (char)(*a + 32) : *a;
-        char cb = *b >= 'A' && *b <= 'Z' ? (char)(*b + 32) : *b;
-        if (ca != cb) {
+        char callback = *b >= 'A' && *b <= 'Z' ? (char)(*b + 32) : *b;
+        if (ca != callback) {
             return 0;
         }
         a++;
@@ -88,9 +88,9 @@ static const struct alias ALIASES[] = {
     {"iso-8859-15", ENC_SB, 0, ENC_SB},
 };
 
-static int lookup(const char *name, enum enc *enc, const uint16_t **tbl,
+static int lookup(const char *name, enum enc *enc, const uint16_t **table,
                   int *bom, enum enc *dflt) {
-    *tbl = 0;
+    *table = 0;
     *bom = 0;
     for (size_t i = 0; i < sizeof(ALIASES) / sizeof(ALIASES[0]); i++) {
         if (ALIASES[i].enc != ENC_SB && name_eq(name, ALIASES[i].name)) {
@@ -103,7 +103,7 @@ static int lookup(const char *name, enum enc *enc, const uint16_t **tbl,
     for (size_t i = 0; i < __iconv_sb_charset_count; i++) {
         if (name_eq(name, __iconv_sb_charsets[i].name)) {
             *enc = ENC_SB;
-            *tbl = __iconv_sb_charsets[i].high;
+            *table = __iconv_sb_charsets[i].high;
             *dflt = ENC_SB;
             return 1;
         }
@@ -125,7 +125,7 @@ static int lookup(const char *name, enum enc *enc, const uint16_t **tbl,
     };
     for (size_t i = 0; i < sizeof(SB_ALIASES) / sizeof(SB_ALIASES[0]); i++) {
         if (name_eq(name, SB_ALIASES[i].alias)) {
-            return lookup(SB_ALIASES[i].real, enc, tbl, bom, dflt);
+            return lookup(SB_ALIASES[i].real, enc, table, bom, dflt);
         }
     }
     return 0;
@@ -144,8 +144,8 @@ iconv_t iconv_open(const char *tocode, const char *fromcode) {
     memset(&cd, 0, sizeof(cd));
     int fbom = 0, tbom = 0;
     enum enc fdflt = ENC_UTF8, tdflt = ENC_UTF8;
-    if (!lookup(fromcode, &cd.from, &cd.from_tbl, &fbom, &fdflt) ||
-        !lookup(tocode, &cd.to, &cd.to_tbl, &tbom, &tdflt)) {
+    if (!lookup(fromcode, &cd.from, &cd.from_table, &fbom, &fdflt) ||
+        !lookup(tocode, &cd.to, &cd.to_table, &tbom, &tdflt)) {
         errno = EINVAL;
         return (iconv_t)-1;
     }
@@ -175,7 +175,7 @@ int iconv_close(iconv_t cd) {
     return 0;
 }
 
-static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
+static int decode(struct iconv_cd *c, const unsigned char *in, size_t length,
                   uint32_t *cp) {
     switch (c->from) {
     case ENC_ASCII:
@@ -192,7 +192,7 @@ static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
             *cp = in[0];
             return 1;
         }
-        uint16_t v = c->from_tbl[in[0] - 0x80];
+        uint16_t v = c->from_table[in[0] - 0x80];
         if (v == REPLACEMENT_UNASSIGNED) {
             return -1;
         }
@@ -215,7 +215,7 @@ static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
         } else {
             return -1;
         }
-        if (len < (size_t)n) {
+        if (length < (size_t)n) {
             return 0;
         }
         for (int i = 1; i < n; i++) {
@@ -235,13 +235,13 @@ static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
     case ENC_UTF16LE:
     case ENC_UTF16BE: {
         int be = c->from == ENC_UTF16BE;
-        if (len < 2) {
+        if (length < 2) {
             return 0;
         }
         uint32_t u = be ? (uint32_t)((in[0] << 8) | in[1])
                         : (uint32_t)((in[1] << 8) | in[0]);
         if (u >= 0xD800 && u <= 0xDBFF) {
-            if (len < 4) {
+            if (length < 4) {
                 return 0;
             }
             uint32_t lo = be ? (uint32_t)((in[2] << 8) | in[3])
@@ -260,7 +260,7 @@ static int decode(struct iconv_cd *c, const unsigned char *in, size_t len,
     }
     default: {
         int be = c->from == ENC_UTF32BE;
-        if (len < 4) {
+        if (length < 4) {
             return 0;
         }
         uint32_t v = be ? ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) |
@@ -312,7 +312,7 @@ static int encode(struct iconv_cd *c, uint32_t cp, unsigned char *out,
             return -1;
         }
         for (int i = 0; i < 128; i++) {
-            if (c->to_tbl[i] == (uint16_t)cp) {
+            if (c->to_table[i] == (uint16_t)cp) {
                 if (room < 1) {
                     return 0;
                 }

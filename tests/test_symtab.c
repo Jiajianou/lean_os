@@ -20,16 +20,16 @@ static int name_is(const symbol_table_entry_t *e, const char *want) {
         return 0;
     }
     size_t n = strlen(want);
-    return e->name_len == n && strncmp(e->name, want, n) == 0;
+    return e->name_length == n && strncmp(e->name, want, n) == 0;
 }
 
 TEST(symbol_table, parses_every_line) {
     symbol_table_entry_t storage[16];
     symbol_table_t st;
     CHECK_EQ(parse_sample(&st, storage, 16), 5);
-    CHECK_EQ((long long)st.entries[0].addr, 0x100000);
+    CHECK_EQ((long long)st.entries[0].address, 0x100000);
     CHECK(name_is(&st.entries[0], "_start"));
-    CHECK_EQ((long long)st.entries[4].addr, 0x102abc);
+    CHECK_EQ((long long)st.entries[4].address, 0x102abc);
     CHECK(name_is(&st.entries[4], "[end-of-text]"));
     CHECK_EQ(symbol_table_is_sorted(&st), 1);
 }

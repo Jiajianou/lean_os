@@ -3,11 +3,11 @@
 #include "syscall_wrappers.h"
 #include "user_interface_font.h"
 
-#define BUF_W 640
-#define BUF_H 32
+#define BUFFER_W 640
+#define BUFFER_H 32
 
-static uint32_t pixels[BUF_W * BUF_H];
-static graphics_context_t context = { pixels, BUF_W, BUF_H };
+static uint32_t pixels[BUFFER_W * BUFFER_H];
+static graphics_context_t context = { pixels, BUFFER_W, BUFFER_H };
 
 #define INK 0x00FFFFFFu
 #define BG  0x00000000u
@@ -31,16 +31,16 @@ static void fail(const char *what, const char *detail) {
 }
 
 static void clear(void) {
-    for (int i = 0; i < BUF_W * BUF_H; i++) {
+    for (int i = 0; i < BUFFER_W * BUFFER_H; i++) {
         pixels[i] = BG;
     }
 }
 
 static void ink_box(int32_t *x0, int32_t *x1, int32_t *y0, int32_t *y1) {
     *x0 = -1; *x1 = -1; *y0 = -1; *y1 = -1;
-    for (int32_t y = 0; y < BUF_H; y++) {
-        for (int32_t x = 0; x < BUF_W; x++) {
-            if (pixels[y * BUF_W + x] == BG) {
+    for (int32_t y = 0; y < BUFFER_H; y++) {
+        for (int32_t x = 0; x < BUFFER_W; x++) {
+            if (pixels[y * BUFFER_W + x] == BG) {
                 continue;
             }
             if (*x0 < 0 || x < *x0) *x0 = x;

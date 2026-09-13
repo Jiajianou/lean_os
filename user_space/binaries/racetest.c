@@ -7,7 +7,7 @@
 
 #define ROUNDS      12
 #define FILE_BYTES  512
-#define SHM_BYTES   4096
+#define SHARED_MEMORY_BYTES   4096
 #define PIPE_BYTES  256
 
 static int failures;
@@ -65,18 +65,18 @@ int main(int argc, char **argv) {
         }
         check(fs_ok, "a file read back bytes this process did not write");
 
-        long id = sys_shared_memory_create(SHM_BYTES);
+        long id = sys_shared_memory_create(SHARED_MEMORY_BYTES);
         check(id >= 0, "shm_create failed");
         if (id >= 0) {
             unsigned char *p = (unsigned char *)sys_shared_memory_map(id);
             check(p != (unsigned char *)-1 && p != 0, "shm_map failed");
             if (p && p != (unsigned char *)-1) {
-                for (int i = 0; i < SHM_BYTES; i += 64) {
+                for (int i = 0; i < SHARED_MEMORY_BYTES; i += 64) {
                     p[i] = stamp(pid, round, i);
                 }
                 sys_yield();
                 int shared_memory_ok = 1;
-                for (int i = 0; i < SHM_BYTES; i += 64) {
+                for (int i = 0; i < SHARED_MEMORY_BYTES; i += 64) {
                     if (p[i] != stamp(pid, round, i)) { shared_memory_ok = 0; break; }
                 }
                 check(shared_memory_ok, "a shared-memory segment came back holding another process's bytes");
@@ -84,18 +84,18 @@ int main(int argc, char **argv) {
             }
         }
 
-        int fds[2];
-        check(sys_pipe(fds) == 0, "pipe failed");
-        if (fds[0] >= 0 && fds[1] >= 0) {
+        int file_descriptors[2];
+        check(sys_pipe(file_descriptors) == 0, "pipe failed");
+        if (file_descriptors[0] >= 0 && file_descriptors[1] >= 0) {
             for (int i = 0; i < PIPE_BYTES; i++) {
                 out[i] = stamp(pid, round, i);
             }
-            check(sys_write(fds[1], out, PIPE_BYTES) == PIPE_BYTES, "pipe write was short");
+            check(sys_write(file_descriptors[1], out, PIPE_BYTES) == PIPE_BYTES, "pipe write was short");
             sys_yield();
             memset(back, 0, PIPE_BYTES);
             long got = 0;
             while (got < PIPE_BYTES) {
-                long r = sys_read(fds[0], back + got, (size_t)(PIPE_BYTES - got));
+                long r = sys_read(file_descriptors[0], back + got, (size_t)(PIPE_BYTES - got));
                 if (r <= 0) { break; }
                 got += r;
             }
@@ -105,12 +105,12 @@ int main(int argc, char **argv) {
                 if (back[i] != out[i]) { pipe_ok = 0; break; }
             }
             check(pipe_ok, "bytes came out of a pipe in the wrong order or from the wrong writer");
-            sys_close(fds[0]);
-            sys_close(fds[1]);
+            sys_close(file_descriptors[0]);
+            sys_close(file_descriptors[1]);
         }
 
-        int s1 = (int)sys_socket(OS_SOCK_DGRAM);
-        int s2 = (int)sys_socket(OS_SOCK_DGRAM);
+        int s1 = (int)sys_socket(OS_SOCKET_DGRAM);
+        int s2 = (int)sys_socket(OS_SOCKET_DGRAM);
         check(s1 >= 0 && s2 >= 0, "socket allocation failed");
         if (s1 >= 0 && s2 >= 0) {
             long p1 = sys_bind(s1, 0);

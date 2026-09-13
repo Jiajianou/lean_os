@@ -40,10 +40,10 @@ void file_system_utilities_format_size(uint32_t bytes, char *out) {
 
 void file_system_utilities_format_exact(uint32_t n, char *out) {
     char plain[12];
-    int len = digits_into(n, plain);
+    int length = digits_into(n, plain);
     int w = 0;
-    for (int i = 0; i < len; i++) {
-        if (i > 0 && ((len - i) % 3) == 0) {
+    for (int i = 0; i < length; i++) {
+        if (i > 0 && ((length - i) % 3) == 0) {
             out[w++] = ',';
         }
         out[w++] = plain[i];
@@ -94,18 +94,18 @@ int file_system_utilities_name_ok(const char *name) {
     return 1;
 }
 
-static char walk_path[PATH_MAX_LEN];
+static char walk_path[PATH_MAX_LENGTH];
 
-static int walk_push(int len, const char *name) {
-    int n = len;
+static int walk_push(int length, const char *name) {
+    int n = length;
     if (n > 0 && walk_path[n - 1] != '/') {
-        if (n >= PATH_MAX_LEN - 1) {
+        if (n >= PATH_MAX_LENGTH - 1) {
             return -1;
         }
         walk_path[n++] = '/';
     }
     for (const char *s = name; *s; s++) {
-        if (n >= PATH_MAX_LEN - 1) {
+        if (n >= PATH_MAX_LENGTH - 1) {
             return -1;
         }
         walk_path[n++] = *s;
@@ -118,20 +118,20 @@ static int is_dot_entry(const char *name) {
     return name[0] == '.' && (!name[1] || (name[1] == '.' && !name[2]));
 }
 
-static int count_at(int len, int depth, file_system_utilities_tree_t *out) {
-    if (depth >= FSUTIL_MAX_DEPTH) {
+static int count_at(int length, int depth, file_system_utilities_tree_t *out) {
+    if (depth >= FILE_SYSTEM_UTILITIES_MAX_DEPTH) {
         out->deep = 1;
         return 0;
     }
     unsigned int cookie = 0;
     for (;;) {
-        union { char bytes[FSUTIL_DIRENT_BUF]; uint64_t align; } buf;
-        long n = sys_getdents(walk_path, &cookie, buf.bytes, sizeof(buf.bytes));
+        union { char bytes[FILE_SYSTEM_UTILITIES_DIRENT_BUFFER]; uint64_t align; } buffer;
+        long n = sys_getdents(walk_path, &cookie, buffer.bytes, sizeof(buffer.bytes));
         if (n <= 0) {
             return n == 0 ? 0 : -1;
         }
         for (long off = 0; off + 8 <= n;) {
-            const os_dirent_t *d = (const os_dirent_t *)(void *)(buf.bytes + off);
+            const os_dirent_t *d = (const os_dirent_t *)(void *)(buffer.bytes + off);
             if (d->reclen == 0 || off + d->reclen > n) {
                 break;
             }
@@ -140,12 +140,12 @@ static int count_at(int len, int depth, file_system_utilities_tree_t *out) {
                 continue;
             }
             out->entries++;
-            int saved = len;
-            int pushed = walk_push(len, d->name);
+            int saved = length;
+            int pushed = walk_push(length, d->name);
             if (pushed < 0) {
                 continue;
             }
-            if (d->type == OS_DT_DIR) {
+            if (d->type == OS_DT_DIRECTORY) {
                 count_at(pushed, depth + 1, out);
             } else {
                 os_stat_t st;
@@ -163,27 +163,27 @@ int file_system_utilities_count_tree(const char *path, file_system_utilities_tre
     out->bytes = 0;
     out->deep = 0;
     walk_path[0] = '\0';
-    int len = walk_push(0, path);
-    if (len < 0) {
+    int length = walk_push(0, path);
+    if (length < 0) {
         return -1;
     }
-    return count_at(len, 0, out);
+    return count_at(length, 0, out);
 }
 
-static int remove_at(int len, int depth) {
-    if (depth >= FSUTIL_MAX_DEPTH) {
+static int remove_at(int length, int depth) {
+    if (depth >= FILE_SYSTEM_UTILITIES_MAX_DEPTH) {
         return -1;
     }
     for (;;) {
         unsigned int cookie = 0;
-        union { char bytes[FSUTIL_DIRENT_BUF]; uint64_t align; } buf;
-        long n = sys_getdents(walk_path, &cookie, buf.bytes, sizeof(buf.bytes));
+        union { char bytes[FILE_SYSTEM_UTILITIES_DIRENT_BUFFER]; uint64_t align; } buffer;
+        long n = sys_getdents(walk_path, &cookie, buffer.bytes, sizeof(buffer.bytes));
         if (n <= 0) {
             break;
         }
         int removed = 0;
         for (long off = 0; off + 8 <= n;) {
-            const os_dirent_t *d = (const os_dirent_t *)(void *)(buf.bytes + off);
+            const os_dirent_t *d = (const os_dirent_t *)(void *)(buffer.bytes + off);
             if (d->reclen == 0 || off + d->reclen > n) {
                 break;
             }
@@ -191,12 +191,12 @@ static int remove_at(int len, int depth) {
             if (is_dot_entry(d->name)) {
                 continue;
             }
-            int saved = len;
-            int pushed = walk_push(len, d->name);
+            int saved = length;
+            int pushed = walk_push(length, d->name);
             if (pushed < 0) {
                 return -1;
             }
-            int rc = (d->type == OS_DT_DIR) ? remove_at(pushed, depth + 1)
+            int rc = (d->type == OS_DT_DIRECTORY) ? remove_at(pushed, depth + 1)
                                             : (int)sys_unlink(walk_path);
             walk_path[saved] = '\0';
             if (rc != 0) {
@@ -213,9 +213,9 @@ static int remove_at(int len, int depth) {
 
 int file_system_utilities_remove_tree(const char *path) {
     walk_path[0] = '\0';
-    int len = walk_push(0, path);
-    if (len < 0) {
+    int length = walk_push(0, path);
+    if (length < 0) {
         return -1;
     }
-    return remove_at(len, 0);
+    return remove_at(length, 0);
 }

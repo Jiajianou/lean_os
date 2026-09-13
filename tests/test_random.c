@@ -121,12 +121,12 @@ TEST(random, the_output_is_not_a_counter) {
     random_test_tsc_value = 424242;
     random_init("stats", 5);
     enum { N = 1 << 20 };
-    static uint8_t buf[N];
-    random_bytes(buf, N);
+    static uint8_t buffer[N];
+    random_bytes(buffer, N);
     unsigned counts[256];
     memset(counts, 0, sizeof(counts));
     for (int i = 0; i < N; i++) {
-        counts[buf[i]]++;
+        counts[buffer[i]]++;
     }
     unsigned lo = N, hi = 0;
     for (int v = 0; v < 256; v++) {
@@ -138,7 +138,7 @@ TEST(random, the_output_is_not_a_counter) {
     int repeats = 0;
     for (int i = 0; i + 64 * 17 <= N; i += 64) {
         for (int j = 1; j <= 16; j++) {
-            if (memcmp(buf + i, buf + i + 64 * j, 64) == 0) {
+            if (memcmp(buffer + i, buffer + i + 64 * j, 64) == 0) {
                 repeats++;
             }
         }
@@ -151,6 +151,6 @@ TEST(random, the_output_is_not_a_counter) {
     random_bytes(again + 1, 63);
     random_bytes(again + 64, 100);
     random_bytes(again + 164, 36);
-    CHECK(memcmp(again, buf, 200) != 0);
+    CHECK(memcmp(again, buffer, 200) != 0);
     CHECK(memcmp(again, again + 64, 36) != 0);
 }

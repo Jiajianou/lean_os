@@ -72,15 +72,15 @@ static void ratchet(void) {
     k_memset(block, 0, sizeof(block));
 }
 
-static void mix_locked(const uint8_t *p, size_t len) {
-    while (len) {
-        size_t n = len < 32 ? len : 32;
+static void mix_locked(const uint8_t *p, size_t length) {
+    while (length) {
+        size_t n = length < 32 ? length : 32;
         for (size_t i = 0; i < n; i++) {
             key[i] ^= p[i];
         }
         ratchet();
         p += n;
-        len -= n;
+        length -= n;
     }
 }
 
@@ -124,7 +124,7 @@ uint64_t random_test_tsc_value;
 static uint64_t tsc(void) { return random_test_tsc_value; }
 #endif
 
-void random_init(const void *seed, size_t len) {
+void random_init(const void *seed, size_t length) {
     k_memset(key, 0, sizeof(key));
     counter = 0;
     events = 0;
@@ -132,8 +132,8 @@ void random_init(const void *seed, size_t len) {
     probe_hardware();
     uint64_t t = tsc();
     mix_locked((const uint8_t *)&t, sizeof(t));
-    if (seed && len) {
-        mix_locked((const uint8_t *)seed, len);
+    if (seed && length) {
+        mix_locked((const uint8_t *)seed, length);
     }
     for (int i = 0; i < 8; i++) {
         uint64_t w;
@@ -145,19 +145,19 @@ void random_init(const void *seed, size_t len) {
     }
 }
 
-void random_feed(const void *data, size_t len) {
+void random_feed(const void *data, size_t length) {
     uint64_t f = spin_lock_irqsave(&rng_lock);
     uint64_t t = tsc();
     mix_locked((const uint8_t *)&t, sizeof(t));
-    if (data && len) {
-        mix_locked((const uint8_t *)data, len);
+    if (data && length) {
+        mix_locked((const uint8_t *)data, length);
     }
     events++;
     spin_unlock_irqrestore(&rng_lock, f);
 }
 
-void random_bytes(void *out, size_t len) {
-    uint8_t *dst = (uint8_t *)out;
+void random_bytes(void *out, size_t length) {
+    uint8_t *destination = (uint8_t *)out;
     uint64_t f = spin_lock_irqsave(&rng_lock);
     uint64_t w;
     if (hw_word(&w)) {
@@ -170,16 +170,16 @@ void random_bytes(void *out, size_t len) {
     k_memcpy(next, block, 32);
     size_t have = 32;
     size_t off = 0;
-    while (off < len) {
+    while (off < length) {
         if (have == 64) {
             chacha20_block(key, NONCE, counter++, block);
             have = 0;
         }
         size_t n = 64 - have;
-        if (n > len - off) {
-            n = len - off;
+        if (n > length - off) {
+            n = length - off;
         }
-        k_memcpy(dst + off, block + have, n);
+        k_memcpy(destination + off, block + have, n);
         off += n;
         have += n;
     }

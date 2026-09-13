@@ -13,9 +13,9 @@ typedef struct {
 
     uint32_t request_width, request_height, request_panel_dock_h;
     uint8_t request_panel, request_translucent, request_desktop, request_confirm_close;
-    char request_title[WM_TITLE_MAX];
+    char request_title[WINDOW_MANAGER_TITLE_MAX];
     int32_t compositor_pid;
-    int32_t shm_id;
+    int32_t shared_memory_id;
     unsigned long shared_memory_bytes;
 } window_manager_window_t;
 
@@ -27,7 +27,7 @@ int window_manager_connect_desktop(window_manager_window_t *out);
 
 int window_manager_connect_confirm_close(uint32_t width, uint32_t height, const char *title, window_manager_window_t *out);
 
-int window_manager_query_windows(wm_query_response_t *out);
+int window_manager_query_windows(window_manager_query_response_t *out);
 
 int window_manager_send_action(int32_t window_id, uint32_t action);
 
@@ -50,17 +50,17 @@ int window_manager_confirm_display_mode(void);
 
 int window_manager_set_theme(uint32_t bg_color, uint32_t accent_color, uint32_t wallpaper);
 
-int window_manager_set_settings(const wm_settings_request_t *in);
+int window_manager_set_settings(const window_manager_settings_request_t *in);
 
 int window_manager_set_taskbar_slot(int32_t window_id, int32_t x, int32_t width);
 
-int window_manager_query_settings(wm_settings_request_t *out);
+int window_manager_query_settings(window_manager_settings_request_t *out);
 
-int window_manager_wait_event(window_manager_window_t *win, wm_event_t *out);
+int window_manager_wait_event(window_manager_window_t *win, window_manager_event_t *out);
 
-int window_manager_poll_event(window_manager_window_t *win, wm_event_t *out);
+int window_manager_poll_event(window_manager_window_t *win, window_manager_event_t *out);
 
-#define WM_WAIT_CAP_MS 250
+#define WINDOW_MANAGER_WAIT_CAP_MS 250
 int window_manager_wait_ms(window_manager_window_t *win, const int *extra_file_descriptors, int n_extra, int timeout_ms);
 
 int window_manager_present(window_manager_window_t *win);

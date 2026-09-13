@@ -4,15 +4,15 @@
 #include <errno.h>
 
 static int roundtrips(unsigned int cp) {
-    char buf[8];
+    char buffer[8];
     mbstate_t st = {0, 0, 0};
-    size_t n = wcrtomb(buf, (wchar_t)cp, &st);
+    size_t n = wcrtomb(buffer, (wchar_t)cp, &st);
     if (n == (size_t)-1 || n > 4) {
         return 0;
     }
     wchar_t back = 0;
     mbstate_t rst = {0, 0, 0};
-    size_t used = mbrtowc(&back, buf, n, &rst);
+    size_t used = mbrtowc(&back, buffer, n, &rst);
     if (cp == 0) {
         return used == 0 && back == 0 && n == 1;
     }
@@ -44,22 +44,22 @@ TEST(utf8, every_length_boundary_round_trips) {
 }
 
 TEST(utf8, encoded_lengths_are_the_specified_ones) {
-    char buf[8];
-    CHECK_EQ(wcrtomb(buf, (wchar_t)0x41u, NULL), (size_t)1);
-    CHECK_EQ(wcrtomb(buf, (wchar_t)0xE9u, NULL), (size_t)2);
-    CHECK_EQ(wcrtomb(buf, (wchar_t)0x20ACu, NULL), (size_t)3);
-    CHECK_EQ(wcrtomb(buf, (wchar_t)0x1F600u, NULL), (size_t)4);
+    char buffer[8];
+    CHECK_EQ(wcrtomb(buffer, (wchar_t)0x41u, NULL), (size_t)1);
+    CHECK_EQ(wcrtomb(buffer, (wchar_t)0xE9u, NULL), (size_t)2);
+    CHECK_EQ(wcrtomb(buffer, (wchar_t)0x20ACu, NULL), (size_t)3);
+    CHECK_EQ(wcrtomb(buffer, (wchar_t)0x1F600u, NULL), (size_t)4);
 }
 
 TEST(utf8, the_encoding_is_the_one_on_the_wire) {
-    char buf[8];
-    CHECK_EQ(wcrtomb(buf, (wchar_t)0xE9u, NULL), (size_t)2);
-    CHECK_EQ((unsigned char)buf[0], 0xC3u);
-    CHECK_EQ((unsigned char)buf[1], 0xA9u);
-    CHECK_EQ(wcrtomb(buf, (wchar_t)0x20ACu, NULL), (size_t)3);
-    CHECK_EQ((unsigned char)buf[0], 0xE2u);
-    CHECK_EQ((unsigned char)buf[1], 0x82u);
-    CHECK_EQ((unsigned char)buf[2], 0xACu);
+    char buffer[8];
+    CHECK_EQ(wcrtomb(buffer, (wchar_t)0xE9u, NULL), (size_t)2);
+    CHECK_EQ((unsigned char)buffer[0], 0xC3u);
+    CHECK_EQ((unsigned char)buffer[1], 0xA9u);
+    CHECK_EQ(wcrtomb(buffer, (wchar_t)0x20ACu, NULL), (size_t)3);
+    CHECK_EQ((unsigned char)buffer[0], 0xE2u);
+    CHECK_EQ((unsigned char)buffer[1], 0x82u);
+    CHECK_EQ((unsigned char)buffer[2], 0xACu);
 }
 
 static size_t decode(const char *bytes, size_t n, wchar_t *out) {
@@ -82,9 +82,9 @@ TEST(utf8, a_surrogate_half_is_refused_both_ways) {
     wchar_t wc = 0;
     CHECK_EQ(decode("\xED\xA0\x80", 3, &wc), (size_t)-1);
     CHECK_EQ(errno, EILSEQ);
-    char buf[8];
+    char buffer[8];
     errno = 0;
-    CHECK_EQ(wcrtomb(buf, (wchar_t)0xD800u, NULL), (size_t)-1);
+    CHECK_EQ(wcrtomb(buffer, (wchar_t)0xD800u, NULL), (size_t)-1);
     CHECK_EQ(errno, EILSEQ);
 }
 
@@ -92,9 +92,9 @@ TEST(utf8, past_the_last_code_point_is_refused) {
     wchar_t wc = 0;
     CHECK_EQ(decode("\xF4\x90\x80\x80", 4, &wc), (size_t)-1);
     CHECK_EQ(decode("\xF8\x88\x80\x80\x80", 5, &wc), (size_t)-1);
-    char buf[8];
+    char buffer[8];
     errno = 0;
-    CHECK_EQ(wcrtomb(buf, (wchar_t)0x110000u, NULL), (size_t)-1);
+    CHECK_EQ(wcrtomb(buffer, (wchar_t)0x110000u, NULL), (size_t)-1);
     CHECK_EQ(errno, EILSEQ);
 }
 
@@ -149,14 +149,14 @@ TEST(utf8, wcstombs_never_writes_a_partial_character) {
     wide[0] = (wchar_t)0x41u;
     wide[1] = (wchar_t)0x20ACu;
     wide[2] = 0;
-    char buf[8];
+    char buffer[8];
     for (size_t room = 1; room < 4; room++) {
-        memset(buf, 0x7F, sizeof(buf));
-        CHECK_EQ(wcstombs(buf, wide, room), (size_t)1);
-        CHECK_EQ((unsigned char)buf[0], 0x41u);
-        CHECK_EQ((unsigned char)buf[1], 0x7Fu);
+        memset(buffer, 0x7F, sizeof(buffer));
+        CHECK_EQ(wcstombs(buffer, wide, room), (size_t)1);
+        CHECK_EQ((unsigned char)buffer[0], 0x41u);
+        CHECK_EQ((unsigned char)buffer[1], 0x7Fu);
     }
-    CHECK_EQ(wcstombs(buf, wide, 5), (size_t)4);
+    CHECK_EQ(wcstombs(buffer, wide, 5), (size_t)4);
 }
 
 TEST(utf8, mblen_agrees_with_the_decoder) {
@@ -199,9 +199,9 @@ TEST(utf8, the_string_conversions_report_a_bad_sequence) {
     wchar_t bad[2];
     bad[0] = (wchar_t)0xD800u;
     bad[1] = 0;
-    char buf[8];
+    char buffer[8];
     errno = 0;
-    CHECK_EQ(wcstombs(buf, bad, sizeof(buf)), (size_t)-1);
+    CHECK_EQ(wcstombs(buffer, bad, sizeof(buffer)), (size_t)-1);
     CHECK_EQ(errno, EILSEQ);
 
     const char *p = "\xE2\x41";
@@ -213,27 +213,27 @@ TEST(utf8, the_string_conversions_report_a_bad_sequence) {
     const char *nullsrc = NULL;
     CHECK_EQ(mbsrtowcs(wide, &nullsrc, 8, &st), (size_t)-1);
     const wchar_t *nullwsrc = NULL;
-    CHECK_EQ(wcsrtombs(buf, &nullwsrc, sizeof(buf), &st), (size_t)-1);
+    CHECK_EQ(wcsrtombs(buffer, &nullwsrc, sizeof(buffer), &st), (size_t)-1);
 }
 
 TEST(utf8, wcsrtombs_converts_and_resumes) {
-    static const wchar_t src[] = {0x41u, 0x20ACu, 0x42u, 0};
-    const wchar_t *p = src;
-    char buf[16];
+    static const wchar_t source[] = {0x41u, 0x20ACu, 0x42u, 0};
+    const wchar_t *p = source;
+    char buffer[16];
     mbstate_t st = {0, 0, 0};
-    memset(buf, 0x7F, sizeof(buf));
-    CHECK_EQ(wcsrtombs(buf, &p, sizeof(buf), &st), (size_t)5);
-    CHECK_EQ((unsigned char)buf[0], 0x41u);
-    CHECK_EQ((unsigned char)buf[1], 0xE2u);
-    CHECK_EQ((unsigned char)buf[4], 0x42u);
-    CHECK_EQ(buf[5], 0);
+    memset(buffer, 0x7F, sizeof(buffer));
+    CHECK_EQ(wcsrtombs(buffer, &p, sizeof(buffer), &st), (size_t)5);
+    CHECK_EQ((unsigned char)buffer[0], 0x41u);
+    CHECK_EQ((unsigned char)buffer[1], 0xE2u);
+    CHECK_EQ((unsigned char)buffer[4], 0x42u);
+    CHECK_EQ(buffer[5], 0);
     CHECK(p == NULL);
 
-    p = src;
-    memset(buf, 0x7F, sizeof(buf));
-    CHECK_EQ(wcsrtombs(buf, &p, 3, &st), (size_t)1);
-    CHECK_EQ((unsigned char)buf[1], 0x7Fu);
-    CHECK(p == src + 1);
+    p = source;
+    memset(buffer, 0x7F, sizeof(buffer));
+    CHECK_EQ(wcsrtombs(buffer, &p, 3, &st), (size_t)1);
+    CHECK_EQ((unsigned char)buffer[1], 0x7Fu);
+    CHECK(p == source + 1);
 }
 
 TEST(utf8, the_null_destination_forms_answer_without_writing) {
@@ -254,10 +254,10 @@ TEST(utf8, the_null_destination_forms_answer_without_writing) {
 }
 
 TEST(utf8, wctomb_reports_what_it_cannot_encode) {
-    char buf[8];
-    CHECK_EQ(wctomb(buf, (wchar_t)0xD800u), -1);
-    CHECK_EQ(wctomb(buf, (wchar_t)0x110000u), -1);
-    CHECK_EQ(wctomb(buf, (wchar_t)0x41u), 1);
+    char buffer[8];
+    CHECK_EQ(wctomb(buffer, (wchar_t)0xD800u), -1);
+    CHECK_EQ(wctomb(buffer, (wchar_t)0x110000u), -1);
+    CHECK_EQ(wctomb(buffer, (wchar_t)0x41u), 1);
 }
 
 TEST(utf8, mbstowcs_terminates_only_when_there_is_room) {
@@ -276,14 +276,14 @@ TEST(utf8, mbstowcs_terminates_only_when_there_is_room) {
 
 TEST(utf8, the_terminators_land_only_where_they_fit_and_are_NUL) {
     static const wchar_t one[] = {0x41u, 0};
-    char buf[8];
-    memset(buf, 0x7F, sizeof(buf));
-    CHECK_EQ(wcstombs(buf, one, 1), (size_t)1);
-    CHECK_EQ((unsigned char)buf[0], 0x41u);
-    CHECK_EQ((unsigned char)buf[1], 0x7Fu);
-    memset(buf, 0x7F, sizeof(buf));
-    CHECK_EQ(wcstombs(buf, one, 2), (size_t)1);
-    CHECK_EQ((unsigned char)buf[1], 0u);
+    char buffer[8];
+    memset(buffer, 0x7F, sizeof(buffer));
+    CHECK_EQ(wcstombs(buffer, one, 1), (size_t)1);
+    CHECK_EQ((unsigned char)buffer[0], 0x41u);
+    CHECK_EQ((unsigned char)buffer[1], 0x7Fu);
+    memset(buffer, 0x7F, sizeof(buffer));
+    CHECK_EQ(wcstombs(buffer, one, 2), (size_t)1);
+    CHECK_EQ((unsigned char)buffer[1], 0u);
 
     static const char *s = "\xC3\xA9";
     const char *p = s;
@@ -298,11 +298,11 @@ TEST(utf8, the_terminators_land_only_where_they_fit_and_are_NUL) {
 }
 
 TEST(utf8, wcsrtombs_measures_and_refuses) {
-    static const wchar_t src[] = {0x41u, 0x20ACu, 0};
-    const wchar_t *p = src;
+    static const wchar_t source[] = {0x41u, 0x20ACu, 0};
+    const wchar_t *p = source;
     mbstate_t st = {0, 0, 0};
     CHECK_EQ(wcsrtombs(NULL, &p, 0, &st), (size_t)4);
-    CHECK(p == src);
+    CHECK(p == source);
 
     static const wchar_t one[] = {0x41u, 0};
     p = one;
@@ -314,8 +314,8 @@ TEST(utf8, wcsrtombs_measures_and_refuses) {
 
     static const wchar_t bad[] = {0x41u, 0x110000u, 0};
     p = bad;
-    char buf[8];
+    char buffer[8];
     errno = 0;
-    CHECK_EQ(wcsrtombs(buf, &p, sizeof(buf), &st), (size_t)-1);
+    CHECK_EQ(wcsrtombs(buffer, &p, sizeof(buffer), &st), (size_t)-1);
     CHECK_EQ(errno, EILSEQ);
 }

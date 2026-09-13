@@ -21,7 +21,7 @@ static const struct {
     const char *name;
     const char *text;
     hb_script_t script;
-    hb_direction_t dir;
+    hb_direction_t directory;
     const char *lang;
 } CASES[] = {
     {"latin-ligatures", "office waffle fjord AVAST To.", HB_SCRIPT_LATIN, HB_DIRECTION_LTR, "en"},
@@ -33,31 +33,31 @@ static const struct {
 };
 
 static void shape_and_print(hb_font_t *font, const char *how, unsigned c) {
-    hb_buffer_t *buf = hb_buffer_create();
-    hb_buffer_add_utf8(buf, CASES[c].text, -1, 0, -1);
-    hb_buffer_set_script(buf, CASES[c].script);
-    hb_buffer_set_direction(buf, CASES[c].dir);
-    hb_buffer_set_language(buf, hb_language_from_string(CASES[c].lang, -1));
-    hb_shape(font, buf, NULL, 0);
-    unsigned n = hb_buffer_get_length(buf);
-    hb_glyph_info_t *info = hb_buffer_get_glyph_infos(buf, NULL);
-    hb_glyph_position_t *pos = hb_buffer_get_glyph_positions(buf, NULL);
+    hb_buffer_t *buffer = hb_buffer_create();
+    hb_buffer_add_utf8(buffer, CASES[c].text, -1, 0, -1);
+    hb_buffer_set_script(buffer, CASES[c].script);
+    hb_buffer_set_direction(buffer, CASES[c].directory);
+    hb_buffer_set_language(buffer, hb_language_from_string(CASES[c].lang, -1));
+    hb_shape(font, buffer, NULL, 0);
+    unsigned n = hb_buffer_get_length(buffer);
+    hb_glyph_info_t *info = hb_buffer_get_glyph_infos(buffer, NULL);
+    hb_glyph_position_t *position = hb_buffer_get_glyph_positions(buffer, NULL);
     printf("%s %s: %u glyphs\n", how, CASES[c].name, n);
     long pen = 0;
     for (unsigned i = 0; i < n; i++) {
         printf("  gid %u cluster %u adv %d,%d off %d,%d\n",
                (unsigned)info[i].codepoint, (unsigned)info[i].cluster,
-               (int)pos[i].x_advance, (int)pos[i].y_advance,
-               (int)pos[i].x_offset, (int)pos[i].y_offset);
+               (int)position[i].x_advance, (int)position[i].y_advance,
+               (int)position[i].x_offset, (int)position[i].y_offset);
         mix(info[i].codepoint);
         mix(info[i].cluster);
-        mix((uint64_t)(int64_t)pos[i].x_advance);
-        mix((uint64_t)(int64_t)pos[i].x_offset);
-        mix((uint64_t)(int64_t)pos[i].y_offset);
-        pen += pos[i].x_advance;
+        mix((uint64_t)(int64_t)position[i].x_advance);
+        mix((uint64_t)(int64_t)position[i].x_offset);
+        mix((uint64_t)(int64_t)position[i].y_offset);
+        pen += position[i].x_advance;
     }
     printf("  width %ld\n", pen);
-    hb_buffer_destroy(buf);
+    hb_buffer_destroy(buffer);
 }
 
 int main(int argc, char **argv) {

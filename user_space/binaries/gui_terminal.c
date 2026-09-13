@@ -16,8 +16,8 @@
 #define CURSOR_COLOR 0x00D0D0D0u
 
 #define LINE_MAX (COLS - 4)
-#define IO_BUF_SIZE 512
-#define LIST_BUF 16384
+#define IO_BUFFER_SIZE 512
+#define LIST_BUFFER 16384
 #define LEANFS_NAME_MAX 256
 
 static char grid[ROWS][COLS + 1];
@@ -71,14 +71,14 @@ static int line_length;
 static int running_pid = -1;
 static int pipe_pid = -1;
 
-static char term_cwd[PATH_MAX_LEN] = PATH_HOME;
+static char term_cwd[PATH_MAX_LENGTH] = PATH_HOME;
 
 static void sync_cwd(void) {
-    char buf[PATH_MAX_LEN];
-    if (sys_getcwd(buf, sizeof(buf)) >= 0) {
+    char buffer[PATH_MAX_LENGTH];
+    if (sys_getcwd(buffer, sizeof(buffer)) >= 0) {
         int i = 0;
-        for (; buf[i] && i < PATH_MAX_LEN - 1; i++) {
-            term_cwd[i] = buf[i];
+        for (; buffer[i] && i < PATH_MAX_LENGTH - 1; i++) {
+            term_cwd[i] = buffer[i];
         }
         term_cwd[i] = '\0';
     }
@@ -87,7 +87,7 @@ static void sync_cwd(void) {
 static int resolve_path(const char *name, char *out) {
     if (name[0] == '/') {
         int i = 0;
-        for (; name[i] && i < PATH_MAX_LEN - 1; i++) {
+        for (; name[i] && i < PATH_MAX_LENGTH - 1; i++) {
             out[i] = name[i];
         }
         out[i] = '\0';
@@ -95,7 +95,7 @@ static int resolve_path(const char *name, char *out) {
     }
     int n = 0;
     for (const char *s = term_cwd; *s; s++) {
-        if (n >= PATH_MAX_LEN - 2) {
+        if (n >= PATH_MAX_LENGTH - 2) {
             return -1;
         }
         out[n++] = *s;
@@ -104,7 +104,7 @@ static int resolve_path(const char *name, char *out) {
         out[n++] = '/';
     }
     for (const char *s = name; *s; s++) {
-        if (n >= PATH_MAX_LEN - 1) {
+        if (n >= PATH_MAX_LENGTH - 1) {
             return -1;
         }
         out[n++] = *s;
@@ -162,8 +162,8 @@ static void putc_term(char c) {
     }
 }
 
-static void print_term(const char *s, size_t len) {
-    for (size_t i = 0; i < len; i++) {
+static void print_term(const char *s, size_t length) {
+    for (size_t i = 0; i < length; i++) {
         putc_term(s[i]);
     }
 }
@@ -208,23 +208,23 @@ static void normalized_selection(int *sr, int *sc, int *er, int *ec) {
 static void copy_selection_to_clipboard(void) {
     int sr, sc, er, ec;
     normalized_selection(&sr, &sc, &er, &ec);
-    static char buf[1024];
+    static char buffer[1024];
     size_t n = 0;
-    for (int r = sr; r <= er && n < sizeof(buf); r++) {
+    for (int r = sr; r <= er && n < sizeof(buffer); r++) {
         int col_start = (r == sr) ? sc : 0;
         int col_end = (r == er) ? ec : COLS;
-        const char *src = view_row(r);
-        while (col_end > col_start && src[col_end - 1] == ' ') {
+        const char *source = view_row(r);
+        while (col_end > col_start && source[col_end - 1] == ' ') {
             col_end--;
         }
-        for (int c = col_start; c < col_end && n < sizeof(buf); c++) {
-            buf[n++] = src[c];
+        for (int c = col_start; c < col_end && n < sizeof(buffer); c++) {
+            buffer[n++] = source[c];
         }
-        if (r != er && n < sizeof(buf)) {
-            buf[n++] = '\n';
+        if (r != er && n < sizeof(buffer)) {
+            buffer[n++] = '\n';
         }
     }
-    sys_clipboard_set(buf, n);
+    sys_clipboard_set(buffer, n);
 }
 
 static void redraw(window_manager_window_t *win, int show_cursor) {
@@ -252,16 +252,16 @@ static void redraw(window_manager_window_t *win, int show_cursor) {
 }
 
 static long drain_output(void) {
-    char buf[IO_BUF_SIZE];
+    char buffer[IO_BUFFER_SIZE];
     long drained = 0;
     long avail = sys_pipe_poll(read_file_descriptor);
     while (avail > 0) {
-        size_t n = (size_t)avail < IO_BUF_SIZE ? (size_t)avail : IO_BUF_SIZE;
-        long got = sys_read(read_file_descriptor, buf, n);
+        size_t n = (size_t)avail < IO_BUFFER_SIZE ? (size_t)avail : IO_BUFFER_SIZE;
+        long got = sys_read(read_file_descriptor, buffer, n);
         if (got <= 0) {
             break;
         }
-        print_term(buf, (size_t)got);
+        print_term(buffer, (size_t)got);
         drained += got;
         avail = sys_pipe_poll(read_file_descriptor);
     }
@@ -272,10 +272,10 @@ static void start_prompt(void) {
     print_string_term("$ ");
 }
 
-#define MAX_ARGS 16
+#define MAX_ARGUMENTS 16
 
 typedef struct {
-    char *argv[MAX_ARGS + 1];
+    char *argv[MAX_ARGUMENTS + 1];
     int argc;
 } command_t;
 
@@ -289,25 +289,25 @@ static int tokenize(char *line, char **out, int max) {
         if (!*p) {
             break;
         }
-        char *dst = p;
-        out[n++] = dst;
+        char *destination = p;
+        out[n++] = destination;
         while (*p && *p != ' ' && *p != '\t') {
             if (*p == '"' || *p == '\'') {
                 char quote = *p++;
                 while (*p && *p != quote) {
-                    *dst++ = *p++;
+                    *destination++ = *p++;
                 }
                 if (!*p) {
                     return -1;
                 }
                 p++;
             } else {
-                *dst++ = *p++;
+                *destination++ = *p++;
             }
         }
         int at_end = (*p == '\0');
         p++;
-        *dst = '\0';
+        *destination = '\0';
         if (at_end) {
             break;
         }
@@ -319,14 +319,14 @@ static int resolve_program(const char *name, char *out) {
     for (const char *c = name; *c; c++) {
         if (*c == '/') {
             int i = 0;
-            for (; name[i] && i < PATH_MAX_LEN - 1; i++) {
+            for (; name[i] && i < PATH_MAX_LENGTH - 1; i++) {
                 out[i] = name[i];
             }
             out[i] = '\0';
             return name[i] ? -1 : 0;
         }
     }
-    return path_join(out, PATH_BIN_DIR, name);
+    return path_join(out, PATH_BIN_DIRECTORY, name);
 }
 
 static void restore_std_file_descriptors(void) {
@@ -352,7 +352,7 @@ static void run_line(void) {
         return;
     }
 
-    char *tokens[MAX_ARGS * 2 + 8];
+    char *tokens[MAX_ARGUMENTS * 2 + 8];
     int ntok = tokenize(line_buffer, tokens, (int)(sizeof(tokens) / sizeof(tokens[0])));
     if (ntok < 0) {
         report("", "unterminated quote\n");
@@ -393,7 +393,7 @@ static void run_line(void) {
             redirect_to = tokens[++i];
             continue;
         }
-        if (into->argc >= MAX_ARGS) {
+        if (into->argc >= MAX_ARGUMENTS) {
             report("", "too many arguments\n");
             start_prompt();
             return;
@@ -426,8 +426,8 @@ static void run_line(void) {
         return;
     }
 
-    char left_path[PATH_MAX_LEN];
-    char right_path[PATH_MAX_LEN];
+    char left_path[PATH_MAX_LENGTH];
+    char right_path[PATH_MAX_LENGTH];
     if (resolve_program(left.argv[0], left_path) != 0 ||
         (have_pipe && resolve_program(right.argv[0], right_path) != 0)) {
         report("", "name too long\n");
@@ -437,7 +437,7 @@ static void run_line(void) {
 
     int out_file_descriptor = -1;
     if (redirect_to) {
-        char full[PATH_MAX_LEN];
+        char full[PATH_MAX_LENGTH];
         if (resolve_path(redirect_to, full) != 0) {
             report(redirect_to, ": name too long\n");
             start_prompt();
@@ -527,14 +527,14 @@ static void complete_line(void) {
     const char *stem = line_buffer + start;
     int stem_length = line_length - start;
 
-    char dir[PATH_MAX_LEN];
+    char directory[PATH_MAX_LENGTH];
     const char *leaf = stem;
     if (is_first) {
         int i = 0;
-        for (; PATH_BIN_DIR[i]; i++) {
-            dir[i] = PATH_BIN_DIR[i];
+        for (; PATH_BIN_DIRECTORY[i]; i++) {
+            directory[i] = PATH_BIN_DIRECTORY[i];
         }
-        dir[i] = '\0';
+        directory[i] = '\0';
     } else {
         int last_slash = -1;
         for (int i = 0; i < stem_length; i++) {
@@ -544,23 +544,23 @@ static void complete_line(void) {
         }
         if (last_slash < 0) {
             int i = 0;
-            for (; term_cwd[i] && i < PATH_MAX_LEN - 1; i++) {
-                dir[i] = term_cwd[i];
+            for (; term_cwd[i] && i < PATH_MAX_LENGTH - 1; i++) {
+                directory[i] = term_cwd[i];
             }
-            dir[i] = '\0';
+            directory[i] = '\0';
         } else {
             int n = last_slash == 0 ? 1 : last_slash;
             for (int i = 0; i < n; i++) {
-                dir[i] = stem[i];
+                directory[i] = stem[i];
             }
-            dir[n] = '\0';
+            directory[n] = '\0';
             leaf = stem + last_slash + 1;
         }
     }
     int leaf_length = (int)strlen(leaf);
 
-    static char listing[LIST_BUF];
-    long n = sys_listdir(dir, listing, sizeof(listing));
+    static char listing[LIST_BUFFER];
+    long n = sys_listdir(directory, listing, sizeof(listing));
     if (n <= 0) {
         return;
     }
@@ -704,29 +704,29 @@ int main(void) {
 
     for (;;) {
         int changed = 0;
-        wm_event_t ev;
+        window_manager_event_t ev;
         while (window_manager_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+            if (ev.type == WINDOW_MANAGER_EVENT_EXPOSE || ev.type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {
                 changed = 1;
-            } else if (ev.type == WM_EVENT_MOUSE_MOVE && sel_dragging) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_MOVE && sel_dragging) {
                 pixel_to_cell(ev.x, ev.y, &sel_end_row, &sel_end_col);
                 changed = 1;
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 sel_active = 0;
                 sel_dragging = 1;
                 pixel_to_cell(ev.x, ev.y, &sel_anchor_row, &sel_anchor_col);
                 sel_end_row = sel_anchor_row;
                 sel_end_col = sel_anchor_col;
                 changed = 1;
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && !(ev.buttons & 1) && sel_dragging) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && !(ev.buttons & 1) && sel_dragging) {
                 sel_dragging = 0;
                 sel_active = (sel_anchor_row != sel_end_row || sel_anchor_col != sel_end_col);
                 changed = 1;
-            } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_WHEEL) {
                 view_scroll(-ev.wheel);
                 changed = 1;
-            } else if (ev.type == WM_EVENT_KEY && (running_pid >= 0 || pipe_pid >= 0)) {
-                if ((ev.mods & KBD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_KEY && (running_pid >= 0 || pipe_pid >= 0)) {
+                if ((ev.mods & KEYBOARD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
                     if (running_pid >= 0) {
                         sys_kill(running_pid, SIGINT);
                     }
@@ -736,18 +736,18 @@ int main(void) {
                     print_string_term("^C\n");
                     changed = 1;
                 }
-            } else if (ev.type == WM_EVENT_KEY) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_KEY) {
                 if (view_offset != 0) {
                     view_offset = 0;
                 }
                 long mods = ev.mods;
-                if ((mods & KBD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
+                if ((mods & KEYBOARD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
                     if (sel_active) {
                         copy_selection_to_clipboard();
                     } else {
                         sys_clipboard_set(line_buffer, (size_t)line_length);
                     }
-                } else if ((mods & KBD_MOD_CTRL) && (ev.ch == 'v' || ev.ch == 'V')) {
+                } else if ((mods & KEYBOARD_MOD_CTRL) && (ev.ch == 'v' || ev.ch == 'V')) {
                     char paste_buffer[LINE_MAX];
                     long n = sys_clipboard_get(paste_buffer, sizeof(paste_buffer));
                     if (n > (long)sizeof(paste_buffer)) {

@@ -180,7 +180,7 @@ static long do_syscall4(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uin
 
 static uint8_t *read_program(const char *path, size_t *out_size) {
     leanfs_stat_t st;
-    if (virtual_file_system_stat(path, &st) != 0 || st.is_dir || st.size == 0) {
+    if (virtual_file_system_stat(path, &st) != 0 || st.is_directory || st.size == 0) {
         panic("read_program: a program this kernel just seeded is missing or empty");
     }
     uint8_t *image = (uint8_t *)kmalloc(st.size);
@@ -461,8 +461,8 @@ static int selftest_term_top_settled(int differs_from, uint32_t timeout_ms) {
 static int selftest_wait_for_animations_setting(int want, uint32_t timeout_ms) {
     int sq_file_descriptors[2];
     int sqr_file_descriptors[2];
-    if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_PIPE, (uint64_t)sq_file_descriptors, 0) != 0 ||
-        do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_RESP_PIPE, (uint64_t)sqr_file_descriptors, 0) != 0) {
+    if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_SETTINGS_QUERY_PIPE, (uint64_t)sq_file_descriptors, 0) != 0 ||
+        do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_SETTINGS_QUERY_RESPONSE_PIPE, (uint64_t)sqr_file_descriptors, 0) != 0) {
         return 0;
     }
     uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
@@ -471,7 +471,7 @@ static int selftest_wait_for_animations_setting(int want, uint32_t timeout_ms) {
         uint8_t ping = 1;
         do_syscall(SYS_write, (uint64_t)sq_file_descriptors[1], (uint64_t)&ping, sizeof(ping));
         pit_sleep_ms(SELFTEST_POLL_MS);
-        wm_settings_request_t got;
+        window_manager_settings_request_t got;
         k_memset(&got, 0, sizeof(got));
         if (do_syscall(SYS_read, (uint64_t)sqr_file_descriptors[0], (uint64_t)&got, sizeof(got)) == (long)sizeof(got) &&
             (int)(got.animations != 0) == (want != 0)) {
@@ -578,19 +578,19 @@ static void syscall_exit_task(void *arg) {
 
 static void pipe_producer_task(void *arg) {
     pipe_t *p = (pipe_t *)arg;
-    static const char msg[] = "ping";
+    static const char message[] = "ping";
     for (int i = 0; i < 3; i++) {
-        pipe_write(p, msg, sizeof(msg) - 1, 0);
+        pipe_write(p, message, sizeof(message) - 1, 0);
     }
     pipe_close_write(p);
 }
 
 static void pipe_consumer_task(void *arg) {
     pipe_t *p = (pipe_t *)arg;
-    char buf[64];
+    char buffer[64];
     size_t total = 0;
     for (;;) {
-        long n = pipe_read(p, buf + total, sizeof(buf) - total, 0);
+        long n = pipe_read(p, buffer + total, sizeof(buffer) - total, 0);
         if (n == 0) {
             break;
         }
@@ -600,20 +600,20 @@ static void pipe_consumer_task(void *arg) {
     kernel_log_put_hex64((uint64_t)total);
     kernel_log_puts(" bytes: \"");
     for (size_t i = 0; i < total; i++) {
-        kernel_log_putc(buf[i]);
+        kernel_log_putc(buffer[i]);
     }
     kernel_log_puts("\"\n");
-    buf[total] = '\0';
-    if (total != 12 || k_strcmp(buf, "pingpingping") != 0) {
+    buffer[total] = '\0';
+    if (total != 12 || k_strcmp(buffer, "pingpingping") != 0) {
         panic("pipe self-test: consumer received unexpected data");
     }
 }
 
 static void m68_sleeper_task(void *arg) {
     int fd = (int)(uint64_t)arg;
-    int fds[1];
-    fds[0] = fd;
-    do_syscall(SYS_waitfds, (uint64_t)fds, 1, 10000);
+    int file_descriptors[1];
+    file_descriptors[0] = fd;
+    do_syscall(SYS_waitfds, (uint64_t)file_descriptors, 1, 10000);
     task_exit();
 }
 
@@ -670,18 +670,18 @@ static void boot_selftests_desktop(void) {
             scheduler_debug_dump("wm_demo overran its budget");
             {
                 int probe[2];
-                if (do_syscall(SYS_pipe_open, (uint64_t)WM_REQUEST_PIPE, (uint64_t)probe, 0) == 0) {
+                if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_REQUEST_PIPE, (uint64_t)probe, 0) == 0) {
                     kernel_log_puts("[wm_demo] WM_REQUEST_PIPE holds ");
                     kernel_log_put_dec((uint32_t)do_syscall(SYS_pipe_poll, (uint64_t)probe[0], 0, 0));
                     kernel_log_puts(" byte(s), a request is ");
-                    kernel_log_put_dec((uint32_t)sizeof(wm_create_request_t));
+                    kernel_log_put_dec((uint32_t)sizeof(window_manager_create_request_t));
                     kernel_log_putc('\n');
                 }
-                if (do_syscall(SYS_pipe_open, (uint64_t)WM_RESPONSE_PIPE, (uint64_t)probe, 0) == 0) {
+                if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_RESPONSE_PIPE, (uint64_t)probe, 0) == 0) {
                     kernel_log_puts("[wm_demo] WM_RESPONSE_PIPE holds ");
                     kernel_log_put_dec((uint32_t)do_syscall(SYS_pipe_poll, (uint64_t)probe[0], 0, 0));
                     kernel_log_puts(" byte(s), a response is ");
-                    kernel_log_put_dec((uint32_t)sizeof(wm_create_response_t));
+                    kernel_log_put_dec((uint32_t)sizeof(window_manager_create_response_t));
                     kernel_log_putc('\n');
                 }
             }
@@ -871,7 +871,7 @@ static void boot_selftests_desktop(void) {
         pit_sleep_ms(500);
 
         int action_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M30 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
 
@@ -879,30 +879,30 @@ static void boot_selftests_desktop(void) {
         const uint32_t clock_bg = 0x00122438u;
         const uint32_t desktop_bg = 0x001A1A2Eu;
 
-        wm_action_request_t req;
-        req.window_id = 0;
+        window_manager_action_request_t request;
+        request.window_id = 0;
 
-        req.action = WM_ACTION_MAXIMIZE;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        request.action = WINDOW_MANAGER_ACTION_MAXIMIZE;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t after_maximize = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                           desktop_bg, "the maximize to leave the home position");
 
-        req.action = WM_ACTION_RESTORE;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        request.action = WINDOW_MANAGER_ACTION_RESTORE;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t after_restore = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                          clock_bg, "the restore to put the window back");
 
-        req.action = WM_ACTION_TOGGLE_MINIMIZE;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        request.action = WINDOW_MANAGER_ACTION_TOGGLE_MINIMIZE;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t after_minimize = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                           desktop_bg, "the minimize to clear the home position");
 
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t after_unminimize = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                             clock_bg, "the window to come back");
 
-        req.action = WM_ACTION_CLOSE;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        request.action = WINDOW_MANAGER_ACTION_CLOSE;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t after_close = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                        desktop_bg, "the closed window's slot to be reclaimed");
         long clock_exit = do_syscall(SYS_wait, (uint64_t)clock_task->id, 0, 0);
@@ -967,13 +967,13 @@ static void boot_selftests_desktop(void) {
     }
 
     {
-        const char msg[] = "clipboard round trip";
-        do_syscall(SYS_clipboard_set, (uint64_t)msg, sizeof(msg) - 1, 0);
+        const char message[] = "clipboard round trip";
+        do_syscall(SYS_clipboard_set, (uint64_t)message, sizeof(message) - 1, 0);
         char readback[64];
         long n = do_syscall(SYS_clipboard_get, (uint64_t)readback, sizeof(readback), 0);
-        int mismatch = (n != (long)(sizeof(msg) - 1));
+        int mismatch = (n != (long)(sizeof(message) - 1));
         for (long i = 0; !mismatch && i < n; i++) {
-            if (readback[i] != msg[i]) {
+            if (readback[i] != message[i]) {
                 mismatch = 1;
             }
         }
@@ -985,12 +985,12 @@ static void boot_selftests_desktop(void) {
 
     {
         const char content[] = "M33 SYS_writefile self-test content";
-        long wrc = do_syscall(SYS_writefile, (uint64_t)(PATH_TMP_DIR "m33test"), (uint64_t)content, sizeof(content) - 1);
+        long wrc = do_syscall(SYS_writefile, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m33test"), (uint64_t)content, sizeof(content) - 1);
         if (wrc != 0) {
             panic("M33 self-test: SYS_writefile failed");
         }
         char readback[64];
-        long n = do_syscall(SYS_readfile, (uint64_t)(PATH_TMP_DIR "m33test"), (uint64_t)readback, sizeof(readback));
+        long n = do_syscall(SYS_readfile, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m33test"), (uint64_t)readback, sizeof(readback));
         int mismatch = (n != (long)(sizeof(content) - 1));
         for (long i = 0; !mismatch && i < n; i++) {
             if (readback[i] != content[i]) {
@@ -1003,7 +1003,7 @@ static void boot_selftests_desktop(void) {
         kernel_log_puts("[vfs] SYS_writefile/SYS_readfile self-test passed.\n\n");
 
     {
-        const char *FDT = PATH_TMP_DIR "fdcycle";
+        const char *FDT = PATH_TEMPORARY_DIRECTORY "fdcycle";
         int file_descriptor_ok = 1;
         for (int round = 0; round < 2; round++) {
             long saved = do_syscall(SYS_dup2, 1, 9, 0);
@@ -1050,16 +1050,16 @@ static void boot_selftests_desktop(void) {
         selftest_wait_for_compositor();
 
         int settings_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
             panic("M33 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
-        wm_settings_request_t req;
-        k_memset(&req, 0, sizeof(req));
-        req.animations = 1;
-        req.wallpaper = 0;
-        req.bg_color = 0x00123456u;
-        req.accent_color = 0;
-        do_syscall(SYS_write, (uint64_t)settings_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        window_manager_settings_request_t request;
+        k_memset(&request, 0, sizeof(request));
+        request.animations = 1;
+        request.wallpaper = 0;
+        request.bg_color = 0x00123456u;
+        request.accent_color = 0;
+        do_syscall(SYS_write, (uint64_t)settings_file_descriptors[1], (uint64_t)&request, sizeof(request));
         pit_sleep_ms(300);
         uint32_t got = framebuffer_get_pixel(500, 500);
 
@@ -1067,9 +1067,9 @@ static void boot_selftests_desktop(void) {
         console_init();
         kernel_log_use_console();
 
-        if (got != req.bg_color) {
+        if (got != request.bg_color) {
             kernel_log_puts("[settings] pixel check failed: desktop background did not change - expected 0x");
-            kernel_log_put_hex32(req.bg_color);
+            kernel_log_put_hex32(request.bg_color);
             kernel_log_puts(" got 0x");
             kernel_log_put_hex32(got);
             kernel_log_putc('\n');
@@ -1095,7 +1095,7 @@ static void boot_selftests_desktop(void) {
         pit_sleep_ms(500);
 
         int action_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M36 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
 
@@ -1105,10 +1105,10 @@ static void boot_selftests_desktop(void) {
 
         uint32_t before_close = framebuffer_get_pixel((uint32_t)probe_x, (uint32_t)probe_y);
 
-        wm_action_request_t req;
-        req.window_id = 0;
-        req.action = WM_ACTION_CLOSE;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        window_manager_action_request_t request;
+        request.window_id = 0;
+        request.action = WINDOW_MANAGER_ACTION_CLOSE;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t after_close = selftest_pixel_settled((uint32_t)probe_x, (uint32_t)probe_y,
                                                        desktop_bg, "the editor's window to go away");
         long editor_exit = do_syscall(SYS_wait, (uint64_t)editor_task->id, 0, 0);
@@ -1167,16 +1167,16 @@ static void boot_selftests_desktop(void) {
                                                         "the window's drop shadow to be drawn");
 
         int settings_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
             panic("M38 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
-        wm_settings_request_t req;
-        k_memset(&req, 0, sizeof(req));
-        req.animations = 1;
-        req.wallpaper = 0;
-        req.bg_color = 0x001A1A2Eu;
-        req.accent_color = 0x00AA5500u;
-        do_syscall(SYS_write, (uint64_t)settings_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        window_manager_settings_request_t request;
+        k_memset(&request, 0, sizeof(request));
+        request.animations = 1;
+        request.wallpaper = 0;
+        request.bg_color = 0x001A1A2Eu;
+        request.accent_color = 0x00AA5500u;
+        do_syscall(SYS_write, (uint64_t)settings_file_descriptors[1], (uint64_t)&request, sizeof(request));
         pit_sleep_ms(300);
         uint32_t titlebar_pixel = framebuffer_get_pixel(200, 88);
 
@@ -1194,9 +1194,9 @@ static void boot_selftests_desktop(void) {
             kernel_log_putc('\n');
             all_ok = 0;
         }
-        if (titlebar_pixel != req.accent_color) {
+        if (titlebar_pixel != request.accent_color) {
             kernel_log_puts("[wm38] pixel check failed: focused titlebar did not pick up the new accent color - expected 0x");
-            kernel_log_put_hex32(req.accent_color);
+            kernel_log_put_hex32(request.accent_color);
             kernel_log_puts(" got 0x");
             kernel_log_put_hex32(titlebar_pixel);
             kernel_log_putc('\n');
@@ -1256,10 +1256,10 @@ static void selftest_image_manifest(void) {
 
     char *text = (char *)kmalloc(MANIFEST_MAX);
     char *path = (char *)kmalloc(LEANFS_MAX_PATH);
-    uint8_t *buf = (uint8_t *)kmalloc(LEANFS_BLOCK_SIZE * 8);
+    uint8_t *buffer = (uint8_t *)kmalloc(LEANFS_BLOCK_SIZE * 8);
     manifest_frame_t *stack =
         (manifest_frame_t *)kmalloc(sizeof(manifest_frame_t) * MANIFEST_DEPTH);
-    if (!text || !path || !buf || !stack) {
+    if (!text || !path || !buffer || !stack) {
         panic("M93 image-manifest self-test: out of memory before it could start");
     }
 
@@ -1338,7 +1338,7 @@ static void selftest_image_manifest(void) {
             panic("M93 image-manifest self-test: a name in this tree does not resolve");
         }
 
-        if (st.is_dir) {
+        if (st.is_directory) {
             dirs++;
             if (depth >= MANIFEST_DEPTH) {
                 panic("M93 image-manifest self-test: this tree is deeper than the walk allows");
@@ -1361,11 +1361,11 @@ static void selftest_image_manifest(void) {
         uint32_t h = leanfs_fnv1a(LEANFS_FNV1A_INIT, rel, k_strlen(rel));
 
         if (st.is_link) {
-            int64_t n = virtual_file_system_readlink(path, (char *)buf, LEANFS_BLOCK_SIZE * 8);
+            int64_t n = virtual_file_system_readlink(path, (char *)buffer, LEANFS_BLOCK_SIZE * 8);
             if (n < 0) {
                 panic("M93 image-manifest self-test: a symlink in this tree would not read");
             }
-            hash += leanfs_fnv1a(h, buf, (size_t)n);
+            hash += leanfs_fnv1a(h, buffer, (size_t)n);
             links++;
             continue;
         }
@@ -1380,11 +1380,11 @@ static void selftest_image_manifest(void) {
             if (chunk > LEANFS_BLOCK_SIZE * 8) {
                 chunk = LEANFS_BLOCK_SIZE * 8;
             }
-            int64_t n = virtual_file_system_handle_read(fh, buf, chunk, off);
+            int64_t n = virtual_file_system_handle_read(fh, buffer, chunk, off);
             if (n != (int64_t)chunk) {
                 panic("M93 image-manifest self-test: a file in this tree read short");
             }
-            h = leanfs_fnv1a(h, buf, (size_t)n);
+            h = leanfs_fnv1a(h, buffer, (size_t)n);
             off += chunk;
         }
         hash += h;
@@ -1431,7 +1431,7 @@ static void selftest_image_manifest(void) {
     uint32_t check_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - check_started;
 
     kfree(stack);
-    kfree(buf);
+    kfree(buffer);
     kfree(path);
     kfree(text);
 
@@ -1532,7 +1532,7 @@ static void selftest_profile(void) {
     }
     profile_stop();
 
-    prof_stats_t st;
+    prof_statistics_t st;
     profile_get_statistics(&st);
     kernel_log_puts("[m101] profile: samples=");
     kernel_log_put_dec((uint32_t)st.samples);
@@ -1588,12 +1588,12 @@ static void selftest_profile(void) {
     }
 
     {
-        prof_stats_t before;
+        prof_statistics_t before;
         profile_get_statistics(&before);
         uint64_t target = pit_get_ticks() + 10;
         while (pit_get_ticks() < target) {
         }
-        prof_stats_t after;
+        prof_statistics_t after;
         profile_get_statistics(&after);
         if (after.samples != before.samples) {
             panic("m101: the profiler kept sampling after being stopped");
@@ -1662,7 +1662,7 @@ static void selftest_profile(void) {
     }
 
     {
-        if (do_syscall(SYS_profile, PROFILE_OP_STATS, 0, 0) != -1) {
+        if (do_syscall(SYS_profile, PROFILE_OP_STATISTICS, 0, 0) != -1) {
             panic("m101: SYS_profile accepted a null pointer");
         }
         if (do_syscall(SYS_profile, 999, 0, 0) != -1) {
@@ -1679,8 +1679,8 @@ static void selftest_profile(void) {
                 kernel_log_putc('\n');
                 panic("m101: procfs runs out of handles - the close path is broken");
             }
-            char buf[64];
-            if (do_syscall(SYS_read, (uint64_t)fd, (uint64_t)buf, sizeof(buf)) <= 0) {
+            char buffer[64];
+            if (do_syscall(SYS_read, (uint64_t)fd, (uint64_t)buffer, sizeof(buffer)) <= 0) {
                 panic("m101: a /proc file opened but read nothing");
             }
             do_syscall(SYS_close, (uint64_t)fd, 0, 0);
@@ -1690,12 +1690,12 @@ static void selftest_profile(void) {
     }
 
     {
-        char buf[512];
-        long n = do_syscall(SYS_readfile, (uint64_t)"/proc/syscalls", (uint64_t)buf, sizeof(buf));
+        char buffer[512];
+        long n = do_syscall(SYS_readfile, (uint64_t)"/proc/syscalls", (uint64_t)buffer, sizeof(buffer));
         if (n <= 0) {
             panic("m101: /proc/syscalls is empty on a machine that has made syscalls");
         }
-        n = do_syscall(SYS_readfile, (uint64_t)"/proc/profile", (uint64_t)buf, sizeof(buf));
+        n = do_syscall(SYS_readfile, (uint64_t)"/proc/profile", (uint64_t)buffer, sizeof(buffer));
         if (n <= 0) {
             panic("m101: /proc/profile reported nothing");
         }
@@ -1867,12 +1867,12 @@ static void boot_selftests_system(void) {
                        "tools/cxx-test.sh installs what it produces.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m97.sh";
-            const char *result = PATH_TMP_DIR "m97.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m97.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m97.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "/bin/cxxtest > " PATH_TMP_DIR "m97.out\n"
-                "echo code $? >> " PATH_TMP_DIR "m97.out\n";
+                "/bin/cxxtest > " PATH_TEMPORARY_DIRECTORY "m97.out\n"
+                "echo code $? >> " PATH_TEMPORARY_DIRECTORY "m97.out\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M97 self-test: could not write the script fixture");
@@ -1930,12 +1930,12 @@ static void boot_selftests_system(void) {
             os_stat_t lt;
             if (do_syscall(SYS_stat, (uint64_t)"/bin/cxxlib", (uint64_t)&lt, 0) == 0) {
                 int lib_ok = 1;
-                const char *lscript = PATH_TMP_DIR "m97lib.sh";
-                const char *lresult = PATH_TMP_DIR "m97lib.out";
+                const char *lscript = PATH_TEMPORARY_DIRECTORY "m97lib.sh";
+                const char *lresult = PATH_TEMPORARY_DIRECTORY "m97lib.out";
                 static const char LSCRIPT[] =
                     "#!/bin/sh\n"
-                    "/bin/cxxlib > " PATH_TMP_DIR "m97lib.out\n"
-                    "echo code $? >> " PATH_TMP_DIR "m97lib.out\n";
+                    "/bin/cxxlib > " PATH_TEMPORARY_DIRECTORY "m97lib.out\n"
+                    "echo code $? >> " PATH_TEMPORARY_DIRECTORY "m97lib.out\n";
                 if (do_syscall(SYS_writefile, (uint64_t)lscript, (uint64_t)LSCRIPT,
                                 sizeof(LSCRIPT) - 1) != 0) {
                     panic("M97 self-test: could not write the library script fixture");
@@ -2001,12 +2001,12 @@ static void boot_selftests_system(void) {
             os_stat_t bt;
             if (do_syscall(SYS_stat, (uint64_t)"/bin/throwmain", (uint64_t)&bt, 0) == 0) {
                 int b_ok = 1;
-                const char *bscript = PATH_TMP_DIR "m97b.sh";
-                const char *bresult = PATH_TMP_DIR "m97b.out";
+                const char *bscript = PATH_TEMPORARY_DIRECTORY "m97b.sh";
+                const char *bresult = PATH_TEMPORARY_DIRECTORY "m97b.out";
                 static const char BSCRIPT[] =
                     "#!/bin/sh\n"
-                    "/bin/throwmain > " PATH_TMP_DIR "m97b.out\n"
-                    "echo code $? >> " PATH_TMP_DIR "m97b.out\n";
+                    "/bin/throwmain > " PATH_TEMPORARY_DIRECTORY "m97b.out\n"
+                    "echo code $? >> " PATH_TEMPORARY_DIRECTORY "m97b.out\n";
                 if (do_syscall(SYS_writefile, (uint64_t)bscript, (uint64_t)BSCRIPT,
                                 sizeof(BSCRIPT) - 1) != 0) {
                     panic("M97 self-test: could not write the boundary script fixture");
@@ -2167,7 +2167,7 @@ static void boot_selftests_system(void) {
         kernel_log_puts(" task slots ever live at once, and ");
         kernel_log_put_dec((uint32_t)file_descriptor_peak);
         kernel_log_puts(" of ");
-        kernel_log_put_dec((uint32_t)MAX_FDS);
+        kernel_log_put_dec((uint32_t)MAX_FILE_DESCRIPTORS);
         kernel_log_puts(" descriptors in the hungriest task (pid 0x");
         kernel_log_put_hex32((uint32_t)file_descriptor_task);
         kernel_log_puts(") - self-test passed.\n\n");
@@ -2233,26 +2233,26 @@ static void boot_selftests_system(void) {
         uint32_t tray_sep_px = framebuffer_get_pixel(912, 750);
 
         int action_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M42 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
-        wm_action_request_t req;
-        k_memset(&req, 0, sizeof(req));
-        req.window_id = 1;
-        req.action = WM_ACTION_MAXIMIZE;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        window_manager_action_request_t request;
+        k_memset(&request, 0, sizeof(request));
+        request.window_id = 1;
+        request.action = WINDOW_MANAGER_ACTION_MAXIMIZE;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t maximized_titlebar = selftest_pixel_settled(100, 12, 0x004C99E6u,
                                                               "the maximized window's titlebar");
         uint32_t panel_over_maximized = selftest_pixel_settled(512, 738, 0x00181829u,
                                                                 "the taskbar to stay on top of the maximized window");
 
-        k_memset(&req, 0, sizeof(req));
-        req.window_id = -1;
-        req.action = WM_ACTION_TOGGLE_LAUNCHER;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        k_memset(&request, 0, sizeof(request));
+        request.window_id = -1;
+        request.action = WINDOW_MANAGER_ACTION_TOGGLE_LAUNCHER;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t launcher_open_px = selftest_pixel_settled(512, 309, 0x001B2032u,
                                                             "the launcher overlay to finish fading in");
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t launcher_closed_px = selftest_pixel_settled(512, 309, 0x001A1A2Eu,
                                                               "the launcher overlay to go away again");
 
@@ -2319,36 +2319,36 @@ static void boot_selftests_system(void) {
         pit_sleep_ms(700);
 
         int action_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M43 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
-        wm_action_request_t req;
-        k_memset(&req, 0, sizeof(req));
-        req.window_id = 1;
+        window_manager_action_request_t request;
+        k_memset(&request, 0, sizeof(request));
+        request.window_id = 1;
 
-        req.action = WM_ACTION_SNAP_RIGHT;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        request.action = WINDOW_MANAGER_ACTION_SNAP_RIGHT;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t right_titlebar = selftest_pixel_settled(700, 12, 0x004C99E6u,
                                                           "the window to snap to the right half");
         uint32_t right_left_half = selftest_pixel_settled(200, 12, 0x001A1A2Eu,
                                                            "the left half to be empty");
 
-        req.action = WM_ACTION_SNAP_LEFT;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        request.action = WINDOW_MANAGER_ACTION_SNAP_LEFT;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t left_titlebar = selftest_pixel_settled(200, 12, 0x004C99E6u,
                                                          "the window to snap to the left half");
         uint32_t left_right_half = selftest_pixel_settled(700, 12, 0x001A1A2Eu,
                                                            "the right half to be empty");
 
-        k_memset(&req, 0, sizeof(req));
-        req.window_id = -1;
-        req.action = WM_ACTION_TOGGLE_LAUNCHER;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        k_memset(&request, 0, sizeof(request));
+        request.window_id = -1;
+        request.action = WINDOW_MANAGER_ACTION_TOGGLE_LAUNCHER;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t launcher_bg = selftest_pixel_settled(700, 309, 0x001B2032u,
                                                        "the launcher overlay to finish fading in");
         uint32_t launcher_selected_row = selftest_pixel_settled(700, 205, 0x00335577u,
                                                                  "the launcher's first result to be drawn selected");
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t launcher_closed = selftest_pixel_settled(700, 309, 0x001A1A2Eu,
                                                            "the launcher overlay to go away again");
 
@@ -2417,10 +2417,10 @@ static void boot_selftests_system(void) {
         uint32_t taskbar_over_grad = framebuffer_get_pixel(500, 738);
 
         int settings_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
             panic("M44 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
-        wm_settings_request_t set_request;
+        window_manager_settings_request_t set_request;
         k_memset(&set_request, 0, sizeof(set_request));
         set_request.animations = 1;
         set_request.bg_color = 0x001A1A2Eu;
@@ -2433,15 +2433,15 @@ static void boot_selftests_system(void) {
 
         int sq_file_descriptors[2];
         int sqr_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_PIPE, (uint64_t)sq_file_descriptors, 0) != 0 ||
-            do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_RESP_PIPE, (uint64_t)sqr_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_SETTINGS_QUERY_PIPE, (uint64_t)sq_file_descriptors, 0) != 0 ||
+            do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_SETTINGS_QUERY_RESPONSE_PIPE, (uint64_t)sqr_file_descriptors, 0) != 0) {
             panic("M44 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_QUERY_*) failed");
         }
         do_syscall(SYS_pipe_reset, (uint64_t)sqr_file_descriptors[0], 0, 0);
         uint8_t ping = 1;
         do_syscall(SYS_write, (uint64_t)sq_file_descriptors[1], (uint64_t)&ping, sizeof(ping));
         pit_sleep_ms(300);
-        wm_settings_request_t queried;
+        window_manager_settings_request_t queried;
         k_memset(&queried, 0, sizeof(queried));
         long settings_read = do_syscall(SYS_read, (uint64_t)sqr_file_descriptors[0], (uint64_t)&queried, sizeof(queried));
 
@@ -2515,26 +2515,26 @@ static void boot_selftests_system(void) {
             }
             if (infos[i].pid == victim->id && k_strcmp(infos[i].name, "wm_stubborn") == 0) {
                 found_victim = 1;
-                victim_shared_memory = infos[i].shm_segments;
+                victim_shared_memory = infos[i].shared_memory_segments;
             }
         }
 
         int action_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M45 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
-        wm_action_request_t req;
-        k_memset(&req, 0, sizeof(req));
-        req.window_id = 0;
+        window_manager_action_request_t request;
+        k_memset(&request, 0, sizeof(request));
+        request.window_id = 0;
 
-        req.action = WM_ACTION_CLOSE;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        request.action = WINDOW_MANAGER_ACTION_CLOSE;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         pit_sleep_ms(600);
         uint32_t after_close_pixel = framebuffer_get_pixel(200, 150);
         long alive_after_close = do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
 
-        req.action = WM_ACTION_KILL;
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        request.action = WINDOW_MANAGER_ACTION_KILL;
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         long alive_after_kill = 1;
         for (int spin = 0; spin < 200 && alive_after_kill == 1; spin++) {
             pit_sleep_ms(10);
@@ -2809,25 +2809,25 @@ static void boot_selftests_system(void) {
         if (comp_size < 64) {
             panic("vfs_read: compositor missing or absurdly small - should exist, just seeded");
         }
-        if (virtual_file_system_write(PATH_TMP_DIR "m48trunc", comp_image, 64) != 0) {
+        if (virtual_file_system_write(PATH_TEMPORARY_DIRECTORY "m48trunc", comp_image, 64) != 0) {
             panic("M48 self-test: could not write the truncated-ELF fixture");
         }
 
         long rc_missing = do_syscall(SYS_spawn, (uint64_t)"definitely_not_a_file", 0, 0);
-        long rc_text = do_syscall(SYS_spawn, (uint64_t)(PATH_TMP_DIR "m33test"), 0, 0);
-        long rc_trunc = do_syscall(SYS_spawn, (uint64_t)(PATH_TMP_DIR "m48trunc"), 0, 0);
+        long rc_text = do_syscall(SYS_spawn, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m33test"), 0, 0);
+        long rc_trunc = do_syscall(SYS_spawn, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m48trunc"), 0, 0);
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         selftest_wait_for_compositor();
 
         int notify_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_NOTIFY_PIPE, (uint64_t)notify_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_NOTIFY_PIPE, (uint64_t)notify_file_descriptors, 0) != 0) {
             panic("M48 self-test: kernel-side SYS_pipe_open(WM_NOTIFY_PIPE) failed");
         }
-        wm_notify_request_t note;
+        window_manager_notify_request_t note;
         k_memset(&note, 0, sizeof(note));
-        note.level = WM_NOTIFY_ERROR;
+        note.level = WINDOW_MANAGER_NOTIFY_ERROR;
         k_strlcpy(note.title, "Test", sizeof(note.title));
         k_strlcpy(note.body, "Body", sizeof(note.body));
         do_syscall(SYS_write, (uint64_t)notify_file_descriptors[1], (uint64_t)&note, sizeof(note));
@@ -2869,9 +2869,9 @@ static void boot_selftests_system(void) {
             }
         }
         static const struct { const char *what; long expected; long got; } codes[] = {
-            {"a name that is not on disk", SPAWN_ERR_NOT_FOUND, 0},
-            {"an ordinary text file", SPAWN_ERR_BAD_IMAGE, 0},
-            {"a truncated ELF", SPAWN_ERR_BAD_IMAGE, 0},
+            {"a name that is not on disk", SPAWN_ERROR_NOT_FOUND, 0},
+            {"an ordinary text file", SPAWN_ERROR_BAD_IMAGE, 0},
+            {"a truncated ELF", SPAWN_ERROR_BAD_IMAGE, 0},
         };
         const long got_codes[] = {rc_missing, rc_text, rc_trunc};
         for (size_t i = 0; i < sizeof(got_codes) / sizeof(got_codes[0]); i++) {
@@ -2886,7 +2886,7 @@ static void boot_selftests_system(void) {
                 all_ok = 0;
             }
         }
-        if (k_strcmp(spawn_error_message(SPAWN_ERR_NOT_FOUND), spawn_error_message(SPAWN_ERR_BAD_IMAGE)) == 0) {
+        if (k_strcmp(spawn_error_message(SPAWN_ERROR_NOT_FOUND), spawn_error_message(SPAWN_ERROR_BAD_IMAGE)) == 0) {
             kernel_log_puts("[m48] two distinct spawn errors share one message - the codes buy nothing\n");
             all_ok = 0;
         }
@@ -2900,18 +2900,18 @@ static void boot_selftests_system(void) {
 
     {
         static const struct { const char *what; char ch; int mods; int expect; } chords[] = {
-            {"Alt+Tab", '\t', KBD_MOD_ALT, SHORTCUT_CYCLE_FORWARD},
-            {"Shift+Alt+Tab", '\t', KBD_MOD_ALT | KBD_MOD_SHIFT, SHORTCUT_CYCLE_BACKWARD},
-            {"Ctrl+Space", ' ', KBD_MOD_CTRL, SHORTCUT_LAUNCHER},
-            {"Ctrl+Shift+Esc", 27, KBD_MOD_CTRL | KBD_MOD_SHIFT, SHORTCUT_TASK_MANAGER},
-            {"Alt+F4", (char)KBD_KEY_FN(4), KBD_MOD_ALT, SHORTCUT_CLOSE_WINDOW},
-            {"Ctrl+Alt+Left", (char)KBD_KEY_LEFT, KBD_MOD_CTRL | KBD_MOD_ALT, SHORTCUT_SNAP_LEFT},
-            {"Ctrl+Alt+Right", (char)KBD_KEY_RIGHT, KBD_MOD_CTRL | KBD_MOD_ALT, SHORTCUT_SNAP_RIGHT},
-            {"Ctrl+Alt+Up", (char)KBD_KEY_UP, KBD_MOD_CTRL | KBD_MOD_ALT, SHORTCUT_MAXIMIZE},
-            {"Ctrl+Alt+Down", (char)KBD_KEY_DOWN, KBD_MOD_CTRL | KBD_MOD_ALT, SHORTCUT_MINIMIZE},
+            {"Alt+Tab", '\t', KEYBOARD_MOD_ALT, SHORTCUT_CYCLE_FORWARD},
+            {"Shift+Alt+Tab", '\t', KEYBOARD_MOD_ALT | KEYBOARD_MOD_SHIFT, SHORTCUT_CYCLE_BACKWARD},
+            {"Ctrl+Space", ' ', KEYBOARD_MOD_CTRL, SHORTCUT_LAUNCHER},
+            {"Ctrl+Shift+Esc", 27, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT, SHORTCUT_TASK_MANAGER},
+            {"Alt+F4", (char)KEYBOARD_KEY_FUNCTION(4), KEYBOARD_MOD_ALT, SHORTCUT_CLOSE_WINDOW},
+            {"Ctrl+Alt+Left", (char)KEYBOARD_KEY_LEFT, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT, SHORTCUT_SNAP_LEFT},
+            {"Ctrl+Alt+Right", (char)KEYBOARD_KEY_RIGHT, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT, SHORTCUT_SNAP_RIGHT},
+            {"Ctrl+Alt+Up", (char)KEYBOARD_KEY_UP, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT, SHORTCUT_MAXIMIZE},
+            {"Ctrl+Alt+Down", (char)KEYBOARD_KEY_DOWN, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT, SHORTCUT_MINIMIZE},
             {"a plain Tab, which must NOT be a chord", '\t', 0, SHORTCUT_NONE},
             {"a plain space", ' ', 0, SHORTCUT_NONE},
-            {"an ordinary letter with Ctrl held", 'c', KBD_MOD_CTRL, SHORTCUT_NONE},
+            {"an ordinary letter with Ctrl held", 'c', KEYBOARD_MOD_CTRL, SHORTCUT_NONE},
         };
         int all_ok = 1;
         for (size_t i = 0; i < sizeof(chords) / sizeof(chords[0]); i++) {
@@ -2944,12 +2944,12 @@ static void boot_selftests_system(void) {
         selftest_wait_for_compositor();
 
         int drag_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_DRAG_PIPE, (uint64_t)drag_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_DRAG_PIPE, (uint64_t)drag_file_descriptors, 0) != 0) {
             panic("M49 self-test: kernel-side SYS_pipe_open(WM_DRAG_PIPE) failed");
         }
-        wm_drag_request_t drag;
+        window_manager_drag_request_t drag;
         k_memset(&drag, 0, sizeof(drag));
-        k_strlcpy(drag.payload, PATH_TMP_DIR "m33test", sizeof(drag.payload));
+        k_strlcpy(drag.payload, PATH_TEMPORARY_DIRECTORY "m33test", sizeof(drag.payload));
         do_syscall(SYS_write, (uint64_t)drag_file_descriptors[1], (uint64_t)&drag, sizeof(drag));
         pit_sleep_ms(300);
 
@@ -2979,7 +2979,7 @@ static void boot_selftests_system(void) {
         uint64_t shared_memory_baseline = physical_memory_free_frame_count();
         int shared_memory_cycles_ok = 1;
         for (int i = 0; i < 24; i++) {
-            long id = do_syscall(SYS_shm_create, 64 * 1024, 0, 0);
+            long id = do_syscall(SYS_shared_memory_create, 64 * 1024, 0, 0);
             if (id < 0) {
                 kernel_log_puts("[m50] shm_create failed on cycle 0x");
                 kernel_log_put_hex32((uint32_t)i);
@@ -2987,7 +2987,7 @@ static void boot_selftests_system(void) {
                 shared_memory_cycles_ok = 0;
                 break;
             }
-            if (do_syscall(SYS_shm_free, (uint64_t)id, 0, 0) != 0) {
+            if (do_syscall(SYS_shared_memory_free, (uint64_t)id, 0, 0) != 0) {
                 kernel_log_puts("[m50] shm_free refused a segment this task had just created\n");
                 shared_memory_cycles_ok = 0;
                 break;
@@ -3003,9 +3003,9 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
 
-        long id_twice = do_syscall(SYS_shm_create, 4096, 0, 0);
-        long first_free = do_syscall(SYS_shm_free, (uint64_t)id_twice, 0, 0);
-        long second_free = do_syscall(SYS_shm_free, (uint64_t)id_twice, 0, 0);
+        long id_twice = do_syscall(SYS_shared_memory_create, 4096, 0, 0);
+        long first_free = do_syscall(SYS_shared_memory_free, (uint64_t)id_twice, 0, 0);
+        long second_free = do_syscall(SYS_shared_memory_free, (uint64_t)id_twice, 0, 0);
         if (first_free != 0 || second_free == 0) {
             kernel_log_puts("[m50] freeing an shm segment twice did not fail the second time (0x");
             kernel_log_put_hex32((uint32_t)first_free);
@@ -3048,15 +3048,15 @@ static void boot_selftests_system(void) {
         int storm_shared_memory_after = shared_memory_count_by_owner(comp_task->id);
 
         int comp_file_descriptors = 0;
-        for (int f = 0; f < MAX_FDS; f++) {
-            if (comp_task->fds[f].type != FD_NONE) {
+        for (int f = 0; f < MAX_FILE_DESCRIPTORS; f++) {
+            if (comp_task->file_descriptors[f].type != FILE_DESCRIPTOR_NONE) {
                 comp_file_descriptors++;
             }
         }
         kernel_log_puts("[m50] compositor after the storm: 0x");
         kernel_log_put_hex32((uint32_t)comp_file_descriptors);
         kernel_log_puts(" of 0x");
-        kernel_log_put_hex32((uint32_t)MAX_FDS);
+        kernel_log_put_hex32((uint32_t)MAX_FILE_DESCRIPTORS);
         kernel_log_puts(" fds, 0x");
         kernel_log_put_hex32((uint32_t)storm_shared_memory_after);
         kernel_log_puts(" shm segment(s) held.\n");
@@ -3106,16 +3106,16 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
 
-        static const uint64_t KERNEL_ADDR = 0x100000ULL;
+        static const uint64_t KERNEL_ADDRESS = 0x100000ULL;
         static task_info_t garbage_scratch[2];
         struct { const char *what; long got; } garbage[] = {
             {"SYS_taskinfo with a null buffer", do_syscall(SYS_taskinfo, 0, 8, 0)},
             {"SYS_taskinfo with a zero count", do_syscall(SYS_taskinfo, (uint64_t)garbage_scratch, 0, 0)},
             {"SYS_taskinfo with an absurd count", do_syscall(SYS_taskinfo, (uint64_t)garbage_scratch, 0xFFFFFFFFULL, 0)},
             {"SYS_close on an out-of-range fd", do_syscall(SYS_close, 0xFFFFFFFFULL, 0, 0)},
-            {"SYS_close on an fd that was never open", do_syscall(SYS_close, MAX_FDS - 1, 0, 0)},
-            {"SYS_shm_free on an id that does not exist", do_syscall(SYS_shm_free, 0xFFFFULL, 0, 0)},
-            {"SYS_shm_free with a misaligned address", do_syscall(SYS_shm_free, 0, KERNEL_ADDR + 1, 0)},
+            {"SYS_close on an fd that was never open", do_syscall(SYS_close, MAX_FILE_DESCRIPTORS - 1, 0, 0)},
+            {"SYS_shm_free on an id that does not exist", do_syscall(SYS_shared_memory_free, 0xFFFFULL, 0, 0)},
+            {"SYS_shm_free with a misaligned address", do_syscall(SYS_shared_memory_free, 0, KERNEL_ADDRESS + 1, 0)},
             {"SYS_shutdown with an unrecognized mode", do_syscall(SYS_shutdown, 99, 0, 0)},
             {"SYS_kill on a pid that was never valid", do_syscall(SYS_kill, 0xFFFFULL, SIGKILL, 0)},
         };
@@ -3141,7 +3141,7 @@ static void boot_selftests_system(void) {
     {
         int all_ok = 1;
 
-        static const char *const LAYOUT[] = {PATH_BIN, PATH_HOME, PATH_ETC, PATH_TMP};
+        static const char *const LAYOUT[] = {PATH_BIN, PATH_HOME, PATH_ETC, PATH_TEMPORARY};
         for (size_t i = 0; i < sizeof(LAYOUT) / sizeof(LAYOUT[0]); i++) {
             if (!virtual_file_system_is_directory(LAYOUT[i])) {
                 kernel_log_puts("[m53] ");
@@ -3155,8 +3155,8 @@ static void boot_selftests_system(void) {
         size_t list_length = virtual_file_system_list(PATH_BIN, list_buffer, sizeof(list_buffer));
         int found = 0;
         for (size_t i = 0; i < EMBEDDED_PROGRAM_COUNT; i++) {
-            char path[PATH_MAX_LEN];
-            path_join(path, PATH_BIN_DIR, embedded_programs[i].name);
+            char path[PATH_MAX_LENGTH];
+            path_join(path, PATH_BIN_DIRECTORY, embedded_programs[i].name);
             if (virtual_file_system_exists(path)) {
                 found++;
             } else {
@@ -3183,9 +3183,9 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
 
-        static const char *const DEEP = PATH_TMP_DIR "m53dir";
+        static const char *const DEEP = PATH_TEMPORARY_DIRECTORY "m53dir";
         if (!virtual_file_system_exists(DEEP) && virtual_file_system_mkdir(DEEP) != 0) {
-            kernel_log_puts("[m53] vfs_mkdir failed on a fresh path under " PATH_TMP "\n");
+            kernel_log_puts("[m53] vfs_mkdir failed on a fresh path under " PATH_TEMPORARY "\n");
             all_ok = 0;
         }
         if (!virtual_file_system_is_directory(DEEP)) {
@@ -3194,13 +3194,13 @@ static void boot_selftests_system(void) {
         }
         const int DEEP_FILES = 17;
         for (int i = 0; i < DEEP_FILES; i++) {
-            char path[PATH_MAX_LEN];
+            char path[PATH_MAX_LENGTH];
             char name[8];
             name[0] = 'f';
             name[1] = (char)('0' + i / 10);
             name[2] = (char)('0' + i % 10);
             name[3] = '\0';
-            path_join(path, PATH_TMP_DIR "m53dir/", name);
+            path_join(path, PATH_TEMPORARY_DIRECTORY "m53dir/", name);
             char body[16];
             k_memset(body, 0, sizeof(body));
             body[0] = (char)('A' + i);
@@ -3230,7 +3230,7 @@ static void boot_selftests_system(void) {
         {
             char body[16];
             k_memset(body, 0, sizeof(body));
-            int64_t n = virtual_file_system_read(PATH_TMP_DIR "m53dir/f16", body, sizeof(body));
+            int64_t n = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m53dir/f16", body, sizeof(body));
             if (n != 16 || body[0] != (char)('A' + 16)) {
                 kernel_log_puts("[m53] the 17th file in that directory did not read back by path (0x");
                 kernel_log_put_hex32((uint32_t)n);
@@ -3243,16 +3243,16 @@ static void boot_selftests_system(void) {
 
         static const char a_body[] = "in-tmp";
         static const char b_body[] = "in-home";
-        if (virtual_file_system_write(PATH_TMP_DIR "m53same", a_body, sizeof(a_body)) != 0 ||
-            virtual_file_system_write(PATH_ETC_DIR "m53same", b_body, sizeof(b_body)) != 0) {
+        if (virtual_file_system_write(PATH_TEMPORARY_DIRECTORY "m53same", a_body, sizeof(a_body)) != 0 ||
+            virtual_file_system_write(PATH_ETC_DIRECTORY "m53same", b_body, sizeof(b_body)) != 0) {
             kernel_log_puts("[m53] could not create the same name in two directories\n");
             all_ok = 0;
         } else {
             char got_a[16], got_b[16];
             k_memset(got_a, 0, sizeof(got_a));
             k_memset(got_b, 0, sizeof(got_b));
-            virtual_file_system_read(PATH_TMP_DIR "m53same", got_a, sizeof(got_a));
-            virtual_file_system_read(PATH_ETC_DIR "m53same", got_b, sizeof(got_b));
+            virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m53same", got_a, sizeof(got_a));
+            virtual_file_system_read(PATH_ETC_DIRECTORY "m53same", got_b, sizeof(got_b));
             if (k_strcmp(got_a, a_body) != 0 || k_strcmp(got_b, b_body) != 0) {
                 kernel_log_puts("[m53] the same name in two directories resolved to one file: '");
                 kernel_log_puts(got_a);
@@ -3269,7 +3269,7 @@ static void boot_selftests_system(void) {
             {"a '.' component", "/./bin"},
             {"a '..' component, the escape this format refuses to synthesize", "/bin/../etc"},
             {"a '..' climbing out of the root", "/.."},
-            {"walking through a regular file as if it were a directory", PATH_BIN_DIR "ls/nope"},
+            {"walking through a regular file as if it were a directory", PATH_BIN_DIRECTORY "ls/nope"},
             {"a component longer than a name may be", "/bin/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
         };
         for (size_t i = 0; i < sizeof(BAD_PATHS) / sizeof(BAD_PATHS[0]); i++) {
@@ -3284,19 +3284,19 @@ static void boot_selftests_system(void) {
             }
         }
 
-        if (!virtual_file_system_is_directory(PATH_BIN_DIR)) {
-            kernel_log_puts("[m53] a trailing slash on a directory was refused ('" PATH_BIN_DIR "')\n");
+        if (!virtual_file_system_is_directory(PATH_BIN_DIRECTORY)) {
+            kernel_log_puts("[m53] a trailing slash on a directory was refused ('" PATH_BIN_DIRECTORY "')\n");
             all_ok = 0;
         }
         {
             char scratch[16];
-            if (virtual_file_system_read(PATH_BIN_DIR "ls/", scratch, sizeof(scratch)) >= 0) {
+            if (virtual_file_system_read(PATH_BIN_DIRECTORY "ls/", scratch, sizeof(scratch)) >= 0) {
                 kernel_log_puts("[m53] a trailing slash on a regular file was accepted\n");
                 all_ok = 0;
             }
         }
 
-        if (virtual_file_system_exists(PATH_BIN_DIR "settings.conf") || !virtual_file_system_exists(PATH_SETTINGS)) {
+        if (virtual_file_system_exists(PATH_BIN_DIRECTORY "settings.conf") || !virtual_file_system_exists(PATH_SETTINGS)) {
             kernel_log_puts("[m53] settings.conf is not where the layout says it is\n");
             all_ok = 0;
         }
@@ -3362,21 +3362,21 @@ static void boot_selftests_system(void) {
                                                         "the other window's tick to stay unlit still");
 
         int query_file_descriptors[2], query_response_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_QUERY_PIPE, (uint64_t)query_file_descriptors, 0) != 0 ||
-            do_syscall(SYS_pipe_open, (uint64_t)WM_QUERY_RESP_PIPE, (uint64_t)query_response_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_QUERY_PIPE, (uint64_t)query_file_descriptors, 0) != 0 ||
+            do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_QUERY_RESPONSE_PIPE, (uint64_t)query_response_file_descriptors, 0) != 0) {
             panic("M51 self-test: kernel-side SYS_pipe_open(WM_QUERY_PIPE) failed");
         }
         uint8_t ping = 1;
         do_syscall(SYS_write, (uint64_t)query_file_descriptors[1], (uint64_t)&ping, sizeof(ping));
         pit_sleep_ms(300);
-        wm_query_response_t *q = (wm_query_response_t *)kmalloc(sizeof(wm_query_response_t));
+        window_manager_query_response_t *q = (window_manager_query_response_t *)kmalloc(sizeof(window_manager_query_response_t));
         if (!q) {
             panic("out of memory for the M51 query response");
         }
         k_memset(q, 0, sizeof(*q));
         do_syscall(SYS_read, (uint64_t)query_response_file_descriptors[0], (uint64_t)q, sizeof(*q));
         int32_t a_z = -1, b_z = -1;
-        for (int32_t i = 0; i < q->count && i < WM_MAX_ROUTABLE_WINDOWS; i++) {
+        for (int32_t i = 0; i < q->count && i < WINDOW_MANAGER_MAX_ROUTABLE_WINDOWS; i++) {
             if (k_strcmp(q->windows[i].title, "zA") == 0) {
                 a_z = q->windows[i].z_index;
             } else if (k_strcmp(q->windows[i].title, "zB") == 0) {
@@ -3551,10 +3551,10 @@ static void boot_selftests_system(void) {
         long victim_exit = do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0);
         uint64_t frames_after = physical_memory_free_frame_count();
 
-        long seg = do_syscall(SYS_shm_create, 4096, 0, 0);
-        long free_kernel_address = do_syscall(SYS_shm_free, (uint64_t)seg, 0x100000ULL, 0);
-        long free_unaligned = do_syscall(SYS_shm_free, (uint64_t)seg, USER_SHM_BASE + 1, 0);
-        long free_ok = do_syscall(SYS_shm_free, (uint64_t)seg, 0, 0);
+        long seg = do_syscall(SYS_shared_memory_create, 4096, 0, 0);
+        long free_kernel_address = do_syscall(SYS_shared_memory_free, (uint64_t)seg, 0x100000ULL, 0);
+        long free_unaligned = do_syscall(SYS_shared_memory_free, (uint64_t)seg, USER_SHARED_MEMORY_BASE + 1, 0);
+        long free_ok = do_syscall(SYS_shared_memory_free, (uint64_t)seg, 0, 0);
 
         selftest_reap(comp_task);
         console_init();
@@ -3640,13 +3640,13 @@ static void boot_selftests_system(void) {
 
     {
         size_t hello_size_bytes = 0;
-        uint8_t *hello_image = read_program(PATH_BIN_DIR "hello", &hello_size_bytes);
+        uint8_t *hello_image = read_program(PATH_BIN_DIRECTORY "hello", &hello_size_bytes);
         int64_t hello_size = (int64_t)hello_size_bytes;
 
         const int ROUNDS = MAX_TASKS * 3;
 
-        file_descriptor_slot_t saved_stdout = scheduler_current()->fds[1];
-        scheduler_current()->fds[1].type = FD_NONE;
+        file_descriptor_slot_t saved_stdout = scheduler_current()->file_descriptors[1];
+        scheduler_current()->file_descriptors[1].type = FILE_DESCRIPTOR_NONE;
 
         int live_before = scheduler_live_task_count();
         uint64_t frames_before = physical_memory_free_frame_count();
@@ -3671,7 +3671,7 @@ static void boot_selftests_system(void) {
 
         int live_after = scheduler_live_task_count();
         uint64_t frames_after = physical_memory_free_frame_count();
-        scheduler_current()->fds[1] = saved_stdout;
+        scheduler_current()->file_descriptors[1] = saved_stdout;
         kfree(hello_image);
 
         int all_ok = 1;
@@ -3726,10 +3726,10 @@ static void boot_selftests_system(void) {
 
     {
         size_t comp_size_bytes = 0;
-        uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_size_bytes);
+        uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_size_bytes);
         int64_t comp_size = (int64_t)comp_size_bytes;
         size_t z_size_bytes = 0;
-        uint8_t *z_image = read_program(PATH_BIN_DIR "wm_zorder", &z_size_bytes);
+        uint8_t *z_image = read_program(PATH_BIN_DIRECTORY "wm_zorder", &z_size_bytes);
         int64_t z_size = (int64_t)z_size_bytes;
 
         task_t *comp1 = process_spawn("compositor", comp_image, (size_t)comp_size, "");
@@ -3833,18 +3833,18 @@ static void boot_selftests_system(void) {
             for (size_t i = 0; i < sizeof(payload); i++) {
                 payload[i] = (char)('a' + (i % 26));
             }
-            if (virtual_file_system_write(PATH_TMP_DIR "m56a", payload, sizeof(payload)) != 0) {
+            if (virtual_file_system_write(PATH_TEMPORARY_DIRECTORY "m56a", payload, sizeof(payload)) != 0) {
                 kernel_log_puts("[m56] could not create the file this test is about\n");
                 all_ok = 0;
             }
-            if (virtual_file_system_rename(PATH_TMP_DIR "m56a", PATH_TMP_DIR "m56b") != 0 ||
-                virtual_file_system_exists(PATH_TMP_DIR "m56a") || !virtual_file_system_exists(PATH_TMP_DIR "m56b")) {
+            if (virtual_file_system_rename(PATH_TEMPORARY_DIRECTORY "m56a", PATH_TEMPORARY_DIRECTORY "m56b") != 0 ||
+                virtual_file_system_exists(PATH_TEMPORARY_DIRECTORY "m56a") || !virtual_file_system_exists(PATH_TEMPORARY_DIRECTORY "m56b")) {
                 kernel_log_puts("[m56] rename did not move the name\n");
                 all_ok = 0;
             }
             static char readback[2000];
             k_memset(readback, 0, sizeof(readback));
-            if (virtual_file_system_read(PATH_TMP_DIR "m56b", readback, sizeof(readback)) != (int64_t)sizeof(payload)) {
+            if (virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m56b", readback, sizeof(readback)) != (int64_t)sizeof(payload)) {
                 kernel_log_puts("[m56] the renamed file did not read back at its own size - a rename moved data it should not have touched\n");
                 all_ok = 0;
             }
@@ -3855,12 +3855,12 @@ static void boot_selftests_system(void) {
                     break;
                 }
             }
-            if (virtual_file_system_rename(PATH_TMP_DIR "m56b", PATH_TMP_DIR "m53same") == 0) {
+            if (virtual_file_system_rename(PATH_TEMPORARY_DIRECTORY "m56b", PATH_TEMPORARY_DIRECTORY "m53same") == 0) {
                 kernel_log_puts("[m56] rename over an existing name succeeded - that is how a file gets lost silently\n");
                 all_ok = 0;
             }
             uint32_t free_before = virtual_file_system_free_blocks();
-            if (virtual_file_system_write(PATH_TMP_DIR "m56c", payload, sizeof(payload)) != 0) {
+            if (virtual_file_system_write(PATH_TEMPORARY_DIRECTORY "m56c", payload, sizeof(payload)) != 0) {
                 kernel_log_puts("[m56] could not create the file the block accounting is about\n");
                 all_ok = 0;
             }
@@ -3869,7 +3869,7 @@ static void boot_selftests_system(void) {
                 kernel_log_puts("[m56] writing 2000 bytes consumed no blocks at all\n");
                 all_ok = 0;
             }
-            if (virtual_file_system_unlink(PATH_TMP_DIR "m56c") != 0) {
+            if (virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m56c") != 0) {
                 kernel_log_puts("[m56] unlink failed on a file that had just been written\n");
                 all_ok = 0;
             }
@@ -3885,14 +3885,14 @@ static void boot_selftests_system(void) {
                 all_ok = 0;
             }
             uint32_t free_pre_rename = virtual_file_system_free_blocks();
-            int rename_ok = virtual_file_system_rename(PATH_TMP_DIR "m56b", PATH_TMP_DIR "m56d") == 0 &&
-                            virtual_file_system_rename(PATH_TMP_DIR "m56d", PATH_TMP_DIR "m56b") == 0;
+            int rename_ok = virtual_file_system_rename(PATH_TEMPORARY_DIRECTORY "m56b", PATH_TEMPORARY_DIRECTORY "m56d") == 0 &&
+                            virtual_file_system_rename(PATH_TEMPORARY_DIRECTORY "m56d", PATH_TEMPORARY_DIRECTORY "m56b") == 0;
             if (!rename_ok || virtual_file_system_free_blocks() != free_pre_rename) {
                 kernel_log_puts("[m56] a rename moved blocks, or failed outright\n");
                 all_ok = 0;
             }
 
-            virtual_file_system_unlink(PATH_TMP_DIR "m56b");
+            virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m56b");
             if (virtual_file_system_unlink(PATH_BIN) == 0) {
                 kernel_log_puts("[m56] unlink accepted a directory - see leanfs.h on why that is refused rather than recursed\n");
                 all_ok = 0;
@@ -3903,42 +3903,42 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_clipboard_set, (uint64_t)pasted, sizeof(pasted) - 1, 0);
 
         size_t comp_size_bytes = 0;
-        uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_size_bytes);
+        uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_size_bytes);
         int64_t comp_size = (int64_t)comp_size_bytes;
         size_t ed_size_bytes = 0;
-        uint8_t *ed_image = read_program(PATH_BIN_DIR "text_editor", &ed_size_bytes);
+        uint8_t *ed_image = read_program(PATH_BIN_DIRECTORY "text_editor", &ed_size_bytes);
         int64_t ed_size = (int64_t)ed_size_bytes;
         size_t term_size_bytes = 0;
-        uint8_t *term_image = read_program(PATH_BIN_DIR "gui_terminal", &term_size_bytes);
+        uint8_t *term_image = read_program(PATH_BIN_DIRECTORY "gui_terminal", &term_size_bytes);
         int64_t term_size = (int64_t)term_size_bytes;
 
-        virtual_file_system_unlink(PATH_TMP_DIR "m56undo");
+        virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m56undo");
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         selftest_wait_for_compositor();
         task_t *ed_task = process_spawn("text_editor", ed_image, (size_t)ed_size,
-                                         PATH_TMP_DIR "m56undo");
+                                         PATH_TEMPORARY_DIRECTORY "m56undo");
         kfree(ed_image);
         pit_sleep_ms(800);
 
         keyboard_inject('A', 0);
         keyboard_inject('B', 0);
         pit_sleep_ms(200);
-        keyboard_inject('V', KBD_MOD_CTRL);
+        keyboard_inject('V', KEYBOARD_MOD_CTRL);
         pit_sleep_ms(300);
-        keyboard_inject('S', KBD_MOD_CTRL);
+        keyboard_inject('S', KEYBOARD_MOD_CTRL);
         pit_sleep_ms(500);
         static char after_paste[64];
         k_memset(after_paste, 0, sizeof(after_paste));
-        int64_t paste_length = virtual_file_system_read(PATH_TMP_DIR "m56undo", after_paste, sizeof(after_paste) - 1);
+        int64_t paste_length = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m56undo", after_paste, sizeof(after_paste) - 1);
 
-        keyboard_inject('Z', KBD_MOD_CTRL);
+        keyboard_inject('Z', KEYBOARD_MOD_CTRL);
         pit_sleep_ms(300);
-        keyboard_inject('S', KBD_MOD_CTRL);
+        keyboard_inject('S', KEYBOARD_MOD_CTRL);
         pit_sleep_ms(500);
         static char after_undo[64];
         k_memset(after_undo, 0, sizeof(after_undo));
-        int64_t undo_length = virtual_file_system_read(PATH_TMP_DIR "m56undo", after_undo, sizeof(after_undo) - 1);
+        int64_t undo_length = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m56undo", after_undo, sizeof(after_undo) - 1);
 
         selftest_reap(ed_task);
         pit_sleep_ms(200);
@@ -3948,9 +3948,9 @@ static void boot_selftests_system(void) {
         pit_sleep_ms(900);
 
         int lit_before_command = selftest_term_top_lit();
-        static const char cmd[] = "ls /bin\n";
-        for (size_t i = 0; i < sizeof(cmd) - 1; i++) {
-            keyboard_inject(cmd[i], 0);
+        static const char command[] = "ls /bin\n";
+        for (size_t i = 0; i < sizeof(command) - 1; i++) {
+            keyboard_inject(command[i], 0);
         }
         int lit_live = selftest_term_top_settled(lit_before_command, 12000);
         mouse_inject(0, 0, 0, -10);
@@ -4042,15 +4042,15 @@ static void boot_selftests_system(void) {
         uint32_t before_right = framebuffer_get_pixel(boot_w - 3, boot_h - bar_row_from_bottom);
 
         int action_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M58 desktop self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
-        wm_action_request_t req;
-        k_memset(&req, 0, sizeof(req));
-        req.window_id = -1;
-        req.action = WM_ACTION_SET_MODE;
-        req.value = wm_pack_mode(list[pick].width, list[pick].height);
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        window_manager_action_request_t request;
+        k_memset(&request, 0, sizeof(request));
+        request.window_id = -1;
+        request.action = WINDOW_MANAGER_ACTION_SET_MODE;
+        request.value = window_manager_pack_mode(list[pick].width, list[pick].height);
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         pit_sleep_ms(2500);
 
         uint32_t after_w = framebuffer_width(), after_h = framebuffer_height();
@@ -4062,7 +4062,7 @@ static void boot_selftests_system(void) {
             after_desktop = framebuffer_get_pixel(after_w / 2, after_h / 2);
         }
 
-        pit_sleep_ms(WM_MODE_REVERT_MS + 2500);
+        pit_sleep_ms(WINDOW_MANAGER_MODE_REVERT_MS + 2500);
 
         uint32_t back_w = framebuffer_width(), back_h = framebuffer_height();
         uint32_t back_left = 0, back_right = 0;
@@ -4135,7 +4135,7 @@ static void boot_selftests_system(void) {
 
         static const char PART_A[] = "hello ";
         static const char PART_B[] = "descriptors";
-        long fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59fd"),
+        long fd = do_syscall(SYS_open, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59fd"),
                               OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0);
         if (fd < 0) {
             kernel_log_puts("[m59] SYS_open could not create a file\n");
@@ -4145,12 +4145,12 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_write, (uint64_t)fd, (uint64_t)PART_B, sizeof(PART_B) - 1);
             do_syscall(SYS_close, (uint64_t)fd, 0, 0);
 
-            fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59fd"), OPEN_READ, 0);
+            fd = do_syscall(SYS_open, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59fd"), OPEN_READ, 0);
             char back[32];
             k_memset(back, 0, sizeof(back));
-            long pos = do_syscall(SYS_lseek, (uint64_t)fd, 6, SEEK_SET);
+            long position = do_syscall(SYS_lseek, (uint64_t)fd, 6, SEEK_SET);
             long n = do_syscall(SYS_read, (uint64_t)fd, (uint64_t)back, 11);
-            if (pos != 6 || n != 11 || k_strcmp(back, "descriptors") != 0) {
+            if (position != 6 || n != 11 || k_strcmp(back, "descriptors") != 0) {
                 kernel_log_puts("[m59] a seek-then-read did not land where it was told to\n");
                 all_ok = 0;
             }
@@ -4167,7 +4167,7 @@ static void boot_selftests_system(void) {
         }
 
         {
-            fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59hole"),
+            fd = do_syscall(SYS_open, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59hole"),
                              OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0);
             do_syscall(SYS_write, (uint64_t)fd, (uint64_t)"ABC", 3);
             do_syscall(SYS_lseek, (uint64_t)fd, 300, SEEK_SET);
@@ -4176,7 +4176,7 @@ static void boot_selftests_system(void) {
 
             static uint8_t hole[512];
             k_memset(hole, 0xAA, sizeof(hole));
-            fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59hole"), OPEN_READ, 0);
+            fd = do_syscall(SYS_open, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59hole"), OPEN_READ, 0);
             long got = do_syscall(SYS_read, (uint64_t)fd, (uint64_t)hole, sizeof(hole));
             do_syscall(SYS_close, (uint64_t)fd, 0, 0);
             if (got != 301) {
@@ -4197,14 +4197,14 @@ static void boot_selftests_system(void) {
                     }
                 }
             }
-            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59hole"), 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59hole"), 0, 0);
         }
 
         {
             uint32_t free_before = virtual_file_system_free_blocks();
             const uint32_t BIG = 200u * 1024u;
             static uint8_t chunk[1024];
-            fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59big"),
+            fd = do_syscall(SYS_open, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59big"),
                              OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0);
             if (fd < 0) {
                 kernel_log_puts("[m59] could not create the large file this test is about\n");
@@ -4223,12 +4223,12 @@ static void boot_selftests_system(void) {
                 do_syscall(SYS_close, (uint64_t)fd, 0, 0);
 
                 os_stat_t st;
-                if (do_syscall(SYS_stat, (uint64_t)(PATH_TMP_DIR "m59big"), (uint64_t)&st, 0) != 0 ||
+                if (do_syscall(SYS_stat, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59big"), (uint64_t)&st, 0) != 0 ||
                     st.size != BIG) {
                     kernel_log_puts("[m59] the large file is not the size it was written at\n");
                     all_ok = 0;
                 }
-                fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59big"), OPEN_READ, 0);
+                fd = do_syscall(SYS_open, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59big"), OPEN_READ, 0);
                 static uint8_t verify[1024];
                 for (uint32_t off = 0; off < BIG && all_ok; off += sizeof(verify)) {
                     if (do_syscall(SYS_read, (uint64_t)fd, (uint64_t)verify, sizeof(verify)) != (long)sizeof(verify)) {
@@ -4246,7 +4246,7 @@ static void boot_selftests_system(void) {
                 }
                 do_syscall(SYS_close, (uint64_t)fd, 0, 0);
             }
-            if (do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59big"), 0, 0) != 0) {
+            if (do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59big"), 0, 0) != 0) {
                 kernel_log_puts("[m59] could not unlink the large file\n");
                 all_ok = 0;
             }
@@ -4264,7 +4264,7 @@ static void boot_selftests_system(void) {
         {
             os_stat_t st;
             uint32_t now = rtc_now();
-            if (do_syscall(SYS_stat, (uint64_t)(PATH_TMP_DIR "m59fd"), (uint64_t)&st, 0) != 0) {
+            if (do_syscall(SYS_stat, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59fd"), (uint64_t)&st, 0) != 0) {
                 kernel_log_puts("[m59] SYS_stat failed on a file that exists\n");
                 all_ok = 0;
             } else if (rtc_available()) {
@@ -4281,7 +4281,7 @@ static void boot_selftests_system(void) {
 
         {
             uint32_t before = leanfs_meta_writes();
-            fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59fd"), OPEN_WRITE, 0);
+            fd = do_syscall(SYS_open, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59fd"), OPEN_WRITE, 0);
             do_syscall(SYS_lseek, (uint64_t)fd, 0, SEEK_SET);
             do_syscall(SYS_write, (uint64_t)fd, (uint64_t)"H", 1);
             do_syscall(SYS_close, (uint64_t)fd, 0, 0);
@@ -4295,30 +4295,30 @@ static void boot_selftests_system(void) {
         }
 
         {
-            if (do_syscall(SYS_mkdir, (uint64_t)(PATH_TMP_DIR "m59dir"), 0, 0) != 0) {
+            if (do_syscall(SYS_mkdir, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59dir"), 0, 0) != 0) {
                 kernel_log_puts("[m59] could not create the directory this test is about\n");
                 all_ok = 0;
             }
-            if (virtual_file_system_write(PATH_TMP_DIR "m59dir/inside", "x", 1) != 0) {
+            if (virtual_file_system_write(PATH_TEMPORARY_DIRECTORY "m59dir/inside", "x", 1) != 0) {
                 kernel_log_puts("[m59] could not put a file inside the test directory\n");
                 all_ok = 0;
             }
-            if (do_syscall(SYS_rmdir, (uint64_t)(PATH_TMP_DIR "m59dir"), 0, 0) == 0) {
+            if (do_syscall(SYS_rmdir, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59dir"), 0, 0) == 0) {
                 kernel_log_puts("[m59] rmdir removed a directory that still held a file\n");
                 all_ok = 0;
             }
-            if (do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59dir/inside"), 0, 0) != 0 ||
-                do_syscall(SYS_rmdir, (uint64_t)(PATH_TMP_DIR "m59dir"), 0, 0) != 0) {
+            if (do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59dir/inside"), 0, 0) != 0 ||
+                do_syscall(SYS_rmdir, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59dir"), 0, 0) != 0) {
                 kernel_log_puts("[m59] rmdir refused a directory that was empty\n");
                 all_ok = 0;
             }
-            if (virtual_file_system_exists(PATH_TMP_DIR "m59dir")) {
+            if (virtual_file_system_exists(PATH_TEMPORARY_DIRECTORY "m59dir")) {
                 kernel_log_puts("[m59] the removed directory is still there\n");
                 all_ok = 0;
             }
         }
 
-        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59fd"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m59fd"), 0, 0);
 
         {
             int openfiles_after = open_file_in_use();
@@ -4347,15 +4347,15 @@ static void boot_selftests_system(void) {
 
         {
             static const char body[] = "argv is real now\n";
-            virtual_file_system_unlink(PATH_TMP_DIR "m60src");
-            virtual_file_system_unlink(PATH_TMP_DIR "m60dst");
-            if (virtual_file_system_write(PATH_TMP_DIR "m60src", body, sizeof(body) - 1) != 0) {
+            virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m60src");
+            virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m60dst");
+            if (virtual_file_system_write(PATH_TEMPORARY_DIRECTORY "m60src", body, sizeof(body) - 1) != 0) {
                 kernel_log_puts("[m60] could not create the file cp is about to copy\n");
                 all_ok = 0;
             }
             size_t cp_bytes = 0;
-            uint8_t *cp_image = read_program(PATH_BIN_DIR "cp", &cp_bytes);
-            const char *cp_argv[] = { PATH_BIN_DIR "cp", PATH_TMP_DIR "m60src", PATH_TMP_DIR "m60dst", 0 };
+            uint8_t *cp_image = read_program(PATH_BIN_DIRECTORY "cp", &cp_bytes);
+            const char *cp_argv[] = { PATH_BIN_DIRECTORY "cp", PATH_TEMPORARY_DIRECTORY "m60src", PATH_TEMPORARY_DIRECTORY "m60dst", 0 };
             task_t *cp_task = process_spawnv("cp", cp_image, cp_bytes, cp_argv);
             kfree(cp_image);
             if (!cp_task) {
@@ -4367,7 +4367,7 @@ static void boot_selftests_system(void) {
             } else {
                 static char copied[64];
                 k_memset(copied, 0, sizeof(copied));
-                int64_t n = virtual_file_system_read(PATH_TMP_DIR "m60dst", copied, sizeof(copied) - 1);
+                int64_t n = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m60dst", copied, sizeof(copied) - 1);
                 if (n != (int64_t)(sizeof(body) - 1) || k_strcmp(copied, body) != 0) {
                     kernel_log_puts("[m60] cp produced the wrong bytes\n");
                     all_ok = 0;
@@ -4377,13 +4377,13 @@ static void boot_selftests_system(void) {
 
         {
             size_t comp_bytes = 0;
-            uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+            uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
             size_t term_bytes = 0;
-            uint8_t *term_image = read_program(PATH_BIN_DIR "gui_terminal", &term_bytes);
+            uint8_t *term_image = read_program(PATH_BIN_DIRECTORY "gui_terminal", &term_bytes);
 
-            virtual_file_system_unlink(PATH_TMP_DIR "m60out");
-            virtual_file_system_unlink(PATH_TMP_DIR "m60pipe");
-            virtual_file_system_unlink(PATH_TMP_DIR "m60tab");
+            virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m60out");
+            virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m60pipe");
+            virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m60tab");
 
             task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
             kfree(comp_image);
@@ -4392,18 +4392,18 @@ static void boot_selftests_system(void) {
             kfree(term_image);
             pit_sleep_ms(900);
 
-            selftest_type("ls /bin > " PATH_TMP_DIR "m60out");
+            selftest_type("ls /bin > " PATH_TEMPORARY_DIRECTORY "m60out");
             keyboard_inject('\n', 0);
             pit_sleep_ms(2500);
 
-            selftest_type("ls /bin | cat > " PATH_TMP_DIR "m60pipe");
+            selftest_type("ls /bin | cat > " PATH_TEMPORARY_DIRECTORY "m60pipe");
             keyboard_inject('\n', 0);
             pit_sleep_ms(3500);
 
             selftest_type("ls /b");
             keyboard_inject('\t', 0);
             pit_sleep_ms(300);
-            selftest_type(" > " PATH_TMP_DIR "m60tab");
+            selftest_type(" > " PATH_TEMPORARY_DIRECTORY "m60tab");
             keyboard_inject('\n', 0);
             pit_sleep_ms(2500);
 
@@ -4414,7 +4414,7 @@ static void boot_selftests_system(void) {
 
             static char redirected[2048];
             k_memset(redirected, 0, sizeof(redirected));
-            int64_t rn = virtual_file_system_read(PATH_TMP_DIR "m60out", redirected, sizeof(redirected) - 1);
+            int64_t rn = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m60out", redirected, sizeof(redirected) - 1);
             if (rn <= 0 || !k_strstr(redirected, "compositor")) {
                 kernel_log_puts("[m60] `ls /bin > file` did not put the listing in the file\n");
                 all_ok = 0;
@@ -4422,7 +4422,7 @@ static void boot_selftests_system(void) {
 
             static char completed[2048];
             k_memset(completed, 0, sizeof(completed));
-            int64_t cn = virtual_file_system_read(PATH_TMP_DIR "m60tab", completed, sizeof(completed) - 1);
+            int64_t cn = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m60tab", completed, sizeof(completed) - 1);
             if (cn <= 0 || !k_strstr(completed, "compositor")) {
                 kernel_log_puts("[m60] Tab did not complete `/b` to `/bin/` - the listing is of the wrong directory\n");
                 all_ok = 0;
@@ -4430,7 +4430,7 @@ static void boot_selftests_system(void) {
 
             static char piped[2048];
             k_memset(piped, 0, sizeof(piped));
-            int64_t pn = virtual_file_system_read(PATH_TMP_DIR "m60pipe", piped, sizeof(piped) - 1);
+            int64_t pn = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m60pipe", piped, sizeof(piped) - 1);
             if (pn <= 0 || !k_strstr(piped, "compositor")) {
                 kernel_log_puts("[m60] `ls /bin | cat > file` produced nothing - the pipe never ended\n");
                 all_ok = 0;
@@ -4446,48 +4446,48 @@ static void boot_selftests_system(void) {
 
         {
             size_t comp_bytes = 0;
-            uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+            uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
             size_t ed_bytes = 0;
-            uint8_t *ed_image = read_program(PATH_BIN_DIR "text_editor", &ed_bytes);
+            uint8_t *ed_image = read_program(PATH_BIN_DIRECTORY "text_editor", &ed_bytes);
 
-            virtual_file_system_unlink(PATH_TMP_DIR "m60para");
+            virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m60para");
 
             task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
             kfree(comp_image);
             selftest_wait_for_compositor();
-            task_t *ed_task = process_spawn("text_editor", ed_image, ed_bytes, PATH_TMP_DIR "m60para");
+            task_t *ed_task = process_spawn("text_editor", ed_image, ed_bytes, PATH_TEMPORARY_DIRECTORY "m60para");
             kfree(ed_image);
             pit_sleep_ms(900);
 
             selftest_type("ONETWO");
             for (int i = 0; i < 3; i++) {
-                keyboard_inject((char)KBD_KEY_LEFT, 0);
+                keyboard_inject((char)KEYBOARD_KEY_LEFT, 0);
             }
             pit_sleep_ms(200);
             keyboard_inject('\n', 0);
             pit_sleep_ms(200);
-            keyboard_inject('S', KBD_MOD_CTRL);
+            keyboard_inject('S', KEYBOARD_MOD_CTRL);
             pit_sleep_ms(600);
 
             static char para[64];
             k_memset(para, 0, sizeof(para));
-            int64_t pl = virtual_file_system_read(PATH_TMP_DIR "m60para", para, sizeof(para) - 1);
+            int64_t pl = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m60para", para, sizeof(para) - 1);
 
-            keyboard_inject('Z', KBD_MOD_CTRL);
+            keyboard_inject('Z', KEYBOARD_MOD_CTRL);
             pit_sleep_ms(200);
-            keyboard_inject('S', KBD_MOD_CTRL);
+            keyboard_inject('S', KEYBOARD_MOD_CTRL);
             pit_sleep_ms(600);
             static char undone[64];
             k_memset(undone, 0, sizeof(undone));
-            int64_t ul = virtual_file_system_read(PATH_TMP_DIR "m60para", undone, sizeof(undone) - 1);
+            int64_t ul = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m60para", undone, sizeof(undone) - 1);
 
-            keyboard_inject('Y', KBD_MOD_CTRL);
+            keyboard_inject('Y', KEYBOARD_MOD_CTRL);
             pit_sleep_ms(200);
-            keyboard_inject('S', KBD_MOD_CTRL);
+            keyboard_inject('S', KEYBOARD_MOD_CTRL);
             pit_sleep_ms(600);
             static char redone[64];
             k_memset(redone, 0, sizeof(redone));
-            int64_t rl = virtual_file_system_read(PATH_TMP_DIR "m60para", redone, sizeof(redone) - 1);
+            int64_t rl = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m60para", redone, sizeof(redone) - 1);
 
             selftest_reap(ed_task);
             selftest_reap(comp_task);
@@ -4528,9 +4528,9 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
 
         size_t comp_bytes = 0;
-        uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+        uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
         size_t clock_bytes = 0;
-        uint8_t *clock_image = read_program(PATH_BIN_DIR "gui_clock", &clock_bytes);
+        uint8_t *clock_image = read_program(PATH_BIN_DIRECTORY "gui_clock", &clock_bytes);
 
         task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
         selftest_wait_for_compositor();
@@ -4543,25 +4543,25 @@ static void boot_selftests_system(void) {
         int before_lit = selftest_column_lit(probe_x, desktop_bg);
 
         int action_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M61 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
-        wm_action_request_t req;
-        k_memset(&req, 0, sizeof(req));
-        req.window_id = 0;
-        req.action = WM_ACTION_TOGGLE_MINIMIZE;
+        window_manager_action_request_t request;
+        k_memset(&request, 0, sizeof(request));
+        request.window_id = 0;
+        request.action = WINDOW_MANAGER_ACTION_TOGGLE_MINIMIZE;
 
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t lit_ms = 0;
         int during_lit = selftest_column_lit_wait(probe_x, desktop_bg, 4000, &lit_ms);
         int after_lit = selftest_column_clear_wait(probe_x, desktop_bg, 4000);
         uint32_t after_window = framebuffer_get_pixel(150, 150);
 
         int settings_file_descriptors[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
+        if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
             panic("M61 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
-        wm_settings_request_t off;
+        window_manager_settings_request_t off;
         k_memset(&off, 0, sizeof(off));
         off.volume = 70;
         off.animations = 0;
@@ -4571,7 +4571,7 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_write, (uint64_t)settings_file_descriptors[1], (uint64_t)&off, sizeof(off));
         selftest_wait_for_animations_setting(0, 4000);
 
-        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         selftest_wait_for_pixel(150, 150, before_window, 4000, "the window to come back");
         uint32_t quiet_bg = framebuffer_get_pixel(probe_x, 700);
         uint32_t quiet_window = lit_ms * 4 + 400;
@@ -4694,7 +4694,7 @@ static void boot_selftests_system(void) {
 
         {
             size_t claim_bytes = 0;
-            uint8_t *claim_image = read_program(PATH_BIN_DIR "audiograb", &claim_bytes);
+            uint8_t *claim_image = read_program(PATH_BIN_DIRECTORY "audiograb", &claim_bytes);
             task_t *grabber = process_spawn("audiograb", claim_image, claim_bytes, "");
             kfree(claim_image);
             long rc = do_syscall(SYS_wait, (uint64_t)grabber->id, 0, 0);
@@ -4728,7 +4728,7 @@ static void boot_selftests_system(void) {
 
         {
             size_t bytes = 0;
-            uint8_t *image = read_program(PATH_BIN_DIR "libctest", &bytes);
+            uint8_t *image = read_program(PATH_BIN_DIRECTORY "libctest", &bytes);
             task_t *t = process_spawn("libctest", image, bytes, "");
             kfree(image);
             long rc = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
@@ -4746,8 +4746,8 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)out_file_descriptors[1], 1, 0);
 
             size_t bytes = 0;
-            uint8_t *image = read_program(PATH_BIN_DIR "whetstone", &bytes);
-            const char *argv[] = { PATH_BIN_DIR "whetstone", "8000", 0 };
+            uint8_t *image = read_program(PATH_BIN_DIRECTORY "whetstone", &bytes);
+            const char *argv[] = { PATH_BIN_DIRECTORY "whetstone", "8000", 0 };
             long wall_before = do_syscall(SYS_time, 0, 0, 0);
             task_t *t = process_spawnv("whetstone", image, bytes, argv);
             kfree(image);
@@ -4786,8 +4786,8 @@ static void boot_selftests_system(void) {
             out[got] = '\0';
             do_syscall(SYS_close, (uint64_t)out_file_descriptors[0], 0, 0);
             do_syscall(SYS_close, (uint64_t)out_file_descriptors[1], 0, 0);
-            file_descriptor_release(&scheduler_current()->fds[1]);
-            scheduler_current()->fds[1].type = FD_STDOUT;
+            file_descriptor_release(&scheduler_current()->file_descriptors[1]);
+            scheduler_current()->file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
 
             long wall_after = do_syscall(SYS_time, 0, 0, 0);
 
@@ -4834,9 +4834,9 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
 
         size_t comp_bytes = 0;
-        uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+        uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
         size_t icons_bytes = 0;
-        uint8_t *icons_image = read_program(PATH_BIN_DIR "desktop_icons", &icons_bytes);
+        uint8_t *icons_image = read_program(PATH_BIN_DIRECTORY "desktop_icons", &icons_bytes);
 
         task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
         kfree(comp_image);
@@ -4855,7 +4855,7 @@ static void boot_selftests_system(void) {
         }
 
         static uint8_t blob[512];
-        int64_t n = virtual_file_system_read(PATH_ICONS_DIR "Terminal.icn", blob, sizeof(blob));
+        int64_t n = virtual_file_system_read(PATH_ICONS_DIRECTORY "Terminal.icn", blob, sizeof(blob));
         int wrote = 0;
         if (n < ICON_HEADER_BYTES || !icon_valid(blob)) {
             kernel_log_puts("[m63] the desktop did not write its icons out as files\n");
@@ -4864,7 +4864,7 @@ static void boot_selftests_system(void) {
             blob[ICON_HEADER_BYTES + 3] = 0xFF;
             blob[ICON_HEADER_BYTES + 4] = 0x00;
             blob[ICON_HEADER_BYTES + 5] = 0xFF;
-            if (virtual_file_system_write(PATH_ICONS_DIR "Terminal.icn", blob, (size_t)n) != 0) {
+            if (virtual_file_system_write(PATH_ICONS_DIRECTORY "Terminal.icn", blob, (size_t)n) != 0) {
                 kernel_log_puts("[m63] could not write the edited icon back\n");
                 all_ok = 0;
             } else {
@@ -4902,7 +4902,7 @@ static void boot_selftests_system(void) {
         }
 
         if (wrote) {
-            virtual_file_system_unlink(PATH_ICONS_DIR "Terminal.icn");
+            virtual_file_system_unlink(PATH_ICONS_DIRECTORY "Terminal.icn");
         }
 
         if (!all_ok) {
@@ -4917,9 +4917,9 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
 
         size_t comp_bytes = 0;
-        uint8_t *comp_image = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+        uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
         size_t clock_bytes = 0;
-        uint8_t *clock_image = read_program(PATH_BIN_DIR "gui_clock", &clock_bytes);
+        uint8_t *clock_image = read_program(PATH_BIN_DIRECTORY "gui_clock", &clock_bytes);
 
         task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
         kfree(comp_image);
@@ -4931,19 +4931,19 @@ static void boot_selftests_system(void) {
         uint32_t desktop = framebuffer_get_pixel(500, 500);
         uint32_t on_home = framebuffer_get_pixel(150, 150);
 
-        keyboard_inject((char)KBD_KEY_RIGHT, KBD_MOD_CTRL | KBD_MOD_SHIFT);
+        keyboard_inject((char)KEYBOARD_KEY_RIGHT, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT);
         uint32_t after_switch = selftest_pixel_settled(150, 150, desktop,
                                                         "the window to be hidden by switching desktop");
 
-        keyboard_inject((char)KBD_KEY_LEFT, KBD_MOD_CTRL | KBD_MOD_SHIFT);
+        keyboard_inject((char)KEYBOARD_KEY_LEFT, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT);
         uint32_t back_home = selftest_pixel_settled(150, 150, on_home,
                                                      "the window to come back when we switch back");
 
-        keyboard_inject((char)KBD_KEY_RIGHT, KBD_MOD_CTRL | KBD_MOD_SHIFT | KBD_MOD_ALT);
+        keyboard_inject((char)KEYBOARD_KEY_RIGHT, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT | KEYBOARD_MOD_ALT);
         uint32_t moved_with = selftest_pixel_settled(150, 150, on_home,
                                                       "the window to follow us to the next desktop");
 
-        keyboard_inject((char)KBD_KEY_LEFT, KBD_MOD_CTRL | KBD_MOD_SHIFT);
+        keyboard_inject((char)KEYBOARD_KEY_LEFT, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT);
         uint32_t left_behind = selftest_pixel_settled(150, 150, desktop,
                                                        "the desktop it came from to be empty");
 
@@ -4991,7 +4991,7 @@ static void boot_selftests_system(void) {
             }
 
             size_t bytes = 0;
-            uint8_t *image = read_program(PATH_BIN_DIR "nettest", &bytes);
+            uint8_t *image = read_program(PATH_BIN_DIRECTORY "nettest", &bytes);
             task_t *t = process_spawn("nettest", image, bytes, "");
             kfree(image);
             if (do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) != 0) {
@@ -5005,7 +5005,7 @@ static void boot_selftests_system(void) {
             }
             do_syscall(SYS_dup2, (uint64_t)out_file_descriptors[1], 1, 0);
 
-            image = read_program(PATH_BIN_DIR "nettime", &bytes);
+            image = read_program(PATH_BIN_DIRECTORY "nettime", &bytes);
             task_t *nt = process_spawn("nettime", image, bytes, "");
             kfree(image);
 
@@ -5019,8 +5019,8 @@ static void boot_selftests_system(void) {
             nettime_out[got > 0 ? got : 0] = '\0';
             do_syscall(SYS_close, (uint64_t)out_file_descriptors[0], 0, 0);
             do_syscall(SYS_close, (uint64_t)out_file_descriptors[1], 0, 0);
-            file_descriptor_release(&scheduler_current()->fds[1]);
-            scheduler_current()->fds[1].type = FD_STDOUT;
+            file_descriptor_release(&scheduler_current()->file_descriptors[1]);
+            scheduler_current()->file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
 
             if (elapsed_ms > 5000) {
                 kernel_log_puts("[m64] nettime took longer than its own deadline to give up\n");
@@ -5060,7 +5060,7 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
 
         size_t bytes = 0;
-        uint8_t *image = read_program(PATH_BIN_DIR "hello", &bytes);
+        uint8_t *image = read_program(PATH_BIN_DIRECTORY "hello", &bytes);
         task_t *plain = process_spawn("hello", image, bytes, "");
         kfree(image);
         uint32_t plain_caps = plain->caps;
@@ -5076,7 +5076,7 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
 
-        image = read_program(PATH_BIN_DIR "compositor", &bytes);
+        image = read_program(PATH_BIN_DIRECTORY "compositor", &bytes);
         task_t *comp = process_spawn("compositor", image, bytes, "");
         kfree(image);
         if (comp->caps != CAP_ALL) {
@@ -5103,7 +5103,7 @@ static void boot_selftests_system(void) {
             victim_pid[m] = '\0';
         }
 
-        image = read_program(PATH_BIN_DIR "captest", &bytes);
+        image = read_program(PATH_BIN_DIRECTORY "captest", &bytes);
         task_t *ct = process_spawn("captest", image, bytes, victim_pid);
         kfree(image);
         if (do_syscall(SYS_wait, (uint64_t)ct->id, 0, 0) != 0) {
@@ -5133,7 +5133,7 @@ static void boot_selftests_system(void) {
         int retransmits_before = tcp_debug_retransmits();
 
         size_t bytes = 0;
-        uint8_t *image = read_program(PATH_BIN_DIR "tcptest", &bytes);
+        uint8_t *image = read_program(PATH_BIN_DIRECTORY "tcptest", &bytes);
         task_t *t = process_spawn("tcptest", image, bytes, "");
         kfree(image);
         if (do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) != 0) {
@@ -5170,7 +5170,7 @@ static void boot_selftests_system(void) {
         int spawned = 0;
 
         size_t rbytes = 0;
-        uint8_t *rimage = read_program(PATH_BIN_DIR "racetest", &rbytes);
+        uint8_t *rimage = read_program(PATH_BIN_DIRECTORY "racetest", &rbytes);
         for (int i = 0; i < RACERS; i++) {
             racers[i] = process_spawn("racetest", rimage, rbytes, "");
             if (racers[i]) {
@@ -5214,7 +5214,7 @@ static void boot_selftests_system(void) {
 
     {
         size_t comp_bytes = 0;
-        uint8_t *comp_img = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
+        uint8_t *comp_img = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
         task_t *comp = process_spawn("compositor", comp_img, comp_bytes, "");
         kfree(comp_img);
 
@@ -5295,7 +5295,7 @@ static void boot_selftests_system(void) {
         const long OVERLAP = (long)sizeof(MARKER) - 2;
         long carry = 0;
         for (int pass = 0; pass < 256 && !found; pass++) {
-            long n = do_syscall4(SYS_klog, cursor, (uint64_t)(logbuf + carry),
+            long n = do_syscall4(SYS_kernel_log, cursor, (uint64_t)(logbuf + carry),
                                   sizeof(logbuf) - 1 - (uint64_t)carry, (uint64_t)&next);
             if (n <= 0) {
                 break;
@@ -5325,7 +5325,7 @@ static void boot_selftests_system(void) {
         }
 
         uint64_t end = kernel_log_written_total();
-        long none = do_syscall4(SYS_klog, end, (uint64_t)logbuf, sizeof(logbuf) - 1,
+        long none = do_syscall4(SYS_kernel_log, end, (uint64_t)logbuf, sizeof(logbuf) - 1,
                                  (uint64_t)&next);
         if (none != 0) {
             kernel_log_puts("[m70] a read from the end of the log returned bytes that were not "
@@ -5333,7 +5333,7 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
         kernel_log_puts("x\n");
-        long some = do_syscall4(SYS_klog, end, (uint64_t)logbuf, sizeof(logbuf) - 1,
+        long some = do_syscall4(SYS_kernel_log, end, (uint64_t)logbuf, sizeof(logbuf) - 1,
                                  (uint64_t)&next);
         if (some <= 0) {
             kernel_log_puts("[m70] the log did not advance after something was written to it\n");
@@ -5395,8 +5395,8 @@ static void boot_selftests_system(void) {
         static const char NEW_TEXT[] = "the version being written over it";
         static char readback[128];
 
-        const char *target = PATH_TMP_DIR "m71target";
-        const char *temp   = PATH_TMP_DIR "m71target.tmp~";
+        const char *target = PATH_TEMPORARY_DIRECTORY "m71target";
+        const char *temp   = PATH_TEMPORARY_DIRECTORY "m71target.tmp~";
 
         if (do_syscall(SYS_writefile, (uint64_t)target, (uint64_t)OLD_TEXT,
                         sizeof(OLD_TEXT) - 1) != 0 ||
@@ -5443,7 +5443,7 @@ static void boot_selftests_system(void) {
 
         static char filler[3000];
         k_memset(filler, 'z', sizeof(filler));
-        const char *doomed = PATH_TMP_DIR "m71orphan";
+        const char *doomed = PATH_TEMPORARY_DIRECTORY "m71orphan";
         if (do_syscall(SYS_writefile, (uint64_t)doomed, (uint64_t)filler, sizeof(filler)) != 0) {
             panic("M71 self-test: could not write the orphan fixture");
         }
@@ -5484,20 +5484,20 @@ static void boot_selftests_system(void) {
 
     {
         int all_ok = 1;
-        const char *script = PATH_TMP_DIR "m72.sh";
-        const char *result = PATH_TMP_DIR "m72.out";
+        const char *script = PATH_TEMPORARY_DIRECTORY "m72.sh";
+        const char *result = PATH_TEMPORARY_DIRECTORY "m72.out";
 
         static const char SCRIPT[] =
             "#!/bin/sh\n"
             "# a comment, which must not be run\n"
             "GREETING=hello\n"
             "NAME='lean os'\n"
-            "echo $GREETING \"$NAME\" > " PATH_TMP_DIR "m72.out\n"
+            "echo $GREETING \"$NAME\" > " PATH_TEMPORARY_DIRECTORY "m72.out\n"
             "notaprogram\n"
-            "echo status=$? >> " PATH_TMP_DIR "m72.out\n"
-            "cd " PATH_TMP_DIR " && echo and-ran >> " PATH_TMP_DIR "m72.out\n"
-            "notaprogram || echo or-ran >> " PATH_TMP_DIR "m72.out\n"
-            "notaprogram && echo must-not-run >> " PATH_TMP_DIR "m72.out\n";
+            "echo status=$? >> " PATH_TEMPORARY_DIRECTORY "m72.out\n"
+            "cd " PATH_TEMPORARY_DIRECTORY " && echo and-ran >> " PATH_TEMPORARY_DIRECTORY "m72.out\n"
+            "notaprogram || echo or-ran >> " PATH_TEMPORARY_DIRECTORY "m72.out\n"
+            "notaprogram && echo must-not-run >> " PATH_TEMPORARY_DIRECTORY "m72.out\n";
 
         if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                         sizeof(SCRIPT) - 1) != 0) {
@@ -5625,12 +5625,12 @@ static void boot_selftests_system(void) {
 
     {
         int all_ok = 1;
-        const char *script = PATH_TMP_DIR "m86.sh";
-        const char *result = PATH_TMP_DIR "m86.out";
+        const char *script = PATH_TEMPORARY_DIRECTORY "m86.sh";
+        const char *result = PATH_TEMPORARY_DIRECTORY "m86.out";
 
         static const char SCRIPT[] =
             "#!/bin/sh\n"
-            "out=" PATH_TMP_DIR "m86.out\n"
+            "out=" PATH_TEMPORARY_DIRECTORY "m86.out\n"
             "say() { echo \"func:$1\"; }\n"
             "say 'two words' > $out\n"
             "if false; then echo bad >> $out\n"
@@ -5652,7 +5652,7 @@ static void boot_selftests_system(void) {
             "echo \"after:$v\" >> $out\n"
             "PRIVATE=no\n"
             "export SHARED=yes\n"
-            "env | cat >> " PATH_TMP_DIR "m86.env\n"
+            "env | cat >> " PATH_TEMPORARY_DIRECTORY "m86.env\n"
             "cat >> $out <<END\n"
             "here:$v\n"
             "END\n"
@@ -5711,7 +5711,7 @@ static void boot_selftests_system(void) {
 
         static char env_seen[2048];
         k_memset(env_seen, 0, sizeof(env_seen));
-        int64_t en = virtual_file_system_read(PATH_TMP_DIR "m86.env", env_seen, sizeof(env_seen) - 1);
+        int64_t en = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m86.env", env_seen, sizeof(env_seen) - 1);
         if (en <= 0) {
             kernel_log_puts("[m86] `env` in a pipeline produced nothing\n");
             all_ok = 0;
@@ -5730,7 +5730,7 @@ static void boot_selftests_system(void) {
 
         do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
         do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
-        do_syscall(SYS_unlink, (uint64_t)PATH_TMP_DIR "m86.env", 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)PATH_TEMPORARY_DIRECTORY "m86.env", 0, 0);
 
         if (!all_ok) {
             kernel_log_puts("[m86] what the script actually wrote:\n");
@@ -5754,12 +5754,12 @@ static void boot_selftests_system(void) {
                        "`make toybox` installs it; see milestones.md M89.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m89.sh";
-            const char *result = PATH_TMP_DIR "m89.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m89.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m89.out";
 
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "d=" PATH_TMP_DIR "m89tree\n"
+                "d=" PATH_TEMPORARY_DIRECTORY "m89tree\n"
                 "rm -rf $d 2>/dev/null\n"
                 "mkdir -p $d/a $d/b\n"
                 "echo something > $d/a/one\n"
@@ -5767,8 +5767,8 @@ static void boot_selftests_system(void) {
                 "echo something > $d/b/three\n"
                 "cd $d\n"
                 "find . -type f | xargs grep -l something | sort | uniq -c | sort -rn "
-                    "> " PATH_TMP_DIR "m89.out\n"
-                "find . -type f | wc -l >> " PATH_TMP_DIR "m89.out\n";
+                    "> " PATH_TEMPORARY_DIRECTORY "m89.out\n"
+                "find . -type f | wc -l >> " PATH_TEMPORARY_DIRECTORY "m89.out\n";
 
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
@@ -5835,11 +5835,11 @@ static void boot_selftests_system(void) {
                        "tools/gcc-test.sh installs what it produces.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m94.sh";
-            const char *result = PATH_TMP_DIR "m94.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m94.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m94.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "/bin/gcctest > " PATH_TMP_DIR "m94.out\n";
+                "/bin/gcctest > " PATH_TEMPORARY_DIRECTORY "m94.out\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M94 self-test: could not write the script fixture");
@@ -5896,10 +5896,10 @@ static void boot_selftests_system(void) {
             if (do_syscall(SYS_stat, (uint64_t)"/bin/bzip2", (uint64_t)&tp, 0) == 0 &&
                 do_syscall(SYS_stat, (uint64_t)"/bin/gnuhello", (uint64_t)&tp, 0) == 0) {
                 int third_ok = 1;
-                const char *tscript = PATH_TMP_DIR "m94b.sh";
+                const char *tscript = PATH_TEMPORARY_DIRECTORY "m94b.sh";
                 static const char TSCRIPT[] =
                     "#!/bin/sh\n"
-                    "d=" PATH_TMP_DIR "m94t\n"
+                    "d=" PATH_TEMPORARY_DIRECTORY "m94t\n"
                     "rm -rf $d 2>/dev/null\n"
                     "mkdir -p $d\n"
                     "for i in 1 2 3 4 5 6 7 8; do\n"
@@ -5907,10 +5907,10 @@ static void boot_selftests_system(void) {
                     "done\n"
                     "cp $d/in $d/keep\n"
                     "/bin/bzip2 -z $d/in\n"
-                    "test -f $d/in || echo bzip2:consumed > " PATH_TMP_DIR "m94b.out\n"
+                    "test -f $d/in || echo bzip2:consumed > " PATH_TEMPORARY_DIRECTORY "m94b.out\n"
                     "/bin/bzip2 -d $d/in.bz2\n"
-                    "cmp $d/in $d/keep && echo bzip2:roundtrip >> " PATH_TMP_DIR "m94b.out\n"
-                    "/bin/gnuhello >> " PATH_TMP_DIR "m94b.out\n";
+                    "cmp $d/in $d/keep && echo bzip2:roundtrip >> " PATH_TEMPORARY_DIRECTORY "m94b.out\n"
+                    "/bin/gnuhello >> " PATH_TEMPORARY_DIRECTORY "m94b.out\n";
                 if (do_syscall(SYS_writefile, (uint64_t)tscript, (uint64_t)TSCRIPT,
                                 sizeof(TSCRIPT) - 1) != 0) {
                     panic("M94 self-test: could not write the third-party fixture");
@@ -5924,7 +5924,7 @@ static void boot_selftests_system(void) {
                 }
                 static char tout[512];
                 k_memset(tout, 0, sizeof(tout));
-                int64_t tn = virtual_file_system_read(PATH_TMP_DIR "m94b.out", tout, sizeof(tout) - 1);
+                int64_t tn = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "m94b.out", tout, sizeof(tout) - 1);
                 if (tn <= 0) {
                     kernel_log_puts("[m94] neither ported program produced output\n");
                     third_ok = 0;
@@ -5946,7 +5946,7 @@ static void boot_selftests_system(void) {
                     }
                 }
                 do_syscall(SYS_unlink, (uint64_t)tscript, 0, 0);
-                do_syscall(SYS_unlink, (uint64_t)PATH_TMP_DIR "m94b.out", 0, 0);
+                do_syscall(SYS_unlink, (uint64_t)PATH_TEMPORARY_DIRECTORY "m94b.out", 0, 0);
                 if (!third_ok) {
                     kernel_log_puts("[m94] what they wrote:\n");
                     kernel_log_puts(tout);
@@ -5982,29 +5982,29 @@ static void boot_selftests_system(void) {
         } else {
             int all_ok = 1;
             int gcc_here = 0;
-            const char *script = PATH_TMP_DIR "m98.sh";
-            const char *result = PATH_TMP_DIR "m98.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m98.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m98.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "cd " PATH_TMP_DIR "\n"
+                "cd " PATH_TEMPORARY_DIRECTORY "\n"
                 "as /tests/binutils-hello.s -o m98.o\n"
-                "nm m98.o > " PATH_TMP_DIR "m98.out\n"
+                "nm m98.o > " PATH_TEMPORARY_DIRECTORY "m98.out\n"
                 "ar rcs m98.a m98.o\n"
-                "ar t m98.a >> " PATH_TMP_DIR "m98.out\n"
+                "ar t m98.a >> " PATH_TEMPORARY_DIRECTORY "m98.out\n"
                 "ld m98.o -o m98\n"
                 "strip m98\n"
-                "objdump -d m98 >> " PATH_TMP_DIR "m98.out\n"
-                "./m98 >> " PATH_TMP_DIR "m98.out\n"
+                "objdump -d m98 >> " PATH_TEMPORARY_DIRECTORY "m98.out\n"
+                "./m98 >> " PATH_TEMPORARY_DIRECTORY "m98.out\n"
                 "gcc /tests/m98c.c -o m98c\n"
-                "./m98c >> " PATH_TMP_DIR "m98.out\n"
+                "./m98c >> " PATH_TEMPORARY_DIRECTORY "m98.out\n"
                 "mkdir -p m98prj\n"
                 "cd m98prj\n"
                 "cp /tests/m98mk/Makefile Makefile\n"
                 "cp /tests/m98mk/main.c main.c\n"
                 "cp /tests/m98mk/lib.c lib.c\n"
-                "make >> " PATH_TMP_DIR "m98.out\n"
-                "./prog >> " PATH_TMP_DIR "m98.out\n"
-                "make >> " PATH_TMP_DIR "m98.out\n";
+                "make >> " PATH_TEMPORARY_DIRECTORY "m98.out\n"
+                "./prog >> " PATH_TEMPORARY_DIRECTORY "m98.out\n"
+                "make >> " PATH_TEMPORARY_DIRECTORY "m98.out\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M98 self-test: could not write the script fixture");
@@ -6072,10 +6072,10 @@ static void boot_selftests_system(void) {
 
             do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
-            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98.o"), 0, 0);
-            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98.a"), 0, 0);
-            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98"), 0, 0);
-            do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98c"), 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m98.o"), 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m98.a"), 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m98"), 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m98c"), 0, 0);
 
             if (!all_ok) {
                 kernel_log_puts("[m98] what the toolchain actually wrote:\n");
@@ -6109,11 +6109,11 @@ static void boot_selftests_system(void) {
                        "tools/install-python.sh puts it here.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m99.sh";
-            const char *result = PATH_TMP_DIR "m99.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m99.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m99.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "/bin/python3 /tests/python/m99.py > " PATH_TMP_DIR "m99.out\n";
+                "/bin/python3 /tests/python/m99.py > " PATH_TEMPORARY_DIRECTORY "m99.out\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M99 self-test: could not write the fixture");
@@ -6242,11 +6242,11 @@ static void boot_selftests_system(void) {
                        "tools/build-dynamic.sh builds it.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m95.sh";
-            const char *result = PATH_TMP_DIR "m95.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m95.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m95.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "/bin/dyntest > " PATH_TMP_DIR "m95.out\n";
+                "/bin/dyntest > " PATH_TEMPORARY_DIRECTORY "m95.out\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M95 self-test: could not write the fixture");
@@ -6397,25 +6397,25 @@ static void boot_selftests_system(void) {
                        "tools/build-thirdparty.sh builds zlib.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m100.sh";
-            const char *result = PATH_TMP_DIR "m100.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m100.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m100.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "cd " PATH_TMP_DIR "\n"
-                "/bin/zlibtest > " PATH_TMP_DIR "m100.out 2>&1\n"
-                "echo \"zlibtest exit $?\" >> " PATH_TMP_DIR "m100.out\n"
+                "cd " PATH_TEMPORARY_DIRECTORY "\n"
+                "/bin/zlibtest > " PATH_TEMPORARY_DIRECTORY "m100.out 2>&1\n"
+                "echo \"zlibtest exit $?\" >> " PATH_TEMPORARY_DIRECTORY "m100.out\n"
                 "echo 'the quick brown fox, and enough text after it that "
                 "deflate has something to find - the quick brown fox, and "
                 "enough text after it that deflate has something to find' "
-                "> " PATH_TMP_DIR "m100.txt\n"
-                "/bin/minigzip < " PATH_TMP_DIR "m100.txt > "
-                PATH_TMP_DIR "m100.gz\n"
-                "/bin/minigzip -d < " PATH_TMP_DIR "m100.gz > "
-                PATH_TMP_DIR "m100.back\n"
-                "toybox cmp " PATH_TMP_DIR "m100.txt " PATH_TMP_DIR "m100.back"
-                " && echo 'round trip identical' >> " PATH_TMP_DIR "m100.out\n"
-                "toybox rm -f " PATH_TMP_DIR "m100.txt " PATH_TMP_DIR
-                "m100.gz " PATH_TMP_DIR "m100.back foo.gz\n";
+                "> " PATH_TEMPORARY_DIRECTORY "m100.txt\n"
+                "/bin/minigzip < " PATH_TEMPORARY_DIRECTORY "m100.txt > "
+                PATH_TEMPORARY_DIRECTORY "m100.gz\n"
+                "/bin/minigzip -d < " PATH_TEMPORARY_DIRECTORY "m100.gz > "
+                PATH_TEMPORARY_DIRECTORY "m100.back\n"
+                "toybox cmp " PATH_TEMPORARY_DIRECTORY "m100.txt " PATH_TEMPORARY_DIRECTORY "m100.back"
+                " && echo 'round trip identical' >> " PATH_TEMPORARY_DIRECTORY "m100.out\n"
+                "toybox rm -f " PATH_TEMPORARY_DIRECTORY "m100.txt " PATH_TEMPORARY_DIRECTORY
+                "m100.gz " PATH_TEMPORARY_DIRECTORY "m100.back foo.gz\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M100 self-test: could not write the fixture");
@@ -6476,13 +6476,13 @@ static void boot_selftests_system(void) {
                        "tools/build-thirdparty.sh builds libpng and libjpeg.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m100b.sh";
-            const char *result = PATH_TMP_DIR "m100b.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m100b.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m100b.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "cd " PATH_TMP_DIR "\n"
+                "cd " PATH_TEMPORARY_DIRECTORY "\n"
                 "D=/usr/share/m100\n"
-                "O=" PATH_TMP_DIR "m100b.out\n"
+                "O=" PATH_TEMPORARY_DIRECTORY "m100b.out\n"
                 "/bin/djpeg -dct int -ppm -outfile jout.ppm $D/testorig.jpg\n"
                 "/bin/djpeg -dct int -gif -outfile jout.gif $D/testorig.jpg\n"
                 "/bin/djpeg -dct int -bmp -colors 256 -outfile jout.bmp "
@@ -6502,13 +6502,13 @@ static void boot_selftests_system(void) {
                 " encode' >> $O\n"
                 "toybox cmp $D/testorig.jpg joutt.jpg && echo 'jpeg transcode'"
                 " >> $O\n"
-                "/bin/pngtest --strict $D/pngtest.png > " PATH_TMP_DIR
+                "/bin/pngtest --strict $D/pngtest.png > " PATH_TEMPORARY_DIRECTORY
                 "m100b.png.log 2>&1\n"
                 "echo \"pngtest exit $?\" >> $O\n"
-                "toybox grep -h 'libpng passes test' " PATH_TMP_DIR
+                "toybox grep -h 'libpng passes test' " PATH_TEMPORARY_DIRECTORY
                 "m100b.png.log >> $O\n"
                 "toybox rm -f jout.ppm jout.gif jout.bmp jout.jpg joutp.ppm"
-                " joutp.jpg joutt.jpg pngout.png " PATH_TMP_DIR
+                " joutp.jpg joutt.jpg pngout.png " PATH_TEMPORARY_DIRECTORY
                 "m100b.png.log\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
@@ -6586,20 +6586,20 @@ static void boot_selftests_system(void) {
                        "tools/build-thirdparty.sh builds freetype and expat.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m100c.sh";
-            const char *result = PATH_TMP_DIR "m100c.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m100c.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m100c.out";
             static const char FT_SCRIPT[] =
                 "#!/bin/sh\n"
-                "cd " PATH_TMP_DIR "\n"
+                "cd " PATH_TEMPORARY_DIRECTORY "\n"
                 "D=/usr/share/m100\n"
-                "O=" PATH_TMP_DIR "m100c.out\n"
-                "/bin/ftrender $D/DejaVuSans.ttf > " PATH_TMP_DIR "m100c.ft.txt 2>&1\n"
+                "O=" PATH_TEMPORARY_DIRECTORY "m100c.out\n"
+                "/bin/ftrender $D/DejaVuSans.ttf > " PATH_TEMPORARY_DIRECTORY "m100c.ft.txt 2>&1\n"
                 "echo \"ftrender exit $?\" >> $O\n"
-                "toybox cmp $D/ftrender.expected " PATH_TMP_DIR "m100c.ft.txt"
+                "toybox cmp $D/ftrender.expected " PATH_TEMPORARY_DIRECTORY "m100c.ft.txt"
                 " && echo 'freetype agrees with the host' >> $O\n"
-                "toybox tail -n 1 " PATH_TMP_DIR "m100c.ft.txt >> $O\n"
+                "toybox tail -n 1 " PATH_TEMPORARY_DIRECTORY "m100c.ft.txt >> $O\n"
                 "echo \"host: $(toybox tail -n 1 $D/ftrender.expected)\" >> $O\n"
-                "toybox rm -f " PATH_TMP_DIR "m100c.ft.txt\n";
+                "toybox rm -f " PATH_TEMPORARY_DIRECTORY "m100c.ft.txt\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)FT_SCRIPT,
                             sizeof(FT_SCRIPT) - 1) != 0) {
                 panic("M100c self-test: could not write the freetype fixture");
@@ -6648,17 +6648,17 @@ static void boot_selftests_system(void) {
 
             static const char XML_SCRIPT[] =
                 "#!/bin/sh\n"
-                "cd " PATH_TMP_DIR "\n"
-                "O=" PATH_TMP_DIR "m100c.out\n"
-                "/bin/expattest > " PATH_TMP_DIR "m100c.expat.txt 2>&1\n"
+                "cd " PATH_TEMPORARY_DIRECTORY "\n"
+                "O=" PATH_TEMPORARY_DIRECTORY "m100c.out\n"
+                "/bin/expattest > " PATH_TEMPORARY_DIRECTORY "m100c.expat.txt 2>&1\n"
                 "echo \"expattest exit $?\" >> $O\n"
-                "toybox grep -h 'Checks:' " PATH_TMP_DIR "m100c.expat.txt >> $O\n"
-                "echo '<a><b x=\"1\">hi</b></a>' > " PATH_TMP_DIR "m100c.xml\n"
-                "/bin/xmlwf " PATH_TMP_DIR "m100c.xml && echo 'xmlwf well-formed' >> $O\n"
-                "echo '<a><b></a>' > " PATH_TMP_DIR "m100c.bad.xml\n"
-                "/bin/xmlwf " PATH_TMP_DIR "m100c.bad.xml >> $O 2>&1\n"
-                "toybox rm -f " PATH_TMP_DIR "m100c.expat.txt " PATH_TMP_DIR
-                "m100c.xml " PATH_TMP_DIR "m100c.bad.xml\n";
+                "toybox grep -h 'Checks:' " PATH_TEMPORARY_DIRECTORY "m100c.expat.txt >> $O\n"
+                "echo '<a><b x=\"1\">hi</b></a>' > " PATH_TEMPORARY_DIRECTORY "m100c.xml\n"
+                "/bin/xmlwf " PATH_TEMPORARY_DIRECTORY "m100c.xml && echo 'xmlwf well-formed' >> $O\n"
+                "echo '<a><b></a>' > " PATH_TEMPORARY_DIRECTORY "m100c.bad.xml\n"
+                "/bin/xmlwf " PATH_TEMPORARY_DIRECTORY "m100c.bad.xml >> $O 2>&1\n"
+                "toybox rm -f " PATH_TEMPORARY_DIRECTORY "m100c.expat.txt " PATH_TEMPORARY_DIRECTORY
+                "m100c.xml " PATH_TEMPORARY_DIRECTORY "m100c.bad.xml\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)XML_SCRIPT,
                             sizeof(XML_SCRIPT) - 1) != 0) {
                 panic("M100c self-test: could not write the expat fixture");
@@ -6726,22 +6726,22 @@ static void boot_selftests_system(void) {
                        "tools/build-thirdparty.sh builds sqlite.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m100d.sh";
-            const char *result = PATH_TMP_DIR "m100d.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m100d.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m100d.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "cd " PATH_TMP_DIR "\n"
+                "cd " PATH_TEMPORARY_DIRECTORY "\n"
                 "D=/usr/share/m100\n"
-                "O=" PATH_TMP_DIR "m100d.out\n"
-                "toybox rm -f " PATH_TMP_DIR "m100d.db " PATH_TMP_DIR "m100d.db-journal\n"
-                "/bin/sqlite3 -batch -bail " PATH_TMP_DIR "m100d.db < $D/cases.sql > "
-                PATH_TMP_DIR "m100d.txt 2>&1\n"
+                "O=" PATH_TEMPORARY_DIRECTORY "m100d.out\n"
+                "toybox rm -f " PATH_TEMPORARY_DIRECTORY "m100d.db " PATH_TEMPORARY_DIRECTORY "m100d.db-journal\n"
+                "/bin/sqlite3 -batch -bail " PATH_TEMPORARY_DIRECTORY "m100d.db < $D/cases.sql > "
+                PATH_TEMPORARY_DIRECTORY "m100d.txt 2>&1\n"
                 "echo \"sqlite3 exit $?\" >> $O\n"
-                "toybox cmp $D/sqlite.expected " PATH_TMP_DIR "m100d.txt"
+                "toybox cmp $D/sqlite.expected " PATH_TEMPORARY_DIRECTORY "m100d.txt"
                 " && echo 'sqlite agrees with the host' >> $O\n"
-                "toybox tail -n 3 " PATH_TMP_DIR "m100d.txt >> $O\n"
-                "toybox rm -f " PATH_TMP_DIR "m100d.txt " PATH_TMP_DIR "m100d.db "
-                PATH_TMP_DIR "m100d.db-journal\n";
+                "toybox tail -n 3 " PATH_TEMPORARY_DIRECTORY "m100d.txt >> $O\n"
+                "toybox rm -f " PATH_TEMPORARY_DIRECTORY "m100d.txt " PATH_TEMPORARY_DIRECTORY "m100d.db "
+                PATH_TEMPORARY_DIRECTORY "m100d.db-journal\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M100d self-test: could not write the sqlite fixture");
@@ -6812,20 +6812,20 @@ static void boot_selftests_system(void) {
                        "tools/build-thirdparty.sh builds harfbuzz.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m100e.sh";
-            const char *result = PATH_TMP_DIR "m100e.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m100e.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m100e.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "cd " PATH_TMP_DIR "\n"
+                "cd " PATH_TEMPORARY_DIRECTORY "\n"
                 "D=/usr/share/m100\n"
-                "O=" PATH_TMP_DIR "m100e.out\n"
-                "/bin/hbshape $D/DejaVuSans.ttf > " PATH_TMP_DIR "m100e.txt 2>&1\n"
+                "O=" PATH_TEMPORARY_DIRECTORY "m100e.out\n"
+                "/bin/hbshape $D/DejaVuSans.ttf > " PATH_TEMPORARY_DIRECTORY "m100e.txt 2>&1\n"
                 "echo \"hbshape exit $?\" >> $O\n"
-                "toybox cmp $D/hbshape.expected " PATH_TMP_DIR "m100e.txt"
+                "toybox cmp $D/hbshape.expected " PATH_TEMPORARY_DIRECTORY "m100e.txt"
                 " && echo 'harfbuzz agrees with the host' >> $O\n"
-                "toybox tail -n 1 " PATH_TMP_DIR "m100e.txt >> $O\n"
+                "toybox tail -n 1 " PATH_TEMPORARY_DIRECTORY "m100e.txt >> $O\n"
                 "echo \"host: $(toybox tail -n 1 $D/hbshape.expected)\" >> $O\n"
-                "toybox rm -f " PATH_TMP_DIR "m100e.txt\n";
+                "toybox rm -f " PATH_TEMPORARY_DIRECTORY "m100e.txt\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M100e self-test: could not write the harfbuzz fixture");
@@ -6888,33 +6888,33 @@ static void boot_selftests_system(void) {
                        "tools/build-thirdparty.sh builds mbedtls.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m100f.sh";
-            const char *result = PATH_TMP_DIR "m100f.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m100f.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m100f.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "cd " PATH_TMP_DIR "\n"
+                "cd " PATH_TEMPORARY_DIRECTORY "\n"
                 "D=/usr/share/m100\n"
-                "O=" PATH_TMP_DIR "m100f.out\n"
+                "O=" PATH_TEMPORARY_DIRECTORY "m100f.out\n"
                 "/bin/ssl_server2 server_addr=127.0.0.1 server_port=4433 debug_level=1 > "
-                PATH_TMP_DIR "m100f.srv.txt 2>&1 &\n"
+                PATH_TEMPORARY_DIRECTORY "m100f.srv.txt 2>&1 &\n"
                 "toybox sleep 8\n"
                 "/bin/ssl_client2 server_addr=127.0.0.1 server_name=localhost "
-                "server_port=4433 debug_level=1 > " PATH_TMP_DIR "m100f.c2.txt 2>&1\n"
+                "server_port=4433 debug_level=1 > " PATH_TEMPORARY_DIRECTORY "m100f.c2.txt 2>&1\n"
                 "echo \"ssl_client2 exit $?\" >> $O\n"
                 "toybox grep -h 'TLS1-3\\|Protocol is\\|HTTP/1.0 200' "
-                PATH_TMP_DIR "m100f.c2.txt >> $O\n"
+                PATH_TEMPORARY_DIRECTORY "m100f.c2.txt >> $O\n"
                 "echo '--- client tail:' >> $O\n"
-                "toybox tail -n 12 " PATH_TMP_DIR "m100f.c2.txt >> $O\n"
+                "toybox tail -n 12 " PATH_TEMPORARY_DIRECTORY "m100f.c2.txt >> $O\n"
                 "echo '--- server tail:' >> $O\n"
-                "toybox tail -n 12 " PATH_TMP_DIR "m100f.srv.txt >> $O\n"
+                "toybox tail -n 12 " PATH_TEMPORARY_DIRECTORY "m100f.srv.txt >> $O\n"
                 "/bin/httpsget localhost 4433 $D/mbedtls-test-ca.pem / > "
-                PATH_TMP_DIR "m100f.hg.txt 2>&1\n"
+                PATH_TEMPORARY_DIRECTORY "m100f.hg.txt 2>&1\n"
                 "echo \"httpsget exit $?\" >> $O\n"
-                "toybox grep -h 'httpsget: \\|Mbed TLS Test Server' " PATH_TMP_DIR "m100f.hg.txt >> $O\n"
+                "toybox grep -h 'httpsget: \\|Mbed TLS Test Server' " PATH_TEMPORARY_DIRECTORY "m100f.hg.txt >> $O\n"
                 "/bin/httpsget 127.0.0.1 4433 $D/mbedtls-test-ca.pem / > "
-                PATH_TMP_DIR "m100f.bad.txt 2>&1\n"
+                PATH_TEMPORARY_DIRECTORY "m100f.bad.txt 2>&1\n"
                 "echo \"httpsget wrong-name exit $?\" >> $O\n"
-                "toybox grep -h 'does not match\\|CN mismatch' " PATH_TMP_DIR "m100f.bad.txt >> $O\n"
+                "toybox grep -h 'does not match\\|CN mismatch' " PATH_TEMPORARY_DIRECTORY "m100f.bad.txt >> $O\n"
                 "toybox killall ssl_server2\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
@@ -6989,18 +6989,18 @@ static void boot_selftests_system(void) {
                        "tools/build-thirdparty.sh builds them.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m100g.sh";
-            const char *result = PATH_TMP_DIR "m100g.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m100g.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m100g.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
                 "cd /usr/share/m100/mbedtls\n"
-                "O=" PATH_TMP_DIR "m100g.out\n"
+                "O=" PATH_TEMPORARY_DIRECTORY "m100g.out\n"
                 "for s in test_suite_*; do\n"
                 "  case $s in *.datax) continue;; esac\n"
-                "  ./$s $s.datax > " PATH_TMP_DIR "m100g.one.txt 2>&1\n"
-                "  echo \"$s: $(toybox tail -n 1 " PATH_TMP_DIR "m100g.one.txt)\" >> $O\n"
+                "  ./$s $s.datax > " PATH_TEMPORARY_DIRECTORY "m100g.one.txt 2>&1\n"
+                "  echo \"$s: $(toybox tail -n 1 " PATH_TEMPORARY_DIRECTORY "m100g.one.txt)\" >> $O\n"
                 "done\n"
-                "toybox rm -f " PATH_TMP_DIR "m100g.one.txt\n";
+                "toybox rm -f " PATH_TEMPORARY_DIRECTORY "m100g.one.txt\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M100g self-test: could not write the fixture");
@@ -7072,11 +7072,11 @@ static void boot_selftests_system(void) {
                        "tools/build-dynamic.sh builds it.\n\n");
         } else {
             int all_ok = 1;
-            const char *script = PATH_TMP_DIR "m99ld.sh";
-            const char *result = PATH_TMP_DIR "m99ld.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m99ld.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m99ld.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "/bin/manydyn > " PATH_TMP_DIR "m99ld.out\n";
+                "/bin/manydyn > " PATH_TEMPORARY_DIRECTORY "m99ld.out\n";
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
                             sizeof(SCRIPT) - 1) != 0) {
                 panic("M99 loader self-test: could not write the fixture");
@@ -7134,8 +7134,8 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
 
         size_t ns_bytes = 0;
-        uint8_t *ns_img = read_program(PATH_BIN_DIR "nslookup", &ns_bytes);
-        const char *ns_argv[] = {PATH_BIN_DIR "nslookup", "-s", 0};
+        uint8_t *ns_img = read_program(PATH_BIN_DIRECTORY "nslookup", &ns_bytes);
+        const char *ns_argv[] = {PATH_BIN_DIRECTORY "nslookup", "-s", 0};
         task_t *ns = process_spawnv("nslookup", ns_img, ns_bytes, ns_argv);
         kfree(ns_img);
         if (!ns || do_syscall(SYS_wait, (uint64_t)ns->id, 0, 0) != 0) {
@@ -7144,16 +7144,16 @@ static void boot_selftests_system(void) {
         }
 
         size_t hd_bytes = 0;
-        uint8_t *hd_img = read_program(PATH_BIN_DIR "httpd", &hd_bytes);
-        const char *hd_argv[] = {PATH_BIN_DIR "httpd", "8081", 0};
+        uint8_t *hd_img = read_program(PATH_BIN_DIRECTORY "httpd", &hd_bytes);
+        const char *hd_argv[] = {PATH_BIN_DIRECTORY "httpd", "8081", 0};
         task_t *hd = process_spawnv("httpd", hd_img, hd_bytes, hd_argv);
         kfree(hd_img);
         pit_sleep_ms(300);
 
-        const char *FETCHED = PATH_TMP_DIR "m73.txt";
+        const char *FETCHED = PATH_TEMPORARY_DIRECTORY "m73.txt";
         size_t ft_bytes = 0;
-        uint8_t *ft_img = read_program(PATH_BIN_DIR "fetch", &ft_bytes);
-        const char *ft_argv[] = {PATH_BIN_DIR "fetch",
+        uint8_t *ft_img = read_program(PATH_BIN_DIRECTORY "fetch", &ft_bytes);
+        const char *ft_argv[] = {PATH_BIN_DIRECTORY "fetch",
                                   "http://127.0.0.1:8081/hello", FETCHED, 0};
         task_t *ft = process_spawnv("fetch", ft_img, ft_bytes, ft_argv);
         kfree(ft_img);
@@ -7168,10 +7168,10 @@ static void boot_selftests_system(void) {
         static const char EXPECT[] = "lean_os fetched this over loopback\n";
         static char fetched[128];
         k_memset(fetched, 0, sizeof(fetched));
-        int64_t fn = virtual_file_system_read(FETCHED, fetched, sizeof(fetched) - 1);
-        if (fn != (int64_t)sizeof(EXPECT) - 1 || k_strcmp(fetched, EXPECT) != 0) {
+        int64_t function = virtual_file_system_read(FETCHED, fetched, sizeof(fetched) - 1);
+        if (function != (int64_t)sizeof(EXPECT) - 1 || k_strcmp(fetched, EXPECT) != 0) {
             kernel_log_puts("[m73] the fetched file is not what the server sent - got ");
-            kernel_log_put_dec((uint32_t)(fn < 0 ? 0 : fn));
+            kernel_log_put_dec((uint32_t)(function < 0 ? 0 : function));
             kernel_log_puts(" byte(s)\n");
             all_ok = 0;
         }
@@ -7193,7 +7193,7 @@ static void boot_selftests_system(void) {
 
     {
         int all_ok = 1;
-        const char *SESSION = PATH_ETC_DIR "session.conf";
+        const char *SESSION = PATH_ETC_DIRECTORY "session.conf";
         static char saved_session[512];
         int64_t saved_session_length = virtual_file_system_read(SESSION, saved_session, sizeof(saved_session));
         if (saved_session_length > (int64_t)sizeof(saved_session)) {
@@ -7212,8 +7212,8 @@ static void boot_selftests_system(void) {
                    sizeof(SELFTEST_SETTINGS_NO_ANIM) - 1);
 
         size_t comp_bytes = 0;
-        uint8_t *comp_img = read_program(PATH_BIN_DIR "compositor", &comp_bytes);
-        const char *comp_argv[] = {PATH_BIN_DIR "compositor", 0};
+        uint8_t *comp_img = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
+        const char *comp_argv[] = {PATH_BIN_DIRECTORY "compositor", 0};
         const char *comp_envp[] = {"LEANOS_SESSION=1", 0};
         task_t *comp = process_spawnve("compositor", comp_img, comp_bytes, comp_argv, comp_envp);
         kfree(comp_img);
@@ -7230,7 +7230,7 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_unlink, (uint64_t)SESSION, 0, 0);
 
         size_t z_bytes = 0;
-        uint8_t *z_img = read_program(PATH_BIN_DIR "wm_zorder", &z_bytes);
+        uint8_t *z_img = read_program(PATH_BIN_DIRECTORY "wm_zorder", &z_bytes);
         task_t *second = process_spawn("wm_zorder", z_img, z_bytes, "s2 00C08040");
         kfree(z_img);
         pit_sleep_ms(3000);
@@ -7287,27 +7287,27 @@ static void boot_selftests_system(void) {
 
     {
         int all_ok = 1;
-        const char *DIR_A = PATH_TMP_DIR "m75a";
-        const char *DIR_B = PATH_TMP_DIR "m75b";
-        do_syscall(SYS_mkdir, (uint64_t)DIR_A, 0, 0);
-        do_syscall(SYS_mkdir, (uint64_t)DIR_B, 0, 0);
-        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75a/alpha"), 0, 0);
-        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75b/beta"), 0, 0);
+        const char *DIRECTORY_A = PATH_TEMPORARY_DIRECTORY "m75a";
+        const char *DIRECTORY_B = PATH_TEMPORARY_DIRECTORY "m75b";
+        do_syscall(SYS_mkdir, (uint64_t)DIRECTORY_A, 0, 0);
+        do_syscall(SYS_mkdir, (uint64_t)DIRECTORY_B, 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m75a/alpha"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m75b/beta"), 0, 0);
 
         static const char SELF_ENV[] = "M75_ABSENT=1\0M75_OUT=wrong\0M75_BODY=wrong";
         scheduler_set_env(scheduler_current(), SELF_ENV, sizeof(SELF_ENV) - 1, 3);
 
         size_t et_bytes = 0;
-        uint8_t *et_img = read_program(PATH_BIN_DIR "envtest", &et_bytes);
+        uint8_t *et_img = read_program(PATH_BIN_DIRECTORY "envtest", &et_bytes);
         if (!et_img) {
             panic("M75 self-test: /bin/envtest is not on this disk");
         }
 
-        if (do_syscall(SYS_chdir, (uint64_t)DIR_A, 0, 0) != 0) {
+        if (do_syscall(SYS_chdir, (uint64_t)DIRECTORY_A, 0, 0) != 0) {
             panic("M75 self-test: chdir into the fixture directory failed");
         }
         {
-            const char *argv[] = {PATH_BIN_DIR "envtest", 0};
+            const char *argv[] = {PATH_BIN_DIRECTORY "envtest", 0};
             const char *envp[] = {"M75_OUT=alpha", "M75_BODY=first", 0};
             task_t *t = process_spawnve("envtest", et_img, et_bytes, argv, envp);
             long rc = t ? do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) : -1;
@@ -7325,20 +7325,20 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
         {
-            char where[PATH_MAX_LEN];
+            char where[PATH_MAX_LENGTH];
             k_memset(where, 0, sizeof(where));
             long n = do_syscall(SYS_getcwd, (uint64_t)where, sizeof(where), 0);
-            if (n < 0 || k_strcmp(where, DIR_B) != 0) {
+            if (n < 0 || k_strcmp(where, DIRECTORY_B) != 0) {
                 kernel_log_puts("[m75] after `cd ../m75b` the directory is '");
                 kernel_log_puts(where);
                 kernel_log_puts("' rather than ");
-                kernel_log_puts(DIR_B);
+                kernel_log_puts(DIRECTORY_B);
                 kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         {
-            const char *argv[] = {PATH_BIN_DIR "envtest", 0};
+            const char *argv[] = {PATH_BIN_DIRECTORY "envtest", 0};
             const char *envp[] = {"M75_OUT=beta", "M75_BODY=second", 0};
             task_t *t = process_spawnve("envtest", et_img, et_bytes, argv, envp);
             long rc = t ? do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) : -1;
@@ -7355,11 +7355,11 @@ static void boot_selftests_system(void) {
             const char *path;
             const char *expect;
         } LANDED[] = {
-            {PATH_TMP_DIR "m75a/alpha", PATH_TMP_DIR "m75a first"},
-            {PATH_TMP_DIR "m75b/beta",  PATH_TMP_DIR "m75b second"},
+            {PATH_TEMPORARY_DIRECTORY "m75a/alpha", PATH_TEMPORARY_DIRECTORY "m75a first"},
+            {PATH_TEMPORARY_DIRECTORY "m75b/beta",  PATH_TEMPORARY_DIRECTORY "m75b second"},
         };
         for (size_t i = 0; i < sizeof(LANDED) / sizeof(LANDED[0]); i++) {
-            static char got[PATH_MAX_LEN + 64];
+            static char got[PATH_MAX_LENGTH + 64];
             k_memset(got, 0, sizeof(got));
             int64_t n = virtual_file_system_read(LANDED[i].path, got, sizeof(got) - 1);
             if (n <= 0) {
@@ -7383,11 +7383,11 @@ static void boot_selftests_system(void) {
         }
 
         {
-            const char *SCRIPT = PATH_TMP_DIR "m75.sh";
-            const char *RESULT = PATH_TMP_DIR "m75a/fromsh";
+            const char *SCRIPT = PATH_TEMPORARY_DIRECTORY "m75.sh";
+            const char *RESULT = PATH_TEMPORARY_DIRECTORY "m75a/fromsh";
             static const char SH[] =
                 "#!/bin/sh\n"
-                "cd " PATH_TMP_DIR "\n"
+                "cd " PATH_TEMPORARY_DIRECTORY "\n"
                 "cd m75a\n"
                 "M75_SHELL=exported\n"
                 "export M75_SHELL\n"
@@ -7417,7 +7417,7 @@ static void boot_selftests_system(void) {
                 shout[n] = '\0';
                 static const struct { const char *needle; const char *what; } WANT[] = {
                     {"M75_SHELL=exported", "a shell assignment reaching a spawned program's environment"},
-                    {PATH_TMP_DIR "m75a",  "`pwd` reporting the directory two relative cds arrived at"},
+                    {PATH_TEMPORARY_DIRECTORY "m75a",  "`pwd` reporting the directory two relative cds arrived at"},
                 };
                 for (size_t w = 0; w < sizeof(WANT) / sizeof(WANT[0]); w++) {
                     if (!selftest_contains(shout, WANT[w].needle)) {
@@ -7434,10 +7434,10 @@ static void boot_selftests_system(void) {
 
         do_syscall(SYS_chdir, (uint64_t)"/", 0, 0);
         scheduler_release_env(scheduler_current());
-        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75a/alpha"), 0, 0);
-        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75b/beta"), 0, 0);
-        do_syscall(SYS_rmdir, (uint64_t)DIR_A, 0, 0);
-        do_syscall(SYS_rmdir, (uint64_t)DIR_B, 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m75a/alpha"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m75b/beta"), 0, 0);
+        do_syscall(SYS_rmdir, (uint64_t)DIRECTORY_A, 0, 0);
+        do_syscall(SYS_rmdir, (uint64_t)DIRECTORY_B, 0, 0);
 
         if (!all_ok) {
             panic("M75 self-test: there is still nowhere to stand and nothing to stand there with");
@@ -7452,17 +7452,17 @@ static void boot_selftests_system(void) {
 
     {
         int all_ok = 1;
-        const char *READY = PATH_TMP_DIR "m76ready";
-        const char *ALIVE = PATH_TMP_DIR "m76alive";
+        const char *READY = PATH_TEMPORARY_DIRECTORY "m76ready";
+        const char *ALIVE = PATH_TEMPORARY_DIRECTORY "m76alive";
         do_syscall(SYS_unlink, (uint64_t)READY, 0, 0);
         do_syscall(SYS_unlink, (uint64_t)ALIVE, 0, 0);
 
         size_t st_bytes = 0;
-        uint8_t *st_img = read_program(PATH_BIN_DIR "sigtest", &st_bytes);
+        uint8_t *st_img = read_program(PATH_BIN_DIRECTORY "sigtest", &st_bytes);
         if (!st_img) {
             panic("M76 self-test: /bin/sigtest is not on this disk");
         }
-        const char *st_argv[] = {PATH_BIN_DIR "sigtest", 0};
+        const char *st_argv[] = {PATH_BIN_DIRECTORY "sigtest", 0};
         task_t *st = process_spawnv("sigtest", st_img, st_bytes, st_argv);
         if (!st) {
             panic("M76 self-test: could not spawn sigtest");
@@ -7547,8 +7547,8 @@ static void boot_selftests_system(void) {
 
         {
             size_t h_bytes = 0;
-            uint8_t *h_img = read_program(PATH_BIN_DIR "sh", &h_bytes);
-            const char *h_argv[] = {PATH_BIN_DIR "sh", 0};
+            uint8_t *h_img = read_program(PATH_BIN_DIRECTORY "sh", &h_bytes);
+            const char *h_argv[] = {PATH_BIN_DIRECTORY "sh", 0};
             task_t *h = process_spawnv("sh", h_img, h_bytes, h_argv);
             kfree(h_img);
             if (!h) {
@@ -7584,11 +7584,11 @@ static void boot_selftests_system(void) {
 
     {
         size_t ft_bytes = 0;
-        uint8_t *ft_img = read_program(PATH_BIN_DIR "faulttest", &ft_bytes);
+        uint8_t *ft_img = read_program(PATH_BIN_DIRECTORY "faulttest", &ft_bytes);
         if (!ft_img) {
             panic("M99 self-test: /bin/faulttest is not on this disk");
         }
-        const char *ft_argv[] = {PATH_BIN_DIR "faulttest", 0};
+        const char *ft_argv[] = {PATH_BIN_DIRECTORY "faulttest", 0};
         task_t *ft = process_spawnv("faulttest", ft_img, ft_bytes, ft_argv);
         long ft_rc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
         kfree(ft_img);
@@ -7612,12 +7612,12 @@ static void boot_selftests_system(void) {
 
     {
         int all_ok = 1;
-        const char *ROOT = PATH_TMP_DIR "m77";
-        const char *SUB = PATH_TMP_DIR "m77/inner";
-        const char *OUT = PATH_TMP_DIR "m77out";
+        const char *ROOT = PATH_TEMPORARY_DIRECTORY "m77";
+        const char *SUB = PATH_TEMPORARY_DIRECTORY "m77/inner";
+        const char *OUT = PATH_TEMPORARY_DIRECTORY "m77out";
 
-        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m77/inner/deep.bin"), 0, 0);
-        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m77/top.txt"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m77/inner/deep.bin"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m77/top.txt"), 0, 0);
         do_syscall(SYS_rmdir, (uint64_t)SUB, 0, 0);
         do_syscall(SYS_rmdir, (uint64_t)ROOT, 0, 0);
 
@@ -7629,15 +7629,15 @@ static void boot_selftests_system(void) {
         static char thirty[30];
         k_memset(eleven, 'a', sizeof(eleven));
         k_memset(thirty, 'b', sizeof(thirty));
-        if (do_syscall(SYS_writefile, (uint64_t)(PATH_TMP_DIR "m77/top.txt"),
+        if (do_syscall(SYS_writefile, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m77/top.txt"),
                         (uint64_t)eleven, sizeof(eleven)) != 0 ||
-            do_syscall(SYS_writefile, (uint64_t)(PATH_TMP_DIR "m77/inner/deep.bin"),
+            do_syscall(SYS_writefile, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m77/inner/deep.bin"),
                         (uint64_t)thirty, sizeof(thirty)) != 0) {
             panic("M77 self-test: could not write the fixture files");
         }
 
         size_t tw_bytes = 0;
-        uint8_t *tw_img = read_program(PATH_BIN_DIR "treewalk", &tw_bytes);
+        uint8_t *tw_img = read_program(PATH_BIN_DIRECTORY "treewalk", &tw_bytes);
         if (!tw_img) {
             panic("M77 self-test: /bin/treewalk is not on this disk");
         }
@@ -7648,7 +7648,7 @@ static void boot_selftests_system(void) {
             panic("M77 self-test: could not redirect the walker's output");
         }
         do_syscall(SYS_dup2, (uint64_t)outfd, 1, 0);
-        const char *tw_argv[] = {PATH_BIN_DIR "treewalk", ROOT, 0};
+        const char *tw_argv[] = {PATH_BIN_DIRECTORY "treewalk", ROOT, 0};
         task_t *tw = process_spawnv("treewalk", tw_img, tw_bytes, tw_argv);
         long rc = tw ? do_syscall(SYS_wait, (uint64_t)tw->id, 0, 0) : -1;
         do_syscall(SYS_dup2, (uint64_t)saved, 1, 0);
@@ -7671,10 +7671,10 @@ static void boot_selftests_system(void) {
         } else {
             walked[wn] = '\0';
             static const struct { const char *needle; const char *what; } WANT[] = {
-                {"f       11 " PATH_TMP_DIR "m77/top.txt",
+                {"f       11 " PATH_TEMPORARY_DIRECTORY "m77/top.txt",
                  "a file at the top level, with the size <sys/stat.h> reported"},
                 {"d ", "a directory, told apart from a file by S_ISDIR"},
-                {"f       30 " PATH_TMP_DIR "m77/inner/deep.bin",
+                {"f       30 " PATH_TEMPORARY_DIRECTORY "m77/inner/deep.bin",
                  "a file one level down, found by descending rather than by being told"},
                 {"total 41 byte(s) in 2 file(s), 1 director(ies)",
                  "a total that adds up - which is what makes this a walk rather than a listing"},
@@ -7695,8 +7695,8 @@ static void boot_selftests_system(void) {
         }
 
         {
-            const char *A = PATH_TMP_DIR "m77/named.txt";
-            const char *B = PATH_TMP_DIR "m77/renamed.txt";
+            const char *A = PATH_TEMPORARY_DIRECTORY "m77/named.txt";
+            const char *B = PATH_TEMPORARY_DIRECTORY "m77/renamed.txt";
             do_syscall(SYS_unlink, (uint64_t)B, 0, 0);
             do_syscall(SYS_writefile, (uint64_t)A, (uint64_t)thirty, sizeof(thirty));
             long fd = do_syscall(SYS_open, (uint64_t)A, OPEN_READ, 0);
@@ -7711,7 +7711,7 @@ static void boot_selftests_system(void) {
                 os_stat_t st;
                 k_memset(&st, 0, sizeof(st));
                 if (do_syscall(SYS_fstat, (uint64_t)fd, (uint64_t)&st, 0) != 0 ||
-                    st.size != sizeof(thirty) || st.is_dir) {
+                    st.size != sizeof(thirty) || st.is_directory) {
                     kernel_log_puts("[m77] SYS_fstat could not describe a descriptor whose name "
                                "had changed - which is the one question SYS_stat cannot answer\n");
                     all_ok = 0;
@@ -7720,7 +7720,7 @@ static void boot_selftests_system(void) {
                 if (do_syscall(SYS_pipe, (uint64_t)pfds, 0, 0) == 0) {
                     k_memset(&st, 0, sizeof(st));
                     if (do_syscall(SYS_fstat, (uint64_t)pfds[0], (uint64_t)&st, 0) != 0 ||
-                        st.kind != OS_STAT_FIFO || st.size != 0 || st.is_dir) {
+                        st.kind != OS_STAT_FIFO || st.size != 0 || st.is_directory) {
                         kernel_log_puts("[m77] SYS_fstat could not say that a pipe is a pipe\n");
                         all_ok = 0;
                     }
@@ -7736,8 +7736,8 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)B, 0, 0);
         }
 
-        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m77/inner/deep.bin"), 0, 0);
-        do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m77/top.txt"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m77/inner/deep.bin"), 0, 0);
+        do_syscall(SYS_unlink, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m77/top.txt"), 0, 0);
         do_syscall(SYS_unlink, (uint64_t)OUT, 0, 0);
         do_syscall(SYS_rmdir, (uint64_t)SUB, 0, 0);
         if (do_syscall(SYS_rmdir, (uint64_t)ROOT, 0, 0) != 0) {
@@ -7778,13 +7778,13 @@ static void boot_selftests_system(void) {
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         size_t ex_bytes = 0;
-        uint8_t *ex_img = read_program(PATH_BIN_DIR "exhausttest", &ex_bytes);
+        uint8_t *ex_img = read_program(PATH_BIN_DIRECTORY "exhausttest", &ex_bytes);
         if (!ex_img) {
             panic("Q9 self-test: /bin/exhausttest is not on this disk");
         }
         uint64_t frames_before = physical_memory_free_frame_count();
         for (int round = 0; round < 2; round++) {
-            const char *ex_argv[] = {PATH_BIN_DIR "exhausttest", 0};
+            const char *ex_argv[] = {PATH_BIN_DIRECTORY "exhausttest", 0};
             task_t *ex = process_spawnv("exhausttest", ex_img, ex_bytes, ex_argv);
             long rc = ex ? do_syscall(SYS_wait, (uint64_t)ex->id, 0, 0) : -1;
             if (rc != 0) {
@@ -7840,9 +7840,9 @@ static void boot_selftests_system(void) {
             virtual_file_system_unlink("/tmp/q9-churn");
 
             size_t sp_bytes = 0;
-            uint8_t *sp_img = read_program(PATH_BIN_DIR "hello", &sp_bytes);
+            uint8_t *sp_img = read_program(PATH_BIN_DIRECTORY "hello", &sp_bytes);
             if (sp_img) {
-                const char *sp_argv[] = {PATH_BIN_DIR "hello", 0};
+                const char *sp_argv[] = {PATH_BIN_DIRECTORY "hello", 0};
                 for (int i = 0; i < 200; i++) {
                     task_t *t = process_spawnv("hello", sp_img, sp_bytes, sp_argv);
                     if (t) {
@@ -7909,11 +7909,11 @@ static void boot_selftests_system(void) {
                       "Run tools/build-packages.sh and `make packages`.\n\n");
         } else {
             size_t pk_bytes = 0;
-            uint8_t *pk_img = read_program(PATH_BIN_DIR "pkgtest", &pk_bytes);
+            uint8_t *pk_img = read_program(PATH_BIN_DIRECTORY "pkgtest", &pk_bytes);
             if (!pk_img) {
                 panic("M111 self-test: /bin/pkgtest is not on this disk");
             }
-            const char *pk_argv[] = {PATH_BIN_DIR "pkgtest", 0};
+            const char *pk_argv[] = {PATH_BIN_DIRECTORY "pkgtest", 0};
             task_t *pk = process_spawnv("pkgtest", pk_img, pk_bytes, pk_argv);
             long rc = pk ? do_syscall(SYS_wait, (uint64_t)pk->id, 0, 0) : -1;
             kfree(pk_img);
@@ -7954,11 +7954,11 @@ static void boot_selftests_system(void) {
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         size_t dt_bytes = 0;
-        uint8_t *dt_img = read_program(PATH_BIN_DIR "dirtest", &dt_bytes);
+        uint8_t *dt_img = read_program(PATH_BIN_DIRECTORY "dirtest", &dt_bytes);
         if (!dt_img) {
             panic("M112 self-test: /bin/dirtest is not on this disk");
         }
-        const char *dt_argv[] = {PATH_BIN_DIR "dirtest", 0};
+        const char *dt_argv[] = {PATH_BIN_DIRECTORY "dirtest", 0};
         task_t *dt = process_spawnv("dirtest", dt_img, dt_bytes, dt_argv);
         long rc = dt ? do_syscall(SYS_wait, (uint64_t)dt->id, 0, 0) : -1;
         kfree(dt_img);
@@ -7982,11 +7982,11 @@ static void boot_selftests_system(void) {
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         size_t bt_bytes = 0;
-        uint8_t *bt_img = read_program(PATH_BIN_DIR "browsertest", &bt_bytes);
+        uint8_t *bt_img = read_program(PATH_BIN_DIRECTORY "browsertest", &bt_bytes);
         if (!bt_img) {
             panic("M100 self-test: /bin/browsertest is not on this disk");
         }
-        const char *bt_argv[] = {PATH_BIN_DIR "browsertest", 0};
+        const char *bt_argv[] = {PATH_BIN_DIRECTORY "browsertest", 0};
         task_t *bt = process_spawnv("browsertest", bt_img, bt_bytes, bt_argv);
         long rc = bt ? do_syscall(SYS_wait, (uint64_t)bt->id, 0, 0) : -1;
         kfree(bt_img);
@@ -8012,11 +8012,11 @@ static void boot_selftests_system(void) {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         int un_before = unix_socket_in_use();
         size_t ut_bytes = 0;
-        uint8_t *ut_img = read_program(PATH_BIN_DIR "unixtest", &ut_bytes);
+        uint8_t *ut_img = read_program(PATH_BIN_DIRECTORY "unixtest", &ut_bytes);
         if (!ut_img) {
             panic("M118 self-test: /bin/unixtest is not on this disk");
         }
-        const char *ut_argv[] = {PATH_BIN_DIR "unixtest", 0};
+        const char *ut_argv[] = {PATH_BIN_DIRECTORY "unixtest", 0};
         task_t *ut = process_spawnv("unixtest", ut_img, ut_bytes, ut_argv);
         long rc = ut ? do_syscall(SYS_wait, (uint64_t)ut->id, 0, 0) : -1;
         kfree(ut_img);
@@ -8060,11 +8060,11 @@ static void boot_selftests_system(void) {
         int tf_before = timerfd_in_use();
         int ep_before = epoll_in_use();
         size_t et_bytes = 0;
-        uint8_t *et_img = read_program(PATH_BIN_DIR "epolltest", &et_bytes);
+        uint8_t *et_img = read_program(PATH_BIN_DIRECTORY "epolltest", &et_bytes);
         if (!et_img) {
             panic("M119 self-test: /bin/epolltest is not on this disk");
         }
-        const char *et_argv[] = {PATH_BIN_DIR "epolltest", 0};
+        const char *et_argv[] = {PATH_BIN_DIRECTORY "epolltest", 0};
         task_t *et = process_spawnv("epolltest", et_img, et_bytes, et_argv);
         long rc = et ? do_syscall(SYS_wait, (uint64_t)et->id, 0, 0) : -1;
         kfree(et_img);
@@ -8115,11 +8115,11 @@ static void boot_selftests_system(void) {
         uint32_t pages_before = memfd_pages_held();
         uint64_t frames_before = physical_memory_free_frame_count();
         size_t mf_bytes = 0;
-        uint8_t *mf_img = read_program(PATH_BIN_DIR "memfdtest", &mf_bytes);
+        uint8_t *mf_img = read_program(PATH_BIN_DIRECTORY "memfdtest", &mf_bytes);
         if (!mf_img) {
             panic("M120 self-test: /bin/memfdtest is not on this disk");
         }
-        const char *mf_argv[] = {PATH_BIN_DIR "memfdtest", 0};
+        const char *mf_argv[] = {PATH_BIN_DIRECTORY "memfdtest", 0};
         task_t *mf = process_spawnv("memfdtest", mf_img, mf_bytes, mf_argv);
         long rc = mf ? do_syscall(SYS_wait, (uint64_t)mf->id, 0, 0) : -1;
         kfree(mf_img);
@@ -8177,17 +8177,17 @@ static void boot_selftests_system(void) {
             int have_cxx =
                 do_syscall(SYS_stat, (uint64_t)"/bin/clangcxxtest",
                            (uint64_t)&ct, 0) == 0;
-            const char *script = PATH_TMP_DIR "m121.sh";
-            const char *result = PATH_TMP_DIR "m121.out";
+            const char *script = PATH_TEMPORARY_DIRECTORY "m121.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m121.out";
             static const char SCRIPT[] =
                 "#!/bin/sh\n"
-                "/bin/clangtest > " PATH_TMP_DIR "m121.out\n"
-                "/bin/mixedtest >> " PATH_TMP_DIR "m121.out\n";
+                "/bin/clangtest > " PATH_TEMPORARY_DIRECTORY "m121.out\n"
+                "/bin/mixedtest >> " PATH_TEMPORARY_DIRECTORY "m121.out\n";
             static const char SCRIPT_CXX[] =
                 "#!/bin/sh\n"
-                "/bin/clangtest > " PATH_TMP_DIR "m121.out\n"
-                "/bin/mixedtest >> " PATH_TMP_DIR "m121.out\n"
-                "/bin/clangcxxtest >> " PATH_TMP_DIR "m121.out\n";
+                "/bin/clangtest > " PATH_TEMPORARY_DIRECTORY "m121.out\n"
+                "/bin/mixedtest >> " PATH_TEMPORARY_DIRECTORY "m121.out\n"
+                "/bin/clangcxxtest >> " PATH_TEMPORARY_DIRECTORY "m121.out\n";
             const char *body = have_cxx ? SCRIPT_CXX : SCRIPT;
             size_t body_length = have_cxx ? sizeof(SCRIPT_CXX) - 1
                                        : sizeof(SCRIPT) - 1;
@@ -8303,7 +8303,7 @@ static void boot_selftests_system(void) {
 
     {
         os_stat_t nst;
-        if (do_syscall(SYS_stat, (uint64_t)(PATH_BIN_DIR "netsurf"),
+        if (do_syscall(SYS_stat, (uint64_t)(PATH_BIN_DIRECTORY "netsurf"),
                         (uint64_t)&nst, 0) != 0) {
             kernel_log_puts("[m113] /bin/netsurf is not on this image - skipped. "
                        "`make browser` builds and installs it; see "
@@ -8338,7 +8338,7 @@ static void boot_selftests_system(void) {
                 all_ok = 0;
             }
 
-            uint32_t ncaps = caps_for_program(PATH_BIN_DIR "netsurf");
+            uint32_t ncaps = caps_for_program(PATH_BIN_DIRECTORY "netsurf");
             if (ncaps != (CAP_APP_DEFAULT | CAP_NETWORK)) {
                 kernel_log_puts("[m113] netsurf's capability grant is 0x");
                 kernel_log_put_hex32(ncaps);
@@ -8404,11 +8404,11 @@ static void boot_selftests_system(void) {
         } else {
             uint32_t checksum_before = tcp_checksum_failures();
             size_t number_bytes = 0;
-            uint8_t *number_img = read_program(PATH_BIN_DIR "netrecv", &number_bytes);
+            uint8_t *number_img = read_program(PATH_BIN_DIRECTORY "netrecv", &number_bytes);
             if (!number_img) {
                 panic("M116 self-test: /bin/netrecv is not on this disk");
             }
-            const char *number_argv[] = {PATH_BIN_DIR "netrecv", "10.0.2.100", "7777", want, 0};
+            const char *number_argv[] = {PATH_BIN_DIRECTORY "netrecv", "10.0.2.100", "7777", want, 0};
             uint64_t t0 = tsc_read();
             task_t *nr = process_spawnv("netrecv", number_img, number_bytes, number_argv);
             kfree(number_img);
@@ -8496,7 +8496,7 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            static uint8_t q16_raw[BLK_SECTOR_SIZE];
+            static uint8_t q16_raw[BLOCK_DEVICE_SECTOR_SIZE];
             k_memset(q16_raw, 'z', sizeof(q16_raw));
             block_device_cache_drop();
             block_device_fault_inject(0, -1);
@@ -8545,11 +8545,11 @@ static void boot_selftests_system(void) {
         uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t mt_bytes = 0;
-        uint8_t *mt_img = read_program(PATH_BIN_DIR "mmaptest", &mt_bytes);
+        uint8_t *mt_img = read_program(PATH_BIN_DIRECTORY "mmaptest", &mt_bytes);
         if (!mt_img) {
             panic("M78 self-test: /bin/mmaptest is not on this disk");
         }
-        const char *mt_argv[] = {PATH_BIN_DIR "mmaptest", 0};
+        const char *mt_argv[] = {PATH_BIN_DIRECTORY "mmaptest", 0};
         task_t *mt = process_spawnv("mmaptest", mt_img, mt_bytes, mt_argv);
         long rc = mt ? do_syscall(SYS_wait, (uint64_t)mt->id, 0, 0) : -1;
         kfree(mt_img);
@@ -8572,8 +8572,8 @@ static void boot_selftests_system(void) {
 
         if (all_ok) {
             uint64_t mid_before = physical_memory_free_frame_count();
-            const char *again[] = {PATH_BIN_DIR "mmaptest", 0};
-            uint8_t *again_img = read_program(PATH_BIN_DIR "mmaptest", &mt_bytes);
+            const char *again[] = {PATH_BIN_DIRECTORY "mmaptest", 0};
+            uint8_t *again_img = read_program(PATH_BIN_DIRECTORY "mmaptest", &mt_bytes);
             task_t *m2 = again_img
                              ? process_spawnv("mmaptest", again_img, mt_bytes, again)
                              : (task_t *)0;
@@ -8607,7 +8607,7 @@ static void boot_selftests_system(void) {
     {
         int all_ok = 1;
         size_t tt_bytes = 0;
-        uint8_t *tt_img = read_program(PATH_BIN_DIR "threadtest", &tt_bytes);
+        uint8_t *tt_img = read_program(PATH_BIN_DIRECTORY "threadtest", &tt_bytes);
         if (!tt_img) {
             panic("M79 self-test: /bin/threadtest is not on this disk");
         }
@@ -8620,7 +8620,7 @@ static void boot_selftests_system(void) {
 
         uint64_t frames_before = physical_memory_free_frame_count();
 
-        const char *tt_argv[] = {PATH_BIN_DIR "threadtest", 0};
+        const char *tt_argv[] = {PATH_BIN_DIRECTORY "threadtest", 0};
         task_t *tt = process_spawnv("threadtest", tt_img, tt_bytes, tt_argv);
         kfree(tt_img);
         if (!tt) {
@@ -8690,7 +8690,7 @@ static void boot_selftests_system(void) {
 
     {
         size_t image_bytes = 0;
-        uint8_t *image = read_program(PATH_BIN_DIR "futextest", &image_bytes);
+        uint8_t *image = read_program(PATH_BIN_DIRECTORY "futextest", &image_bytes);
         if (!image) {
             panic("m96: /bin/futextest is not on the disk");
         }
@@ -8762,7 +8762,7 @@ static void boot_selftests_system(void) {
         uint32_t free_before = virtual_file_system_free_blocks();
 
         size_t image_bytes = 0;
-        uint8_t *image = read_program(PATH_BIN_DIR "fswriter", &image_bytes);
+        uint8_t *image = read_program(PATH_BIN_DIRECTORY "fswriter", &image_bytes);
         if (!image) {
             panic("m105: /bin/fswriter is not on the disk");
         }
@@ -8829,14 +8829,14 @@ static void boot_selftests_system(void) {
         }
 
         for (int w = 0; w < WRITERS; w++) {
-            char dir[64], path[96];
-            k_strlcpy(dir, PATH_TMP "/w", sizeof(dir));
-            size_t dn = k_strlen(dir);
-            dir[dn] = (char)('0' + w);
-            dir[dn + 1] = '\0';
+            char directory[64], path[96];
+            k_strlcpy(directory, PATH_TEMPORARY "/w", sizeof(directory));
+            size_t dn = k_strlen(directory);
+            directory[dn] = (char)('0' + w);
+            directory[dn + 1] = '\0';
             for (int f = 0; f < 32; f++) {
                 for (int which = 0; which < 2; which++) {
-                    k_strlcpy(path, dir, sizeof(path));
+                    k_strlcpy(path, directory, sizeof(path));
                     size_t q = k_strlen(path);
                     path[q++] = '/';
                     path[q++] = which ? 't' : 'f';
@@ -8850,7 +8850,7 @@ static void boot_selftests_system(void) {
                     }
                 }
             }
-            virtual_file_system_rmdir(dir);
+            virtual_file_system_rmdir(directory);
         }
         uint32_t free_after = virtual_file_system_free_blocks();
         if (free_after != free_before) {
@@ -8902,19 +8902,19 @@ static void boot_selftests_system(void) {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
 
         const int MANY = 1200;
-        static const char *const MANY_DIR = PATH_TMP_DIR "m81many";
+        static const char *const MANY_DIRECTORY = PATH_TEMPORARY_DIRECTORY "m81many";
 
-        if (!virtual_file_system_exists(MANY_DIR) && virtual_file_system_mkdir(MANY_DIR) != 0) {
+        if (!virtual_file_system_exists(MANY_DIRECTORY) && virtual_file_system_mkdir(MANY_DIRECTORY) != 0) {
             kernel_log_puts("[m81] could not create the directory for the file storm\n");
             all_ok = 0;
         }
 
         int created = 0;
         for (int i = 0; i < MANY && all_ok; i++) {
-            char path[PATH_MAX_LEN];
+            char path[PATH_MAX_LENGTH];
             char name[16];
             m81_storm_name(name, i);
-            if (path_join(path, PATH_TMP_DIR "m81many/", name) != 0) {
+            if (path_join(path, PATH_TEMPORARY_DIRECTORY "m81many/", name) != 0) {
                 kernel_log_puts("[m81] a name in the file storm did not fit a path\n");
                 all_ok = 0;
                 break;
@@ -8940,8 +8940,8 @@ static void boot_selftests_system(void) {
         }
         longname[LEANFS_MAX_NAME] = '\0';
         {
-            char path[PATH_MAX_LEN];
-            if (path_join(path, PATH_TMP_DIR "m81many/", longname) != 0 ||
+            char path[PATH_MAX_LENGTH];
+            if (path_join(path, PATH_TEMPORARY_DIRECTORY "m81many/", longname) != 0 ||
                 virtual_file_system_write(path, "long", 5) != 0) {
                 kernel_log_puts("[m81] a 255-character name was refused\n");
                 all_ok = 0;
@@ -8955,11 +8955,11 @@ static void boot_selftests_system(void) {
             }
         }
 
-        char deep[PATH_MAX_LEN];
+        char deep[PATH_MAX_LENGTH];
         int deep_length = 0;
         {
             const char *seg = "/adirectorylevelname";
-            k_strlcpy(deep, PATH_TMP_DIR "m81deep", sizeof(deep));
+            k_strlcpy(deep, PATH_TEMPORARY_DIRECTORY "m81deep", sizeof(deep));
             deep_length = (int)k_strlen(deep);
             if (!virtual_file_system_exists(deep) && virtual_file_system_mkdir(deep) != 0) {
                 kernel_log_puts("[m81] could not start the deep path\n");
@@ -8986,7 +8986,7 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
         if (all_ok) {
-            char leaf[PATH_MAX_LEN];
+            char leaf[PATH_MAX_LENGTH];
             k_strlcpy(leaf, deep, sizeof(leaf));
             size_t l = k_strlen(leaf);
             k_strlcpy(leaf + l, "/bottom.txt", sizeof(leaf) - l);
@@ -9016,7 +9016,7 @@ static void boot_selftests_system(void) {
             uint32_t cookie = 0;
             leanfs_directory_entry_t e;
             int rc;
-            while ((rc = virtual_file_system_readdir(MANY_DIR, &cookie, &e)) == 1) {
+            while ((rc = virtual_file_system_readdir(MANY_DIRECTORY, &cookie, &e)) == 1) {
                 seen++;
                 if (e.inode < LEANFS_MAX_INODES) {
                     if (seen_ino[e.inode / 8] & (1u << (e.inode % 8))) {
@@ -9052,13 +9052,13 @@ static void boot_selftests_system(void) {
 
         if (all_ok) {
             leanfs_stat_t before, after;
-            virtual_file_system_stat(MANY_DIR, &before);
+            virtual_file_system_stat(MANY_DIRECTORY, &before);
             const int CHURN = 8;
             for (int i = 0; i < created; i += CHURN) {
-                char path[PATH_MAX_LEN];
+                char path[PATH_MAX_LENGTH];
                 char name[16];
                 m81_storm_name(name, i);
-                path_join(path, PATH_TMP_DIR "m81many/", name);
+                path_join(path, PATH_TEMPORARY_DIRECTORY "m81many/", name);
                 if (virtual_file_system_unlink(path) != 0) {
                     kernel_log_puts("[m81] could not remove a file from the storm\n");
                     all_ok = 0;
@@ -9066,17 +9066,17 @@ static void boot_selftests_system(void) {
                 }
             }
             for (int i = 0; i < created && all_ok; i += CHURN) {
-                char path[PATH_MAX_LEN];
+                char path[PATH_MAX_LENGTH];
                 char name[16];
                 m81_storm_name(name, i);
-                path_join(path, PATH_TMP_DIR "m81many/", name);
+                path_join(path, PATH_TEMPORARY_DIRECTORY "m81many/", name);
                 if (virtual_file_system_write(path, "re", 3) != 0) {
                     kernel_log_puts("[m81] could not put a removed file back\n");
                     all_ok = 0;
                     break;
                 }
             }
-            virtual_file_system_stat(MANY_DIR, &after);
+            virtual_file_system_stat(MANY_DIRECTORY, &after);
             if (all_ok && after.size > before.size) {
                 kernel_log_puts("[m81] a directory grew from 0x");
                 kernel_log_put_hex32(before.size);
@@ -9108,7 +9108,7 @@ static void boot_selftests_system(void) {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         int all_ok = 1;
 
-        static const char *const BIG = PATH_TMP_DIR "m93big";
+        static const char *const BIG = PATH_TEMPORARY_DIRECTORY "m93big";
         const uint32_t BIG_BYTES = 16u * 1024 * 1024;
         const uint32_t CHUNK = 64u * 1024;
         static uint8_t chunk[64 * 1024];
@@ -9161,7 +9161,7 @@ static void boot_selftests_system(void) {
             }
         }
 
-        static const char *const MANYDIR = PATH_TMP_DIR "m93many";
+        static const char *const MANYDIR = PATH_TEMPORARY_DIRECTORY "m93many";
         const int PAST_CAP = 9000;
         int made = 0;
         if (all_ok && !virtual_file_system_exists(MANYDIR) && virtual_file_system_mkdir(MANYDIR) != 0) {
@@ -9169,10 +9169,10 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
         for (int i = 0; i < PAST_CAP && all_ok; i++) {
-            char path[PATH_MAX_LEN];
+            char path[PATH_MAX_LENGTH];
             char name[16];
             m81_storm_name(name, i);
-            if (path_join(path, PATH_TMP_DIR "m93many/", name) != 0 ||
+            if (path_join(path, PATH_TEMPORARY_DIRECTORY "m93many/", name) != 0 ||
                 virtual_file_system_write(path, "x", 1) != 0) {
                 kernel_log_puts("[m93] file creation failed at 0x");
                 kernel_log_put_hex32((uint32_t)i);
@@ -9203,8 +9203,8 @@ static void boot_selftests_system(void) {
             }
         }
 
-        static const char *const L_A = PATH_TMP_DIR "m93link.a";
-        static const char *const L_B = PATH_TMP_DIR "m93link.b";
+        static const char *const L_A = PATH_TEMPORARY_DIRECTORY "m93link.a";
+        static const char *const L_B = PATH_TEMPORARY_DIRECTORY "m93link.b";
         if (all_ok) {
             virtual_file_system_unlink(L_A);
             virtual_file_system_unlink(L_B);
@@ -9221,7 +9221,7 @@ static void boot_selftests_system(void) {
             kernel_log_puts("[m93] the link count is not 2 through both names\n");
             all_ok = 0;
         }
-        if (all_ok && virtual_file_system_link(PATH_TMP_DIR "m93many", PATH_TMP_DIR "m93dirlink") == 0) {
+        if (all_ok && virtual_file_system_link(PATH_TEMPORARY_DIRECTORY "m93many", PATH_TEMPORARY_DIRECTORY "m93dirlink") == 0) {
             kernel_log_puts("[m93] a hard link to a directory was allowed\n");
             all_ok = 0;
         }
@@ -9246,14 +9246,14 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            int fds[2];
-            if (do_syscall(SYS_pipe, (uint64_t)fds, 0, 0) == 0) {
-                if (do_syscall(SYS_fsync, (uint64_t)fds[0], 0, 0) == 0) {
+            int file_descriptors[2];
+            if (do_syscall(SYS_pipe, (uint64_t)file_descriptors, 0, 0) == 0) {
+                if (do_syscall(SYS_fsync, (uint64_t)file_descriptors[0], 0, 0) == 0) {
                     kernel_log_puts("[m93] fsync claimed to have made a pipe durable\n");
                     all_ok = 0;
                 }
-                do_syscall(SYS_close, (uint64_t)fds[0], 0, 0);
-                do_syscall(SYS_close, (uint64_t)fds[1], 0, 0);
+                do_syscall(SYS_close, (uint64_t)file_descriptors[0], 0, 0);
+                do_syscall(SYS_close, (uint64_t)file_descriptors[1], 0, 0);
             }
         }
 
@@ -9281,12 +9281,12 @@ static void boot_selftests_system(void) {
         uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t lz_bytes = 0;
-        uint8_t *lz_img = read_program(PATH_BIN_DIR "lazytest", &lz_bytes);
+        uint8_t *lz_img = read_program(PATH_BIN_DIRECTORY "lazytest", &lz_bytes);
         if (!lz_img) {
             panic("M82 self-test: /bin/lazytest is not on this disk");
         }
 
-        const char *lz_argv[] = {PATH_BIN_DIR "lazytest", 0};
+        const char *lz_argv[] = {PATH_BIN_DIRECTORY "lazytest", 0};
         task_t *lz = process_spawnv("lazytest", lz_img, lz_bytes, lz_argv);
         if (!lz) {
             panic("M82 self-test: could not spawn lazytest");
@@ -9346,11 +9346,11 @@ static void boot_selftests_system(void) {
         };
         for (int m = 0; m < 2 && all_ok; m++) {
             size_t f_bytes = 0;
-            uint8_t *f_img = read_program(PATH_BIN_DIR "lazytest", &f_bytes);
+            uint8_t *f_img = read_program(PATH_BIN_DIRECTORY "lazytest", &f_bytes);
             if (!f_img) {
                 panic("M82 self-test: /bin/lazytest vanished mid-test");
             }
-            const char *f_argv[] = {PATH_BIN_DIR "lazytest", FATAL_MODES[m], 0};
+            const char *f_argv[] = {PATH_BIN_DIRECTORY "lazytest", FATAL_MODES[m], 0};
             task_t *ft = process_spawnv("lazytest", f_img, f_bytes, f_argv);
             long frc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
             kfree(f_img);
@@ -9389,11 +9389,11 @@ static void boot_selftests_system(void) {
         uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t vm_bytes = 0;
-        uint8_t *vm_img = read_program(PATH_BIN_DIR "vmtest", &vm_bytes);
+        uint8_t *vm_img = read_program(PATH_BIN_DIRECTORY "vmtest", &vm_bytes);
         if (!vm_img) {
             panic("M91 self-test: /bin/vmtest is not on this disk");
         }
-        const char *vm_argv[] = {PATH_BIN_DIR "vmtest", 0};
+        const char *vm_argv[] = {PATH_BIN_DIRECTORY "vmtest", 0};
         task_t *vt = process_spawnv("vmtest", vm_img, vm_bytes, vm_argv);
         long vrc = vt ? do_syscall(SYS_wait, (uint64_t)vt->id, 0, 0) : -1;
         kfree(vm_img);
@@ -9413,11 +9413,11 @@ static void boot_selftests_system(void) {
         };
         for (int m = 0; m < 4 && all_ok; m++) {
             size_t f_bytes = 0;
-            uint8_t *f_img = read_program(PATH_BIN_DIR "vmtest", &f_bytes);
+            uint8_t *f_img = read_program(PATH_BIN_DIRECTORY "vmtest", &f_bytes);
             if (!f_img) {
                 panic("M91 self-test: /bin/vmtest vanished mid-test");
             }
-            const char *f_argv[] = {PATH_BIN_DIR "vmtest", M91_FATAL[m], 0};
+            const char *f_argv[] = {PATH_BIN_DIRECTORY "vmtest", M91_FATAL[m], 0};
             task_t *ft = process_spawnv("vmtest", f_img, f_bytes, f_argv);
             long frc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
             kfree(f_img);
@@ -9482,11 +9482,11 @@ static void boot_selftests_system(void) {
         uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t ft_bytes = 0;
-        uint8_t *ft_img = read_program(PATH_BIN_DIR "forktest", &ft_bytes);
+        uint8_t *ft_img = read_program(PATH_BIN_DIRECTORY "forktest", &ft_bytes);
         if (!ft_img) {
             panic("M83 self-test: /bin/forktest is not on this disk");
         }
-        const char *ft_argv[] = {PATH_BIN_DIR "forktest", 0};
+        const char *ft_argv[] = {PATH_BIN_DIRECTORY "forktest", 0};
         task_t *ft = process_spawnv("forktest", ft_img, ft_bytes, ft_argv);
         long rc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
         kfree(ft_img);
@@ -9517,11 +9517,11 @@ static void boot_selftests_system(void) {
         if (all_ok) {
             uint64_t cow_before = physical_memory_free_frame_count();
             size_t cw_bytes = 0;
-            uint8_t *cw_img = read_program(PATH_BIN_DIR "forktest", &cw_bytes);
+            uint8_t *cw_img = read_program(PATH_BIN_DIRECTORY "forktest", &cw_bytes);
             if (!cw_img) {
                 panic("M83 self-test: /bin/forktest vanished mid-test");
             }
-            const char *cw_argv[] = {PATH_BIN_DIR "forktest", "cow", 0};
+            const char *cw_argv[] = {PATH_BIN_DIRECTORY "forktest", "cow", 0};
             task_t *cw = process_spawnv("forktest", cw_img, cw_bytes, cw_argv);
             if (!cw) {
                 panic("M83 self-test: could not spawn forktest in cow mode");
@@ -9595,11 +9595,11 @@ static void boot_selftests_system(void) {
         uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t ex_bytes = 0;
-        uint8_t *ex_img = read_program(PATH_BIN_DIR "exectest", &ex_bytes);
+        uint8_t *ex_img = read_program(PATH_BIN_DIRECTORY "exectest", &ex_bytes);
         if (!ex_img) {
             panic("M84 self-test: /bin/exectest is not on this disk");
         }
-        const char *ex_argv[] = {PATH_BIN_DIR "exectest", 0};
+        const char *ex_argv[] = {PATH_BIN_DIRECTORY "exectest", 0};
         const char *ex_envp[] = {"PATH=" PATH_BIN, 0};
         task_t *ex = process_spawnve("exectest", ex_img, ex_bytes, ex_argv, ex_envp);
         long rc = ex ? do_syscall(SYS_wait, (uint64_t)ex->id, 0, 0) : -1;
@@ -9769,11 +9769,11 @@ static void boot_selftests_system(void) {
 
         if (all_ok) {
             size_t pt_bytes = 0;
-            uint8_t *pt_img = read_program(PATH_BIN_DIR "ptytest", &pt_bytes);
+            uint8_t *pt_img = read_program(PATH_BIN_DIRECTORY "ptytest", &pt_bytes);
             if (!pt_img) {
                 panic("M85 self-test: /bin/ptytest is not on this disk");
             }
-            const char *pt_argv[] = {PATH_BIN_DIR "ptytest", 0};
+            const char *pt_argv[] = {PATH_BIN_DIRECTORY "ptytest", 0};
             task_t *pt = process_spawnv("ptytest", pt_img, pt_bytes, pt_argv);
             long rc = pt ? do_syscall(SYS_wait, (uint64_t)pt->id, 0, 0) : -1;
             kfree(pt_img);
@@ -9802,20 +9802,20 @@ static void boot_selftests_system(void) {
     {
         int all_ok = 1;
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
-        char buf[128];
+        char buffer[128];
 
-        if (!virtual_file_system_is_directory(PATH_DEV) || !virtual_file_system_is_directory(PATH_PROC)) {
+        if (!virtual_file_system_is_directory(PATH_DEV) || !virtual_file_system_is_directory(PATH_PROCESS)) {
             kernel_log_puts("[m87] /dev or /proc is not a directory\n");
             all_ok = 0;
         }
         if (all_ok) {
-            size_t n = virtual_file_system_list("/", buf, sizeof(buf));
+            size_t n = virtual_file_system_list("/", buffer, sizeof(buffer));
             int saw_dev = 0, saw_process = 0;
             for (size_t i = 0; i + 4 <= n; i++) {
-                if (k_memcmp(buf + i, "dev/", 4) == 0) {
+                if (k_memcmp(buffer + i, "dev/", 4) == 0) {
                     saw_dev = 1;
                 }
-                if (i + 5 <= n && k_memcmp(buf + i, "proc/", 5) == 0) {
+                if (i + 5 <= n && k_memcmp(buffer + i, "proc/", 5) == 0) {
                     saw_process = 1;
                 }
             }
@@ -9826,13 +9826,13 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            int h = virtual_file_system_open(PATH_DEV_DIR "null", 0);
+            int h = virtual_file_system_open(PATH_DEV_DIRECTORY "null", 0);
             if (h < 0) {
                 kernel_log_puts("[m87] /dev/null could not be opened\n");
                 all_ok = 0;
             } else {
-                k_memset(buf, 0xAA, sizeof(buf));
-                if (virtual_file_system_handle_read(h, buf, sizeof(buf), 0) != 0) {
+                k_memset(buffer, 0xAA, sizeof(buffer));
+                if (virtual_file_system_handle_read(h, buffer, sizeof(buffer), 0) != 0) {
                     kernel_log_puts("[m87] a read of /dev/null returned bytes\n");
                     all_ok = 0;
                 }
@@ -9844,20 +9844,20 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            int h = virtual_file_system_open(PATH_DEV_DIR "zero", 0);
-            k_memset(buf, 0xAA, sizeof(buf));
-            if (h < 0 || virtual_file_system_handle_read(h, buf, 64, 0) != 64) {
+            int h = virtual_file_system_open(PATH_DEV_DIRECTORY "zero", 0);
+            k_memset(buffer, 0xAA, sizeof(buffer));
+            if (h < 0 || virtual_file_system_handle_read(h, buffer, 64, 0) != 64) {
                 kernel_log_puts("[m87] /dev/zero did not deliver 64 bytes\n");
                 all_ok = 0;
             } else {
                 for (int i = 0; i < 64; i++) {
-                    if (buf[i] != 0) {
+                    if (buffer[i] != 0) {
                         kernel_log_puts("[m87] /dev/zero delivered something that was not zero\n");
                         all_ok = 0;
                         break;
                     }
                 }
-                if (all_ok && virtual_file_system_handle_read(h, buf, 16, 4096) != 16) {
+                if (all_ok && virtual_file_system_handle_read(h, buffer, 16, 4096) != 16) {
                     kernel_log_puts("[m87] /dev/zero ended at an offset - it is being treated as a file\n");
                     all_ok = 0;
                 }
@@ -9865,7 +9865,7 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            int h = virtual_file_system_open(PATH_DEV_DIR "full", 0);
+            int h = virtual_file_system_open(PATH_DEV_DIRECTORY "full", 0);
             if (h < 0 || virtual_file_system_handle_write(h, "x", 1, 0) != -1) {
                 kernel_log_puts("[m87] /dev/full accepted a write\n");
                 all_ok = 0;
@@ -9873,7 +9873,7 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            int h = virtual_file_system_open(PATH_DEV_DIR "urandom", 0);
+            int h = virtual_file_system_open(PATH_DEV_DIRECTORY "urandom", 0);
             char a[16], b[16];
             k_memset(a, 0, sizeof(a));
             k_memset(b, 0, sizeof(b));
@@ -9888,19 +9888,19 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            if (virtual_file_system_write(PATH_DEV_DIR "null", "x", 1) == 0 ||
-                virtual_file_system_mkdir(PATH_DEV_DIR "newdir") == 0 ||
-                virtual_file_system_unlink(PATH_DEV_DIR "null") == 0 ||
-                virtual_file_system_write(PATH_PROC_DIR "uptime", "x", 1) == 0) {
+            if (virtual_file_system_write(PATH_DEV_DIRECTORY "null", "x", 1) == 0 ||
+                virtual_file_system_mkdir(PATH_DEV_DIRECTORY "newdir") == 0 ||
+                virtual_file_system_unlink(PATH_DEV_DIRECTORY "null") == 0 ||
+                virtual_file_system_write(PATH_PROCESS_DIRECTORY "uptime", "x", 1) == 0) {
                 kernel_log_puts("[m87] a synthetic filesystem accepted a change to itself\n");
                 all_ok = 0;
             }
         }
 
         if (all_ok) {
-            k_memset(buf, 0, sizeof(buf));
-            int64_t n = virtual_file_system_read(PATH_PROC_DIR "self/exe", buf, sizeof(buf) - 1);
-            if (n <= 0 || buf[0] != '/') {
+            k_memset(buffer, 0, sizeof(buffer));
+            int64_t n = virtual_file_system_read(PATH_PROCESS_DIRECTORY "self/exe", buffer, sizeof(buffer) - 1);
+            if (n <= 0 || buffer[0] != '/') {
                 kernel_log_puts("[m87] /proc/self/exe did not read back a path\n");
                 all_ok = 0;
             }
@@ -9910,14 +9910,14 @@ static void boot_selftests_system(void) {
             char first[32], second[32];
             k_memset(first, 0, sizeof(first));
             k_memset(second, 0, sizeof(second));
-            virtual_file_system_read(PATH_PROC_DIR "uptime", first, sizeof(first) - 1);
+            virtual_file_system_read(PATH_PROCESS_DIRECTORY "uptime", first, sizeof(first) - 1);
             if (first[0] < '0' || first[0] > '9') {
                 kernel_log_puts("[m87] /proc/uptime did not start with a digit\n");
                 all_ok = 0;
             }
             if (all_ok) {
                 pit_sleep_ms(1200);
-                virtual_file_system_read(PATH_PROC_DIR "uptime", second, sizeof(second) - 1);
+                virtual_file_system_read(PATH_PROCESS_DIRECTORY "uptime", second, sizeof(second) - 1);
                 if (k_strcmp(first, second) == 0) {
                     kernel_log_puts("[m87] /proc/uptime read the same twice a second apart\n");
                     all_ok = 0;
@@ -9926,9 +9926,9 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            k_memset(buf, 0, sizeof(buf));
-            int64_t n = virtual_file_system_read(PATH_PROC_DIR "self/status", buf, sizeof(buf) - 1);
-            if (n <= 0 || k_memcmp(buf, "Name:\t", 6) != 0) {
+            k_memset(buffer, 0, sizeof(buffer));
+            int64_t n = virtual_file_system_read(PATH_PROCESS_DIRECTORY "self/status", buffer, sizeof(buffer) - 1);
+            if (n <= 0 || k_memcmp(buffer, "Name:\t", 6) != 0) {
                 kernel_log_puts("[m87] /proc/self/status did not begin with a Name field\n");
                 all_ok = 0;
             }
@@ -9939,7 +9939,7 @@ static void boot_selftests_system(void) {
             leanfs_directory_entry_t e;
             int entries = 0;
             int saw_uptime = 0;
-            while (virtual_file_system_readdir(PATH_PROC, &cookie, &e) == 1 && entries < 200) {
+            while (virtual_file_system_readdir(PATH_PROCESS, &cookie, &e) == 1 && entries < 200) {
                 entries++;
                 if (k_strcmp(e.name, "uptime") == 0) {
                     saw_uptime = 1;
@@ -9958,8 +9958,8 @@ static void boot_selftests_system(void) {
                 kernel_log_puts("[m87] /devices could not be created on the real filesystem\n");
                 all_ok = 0;
             } else {
-                k_memset(buf, 0, sizeof(buf));
-                if (virtual_file_system_read("/devices", buf, sizeof(buf)) != 5 || buf[0] != 'r') {
+                k_memset(buffer, 0, sizeof(buffer));
+                if (virtual_file_system_read("/devices", buffer, sizeof(buffer)) != 5 || buffer[0] != 'r') {
                     kernel_log_puts("[m87] /devices was shadowed by the /dev mount\n");
                     all_ok = 0;
                 }
@@ -9968,7 +9968,7 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            static const char *const LOCK = PATH_TMP_DIR "m87.lock";
+            static const char *const LOCK = PATH_TEMPORARY_DIRECTORY "m87.lock";
             virtual_file_system_unlink(LOCK);
             int first = virtual_file_system_open(LOCK, LEANFS_OPEN_CREATE | LEANFS_OPEN_EXCL);
             int second = virtual_file_system_open(LOCK, LEANFS_OPEN_CREATE | LEANFS_OPEN_EXCL);
@@ -9987,7 +9987,7 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            static const char *const TRUNC = PATH_TMP_DIR "m87.trunc";
+            static const char *const TRUNC = PATH_TEMPORARY_DIRECTORY "m87.trunc";
             static char body[100];
             k_memset(body, 'A', sizeof(body));
             if (virtual_file_system_write(TRUNC, body, sizeof(body)) != 0) {
@@ -10038,11 +10038,11 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            static const char *const REAL = PATH_TMP_DIR "m87real";
-            static const char *const LINK = PATH_TMP_DIR "m87link";
-            static const char *const CHAIN = PATH_TMP_DIR "m87chain";
-            static const char *const LOOP_A = PATH_TMP_DIR "m87loopa";
-            static const char *const LOOP_B = PATH_TMP_DIR "m87loopb";
+            static const char *const REAL = PATH_TEMPORARY_DIRECTORY "m87real";
+            static const char *const LINK = PATH_TEMPORARY_DIRECTORY "m87link";
+            static const char *const CHAIN = PATH_TEMPORARY_DIRECTORY "m87chain";
+            static const char *const LOOP_A = PATH_TEMPORARY_DIRECTORY "m87loopa";
+            static const char *const LOOP_B = PATH_TEMPORARY_DIRECTORY "m87loopb";
             virtual_file_system_unlink(LINK);
             virtual_file_system_unlink(CHAIN);
             virtual_file_system_unlink(LOOP_A);
@@ -10057,9 +10057,9 @@ static void boot_selftests_system(void) {
             }
 
             if (all_ok) {
-                k_memset(buf, 0, sizeof(buf));
-                if (virtual_file_system_read(LINK, buf, sizeof(buf)) != (int64_t)sizeof(body) ||
-                    buf[0] != 'p') {
+                k_memset(buffer, 0, sizeof(buffer));
+                if (virtual_file_system_read(LINK, buffer, sizeof(buffer)) != (int64_t)sizeof(body) ||
+                    buffer[0] != 'p') {
                     kernel_log_puts("[m87] reading through a symlink did not reach the file\n");
                     all_ok = 0;
                 }
@@ -10098,8 +10098,8 @@ static void boot_selftests_system(void) {
                     kernel_log_puts("[m87] could not create a link to a link\n");
                     all_ok = 0;
                 } else {
-                    k_memset(buf, 0, sizeof(buf));
-                    if (virtual_file_system_read(CHAIN, buf, sizeof(buf)) != (int64_t)sizeof(body)) {
+                    k_memset(buffer, 0, sizeof(buffer));
+                    if (virtual_file_system_read(CHAIN, buffer, sizeof(buffer)) != (int64_t)sizeof(body)) {
                         kernel_log_puts("[m87] a chain of two links did not reach the file\n");
                         all_ok = 0;
                     }
@@ -10162,7 +10162,7 @@ static void boot_selftests_system(void) {
             panic("M40 SYS_spawn self-test: spawning a nonexistent file should fail");
         }
 
-        long rc_not_elf = do_syscall(SYS_spawn, (uint64_t)(PATH_TMP_DIR "m33test"), 0, 0);
+        long rc_not_elf = do_syscall(SYS_spawn, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m33test"), 0, 0);
         if (rc_not_elf >= 0) {
             panic("M40 SYS_spawn self-test: spawning a non-ELF file should fail, not succeed");
         }
@@ -10193,8 +10193,8 @@ static void boot_selftests_system(void) {
     {
         task_t *boot_task = scheduler_current();
         int leaked = 0;
-        for (int i = 2; i < MAX_FDS; i++) {
-            if (boot_task->fds[i].type != FD_NONE) {
+        for (int i = 2; i < MAX_FILE_DESCRIPTORS; i++) {
+            if (boot_task->file_descriptors[i].type != FILE_DESCRIPTOR_NONE) {
                 leaked++;
             }
         }
@@ -10202,12 +10202,12 @@ static void boot_selftests_system(void) {
             panic("M40 fd-inheritance self-test: expected the boot self-tests above to have left fds open on task 0 - if that is genuinely no longer true, delete this check and sched_reset_fds_to_std with it");
         }
         scheduler_reset_file_descriptors_to_std(boot_task);
-        for (int i = 2; i < MAX_FDS; i++) {
-            if (boot_task->fds[i].type != FD_NONE) {
+        for (int i = 2; i < MAX_FILE_DESCRIPTORS; i++) {
+            if (boot_task->file_descriptors[i].type != FILE_DESCRIPTOR_NONE) {
                 panic("M40 fd-inheritance self-test: sched_reset_fds_to_std left an fd behind");
             }
         }
-        if (boot_task->fds[0].type != FD_STDIN || boot_task->fds[1].type != FD_STDOUT) {
+        if (boot_task->file_descriptors[0].type != FILE_DESCRIPTOR_STDIN || boot_task->file_descriptors[1].type != FILE_DESCRIPTOR_STDOUT) {
             panic("M40 fd-inheritance self-test: sched_reset_fds_to_std did not leave stdin/stdout intact");
         }
         kernel_log_puts("[m40] boot-task fd reset self-test passed (0x");
@@ -10272,7 +10272,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
 
     uint64_t scratch_phys = physical_memory_alloc_frame();
     uint64_t scratch_virt = KERNEL_HEAP_VIRT_BASE - 0x40000000ULL;
-    virtual_memory_map_page(scratch_virt, scratch_phys, VMM_FLAG_WRITABLE);
+    virtual_memory_map_page(scratch_virt, scratch_phys, VIRTUAL_MEMORY_FLAG_WRITABLE);
     volatile uint64_t *scratch = (volatile uint64_t *)scratch_virt;
     *scratch = 0x1122334455667788ULL;
     if (*scratch != 0x1122334455667788ULL) {
@@ -10296,8 +10296,8 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
     {
         uint64_t tracked = physical_memory_tracked_limit();
         uint64_t floor;
-        if (tracked > PMM_DMA_LIMIT) {
-            floor = PMM_DMA_LIMIT;
+        if (tracked > PHYSICAL_MEMORY_DMA_LIMIT) {
+            floor = PHYSICAL_MEMORY_DMA_LIMIT;
         } else if (tracked > 0x40000000ULL) {
             floor = 0x40000000ULL;
         } else {
@@ -10518,7 +10518,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
                 { "'x' does not start on the shared x-height line",   top[1], FONT_X_TOP },
                 { "'x' does not sit on the shared baseline",          bot[1], FONT_BASELINE - 1 },
                 { "'g' does not start on the shared x-height line",   top[2], FONT_X_TOP },
-                { "'g' does not reach the shared descender row",      bot[2], FONT_DESC_LAST },
+                { "'g' does not reach the shared descender row",      bot[2], FONT_DESCRIPTOR_LAST },
                 { "'A' drew into its advance gap (column 7)",         gap_clear[0], 1 },
                 { "'x' drew into its advance gap (column 7)",         gap_clear[1], 1 },
                 { "'g' drew into its advance gap (column 7)",         gap_clear[2], 1 },
@@ -10645,9 +10645,9 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
     kernel_log_put_hex64((uint64_t)pid);
     kernel_log_putc('\n');
 
-    static const char msg[] = "[syscall] hello via SYS_write\n";
-    long written = do_syscall(SYS_write, 1, (uint64_t)msg, sizeof(msg) - 1);
-    if (written != (long)sizeof(msg) - 1) {
+    static const char message[] = "[syscall] hello via SYS_write\n";
+    long written = do_syscall(SYS_write, 1, (uint64_t)message, sizeof(message) - 1);
+    if (written != (long)sizeof(message) - 1) {
         panic("syscall self-test: SYS_write returned an unexpected length");
     }
 
@@ -10732,7 +10732,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
         static uint8_t cold[64 * 1024];
         static uint8_t warm[64 * 1024];
         const uint32_t RUNS = 16;
-        const uint32_t SECTORS = sizeof(cold) / BLK_SECTOR_SIZE;
+        const uint32_t SECTORS = sizeof(cold) / BLOCK_DEVICE_SECTOR_SIZE;
 
         block_device_cache_drop();
         block_device_statistics(&before);
@@ -10864,7 +10864,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
         static uint8_t wbuf[64 * 1024];
         static uint8_t rbuf[64 * 1024];
         const uint32_t RUNS = 16;
-        const uint32_t SECTORS = sizeof(wbuf) / BLK_SECTOR_SIZE;
+        const uint32_t SECTORS = sizeof(wbuf) / BLOCK_DEVICE_SECTOR_SIZE;
         const uint32_t SCRATCH = leanfs_free_scratch_lba(RUNS * 16u);
         if (SCRATCH == 0) {
             kernel_log_puts("[m104] no free run at the end of the data region - the "
@@ -10893,7 +10893,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
         for (uint32_t r = 0; r < RUNS; r++) {
             for (uint32_t k = 0; k < SECTORS; k++) {
                 block_device_write(SCRATCH + r * SECTORS + k, 1,
-                          wbuf + (uint64_t)k * BLK_SECTOR_SIZE);
+                          wbuf + (uint64_t)k * BLOCK_DEVICE_SECTOR_SIZE);
             }
         }
         uint64_t t3 = tsc_read();
@@ -10966,7 +10966,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
 
     tty_init();
     {
-        static const char *const LAYOUT[] = {PATH_BIN, PATH_HOME, PATH_ETC, PATH_TMP};
+        static const char *const LAYOUT[] = {PATH_BIN, PATH_HOME, PATH_ETC, PATH_TEMPORARY};
         for (size_t i = 0; i < sizeof(LAYOUT) / sizeof(LAYOUT[0]); i++) {
             if (!virtual_file_system_exists(LAYOUT[i]) && virtual_file_system_mkdir(LAYOUT[i]) != 0) {
                 panic("vfs_mkdir: failed to create the filesystem layout");
@@ -10975,8 +10975,8 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
     }
     for (size_t i = 0; i < EMBEDDED_PROGRAM_COUNT; i++) {
         const embedded_program_t *p = &embedded_programs[i];
-        char path[PATH_MAX_LEN];
-        if (path_join(path, PATH_BIN_DIR, p->name) != 0) {
+        char path[PATH_MAX_LENGTH];
+        if (path_join(path, PATH_BIN_DIRECTORY, p->name) != 0) {
             panic("a program name is too long to live in /bin");
         }
         if (!virtual_file_system_exists(path)) {
@@ -10996,7 +10996,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
             const char *path;
             const char *body;
         } FIRST_BOOT[] = {
-            {PATH_HOME_DIR "readme.txt",
+            {PATH_HOME_DIRECTORY "readme.txt",
              "Welcome to lean_os.\n"
              "\n"
              "This is /home - your files live here.\n"
@@ -11016,14 +11016,14 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
              "  Whatever is open when this machine stops is open again when\n"
              "  it starts, in the same places. /etc/session.conf is the file\n"
              "  that remembers, and it is plain text.\n"},
-            {PATH_HOME_DIR "notes.txt",
+            {PATH_HOME_DIRECTORY "notes.txt",
              "Scratch file.\n"
              "\n"
              "The editor has undo (Ctrl+Z), redo (Ctrl+Y), find (Ctrl+F),\n"
              "cut/copy/paste, and a File menu that can save somewhere else.\n"
              "\n"
              "Nothing here is precious - edit it.\n"},
-            {PATH_HOME_DIR "hello.sh",
+            {PATH_HOME_DIRECTORY "hello.sh",
              "#!/bin/sh\n"
              "# A script is a program here. Run it from the terminal as\n"
              "#   /home/hello.sh\n"
@@ -11053,11 +11053,11 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
             if (virtual_file_system_exists(FIRST_BOOT[i].path)) {
                 continue;
             }
-            size_t len = 0;
-            while (FIRST_BOOT[i].body[len]) {
-                len++;
+            size_t length = 0;
+            while (FIRST_BOOT[i].body[length]) {
+                length++;
             }
-            if (virtual_file_system_write(FIRST_BOOT[i].path, FIRST_BOOT[i].body, len) != 0) {
+            if (virtual_file_system_write(FIRST_BOOT[i].path, FIRST_BOOT[i].body, length) != 0) {
                 panic("vfs_write: failed to seed a first-boot file into " PATH_HOME);
             }
         }
@@ -11073,11 +11073,11 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
         for (size_t i = 0; i < fstest_length; i++) {
             fstest_buffer[i] = (uint8_t)(i * 31 + 7);
         }
-        if (virtual_file_system_write(PATH_TMP_DIR "fstest", fstest_buffer, fstest_length) != 0) {
+        if (virtual_file_system_write(PATH_TEMPORARY_DIRECTORY "fstest", fstest_buffer, fstest_length) != 0) {
             panic("leanfs indirect-block self-test: vfs_write failed");
         }
         k_memset(fstest_readback, 0, fstest_length);
-        int64_t fstest_size = virtual_file_system_read(PATH_TMP_DIR "fstest", fstest_readback, fstest_length);
+        int64_t fstest_size = virtual_file_system_read(PATH_TEMPORARY_DIRECTORY "fstest", fstest_readback, fstest_length);
         if (fstest_size != (int64_t)fstest_length) {
             panic("leanfs indirect-block self-test: size mismatch on readback");
         }
@@ -11187,7 +11187,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
             kernel_log_puts(" task slots and ");
             kernel_log_put_dec((uint32_t)file_descriptor_peak);
             kernel_log_puts(" of ");
-            kernel_log_put_dec((uint32_t)MAX_FDS);
+            kernel_log_put_dec((uint32_t)MAX_FILE_DESCRIPTORS);
             kernel_log_puts(" descriptors in one task - measured.\n\n");
         }
     }
@@ -11230,7 +11230,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
             kernel_log_puts(" task slots and ");
             kernel_log_put_dec((uint32_t)file_descriptor_peak);
             kernel_log_puts(" of ");
-            kernel_log_put_dec((uint32_t)MAX_FDS);
+            kernel_log_put_dec((uint32_t)MAX_FILE_DESCRIPTORS);
             kernel_log_puts(" descriptors in one task - and what it says about "
                        "itself is above, in its own words.\n\n");
         }

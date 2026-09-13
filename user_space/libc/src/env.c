@@ -19,33 +19,33 @@ extern void (*__fini_array_end[])(void) __attribute__((weak));
 #define ATEXIT_MAX 32
 
 typedef struct {
-    void (*fn)(void *);
+    void (*function)(void *);
     void *arg;
     void *dso;
-    int takes_arg;
+    int takes_argument;
 } exit_entry_t;
 
 static exit_entry_t atexit_fns[ATEXIT_MAX];
 static int atexit_count;
 
-static int register_exit(void (*fn)(void *), void *arg, void *dso, int takes_arg) {
-    if (!fn || atexit_count >= ATEXIT_MAX) {
+static int register_exit(void (*function)(void *), void *arg, void *dso, int takes_argument) {
+    if (!function || atexit_count >= ATEXIT_MAX) {
         return -1;
     }
-    atexit_fns[atexit_count].fn = fn;
+    atexit_fns[atexit_count].function = function;
     atexit_fns[atexit_count].arg = arg;
     atexit_fns[atexit_count].dso = dso;
-    atexit_fns[atexit_count].takes_arg = takes_arg;
+    atexit_fns[atexit_count].takes_argument = takes_argument;
     atexit_count++;
     return 0;
 }
 
-int atexit(void (*fn)(void)) {
-    return register_exit((void (*)(void *))(void *)fn, (void *)0, (void *)0, 0);
+int atexit(void (*function)(void)) {
+    return register_exit((void (*)(void *))(void *)function, (void *)0, (void *)0, 0);
 }
 
-int __cxa_atexit(void (*fn)(void *), void *arg, void *dso) {
-    return register_exit(fn, arg, dso, 1);
+int __cxa_atexit(void (*function)(void *), void *arg, void *dso) {
+    return register_exit(function, arg, dso, 1);
 }
 
 void __cxa_finalize(void *dso) {
@@ -62,10 +62,10 @@ void __cxa_finalize(void *dso) {
             atexit_fns[k] = atexit_fns[k + 1];
         }
         atexit_count--;
-        if (e.takes_arg) {
-            e.fn(e.arg);
+        if (e.takes_argument) {
+            e.function(e.arg);
         } else {
-            ((void (*)(void))(void *)e.fn)();
+            ((void (*)(void))(void *)e.function)();
         }
     }
 }
@@ -132,7 +132,7 @@ static int env_count(void) {
     return n;
 }
 
-static int name_len(const char *entry) {
+static int name_length(const char *entry) {
     const char *eq = strchr(entry, '=');
     return eq ? (int)(eq - entry) : -1;
 }
@@ -196,8 +196,8 @@ int setenv(const char *name, const char *value, int overwrite) {
         return 0;
     }
 
-    size_t len = namelen + 1 + strlen(value) + 1;
-    char *entry = (char *)malloc(len);
+    size_t length = namelen + 1 + strlen(value) + 1;
+    char *entry = (char *)malloc(length);
     if (!entry) {
         return -1;
     }
@@ -258,7 +258,7 @@ int putenv(char *entry) {
     if (!entry) {
         return -1;
     }
-    int nl = name_len(entry);
+    int nl = name_length(entry);
     if (nl <= 0) {
         return -1;
     }

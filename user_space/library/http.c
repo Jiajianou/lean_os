@@ -8,7 +8,7 @@
 
 #define HTTP_CONNECT_MS 5000
 #define HTTP_READ_MS    8000
-#define HTTP_HDR_MAX    2048
+#define HTTP_HEADER_MAX    2048
 
 static int split_url(const char *url, char *host, int host_cap,
                       uint16_t *port, char *path, int path_cap) {
@@ -83,10 +83,10 @@ static int parse_dotted(const char *s, uint32_t *out) {
     return 0;
 }
 
-static long read_until_closed(int fd, char *buf, long cap, long deadline) {
+static long read_until_closed(int fd, char *buffer, long cap, long deadline) {
     long got = 0;
     while (sys_uptime_ms() < deadline) {
-        long n = sys_recv(fd, buf + got, (uint32_t)(cap - got));
+        long n = sys_receive(fd, buffer + got, (uint32_t)(cap - got));
         if (n < 0) {
             break;
         }
@@ -102,18 +102,18 @@ static long read_until_closed(int fd, char *buf, long cap, long deadline) {
     return got;
 }
 
-static long dechunk(char *buf, long len) {
+static long dechunk(char *buffer, long length) {
     long in = 0, out = 0;
-    while (in < len) {
+    while (in < length) {
         long size = 0;
         int digits = 0;
-        while (in < len && buf[in] != '\r' && buf[in] != '\n') {
-            char c = buf[in++];
+        while (in < length && buffer[in] != '\r' && buffer[in] != '\n') {
+            char c = buffer[in++];
             int d;
             if (c >= '0' && c <= '9') { d = c - '0'; }
             else if (c >= 'a' && c <= 'f') { d = c - 'a' + 10; }
             else if (c >= 'A' && c <= 'F') { d = c - 'A' + 10; }
-            else if (c == ';') { while (in < len && buf[in] != '\r' && buf[in] != '\n') { in++; } break; }
+            else if (c == ';') { while (in < length && buffer[in] != '\r' && buffer[in] != '\n') { in++; } break; }
             else { return -1; }
             size = size * 16 + d;
             if (++digits > 8) {
@@ -123,19 +123,19 @@ static long dechunk(char *buf, long len) {
         if (digits == 0) {
             return -1;
         }
-        while (in < len && (buf[in] == '\r' || buf[in] == '\n')) {
+        while (in < length && (buffer[in] == '\r' || buffer[in] == '\n')) {
             in++;
         }
         if (size == 0) {
             return out;
         }
-        if (in + size > len) {
+        if (in + size > length) {
             return -1;
         }
         for (long i = 0; i < size; i++) {
-            buf[out++] = buf[in++];
+            buffer[out++] = buffer[in++];
         }
-        while (in < len && (buf[in] == '\r' || buf[in] == '\n')) {
+        while (in < length && (buffer[in] == '\r' || buffer[in] == '\n')) {
             in++;
         }
     }
@@ -148,10 +148,10 @@ static int header_has(const char *header, const char *name, const char **val) {
             const char *a = name;
             const char *b = p;
             while (*a && *b) {
-                char ca = *a, cb = *b;
+                char ca = *a, callback = *b;
                 if (ca >= 'A' && ca <= 'Z') { ca = (char)(ca - 'A' + 'a'); }
-                if (cb >= 'A' && cb <= 'Z') { cb = (char)(cb - 'A' + 'a'); }
-                if (ca != cb) { break; }
+                if (callback >= 'A' && callback <= 'Z') { callback = (char)(callback - 'A' + 'a'); }
+                if (ca != callback) { break; }
                 a++; b++;
             }
             if (!*a) {
@@ -183,7 +183,7 @@ long http_get(const char *url, char *body, long cap, int *status_out) {
             }
         }
 
-        int fd = (int)sys_socket(OS_SOCK_STREAM);
+        int fd = (int)sys_socket(OS_SOCKET_STREAM);
         if (fd < 0) {
             return -3;
         }
@@ -200,18 +200,18 @@ long http_get(const char *url, char *body, long cap, int *status_out) {
             return -3;
         }
 
-        char req[768];
+        char request[768];
         int rn = 0;
         const char *parts[] = {"GET ", path, " HTTP/1.1\r\nHost: ", host,
                                 "\r\nConnection: close\r\nUser-Agent: lean_os/1\r\n\r\n"};
         for (int i = 0; i < 5; i++) {
-            for (const char *c = parts[i]; *c && rn < (int)sizeof(req) - 1; c++) {
-                req[rn++] = *c;
+            for (const char *c = parts[i]; *c && rn < (int)sizeof(request) - 1; c++) {
+                request[rn++] = *c;
             }
         }
         long sent = 0;
         while (sent < rn) {
-            long n = sys_send(fd, req + sent, (uint32_t)(rn - sent));
+            long n = sys_send(fd, request + sent, (uint32_t)(rn - sent));
             if (n < 0) {
                 sys_close(fd);
                 return -3;
@@ -237,7 +237,7 @@ long http_get(const char *url, char *body, long cap, int *status_out) {
                 break;
             }
         }
-        if (header_end < 0 || header_end > HTTP_HDR_MAX) {
+        if (header_end < 0 || header_end > HTTP_HEADER_MAX) {
             return -4;
         }
 
@@ -252,8 +252,8 @@ long http_get(const char *url, char *body, long cap, int *status_out) {
             *status_out = status;
         }
 
-        char header[HTTP_HDR_MAX + 1];
-        long hlen = header_end < HTTP_HDR_MAX ? header_end : HTTP_HDR_MAX;
+        char header[HTTP_HEADER_MAX + 1];
+        long hlen = header_end < HTTP_HEADER_MAX ? header_end : HTTP_HEADER_MAX;
         memcpy(header, body, (size_t)hlen);
         header[hlen] = '\0';
 

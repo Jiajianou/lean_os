@@ -53,13 +53,13 @@ int __lean_path_errno(const char *path, int creating) {
     if (sys_stat(parent, &st) != 0) {
         return ENOENT;
     }
-    return st.is_dir ? ENOENT : ENOTDIR;
+    return st.is_directory ? ENOENT : ENOTDIR;
 }
 
 int chdir(const char *path) {
     if (sys_chdir(path) != 0) {
         os_stat_t st;
-        if (sys_stat(path, &st) == 0 && !st.is_dir) {
+        if (sys_stat(path, &st) == 0 && !st.is_directory) {
             errno = ENOTDIR;
         } else {
             errno = __lean_path_errno(path, 0);
@@ -69,27 +69,27 @@ int chdir(const char *path) {
     return 0;
 }
 
-char *getcwd(char *buf, size_t size) {
-    if (!buf || size == 0) {
+char *getcwd(char *buffer, size_t size) {
+    if (!buffer || size == 0) {
         return 0;
     }
-    if (sys_getcwd(buf, size) < 0) {
+    if (sys_getcwd(buffer, size) < 0) {
         return 0;
     }
-    return buf;
+    return buffer;
 }
 
 int getpid(void) {
     return (int)sys_getpid();
 }
 
-long read(int fd, void *buf, size_t count) {
-    long r = sys_read(fd, buf, count);
-    if (r == -OS_ERR_INTR) {
+long read(int fd, void *buffer, size_t count) {
+    long r = sys_read(fd, buffer, count);
+    if (r == -OS_ERROR_INTR) {
         errno = EINTR;
         return -1;
     }
-    if (r == -OS_ERR_AGAIN) {
+    if (r == -OS_ERROR_AGAIN) {
         errno = EAGAIN;
         return -1;
     }
@@ -99,9 +99,9 @@ long read(int fd, void *buf, size_t count) {
     return r;
 }
 
-ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
-    long r = sys_pread(fd, buf, count, (long)offset);
-    if (r == -OS_ERR_SPIPE) {
+ssize_t pread(int fd, void *buffer, size_t count, off_t offset) {
+    long r = sys_pread(fd, buffer, count, (long)offset);
+    if (r == -OS_ERROR_SPIPE) {
         errno = ESPIPE;
         return -1;
     }
@@ -112,9 +112,9 @@ ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
     return r;
 }
 
-ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
-    long r = sys_pwrite(fd, buf, count, (long)offset);
-    if (r == -OS_ERR_SPIPE) {
+ssize_t pwrite(int fd, const void *buffer, size_t count, off_t offset) {
+    long r = sys_pwrite(fd, buffer, count, (long)offset);
+    if (r == -OS_ERROR_SPIPE) {
         errno = ESPIPE;
         return -1;
     }
@@ -125,13 +125,13 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
     return r;
 }
 
-long write(int fd, const void *buf, size_t count) {
-    long r = sys_write(fd, buf, count);
-    if (r == -OS_ERR_INTR) {
+long write(int fd, const void *buffer, size_t count) {
+    long r = sys_write(fd, buffer, count);
+    if (r == -OS_ERROR_INTR) {
         errno = EINTR;
         return -1;
     }
-    if (r == -OS_ERR_AGAIN) {
+    if (r == -OS_ERROR_AGAIN) {
         errno = EAGAIN;
         return -1;
     }
@@ -169,7 +169,7 @@ int rmdir(const char *path) {
     if (sys_rmdir(path) != 0) {
         os_stat_t st;
         if (sys_stat(path, &st) == 0) {
-            errno = st.is_dir ? ENOTEMPTY : ENOTDIR;
+            errno = st.is_directory ? ENOTEMPTY : ENOTDIR;
         } else {
             errno = __lean_path_errno(path, 0);
         }
@@ -181,7 +181,7 @@ int rmdir(const char *path) {
 int unlink(const char *path) {
     if (sys_unlink(path) != 0) {
         os_stat_t st;
-        if (sys_stat(path, &st) == 0 && st.is_dir) {
+        if (sys_stat(path, &st) == 0 && st.is_directory) {
             errno = EISDIR;
         } else {
             errno = __lean_path_errno(path, 0);
@@ -221,8 +221,8 @@ int dup2(int oldfd, int newfd) {
     return (int)sys_dup2(oldfd, newfd);
 }
 
-int pipe(int fds[2]) {
-    return (int)sys_pipe(fds);
+int pipe(int file_descriptors[2]) {
+    return (int)sys_pipe(file_descriptors);
 }
 
 int open(const char *path, int flags, ...) {
@@ -237,28 +237,28 @@ int creat(const char *path, mode_t mode) {
     return open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
 }
 
-int fcntl(int fd, int cmd, ...) {
+int fcntl(int fd, int command, ...) {
     if (fd < 0) {
         return -1;
     }
-    switch (cmd) {
+    switch (command) {
     case F_GETFD:
-        return (int)sys_fcntl(fd, F_GETFD_CMD, 0);
+        return (int)sys_fcntl(fd, F_GETFD_COMMAND, 0);
     case F_SETFD: {
         __builtin_va_list ap;
-        __builtin_va_start(ap, cmd);
+        __builtin_va_start(ap, command);
         int arg = __builtin_va_arg(ap, int);
         __builtin_va_end(ap);
-        return (int)sys_fcntl(fd, F_SETFD_CMD, arg & FD_CLOEXEC);
+        return (int)sys_fcntl(fd, F_SETFD_COMMAND, arg & FD_CLOEXEC);
     }
     case F_GETFL:
-        return (int)sys_fcntl(fd, F_GETFL_CMD, 0);
+        return (int)sys_fcntl(fd, F_GETFL_COMMAND, 0);
     case F_SETFL: {
         __builtin_va_list ap;
-        __builtin_va_start(ap, cmd);
+        __builtin_va_start(ap, command);
         int arg = __builtin_va_arg(ap, int);
         __builtin_va_end(ap);
-        if (sys_fcntl(fd, F_SETFL_CMD, arg & O_NONBLOCK) < 0) {
+        if (sys_fcntl(fd, F_SETFL_COMMAND, arg & O_NONBLOCK) < 0) {
             errno = EBADF;
             return -1;
         }
@@ -268,7 +268,7 @@ int fcntl(int fd, int cmd, ...) {
     case F_SETLK:
     case F_SETLKW: {
         __builtin_va_list ap;
-        __builtin_va_start(ap, cmd);
+        __builtin_va_start(ap, command);
         struct flock *fl = __builtin_va_arg(ap, struct flock *);
         __builtin_va_end(ap);
         if (!fl) {
@@ -280,15 +280,15 @@ int fcntl(int fd, int cmd, ...) {
         k.whence = fl->l_whence;
         k.pid = 0;
         k.start = (int64_t)fl->l_start;
-        k.len = (int64_t)fl->l_len;
-        int kcmd = cmd == F_GETLK ? F_GETLK_CMD : cmd == F_SETLK ? F_SETLK_CMD : F_SETLKW_CMD;
+        k.length = (int64_t)fl->l_len;
+        int kcmd = command == F_GETLK ? F_GETLK_COMMAND : command == F_SETLK ? F_SETLK_COMMAND : F_SETLKW_COMMAND;
         long r = sys_fcntl(fd, kcmd, (long)(uintptr_t)&k);
         if (r == 0) {
-            if (cmd == F_GETLK) {
+            if (command == F_GETLK) {
                 fl->l_type = k.type;
                 fl->l_whence = k.whence;
                 fl->l_start = (off_t)k.start;
-                fl->l_len = (off_t)k.len;
+                fl->l_len = (off_t)k.length;
                 fl->l_pid = (pid_t)k.pid;
             }
             return 0;
@@ -337,7 +337,7 @@ int execvp(const char *file, char *const argv[]) {
     if (!path || !*path) {
         path = PATH_DEFAULT;
     }
-    char attempt[PATH_MAX_LEN];
+    char attempt[PATH_MAX_LENGTH];
     const char *p = path;
     while (*p) {
         size_t n = 0;
@@ -423,8 +423,8 @@ int fdatasync(int fd) {
     return fsync(fd);
 }
 
-long readlink(const char *path, char *buf, size_t bufsiz) {
-    return sys_readlink(path, buf, bufsiz);
+long readlink(const char *path, char *buffer, size_t bufsiz) {
+    return sys_readlink(path, buffer, bufsiz);
 }
 
 uid_t getuid(void) {
@@ -678,7 +678,7 @@ long sysconf(int name) {
     }
 }
 
-size_t confstr(int name, char *buf, size_t len) {
+size_t confstr(int name, char *buffer, size_t length) {
     const char *value;
     switch (name) {
     case _CS_PATH:
@@ -696,12 +696,12 @@ size_t confstr(int name, char *buf, size_t len) {
     while (value[n]) {
         n++;
     }
-    if (buf && len > 0) {
-        size_t copy = (n + 1 <= len) ? n + 1 : len;
+    if (buffer && length > 0) {
+        size_t copy = (n + 1 <= length) ? n + 1 : length;
         for (size_t i = 0; i + 1 < copy; i++) {
-            buf[i] = value[i];
+            buffer[i] = value[i];
         }
-        buf[copy - 1] = '\0';
+        buffer[copy - 1] = '\0';
     }
     return n + 1;
 }
@@ -739,7 +739,7 @@ int dup(int oldfd) {
         if (i == oldfd) {
             continue;
         }
-        if (sys_fcntl(i, F_GETFD_CMD, 0) < 0) {
+        if (sys_fcntl(i, F_GETFD_COMMAND, 0) < 0) {
             return dup2(oldfd, i);
         }
     }
@@ -762,14 +762,14 @@ int chroot(const char *path) {
     return -1;
 }
 
-int gethostname(char *name, size_t len) {
+int gethostname(char *name, size_t length) {
     static const char host[] = "lean_os";
-    if (!name || len == 0) {
+    if (!name || length == 0) {
         errno = EINVAL;
         return -1;
     }
     size_t n = sizeof(host) - 1;
-    if (len < n + 1) {
+    if (length < n + 1) {
         errno = ENAMETOOLONG;
         return -1;
     }
@@ -779,9 +779,9 @@ int gethostname(char *name, size_t len) {
     return 0;
 }
 
-int sethostname(const char *name, size_t len) {
+int sethostname(const char *name, size_t length) {
     (void)name;
-    (void)len;
+    (void)length;
     errno = EPERM;
     return -1;
 }
@@ -849,19 +849,19 @@ long fpathconf(int fd, int name) {
     return pathconf_value(name);
 }
 
-int ttyname_r(int fd, char *buf, size_t len) {
+int ttyname_r(int fd, char *buffer, size_t length) {
     static const char name[] = "/dev/tty";
-    if (!buf) {
+    if (!buffer) {
         return EINVAL;
     }
     if (!isatty(fd)) {
         return ENOTTY;
     }
-    if (len < sizeof(name)) {
+    if (length < sizeof(name)) {
         return ERANGE;
     }
     for (size_t i = 0; i < sizeof(name); i++) {
-        buf[i] = name[i];
+        buffer[i] = name[i];
     }
     return 0;
 }
@@ -871,12 +871,12 @@ char *ttyname(int fd) {
     return ttyname_r(fd, shared, sizeof(shared)) == 0 ? shared : (char *)0;
 }
 
-ssize_t getrandom(void *buf, size_t len, unsigned int flags) {
+ssize_t getrandom(void *buffer, size_t length, unsigned int flags) {
     if (flags & ~(unsigned int)(GRND_NONBLOCK | GRND_RANDOM)) {
         errno = EINVAL;
         return -1;
     }
-    long r = sys_getrandom(buf, len, flags);
+    long r = sys_getrandom(buffer, length, flags);
     if (r < 0) {
         errno = EFAULT;
         return -1;
@@ -884,10 +884,10 @@ ssize_t getrandom(void *buf, size_t len, unsigned int flags) {
     return (ssize_t)r;
 }
 
-int getentropy(void *buf, size_t len) {
-    if (len > 256) {
+int getentropy(void *buffer, size_t length) {
+    if (length > 256) {
         errno = EIO;
         return -1;
     }
-    return sys_getrandom(buf, len, 0) == (long)len ? 0 : -1;
+    return sys_getrandom(buffer, length, 0) == (long)length ? 0 : -1;
 }

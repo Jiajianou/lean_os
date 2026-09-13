@@ -13,7 +13,7 @@
 #define TCP_PSH 0x08
 #define TCP_ACK 0x10
 
-#define TCP_HEADER_LEN 20
+#define TCP_HEADER_LENGTH 20
 
 static int sequence_leq(uint32_t a, uint32_t b) { return (int32_t)(a - b) <= 0; }
 static int sequence_gt(uint32_t a, uint32_t b)  { return (int32_t)(a - b) > 0; }
@@ -31,10 +31,10 @@ struct tcpcb {
 
     uint16_t mss;
 
-    uint8_t send_buffer[TCP_SEND_BUF];
+    uint8_t send_buffer[TCP_SEND_BUFFER];
     uint32_t send_length;
 
-    uint8_t receive_buffer[TCP_RECV_BUF];
+    uint8_t receive_buffer[TCP_RECEIVE_BUFFER];
     uint32_t receive_length;
 
     uint32_t cwnd, ssthresh;
@@ -80,10 +80,10 @@ int tcp_debug_retransmits(void) { return debug_retransmits; }
 static uint32_t checksum_failures;
 uint32_t tcp_checksum_failures(void) { return checksum_failures; }
 
-static uint32_t pseudo_sum(uint32_t src, uint32_t dst, uint16_t seg_length) {
+static uint32_t pseudo_sum(uint32_t source, uint32_t destination, uint16_t seg_length) {
     uint8_t p[12];
-    net_write_be32(p + 0, src);
-    net_write_be32(p + 4, dst);
+    net_write_be32(p + 0, source);
+    net_write_be32(p + 4, destination);
     p[8] = 0;
     p[9] = IP_PROTO_TCP;
     net_write_be16(p + 10, seg_length);
@@ -91,14 +91,14 @@ static uint32_t pseudo_sum(uint32_t src, uint32_t dst, uint16_t seg_length) {
 }
 
 static uint16_t window_of(const struct tcpcb *t) {
-    uint32_t free_space = TCP_RECV_BUF - t->receive_length;
+    uint32_t free_space = TCP_RECEIVE_BUFFER - t->receive_length;
     return free_space > 0xFFFF ? 0xFFFF : (uint16_t)free_space;
 }
 
 static int emit(struct tcpcb *t, uint32_t seq, uint8_t flags,
                 const uint8_t *payload, uint16_t payload_length, int with_mss) {
-    static uint8_t seg[TCP_HEADER_LEN + 4 + TCP_MAX_MSS];
-    uint16_t header_length = TCP_HEADER_LEN + (with_mss ? 4 : 0);
+    static uint8_t seg[TCP_HEADER_LENGTH + 4 + TCP_MAX_MSS];
+    uint16_t header_length = TCP_HEADER_LENGTH + (with_mss ? 4 : 0);
 
     if (payload_length > TCP_MAX_MSS) {
         payload_length = TCP_MAX_MSS;
@@ -136,7 +136,7 @@ static int emit(struct tcpcb *t, uint32_t seq, uint8_t flags,
     return ip_send_from(t->local_ip, t->remote_ip, IP_PROTO_TCP, seg, total);
 }
 
-static void send_reset(uint32_t source_ip, uint32_t destination_ip, const uint8_t *seg, uint16_t len) {
+static void send_reset(uint32_t source_ip, uint32_t destination_ip, const uint8_t *seg, uint16_t length) {
     if (seg[13] & TCP_RST) {
         return;
     }
@@ -147,17 +147,17 @@ static void send_reset(uint32_t source_ip, uint32_t destination_ip, const uint8_
     kernel_log_puts(" flags ");
     kernel_log_put_hex32(seg[13]);
     kernel_log_putc('\n');
-    uint8_t out[TCP_HEADER_LEN];
+    uint8_t out[TCP_HEADER_LENGTH];
     uint16_t data_off = (uint16_t)((seg[12] >> 4) * 4);
     uint32_t their_sequence = net_read_be32(seg + 4);
     uint32_t their_ack = net_read_be32(seg + 8);
-    uint16_t seg_length = (uint16_t)(len - data_off);
+    uint16_t seg_length = (uint16_t)(length - data_off);
     if (seg[13] & TCP_SYN) { seg_length++; }
     if (seg[13] & TCP_FIN) { seg_length++; }
 
     net_write_be16(out + 0, net_read_be16(seg + 2));
     net_write_be16(out + 2, net_read_be16(seg + 0));
-    out[12] = (uint8_t)((TCP_HEADER_LEN / 4) << 4);
+    out[12] = (uint8_t)((TCP_HEADER_LENGTH / 4) << 4);
     net_write_be16(out + 14, 0);
     out[16] = 0; out[17] = 0;
     net_write_be16(out + 18, 0);
@@ -172,9 +172,9 @@ static void send_reset(uint32_t source_ip, uint32_t destination_ip, const uint8_
         out[13] = TCP_RST | TCP_ACK;
     }
 
-    uint16_t csum = net_fold16(net_sum16(pseudo_sum(destination_ip, source_ip, TCP_HEADER_LEN), out, TCP_HEADER_LEN));
+    uint16_t csum = net_fold16(net_sum16(pseudo_sum(destination_ip, source_ip, TCP_HEADER_LENGTH), out, TCP_HEADER_LENGTH));
     net_write_be16(out + 16, csum);
-    ip_send_from(destination_ip, source_ip, IP_PROTO_TCP, out, TCP_HEADER_LEN);
+    ip_send_from(destination_ip, source_ip, IP_PROTO_TCP, out, TCP_HEADER_LENGTH);
 }
 
 static void send_ack(struct tcpcb *t) {
@@ -197,9 +197,9 @@ static void note_rtt(struct tcpcb *t, uint32_t measured) {
         t->srtt = r << 3;
         t->rttvar = r << 1;
     } else {
-        int32_t err = r - (t->srtt >> 3);
-        t->srtt += err;
-        int32_t abs_error = err < 0 ? -err : err;
+        int32_t error = r - (t->srtt >> 3);
+        t->srtt += error;
+        int32_t abs_error = error < 0 ? -error : error;
         t->rttvar += (abs_error - (t->rttvar >> 2));
     }
     uint32_t rto = (uint32_t)((t->srtt >> 3) + (t->rttvar >> 1));
@@ -444,15 +444,15 @@ int tcp_accept_pending(const struct tcpcb *listener) {
     return n;
 }
 
-int tcp_send(struct tcpcb *t, const uint8_t *data, uint16_t len) {
+int tcp_send(struct tcpcb *t, const uint8_t *data, uint16_t length) {
     if (!t || !t->in_use || t->fin_sent) {
         return -1;
     }
     if (t->state != TCP_ESTABLISHED && t->state != TCP_CLOSE_WAIT) {
         return -1;
     }
-    uint32_t room = TCP_SEND_BUF - t->send_length;
-    uint32_t n = len < room ? len : room;
+    uint32_t room = TCP_SEND_BUFFER - t->send_length;
+    uint32_t n = length < room ? length : room;
     if (n) {
         k_memcpy(t->send_buffer + t->send_length, data, n);
         t->send_length += n;
@@ -488,7 +488,7 @@ int tcp_bytes_available(const struct tcpcb *t) {
 }
 
 int tcp_send_space(const struct tcpcb *t) {
-    return (t && t->in_use) ? (int)(TCP_SEND_BUF - t->send_length) : 0;
+    return (t && t->in_use) ? (int)(TCP_SEND_BUFFER - t->send_length) : 0;
 }
 
 tcp_state_t tcp_state(const struct tcpcb *t) {
@@ -566,7 +566,7 @@ void tcp_abort(struct tcpcb *t) {
 }
 
 static void parse_mss(struct tcpcb *t, const uint8_t *seg, uint16_t data_off) {
-    uint16_t i = TCP_HEADER_LEN;
+    uint16_t i = TCP_HEADER_LENGTH;
     while (i + 1 < data_off) {
         uint8_t kind = seg[i];
         if (kind == 0) { break; }
@@ -650,36 +650,36 @@ static int process_ack(struct tcpcb *t, uint32_t ack, uint32_t window) {
     return 1;
 }
 
-static void deliver(struct tcpcb *t, const uint8_t *data, uint16_t len) {
-    uint32_t room = TCP_RECV_BUF - t->receive_length;
-    uint32_t n = len < room ? len : room;
+static void deliver(struct tcpcb *t, const uint8_t *data, uint16_t length) {
+    uint32_t room = TCP_RECEIVE_BUFFER - t->receive_length;
+    uint32_t n = length < room ? length : room;
     if (n) {
         k_memcpy(t->receive_buffer + t->receive_length, data, n);
         t->receive_length += n;
         t->rcv_nxt += n;
     }
-    if (n < len) {
+    if (n < length) {
         kernel_log_puts("[tcp] window: port ");
         kernel_log_put_dec(t->local_port);
         kernel_log_puts(" refused ");
-        kernel_log_put_dec(len - n);
+        kernel_log_put_dec(length - n);
         kernel_log_puts(" of ");
-        kernel_log_put_dec(len);
+        kernel_log_put_dec(length);
         kernel_log_puts(" bytes, buffer ");
         kernel_log_put_dec(t->receive_length);
         kernel_log_putc('\n');
     }
 }
 
-static void tcp_handle_packet_locked(uint32_t source_ip, uint32_t destination_ip, const uint8_t *seg, uint16_t len) {
-    if (len < TCP_HEADER_LEN) {
+static void tcp_handle_packet_locked(uint32_t source_ip, uint32_t destination_ip, const uint8_t *seg, uint16_t length) {
+    if (length < TCP_HEADER_LENGTH) {
         return;
     }
     uint16_t data_off = (uint16_t)((seg[12] >> 4) * 4);
-    if (data_off < TCP_HEADER_LEN || data_off > len) {
+    if (data_off < TCP_HEADER_LENGTH || data_off > length) {
         return;
     }
-    if (net_fold16(net_sum16(pseudo_sum(source_ip, destination_ip, len), seg, len)) != 0) {
+    if (net_fold16(net_sum16(pseudo_sum(source_ip, destination_ip, length), seg, length)) != 0) {
         checksum_failures++;
         if (checksum_failures <= 4 || checksum_failures % 256 == 0) {
             kernel_log_puts("[tcp] checksum: dropped a corrupt segment to port ");
@@ -700,22 +700,22 @@ static void tcp_handle_packet_locked(uint32_t source_ip, uint32_t destination_ip
     uint8_t flags = seg[13];
     uint16_t window = net_read_be16(seg + 14);
     const uint8_t *data = seg + data_off;
-    uint16_t data_length = (uint16_t)(len - data_off);
+    uint16_t data_length = (uint16_t)(length - data_off);
 
     struct tcpcb *t = find_tcb(destination_ip, destination_port, source_ip, source_port);
     if (!t) {
-        send_reset(source_ip, destination_ip, seg, len);
+        send_reset(source_ip, destination_ip, seg, length);
         return;
     }
 
     if (t->state == TCP_LISTEN) {
         if (!(flags & TCP_SYN) || (flags & TCP_ACK)) {
-            send_reset(source_ip, destination_ip, seg, len);
+            send_reset(source_ip, destination_ip, seg, length);
             return;
         }
         struct tcpcb *c = alloc_tcb();
         if (!c) {
-            send_reset(source_ip, destination_ip, seg, len);
+            send_reset(source_ip, destination_ip, seg, length);
             return;
         }
         c->local_ip = destination_ip;
@@ -847,9 +847,9 @@ static void tcp_handle_packet_locked(uint32_t source_ip, uint32_t destination_ip
     try_send(t);
 }
 
-void tcp_handle_packet(uint32_t source_ip, uint32_t destination_ip, const uint8_t *seg, uint16_t len) {
-    tcp_handle_packet_locked(source_ip, destination_ip, seg, len);
-    scheduler_wake_all(SCHED_POLL_CHAN);
+void tcp_handle_packet(uint32_t source_ip, uint32_t destination_ip, const uint8_t *seg, uint16_t length) {
+    tcp_handle_packet_locked(source_ip, destination_ip, seg, length);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
 
 }
 
@@ -925,5 +925,5 @@ void tcp_tick(void) {
         }
     }
     net_lock_release();
-    scheduler_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
 }

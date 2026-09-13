@@ -4,6 +4,6 @@
 
 #define CLIPBOARD_MAX 256
 
-void clipboard_set(const void *buf, size_t len);
+void clipboard_set(const void *buffer, size_t length);
 
-size_t clipboard_get(void *buf, size_t maxlen);
+size_t clipboard_get(void *buffer, size_t maxlen);

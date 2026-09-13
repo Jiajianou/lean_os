@@ -11,10 +11,10 @@ static void fill(struct stat *out, const os_stat_t *st) {
         out->st_mode = S_IFLNK;
     } else {
         switch (st->kind) {
-        case OS_STAT_DIR:  out->st_mode = S_IFDIR; break;
+        case OS_STAT_DIRECTORY:  out->st_mode = S_IFDIR; break;
         case OS_STAT_CHR:  out->st_mode = S_IFCHR; break;
         case OS_STAT_FIFO: out->st_mode = S_IFIFO; break;
-        case OS_STAT_SOCK: out->st_mode = S_IFSOCK; break;
+        case OS_STAT_SOCKET: out->st_mode = S_IFSOCK; break;
         default:           out->st_mode = S_IFREG; break;
         }
     }
@@ -33,9 +33,9 @@ static void fill(struct stat *out, const os_stat_t *st) {
 }
 
 static long stat_errno(long r) {
-    if (r == -OS_ERR_NOENT) {
+    if (r == -OS_ERROR_NOENT) {
         errno = ENOENT;
-    } else if (r == -OS_ERR_FAULT) {
+    } else if (r == -OS_ERROR_FAULT) {
         errno = EFAULT;
     }
     return r;

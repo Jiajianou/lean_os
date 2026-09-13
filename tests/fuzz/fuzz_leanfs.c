@@ -41,13 +41,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
     leanfs_init();
 
-    char buf[128];
+    char buffer[128];
     leanfs_is_directory("/");
     leanfs_exists("/bin");
-    leanfs_read("/bin/hello", buf, sizeof(buf));
+    leanfs_read("/bin/hello", buffer, sizeof(buffer));
     uint32_t cookie = 0;
-    leanfs_directory_entry_t ent;
-    for (int i = 0; i < 64 && leanfs_readdir("/", &cookie, &ent) == 1; i++) {
+    leanfs_directory_entry_t entry;
+    for (int i = 0; i < 64 && leanfs_readdir("/", &cookie, &entry) == 1; i++) {
     }
     leanfs_write("/afterwards", "ok", 2);
 

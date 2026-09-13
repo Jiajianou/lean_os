@@ -18,8 +18,8 @@ static uint64_t map_through(uint64_t bytes) {
     uint64_t pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
     uint64_t have = framebuffer_mapped / PAGE_SIZE;
     for (uint64_t i = have; i < pages; i++) {
-        uint64_t addr = framebuffer_base + i * PAGE_SIZE;
-        virtual_memory_map_page(addr, addr, VMM_FLAG_WRITABLE);
+        uint64_t address = framebuffer_base + i * PAGE_SIZE;
+        virtual_memory_map_page(address, address, VIRTUAL_MEMORY_FLAG_WRITABLE);
     }
     if (pages * PAGE_SIZE > framebuffer_mapped) {
         framebuffer_mapped = pages * PAGE_SIZE;
@@ -140,9 +140,9 @@ void framebuffer_scroll_up(uint32_t rows, uint32_t bg_rgb) {
         return;
     }
     for (uint32_t y = 0; y < framebuffer_h - rows; y++) {
-        volatile uint32_t *dst = pixel_address(0, y);
-        volatile uint32_t *src = pixel_address(0, y + rows);
-        k_memcpy((void *)dst, (const void *)src, (size_t)framebuffer_w * sizeof(uint32_t));
+        volatile uint32_t *destination = pixel_address(0, y);
+        volatile uint32_t *source = pixel_address(0, y + rows);
+        k_memcpy((void *)destination, (const void *)source, (size_t)framebuffer_w * sizeof(uint32_t));
     }
     framebuffer_fill_rect(0, framebuffer_h - rows, framebuffer_w, rows, bg_rgb);
 }

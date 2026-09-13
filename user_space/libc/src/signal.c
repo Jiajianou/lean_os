@@ -10,14 +10,14 @@ const unsigned int __lean_sigreturn_number = SYS_sigreturn;
 static int lean_sa_flags[SIG_MAX + 1];
 
 sighandler_t signal(int sig, sighandler_t handler) {
-    long prev = sys_sigaction(sig, (void *)handler, __lean_sigreturn, 0);
-    if (prev < 0) {
+    long previous = sys_sigaction(sig, (void *)handler, __lean_sigreturn, 0);
+    if (previous < 0) {
         return SIG_ERR;
     }
     if (sig >= 0 && sig <= SIG_MAX) {
         lean_sa_flags[sig] = 0;
     }
-    return (sighandler_t)prev;
+    return (sighandler_t)previous;
 }
 
 int kill(int pid, int sig) {
@@ -42,30 +42,30 @@ int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
         return -1;
     }
     if (!act) {
-        long prev = sys_sigaction(sig, (void *)SIG_DFL, __lean_sigreturn, 0);
-        if (prev < 0) {
+        long previous = sys_sigaction(sig, (void *)SIG_DFL, __lean_sigreturn, 0);
+        if (previous < 0) {
             return -1;
         }
-        sys_sigaction(sig, (void *)prev, __lean_sigreturn,
+        sys_sigaction(sig, (void *)previous, __lean_sigreturn,
                       (unsigned int)lean_sa_flags[sig]);
         if (old) {
-            old->sa_handler = (sighandler_t)prev;
+            old->sa_handler = (sighandler_t)previous;
             old->sa_mask = 0;
             old->sa_flags = lean_sa_flags[sig];
         }
         return 0;
     }
-    long prev = sys_sigaction(sig, (void *)act->sa_handler, __lean_sigreturn,
+    long previous = sys_sigaction(sig, (void *)act->sa_handler, __lean_sigreturn,
                               (unsigned int)act->sa_flags);
-    if (prev < 0) {
+    if (previous < 0) {
         return -1;
     }
-    int prev_flags = lean_sa_flags[sig];
+    int previous_flags = lean_sa_flags[sig];
     lean_sa_flags[sig] = act->sa_flags;
     if (old) {
-        old->sa_handler = (sighandler_t)prev;
+        old->sa_handler = (sighandler_t)previous;
         old->sa_mask = 0;
-        old->sa_flags = prev_flags;
+        old->sa_flags = previous_flags;
     }
     return 0;
 }

@@ -15,7 +15,7 @@
 
 union cmsg_one {
     struct cmsghdr align;
-    char buf[CMSG_SPACE(sizeof(int))];
+    char buffer[CMSG_SPACE(sizeof(int))];
 };
 
 static int send_file_descriptor(int sock, int fd, const char *payload) {
@@ -24,18 +24,18 @@ static int send_file_descriptor(int sock, int fd, const char *payload) {
     iov.iov_len = strlen(payload);
     union cmsg_one c;
     memset(&c, 0, sizeof(c));
-    struct msghdr msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = c.buf;
-    msg.msg_controllen = sizeof(c.buf);
-    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+    struct msghdr message;
+    memset(&message, 0, sizeof(message));
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_control = c.buffer;
+    message.msg_controllen = sizeof(c.buffer);
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&message);
     cm->cmsg_level = SOL_SOCKET;
     cm->cmsg_type = SCM_RIGHTS;
     cm->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(cm), &fd, sizeof(int));
-    return (int)sendmsg(sock, &msg, 0);
+    return (int)sendmsg(sock, &message, 0);
 }
 
 static int receive_file_descriptor(int sock, char *out, size_t outlen, int *msgflags) {
@@ -44,19 +44,19 @@ static int receive_file_descriptor(int sock, char *out, size_t outlen, int *msgf
     iov.iov_len = outlen;
     union cmsg_one c;
     memset(&c, 0, sizeof(c));
-    struct msghdr msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = c.buf;
-    msg.msg_controllen = sizeof(c.buf);
-    if (recvmsg(sock, &msg, 0) < 0) {
+    struct msghdr message;
+    memset(&message, 0, sizeof(message));
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_control = c.buffer;
+    message.msg_controllen = sizeof(c.buffer);
+    if (recvmsg(sock, &message, 0) < 0) {
         return -1;
     }
     if (msgflags) {
-        *msgflags = msg.msg_flags;
+        *msgflags = message.msg_flags;
     }
-    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&message);
     if (!cm || cm->cmsg_len < CMSG_LEN(sizeof(int)) || cm->cmsg_type != SCM_RIGHTS) {
         return -1;
     }
@@ -70,15 +70,15 @@ static int test_pair(void) {
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
         FAIL(2);
     }
-    char buf[32];
+    char buffer[32];
     if (write(sv[0], "ping", 4) != 4) {
         FAIL(3);
     }
-    if (read(sv[1], buf, sizeof(buf)) != 4 || memcmp(buf, "ping", 4) != 0) {
+    if (read(sv[1], buffer, sizeof(buffer)) != 4 || memcmp(buffer, "ping", 4) != 0) {
         FAIL(3);
     }
-    if (write(sv[1], "pong", 4) != 4 || read(sv[0], buf, sizeof(buf)) != 4 ||
-        memcmp(buf, "pong", 4) != 0) {
+    if (write(sv[1], "pong", 4) != 4 || read(sv[0], buffer, sizeof(buffer)) != 4 ||
+        memcmp(buffer, "pong", 4) != 0) {
         FAIL(3);
     }
     struct stat st;
@@ -98,11 +98,11 @@ static int test_seqpacket(void) {
     if (write(sv[0], "aa", 2) != 2 || write(sv[0], "bbb", 3) != 3) {
         FAIL(4);
     }
-    char buf[32];
-    if (read(sv[1], buf, sizeof(buf)) != 2 || memcmp(buf, "aa", 2) != 0) {
+    char buffer[32];
+    if (read(sv[1], buffer, sizeof(buffer)) != 2 || memcmp(buffer, "aa", 2) != 0) {
         FAIL(4);
     }
-    if (read(sv[1], buf, sizeof(buf)) != 3 || memcmp(buf, "bbb", 3) != 0) {
+    if (read(sv[1], buffer, sizeof(buffer)) != 3 || memcmp(buffer, "bbb", 3) != 0) {
         FAIL(4);
     }
     close(sv[0]);
@@ -218,10 +218,10 @@ static int test_pass_a_socket(void) {
         FAIL(6);
     }
     close(inner[1]);
-    char buf[32];
-    memset(buf, 0, sizeof(buf));
-    if (read(inner[0], buf, sizeof(buf)) != 13 ||
-        memcmp(buf, "channel-works", 13) != 0) {
+    char buffer[32];
+    memset(buffer, 0, sizeof(buffer));
+    if (read(inner[0], buffer, sizeof(buffer)) != 13 ||
+        memcmp(buffer, "channel-works", 13) != 0) {
         FAIL(10);
     }
     long rc = sys_wait(kid);
@@ -266,12 +266,12 @@ static int test_named(const char *name, int namelen, int failcode) {
     if (conn < 0) {
         FAIL(failcode);
     }
-    char buf[16];
-    memset(buf, 0, sizeof(buf));
-    if (read(conn, buf, sizeof(buf)) != 7 || memcmp(buf, "dialled", 7) != 0) {
+    char buffer[16];
+    memset(buffer, 0, sizeof(buffer));
+    if (read(conn, buffer, sizeof(buffer)) != 7 || memcmp(buffer, "dialled", 7) != 0) {
         FAIL(failcode);
     }
-    if (read(conn, buf, sizeof(buf)) != 0) {
+    if (read(conn, buffer, sizeof(buffer)) != 0) {
         FAIL(15);
     }
     long rc = sys_wait(kid);
@@ -291,15 +291,15 @@ static int test_blocking_and_shutdown(void) {
     }
     if (kid == 0) {
         close(sv[0]);
-        char buf[16];
-        long n = read(sv[1], buf, sizeof(buf));
-        if (n != 5 || memcmp(buf, "woken", 5) != 0) {
+        char buffer[16];
+        long n = read(sv[1], buffer, sizeof(buffer));
+        if (n != 5 || memcmp(buffer, "woken", 5) != 0) {
             sys_exit(14);
         }
         if (shutdown(sv[1], SHUT_WR) != 0) {
             sys_exit(13);
         }
-        n = read(sv[1], buf, sizeof(buf));
+        n = read(sv[1], buffer, sizeof(buffer));
         if (n != 4) {
             sys_exit(13);
         }
@@ -312,8 +312,8 @@ static int test_blocking_and_shutdown(void) {
     if (write(sv[0], "woken", 5) != 5) {
         FAIL(14);
     }
-    char buf[16];
-    long n = read(sv[0], buf, sizeof(buf));
+    char buffer[16];
+    long n = read(sv[0], buffer, sizeof(buffer));
     if (n != 0) {
         FAIL(13);
     }
@@ -339,16 +339,16 @@ static int test_ctrunc(void) {
     }
     close(pipefd[0]);
     close(pipefd[1]);
-    char buf[8];
-    struct iovec iov = {buf, sizeof(buf)};
-    struct msghdr msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    if (recvmsg(sv[1], &msg, 0) != 1) {
+    char buffer[8];
+    struct iovec iov = {buffer, sizeof(buffer)};
+    struct msghdr message;
+    memset(&message, 0, sizeof(message));
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    if (recvmsg(sv[1], &message, 0) != 1) {
         FAIL(17);
     }
-    if (!(msg.msg_flags & MSG_CTRUNC)) {
+    if (!(message.msg_flags & MSG_CTRUNC)) {
         FAIL(17);
     }
     close(sv[0]);
@@ -357,17 +357,17 @@ static int test_ctrunc(void) {
 }
 
 static int test_exhaustion(void) {
-    int fds[64][2];
+    int file_descriptors[64][2];
     int taken = 0;
-    while (taken < 64 && socketpair(AF_UNIX, SOCK_STREAM, 0, fds[taken]) == 0) {
+    while (taken < 64 && socketpair(AF_UNIX, SOCK_STREAM, 0, file_descriptors[taken]) == 0) {
         taken++;
     }
     if (taken == 0) {
         FAIL(16);
     }
     for (int i = 0; i < taken; i++) {
-        close(fds[i][0]);
-        close(fds[i][1]);
+        close(file_descriptors[i][0]);
+        close(file_descriptors[i][1]);
     }
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
@@ -402,8 +402,8 @@ static int test_no_capability_needed(void) {
         if (write(inner[0], "free", 4) != 4) {
             sys_exit(18);
         }
-        char buf[8];
-        if (read(inner[1], buf, sizeof(buf)) != 4) {
+        char buffer[8];
+        if (read(inner[1], buffer, sizeof(buffer)) != 4) {
             sys_exit(18);
         }
         char payload[8];
@@ -425,13 +425,13 @@ static int test_no_capability_needed(void) {
         FAIL(6);
     }
     close(pipefd[1]);
-    char buf[16];
-    memset(buf, 0, sizeof(buf));
-    long n = read(pipefd[0], buf, sizeof(buf));
+    char buffer[16];
+    memset(buffer, 0, sizeof(buffer));
+    long n = read(pipefd[0], buffer, sizeof(buffer));
     close(pipefd[0]);
     long rc = sys_wait(kid);
     close(sv[0]);
-    if (n != 9 || memcmp(buf, "sandboxed", 9) != 0) {
+    if (n != 9 || memcmp(buffer, "sandboxed", 9) != 0) {
         FAIL(18);
     }
     return rc == 0 ? 0 : (int)(rc > 0 ? rc : 18);

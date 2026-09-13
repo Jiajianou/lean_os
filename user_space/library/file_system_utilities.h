@@ -4,9 +4,9 @@
 
 #include "syscall.h"
 
-#define FSUTIL_SIZE_MAX  12
-#define FSUTIL_EXACT_MAX 16
-#define FSUTIL_DATE_MAX  12
+#define FILE_SYSTEM_UTILITIES_SIZE_MAX  12
+#define FILE_SYSTEM_UTILITIES_EXACT_MAX 16
+#define FILE_SYSTEM_UTILITIES_DATE_MAX  12
 
 void file_system_utilities_format_size(uint32_t bytes, char *out);
 
@@ -16,9 +16,9 @@ void file_system_utilities_format_date(uint32_t mtime, char *out);
 
 int file_system_utilities_name_ok(const char *name);
 
-#define FSUTIL_MAX_DEPTH 16
+#define FILE_SYSTEM_UTILITIES_MAX_DEPTH 16
 
-#define FSUTIL_DIRENT_BUF 1024
+#define FILE_SYSTEM_UTILITIES_DIRENT_BUFFER 1024
 
 typedef struct {
     uint32_t entries;

@@ -31,7 +31,7 @@
 #define BTN_TEXT        0x00FFFFFFu
 #define KILL_BTN_BG     0x00663038u
 #define STATUS_OK       0x0090C0A0u
-#define STATUS_ERR      0x00E08878u
+#define STATUS_ERROR      0x00E08878u
 
 #define COL_PID   6
 #define COL_NAME  56
@@ -97,8 +97,8 @@ static void format_int(int32_t v, char *out) {
 
 static void format_resources(const task_info_t *t, char *out) {
     char a[12], b[12];
-    format_int(t->open_fds, a);
-    format_int(t->shm_segments, b);
+    format_int(t->open_file_descriptors, a);
+    format_int(t->shared_memory_segments, b);
     int n = 0;
     for (int i = 0; a[i]; i++) {
         out[n++] = a[i];
@@ -136,23 +136,23 @@ static void clamp_scroll(void) {
 static void signal_selected(int sig) {
     if (selected < 0 || selected >= task_count) {
         status_text = "Nothing selected.";
-        status_color = STATUS_ERR;
+        status_color = STATUS_ERROR;
         return;
     }
     const task_info_t *t = &tasks[selected];
     if (t->state == TASK_INFO_TERMINATED) {
         status_text = "That process has already exited.";
-        status_color = STATUS_ERR;
+        status_color = STATUS_ERROR;
         return;
     }
     if (is_protected(t->name)) {
         status_text = "That process is part of the desktop.";
-        status_color = STATUS_ERR;
+        status_color = STATUS_ERROR;
         return;
     }
     if (sys_kill(t->pid, sig) != 0) {
         status_text = "The kernel refused that signal.";
-        status_color = STATUS_ERR;
+        status_color = STATUS_ERROR;
         return;
     }
     status_text = sig == SIGKILL ? "Force Quit sent." : "End Task sent.";
@@ -168,15 +168,15 @@ static void draw_row(window_manager_window_t *win, int i, int32_t y) {
         graphics_fill_rect(&win->graphics, 0, y, LIST_W, ROW_H, SELECT_COLOR);
         fg = TEXT_COLOR;
     }
-    char buf[16];
-    format_int(t->pid, buf);
-    graphics_draw_text_font(&win->graphics, COL_PID, y + 2, buf, fg, &LIST_FONT, 0);
+    char buffer[16];
+    format_int(t->pid, buffer);
+    graphics_draw_text_font(&win->graphics, COL_PID, y + 2, buffer, fg, &LIST_FONT, 0);
     graphics_draw_text_font(&win->graphics, COL_NAME, y + 2, t->name[0] ? t->name : "?", fg, &LIST_FONT, 0);
     graphics_draw_text_font(&win->graphics, COL_STATE, y + 2, state_name(t->state), fg, &LIST_FONT, 0);
-    format_int(t->parent_pid, buf);
-    graphics_draw_text_font(&win->graphics, COL_PPID, y + 2, buf, fg, &LIST_FONT, 0);
-    format_resources(t, buf);
-    graphics_draw_text_font(&win->graphics, COL_RES, y + 2, buf, fg, &LIST_FONT, 0);
+    format_int(t->parent_pid, buffer);
+    graphics_draw_text_font(&win->graphics, COL_PPID, y + 2, buffer, fg, &LIST_FONT, 0);
+    format_resources(t, buffer);
+    graphics_draw_text_font(&win->graphics, COL_RES, y + 2, buffer, fg, &LIST_FONT, 0);
 }
 
 static void redraw(window_manager_window_t *win) {
@@ -226,16 +226,16 @@ int main(void) {
 
     for (;;) {
         int changed = 0;
-        wm_event_t ev;
+        window_manager_event_t ev;
         while (window_manager_poll_event(&win, &ev)) {
-            if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
+            if (ev.type == WINDOW_MANAGER_EVENT_EXPOSE || ev.type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {
                 changed = 1;
-            } else if (ev.type == WM_EVENT_KEY) {
-                if (ev.ch == KBD_KEY_UP && selected > 0) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_KEY) {
+                if (ev.ch == KEYBOARD_KEY_UP && selected > 0) {
                     selected--;
                     clamp_scroll();
                     changed = 1;
-                } else if (ev.ch == KBD_KEY_DOWN && selected + 1 < task_count) {
+                } else if (ev.ch == KEYBOARD_KEY_DOWN && selected + 1 < task_count) {
                     selected++;
                     clamp_scroll();
                     changed = 1;
@@ -243,7 +243,7 @@ int main(void) {
                     signal_selected(SIGTERM);
                     changed = 1;
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_WHEEL) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_WHEEL) {
                 int max_top = task_count - ROWS_VISIBLE;
                 if (max_top < 0) {
                     max_top = 0;
@@ -259,7 +259,7 @@ int main(void) {
                     scroll_top = want;
                     changed = 1;
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_MOVE) {
                 if (pressed_btn >= 0) {
                     int32_t bx = pressed_btn == 0 ? END_BTN_X : KILL_BTN_X;
                     if (!((ev.buttons & 1) && graphics_point_in_rect(ev.x, ev.y, bx, BTN_Y, BTN_W, BTN_H))) {
@@ -267,12 +267,12 @@ int main(void) {
                         changed = 1;
                     }
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && !(ev.buttons & 1)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && !(ev.buttons & 1)) {
                 if (pressed_btn >= 0) {
                     pressed_btn = -1;
                     changed = 1;
                 }
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
+            } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
                 if (graphics_point_in_rect(ev.x, ev.y, END_BTN_X, BTN_Y, BTN_W, BTN_H)) {
                     pressed_btn = 0;
                     signal_selected(SIGTERM);

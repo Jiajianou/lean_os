@@ -9,17 +9,17 @@ extern "C" {
 typedef struct {
     uint32_t size;
     uint32_t mtime;
-    uint8_t is_dir;
+    uint8_t is_directory;
     uint8_t is_link;
     uint8_t kind;
     uint32_t inode;
 } os_stat_t;
 
 #define OS_STAT_FILE 0
-#define OS_STAT_DIR  1
+#define OS_STAT_DIRECTORY  1
 #define OS_STAT_CHR  2
 #define OS_STAT_FIFO 3
-#define OS_STAT_SOCK 4
+#define OS_STAT_SOCKET 4
 
 typedef struct {
     uint16_t year;

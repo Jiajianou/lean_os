@@ -9,7 +9,7 @@
 
 static spinlock_t fs_lock;
 
-#define VFS_MAX_MOUNTS 3
+#define VIRTUAL_FILE_SYSTEM_MAX_MOUNTS 3
 
 typedef struct {
     const char *prefix;
@@ -17,11 +17,11 @@ typedef struct {
     const virtual_file_system_ops_t *ops;
 } virtual_file_system_mount_t;
 
-static virtual_file_system_mount_t mounts[VFS_MAX_MOUNTS];
+static virtual_file_system_mount_t mounts[VIRTUAL_FILE_SYSTEM_MAX_MOUNTS];
 static int mount_count;
 
 static void virtual_file_system_mount(const char *prefix, const virtual_file_system_ops_t *ops) {
-    if (mount_count >= VFS_MAX_MOUNTS) {
+    if (mount_count >= VIRTUAL_FILE_SYSTEM_MAX_MOUNTS) {
         return;
     }
     mounts[mount_count].prefix = prefix;
@@ -73,10 +73,10 @@ void virtual_file_system_init(void) {
     devfs_init();
     procfs_init();
     virtual_file_system_mount(PATH_DEV, devfs_ops());
-    virtual_file_system_mount(PATH_PROC, procfs_ops());
+    virtual_file_system_mount(PATH_PROCESS, procfs_ops());
 }
 
-int64_t virtual_file_system_read(const char *path, void *buf, size_t maxlen) {
+int64_t virtual_file_system_read(const char *path, void *buffer, size_t maxlen) {
     const char *rel;
     int m = virtual_file_system_resolve_mount(path, &rel);
     if (m >= 0) {
@@ -84,22 +84,22 @@ int64_t virtual_file_system_read(const char *path, void *buf, size_t maxlen) {
         if (h < 0) {
             return -1;
         }
-        int64_t n = mounts[m].ops->read(h, buf, maxlen, 0);
+        int64_t n = mounts[m].ops->read(h, buffer, maxlen, 0);
         return n;
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
-    int64_t r = leanfs_read(path, buf, maxlen);
+    int64_t r = leanfs_read(path, buffer, maxlen);
     spin_unlock_irqrestore(&fs_lock, f);
     return r;
 }
 
-int virtual_file_system_write(const char *path, const void *buf, size_t len) {
+int virtual_file_system_write(const char *path, const void *buffer, size_t length) {
     const char *rel;
     if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return -1;
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
-    int r = leanfs_write(path, buf, len);
+    int r = leanfs_write(path, buffer, length);
     spin_unlock_irqrestore(&fs_lock, f);
     return r;
 }
@@ -120,7 +120,7 @@ int virtual_file_system_is_directory(const char *path) {
     const char *rel;
     int m = virtual_file_system_resolve_mount(path, &rel);
     if (m >= 0) {
-        return mounts[m].ops->is_dir(rel);
+        return mounts[m].ops->is_directory(rel);
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
     int r = leanfs_is_directory(path);
@@ -169,7 +169,7 @@ int virtual_file_system_rename(const char *old_path, const char *new_path) {
     return r;
 }
 
-#define VFS_SYNTH_COOKIE 0x40000000u
+#define VIRTUAL_FILE_SYSTEM_SYNTH_COOKIE 0x40000000u
 
 static int root_is(const char *path) {
     return path && path[0] == '/' && path[1] == '\0';
@@ -182,25 +182,25 @@ int virtual_file_system_readdir(const char *path, uint32_t *cookie, leanfs_direc
         return mounts[m].ops->readdir(rel, cookie, out);
     }
 
-    if (!root_is(path) || *cookie < VFS_SYNTH_COOKIE) {
+    if (!root_is(path) || *cookie < VIRTUAL_FILE_SYSTEM_SYNTH_COOKIE) {
         uint64_t f = spin_lock_irqsave(&fs_lock);
         int r = leanfs_readdir(path, cookie, out);
         spin_unlock_irqrestore(&fs_lock, f);
         if (r != 0 || !root_is(path)) {
             return r;
         }
-        *cookie = VFS_SYNTH_COOKIE;
+        *cookie = VIRTUAL_FILE_SYSTEM_SYNTH_COOKIE;
     }
 
-    uint32_t i = *cookie - VFS_SYNTH_COOKIE;
+    uint32_t i = *cookie - VIRTUAL_FILE_SYSTEM_SYNTH_COOKIE;
     if ((int)i >= mount_count) {
         return 0;
     }
     out->inode = 0;
-    out->is_dir = 1;
+    out->is_directory = 1;
     out->is_link = 0;
     k_strlcpy(out->name, mounts[i].prefix + 1, sizeof(out->name));
-    *cookie = VFS_SYNTH_COOKIE + i + 1;
+    *cookie = VIRTUAL_FILE_SYSTEM_SYNTH_COOKIE + i + 1;
     return 1;
 }
 
@@ -222,7 +222,7 @@ int virtual_file_system_readdir_at(int handle, uint32_t *cookie, leanfs_director
     return r;
 }
 
-size_t virtual_file_system_list(const char *path, char *buf, size_t maxlen) {
+size_t virtual_file_system_list(const char *path, char *buffer, size_t maxlen) {
     const char *rel;
     int m = virtual_file_system_resolve_mount(path, &rel);
     if (m >= 0) {
@@ -231,21 +231,21 @@ size_t virtual_file_system_list(const char *path, char *buf, size_t maxlen) {
         leanfs_directory_entry_t e;
         while (mounts[m].ops->readdir(rel, &cookie, &e) == 1) {
             size_t nlen = k_strlen(e.name);
-            size_t need = nlen + (e.is_dir ? 1u : 0u) + 1u;
+            size_t need = nlen + (e.is_directory ? 1u : 0u) + 1u;
             if (written + need > maxlen) {
                 break;
             }
-            k_memcpy(buf + written, e.name, nlen);
+            k_memcpy(buffer + written, e.name, nlen);
             written += nlen;
-            if (e.is_dir) {
-                buf[written++] = '/';
+            if (e.is_directory) {
+                buffer[written++] = '/';
             }
-            buf[written++] = '\n';
+            buffer[written++] = '\n';
         }
         return written;
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
-    size_t r = leanfs_list(path, buf, maxlen);
+    size_t r = leanfs_list(path, buffer, maxlen);
     spin_unlock_irqrestore(&fs_lock, f);
     if (root_is(path)) {
         for (int i = 0; i < mount_count; i++) {
@@ -254,10 +254,10 @@ size_t virtual_file_system_list(const char *path, char *buf, size_t maxlen) {
             if (r + nlen + 2 > maxlen) {
                 break;
             }
-            k_memcpy(buf + r, name, nlen);
+            k_memcpy(buffer + r, name, nlen);
             r += nlen;
-            buf[r++] = '/';
-            buf[r++] = '\n';
+            buffer[r++] = '/';
+            buffer[r++] = '\n';
         }
     }
     return r;
@@ -368,13 +368,13 @@ uint32_t virtual_file_system_nlink(const char *path) {
     return r;
 }
 
-int64_t virtual_file_system_readlink(const char *path, char *buf, size_t maxlen) {
+int64_t virtual_file_system_readlink(const char *path, char *buffer, size_t maxlen) {
     const char *rel;
     if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return -1;
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
-    int64_t r = leanfs_readlink(path, buf, maxlen);
+    int64_t r = leanfs_readlink(path, buffer, maxlen);
     spin_unlock_irqrestore(&fs_lock, f);
     return r;
 }
@@ -400,7 +400,7 @@ int virtual_file_system_open(const char *path, int create) {
     int m = virtual_file_system_resolve_mount(path, &rel);
     if (m >= 0) {
         int local = mounts[m].ops->open(rel, create);
-        return local < 0 ? -1 : VFS_HANDLE_MAKE(m + 1, local);
+        return local < 0 ? -1 : VIRTUAL_FILE_SYSTEM_HANDLE_MAKE(m + 1, local);
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
     int r = leanfs_open(path, create);
@@ -408,32 +408,32 @@ int virtual_file_system_open(const char *path, int create) {
     return r;
 }
 
-int64_t virtual_file_system_handle_read(int handle, void *buf, size_t len, uint32_t off) {
-    uint32_t m = VFS_HANDLE_MOUNT(handle);
+int64_t virtual_file_system_handle_read(int handle, void *buffer, size_t length, uint32_t off) {
+    uint32_t m = VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle);
     if (m > 0) {
-        return mounts[m - 1].ops->read(VFS_HANDLE_LOCAL(handle), buf, len, off);
+        return mounts[m - 1].ops->read(VIRTUAL_FILE_SYSTEM_HANDLE_LOCAL(handle), buffer, length, off);
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
-    int64_t r = leanfs_handle_read(handle, buf, len, off);
+    int64_t r = leanfs_handle_read(handle, buffer, length, off);
     spin_unlock_irqrestore(&fs_lock, f);
     return r;
 }
 
-int64_t virtual_file_system_handle_write(int handle, const void *buf, size_t len, uint32_t off) {
-    uint32_t m = VFS_HANDLE_MOUNT(handle);
+int64_t virtual_file_system_handle_write(int handle, const void *buffer, size_t length, uint32_t off) {
+    uint32_t m = VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle);
     if (m > 0) {
-        return mounts[m - 1].ops->write(VFS_HANDLE_LOCAL(handle), buf, len, off);
+        return mounts[m - 1].ops->write(VIRTUAL_FILE_SYSTEM_HANDLE_LOCAL(handle), buffer, length, off);
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
-    int64_t r = leanfs_handle_write(handle, buf, len, off);
+    int64_t r = leanfs_handle_write(handle, buffer, length, off);
     spin_unlock_irqrestore(&fs_lock, f);
     return r;
 }
 
 uint32_t virtual_file_system_handle_size(int handle) {
-    uint32_t m = VFS_HANDLE_MOUNT(handle);
+    uint32_t m = VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle);
     if (m > 0) {
-        return mounts[m - 1].ops->size(VFS_HANDLE_LOCAL(handle));
+        return mounts[m - 1].ops->size(VIRTUAL_FILE_SYSTEM_HANDLE_LOCAL(handle));
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
     uint32_t r = leanfs_handle_size(handle);
@@ -442,25 +442,25 @@ uint32_t virtual_file_system_handle_size(int handle) {
 }
 
 int virtual_file_system_handle_stat(int handle, leanfs_stat_t *out) {
-    uint32_t m = VFS_HANDLE_MOUNT(handle);
+    uint32_t m = VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle);
     if (m > 0) {
-        return mounts[m - 1].ops->handle_stat(VFS_HANDLE_LOCAL(handle), out);
+        return mounts[m - 1].ops->handle_stat(VIRTUAL_FILE_SYSTEM_HANDLE_LOCAL(handle), out);
     }
     return leanfs_handle_stat(handle, out);
 }
 
-int virtual_file_system_handle_truncate_to(int handle, uint32_t len) {
-    if (VFS_HANDLE_MOUNT(handle) > 0) {
+int virtual_file_system_handle_truncate_to(int handle, uint32_t length) {
+    if (VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle) > 0) {
         return -1;
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
-    int r = leanfs_handle_truncate_to(handle, len);
+    int r = leanfs_handle_truncate_to(handle, length);
     spin_unlock_irqrestore(&fs_lock, f);
     return r;
 }
 
 int virtual_file_system_handle_truncate(int handle) {
-    if (VFS_HANDLE_MOUNT(handle) > 0) {
+    if (VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle) > 0) {
         return 0;
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
@@ -470,24 +470,24 @@ int virtual_file_system_handle_truncate(int handle) {
 }
 
 int virtual_file_system_handle_readable(int handle) {
-    uint32_t m = VFS_HANDLE_MOUNT(handle);
+    uint32_t m = VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle);
     if (m > 0 && m <= (uint32_t)mount_count && mounts[m - 1].ops->readable) {
-        return mounts[m - 1].ops->readable(VFS_HANDLE_LOCAL(handle));
+        return mounts[m - 1].ops->readable(VIRTUAL_FILE_SYSTEM_HANDLE_LOCAL(handle));
     }
     return 1;
 }
 
 struct tty *virtual_file_system_handle_tty(int handle, int *pty_number) {
-    uint32_t m = VFS_HANDLE_MOUNT(handle);
+    uint32_t m = VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle);
     if (m > 0 && m <= (uint32_t)mount_count && mounts[m - 1].ops->tty_of) {
-        return mounts[m - 1].ops->tty_of(VFS_HANDLE_LOCAL(handle), pty_number);
+        return mounts[m - 1].ops->tty_of(VIRTUAL_FILE_SYSTEM_HANDLE_LOCAL(handle), pty_number);
     }
     return (struct tty *)0;
 }
 
 void virtual_file_system_handle_close(int handle) {
-    uint32_t m = VFS_HANDLE_MOUNT(handle);
+    uint32_t m = VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle);
     if (m > 0 && m <= (uint32_t)mount_count && mounts[m - 1].ops->close) {
-        mounts[m - 1].ops->close(VFS_HANDLE_LOCAL(handle));
+        mounts[m - 1].ops->close(VIRTUAL_FILE_SYSTEM_HANDLE_LOCAL(handle));
     }
 }

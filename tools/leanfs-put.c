@@ -17,19 +17,19 @@ static leanfs_inode_t inodes[LEANFS_MAX_INODES];
 static uint8_t bitmap[BITMAP_BLOCKS * LEANFS_BLOCK_SIZE];
 static uint8_t directory_block[LEANFS_BLOCK_SIZE];
 
-static void die(const char *msg) {
-    fprintf(stderr, "leanfs-put: %s\n", msg);
+static void die(const char *message) {
+    fprintf(stderr, "leanfs-put: %s\n", message);
     exit(1);
 }
 
-static void pread_at(uint64_t byte_off, void *buf, size_t len) {
-    if (fseeko(img, (off_t)byte_off, SEEK_SET) != 0 || fread(buf, 1, len, img) != len) {
+static void pread_at(uint64_t byte_off, void *buffer, size_t length) {
+    if (fseeko(img, (off_t)byte_off, SEEK_SET) != 0 || fread(buffer, 1, length, img) != length) {
         die("short read from disk image - is it fully built (`make all`)?");
     }
 }
 
-static void pwrite_at(uint64_t byte_off, const void *buf, size_t len) {
-    if (fseeko(img, (off_t)byte_off, SEEK_SET) != 0 || fwrite(buf, 1, len, img) != len) {
+static void pwrite_at(uint64_t byte_off, const void *buffer, size_t length) {
+    if (fseeko(img, (off_t)byte_off, SEEK_SET) != 0 || fwrite(buffer, 1, length, img) != length) {
         die("short write to disk image");
     }
 }
@@ -38,12 +38,12 @@ static uint64_t block_bytes(uint32_t block) {
     return (uint64_t)block * LEANFS_BLOCK_SIZE;
 }
 
-static void read_block(uint32_t block, void *buf) {
-    pread_at(block_bytes(sb.data_block + block), buf, LEANFS_BLOCK_SIZE);
+static void read_block(uint32_t block, void *buffer) {
+    pread_at(block_bytes(sb.data_block + block), buffer, LEANFS_BLOCK_SIZE);
 }
 
-static void write_block(uint32_t block, const void *buf) {
-    pwrite_at(block_bytes(sb.data_block + block), buf, LEANFS_BLOCK_SIZE);
+static void write_block(uint32_t block, const void *buffer) {
+    pwrite_at(block_bytes(sb.data_block + block), buffer, LEANFS_BLOCK_SIZE);
 }
 
 static int bitmap_test(uint32_t bit) {
@@ -172,14 +172,14 @@ static void free_inode_blocks(leanfs_inode_t *inode) {
     inode->size = 0;
 }
 
-static void inode_write_all(leanfs_inode_t *inode, const uint8_t *data, size_t len,
+static void inode_write_all(leanfs_inode_t *inode, const uint8_t *data, size_t length,
                             uint32_t mtime) {
     free_inode_blocks(inode);
     uint8_t block_buffer[LEANFS_BLOCK_SIZE];
     size_t done = 0;
-    for (uint32_t b = 0; done < len; b++) {
+    for (uint32_t b = 0; done < length; b++) {
         uint32_t phys = map_block(inode, b);
-        size_t chunk = len - done;
+        size_t chunk = length - done;
         if (chunk > LEANFS_BLOCK_SIZE) {
             chunk = LEANFS_BLOCK_SIZE;
         }
@@ -188,7 +188,7 @@ static void inode_write_all(leanfs_inode_t *inode, const uint8_t *data, size_t l
         write_block(phys, block_buffer);
         done += chunk;
     }
-    inode->size = (uint32_t)len;
+    inode->size = (uint32_t)length;
     inode->mtime = mtime;
 }
 
@@ -199,14 +199,14 @@ static leanfs_dirent_t *directory_rec(uint32_t off) {
 static int directory_block_valid(void) {
     uint32_t off = 0;
     while (off < LEANFS_BLOCK_SIZE) {
-        if (off + LEANFS_DIRENT_HDR > LEANFS_BLOCK_SIZE) {
+        if (off + LEANFS_DIRENT_HEADER > LEANFS_BLOCK_SIZE) {
             return 0;
         }
         leanfs_dirent_t *r = directory_rec(off);
-        if (r->rec_length < LEANFS_DIRENT_HDR ||
+        if (r->rec_length < LEANFS_DIRENT_HEADER ||
             (r->rec_length % LEANFS_DIRENT_ALIGN) != 0 ||
             off + r->rec_length > LEANFS_BLOCK_SIZE ||
-            LEANFS_DIRENT_NEED(r->name_len) > r->rec_length) {
+            LEANFS_DIRENT_NEED(r->name_length) > r->rec_length) {
             return 0;
         }
         off += r->rec_length;
@@ -219,23 +219,23 @@ static void directory_block_init(void) {
     directory_rec(0)->rec_length = (uint16_t)LEANFS_BLOCK_SIZE;
 }
 
-static uint32_t directory_nblocks(const leanfs_inode_t *dir) {
-    return dir->size / LEANFS_BLOCK_SIZE;
+static uint32_t directory_nblocks(const leanfs_inode_t *directory) {
+    return directory->size / LEANFS_BLOCK_SIZE;
 }
 
-static void directory_block_read(leanfs_inode_t *dir, uint32_t logical) {
-    read_block(map_block(dir, logical), directory_block);
+static void directory_block_read(leanfs_inode_t *directory, uint32_t logical) {
+    read_block(map_block(directory, logical), directory_block);
     if (!directory_block_valid()) {
         die("a directory block does not parse - corrupt image");
     }
 }
 
-static int32_t directory_block_find(const char *name, uint32_t name_len) {
+static int32_t directory_block_find(const char *name, uint32_t name_length) {
     uint32_t off = 0;
     while (off < LEANFS_BLOCK_SIZE) {
         leanfs_dirent_t *r = directory_rec(off);
-        if (r->inode != 0 && r->name_len == name_len &&
-            memcmp(directory_block + off + LEANFS_DIRENT_HDR, name, name_len) == 0) {
+        if (r->inode != 0 && r->name_length == name_length &&
+            memcmp(directory_block + off + LEANFS_DIRENT_HEADER, name, name_length) == 0) {
             return (int32_t)off;
         }
         off += r->rec_length;
@@ -243,8 +243,8 @@ static int32_t directory_block_find(const char *name, uint32_t name_len) {
     return -1;
 }
 
-static int directory_block_place(const char *name, uint32_t name_len, int inode_index, uint32_t type) {
-    uint32_t need = LEANFS_DIRENT_NEED(name_len);
+static int directory_block_place(const char *name, uint32_t name_length, int inode_index, uint32_t type) {
+    uint32_t need = LEANFS_DIRENT_NEED(name_length);
     for (int pass = 0; pass < 2; pass++) {
         uint32_t off = 0;
         while (off < LEANFS_BLOCK_SIZE) {
@@ -255,7 +255,7 @@ static int directory_block_place(const char *name, uint32_t name_len, int inode_
                 place_at = off;
                 place_length = r->rec_length;
             } else if (pass == 1 && r->inode != 0) {
-                uint32_t used = LEANFS_DIRENT_NEED(r->name_len);
+                uint32_t used = LEANFS_DIRENT_NEED(r->name_length);
                 if (r->rec_length >= used + need) {
                     place_length = r->rec_length - used;
                     r->rec_length = (uint16_t)used;
@@ -266,9 +266,9 @@ static int directory_block_place(const char *name, uint32_t name_len, int inode_
                 leanfs_dirent_t *n = directory_rec(place_at);
                 n->inode = (uint32_t)inode_index;
                 n->rec_length = (uint16_t)place_length;
-                n->name_len = (uint8_t)name_len;
+                n->name_length = (uint8_t)name_length;
                 n->type = (uint8_t)type;
-                memcpy(directory_block + place_at + LEANFS_DIRENT_HDR, name, name_len);
+                memcpy(directory_block + place_at + LEANFS_DIRENT_HEADER, name, name_length);
                 return 1;
             }
             off += r->rec_length;
@@ -277,15 +277,15 @@ static int directory_block_place(const char *name, uint32_t name_len, int inode_
     return 0;
 }
 
-static int directory_lookup(leanfs_inode_t *dir, const char *name) {
-    if (dir->type != LEANFS_TYPE_DIR) {
+static int directory_lookup(leanfs_inode_t *directory, const char *name) {
+    if (directory->type != LEANFS_TYPE_DIRECTORY) {
         die("a path component exists but is not a directory");
     }
-    uint32_t name_len = (uint32_t)strlen(name);
-    uint32_t blocks = directory_nblocks(dir);
+    uint32_t name_length = (uint32_t)strlen(name);
+    uint32_t blocks = directory_nblocks(directory);
     for (uint32_t b = 0; b < blocks; b++) {
-        directory_block_read(dir, b);
-        int32_t off = directory_block_find(name, name_len);
+        directory_block_read(directory, b);
+        int32_t off = directory_block_find(name, name_length);
         if (off >= 0) {
             return (int)directory_rec((uint32_t)off)->inode;
         }
@@ -313,54 +313,54 @@ static int alloc_inode(uint32_t type) {
     exit(1);
 }
 
-static int directory_repoint(leanfs_inode_t *dir, const char *name, int inode_index) {
-    uint32_t name_len = (uint32_t)strlen(name);
-    uint32_t blocks = directory_nblocks(dir);
+static int directory_repoint(leanfs_inode_t *directory, const char *name, int inode_index) {
+    uint32_t name_length = (uint32_t)strlen(name);
+    uint32_t blocks = directory_nblocks(directory);
     for (uint32_t b = 0; b < blocks; b++) {
-        directory_block_read(dir, b);
-        int32_t off = directory_block_find(name, name_len);
+        directory_block_read(directory, b);
+        int32_t off = directory_block_find(name, name_length);
         if (off >= 0) {
             leanfs_dirent_t *r = directory_rec((uint32_t)off);
             r->inode = (uint32_t)inode_index;
             r->type = (uint8_t)inodes[inode_index].type;
-            write_block(map_block(dir, b), directory_block);
+            write_block(map_block(directory, b), directory_block);
             return 1;
         }
     }
     return 0;
 }
 
-static void directory_add(leanfs_inode_t *dir, const char *name, int inode_index) {
-    if (dir->type != LEANFS_TYPE_DIR) {
+static void directory_add(leanfs_inode_t *directory, const char *name, int inode_index) {
+    if (directory->type != LEANFS_TYPE_DIRECTORY) {
         die("cannot add an entry to something that is not a directory");
     }
-    uint32_t name_len = (uint32_t)strlen(name);
-    if (name_len == 0 || name_len > LEANFS_MAX_NAME) {
+    uint32_t name_length = (uint32_t)strlen(name);
+    if (name_length == 0 || name_length > LEANFS_MAX_NAME) {
         die("empty or over-long name");
     }
     uint32_t type = inodes[inode_index].type;
 
-    uint32_t blocks = directory_nblocks(dir);
+    uint32_t blocks = directory_nblocks(directory);
     if (blocks > 0) {
-        directory_block_read(dir, blocks - 1);
-        if (directory_block_place(name, name_len, inode_index, type)) {
-            write_block(map_block(dir, blocks - 1), directory_block);
+        directory_block_read(directory, blocks - 1);
+        if (directory_block_place(name, name_length, inode_index, type)) {
+            write_block(map_block(directory, blocks - 1), directory_block);
             return;
         }
     }
     for (uint32_t b = 0; b + 1 < blocks; b++) {
-        directory_block_read(dir, b);
-        if (directory_block_place(name, name_len, inode_index, type)) {
-            write_block(map_block(dir, b), directory_block);
+        directory_block_read(directory, b);
+        if (directory_block_place(name, name_length, inode_index, type)) {
+            write_block(map_block(directory, b), directory_block);
             return;
         }
     }
     directory_block_init();
-    if (!directory_block_place(name, name_len, inode_index, type)) {
+    if (!directory_block_place(name, name_length, inode_index, type)) {
         die("a name did not fit an empty directory block - impossible");
     }
-    write_block(map_block(dir, blocks), directory_block);
-    dir->size += LEANFS_BLOCK_SIZE;
+    write_block(map_block(directory, blocks), directory_block);
+    directory->size += LEANFS_BLOCK_SIZE;
 }
 
 static int resolve_parent(const char *path, char *leaf_out) {
@@ -383,7 +383,7 @@ static int resolve_parent(const char *path, char *leaf_out) {
         comp[n] = '\0';
         int next = directory_lookup(&inodes[at], comp);
         if (next < 0) {
-            next = alloc_inode(LEANFS_TYPE_DIR);
+            next = alloc_inode(LEANFS_TYPE_DIRECTORY);
             directory_add(&inodes[at], comp, next);
             fprintf(stderr, "leanfs-put: created directory %.*s\n",
                     (int)(slash - path), path);
@@ -398,21 +398,21 @@ static int resolve_parent(const char *path, char *leaf_out) {
     return at;
 }
 
-static void inode_write_stream(leanfs_inode_t *inode, FILE *src, uint64_t len,
+static void inode_write_stream(leanfs_inode_t *inode, FILE *source, uint64_t length,
                                uint32_t mtime, const char *what, uint32_t *hash) {
     free_inode_blocks(inode);
-    if (len > LEANFS_MAX_FILE_SIZE) {
+    if (length > LEANFS_MAX_FILE_SIZE) {
         fprintf(stderr, "leanfs-put: %s is %llu bytes; leanfs holds at most %u\n",
-                what, (unsigned long long)len, (unsigned)LEANFS_MAX_FILE_SIZE);
+                what, (unsigned long long)length, (unsigned)LEANFS_MAX_FILE_SIZE);
         exit(1);
     }
     uint8_t block_buffer[LEANFS_BLOCK_SIZE];
     uint64_t done = 0;
-    for (uint32_t b = 0; done < len; b++) {
-        size_t chunk = (size_t)((len - done > LEANFS_BLOCK_SIZE)
-                                ? LEANFS_BLOCK_SIZE : (len - done));
+    for (uint32_t b = 0; done < length; b++) {
+        size_t chunk = (size_t)((length - done > LEANFS_BLOCK_SIZE)
+                                ? LEANFS_BLOCK_SIZE : (length - done));
         memset(block_buffer, 0, sizeof(block_buffer));
-        if (fread(block_buffer, 1, chunk, src) != chunk) {
+        if (fread(block_buffer, 1, chunk, source) != chunk) {
             fprintf(stderr, "leanfs-put: short read on %s\n", what);
             exit(1);
         }
@@ -422,7 +422,7 @@ static void inode_write_stream(leanfs_inode_t *inode, FILE *src, uint64_t len,
         write_block(map_block(inode, b), block_buffer);
         done += chunk;
     }
-    inode->size = (uint32_t)len;
+    inode->size = (uint32_t)length;
     inode->mtime = mtime;
 }
 
@@ -551,12 +551,12 @@ static void put_tree(const char *host_directory, int parent, const char *at, uin
         if (S_ISDIR(st.st_mode)) {
             int idx = prior;
             if (idx >= 0) {
-                if (inodes[idx].type != LEANFS_TYPE_DIR) {
+                if (inodes[idx].type != LEANFS_TYPE_DIRECTORY) {
                     die("re-putting a tree where a file became a directory");
                 }
                 inodes[idx].mtime = mtime;
             } else {
-                idx = alloc_inode(LEANFS_TYPE_DIR);
+                idx = alloc_inode(LEANFS_TYPE_DIRECTORY);
                 inodes[idx].mtime = mtime;
                 directory_add(&inodes[parent], name, idx);
             }
@@ -611,17 +611,17 @@ static void put_tree(const char *host_directory, int parent, const char *at, uin
                         exit(1);
                     }
                     uint32_t h = name_hash_start(leanfs_path, tree_root);
-                    uint8_t buf[LEANFS_BLOCK_SIZE];
+                    uint8_t buffer[LEANFS_BLOCK_SIZE];
                     size_t got;
-                    while ((got = fread(buf, 1, sizeof(buf), again)) > 0) {
-                        h = leanfs_fnv1a(h, buf, got);
+                    while ((got = fread(buffer, 1, sizeof(buffer), again)) > 0) {
+                        h = leanfs_fnv1a(h, buffer, got);
                     }
                     fclose(again);
                     tally.hash += h;
                 }
             } else {
-                FILE *src = fopen(host_path, "rb");
-                if (!src) {
+                FILE *source = fopen(host_path, "rb");
+                if (!source) {
                     fprintf(stderr, "leanfs-put: cannot open %s: %s\n",
                             host_path, strerror(errno));
                     exit(1);
@@ -637,9 +637,9 @@ static void put_tree(const char *host_directory, int parent, const char *at, uin
                     directory_add(&inodes[parent], name, idx);
                 }
                 uint32_t h = name_hash_start(leanfs_path, tree_root);
-                inode_write_stream(&inodes[idx], src, (uint64_t)st.st_size, mtime,
+                inode_write_stream(&inodes[idx], source, (uint64_t)st.st_size, mtime,
                                    host_path, &h);
-                fclose(src);
+                fclose(source);
                 if (st.st_nlink > 1) {
                     hl_remember((uint64_t)st.st_dev, (uint64_t)st.st_ino, idx);
                 }
@@ -660,7 +660,7 @@ static void put_tree(const char *host_directory, int parent, const char *at, uin
 
 static void write_manifest(const char *at) {
     char text[1024];
-    int len = snprintf(text, sizeof(text),
+    int length = snprintf(text, sizeof(text),
                        "leanfs-image-manifest 1\n"
                        "tree %s\n"
                        "dirs %llu\n"
@@ -676,7 +676,7 @@ static void write_manifest(const char *at) {
                        (unsigned long long)tally.bytes,
                        tally.deepest,
                        tally.hash);
-    if (len < 0 || len >= (int)sizeof(text)) {
+    if (length < 0 || length >= (int)sizeof(text)) {
         die("the manifest did not fit its buffer");
     }
 
@@ -689,7 +689,7 @@ static void write_manifest(const char *at) {
     } else if (inodes[idx].type != LEANFS_TYPE_FILE) {
         die("/.image-manifest exists and is not a regular file");
     }
-    inode_write_all(&inodes[idx], (const uint8_t *)text, (size_t)len, tree_mtime);
+    inode_write_all(&inodes[idx], (const uint8_t *)text, (size_t)length, tree_mtime);
 }
 
 static void format_fresh(void) {
@@ -708,7 +708,7 @@ static void format_fresh(void) {
     memset(bitmap, 0, sizeof(bitmap));
     bitmap[0] |= 1u;
 
-    inodes[ROOT_INODE].type = LEANFS_TYPE_DIR;
+    inodes[ROOT_INODE].type = LEANFS_TYPE_DIRECTORY;
     inodes[ROOT_INODE].size = 0;
     inodes[ROOT_INODE].nlink = 1;
 }
@@ -758,7 +758,7 @@ static void image_open(const char *image_path) {
         memset(bitmap, 0, sizeof(bitmap));
         pread_at(block_bytes(sb.bitmap_block), bitmap,
                   (size_t)sb.bitmap_blocks_field * LEANFS_BLOCK_SIZE);
-        if (inodes[ROOT_INODE].type != LEANFS_TYPE_DIR) {
+        if (inodes[ROOT_INODE].type != LEANFS_TYPE_DIRECTORY) {
             die("this image has a leanfs superblock but no root directory - corrupt");
         }
     } else if (sb.magic != 0 && sb.magic != 0xFFFFFFFFu) {
@@ -784,9 +784,9 @@ static int resolve_directory(const char *path) {
     int parent = resolve_parent(path, leaf);
     int idx = directory_lookup(&inodes[parent], leaf);
     if (idx < 0) {
-        idx = alloc_inode(LEANFS_TYPE_DIR);
+        idx = alloc_inode(LEANFS_TYPE_DIRECTORY);
         directory_add(&inodes[parent], leaf, idx);
-    } else if (inodes[idx].type != LEANFS_TYPE_DIR) {
+    } else if (inodes[idx].type != LEANFS_TYPE_DIRECTORY) {
         die("the destination path already exists and is not a directory");
     }
     return idx;
@@ -867,7 +867,7 @@ int main(int argc, char **argv) {
         if (idx >= 0 && inodes[idx].type == LEANFS_TYPE_LINK) {
             free_inode_blocks(&inodes[idx]);
         } else if (idx >= 0) {
-            if (inodes[idx].type == LEANFS_TYPE_DIR) {
+            if (inodes[idx].type == LEANFS_TYPE_DIRECTORY) {
                 die("that path already names a directory");
             }
             free_inode_blocks(&inodes[idx]);
@@ -893,8 +893,8 @@ int main(int argc, char **argv) {
     if ((uint64_t)st.st_size > (uint64_t)LEANFS_MAX_FILE_SIZE) {
         die("local-file exceeds LEANFS_MAX_FILE_SIZE");
     }
-    FILE *src = fopen(local_path, "rb");
-    if (!src) {
+    FILE *source = fopen(local_path, "rb");
+    if (!source) {
         die("could not open local-file");
     }
 
@@ -919,12 +919,12 @@ int main(int argc, char **argv) {
         directory_add(&inodes[parent], leaf, idx);
     }
 
-    inode_write_stream(&inodes[idx], src, (uint64_t)st.st_size,
+    inode_write_stream(&inodes[idx], source, (uint64_t)st.st_size,
                        (uint32_t)st.st_mtime, local_path, NULL);
     save_all();
 
     fclose(img);
-    fclose(src);
+    fclose(source);
     printf("leanfs-put: wrote %lld bytes to %s as %s\n",
            (long long)st.st_size, image_path, leanfs_path);
     return 0;

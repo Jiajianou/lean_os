@@ -56,8 +56,8 @@ long double peer_long_double(long double v) {
     return v * 3.0L + 1.0L;
 }
 
-int peer_call_back(callback_function fn, int a, int b) {
-    return fn(a, b) + 1;
+int peer_call_back(callback_function function, int a, int b) {
+    return function(a, b) + 1;
 }
 
 long peer_take_two_longs(struct two_longs s) {

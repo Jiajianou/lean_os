@@ -11,10 +11,10 @@
 #define FLOCK_CONFLICT (-2)
 #define FLOCK_FULL     (-3)
 
-int flock_test(uint32_t ino, int pid, int type, uint64_t start, uint64_t len,
+int flock_test(uint32_t ino, int pid, int type, uint64_t start, uint64_t length,
                os_flock_t *out);
 
-int flock_set(uint32_t ino, int pid, int type, uint64_t start, uint64_t len);
+int flock_set(uint32_t ino, int pid, int type, uint64_t start, uint64_t length);
 
 int flock_release_file(uint32_t ino, int pid);
 

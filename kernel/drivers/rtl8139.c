@@ -19,7 +19,7 @@
 #define REG_TSD0    0x10
 #define REG_TSAD0   0x20
 #define REG_RBSTART 0x30
-#define REG_CMD     0x37
+#define REG_COMMAND     0x37
 #define REG_CAPR    0x38
 #define REG_IMR     0x3C
 #define REG_ISR     0x3E
@@ -27,10 +27,10 @@
 #define REG_RCR     0x44
 #define REG_CONFIG1 0x52
 
-#define CMD_TE   (1 << 2)
-#define CMD_RE   (1 << 3)
-#define CMD_RST  (1 << 4)
-#define CMD_BUFE (1 << 0)
+#define COMMAND_TE   (1 << 2)
+#define COMMAND_RE   (1 << 3)
+#define COMMAND_RST  (1 << 4)
+#define COMMAND_BUFE (1 << 0)
 
 #define ISR_ROK (1 << 0)
 #define ISR_TOK (1 << 2)
@@ -43,7 +43,7 @@
 
 #define TSD_OWN (1u << 13)
 
-#define RX_BUFFER_SIZE (RTL8139_RING_LEN + RTL8139_RING_PAD)
+#define RX_BUFFER_SIZE (RTL8139_RING_LENGTH + RTL8139_RING_PAD)
 #define RX_BUFFER_FRAMES ((RX_BUFFER_SIZE + 4095) / 4096)
 
 #define TX_DESCRIPTORS 4
@@ -63,11 +63,11 @@ static void rtl8139_irq(isr_regs_t *regs) {
     outw(io_base + REG_ISR, status);
 
     if (status & ISR_ROK) {
-        while (!(inb(io_base + REG_CMD) & CMD_BUFE)) {
+        while (!(inb(io_base + REG_COMMAND) & COMMAND_BUFE)) {
             rtl8139_rx_t rx;
             rx_read_offset = rtl8139_ring_take(rx_buffer, rx_read_offset, &rx);
-            if (rx.len) {
-                eth_receive(rx.frame, rx.len);
+            if (rx.length) {
+                eth_receive(rx.frame, rx.length);
             }
 
             outw(io_base + REG_CAPR, (uint16_t)(rx_read_offset - 16));
@@ -82,9 +82,9 @@ uint32_t rtl8139_tx_error_count(void) {
 }
 
 static int rtl8139_reset(void) {
-    outb(io_base + REG_CMD, CMD_RST);
+    outb(io_base + REG_COMMAND, COMMAND_RST);
     for (int i = 0; i < TX_POLL_LIMIT; i++) {
-        if (!(inb(io_base + REG_CMD) & CMD_RST)) {
+        if (!(inb(io_base + REG_COMMAND) & COMMAND_RST)) {
             return 1;
         }
     }
@@ -128,7 +128,7 @@ int rtl8139_init(void) {
     outl(io_base + REG_RCR, RCR_AAP | RCR_APM | RCR_AM | RCR_AB | RCR_WRAP);
 
     outw(io_base + REG_IMR, ISR_ROK | ISR_TOK);
-    outb(io_base + REG_CMD, CMD_RE | CMD_TE);
+    outb(io_base + REG_COMMAND, COMMAND_RE | COMMAND_TE);
 
     irq_register_handler(dev.irq_line, rtl8139_irq);
     irq_enable_line(dev.irq_line);
@@ -158,8 +158,8 @@ const uint8_t *rtl8139_mac(void) {
     return mac;
 }
 
-int rtl8139_send(const uint8_t *frame, uint16_t len) {
-    if (len > RTL8139_MAX_FRAME) {
+int rtl8139_send(const uint8_t *frame, uint16_t length) {
+    if (length > RTL8139_MAX_FRAME) {
         tx_errors++;
         return -1;
     }
@@ -167,9 +167,9 @@ int rtl8139_send(const uint8_t *frame, uint16_t len) {
     int slot = tx_next_descriptor;
     tx_next_descriptor = (tx_next_descriptor + 1) % TX_DESCRIPTORS;
 
-    k_memcpy(tx_buffer[slot], frame, len);
+    k_memcpy(tx_buffer[slot], frame, length);
     outl(io_base + REG_TSAD0 + (uint32_t)slot * 4, (uint32_t)(uintptr_t)tx_buffer[slot]);
-    outl(io_base + REG_TSD0 + (uint32_t)slot * 4, len);
+    outl(io_base + REG_TSD0 + (uint32_t)slot * 4, length);
 
     for (int i = 0; i < TX_POLL_LIMIT; i++) {
         if (inl(io_base + REG_TSD0 + (uint32_t)slot * 4) & TSD_OWN) {

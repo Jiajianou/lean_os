@@ -62,12 +62,12 @@ TEST(net_arp, a_truncated_packet_is_dropped_at_every_length) {
     net_fixture();
     uint8_t packet[28];
     arp_request(packet, PEER_IP, LOCAL_IP);
-    for (uint16_t len = 0; len < 28; len++) {
+    for (uint16_t length = 0; length < 28; length++) {
         fake_net_reset();
-        uint8_t *heap = malloc(len ? len : 1);
+        uint8_t *heap = malloc(length ? length : 1);
         REQUIRE(heap != NULL);
-        memcpy(heap, packet, len);
-        CHECK_NO_PANIC(arp_handle_packet(heap, len));
+        memcpy(heap, packet, length);
+        CHECK_NO_PANIC(arp_handle_packet(heap, length));
         CHECK_EQ(fake_net_tx_count(), 0);
         free(heap);
     }
@@ -103,8 +103,8 @@ TEST(net_arp, the_first_packet_to_an_unresolved_neighbour_is_sent_when_it_answer
     CHECK_EQ(ip_send(NEIGHBOUR, 253, payload, sizeof(payload)), 0);
     REQUIRE(fake_net_tx_count() >= 1);
     for (int i = 0; i < fake_net_tx_count(); i++) {
-        uint32_t len = 0;
-        const uint8_t *f = fake_net_tx_frame(i, &len);
+        uint32_t length = 0;
+        const uint8_t *f = fake_net_tx_frame(i, &length);
         CHECK_EQ((f[12] << 8) | f[13], 0x0806);
     }
 
@@ -114,8 +114,8 @@ TEST(net_arp, the_first_packet_to_an_unresolved_neighbour_is_sent_when_it_answer
     arp_handle_packet(packet, sizeof(packet));
 
     REQUIRE(fake_net_tx_count() == 1);
-    uint32_t len = 0;
-    const uint8_t *f = fake_net_tx_frame(0, &len);
+    uint32_t length = 0;
+    const uint8_t *f = fake_net_tx_frame(0, &length);
     CHECK_MEMEQ(f, neighbour_mac, 6);
     CHECK_EQ((f[12] << 8) | f[13], 0x0800);
     CHECK_EQ(f[14 + 9], 253);
@@ -147,8 +147,8 @@ TEST(net_arp, a_held_packet_is_replaced_by_a_newer_one_and_released_only_by_its_
     arp_reply(packet, A, mac_a);
     arp_handle_packet(packet, sizeof(packet));
     REQUIRE(fake_net_tx_count() == 1);
-    uint32_t len = 0;
-    const uint8_t *f = fake_net_tx_frame(0, &len);
+    uint32_t length = 0;
+    const uint8_t *f = fake_net_tx_frame(0, &length);
     CHECK_MEMEQ(f + 14 + 20, "new", 3);
 }
 
@@ -164,11 +164,11 @@ TEST(net_arp, a_neighbour_that_never_answers_is_unreachable_by_the_third_send) {
 
 TEST(net_eth, a_frame_shorter_than_a_header_is_dropped) {
     net_fixture();
-    for (uint16_t len = 0; len < 14; len++) {
-        uint8_t *heap = malloc(len ? len : 1);
+    for (uint16_t length = 0; length < 14; length++) {
+        uint8_t *heap = malloc(length ? length : 1);
         REQUIRE(heap != NULL);
-        memset(heap, 0xAA, len);
-        CHECK_NO_PANIC(eth_receive(heap, len));
+        memset(heap, 0xAA, length);
+        CHECK_NO_PANIC(eth_receive(heap, length));
         free(heap);
     }
     CHECK_EQ(fake_net_tx_count(), 0);
@@ -184,7 +184,7 @@ TEST(net_eth, an_unknown_ethertype_is_dropped_rather_than_guessed_at) {
     CHECK_EQ(fake_net_tx_count(), 0);
 }
 
-static uint16_t ip_build(uint8_t *out, uint8_t proto, uint32_t dst,
+static uint16_t ip_build(uint8_t *out, uint8_t proto, uint32_t destination,
                          const uint8_t *payload, uint16_t payload_length) {
     memset(out, 0, 20);
     out[0] = 0x45;
@@ -192,7 +192,7 @@ static uint16_t ip_build(uint8_t *out, uint8_t proto, uint32_t dst,
     out[8] = 64;
     out[9] = proto;
     be32_put(out + 12, PEER_IP);
-    be32_put(out + 16, dst);
+    be32_put(out + 16, destination);
     if (payload_length) {
         memcpy(out + 20, payload, payload_length);
     }
@@ -263,11 +263,11 @@ TEST(net_ip, every_truncation_of_a_valid_datagram_is_survived) {
     uint8_t icmp[8] = {8, 0, 0, 0, 0x12, 0x34, 0, 1};
     uint8_t packet[64];
     uint16_t n = ip_build(packet, 1, LOCAL_IP, icmp, sizeof(icmp));
-    for (uint16_t len = 0; len <= n; len++) {
-        uint8_t *heap = malloc(len ? len : 1);
+    for (uint16_t length = 0; length <= n; length++) {
+        uint8_t *heap = malloc(length ? length : 1);
         REQUIRE(heap != NULL);
-        memcpy(heap, packet, len);
-        CHECK_NO_PANIC(ip_handle_packet(peer_mac, heap, len));
+        memcpy(heap, packet, length);
+        CHECK_NO_PANIC(ip_handle_packet(peer_mac, heap, length));
         free(heap);
     }
 }
@@ -376,11 +376,11 @@ TEST(net_udp, every_truncation_of_a_datagram_is_survived) {
 TEST(net_tcp, a_segment_shorter_than_a_header_is_dropped) {
     net_fixture();
     tcp_init();
-    for (uint16_t len = 0; len < 20; len++) {
-        uint8_t *heap = malloc(len ? len : 1);
+    for (uint16_t length = 0; length < 20; length++) {
+        uint8_t *heap = malloc(length ? length : 1);
         REQUIRE(heap != NULL);
-        memset(heap, 0x5A, len);
-        CHECK_NO_PANIC(tcp_handle_packet(PEER_IP, LOCAL_IP, heap, len));
+        memset(heap, 0x5A, length);
+        CHECK_NO_PANIC(tcp_handle_packet(PEER_IP, LOCAL_IP, heap, length));
         free(heap);
     }
 }
@@ -575,9 +575,9 @@ TEST(net_icmp, an_echo_reply_mirrors_the_request_exactly) {
     CHECK_EQ(tx.payload[7], 0x2A);
     CHECK_MEMEQ(tx.payload + 8, body, sizeof(body));
 
-    uint32_t dst = ((uint32_t)tx.ip[16] << 24) | ((uint32_t)tx.ip[17] << 16) |
+    uint32_t destination = ((uint32_t)tx.ip[16] << 24) | ((uint32_t)tx.ip[17] << 16) |
                    ((uint32_t)tx.ip[18] << 8) | (uint32_t)tx.ip[19];
-    CHECK_EQ(dst, PEER_IP);
+    CHECK_EQ(destination, PEER_IP);
 }
 
 TEST(net_icmp, the_reply_checksum_is_correct) {
@@ -643,11 +643,11 @@ TEST(net_udp, a_datagram_is_delivered_with_the_ports_the_wire_carried) {
     ip_handle_packet(peer_mac, packet, n);
 
     REQUIRE(fake_socket_delivered_count() == 1);
-    uint32_t len = 0;
+    uint32_t length = 0;
     uint16_t destination_port = 0;
-    const uint8_t *got = fake_socket_delivered(0, &len, &destination_port);
+    const uint8_t *got = fake_socket_delivered(0, &length, &destination_port);
     CHECK_EQ(destination_port, 1234);
-    CHECK_EQ(len, 8);
+    CHECK_EQ(length, 8);
     CHECK_MEMEQ(got, body, 8);
     CHECK_EQ(fake_socket_delivered_source_port(0), 0xBEEF);
     CHECK_EQ(fake_socket_delivered_source_ip(0), PEER_IP);
@@ -666,9 +666,9 @@ TEST(net_ip, an_outbound_datagram_has_a_well_formed_header) {
     CHECK_EQ(((tx.ip[2] << 8) | tx.ip[3]), 20 + (int)sizeof(body));
     CHECK(tx.ip[8] > 0);
     CHECK_EQ(tx.ip[9], IP_PROTO_UDP);
-    uint32_t src = ((uint32_t)tx.ip[12] << 24) | ((uint32_t)tx.ip[13] << 16) |
+    uint32_t source = ((uint32_t)tx.ip[12] << 24) | ((uint32_t)tx.ip[13] << 16) |
                    ((uint32_t)tx.ip[14] << 8) | (uint32_t)tx.ip[15];
-    CHECK_EQ(src, LOCAL_IP);
+    CHECK_EQ(source, LOCAL_IP);
 
     uint32_t sum = 0;
     for (int i = 0; i < 20; i += 2) {
@@ -728,9 +728,9 @@ TEST(net_udp, a_datagram_with_a_correct_checksum_is_delivered) {
     ip_handle_packet(peer_mac, packet, m);
 
     REQUIRE(fake_socket_delivered_count() == 1);
-    uint32_t len = 0;
-    const uint8_t *got = fake_socket_delivered(0, &len, NULL);
-    CHECK_EQ(len, sizeof(body) - 1);
+    uint32_t length = 0;
+    const uint8_t *got = fake_socket_delivered(0, &length, NULL);
+    CHECK_EQ(length, sizeof(body) - 1);
     CHECK_MEMEQ(got, body, sizeof(body) - 1);
 }
 
@@ -777,10 +777,10 @@ TEST(net_udp, a_datagram_with_no_payload_at_all_is_delivered) {
     ip_handle_packet(peer_mac, packet, m);
 
     REQUIRE(fake_socket_delivered_count() == 1);
-    uint32_t len = 1;
+    uint32_t length = 1;
     uint16_t port = 0;
-    fake_socket_delivered(0, &len, &port);
-    CHECK_EQ(len, 0);
+    fake_socket_delivered(0, &length, &port);
+    CHECK_EQ(length, 0);
     CHECK_EQ(port, 1234);
 }
 
@@ -812,10 +812,10 @@ TEST(net_udp, a_sent_datagram_has_a_header_a_peer_would_accept) {
     CHECK_EQ((tx.payload[4] << 8) | tx.payload[5], 8 + (int)sizeof(body));
     CHECK_MEMEQ(tx.payload + 8, body, sizeof(body));
 
-    uint32_t src = ((uint32_t)tx.ip[12] << 24) | ((uint32_t)tx.ip[13] << 16) |
+    uint32_t source = ((uint32_t)tx.ip[12] << 24) | ((uint32_t)tx.ip[13] << 16) |
                    ((uint32_t)tx.ip[14] << 8) | (uint32_t)tx.ip[15];
     uint32_t sum = 0;
-    sum += (src >> 16) & 0xFFFF; sum += src & 0xFFFF;
+    sum += (source >> 16) & 0xFFFF; sum += source & 0xFFFF;
     sum += (PEER_IP >> 16) & 0xFFFF; sum += PEER_IP & 0xFFFF;
     sum += 17;
     sum += tx.payload_length;

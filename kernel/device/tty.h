@@ -43,13 +43,13 @@ void tty_input_char(tty_t *t, char c);
 
 uint32_t tty_readable(const tty_t *t);
 
-uint32_t tty_read(tty_t *t, char *buf, uint32_t len);
+uint32_t tty_read(tty_t *t, char *buffer, uint32_t length);
 
 int tty_may_read(tty_t *t, int sid, int pgid);
 
 
 int tty_release_session(tty_t *t, int sid);
 
-void tty_write(tty_t *t, const char *buf, uint32_t len);
+void tty_write(tty_t *t, const char *buffer, uint32_t length);
 uint32_t tty_out_readable(const tty_t *t);
-uint32_t tty_out_read(tty_t *t, char *buf, uint32_t len);
+uint32_t tty_out_read(tty_t *t, char *buffer, uint32_t length);

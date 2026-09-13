@@ -142,13 +142,13 @@ TEST(wcs, the_conversions_accept_a_null_end_pointer) {
 }
 
 TEST(wcs, wcsdup_copies_and_is_independent) {
-    wchar_t src[] = L"lean_os";
-    wchar_t *copy = wcsdup(src);
+    wchar_t source[] = L"lean_os";
+    wchar_t *copy = wcsdup(source);
     CHECK(copy != NULL);
-    CHECK(copy != src);
-    CHECK_EQ(wcscmp(copy, src), 0);
+    CHECK(copy != source);
+    CHECK_EQ(wcscmp(copy, source), 0);
     copy[0] = L'L';
-    CHECK_EQ(src[0], (wchar_t)L'l');
+    CHECK_EQ(source[0], (wchar_t)L'l');
     free(copy);
 
     wchar_t *empty = wcsdup(L"");
@@ -191,31 +191,31 @@ TEST(wcs, wcsxfrm_preserves_order_and_reports_the_length_it_needed) {
 }
 
 TEST(wcs, mbsnrtowcs_stops_at_the_input_limit) {
-    const char *src = "abcdef";
-    const char *p = src;
+    const char *source = "abcdef";
+    const char *p = source;
     wchar_t out[8];
     mbstate_t st = {0, 0, 0};
     CHECK_EQ((long)mbsnrtowcs(out, &p, 3, 8, &st), 3L);
     CHECK_EQ(out[0], (wchar_t)L'a');
     CHECK_EQ(out[2], (wchar_t)L'c');
-    CHECK_EQ((long)(p - src), 3L);
+    CHECK_EQ((long)(p - source), 3L);
     CHECK_EQ((long)mbsnrtowcs(out, &p, 3, 8, &st), 3L);
     CHECK_EQ(out[0], (wchar_t)L'd');
-    CHECK_EQ((long)(p - src), 6L);
+    CHECK_EQ((long)(p - source), 6L);
 }
 
 TEST(wcs, mbsnrtowcs_stops_at_the_output_limit) {
-    const char *src = "abcdef";
-    const char *p = src;
+    const char *source = "abcdef";
+    const char *p = source;
     wchar_t out[3];
     mbstate_t st = {0, 0, 0};
     CHECK_EQ((long)mbsnrtowcs(out, &p, 6, 2, &st), 2L);
-    CHECK_EQ((long)(p - src), 2L);
+    CHECK_EQ((long)(p - source), 2L);
 }
 
 TEST(wcs, mbsnrtowcs_consumes_the_terminator_and_says_so) {
-    const char *src = "ab";
-    const char *p = src;
+    const char *source = "ab";
+    const char *p = source;
     wchar_t out[8];
     mbstate_t st = {0, 0, 0};
     CHECK_EQ((long)mbsnrtowcs(out, &p, 8, 8, &st), 2L);
@@ -240,12 +240,12 @@ TEST(wcs, a_window_ending_mid_character_is_not_an_error) {
 }
 
 TEST(wcs, wcsnrtombs_stops_at_both_limits_and_round_trips) {
-    const wchar_t *src = L"abcdef";
-    const wchar_t *p = src;
+    const wchar_t *source = L"abcdef";
+    const wchar_t *p = source;
     char out[16];
     mbstate_t st = {0, 0, 0};
     CHECK_EQ((long)wcsnrtombs(out, &p, 3, 16, &st), 3L);
-    CHECK_EQ((long)(p - src), 3L);
+    CHECK_EQ((long)(p - source), 3L);
 
     const wchar_t two[] = {0x00E9, 0x00E9, 0};
     const wchar_t *q = two;

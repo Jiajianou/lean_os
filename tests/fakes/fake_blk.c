@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-void panic(const char *msg);
+void panic(const char *message);
 
 static uint8_t *disk;
 static uint32_t disk_sectors;
@@ -28,10 +28,10 @@ void fake_block_device_fail_reads_after(int64_t n);
 
 void fake_block_device_reset(uint32_t sectors) {
     if (disk && disk_sectors == sectors) {
-        memset(disk, 0, (size_t)sectors * BLK_SECTOR_SIZE);
+        memset(disk, 0, (size_t)sectors * BLOCK_DEVICE_SECTOR_SIZE);
     } else {
         free(disk);
-        disk = (uint8_t *)calloc(sectors, BLK_SECTOR_SIZE);
+        disk = (uint8_t *)calloc(sectors, BLOCK_DEVICE_SECTOR_SIZE);
         if (!disk) {
             panic("fake_blk: could not allocate the RAM disk");
         }
@@ -70,7 +70,7 @@ uint8_t *fake_block_device_sector(uint32_t lba) {
     if (!disk || lba >= disk_sectors) {
         panic("fake_blk_sector: out of range");
     }
-    return disk + (size_t)lba * BLK_SECTOR_SIZE;
+    return disk + (size_t)lba * BLOCK_DEVICE_SECTOR_SIZE;
 }
 
 static void range_check(uint32_t lba, uint32_t count, const char *what) {
@@ -82,27 +82,27 @@ static void range_check(uint32_t lba, uint32_t count, const char *what) {
     }
 }
 
-int block_device_read(uint32_t lba, uint32_t count, void *buf) {
+int block_device_read(uint32_t lba, uint32_t count, void *buffer) {
     range_check(lba, count, "fake_blk: read past the end of the disk");
     if (fail_reads_after >= 0 && (int64_t)reads >= fail_reads_after) {
-        memset(buf, 0, (size_t)count * BLK_SECTOR_SIZE);
+        memset(buffer, 0, (size_t)count * BLOCK_DEVICE_SECTOR_SIZE);
         reads += count;
         errors++;
         return -1;
     }
-    memcpy(buf, disk + (size_t)lba * BLK_SECTOR_SIZE, (size_t)count * BLK_SECTOR_SIZE);
+    memcpy(buffer, disk + (size_t)lba * BLOCK_DEVICE_SECTOR_SIZE, (size_t)count * BLOCK_DEVICE_SECTOR_SIZE);
     reads += count;
     return 0;
 }
 
-int block_device_write(uint32_t lba, uint32_t count, const void *buf) {
+int block_device_write(uint32_t lba, uint32_t count, const void *buffer) {
     range_check(lba, count, "fake_blk: write past the end of the disk");
     if (fail_writes_after >= 0 && (int64_t)writes >= fail_writes_after) {
         writes += count;
         errors++;
         return silent_writes ? 0 : -1;
     }
-    memcpy(disk + (size_t)lba * BLK_SECTOR_SIZE, buf, (size_t)count * BLK_SECTOR_SIZE);
+    memcpy(disk + (size_t)lba * BLOCK_DEVICE_SECTOR_SIZE, buffer, (size_t)count * BLOCK_DEVICE_SECTOR_SIZE);
     writes += count;
     return 0;
 }

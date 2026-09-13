@@ -71,8 +71,8 @@ static void print_name(uint64_t rip, int pid) {
     if (syms_loaded) {
         const symbol_table_entry_t *e = symbol_table_lookup(&syms, rip);
         if (e) {
-            printf("  %.*s+0x%llx", (int)e->name_len, e->name,
-                   (unsigned long long)(rip - e->addr));
+            printf("  %.*s+0x%llx", (int)e->name_length, e->name,
+                   (unsigned long long)(rip - e->address));
             return;
         }
     }
@@ -99,8 +99,8 @@ static int pct(uint64_t part, uint64_t whole) {
 }
 
 static int report(int top) {
-    prof_stats_t st;
-    if (sys_profile(PROFILE_OP_STATS, &st, 0) != 0) {
+    prof_statistics_t st;
+    if (sys_profile(PROFILE_OP_STATISTICS, &st, 0) != 0) {
         printf("profile: cannot read the profiler (needs process-list)\n");
         return 1;
     }
@@ -143,7 +143,7 @@ static int report(int top) {
 static const char *syscall_name(int num);
 
 static int syscalls_report(int top) {
-    static prof_syscount_t counts[SYSCALL_COUNT];
+    static prof_syscall_counters_t counts[SYSCALL_COUNT];
     long n = sys_profile(PROFILE_OP_SYSCALLS, counts, SYSCALL_COUNT);
     if (n < 0) {
         printf("profile: cannot read the syscall table (needs process-list)\n");
@@ -199,26 +199,26 @@ int main(int argc, char **argv) {
     }
     load_symbols();
 
-    const char *cmd = argv[1];
+    const char *command = argv[1];
 
-    if (strcmp(cmd, "start") == 0) {
+    if (strcmp(command, "start") == 0) {
         return sys_profile(PROFILE_OP_START, NULL, 0) == 0 ? 0 : 1;
     }
-    if (strcmp(cmd, "stop") == 0) {
+    if (strcmp(command, "stop") == 0) {
         return sys_profile(PROFILE_OP_STOP, NULL, 0) == 0 ? 0 : 1;
     }
-    if (strcmp(cmd, "reset") == 0) {
+    if (strcmp(command, "reset") == 0) {
         int a = (int)sys_profile(PROFILE_OP_RESET, NULL, 0);
         int b = (int)sys_profile(PROFILE_OP_SYSRESET, NULL, 0);
         return (a == 0 && b == 0) ? 0 : 1;
     }
-    if (strcmp(cmd, "report") == 0) {
+    if (strcmp(command, "report") == 0) {
         return report(argc > 2 ? atoi(argv[2]) : 20);
     }
-    if (strcmp(cmd, "syscalls") == 0) {
+    if (strcmp(command, "syscalls") == 0) {
         return syscalls_report(argc > 2 ? atoi(argv[2]) : 20);
     }
-    if (strcmp(cmd, "timing") == 0) {
+    if (strcmp(command, "timing") == 0) {
         if (argc < 3) {
             return usage();
         }
@@ -232,7 +232,7 @@ int main(int argc, char **argv) {
                was ? "on" : "off");
         return 0;
     }
-    if (strcmp(cmd, "run") == 0) {
+    if (strcmp(command, "run") == 0) {
         if (argc < 4) {
             return usage();
         }

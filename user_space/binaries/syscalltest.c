@@ -15,19 +15,19 @@ static void check(int ok, const char *what, long num) {
     }
 }
 
-#define KERNEL_ADDR     0xFFFF800000000000ULL
+#define KERNEL_ADDRESS     0xFFFF800000000000ULL
 #define UNMAPPED_USER   0x0000700000000000ULL
 #define NEAR_USER_TOP   0x00007FFFFFFFF000ULL
-#define HUGE_LEN        0x7FFFFFFFFFFFFFFFULL
+#define HUGE_LENGTH        0x7FFFFFFFFFFFFFFFULL
 
 static const unsigned long long bad_ptrs[] = {
-    0ULL, KERNEL_ADDR, UNMAPPED_USER, NEAR_USER_TOP, (unsigned long long)-1,
+    0ULL, KERNEL_ADDRESS, UNMAPPED_USER, NEAR_USER_TOP, (unsigned long long)-1,
 };
 #define N_BAD_PTRS ((int)(sizeof(bad_ptrs) / sizeof(bad_ptrs[0])))
 
-typedef enum { CLASS_SKIP, CLASS_PLAIN, CLASS_PTR, CLASS_BLOCK } class_t;
+typedef enum { CLASS_SKIP, CLASS_PLAIN, CLASS_POINTER, CLASS_BLOCK } class_t;
 
-#define UNOPENABLE_FD 4242L
+#define UNOPENABLE_FILE_DESCRIPTOR 4242L
 
 typedef struct {
     long num;
@@ -59,50 +59,50 @@ static const entry_t table[] = {
 
     {SYS_write,         CLASS_BLOCK, 2, NULL},
     {SYS_read,          CLASS_BLOCK, 2, NULL},
-    {SYS_readfile,      CLASS_PTR, 1, NULL},
-    {SYS_writefile,     CLASS_PTR, 1, NULL},
-    {SYS_listdir,       CLASS_PTR, 1, NULL},
-    {SYS_pipe,          CLASS_PTR, 1, NULL},
-    {SYS_fb_info,       CLASS_PTR, 1, NULL},
-    {SYS_pipe_open,     CLASS_PTR, 1, NULL},
-    {SYS_clipboard_set, CLASS_PTR, 1, NULL},
-    {SYS_clipboard_get, CLASS_PTR, 1, NULL},
-    {SYS_taskinfo,      CLASS_PTR, 1, NULL},
-    {SYS_mkdir,         CLASS_PTR, 1, NULL},
-    {SYS_unlink,        CLASS_PTR, 1, NULL},
-    {SYS_rename,        CLASS_PTR, 1, NULL},
-    {SYS_rename_replace,CLASS_PTR, 1, NULL},
-    {SYS_open,          CLASS_PTR, 1, NULL},
-    {SYS_stat,          CLASS_PTR, 1, NULL},
-    {SYS_lstat,         CLASS_PTR, 1, NULL},
-    {SYS_fstat,         CLASS_PTR, 2, NULL},
-    {SYS_rmdir,         CLASS_PTR, 1, NULL},
-    {SYS_display_modes, CLASS_PTR, 1, NULL},
-    {SYS_bind,          CLASS_PTR, 2, NULL},
-    {SYS_sendto,        CLASS_PTR, 2, NULL},
-    {SYS_netconf,       CLASS_PTR, 1, NULL},
-    {SYS_connstat,      CLASS_PTR, 2, NULL},
-    {SYS_send,          CLASS_PTR, 2, NULL},
-    {SYS_klog,          CLASS_PTR, 1, NULL},
-    {SYS_chdir,         CLASS_PTR, 1, NULL},
-    {SYS_getcwd,        CLASS_PTR, 1, NULL},
+    {SYS_readfile,      CLASS_POINTER, 1, NULL},
+    {SYS_writefile,     CLASS_POINTER, 1, NULL},
+    {SYS_listdir,       CLASS_POINTER, 1, NULL},
+    {SYS_pipe,          CLASS_POINTER, 1, NULL},
+    {SYS_framebuffer_info,       CLASS_POINTER, 1, NULL},
+    {SYS_pipe_open,     CLASS_POINTER, 1, NULL},
+    {SYS_clipboard_set, CLASS_POINTER, 1, NULL},
+    {SYS_clipboard_get, CLASS_POINTER, 1, NULL},
+    {SYS_taskinfo,      CLASS_POINTER, 1, NULL},
+    {SYS_mkdir,         CLASS_POINTER, 1, NULL},
+    {SYS_unlink,        CLASS_POINTER, 1, NULL},
+    {SYS_rename,        CLASS_POINTER, 1, NULL},
+    {SYS_rename_replace,CLASS_POINTER, 1, NULL},
+    {SYS_open,          CLASS_POINTER, 1, NULL},
+    {SYS_stat,          CLASS_POINTER, 1, NULL},
+    {SYS_lstat,         CLASS_POINTER, 1, NULL},
+    {SYS_fstat,         CLASS_POINTER, 2, NULL},
+    {SYS_rmdir,         CLASS_POINTER, 1, NULL},
+    {SYS_display_modes, CLASS_POINTER, 1, NULL},
+    {SYS_bind,          CLASS_POINTER, 2, NULL},
+    {SYS_sendto,        CLASS_POINTER, 2, NULL},
+    {SYS_netconf,       CLASS_POINTER, 1, NULL},
+    {SYS_connstat,      CLASS_POINTER, 2, NULL},
+    {SYS_send,          CLASS_POINTER, 2, NULL},
+    {SYS_kernel_log,          CLASS_POINTER, 1, NULL},
+    {SYS_chdir,         CLASS_POINTER, 1, NULL},
+    {SYS_getcwd,        CLASS_POINTER, 1, NULL},
     {SYS_sigaction,     CLASS_PLAIN, 0, NULL},
-    {SYS_getdents,      CLASS_PTR, 2, NULL},
-    {SYS_symlink,       CLASS_PTR, 1, NULL},
-    {SYS_readlink,      CLASS_PTR, 2, NULL},
-    {SYS_link,          CLASS_PTR, 1, NULL},
-    {SYS_audio_play,    CLASS_PTR, 1, NULL},
-    {SYS_ioctl,         CLASS_PTR, 3, NULL},
-    {SYS_profile,       CLASS_PTR, 2, NULL},
+    {SYS_getdents,      CLASS_POINTER, 2, NULL},
+    {SYS_symlink,       CLASS_POINTER, 1, NULL},
+    {SYS_readlink,      CLASS_POINTER, 2, NULL},
+    {SYS_link,          CLASS_POINTER, 1, NULL},
+    {SYS_audio_play,    CLASS_POINTER, 1, NULL},
+    {SYS_ioctl,         CLASS_POINTER, 3, NULL},
+    {SYS_profile,       CLASS_POINTER, 2, NULL},
 
     {SYS_wait,          CLASS_BLOCK, 0, NULL},
     {SYS_waitpid,       CLASS_BLOCK, 0, NULL},
     {SYS_waitfds,       CLASS_BLOCK, 1, NULL},
-    {SYS_kbd_read,      CLASS_BLOCK, 0, NULL},
+    {SYS_keyboard_read,      CLASS_BLOCK, 0, NULL},
     {SYS_mouse_read,    CLASS_BLOCK, 1, NULL},
     {SYS_accept,        CLASS_BLOCK, 0, NULL},
     {SYS_connect,       CLASS_BLOCK, 2, NULL},
-    {SYS_recv,          CLASS_BLOCK, 2, NULL},
+    {SYS_receive,          CLASS_BLOCK, 2, NULL},
     {SYS_recvfrom,      CLASS_BLOCK, 2, NULL},
 
     {SYS_getpid,        CLASS_PLAIN, 0, NULL},
@@ -110,12 +110,12 @@ static const entry_t table[] = {
     {SYS_getpgid,       CLASS_PLAIN, 0, NULL},
     {SYS_getsid,        CLASS_PLAIN, 0, NULL},
     {SYS_gettid,        CLASS_PLAIN, 0, NULL},
-    {SYS_shm_create,    CLASS_PLAIN, 0, NULL},
-    {SYS_shm_map,       CLASS_PLAIN, 0, NULL},
-    {SYS_shm_free,      CLASS_PLAIN, 0, NULL},
-    {SYS_shm_unmap,     CLASS_PLAIN, 0, NULL},
-    {SYS_fb_map,        CLASS_PLAIN, 0, NULL},
-    {SYS_kbd_modifiers, CLASS_PLAIN, 0, NULL},
+    {SYS_shared_memory_create,    CLASS_PLAIN, 0, NULL},
+    {SYS_shared_memory_map,       CLASS_PLAIN, 0, NULL},
+    {SYS_shared_memory_free,      CLASS_PLAIN, 0, NULL},
+    {SYS_shared_memory_unmap,     CLASS_PLAIN, 0, NULL},
+    {SYS_framebuffer_map,        CLASS_PLAIN, 0, NULL},
+    {SYS_keyboard_modifiers, CLASS_PLAIN, 0, NULL},
     {SYS_pipe_poll,     CLASS_PLAIN, 0, NULL},
     {SYS_pipe_reset,    CLASS_PLAIN, 0, NULL},
     {SYS_uptime_ms,     CLASS_PLAIN, 0, NULL},
@@ -132,7 +132,7 @@ static const entry_t table[] = {
     {SYS_listen,        CLASS_PLAIN, 0, NULL},
     {SYS_sockpoll,      CLASS_PLAIN, 0, NULL},
     {SYS_getcaps,       CLASS_PLAIN, 0, NULL},
-    {SYS_klog_total,    CLASS_PLAIN, 0, NULL},
+    {SYS_kernel_log_total,    CLASS_PLAIN, 0, NULL},
     {SYS_sigprocmask,   CLASS_PLAIN, 0, NULL},
     {SYS_mmap,          CLASS_PLAIN, 0, NULL},
     {SYS_madvise,       CLASS_PLAIN, 0, NULL},
@@ -140,35 +140,35 @@ static const entry_t table[] = {
     {SYS_ftruncate,     CLASS_PLAIN, 0, NULL},
     {SYS_fsync,         CLASS_PLAIN, 0, NULL},
 
-    {SYS_rusage,        CLASS_PTR, 2, NULL},
-    {SYS_statvfs,       CLASS_PTR, 1, NULL},
-    {SYS_utime,         CLASS_PTR, 1, NULL},
-    {SYS_fdpath,        CLASS_PTR, 2, NULL},
+    {SYS_rusage,        CLASS_POINTER, 2, NULL},
+    {SYS_statvfs,       CLASS_POINTER, 1, NULL},
+    {SYS_utime,         CLASS_POINTER, 1, NULL},
+    {SYS_fdpath,        CLASS_POINTER, 2, NULL},
     {SYS_getppid,       CLASS_PLAIN, 0, NULL},
     {SYS_sync,          CLASS_PLAIN, 0, NULL},
-    {SYS_meminfo,       CLASS_PTR, 1, NULL},
+    {SYS_meminfo,       CLASS_POINTER, 1, NULL},
     {SYS_alarm,         CLASS_PLAIN, 0, NULL},
     {SYS_msync,         CLASS_PLAIN, 0, NULL},
     {SYS_arch_prctl,    CLASS_PLAIN, 0, NULL},
     {SYS_futex,         CLASS_PLAIN, 0, NULL},
-    {SYS_getrandom,     CLASS_PTR, 1, NULL},
-    {SYS_pread,         CLASS_PTR, 2, NULL},
-    {SYS_pwrite,        CLASS_PTR, 2, NULL},
+    {SYS_getrandom,     CLASS_POINTER, 1, NULL},
+    {SYS_pread,         CLASS_POINTER, 2, NULL},
+    {SYS_pwrite,        CLASS_POINTER, 2, NULL},
 
-    {SYS_socketpair,    CLASS_PTR, 2, NULL},
-    {SYS_bindun,        CLASS_PTR, 2, NULL},
-    {SYS_connectun,     CLASS_PTR, 2, NULL},
+    {SYS_socketpair,    CLASS_POINTER, 2, NULL},
+    {SYS_bindun,        CLASS_POINTER, 2, NULL},
+    {SYS_connectun,     CLASS_POINTER, 2, NULL},
     {SYS_sendmsg,       CLASS_BLOCK, 2, NULL},
     {SYS_recvmsg,       CLASS_BLOCK, 2, NULL},
     {SYS_sockshut,      CLASS_PLAIN, 0, NULL},
 
     {SYS_epoll_wait,      CLASS_BLOCK, 2, NULL},
-    {SYS_timerfd_settime, CLASS_PTR, 3, NULL},
-    {SYS_timerfd_gettime, CLASS_PTR, 2, NULL},
+    {SYS_timerfd_settime, CLASS_POINTER, 3, NULL},
+    {SYS_timerfd_gettime, CLASS_POINTER, 2, NULL},
     {SYS_epoll_create,   CLASS_SKIP, 0, "creates a descriptor for any argument; checked by name in section 7"},
     {SYS_eventfd,        CLASS_SKIP, 0, "same - and a kernel address is a perfectly good initial count"},
     {SYS_timerfd_create, CLASS_SKIP, 0, "same"},
-    {SYS_epoll_ctl,      CLASS_SKIP, 0, "its pointer is argument 4, past this table's reach; checked by name in section 7"},
+    {SYS_epoll_control,      CLASS_SKIP, 0, "its pointer is argument 4, past this table's reach; checked by name in section 7"},
 
     {SYS_memfd_create,   CLASS_SKIP, 0, "creates a descriptor and takes a pointer; checked by name in section 7"},
     {SYS_memfd_seal,     CLASS_PLAIN, 0, NULL},
@@ -209,16 +209,16 @@ int main(void) {
             if (e->klass == CLASS_BLOCK) {
                 switch (e->pointer_argument) {
                     case 1: (void)sys_raw(n, (long)bad, 1, 0); break;
-                    case 2: (void)sys_raw(n, UNOPENABLE_FD, (long)bad, 1); break;
-                    case 3: (void)sys_raw(n, UNOPENABLE_FD, 1, (long)bad); break;
-                    default: (void)sys_raw(n, UNOPENABLE_FD, 0, 0); break;
+                    case 2: (void)sys_raw(n, UNOPENABLE_FILE_DESCRIPTOR, (long)bad, 1); break;
+                    case 3: (void)sys_raw(n, UNOPENABLE_FILE_DESCRIPTOR, 1, (long)bad); break;
+                    default: (void)sys_raw(n, UNOPENABLE_FILE_DESCRIPTOR, 0, 0); break;
                 }
                 continue;
             }
             (void)sys_raw(n, (long)bad, 0, 0);
             (void)sys_raw(n, 0, (long)bad, 0);
             (void)sys_raw(n, 0, 0, (long)bad);
-            (void)sys_raw(n, (long)bad, (long)HUGE_LEN, (long)bad);
+            (void)sys_raw(n, (long)bad, (long)HUGE_LENGTH, (long)bad);
         }
         swept++;
     }
@@ -229,10 +229,10 @@ int main(void) {
     int pointer_checked = 0;
     for (int i = 0; i < N_TABLE; i++) {
         const entry_t *e = &table[i];
-        if (e->klass != CLASS_PTR && !(e->klass == CLASS_BLOCK && e->pointer_argument)) {
+        if (e->klass != CLASS_POINTER && !(e->klass == CLASS_BLOCK && e->pointer_argument)) {
             continue;
         }
-        long fd = (e->klass == CLASS_BLOCK) ? UNOPENABLE_FD : 1;
+        long fd = (e->klass == CLASS_BLOCK) ? UNOPENABLE_FILE_DESCRIPTOR : 1;
         for (int p = 0; p < N_BAD_PTRS; p++) {
             unsigned long long bad = bad_ptrs[p];
             long r;
@@ -269,9 +269,9 @@ int main(void) {
               "a syscall number outside the table was not refused", bogus[i]);
     }
 
-    check(sys_raw(SYS_write, 1, (long)scratch, (long)HUGE_LEN) < 0,
+    check(sys_raw(SYS_write, 1, (long)scratch, (long)HUGE_LENGTH) < 0,
           "a length that overflows its base was accepted", SYS_write);
-    check(sys_raw(SYS_read, 0, (long)scratch, (long)HUGE_LEN) < 0,
+    check(sys_raw(SYS_read, 0, (long)scratch, (long)HUGE_LENGTH) < 0,
           "a length that overflows its base was accepted", SYS_read);
 
     for (int p = 0; p < N_BAD_PTRS; p++) {
@@ -313,18 +313,18 @@ int main(void) {
         if (epfd >= 0 && tfd >= 0) {
             for (int p = 0; p < N_BAD_PTRS; p++) {
                 unsigned long long bad = bad_ptrs[p];
-                check(sys_epoll_ctl((int)epfd, 1  , (int)tfd,
+                check(sys_epoll_control((int)epfd, 1  , (int)tfd,
                                     (const os_epoll_event_t *)(uintptr_t)bad) < 0,
                       "epoll_ctl accepted an event structure at a kernel or unmapped address",
-                      SYS_epoll_ctl);
+                      SYS_epoll_control);
             }
             os_epoll_event_t ev = {1  , 0, 0};
-            check(sys_epoll_ctl((int)epfd, 1, (int)epfd, &ev) < 0,
-                  "epoll_ctl accepted an epoll set watching itself", SYS_epoll_ctl);
-            check(sys_epoll_ctl((int)epfd, 1, 127, &ev) < 0,
-                  "epoll_ctl accepted a descriptor that was never opened", SYS_epoll_ctl);
-            check(sys_epoll_ctl((int)epfd, 1, (int)tfd, &ev) == 0,
-                  "epoll_ctl refused a valid registration", SYS_epoll_ctl);
+            check(sys_epoll_control((int)epfd, 1, (int)epfd, &ev) < 0,
+                  "epoll_ctl accepted an epoll set watching itself", SYS_epoll_control);
+            check(sys_epoll_control((int)epfd, 1, 127, &ev) < 0,
+                  "epoll_ctl accepted a descriptor that was never opened", SYS_epoll_control);
+            check(sys_epoll_control((int)epfd, 1, (int)tfd, &ev) == 0,
+                  "epoll_ctl refused a valid registration", SYS_epoll_control);
         }
         for (int p = 0; p < N_BAD_PTRS; p++) {
             unsigned long long bad = bad_ptrs[p];

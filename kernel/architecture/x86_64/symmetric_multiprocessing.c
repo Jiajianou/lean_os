@@ -23,7 +23,7 @@ static volatile int initialized;
 
 #define AP_STACK_SIZE (16 * 1024)
 
-#define AP_PARAMS_ADDR       0x7000ULL
+#define AP_PARAMETERS_ADDRESS       0x7000ULL
 #define AP_OFF_CR3           0
 #define AP_OFF_STACK_TOP     8
 #define AP_OFF_ENTRY64       16
@@ -32,10 +32,10 @@ static volatile int initialized;
 #define AP_OFF_CPU_ID        34
 #define AP_OFF_AP_READY      38
 #define AP_OFF_NX            42
-#define AP_PARAMS_SIZE       43
+#define AP_PARAMETERS_SIZE       43
 
-#define AP_TRAMPOLINE_LOAD_ADDR 0x8000ULL
-#define AP_TRAMPOLINE_VECTOR ((uint32_t)(AP_TRAMPOLINE_LOAD_ADDR >> 12))
+#define AP_TRAMPOLINE_LOAD_ADDRESS 0x8000ULL
+#define AP_TRAMPOLINE_VECTOR ((uint32_t)(AP_TRAMPOLINE_LOAD_ADDRESS >> 12))
 
 extern const uint8_t ap_trampoline_start[];
 extern const uint8_t ap_trampoline_end[];
@@ -44,19 +44,19 @@ extern void ap_entry_asm_stub(void);
 static void verify_cpu_identity(uint32_t cpu_id);
 
 static inline void ap_parameters_write64(uint64_t offset, uint64_t value) {
-    *(volatile uint64_t *)(uintptr_t)(AP_PARAMS_ADDR + offset) = value;
+    *(volatile uint64_t *)(uintptr_t)(AP_PARAMETERS_ADDRESS + offset) = value;
 }
 static inline void ap_parameters_write32(uint64_t offset, uint32_t value) {
-    *(volatile uint32_t *)(uintptr_t)(AP_PARAMS_ADDR + offset) = value;
+    *(volatile uint32_t *)(uintptr_t)(AP_PARAMETERS_ADDRESS + offset) = value;
 }
 static inline void ap_parameters_write16(uint64_t offset, uint16_t value) {
-    *(volatile uint16_t *)(uintptr_t)(AP_PARAMS_ADDR + offset) = value;
+    *(volatile uint16_t *)(uintptr_t)(AP_PARAMETERS_ADDRESS + offset) = value;
 }
 static inline void ap_parameters_write8(uint64_t offset, uint8_t value) {
-    *(volatile uint8_t *)(uintptr_t)(AP_PARAMS_ADDR + offset) = value;
+    *(volatile uint8_t *)(uintptr_t)(AP_PARAMETERS_ADDRESS + offset) = value;
 }
 static inline uint32_t ap_parameters_read32(uint64_t offset) {
-    return *(volatile uint32_t *)(uintptr_t)(AP_PARAMS_ADDR + offset);
+    return *(volatile uint32_t *)(uintptr_t)(AP_PARAMETERS_ADDRESS + offset);
 }
 
 void ap_main(uint32_t cpu_id) {
@@ -148,10 +148,10 @@ static int start_ap(int cpu_id, uint32_t apic_id) {
     ap_parameters_write32(AP_OFF_CPU_ID, (uint32_t)cpu_id);
     ap_parameters_write8(AP_OFF_NX, virtual_memory_nx_enabled() ? 1u : 0u);
 
-    uint8_t *dst = (uint8_t *)(uintptr_t)AP_TRAMPOLINE_LOAD_ADDR;
+    uint8_t *destination = (uint8_t *)(uintptr_t)AP_TRAMPOLINE_LOAD_ADDRESS;
     uint64_t blob_length = (uint64_t)(ap_trampoline_end - ap_trampoline_start);
     for (uint64_t i = 0; i < blob_length; i++) {
-        dst[i] = ap_trampoline_start[i];
+        destination[i] = ap_trampoline_start[i];
     }
 
     lapic_send_ipi(apic_id, LAPIC_ICR_DELIVERY_INIT | LAPIC_ICR_LEVEL_ASSERT);

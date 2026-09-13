@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <sys/mman.h>
 
-void panic(const char *msg);
+void panic(const char *message);
 
 #define HEAP_SPAN (64ULL * 1024 * 1024)
 #define PAGE 4096ULL
@@ -122,13 +122,13 @@ static uint64_t unmaps_in;
 uint64_t fake_virtual_memory_cow_breaks(void) { return cow_breaks; }
 uint64_t fake_virtual_memory_unmaps_in(void) { return unmaps_in; }
 
-int virtual_memory_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len, int need_write) {
+int virtual_memory_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t length, int need_write) {
     (void)pml4_phys;
     (void)need_write;
-    if (len == 0) {
+    if (length == 0) {
         return 1;
     }
-    if (virt + len < virt) {
+    if (virt + length < virt) {
         return 0;
     }
     return 1;
@@ -163,7 +163,7 @@ uint64_t virtual_memory_rss_peak_pages(uint64_t pml4_phys) {
 }
 
 void virtual_memory_init(const uint32_t *e820_map) { (void)e820_map; }
-int virtual_memory_identity_covers(uint64_t phys, uint64_t len) { (void)phys; (void)len; return 1; }
+int virtual_memory_identity_covers(uint64_t phys, uint64_t length) { (void)phys; (void)length; return 1; }
 void virtual_memory_enable_nx_this_cpu(void) {}
 int virtual_memory_nx_enabled(void) { return 1; }
 uint64_t virtual_memory_kernel_pml4_phys(void) { return 0; }

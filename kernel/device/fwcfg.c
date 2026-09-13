@@ -8,9 +8,9 @@
 #define FWCFG_PORT_DATA 0x511
 
 #define FWCFG_SIGNATURE 0x0000
-#define FWCFG_FILE_DIR  0x0019
+#define FWCFG_FILE_DIRECTORY  0x0019
 
-#define FWCFG_NAME_LEN 56
+#define FWCFG_NAME_LENGTH 56
 
 static int present;
 
@@ -18,15 +18,15 @@ static void fwcfg_select(uint16_t item) {
     outw(FWCFG_PORT_SEL, item);
 }
 
-static void fwcfg_read(void *dst, uint32_t len) {
-    uint8_t *out = (uint8_t *)dst;
-    for (uint32_t i = 0; i < len; i++) {
+static void fwcfg_read(void *destination, uint32_t length) {
+    uint8_t *out = (uint8_t *)destination;
+    for (uint32_t i = 0; i < length; i++) {
         out[i] = inb(FWCFG_PORT_DATA);
     }
 }
 
-static void fwcfg_skip(uint32_t len) {
-    for (uint32_t i = 0; i < len; i++) {
+static void fwcfg_skip(uint32_t length) {
+    for (uint32_t i = 0; i < length; i++) {
         (void)inb(FWCFG_PORT_DATA);
     }
 }
@@ -70,13 +70,13 @@ int fwcfg_present(void) {
     return present;
 }
 
-int fwcfg_read_file(const char *name, void *dst, uint32_t max) {
-    if (!present || !name || !dst) {
+int fwcfg_read_file(const char *name, void *destination, uint32_t max) {
+    if (!present || !name || !destination) {
         return -1;
     }
 
     uint8_t header[4];
-    fwcfg_select(FWCFG_FILE_DIR);
+    fwcfg_select(FWCFG_FILE_DIRECTORY);
     fwcfg_read(header, sizeof(header));
     uint32_t count = be32(header);
 
@@ -90,7 +90,7 @@ int fwcfg_read_file(const char *name, void *dst, uint32_t max) {
 
     for (uint32_t i = 0; i < count; i++) {
         uint8_t entry[8];
-        char entry_name[FWCFG_NAME_LEN];
+        char entry_name[FWCFG_NAME_LENGTH];
         fwcfg_read(entry, sizeof(entry));
         fwcfg_read(entry_name, sizeof(entry_name));
 
@@ -99,10 +99,10 @@ int fwcfg_read_file(const char *name, void *dst, uint32_t max) {
         }
 
         uint32_t n = 0;
-        while (n < FWCFG_NAME_LEN && name[n] != '\0' && entry_name[n] == name[n]) {
+        while (n < FWCFG_NAME_LENGTH && name[n] != '\0' && entry_name[n] == name[n]) {
             n++;
         }
-        if (name[n] == '\0' && (n == FWCFG_NAME_LEN || entry_name[n] == '\0')) {
+        if (name[n] == '\0' && (n == FWCFG_NAME_LENGTH || entry_name[n] == '\0')) {
             found_size = be32(entry);
             found_sel = be16(entry + 4);
             found = 1;
@@ -115,7 +115,7 @@ int fwcfg_read_file(const char *name, void *dst, uint32_t max) {
 
     uint32_t want = found_size < max ? found_size : max;
     fwcfg_select(found_sel);
-    fwcfg_read(dst, want);
+    fwcfg_read(destination, want);
     if (found_size > want) {
         fwcfg_skip(found_size - want);
     }
@@ -126,10 +126,10 @@ int boot_ioapic_enabled(void) {
     if (ioapic_cached >= 0) {
         return ioapic_cached;
     }
-    char buf[8];
-    k_memset(buf, 0, sizeof(buf));
-    int n = fwcfg_read_file("opt/leanos/ioapic", buf, sizeof(buf) - 1);
-    ioapic_cached = (n == 1 && buf[0] == '1') ? 1 : 0;
+    char buffer[8];
+    k_memset(buffer, 0, sizeof(buffer));
+    int n = fwcfg_read_file("opt/leanos/ioapic", buffer, sizeof(buffer) - 1);
+    ioapic_cached = (n == 1 && buffer[0] == '1') ? 1 : 0;
     return ioapic_cached;
 }
 
@@ -137,10 +137,10 @@ int boot_bootstrap_enabled(void) {
     if (bootstrap_cached >= 0) {
         return bootstrap_cached;
     }
-    char buf[8];
-    k_memset(buf, 0, sizeof(buf));
-    int n = fwcfg_read_file("opt/leanos/bootstrap", buf, sizeof(buf) - 1);
-    bootstrap_cached = (n == 1 && buf[0] == '1') ? 1 : 0;
+    char buffer[8];
+    k_memset(buffer, 0, sizeof(buffer));
+    int n = fwcfg_read_file("opt/leanos/bootstrap", buffer, sizeof(buffer) - 1);
+    bootstrap_cached = (n == 1 && buffer[0] == '1') ? 1 : 0;
     return bootstrap_cached;
 }
 
@@ -148,10 +148,10 @@ int boot_pytest_enabled(void) {
     if (pytest_cached >= 0) {
         return pytest_cached;
     }
-    char buf[8];
-    k_memset(buf, 0, sizeof(buf));
-    int n = fwcfg_read_file("opt/leanos/pytest", buf, sizeof(buf) - 1);
-    pytest_cached = (n == 1 && buf[0] == '1') ? 1 : 0;
+    char buffer[8];
+    k_memset(buffer, 0, sizeof(buffer));
+    int n = fwcfg_read_file("opt/leanos/pytest", buffer, sizeof(buffer) - 1);
+    pytest_cached = (n == 1 && buffer[0] == '1') ? 1 : 0;
     return pytest_cached;
 }
 
@@ -159,10 +159,10 @@ int boot_pybuild_enabled(void) {
     if (pybuild_cached >= 0) {
         return pybuild_cached;
     }
-    char buf[8];
-    k_memset(buf, 0, sizeof(buf));
-    int n = fwcfg_read_file("opt/leanos/pybuild", buf, sizeof(buf) - 1);
-    pybuild_cached = (n == 1 && buf[0] == '1') ? 1 : 0;
+    char buffer[8];
+    k_memset(buffer, 0, sizeof(buffer));
+    int n = fwcfg_read_file("opt/leanos/pybuild", buffer, sizeof(buffer) - 1);
+    pybuild_cached = (n == 1 && buffer[0] == '1') ? 1 : 0;
     return pybuild_cached;
 }
 
@@ -171,10 +171,10 @@ int boot_selftests_enabled(void) {
         return selftest_cached;
     }
 
-    char buf[8];
-    k_memset(buf, 0, sizeof(buf));
-    int n = fwcfg_read_file("opt/leanos/selftest", buf, sizeof(buf) - 1);
+    char buffer[8];
+    k_memset(buffer, 0, sizeof(buffer));
+    int n = fwcfg_read_file("opt/leanos/selftest", buffer, sizeof(buffer) - 1);
 
-    selftest_cached = (n == 1 && buf[0] == '1') ? 1 : 0;
+    selftest_cached = (n == 1 && buffer[0] == '1') ? 1 : 0;
     return selftest_cached;
 }

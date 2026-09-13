@@ -10,11 +10,11 @@ int optopt;
 
 static int nextchar;
 
-static void report(const char *argv0, const char *msg, int c) {
+static void report(const char *argv0, const char *message, int c) {
     if (!opterr) {
         return;
     }
-    fprintf(stderr, "%s: %s -- %c\n", argv0 ? argv0 : "?", msg, c);
+    fprintf(stderr, "%s: %s -- %c\n", argv0 ? argv0 : "?", message, c);
 }
 
 static int do_getopt(int argc, char *const argv[], const char *optstring,

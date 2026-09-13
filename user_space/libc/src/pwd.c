@@ -42,11 +42,11 @@ void endpwent(void) {
     enumerated = 0;
 }
 
-static int copy_pw(struct passwd *out, char *buf, size_t buflen,
+static int copy_pw(struct passwd *out, char *buffer, size_t buflen,
                    struct passwd **result) {
     static const char *const fields[] = {name_root, no_password, gecos, home,
                                          shell};
-    char **dst[] = {&out->pw_name, &out->pw_passwd, &out->pw_gecos,
+    char **destination[] = {&out->pw_name, &out->pw_passwd, &out->pw_gecos,
                     &out->pw_dir, &out->pw_shell};
     size_t used = 0;
     for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
@@ -55,8 +55,8 @@ static int copy_pw(struct passwd *out, char *buf, size_t buflen,
             *result = (struct passwd *)0;
             return ERANGE;
         }
-        memcpy(buf + used, fields[i], n);
-        *dst[i] = buf + used;
+        memcpy(buffer + used, fields[i], n);
+        *destination[i] = buffer + used;
         used += n;
     }
     out->pw_uid = 0;
@@ -65,26 +65,26 @@ static int copy_pw(struct passwd *out, char *buf, size_t buflen,
     return 0;
 }
 
-int getpwuid_r(uid_t uid, struct passwd *out, char *buf, size_t buflen,
+int getpwuid_r(uid_t uid, struct passwd *out, char *buffer, size_t buflen,
                struct passwd **result) {
-    if (!out || !buf || !result) {
+    if (!out || !buffer || !result) {
         return EINVAL;
     }
     if (uid != 0) {
         *result = (struct passwd *)0;
         return 0;
     }
-    return copy_pw(out, buf, buflen, result);
+    return copy_pw(out, buffer, buflen, result);
 }
 
-int getpwnam_r(const char *name, struct passwd *out, char *buf, size_t buflen,
+int getpwnam_r(const char *name, struct passwd *out, char *buffer, size_t buflen,
                struct passwd **result) {
-    if (!out || !buf || !result) {
+    if (!out || !buffer || !result) {
         return EINVAL;
     }
     if (!name || strcmp(name, name_root) != 0) {
         *result = (struct passwd *)0;
         return 0;
     }
-    return copy_pw(out, buf, buflen, result);
+    return copy_pw(out, buffer, buflen, result);
 }

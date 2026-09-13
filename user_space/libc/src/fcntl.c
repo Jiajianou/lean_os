@@ -9,14 +9,14 @@
 
 #include "syscall_wrappers.h"
 
-static int resolve_at(int dirfd, const char *path, char *out, size_t out_len) {
+static int resolve_at(int dirfd, const char *path, char *out, size_t out_length) {
     if (!path || !out) {
         errno = EFAULT;
         return -1;
     }
     if (path[0] == '/' || dirfd == AT_FDCWD) {
         size_t n = strlen(path);
-        if (n + 1 > out_len) {
+        if (n + 1 > out_length) {
             errno = ENAMETOOLONG;
             return -1;
         }
@@ -27,7 +27,7 @@ static int resolve_at(int dirfd, const char *path, char *out, size_t out_len) {
         errno = EBADF;
         return -1;
     }
-    long dn = sys_fdpath(dirfd, out, (unsigned long)out_len);
+    long dn = sys_fdpath(dirfd, out, (unsigned long)out_length);
     if (dn < 0) {
         errno = EBADF;
         return -1;
@@ -37,14 +37,14 @@ static int resolve_at(int dirfd, const char *path, char *out, size_t out_len) {
         return 0;
     }
     if (n > 0 && out[n - 1] != '/') {
-        if (n + 1 >= out_len) {
+        if (n + 1 >= out_length) {
             errno = ENAMETOOLONG;
             return -1;
         }
         out[n++] = '/';
     }
     size_t pn = strlen(path);
-    if (n + pn + 1 > out_len) {
+    if (n + pn + 1 > out_length) {
         errno = ENAMETOOLONG;
         return -1;
     }
@@ -106,12 +106,12 @@ int linkat(int oldfd, const char *oldpath, int newfd, const char *newpath,
     return link(a, b);
 }
 
-long readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+long readlinkat(int dirfd, const char *path, char *buffer, size_t bufsiz) {
     char full[PATH_MAX];
     if (resolve_at(dirfd, path, full, sizeof(full)) != 0) {
         return -1;
     }
-    return readlink(full, buf, bufsiz);
+    return readlink(full, buffer, bufsiz);
 }
 
 int faccessat(int dirfd, const char *path, int mode, int flags) {

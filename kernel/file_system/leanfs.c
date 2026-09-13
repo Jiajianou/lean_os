@@ -17,9 +17,9 @@ static uint8_t bitmap[BITMAP_BLOCKS * LEANFS_BLOCK_SIZE];
 _Static_assert((sizeof(leanfs_inode_t) * LEANFS_MAX_INODES) % LEANFS_BLOCK_SIZE == 0,
                "the inode table must be a whole number of blocks so save_meta can write it in place");
 
-static void block_read(uint32_t block, void *dst);
-static void block_write(uint32_t block, const void *src);
-static void block_write_meta(uint32_t block, const void *src);
+static void block_read(uint32_t block, void *destination);
+static void block_write(uint32_t block, const void *source);
+static void block_write_meta(uint32_t block, const void *source);
 
 static void inodes_alloc(void) {
     uint64_t frames = (sizeof(leanfs_inode_t) * (uint64_t)LEANFS_MAX_INODES) / 4096;
@@ -36,10 +36,10 @@ static int directory_hint_inode = -1;
 static uint32_t directory_hint_block = 0;
 
 static void save_superblock(void) {
-    uint8_t buf[LEANFS_BLOCK_SIZE];
-    k_memset(buf, 0, sizeof(buf));
-    k_memcpy(buf, &sb, sizeof(sb));
-    block_write_meta(LEANFS_START_BLOCK, buf);
+    uint8_t buffer[LEANFS_BLOCK_SIZE];
+    k_memset(buffer, 0, sizeof(buffer));
+    k_memcpy(buffer, &sb, sizeof(sb));
+    block_write_meta(LEANFS_START_BLOCK, buffer);
 }
 
 static uint8_t inode_block_dirty[INODE_TABLE_BLOCKS];
@@ -85,20 +85,20 @@ static int io_failed(void) {
     return io_error;
 }
 
-static void block_read(uint32_t block, void *dst) {
-    if (block_device_read(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, dst) != 0) {
+static void block_read(uint32_t block, void *destination) {
+    if (block_device_read(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, destination) != 0) {
         io_error = 1;
     }
 }
 
-static void block_write(uint32_t block, const void *src) {
-    if (block_device_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, src) != 0) {
+static void block_write(uint32_t block, const void *source) {
+    if (block_device_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, source) != 0) {
         io_error = 1;
     }
 }
 
-static void block_write_meta(uint32_t block, const void *src) {
-    if (block_device_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, src) != 0) {
+static void block_write_meta(uint32_t block, const void *source) {
+    if (block_device_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, source) != 0) {
         io_error = 1;
     }
     if (block_device_flush() != 0) {
@@ -106,16 +106,16 @@ static void block_write_meta(uint32_t block, const void *src) {
     }
 }
 
-static void write_run(uint32_t block, size_t blocks, const uint8_t *src) {
+static void write_run(uint32_t block, size_t blocks, const uint8_t *source) {
     if (block_device_write(block * LEANFS_SECTORS_PER_BLOCK,
-                  (uint32_t)blocks * LEANFS_SECTORS_PER_BLOCK, src) != 0) {
+                  (uint32_t)blocks * LEANFS_SECTORS_PER_BLOCK, source) != 0) {
         io_error = 1;
     }
 }
 
-static void read_run(uint32_t block, size_t blocks, uint8_t *dst) {
+static void read_run(uint32_t block, size_t blocks, uint8_t *destination) {
     if (block_device_read(block * LEANFS_SECTORS_PER_BLOCK,
-                 (uint32_t)blocks * LEANFS_SECTORS_PER_BLOCK, dst) != 0) {
+                 (uint32_t)blocks * LEANFS_SECTORS_PER_BLOCK, destination) != 0) {
         io_error = 1;
     }
 }
@@ -181,7 +181,7 @@ static void format(void) {
     bitmap[0] |= 1u;
     mark_block_bit(0);
 
-    inodes[ROOT_INODE].type = LEANFS_TYPE_DIR;
+    inodes[ROOT_INODE].type = LEANFS_TYPE_DIRECTORY;
     inodes[ROOT_INODE].size = 0;
     inodes[ROOT_INODE].nlink = 1;
 
@@ -193,9 +193,9 @@ static void format(void) {
 
 void leanfs_init(void) {
     inodes_alloc();
-    uint8_t buf[LEANFS_BLOCK_SIZE];
-    block_read(LEANFS_START_BLOCK, buf);
-    k_memcpy(&sb, buf, sizeof(sb));
+    uint8_t buffer[LEANFS_BLOCK_SIZE];
+    block_read(LEANFS_START_BLOCK, buffer);
+    k_memcpy(&sb, buffer, sizeof(sb));
 
     if (sb.magic != LEANFS_MAGIC ||
         sb.data_blocks != LEANFS_DATA_BLOCKS ||
@@ -209,7 +209,7 @@ void leanfs_init(void) {
         read_run(sb.inode_table_block, sb.inode_table_blocks, (uint8_t *)inodes);
         read_run(sb.bitmap_block, sb.bitmap_blocks_field, bitmap);
 
-        if (inodes[ROOT_INODE].type != LEANFS_TYPE_DIR) {
+        if (inodes[ROOT_INODE].type != LEANFS_TYPE_DIRECTORY) {
             kernel_log_puts("[fs] leanfs root inode is not a directory - reformatting\n");
             format();
         } else if (sb.state == LEANFS_STATE_DIRTY) {
@@ -467,50 +467,50 @@ static void free_inode_blocks(int idx) {
     mark_inode(idx);
 }
 
-static int64_t inode_pread(int idx, void *buf, size_t len, uint32_t off) {
+static int64_t inode_pread(int idx, void *buffer, size_t length, uint32_t off) {
     leanfs_inode_t *inode = &inodes[idx];
     if (off >= inode->size) {
         return 0;
     }
     size_t avail = inode->size - off;
-    if (len > avail) {
-        len = avail;
+    if (length > avail) {
+        length = avail;
     }
     static uint8_t block_buffer[LEANFS_BLOCK_SIZE];
     size_t copied = 0;
-    while (copied < len) {
-        uint32_t pos = off + (uint32_t)copied;
-        int64_t block_device = map_block(idx, pos / LEANFS_BLOCK_SIZE, 0);
-        size_t within = pos % LEANFS_BLOCK_SIZE;
+    while (copied < length) {
+        uint32_t position = off + (uint32_t)copied;
+        int64_t block_device = map_block(idx, position / LEANFS_BLOCK_SIZE, 0);
+        size_t within = position % LEANFS_BLOCK_SIZE;
         size_t chunk = LEANFS_BLOCK_SIZE - within;
-        if (chunk > len - copied) {
-            chunk = len - copied;
+        if (chunk > length - copied) {
+            chunk = length - copied;
         }
         if (block_device < 0) {
-            k_memset((uint8_t *)buf + copied, 0, chunk);
+            k_memset((uint8_t *)buffer + copied, 0, chunk);
         } else {
             block_read(sb.data_block + (uint32_t)block_device, block_buffer);
-            k_memcpy((uint8_t *)buf + copied, block_buffer + within, chunk);
+            k_memcpy((uint8_t *)buffer + copied, block_buffer + within, chunk);
         }
         copied += chunk;
     }
     return (int64_t)copied;
 }
 
-static int64_t inode_pwrite(int idx, const void *buf, size_t len, uint32_t off) {
+static int64_t inode_pwrite(int idx, const void *buffer, size_t length, uint32_t off) {
     leanfs_inode_t *inode = &inodes[idx];
-    if (off > (uint32_t)LEANFS_MAX_FILE_SIZE || len > (size_t)LEANFS_MAX_FILE_SIZE - off) {
+    if (off > (uint32_t)LEANFS_MAX_FILE_SIZE || length > (size_t)LEANFS_MAX_FILE_SIZE - off) {
         return -1;
     }
     static uint8_t block_buffer[LEANFS_BLOCK_SIZE];
     size_t written = 0;
-    while (written < len) {
-        uint32_t pos = off + (uint32_t)written;
-        uint32_t logical = pos / LEANFS_BLOCK_SIZE;
-        size_t within = pos % LEANFS_BLOCK_SIZE;
+    while (written < length) {
+        uint32_t position = off + (uint32_t)written;
+        uint32_t logical = position / LEANFS_BLOCK_SIZE;
+        size_t within = position % LEANFS_BLOCK_SIZE;
         size_t chunk = LEANFS_BLOCK_SIZE - within;
-        if (chunk > len - written) {
-            chunk = len - written;
+        if (chunk > length - written) {
+            chunk = length - written;
         }
         int64_t block_device = map_block(idx, logical, 1);
         if (block_device < 0) {
@@ -524,12 +524,12 @@ static int64_t inode_pwrite(int idx, const void *buf, size_t len, uint32_t off) 
                 k_memset(block_buffer, 0, sizeof(block_buffer));
             }
         }
-        k_memcpy(block_buffer + within, (const uint8_t *)buf + written, chunk);
+        k_memcpy(block_buffer + within, (const uint8_t *)buffer + written, chunk);
         block_write(sb.data_block + (uint32_t)block_device,
-                           chunk == LEANFS_BLOCK_SIZE ? (const uint8_t *)buf + written : block_buffer);
+                           chunk == LEANFS_BLOCK_SIZE ? (const uint8_t *)buffer + written : block_buffer);
         written += chunk;
-        if (pos + chunk > inode->size) {
-            inode->size = pos + (uint32_t)chunk;
+        if (position + chunk > inode->size) {
+            inode->size = position + (uint32_t)chunk;
             mark_inode(idx);
         }
     }
@@ -537,29 +537,29 @@ static int64_t inode_pwrite(int idx, const void *buf, size_t len, uint32_t off) 
         inode->mtime = rtc_now();
         mark_inode(idx);
     }
-    return written == 0 && len > 0 ? -1 : (int64_t)written;
+    return written == 0 && length > 0 ? -1 : (int64_t)written;
 }
 
-static int64_t inode_read_data(int idx, void *buf, size_t maxlen) {
-    int64_t n = inode_pread(idx, buf, maxlen, 0);
+static int64_t inode_read_data(int idx, void *buffer, size_t maxlen) {
+    int64_t n = inode_pread(idx, buffer, maxlen, 0);
     if (n < 0) {
         return -1;
     }
     return (int64_t)inodes[idx].size;
 }
 
-static int inode_write_data(int idx, const void *buf, size_t len) {
-    if (len > (size_t)LEANFS_MAX_FILE_SIZE) {
+static int inode_write_data(int idx, const void *buffer, size_t length) {
+    if (length > (size_t)LEANFS_MAX_FILE_SIZE) {
         return -1;
     }
     free_inode_blocks(idx);
     inodes[idx].size = 0;
     mark_inode(idx);
-    if (len == 0) {
+    if (length == 0) {
         inodes[idx].mtime = rtc_now();
         return 0;
     }
-    if (inode_pwrite(idx, buf, len, 0) != (int64_t)len) {
+    if (inode_pwrite(idx, buffer, length, 0) != (int64_t)length) {
         free_inode_blocks(idx);
         inodes[idx].size = 0;
         mark_inode(idx);
@@ -575,14 +575,14 @@ static leanfs_dirent_t *directory_rec(uint32_t off) {
 static int directory_block_valid(void) {
     uint32_t off = 0;
     while (off < LEANFS_BLOCK_SIZE) {
-        if (off + LEANFS_DIRENT_HDR > LEANFS_BLOCK_SIZE) {
+        if (off + LEANFS_DIRENT_HEADER > LEANFS_BLOCK_SIZE) {
             return 0;
         }
         leanfs_dirent_t *r = directory_rec(off);
-        if (r->rec_length < LEANFS_DIRENT_HDR ||
+        if (r->rec_length < LEANFS_DIRENT_HEADER ||
             (r->rec_length % LEANFS_DIRENT_ALIGN) != 0 ||
             off + r->rec_length > LEANFS_BLOCK_SIZE ||
-            LEANFS_DIRENT_NEED(r->name_len) > r->rec_length) {
+            LEANFS_DIRENT_NEED(r->name_length) > r->rec_length) {
             return 0;
         }
         off += r->rec_length;
@@ -624,15 +624,15 @@ static uint32_t directory_nblocks(int idx) {
 }
 
 static int directory_ok(int idx) {
-    return inode_valid(idx) && inodes[idx].type == LEANFS_TYPE_DIR;
+    return inode_valid(idx) && inodes[idx].type == LEANFS_TYPE_DIRECTORY;
 }
 
-static int32_t directory_block_find(const char *name, uint32_t name_len) {
+static int32_t directory_block_find(const char *name, uint32_t name_length) {
     uint32_t off = 0;
     while (off < LEANFS_BLOCK_SIZE) {
         leanfs_dirent_t *r = directory_rec(off);
-        if (r->inode != 0 && r->name_len == name_len &&
-            k_memcmp(directory_block + off + LEANFS_DIRENT_HDR, name, name_len) == 0) {
+        if (r->inode != 0 && r->name_length == name_length &&
+            k_memcmp(directory_block + off + LEANFS_DIRENT_HEADER, name, name_length) == 0) {
             return (int32_t)off;
         }
         off += r->rec_length;
@@ -650,15 +650,15 @@ static void directory_block_coalesce(void) {
                 r->rec_length = (uint16_t)(r->rec_length + directory_rec(next)->rec_length);
                 next = off + r->rec_length;
             }
-            r->name_len = 0;
+            r->name_length = 0;
             r->type = 0;
         }
         off += directory_rec(off)->rec_length;
     }
 }
 
-static int directory_block_place(const char *name, uint32_t name_len, int inode_index) {
-    uint32_t need = LEANFS_DIRENT_NEED(name_len);
+static int directory_block_place(const char *name, uint32_t name_length, int inode_index) {
+    uint32_t need = LEANFS_DIRENT_NEED(name_length);
 
     for (int pass = 0; pass < 2; pass++) {
         uint32_t off = 0;
@@ -671,7 +671,7 @@ static int directory_block_place(const char *name, uint32_t name_len, int inode_
                 place_at = off;
                 place_length = r->rec_length;
             } else if (pass == 1 && r->inode != 0) {
-                uint32_t used = LEANFS_DIRENT_NEED(r->name_len);
+                uint32_t used = LEANFS_DIRENT_NEED(r->name_length);
                 if (r->rec_length >= used + need) {
                     place_length = r->rec_length - used;
                     r->rec_length = (uint16_t)used;
@@ -683,9 +683,9 @@ static int directory_block_place(const char *name, uint32_t name_len, int inode_
                 leanfs_dirent_t *n = directory_rec(place_at);
                 n->inode = (uint32_t)inode_index;
                 n->rec_length = (uint16_t)place_length;
-                n->name_len = (uint8_t)name_len;
+                n->name_length = (uint8_t)name_length;
                 n->type = (uint8_t)inodes[inode_index].type;
-                k_memcpy(directory_block + place_at + LEANFS_DIRENT_HDR, name, name_len);
+                k_memcpy(directory_block + place_at + LEANFS_DIRENT_HEADER, name, name_length);
                 return 1;
             }
             off += r->rec_length;
@@ -694,17 +694,17 @@ static int directory_block_place(const char *name, uint32_t name_len, int inode_
     return 0;
 }
 
-static int directory_lookup(int dir, const char *name) {
-    if (!directory_ok(dir)) {
+static int directory_lookup(int directory, const char *name) {
+    if (!directory_ok(directory)) {
         return -1;
     }
-    uint32_t name_len = (uint32_t)k_strlen(name);
-    uint32_t blocks = directory_nblocks(dir);
+    uint32_t name_length = (uint32_t)k_strlen(name);
+    uint32_t blocks = directory_nblocks(directory);
     for (uint32_t b = 0; b < blocks; b++) {
-        if (directory_block_read(dir, b) < 0) {
+        if (directory_block_read(directory, b) < 0) {
             return -1;
         }
-        int32_t off = directory_block_find(name, name_len);
+        int32_t off = directory_block_find(name, name_length);
         if (off >= 0) {
             return (int)directory_rec((uint32_t)off)->inode;
         }
@@ -712,29 +712,29 @@ static int directory_lookup(int dir, const char *name) {
     return -1;
 }
 
-static int directory_add(int dir, const char *name, int inode_index) {
-    if (!directory_ok(dir) || !inode_valid(inode_index)) {
+static int directory_add(int directory, const char *name, int inode_index) {
+    if (!directory_ok(directory) || !inode_valid(inode_index)) {
         return -1;
     }
-    uint32_t name_len = (uint32_t)k_strlen(name);
-    if (name_len == 0 || name_len > LEANFS_MAX_NAME) {
+    uint32_t name_length = (uint32_t)k_strlen(name);
+    if (name_length == 0 || name_length > LEANFS_MAX_NAME) {
         return -1;
     }
 
-    uint32_t blocks = directory_nblocks(dir);
-    uint32_t start = (dir == directory_hint_inode && directory_hint_block < blocks) ? directory_hint_block : 0;
+    uint32_t blocks = directory_nblocks(directory);
+    uint32_t start = (directory == directory_hint_inode && directory_hint_block < blocks) ? directory_hint_block : 0;
 
     for (int pass = 0; pass < 2; pass++) {
         uint32_t from = (pass == 0) ? start : 0;
         uint32_t to = (pass == 0) ? blocks : start;
         for (uint32_t b = from; b < to; b++) {
-            if (directory_block_read(dir, b) < 0) {
+            if (directory_block_read(directory, b) < 0) {
                 return -1;
             }
-            if (directory_block_place(name, name_len, inode_index)) {
-                directory_hint_inode = dir;
+            if (directory_block_place(name, name_length, inode_index)) {
+                directory_hint_inode = directory;
                 directory_hint_block = b;
-                return directory_block_write(dir, b);
+                return directory_block_write(directory, b);
             }
         }
         if (start == 0) {
@@ -742,39 +742,39 @@ static int directory_add(int dir, const char *name, int inode_index) {
         }
     }
 
-    if (inodes[dir].size > (uint32_t)LEANFS_MAX_FILE_SIZE - LEANFS_BLOCK_SIZE) {
+    if (inodes[directory].size > (uint32_t)LEANFS_MAX_FILE_SIZE - LEANFS_BLOCK_SIZE) {
         return -1;
     }
     directory_block_init();
-    if (!directory_block_place(name, name_len, inode_index)) {
+    if (!directory_block_place(name, name_length, inode_index)) {
         return -1;
     }
-    if (directory_block_write(dir, blocks) != 0) {
+    if (directory_block_write(directory, blocks) != 0) {
         return -1;
     }
-    directory_hint_inode = dir;
+    directory_hint_inode = directory;
     directory_hint_block = blocks;
-    inodes[dir].size += LEANFS_BLOCK_SIZE;
-    mark_inode(dir);
+    inodes[directory].size += LEANFS_BLOCK_SIZE;
+    mark_inode(directory);
     return 0;
 }
 
-static int directory_repoint(int dir, const char *name, int inode_index) {
-    if (!directory_ok(dir) || !inode_valid(inode_index)) {
+static int directory_repoint(int directory, const char *name, int inode_index) {
+    if (!directory_ok(directory) || !inode_valid(inode_index)) {
         return -1;
     }
-    uint32_t name_len = (uint32_t)k_strlen(name);
-    uint32_t blocks = directory_nblocks(dir);
+    uint32_t name_length = (uint32_t)k_strlen(name);
+    uint32_t blocks = directory_nblocks(directory);
     for (uint32_t b = 0; b < blocks; b++) {
-        if (directory_block_read(dir, b) < 0) {
+        if (directory_block_read(directory, b) < 0) {
             return -1;
         }
-        int32_t off = directory_block_find(name, name_len);
+        int32_t off = directory_block_find(name, name_length);
         if (off >= 0) {
             leanfs_dirent_t *r = directory_rec((uint32_t)off);
             r->inode = (uint32_t)inode_index;
             r->type = (uint8_t)inodes[inode_index].type;
-            return directory_block_write(dir, b);
+            return directory_block_write(directory, b);
         }
     }
     return -1;
@@ -840,7 +840,7 @@ static int resolve_ex(const char *path, int follow_final) {
         int rewritten = 0;
 
         while ((rc = next_component(&p, comp)) == 1) {
-            if (inodes[at].type != LEANFS_TYPE_DIR) {
+            if (inodes[at].type != LEANFS_TYPE_DIRECTORY) {
                 return -1;
             }
             at = directory_lookup(at, comp);
@@ -914,8 +914,8 @@ static int resolve_ex(const char *path, int follow_final) {
         if (rc < 0) {
             return -1;
         }
-        size_t len = k_strlen(walk_path);
-        if (len > 1 && walk_path[len - 1] == '/' && inodes[at].type != LEANFS_TYPE_DIR) {
+        size_t length = k_strlen(walk_path);
+        if (length > 1 && walk_path[length - 1] == '/' && inodes[at].type != LEANFS_TYPE_DIRECTORY) {
             return -1;
         }
         return at;
@@ -969,36 +969,36 @@ static int resolve_parent(const char *path, int *out_parent, char *out_leaf) {
         directory_path[directory_length] = '\0';
         parent = resolve(directory_path);
     }
-    if (!inode_valid(parent) || inodes[parent].type != LEANFS_TYPE_DIR) {
+    if (!inode_valid(parent) || inodes[parent].type != LEANFS_TYPE_DIRECTORY) {
         return -1;
     }
     *out_parent = parent;
     return 0;
 }
 
-static int directory_remove(int dir, const char *name) {
-    if (!directory_ok(dir)) {
+static int directory_remove(int directory, const char *name) {
+    if (!directory_ok(directory)) {
         return -1;
     }
-    uint32_t name_len = (uint32_t)k_strlen(name);
-    uint32_t blocks = directory_nblocks(dir);
+    uint32_t name_length = (uint32_t)k_strlen(name);
+    uint32_t blocks = directory_nblocks(directory);
     for (uint32_t b = 0; b < blocks; b++) {
-        if (directory_block_read(dir, b) < 0) {
+        if (directory_block_read(directory, b) < 0) {
             return -1;
         }
-        int32_t off = directory_block_find(name, name_len);
+        int32_t off = directory_block_find(name, name_length);
         if (off >= 0) {
             leanfs_dirent_t *r = directory_rec((uint32_t)off);
             int idx = (int)r->inode;
             r->inode = 0;
-            r->name_len = 0;
+            r->name_length = 0;
             r->type = 0;
             directory_block_coalesce();
-            if (dir != directory_hint_inode || b < directory_hint_block) {
-                directory_hint_inode = dir;
+            if (directory != directory_hint_inode || b < directory_hint_block) {
+                directory_hint_inode = directory;
                 directory_hint_block = b;
             }
-            return directory_block_write(dir, b) == 0 ? idx : -1;
+            return directory_block_write(directory, b) == 0 ? idx : -1;
         }
     }
     return -1;
@@ -1043,21 +1043,21 @@ uint32_t leanfs_free_scratch_lba(uint32_t blocks) {
 
 int leanfs_is_directory(const char *path) {
     int idx = resolve(path);
-    return inode_valid(idx) && inodes[idx].type == LEANFS_TYPE_DIR;
+    return inode_valid(idx) && inodes[idx].type == LEANFS_TYPE_DIRECTORY;
 }
 
-int64_t leanfs_read(const char *path, void *buf, size_t maxlen) {
+int64_t leanfs_read(const char *path, void *buffer, size_t maxlen) {
     io_begin();
     int idx = resolve(path);
     if (!inode_valid(idx) || inodes[idx].type != LEANFS_TYPE_FILE) {
         return -1;
     }
-    int64_t n = inode_read_data(idx, buf, maxlen);
+    int64_t n = inode_read_data(idx, buffer, maxlen);
     return io_failed() ? -1 : n;
 }
 
-int leanfs_write(const char *path, const void *buf, size_t len) {
-    if (len > LEANFS_MAX_FILE_SIZE) {
+int leanfs_write(const char *path, const void *buffer, size_t length) {
+    if (length > LEANFS_MAX_FILE_SIZE) {
         return -1;
     }
     io_begin();
@@ -1087,7 +1087,7 @@ int leanfs_write(const char *path, const void *buf, size_t len) {
         }
     }
 
-    if (inode_write_data(idx, buf, len) != 0) {
+    if (inode_write_data(idx, buffer, length) != 0) {
         return -1;
     }
     save_meta();
@@ -1109,7 +1109,7 @@ int leanfs_mkdir(const char *path) {
         return -1;
     }
     k_memset(&inodes[idx], 0, sizeof(inodes[idx]));
-    inodes[idx].type = LEANFS_TYPE_DIR;
+    inodes[idx].type = LEANFS_TYPE_DIRECTORY;
     inodes[idx].size = 0;
     inodes[idx].nlink = 1;
     mark_inode(idx);
@@ -1203,7 +1203,7 @@ int leanfs_link(const char *old_path, const char *new_path) {
     if (!inode_valid(idx)) {
         return -1;
     }
-    if (inodes[idx].type == LEANFS_TYPE_DIR) {
+    if (inodes[idx].type == LEANFS_TYPE_DIRECTORY) {
         return -1;
     }
     if (directory_lookup(new_parent, new_leaf) >= 0) {
@@ -1297,7 +1297,7 @@ int leanfs_rename_replace(const char *old_path, const char *new_path) {
     }
     int victim = directory_lookup(new_parent, new_leaf);
     if (inode_valid(victim)) {
-        if (inodes[victim].type == LEANFS_TYPE_DIR) {
+        if (inodes[victim].type == LEANFS_TYPE_DIRECTORY) {
             return -1;
         }
         if (victim == idx) {
@@ -1329,7 +1329,7 @@ int leanfs_rmdir(const char *path) {
         return -1;
     }
     int idx = directory_lookup(parent, leaf);
-    if (!inode_valid(idx) || inodes[idx].type != LEANFS_TYPE_DIR) {
+    if (!inode_valid(idx) || inodes[idx].type != LEANFS_TYPE_DIRECTORY) {
         return -1;
     }
     if (!directory_is_empty(idx)) {
@@ -1385,7 +1385,7 @@ int leanfs_symlink(const char *path, const char *target) {
     return 0;
 }
 
-int64_t leanfs_readlink(const char *path, char *buf, size_t maxlen) {
+int64_t leanfs_readlink(const char *path, char *buffer, size_t maxlen) {
     int idx = resolve_nofollow(path);
     if (!inode_valid(idx) || inodes[idx].type != LEANFS_TYPE_LINK) {
         return -1;
@@ -1394,7 +1394,7 @@ int64_t leanfs_readlink(const char *path, char *buf, size_t maxlen) {
     if (n > maxlen) {
         n = (uint32_t)maxlen;
     }
-    return inode_pread(idx, buf, n, 0);
+    return inode_pread(idx, buffer, n, 0);
 }
 
 int leanfs_lstat(const char *path, leanfs_stat_t *out) {
@@ -1404,7 +1404,7 @@ int leanfs_lstat(const char *path, leanfs_stat_t *out) {
     }
     out->size = inodes[idx].size;
     out->mtime = inodes[idx].mtime;
-    out->is_dir = (inodes[idx].type == LEANFS_TYPE_DIR) ? 1 : 0;
+    out->is_directory = (inodes[idx].type == LEANFS_TYPE_DIRECTORY) ? 1 : 0;
     out->is_link = (inodes[idx].type == LEANFS_TYPE_LINK) ? 1 : 0;
     out->inode = (uint32_t)idx;
     return 0;
@@ -1417,7 +1417,7 @@ int leanfs_stat(const char *path, leanfs_stat_t *out) {
     }
     out->size = inodes[idx].size;
     out->mtime = inodes[idx].mtime;
-    out->is_dir = inodes[idx].type == LEANFS_TYPE_DIR;
+    out->is_directory = inodes[idx].type == LEANFS_TYPE_DIRECTORY;
     out->is_link = 0;
     out->inode = (uint32_t)idx;
     return 0;
@@ -1429,7 +1429,7 @@ int leanfs_handle_stat(int handle, leanfs_stat_t *out) {
     }
     out->size = inodes[handle].size;
     out->mtime = inodes[handle].mtime;
-    out->is_dir = inodes[handle].type == LEANFS_TYPE_DIR;
+    out->is_directory = inodes[handle].type == LEANFS_TYPE_DIRECTORY;
     out->is_link = 0;
     out->inode = (uint32_t)handle;
     return 0;
@@ -1442,7 +1442,7 @@ int leanfs_open(const char *path, int create) {
             return -1;
         }
         if (inodes[idx].type == LEANFS_TYPE_FILE ||
-            inodes[idx].type == LEANFS_TYPE_DIR) {
+            inodes[idx].type == LEANFS_TYPE_DIRECTORY) {
             return idx;
         }
         return -1;
@@ -1473,21 +1473,21 @@ int leanfs_open(const char *path, int create) {
     return idx;
 }
 
-int64_t leanfs_handle_read(int handle, void *buf, size_t len, uint32_t off) {
+int64_t leanfs_handle_read(int handle, void *buffer, size_t length, uint32_t off) {
     io_begin();
     if (!inode_valid(handle) || inodes[handle].type != LEANFS_TYPE_FILE) {
         return -1;
     }
-    int64_t n = inode_pread(handle, buf, len, off);
+    int64_t n = inode_pread(handle, buffer, length, off);
     return io_failed() ? -1 : n;
 }
 
-int64_t leanfs_handle_write(int handle, const void *buf, size_t len, uint32_t off) {
+int64_t leanfs_handle_write(int handle, const void *buffer, size_t length, uint32_t off) {
     io_begin();
     if (!inode_valid(handle) || inodes[handle].type != LEANFS_TYPE_FILE) {
         return -1;
     }
-    int64_t n = inode_pwrite(handle, buf, len, off);
+    int64_t n = inode_pwrite(handle, buffer, length, off);
     if (n > 0) {
         save_meta();
     }
@@ -1551,16 +1551,16 @@ int leanfs_handle_truncate(int handle) {
     return 0;
 }
 
-int leanfs_handle_truncate_to(int handle, uint32_t len) {
+int leanfs_handle_truncate_to(int handle, uint32_t length) {
     if (!inode_valid(handle) || inodes[handle].type != LEANFS_TYPE_FILE) {
         return -1;
     }
-    if (len > (uint32_t)LEANFS_MAX_FILE_SIZE) {
+    if (length > (uint32_t)LEANFS_MAX_FILE_SIZE) {
         return -1;
     }
     uint32_t old = inodes[handle].size;
-    if (len < old) {
-        uint32_t first = (len + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
+    if (length < old) {
+        uint32_t first = (length + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
         uint32_t last = (old + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
         for (uint32_t b = first; b < last; b++) {
             int64_t block_device = map_block(handle, b, 0);
@@ -1570,7 +1570,7 @@ int leanfs_handle_truncate_to(int handle, uint32_t len) {
             }
         }
     }
-    inodes[handle].size = len;
+    inodes[handle].size = length;
     inodes[handle].mtime = rtc_now();
     mark_inode(handle);
     save_meta();
@@ -1579,11 +1579,11 @@ int leanfs_handle_truncate_to(int handle, uint32_t len) {
 
 static int directory_next(int idx, uint32_t *cookie, leanfs_directory_entry_t *out) {
     uint32_t blocks = directory_nblocks(idx);
-    uint32_t pos = *cookie;
+    uint32_t position = *cookie;
 
-    while (pos / LEANFS_BLOCK_SIZE < blocks) {
-        uint32_t b = pos / LEANFS_BLOCK_SIZE;
-        uint32_t want = pos % LEANFS_BLOCK_SIZE;
+    while (position / LEANFS_BLOCK_SIZE < blocks) {
+        uint32_t b = position / LEANFS_BLOCK_SIZE;
+        uint32_t want = position % LEANFS_BLOCK_SIZE;
         if (directory_block_read(idx, b) < 0) {
             return -1;
         }
@@ -1591,21 +1591,21 @@ static int directory_next(int idx, uint32_t *cookie, leanfs_directory_entry_t *o
         while (off < LEANFS_BLOCK_SIZE) {
             leanfs_dirent_t *r = directory_rec(off);
             if (off >= want && r->inode != 0) {
-                uint32_t n = r->name_len;
+                uint32_t n = r->name_length;
                 if (n > LEANFS_MAX_NAME) {
                     return -1;
                 }
                 out->inode = r->inode;
-                out->is_dir = (uint8_t)(r->type == LEANFS_TYPE_DIR);
+                out->is_directory = (uint8_t)(r->type == LEANFS_TYPE_DIRECTORY);
                 out->is_link = (uint8_t)(r->type == LEANFS_TYPE_LINK);
-                k_memcpy(out->name, directory_block + off + LEANFS_DIRENT_HDR, n);
+                k_memcpy(out->name, directory_block + off + LEANFS_DIRENT_HEADER, n);
                 out->name[n] = '\0';
                 *cookie = b * LEANFS_BLOCK_SIZE + off + r->rec_length;
                 return 1;
             }
             off += r->rec_length;
         }
-        pos = (b + 1) * LEANFS_BLOCK_SIZE;
+        position = (b + 1) * LEANFS_BLOCK_SIZE;
     }
     *cookie = blocks * LEANFS_BLOCK_SIZE;
     return 0;
@@ -1631,7 +1631,7 @@ int leanfs_readdir(const char *path, uint32_t *cookie, leanfs_directory_entry_t 
     return directory_next(idx, cookie, out);
 }
 
-size_t leanfs_list(const char *path, char *buf, size_t maxlen) {
+size_t leanfs_list(const char *path, char *buffer, size_t maxlen) {
     int idx = resolve(path);
     if (!directory_ok(idx)) {
         return 0;
@@ -1641,18 +1641,18 @@ size_t leanfs_list(const char *path, char *buf, size_t maxlen) {
     leanfs_directory_entry_t e;
     while (directory_next(idx, &cookie, &e) == 1) {
         int child = (int)e.inode;
-        int is_dir = inode_valid(child) && inodes[child].type == LEANFS_TYPE_DIR;
-        size_t name_len = k_strlen(e.name);
-        size_t need = name_len + (is_dir ? 1u : 0u) + 1u;
+        int is_directory = inode_valid(child) && inodes[child].type == LEANFS_TYPE_DIRECTORY;
+        size_t name_length = k_strlen(e.name);
+        size_t need = name_length + (is_directory ? 1u : 0u) + 1u;
         if (written + need > maxlen) {
             break;
         }
-        k_memcpy(buf + written, e.name, name_len);
-        written += name_len;
-        if (is_dir) {
-            buf[written++] = '/';
+        k_memcpy(buffer + written, e.name, name_length);
+        written += name_length;
+        if (is_directory) {
+            buffer[written++] = '/';
         }
-        buf[written++] = '\n';
+        buffer[written++] = '\n';
     }
     return written;
 }

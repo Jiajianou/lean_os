@@ -33,7 +33,7 @@ int main(int argc, char **argv) {
     static task_info_t infos[TASK_INFO_MAX];
     check(sys_taskinfo(infos, TASK_INFO_MAX) < 0, "an ordinary program listed every process");
 
-    check(sys_socket(OS_SOCK_DGRAM) < 0, "an ordinary program opened a socket");
+    check(sys_socket(OS_SOCKET_DGRAM) < 0, "an ordinary program opened a socket");
 
     check(sys_display_set_mode(800, 600) < 0, "an ordinary program changed the screen resolution");
 
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
         check(0, "could not spawn a child to test signalling one");
     }
 
-    wm_fb_info_t framebuffer;
+    window_manager_framebuffer_info_t framebuffer;
     check(sys_framebuffer_info(&framebuffer) == 0, "an ordinary program could not ask the screen's size");
     check(framebuffer.width > 0 && framebuffer.height > 0, "the screen geometry came back empty");
 

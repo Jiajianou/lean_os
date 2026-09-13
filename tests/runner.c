@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
 
         abandon_armed = 1;
         if (setjmp(abandon_jmp) == 0) {
-            tc->fn();
+            tc->function();
         }
         abandon_armed = 0;
         test_panic_armed = 0;

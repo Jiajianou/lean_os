@@ -23,11 +23,11 @@
 #define PORT_BASE(n) (0x100 + (n) * 0x80)
 #define PX_CLB   0x00
 #define PX_CLBU  0x04
-#define PX_FB    0x08
+#define PX_FRAMEBUFFER    0x08
 #define PX_FBU   0x0C
 #define PX_IS    0x10
 #define PX_IE    0x14
-#define PX_CMD   0x18
+#define PX_COMMAND   0x18
 #define PX_TFD   0x20
 #define PX_SIG   0x24
 #define PX_SSTS  0x28
@@ -35,20 +35,20 @@
 #define PX_SERR  0x30
 #define PX_CI    0x38
 
-#define CMD_ST   (1u << 0)
-#define CMD_FRE  (1u << 4)
-#define CMD_FR   (1u << 14)
-#define CMD_CR   (1u << 15)
+#define COMMAND_ST   (1u << 0)
+#define COMMAND_FRE  (1u << 4)
+#define COMMAND_FR   (1u << 14)
+#define COMMAND_CR   (1u << 15)
 
-#define TFD_ERR  (1u << 0)
+#define TFD_ERROR  (1u << 0)
 #define TFD_DRQ  (1u << 3)
 #define TFD_BSY  (1u << 7)
 
 #define SIG_SATA 0x00000101u
 
-#define ATA_CMD_READ_DMA_EXT  0x25
-#define ATA_CMD_WRITE_DMA_EXT 0x35
-#define ATA_CMD_IDENTIFY      0xEC
+#define ATA_COMMAND_READ_DMA_EXT  0x25
+#define ATA_COMMAND_WRITE_DMA_EXT 0x35
+#define ATA_COMMAND_IDENTIFY      0xEC
 
 #define SECTOR_SIZE 512
 
@@ -133,18 +133,18 @@ static int wait_clear(uint32_t off, uint32_t mask) {
 }
 
 static void port_stop(void) {
-    uint32_t cmd = port_read(PX_CMD);
-    port_write(PX_CMD, cmd & ~CMD_ST);
-    wait_clear(PX_CMD, CMD_CR);
-    cmd = port_read(PX_CMD);
-    port_write(PX_CMD, cmd & ~CMD_FRE);
-    wait_clear(PX_CMD, CMD_FR);
+    uint32_t command = port_read(PX_COMMAND);
+    port_write(PX_COMMAND, command & ~COMMAND_ST);
+    wait_clear(PX_COMMAND, COMMAND_CR);
+    command = port_read(PX_COMMAND);
+    port_write(PX_COMMAND, command & ~COMMAND_FRE);
+    wait_clear(PX_COMMAND, COMMAND_FR);
 }
 
 static void port_start(void) {
-    wait_clear(PX_CMD, CMD_CR);
-    port_write(PX_CMD, port_read(PX_CMD) | CMD_FRE);
-    port_write(PX_CMD, port_read(PX_CMD) | CMD_ST);
+    wait_clear(PX_COMMAND, COMMAND_CR);
+    port_write(PX_COMMAND, port_read(PX_COMMAND) | COMMAND_FRE);
+    port_write(PX_COMMAND, port_read(PX_COMMAND) | COMMAND_ST);
 }
 
 static int issue_command(uint8_t command, uint64_t lba, uint32_t sectors,
@@ -193,13 +193,13 @@ static int issue_command(uint8_t command, uint64_t lba, uint32_t sectors,
         if ((port_read(PX_CI) & 1u) == 0) {
             break;
         }
-        if (port_read(PX_TFD) & TFD_ERR) {
+        if (port_read(PX_TFD) & TFD_ERROR) {
             break;
         }
         __asm__ volatile("pause");
     }
 
-    if ((port_read(PX_CI) & 1u) != 0 || (port_read(PX_TFD) & TFD_ERR)) {
+    if ((port_read(PX_CI) & 1u) != 0 || (port_read(PX_TFD) & TFD_ERROR)) {
         kernel_log_puts("[ahci] command 0x");
         kernel_log_put_hex32(command);
         kernel_log_puts(" failed: TFD 0x");
@@ -215,7 +215,7 @@ static int issue_command(uint8_t command, uint64_t lba, uint32_t sectors,
 }
 
 static int identify(void) {
-    if (issue_command(ATA_CMD_IDENTIFY, 0, 0, 512, 0) != 0) {
+    if (issue_command(ATA_COMMAND_IDENTIFY, 0, 0, 512, 0) != 0) {
         return -1;
     }
     const uint16_t *id = (const uint16_t *)bounce;
@@ -289,7 +289,7 @@ int ahci_init(void) {
         port_stop();
         port_write(PX_CLB, (uint32_t)(command_list_phys & 0xFFFFFFFFu));
         port_write(PX_CLBU, (uint32_t)(command_list_phys >> 32));
-        port_write(PX_FB, (uint32_t)(fis_phys & 0xFFFFFFFFu));
+        port_write(PX_FRAMEBUFFER, (uint32_t)(fis_phys & 0xFFFFFFFFu));
         port_write(PX_FBU, (uint32_t)(fis_phys >> 32));
         port_write(PX_SERR, port_read(PX_SERR));
         port_write(PX_IS, port_read(PX_IS));
@@ -322,18 +322,18 @@ int ahci_init(void) {
     return 0;
 }
 
-static int transfer(uint64_t lba, uint32_t count, void *buf, int write) {
+static int transfer(uint64_t lba, uint32_t count, void *buffer, int write) {
     if (!present) {
         return -1;
     }
-    uint8_t *p = (uint8_t *)buf;
+    uint8_t *p = (uint8_t *)buffer;
     while (count > 0) {
         uint32_t n = count > BOUNCE_SECTORS ? BOUNCE_SECTORS : count;
         uint32_t bytes = n * SECTOR_SIZE;
         if (write) {
             k_memcpy(bounce, p, bytes);
         }
-        if (issue_command(write ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_READ_DMA_EXT,
+        if (issue_command(write ? ATA_COMMAND_WRITE_DMA_EXT : ATA_COMMAND_READ_DMA_EXT,
                           lba, n, bytes, write) != 0) {
             return -1;
         }
@@ -347,10 +347,10 @@ static int transfer(uint64_t lba, uint32_t count, void *buf, int write) {
     return 0;
 }
 
-int ahci_read(uint64_t lba, uint32_t count, void *buf) {
-    return transfer(lba, count, buf, 0);
+int ahci_read(uint64_t lba, uint32_t count, void *buffer) {
+    return transfer(lba, count, buffer, 0);
 }
 
-int ahci_write(uint64_t lba, uint32_t count, const void *buf) {
-    return transfer(lba, count, (void *)(uintptr_t)buf, 1);
+int ahci_write(uint64_t lba, uint32_t count, const void *buffer) {
+    return transfer(lba, count, (void *)(uintptr_t)buffer, 1);
 }

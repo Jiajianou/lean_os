@@ -3,28 +3,28 @@
 #include "string_utilities.h"
 #include "syscall_wrappers.h"
 
-#define RECENT_BUF ((PATH_MAX_LEN + 1) * RECENT_MAX)
+#define RECENT_BUFFER ((PATH_MAX_LENGTH + 1) * RECENT_MAX)
 
-static int copy_path(char *dst, const char *src) {
+static int copy_path(char *destination, const char *source) {
     int n = 0;
-    for (; src[n] && n < PATH_MAX_LEN - 1; n++) {
-        dst[n] = src[n];
+    for (; source[n] && n < PATH_MAX_LENGTH - 1; n++) {
+        destination[n] = source[n];
     }
-    dst[n] = '\0';
+    destination[n] = '\0';
     return n;
 }
 
-static int read_raw(char out[][PATH_MAX_LEN], int max) {
-    static char buf[RECENT_BUF];
-    long n = sys_readfile(RECENT_PATH, buf, sizeof(buf) - 1);
+static int read_raw(char out[][PATH_MAX_LENGTH], int max) {
+    static char buffer[RECENT_BUFFER];
+    long n = sys_readfile(RECENT_PATH, buffer, sizeof(buffer) - 1);
     if (n <= 0) {
         return 0;
     }
-    buf[n] = '\0';
+    buffer[n] = '\0';
     int count = 0;
     int col = 0;
     for (long i = 0; i <= n && count < max; i++) {
-        char c = (i < n) ? buf[i] : '\n';
+        char c = (i < n) ? buffer[i] : '\n';
         if (c == '\n' || c == '\r') {
             if (col > 0) {
                 out[count][col] = '\0';
@@ -33,7 +33,7 @@ static int read_raw(char out[][PATH_MAX_LEN], int max) {
             col = 0;
             continue;
         }
-        if (col < PATH_MAX_LEN - 1) {
+        if (col < PATH_MAX_LENGTH - 1) {
             out[count][col++] = c;
         }
     }
@@ -44,17 +44,17 @@ void recent_add(const char *path) {
     if (!path || !path[0] || path[0] != '/') {
         return;
     }
-    if (strlen(path) >= PATH_MAX_LEN) {
+    if (strlen(path) >= PATH_MAX_LENGTH) {
         return;
     }
-    static char list[RECENT_MAX][PATH_MAX_LEN];
+    static char list[RECENT_MAX][PATH_MAX_LENGTH];
     int count = read_raw(list, RECENT_MAX);
 
     if (count > 0 && strcmp(list[0], path) == 0) {
         return;
     }
 
-    static char merged[RECENT_MAX][PATH_MAX_LEN];
+    static char merged[RECENT_MAX][PATH_MAX_LENGTH];
     copy_path(merged[0], path);
     int m = 1;
     for (int i = 0; i < count && m < RECENT_MAX; i++) {
@@ -64,7 +64,7 @@ void recent_add(const char *path) {
         copy_path(merged[m++], list[i]);
     }
 
-    static char out[RECENT_BUF];
+    static char out[RECENT_BUFFER];
     int n = 0;
     for (int i = 0; i < m; i++) {
         for (int j = 0; merged[i][j] && n < (int)sizeof(out) - 1; j++) {
@@ -77,13 +77,13 @@ void recent_add(const char *path) {
     sys_writefile(RECENT_PATH, out, (size_t)n);
 }
 
-int recent_load(char out[][PATH_MAX_LEN], int max) {
-    static char raw[RECENT_MAX][PATH_MAX_LEN];
+int recent_load(char out[][PATH_MAX_LENGTH], int max) {
+    static char raw[RECENT_MAX][PATH_MAX_LENGTH];
     int count = read_raw(raw, RECENT_MAX);
     int kept = 0;
     for (int i = 0; i < count && kept < max; i++) {
         os_stat_t st;
-        if (sys_stat(raw[i], &st) != 0 || st.is_dir) {
+        if (sys_stat(raw[i], &st) != 0 || st.is_directory) {
             continue;
         }
         copy_path(out[kept], raw[i]);

@@ -31,16 +31,16 @@ static void burn_user(long ms) {
 }
 
 int main(void) {
-    prof_stats_t st;
+    prof_statistics_t st;
 
-    check(sys_profile(PROFILE_OP_STATS, &st, 0) == 0,
+    check(sys_profile(PROFILE_OP_STATISTICS, &st, 0) == 0,
           "a program holding process-list was refused PROFILE_OP_STATS");
 
-    check(sys_profile(PROFILE_OP_STATS, (void *)0, 0) == -1,
+    check(sys_profile(PROFILE_OP_STATISTICS, (void *)0, 0) == -1,
           "STATS accepted a null pointer");
-    check(sys_profile(PROFILE_OP_STATS, (void *)A_KERNEL_ADDRESS, 0) == -1,
+    check(sys_profile(PROFILE_OP_STATISTICS, (void *)A_KERNEL_ADDRESS, 0) == -1,
           "STATS wrote to a kernel address");
-    check(sys_profile(PROFILE_OP_STATS, (void *)A_NONCANONICAL_ADDRESS, 0) == -1,
+    check(sys_profile(PROFILE_OP_STATISTICS, (void *)A_NONCANONICAL_ADDRESS, 0) == -1,
           "STATS accepted a non-canonical address");
 
     check(sys_profile(PROFILE_OP_SAMPLES, samples, 0) == -1,
@@ -68,7 +68,7 @@ int main(void) {
     burn_user(1000);
     check(sys_profile(PROFILE_OP_STOP, NULL, 0) == 0, "could not stop the profiler");
 
-    check(sys_profile(PROFILE_OP_STATS, &st, 0) == 0, "could not read stats back");
+    check(sys_profile(PROFILE_OP_STATISTICS, &st, 0) == 0, "could not read stats back");
     printf("proftest: %llu samples - %llu user, %llu kernel, %llu idle\n",
            (unsigned long long)st.samples, (unsigned long long)st.user,
            (unsigned long long)st.kernel, (unsigned long long)st.idle);
@@ -97,7 +97,7 @@ int main(void) {
     }
 
     {
-        static prof_syscount_t counts[SYSCALL_COUNT];
+        static prof_syscall_counters_t counts[SYSCALL_COUNT];
         sys_profile(PROFILE_OP_SYSRESET, NULL, 0);
         for (int i = 0; i < 200; i++) {
             sys_getpid();

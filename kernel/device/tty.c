@@ -95,16 +95,16 @@ int tty_release_session(tty_t *t, int sid) {
     return 1;
 }
 
-void tty_write(tty_t *t, const char *buf, uint32_t len) {
-    if (!t || !buf) {
+void tty_write(tty_t *t, const char *buffer, uint32_t length) {
+    if (!t || !buffer) {
         return;
     }
-    for (uint32_t i = 0; i < len; i++) {
-        if (buf[i] == '\n' &&
+    for (uint32_t i = 0; i < length; i++) {
+        if (buffer[i] == '\n' &&
             (t->tio.c_oflag & (OPOST | ONLCR)) == (OPOST | ONLCR)) {
             sink(t, '\r');
         }
-        sink(t, buf[i]);
+        sink(t, buffer[i]);
     }
 }
 
@@ -115,13 +115,13 @@ uint32_t tty_out_readable(const tty_t *t) {
     return (t->out_tail + TTY_OUTBUF - t->out_head) % TTY_OUTBUF;
 }
 
-uint32_t tty_out_read(tty_t *t, char *buf, uint32_t len) {
+uint32_t tty_out_read(tty_t *t, char *buffer, uint32_t length) {
     uint32_t n = 0;
-    if (!t || !buf) {
+    if (!t || !buffer) {
         return 0;
     }
-    while (n < len && t->out_head != t->out_tail) {
-        buf[n++] = t->outbuf[t->out_head];
+    while (n < length && t->out_head != t->out_tail) {
+        buffer[n++] = t->outbuf[t->out_head];
         t->out_head = (t->out_head + 1) % TTY_OUTBUF;
     }
     return n;
@@ -206,10 +206,10 @@ uint32_t tty_readable(const tty_t *t) {
     return (t->in_tail + TTY_INBUF - t->in_head) % TTY_INBUF;
 }
 
-uint32_t tty_read(tty_t *t, char *buf, uint32_t len) {
+uint32_t tty_read(tty_t *t, char *buffer, uint32_t length) {
     uint32_t n = 0;
-    while (n < len && t->in_head != t->in_tail) {
-        buf[n++] = t->inbuf[t->in_head];
+    while (n < length && t->in_head != t->in_tail) {
+        buffer[n++] = t->inbuf[t->in_head];
         t->in_head = (t->in_head + 1) % TTY_INBUF;
     }
     return n;

@@ -6,7 +6,7 @@
 #endif
 
 #define KERNEL_START_LBA 1
-#define KERNEL_LOAD_ADDR 0x100000ULL
+#define KERNEL_LOAD_ADDRESS 0x100000ULL
 
 #define PAGE_SIZE 4096ULL
 
@@ -43,8 +43,8 @@ static void puts16(CHAR16 *s) {
     gST->ConOut->OutputString(gST->ConOut, s);
 }
 
-static void halt(CHAR16 *msg) {
-    puts16(msg);
+static void halt(CHAR16 *message) {
+    puts16(message);
     for (;;) {
         __asm__ volatile("cli; hlt");
     }
@@ -106,9 +106,9 @@ static UINTN device_path_size_without_last_node(const EFI_DEVICE_PATH_PROTOCOL *
     const EFI_DEVICE_PATH_PROTOCOL *node = path;
     while (!device_path_is_end(node)) {
         last_node_offset = offset;
-        UINT16 len = device_path_node_length(node);
-        offset += len;
-        node = (const EFI_DEVICE_PATH_PROTOCOL *)((const UINT8 *)node + len);
+        UINT16 length = device_path_node_length(node);
+        offset += length;
+        node = (const EFI_DEVICE_PATH_PROTOCOL *)((const UINT8 *)node + length);
     }
     return last_node_offset;
 }
@@ -177,13 +177,13 @@ static void load_kernel(EFI_HANDLE image_handle) {
     if (pages < (kernel_bytes + PAGE_SIZE - 1) / PAGE_SIZE) {
         halt(u"lean_os uefi: KERNEL_IMAGE_PAGES is smaller than the kernel on disk\r\n");
     }
-    EFI_PHYSICAL_ADDRESS addr = KERNEL_LOAD_ADDR;
-    if (EFI_ERROR(gST->BootServices->AllocatePages(AllocateAddress, EfiLoaderData, pages, &addr))) {
+    EFI_PHYSICAL_ADDRESS address = KERNEL_LOAD_ADDRESS;
+    if (EFI_ERROR(gST->BootServices->AllocatePages(AllocateAddress, EfiLoaderData, pages, &address))) {
         halt(u"lean_os uefi: could not reserve kernel load address (0x100000)\r\n");
     }
 
     if (EFI_ERROR(bio->ReadBlocks(bio, bio->Media->MediaId, KERNEL_START_LBA, kernel_bytes,
-                                   (void *)(UINTN)KERNEL_LOAD_ADDR))) {
+                                   (void *)(UINTN)KERNEL_LOAD_ADDRESS))) {
         halt(u"lean_os uefi: ReadBlocks failed loading the kernel\r\n");
     }
 }
@@ -321,7 +321,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         "mov %3, %%rdx\n\t"
         "jmp *%2\n\t"
         :
-        : "r"((UINTN)e820), "r"((UINTN)&framebuffer), "r"((UINTN)KERNEL_LOAD_ADDR), "r"(rsdp)
+        : "r"((UINTN)e820), "r"((UINTN)&framebuffer), "r"((UINTN)KERNEL_LOAD_ADDRESS), "r"(rsdp)
         : "rdi", "rsi", "rdx");
 
     __builtin_unreachable();

@@ -3,8 +3,8 @@
 
 #include "syscall_wrappers.h"
 
-void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
-    long r = sys_mmap(addr, (unsigned long)length, prot, flags, fd,
+void *mmap(void *address, size_t length, int prot, int flags, int fd, off_t offset) {
+    long r = sys_mmap(address, (unsigned long)length, prot, flags, fd,
                       (unsigned long)offset);
     if (r < 0) {
         errno = (fd >= 0) ? EACCES : ENOMEM;
@@ -13,24 +13,24 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
     return (void *)(unsigned long)r;
 }
 
-int munmap(void *addr, size_t length) {
-    return (int)sys_munmap(addr, (unsigned long)length);
+int munmap(void *address, size_t length) {
+    return (int)sys_munmap(address, (unsigned long)length);
 }
 
-int mprotect(void *addr, size_t length, int prot) {
-    return (int)sys_mprotect(addr, (unsigned long)length, prot);
+int mprotect(void *address, size_t length, int prot) {
+    return (int)sys_mprotect(address, (unsigned long)length, prot);
 }
 
-int madvise(void *addr, size_t length, int advice) {
-    return (int)sys_madvise(addr, (unsigned long)length, advice);
+int madvise(void *address, size_t length, int advice) {
+    return (int)sys_madvise(address, (unsigned long)length, advice);
 }
 
-int posix_madvise(void *addr, size_t length, int advice) {
-    return madvise(addr, length, advice);
+int posix_madvise(void *address, size_t length, int advice) {
+    return madvise(address, length, advice);
 }
 
-int msync(void *addr, size_t length, int flags) {
-    if (sys_msync(addr, length, flags) != 0) {
+int msync(void *address, size_t length, int flags) {
+    if (sys_msync(address, length, flags) != 0) {
         errno = EINVAL;
         return -1;
     }

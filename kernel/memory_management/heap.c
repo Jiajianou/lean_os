@@ -36,7 +36,7 @@ static void *grow_heap(uint64_t pages) {
             break;
         }
         if (virtual_memory_try_map_page_in(virtual_memory_kernel_pml4_phys(), heap_virt_end, phys,
-                                VMM_FLAG_WRITABLE) != 0) {
+                                VIRTUAL_MEMORY_FLAG_WRITABLE) != 0) {
             physical_memory_free_frame(phys);
             break;
         }
@@ -91,7 +91,7 @@ void *kmalloc(size_t size) {
 
     uint64_t irq_flags = spin_lock_irqsave(&heap_lock);
 
-    block_header_t *prev = (block_header_t *)0;
+    block_header_t *previous = (block_header_t *)0;
     for (block_header_t *b = heap_head; b; b = b->next) {
         if (b->free && b->size >= size) {
             if (b->size >= size + sizeof(block_header_t) + HEAP_ALIGN) {
@@ -107,7 +107,7 @@ void *kmalloc(size_t size) {
             spin_unlock_irqrestore(&heap_lock, irq_flags);
             return (void *)(b + 1);
         }
-        prev = b;
+        previous = b;
     }
 
     size_t needed = sizeof(block_header_t) + size;
@@ -123,8 +123,8 @@ void *kmalloc(size_t size) {
     heap_used += b->size;
     heap_total += (size_t)(pages * PAGE_SIZE);
 
-    if (prev) {
-        prev->next = b;
+    if (previous) {
+        previous->next = b;
     } else {
         heap_head = b;
     }

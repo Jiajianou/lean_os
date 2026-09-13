@@ -29,7 +29,7 @@ void fake_block_device_fail_reads_after(int64_t n);
 
 void fake_net_reset(void);
 int fake_net_tx_count(void);
-const uint8_t *fake_net_tx_frame(int i, uint32_t *len_out);
+const uint8_t *fake_net_tx_frame(int i, uint32_t *length_out);
 
 void fake_pit_set(uint64_t t);
 void fake_pit_advance(uint64_t t);
@@ -38,8 +38,8 @@ void fake_rtc_set(uint32_t t);
 void fake_rtc_advance(uint32_t secs);
 
 void fake_fwcfg_reset(void);
-void fake_fwcfg_set_item(uint16_t selector, const uint8_t *data, uint32_t len);
-void fake_fwcfg_append_item(uint16_t selector, const uint8_t *data, uint32_t len);
+void fake_fwcfg_set_item(uint16_t selector, const uint8_t *data, uint32_t length);
+void fake_fwcfg_append_item(uint16_t selector, const uint8_t *data, uint32_t length);
 
 void fake_pci_reset(void);
 int fake_pci_add(uint8_t bus, uint8_t slot, uint8_t func, uint16_t vendor, uint16_t device,
@@ -50,7 +50,7 @@ void fake_pci_set_bar(int handle, int index, uint32_t value, uint32_t size_mask)
 
 void fake_socket_reset(void);
 int fake_socket_delivered_count(void);
-const uint8_t *fake_socket_delivered(int i, uint32_t *len_out, uint16_t *destination_port_out);
+const uint8_t *fake_socket_delivered(int i, uint32_t *length_out, uint16_t *destination_port_out);
 uint16_t fake_socket_delivered_source_port(int i);
 uint32_t fake_socket_delivered_source_ip(int i);
 
@@ -96,7 +96,7 @@ void fake_user_net_reset(void);
 void fake_user_net_add_server(uint32_t ip, int behaviour, uint32_t answer);
 void fake_user_net_set_dhcp_dns(uint32_t ip);
 void fake_user_net_set_netconf_fails(int fails);
-void fake_user_net_set_resolv_conf(const char *text, long len);
+void fake_user_net_set_resolv_conf(const char *text, long length);
 void fake_user_net_no_resolv_conf(void);
 void fake_user_net_set_socket_fails(int fails);
 void fake_user_net_set_bind_fails(int fails);

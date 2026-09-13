@@ -14,6 +14,6 @@ void profile_stop(void);
 
 void profile_sample(isr_regs_t *regs);
 
-void profile_get_statistics(prof_stats_t *out);
+void profile_get_statistics(prof_statistics_t *out);
 
 int profile_snapshot(prof_sample_t *out, int max);

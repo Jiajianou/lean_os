@@ -8,22 +8,22 @@
 #include <termios.h>
 #include <unistd.h>
 
-static int read_n(int fd, char *buf, int want) {
+static int read_n(int fd, char *buffer, int want) {
     int got = 0;
     while (got < want) {
-        int n = (int)read(fd, buf + got, (size_t)(want - got));
+        int n = (int)read(fd, buffer + got, (size_t)(want - got));
         if (n <= 0) {
             break;
         }
         got += n;
     }
-    buf[got] = '\0';
+    buffer[got] = '\0';
     return got;
 }
 
 int main(void) {
     char name[64];
-    char buf[256];
+    char buffer[256];
 
     int m = posix_openpt(O_RDWR);
     if (m < 0) {
@@ -46,16 +46,16 @@ int main(void) {
     if (write(m, "abX\177c", 5) != 5) {
         return 5;
     }
-    if (read_n(m, buf, 7) != 7 || strcmp(buf, "abX\b \bc") != 0) {
+    if (read_n(m, buffer, 7) != 7 || strcmp(buffer, "abX\b \bc") != 0) {
         return 6;
     }
     if (write(m, "\n", 1) != 1) {
         return 5;
     }
-    if (read_n(s, buf, 4) != 4 || strcmp(buf, "abc\n") != 0) {
+    if (read_n(s, buffer, 4) != 4 || strcmp(buffer, "abc\n") != 0) {
         return 5;
     }
-    if (read_n(m, buf, 2) != 2 || strcmp(buf, "\r\n") != 0) {
+    if (read_n(m, buffer, 2) != 2 || strcmp(buffer, "\r\n") != 0) {
         return 6;
     }
 
@@ -63,8 +63,8 @@ int main(void) {
         return 7;
     }
     {
-        int n = read_n(m, buf, 4);
-        if (n != 4 || strcmp(buf, "hi\r\n") != 0) {
+        int n = read_n(m, buffer, 4);
+        if (n != 4 || strcmp(buffer, "hi\r\n") != 0) {
             return 7;
         }
     }
@@ -88,8 +88,8 @@ int main(void) {
     }
     close(s);
     {
-        int n = read_n(m, buf, 3);
-        if (n != 3 || buf[0] != 'R') {
+        int n = read_n(m, buffer, 3);
+        if (n != 3 || buffer[0] != 'R') {
             return 8;
         }
     }
@@ -126,8 +126,8 @@ int main(void) {
     }
     close(s);
     {
-        int n = read_n(m, buf, 3);
-        if (n != 3 || buf[0] != 'S') {
+        int n = read_n(m, buffer, 3);
+        if (n != 3 || buffer[0] != 'S') {
             return 11;
         }
     }

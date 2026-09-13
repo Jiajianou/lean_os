@@ -9,7 +9,7 @@
 #define CAP_TOP    2
 #define X_TOP      5
 #define BASELINE   12
-#define DESC_LAST  14
+#define DESCRIPTOR_LAST  14
 
 #define GLYPH_COLS 7
 
@@ -131,7 +131,7 @@ static unsigned char bold[128][FONT_HEIGHT];
 
 static int errors;
 
-static void err(const char *fmt, int code, const char *detail) {
+static void error(const char *fmt, int code, const char *detail) {
     fprintf(stderr, "gen-font: 0x%02X '%c': ", code,
             (code >= 0x20 && code < 0x7F) ? code : '?');
     fprintf(stderr, fmt, detail);
@@ -143,36 +143,36 @@ static void build(void) {
     int seen[128] = { 0 };
 
     for (int g = 0; g < NGLYPHS; g++) {
-        const glyph_source_t *src = &GLYPHS[g];
-        int code = src->code;
+        const glyph_source_t *source = &GLYPHS[g];
+        int code = source->code;
 
         if (code < 0x20 || code > 0x7E) {
-            err("outside the printable range this table covers%s", code, "");
+            error("outside the printable range this table covers%s", code, "");
             continue;
         }
         if (seen[code]) {
-            err("defined twice%s", code, "");
+            error("defined twice%s", code, "");
             continue;
         }
         seen[code] = 1;
 
-        for (int i = 0; src->rows[i]; i++) {
-            const char *art = src->rows[i];
-            int row = src->top + i;
+        for (int i = 0; source->rows[i]; i++) {
+            const char *art = source->rows[i];
+            int row = source->top + i;
 
             if (strlen(art) != GLYPH_COLS) {
-                err("art row is not %s columns wide", code, "7");
+                error("art row is not %s columns wide", code, "7");
                 break;
             }
             if (row < 0 || row >= FONT_HEIGHT) {
-                err("art runs past row 15%s", code, "");
+                error("art runs past row 15%s", code, "");
                 break;
             }
             for (int col = 0; col < GLYPH_COLS; col++) {
                 if (art[col] == '#') {
                     reg[code][row] |= (unsigned char)(0x80u >> col);
                 } else if (art[col] != '.') {
-                    err("art uses a character other than '#' or '.'%s", code, "");
+                    error("art uses a character other than '#' or '.'%s", code, "");
                     break;
                 }
             }
@@ -181,7 +181,7 @@ static void build(void) {
 
     for (int code = 0x20; code <= 0x7E; code++) {
         if (!seen[code]) {
-            err("no glyph defined%s", code, "");
+            error("no glyph defined%s", code, "");
         }
     }
 
@@ -213,27 +213,27 @@ static void check_metric(void) {
     static const char *UPPER  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     static const char *DIGITS = "0123456789";
     static const char *XBAND  = "acemnorsuvwxz";
-    static const char *DESC   = "gpqyj";
+    static const char *DESCRIPTOR   = "gpqyj";
     static const char *ASC    = "bdfhiklt";
 
     for (int code = 0; code < 128; code++) {
         for (int row = 0; row < FONT_HEIGHT; row++) {
             if (reg[code][row] & 0x01u) {
-                err("ink in column 7, which is the reserved advance gap%s", code, "");
+                error("ink in column 7, which is the reserved advance gap%s", code, "");
                 break;
             }
         }
     }
 
     for (int code = 0; code < 0x20; code++) {
-        if (ink_top(code) != -1) err("control code is not blank%s", code, "");
+        if (ink_top(code) != -1) error("control code is not blank%s", code, "");
     }
-    if (ink_top(0x20) != -1) err("space is not blank%s", 0x20, "");
-    if (ink_top(0x7F) != -1) err("0x7F is not blank%s", 0x7F, "");
+    if (ink_top(0x20) != -1) error("space is not blank%s", 0x20, "");
+    if (ink_top(0x7F) != -1) error("0x7F is not blank%s", 0x7F, "");
 
     for (int code = 0x21; code <= 0x7E; code++) {
-        if (ink_top(code) == -1) err("printable glyph is blank%s", code, "");
-        if (ink_bottom(code) > DESC_LAST) err("ink below the descender row%s", code, "");
+        if (ink_top(code) == -1) error("printable glyph is blank%s", code, "");
+        if (ink_bottom(code) > DESCRIPTOR_LAST) error("ink below the descender row%s", code, "");
     }
 
     for (int code = 0x21; code <= 0x7E; code++) {
@@ -241,28 +241,28 @@ static void check_metric(void) {
         if (top < 0) continue;
 
         if (in(UPPER, code) || in(DIGITS, code)) {
-            if (top != CAP_TOP)      err("does not start on the shared cap line (row 2)%s", code, "");
-            if (bot != BASELINE - 1) err("does not sit on the shared baseline (row 11)%s", code, "");
+            if (top != CAP_TOP)      error("does not start on the shared cap line (row 2)%s", code, "");
+            if (bot != BASELINE - 1) error("does not sit on the shared baseline (row 11)%s", code, "");
         } else if (in(XBAND, code)) {
-            if (top != X_TOP)        err("does not start on the shared x-height line (row 5)%s", code, "");
-            if (bot != BASELINE - 1) err("does not sit on the shared baseline (row 11)%s", code, "");
-        } else if (in(DESC, code)) {
-            if (bot != DESC_LAST)    err("descender does not reach the shared descender row (row 14)%s", code, "");
+            if (top != X_TOP)        error("does not start on the shared x-height line (row 5)%s", code, "");
+            if (bot != BASELINE - 1) error("does not sit on the shared baseline (row 11)%s", code, "");
+        } else if (in(DESCRIPTOR, code)) {
+            if (bot != DESCRIPTOR_LAST)    error("descender does not reach the shared descender row (row 14)%s", code, "");
         } else if (in(ASC, code)) {
-            if (top != CAP_TOP && code != 't') err("ascender does not start on the shared cap line (row 2)%s", code, "");
-            if (bot != BASELINE - 1) err("does not sit on the shared baseline (row 11)%s", code, "");
+            if (top != CAP_TOP && code != 't') error("ascender does not start on the shared cap line (row 2)%s", code, "");
+            if (bot != BASELINE - 1) error("does not sit on the shared baseline (row 11)%s", code, "");
         }
     }
 }
 
 static char out[1 << 20];
-static size_t out_len;
+static size_t out_length;
 
 static void emit(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void emit(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    out_len += (size_t)vsnprintf(out + out_len, sizeof(out) - out_len, fmt, ap);
+    out_length += (size_t)vsnprintf(out + out_length, sizeof(out) - out_length, fmt, ap);
     va_end(ap);
 }
 
@@ -280,7 +280,7 @@ static void emit_table(const char *name, unsigned char t[128][FONT_HEIGHT]) {
 
 
 static void build_header(int kernel_side) {
-    out_len = 0;
+    out_length = 0;
     (void)kernel_side;
     emit("#pragma once\n\n");
     emit("#include <stdint.h>\n\n");
@@ -289,14 +289,14 @@ static void build_header(int kernel_side) {
     emit("#define FONT_CAP_TOP   %d\n", CAP_TOP);
     emit("#define FONT_X_TOP     %d\n", X_TOP);
     emit("#define FONT_BASELINE  %d\n", BASELINE);
-    emit("#define FONT_DESC_LAST %d\n\n", DESC_LAST);
+    emit("#define FONT_DESCRIPTOR_LAST %d\n\n", DESCRIPTOR_LAST);
     emit("#define FONT_GLYPH_COLS %d\n\n", GLYPH_COLS);
     emit("extern const uint8_t font8x16[128][16];\n\n");
     emit("extern const uint8_t font8x16_bold[128][16];\n");
 }
 
 static void build_source(int kernel_side) {
-    out_len = 0;
+    out_length = 0;
     (void)kernel_side;
     emit("#include \"font8x16.h\"\n\n");
     emit_table("font8x16", reg);
@@ -376,7 +376,7 @@ static const ui_glyph_source_t UI_UI_OVERRIDE[] = {
 #define SM_CAP_TOP   1
 #define SM_X_TOP     4
 #define SM_BASELINE  9
-#define SM_DESC_LAST 11
+#define SM_DESCRIPTOR_LAST 11
 
 static const ui_glyph_source_t UI_SM_GLYPHS[] = {
 { ' ', 0, 0, { NULL } },
@@ -557,25 +557,25 @@ static void ui_build_from_mono(user_interface_font_t *f) {
 static int ui_scale_first(int m) { return (3 * m + 1) / 2; }
 static int ui_scale_last(int m)  { return (3 * (m + 1) - 1) / 2; }
 
-static void ui_scale_3_2(const user_interface_font_t *src, user_interface_font_t *dst) {
-    dst->height    = src->height * 3 / 2;
-    dst->cap_top   = ui_scale_first(src->cap_top);
-    dst->x_top     = ui_scale_first(src->x_top);
-    dst->baseline  = ui_scale_first(src->baseline);
-    dst->descriptor_last = ui_scale_last(src->descriptor_last);
-    dst->space_advance = (3 * src->space_advance + 1) / 2;
+static void ui_scale_3_2(const user_interface_font_t *source, user_interface_font_t *destination) {
+    destination->height    = source->height * 3 / 2;
+    destination->cap_top   = ui_scale_first(source->cap_top);
+    destination->x_top     = ui_scale_first(source->x_top);
+    destination->baseline  = ui_scale_first(source->baseline);
+    destination->descriptor_last = ui_scale_last(source->descriptor_last);
+    destination->space_advance = (3 * source->space_advance + 1) / 2;
 
     for (int code = 0; code < 128; code++) {
-        int w = src->width[code];
+        int w = source->width[code];
         int dw = w ? (3 * w + 1) / 2 : 0;
 
         if (dw > UI_MAX_COLS) {
-            ui_error("scaled glyph is wider than UI_MAX_COLS", dst->ident, code);
+            ui_error("scaled glyph is wider than UI_MAX_COLS", destination->ident, code);
             dw = UI_MAX_COLS;
         }
-        for (int r = 0; r < dst->height; r++) {
+        for (int r = 0; r < destination->height; r++) {
             int sr = (2 * r) / 3;
-            unsigned short in_row = src->rows[code][sr];
+            unsigned short in_row = source->rows[code][sr];
             unsigned short out_row = 0;
             for (int c = 0; c < dw; c++) {
                 int sc = (2 * c) / 3;
@@ -583,12 +583,12 @@ static void ui_scale_3_2(const user_interface_font_t *src, user_interface_font_t
                     out_row |= (unsigned short)(0x8000u >> c);
                 }
             }
-            dst->rows[code][r] = out_row;
+            destination->rows[code][r] = out_row;
         }
-        dst->width[code]   = (unsigned char)dw;
-        dst->advance[code] = (unsigned char)(dw ? dw + 1 : 0);
+        destination->width[code]   = (unsigned char)dw;
+        destination->advance[code] = (unsigned char)(dw ? dw + 1 : 0);
     }
-    dst->advance[' '] = (unsigned char)dst->space_advance;
+    destination->advance[' '] = (unsigned char)destination->space_advance;
 }
 
 static void ui_make_bold(user_interface_font_t *f) {
@@ -632,7 +632,7 @@ static void ui_check(const user_interface_font_t *f) {
     static const char *UPPER  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     static const char *DIGITS = "0123456789";
     static const char *XBAND  = "acemnorsuvwxz";
-    static const char *DESC   = "gpqyj";
+    static const char *DESCRIPTOR   = "gpqyj";
     static const char *ASC    = "bdfhikl";
 
     if (f->advance[' '] == 0) {
@@ -690,7 +690,7 @@ static void ui_check(const user_interface_font_t *f) {
         } else if (in(XBAND, code)) {
             if (top != f->x_top)        ui_error("does not start on the shared x-height line", f->ident, code);
             if (bot != f->baseline - 1) ui_error("does not sit on the shared baseline", f->ident, code);
-        } else if (in(DESC, code)) {
+        } else if (in(DESCRIPTOR, code)) {
             if (bot != f->descriptor_last)    ui_error("descender does not reach the shared descender row", f->ident, code);
         } else if (in(ASC, code)) {
             if (top != f->cap_top)      ui_error("ascender does not start on the shared cap line", f->ident, code);
@@ -705,7 +705,7 @@ static void ui_build_all(void) {
     ui_ui.cap_top  = CAP_TOP;
     ui_ui.x_top    = X_TOP;
     ui_ui.baseline = BASELINE;
-    ui_ui.descriptor_last = DESC_LAST;
+    ui_ui.descriptor_last = DESCRIPTOR_LAST;
     ui_ui.space_advance = 5;
     ui_build_from_mono(&ui_ui);
     for (size_t i = 0; i < sizeof(UI_UI_OVERRIDE) / sizeof(UI_UI_OVERRIDE[0]); i++) {
@@ -723,7 +723,7 @@ static void ui_build_all(void) {
     ui_small.cap_top  = SM_CAP_TOP;
     ui_small.x_top    = SM_X_TOP;
     ui_small.baseline = SM_BASELINE;
-    ui_small.descriptor_last = SM_DESC_LAST;
+    ui_small.descriptor_last = SM_DESCRIPTOR_LAST;
     ui_small.space_advance = 4;
     for (size_t i = 0; i < sizeof(UI_SM_GLYPHS) / sizeof(UI_SM_GLYPHS[0]); i++) {
         ui_set_glyph(&ui_small, &UI_SM_GLYPHS[i]);
@@ -767,18 +767,18 @@ static void emit_ui_bytes(const char *name, const unsigned char t[128]) {
 }
 
 static void emit_user_interface_font(const user_interface_font_t *f) {
-    char buf[64];
+    char buffer[64];
 
-    snprintf(buf, sizeof(buf), "ui_rows_%s", f->ident);
-    emit_ui_rows(buf, f, f->rows);
+    snprintf(buffer, sizeof(buffer), "ui_rows_%s", f->ident);
+    emit_ui_rows(buffer, f, f->rows);
     if (f->has_bold) {
-        snprintf(buf, sizeof(buf), "ui_bold_%s", f->ident);
-        emit_ui_rows(buf, f, f->bold);
+        snprintf(buffer, sizeof(buffer), "ui_bold_%s", f->ident);
+        emit_ui_rows(buffer, f, f->bold);
     }
-    snprintf(buf, sizeof(buf), "ui_adv_%s", f->ident);
-    emit_ui_bytes(buf, f->advance);
-    snprintf(buf, sizeof(buf), "ui_wid_%s", f->ident);
-    emit_ui_bytes(buf, f->width);
+    snprintf(buffer, sizeof(buffer), "ui_adv_%s", f->ident);
+    emit_ui_bytes(buffer, f->advance);
+    snprintf(buffer, sizeof(buffer), "ui_wid_%s", f->ident);
+    emit_ui_bytes(buffer, f->width);
 
     int max_adv = 0;
     for (int code = 0; code < 128; code++) {
@@ -802,7 +802,7 @@ static void emit_user_interface_font(const user_interface_font_t *f) {
 
 
 static void build_user_interface_font_header(void) {
-    out_len = 0;
+    out_length = 0;
     emit("#pragma once\n\n");
     emit("#include <stdint.h>\n\n");
     emit("#define UI_FONT_MAX_COLS %d\n", UI_MAX_COLS);
@@ -847,7 +847,7 @@ static void build_user_interface_font_header(void) {
 }
 
 static void build_user_interface_font_source(void) {
-    out_len = 0;
+    out_length = 0;
     emit("#include \"user_interface_font.h\"\n\n");
     emit_user_interface_font(&ui_small);
     emit_user_interface_font(&ui_ui);
@@ -861,9 +861,9 @@ static int write_if(const char *path, int check_only) {
         return 1;
     }
     if (!check_only) {
-        fwrite(out, 1, out_len, f);
+        fwrite(out, 1, out_length, f);
         fclose(f);
-        printf("gen-font: wrote %s (%zu bytes)\n", path, out_len);
+        printf("gen-font: wrote %s (%zu bytes)\n", path, out_length);
         return 0;
     }
 
@@ -871,9 +871,9 @@ static int write_if(const char *path, int check_only) {
     size_t have_length = fread(have, 1, sizeof(have), f);
     fclose(f);
 
-    if (have_length != out_len || memcmp(have, out, out_len) != 0) {
+    if (have_length != out_length || memcmp(have, out, out_length) != 0) {
         size_t i = 0, line = 1;
-        while (i < have_length && i < out_len && have[i] == out[i]) {
+        while (i < have_length && i < out_length && have[i] == out[i]) {
             if (have[i] == '\n') line++;
             i++;
         }

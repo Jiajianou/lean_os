@@ -120,18 +120,18 @@ static inline uint32_t caps_for_program(const char *path) {
 }
 
 #define PKG_ROOT     "/pkg"
-#define PKG_ROOT_LEN 4
+#define PKG_ROOT_LENGTH 4
 
 static inline int path_is_under_pkg(const char *path) {
     if (!path || path[0] != '/') {
         return 0;
     }
-    for (int i = 0; i < PKG_ROOT_LEN; i++) {
+    for (int i = 0; i < PKG_ROOT_LENGTH; i++) {
         if (path[i] != PKG_ROOT[i]) {
             return 0;
         }
     }
-    return path[PKG_ROOT_LEN] == '\0' || path[PKG_ROOT_LEN] == '/';
+    return path[PKG_ROOT_LENGTH] == '\0' || path[PKG_ROOT_LENGTH] == '/';
 }
 
 #ifdef __cplusplus

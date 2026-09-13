@@ -21,13 +21,13 @@ int main(void) {
 
     for (int i = 0; i < N; i++) {
         snprintf(symbol, sizeof(symbol), "many_answer_%d", i);
-        int (*fn)(void) = (int (*)(void))dlsym(handles[i], symbol);
-        if (!fn) {
+        int (*function)(void) = (int (*)(void))dlsym(handles[i], symbol);
+        if (!function) {
             printf("manydyn: FAIL dlsym %s: %s\n", symbol, dlerror());
             return 2;
         }
         int want = (int)strlen("manylib") * i + i;
-        int got = fn();
+        int got = function();
         if (got != want) {
             printf("manydyn: FAIL %s returned %d, wanted %d\n", symbol, got, want);
             return 3;

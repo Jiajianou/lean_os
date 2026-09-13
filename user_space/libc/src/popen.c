@@ -54,22 +54,22 @@ FILE *popen(const char *command, const char *mode) {
         errno = EMFILE;
         return (FILE *)0;
     }
-    int fds[2];
-    if (pipe(fds) != 0) {
+    int file_descriptors[2];
+    if (pipe(file_descriptors) != 0) {
         errno = EMFILE;
         return (FILE *)0;
     }
     int reading = mode[0] == 'r';
-    pid_t pid = reading ? run_shell(command, -1, fds[1], fds[0], fds[1])
-                        : run_shell(command, fds[0], -1, fds[0], fds[1]);
+    pid_t pid = reading ? run_shell(command, -1, file_descriptors[1], file_descriptors[0], file_descriptors[1])
+                        : run_shell(command, file_descriptors[0], -1, file_descriptors[0], file_descriptors[1]);
     if (pid < 0) {
-        close(fds[0]);
-        close(fds[1]);
+        close(file_descriptors[0]);
+        close(file_descriptors[1]);
         errno = EAGAIN;
         return (FILE *)0;
     }
-    int keep = reading ? fds[0] : fds[1];
-    close(reading ? fds[1] : fds[0]);
+    int keep = reading ? file_descriptors[0] : file_descriptors[1];
+    close(reading ? file_descriptors[1] : file_descriptors[0]);
     FILE *f = fdopen(keep, reading ? "r" : "w");
     if (!f) {
         close(keep);

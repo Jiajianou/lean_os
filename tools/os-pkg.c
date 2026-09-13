@@ -35,7 +35,7 @@ static void die(const char *fmt, ...) {
     exit(1);
 }
 
-static unsigned char *read_whole(const char *path, size_t *len_out) {
+static unsigned char *read_whole(const char *path, size_t *length_out) {
     FILE *f = fopen(path, "rb");
     if (!f) {
         return NULL;
@@ -50,20 +50,20 @@ static unsigned char *read_whole(const char *path, size_t *len_out) {
         return NULL;
     }
     rewind(f);
-    unsigned char *buf = malloc((size_t)n + 1);
-    if (!buf) {
+    unsigned char *buffer = malloc((size_t)n + 1);
+    if (!buffer) {
         fclose(f);
         return NULL;
     }
-    if (n && fread(buf, 1, (size_t)n, f) != (size_t)n) {
-        free(buf);
+    if (n && fread(buffer, 1, (size_t)n, f) != (size_t)n) {
+        free(buffer);
         fclose(f);
         return NULL;
     }
     fclose(f);
-    buf[n] = '\0';
-    *len_out = (size_t)n;
-    return buf;
+    buffer[n] = '\0';
+    *length_out = (size_t)n;
+    return buffer;
 }
 
 static int cmp_names(const void *a, const void *b) {
@@ -222,14 +222,14 @@ static int command_build(const char *manifest_path, const char *stage, const cha
             data = (const unsigned char *)e->link_target;
         } else {
             size_t got = 0;
-            unsigned char *buf = read_whole(e->host, &got);
-            if (!buf) {
+            unsigned char *buffer = read_whole(e->host, &got);
+            if (!buffer) {
                 die("cannot read %s: %s", e->host, strerror(errno));
             }
             if ((uint64_t)got != e->size) {
                 die("%s changed size while the package was being built", e->host);
             }
-            data = buf;
+            data = buffer;
         }
         memcpy(payload + off, data, (size_t)e->size);
         if (!e->is_symlink) {
@@ -324,13 +324,13 @@ static int command_build(const char *manifest_path, const char *stage, const cha
     return 0;
 }
 
-static int load(const char *path, unsigned char **bytes, size_t *len, osp_t *pkg) {
-    *bytes = read_whole(path, len);
+static int load(const char *path, unsigned char **bytes, size_t *length, osp_t *pkg) {
+    *bytes = read_whole(path, length);
     if (!*bytes) {
         fprintf(stderr, "os-pkg: cannot read %s: %s\n", path, strerror(errno));
         return 2;
     }
-    int rc = os_package_open(*bytes, *len, pkg);
+    int rc = os_package_open(*bytes, *length, pkg);
     if (rc != OSP_OK) {
         fprintf(stderr, "os-pkg: %s: %s\n", path, osp_strerror(rc));
         return 1;
@@ -340,9 +340,9 @@ static int load(const char *path, unsigned char **bytes, size_t *len, osp_t *pkg
 
 static int command_info(const char *path) {
     unsigned char *bytes;
-    size_t len;
+    size_t length;
     osp_t pkg;
-    int rc = load(path, &bytes, &len, &pkg);
+    int rc = load(path, &bytes, &length, &pkg);
     if (rc) {
         return rc;
     }
@@ -369,9 +369,9 @@ static int command_info(const char *path) {
 
 static int command_verify(const char *path) {
     unsigned char *bytes;
-    size_t len;
+    size_t length;
     osp_t pkg;
-    int rc = load(path, &bytes, &len, &pkg);
+    int rc = load(path, &bytes, &length, &pkg);
     if (rc) {
         return rc;
     }
@@ -382,30 +382,30 @@ static int command_verify(const char *path) {
 }
 
 static void mkdir_p(const char *path) {
-    char buf[4096];
-    snprintf(buf, sizeof(buf), "%s", path);
-    for (char *p = buf + 1; *p; p++) {
+    char buffer[4096];
+    snprintf(buffer, sizeof(buffer), "%s", path);
+    for (char *p = buffer + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            mkdir(buf, 0755);
+            mkdir(buffer, 0755);
             *p = '/';
         }
     }
-    mkdir(buf, 0755);
+    mkdir(buffer, 0755);
 }
 
-static int command_extract(const char *path, const char *dir) {
+static int command_extract(const char *path, const char *directory) {
     unsigned char *bytes;
-    size_t len;
+    size_t length;
     osp_t pkg;
-    int rc = load(path, &bytes, &len, &pkg);
+    int rc = load(path, &bytes, &length, &pkg);
     if (rc) {
         return rc;
     }
-    mkdir_p(dir);
+    mkdir_p(directory);
     for (uint32_t i = 0; i < pkg.file_count; i++) {
         char out[4096];
-        snprintf(out, sizeof(out), "%s/%s", dir, pkg.files[i].path);
+        snprintf(out, sizeof(out), "%s/%s", directory, pkg.files[i].path);
         char parent[4096];
         snprintf(parent, sizeof(parent), "%s", out);
         char *slash = strrchr(parent, '/');
@@ -437,7 +437,7 @@ static int command_extract(const char *path, const char *dir) {
             chmod(out, 0755);
         }
     }
-    printf("os-pkg: %u files into %s\n", pkg.file_count, dir);
+    printf("os-pkg: %u files into %s\n", pkg.file_count, directory);
     free(bytes);
     return 0;
 }
@@ -474,18 +474,18 @@ static int command_index(const char *repo) {
     for (int i = 0; i < n; i++) {
         char p[4096];
         snprintf(p, sizeof(p), "%s/%s", repo, names[i]);
-        size_t len = 0;
-        unsigned char *bytes = read_whole(p, &len);
+        size_t length = 0;
+        unsigned char *bytes = read_whole(p, &length);
         if (!bytes) {
             die("cannot read %s", p);
         }
         osp_t pkg;
-        int rc = os_package_open(bytes, len, &pkg);
+        int rc = os_package_open(bytes, length, &pkg);
         if (rc != OSP_OK) {
             die("%s: %s", p, osp_strerror(rc));
         }
         uint8_t whole[SHA256_DIGEST_BYTES];
-        sha256(bytes, len, whole);
+        sha256(bytes, length, whole);
         char hex[65];
         sha256_hex(whole, hex);
         fprintf(o, "\nname: %s\n", pkg.manifest.name);
@@ -496,7 +496,7 @@ static int command_index(const char *repo) {
         if (pkg.manifest.caps[0])     fprintf(o, "caps: %s\n", pkg.manifest.caps);
         if (pkg.manifest.license[0])  fprintf(o, "license: %s\n", pkg.manifest.license);
         fprintf(o, "file: %s\n", names[i]);
-        fprintf(o, "bytes: %zu\n", len);
+        fprintf(o, "bytes: %zu\n", length);
         fprintf(o, "sha256: %s\n", hex);
         free(bytes);
         free(names[i]);

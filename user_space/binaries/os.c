@@ -12,13 +12,13 @@
 #include "sha256.h"
 #include "syscall_wrappers.h"
 
-#define PKG_ROOT_DIR   "/pkg"
-#define PKG_REPO_DIR   "/pkg/repo"
+#define PKG_ROOT_DIRECTORY   "/pkg"
+#define PKG_REPO_DIRECTORY   "/pkg/repo"
 #define PKG_INDEX      "/pkg/repo/index"
-#define PKG_DB_DIR     "/pkg/db"
+#define PKG_DB_DIRECTORY     "/pkg/db"
 #define PKG_DB_INST    "/pkg/db/installed"
 #define PKG_DB_CAPS    "/pkg/db/caps"
-#define PKG_BIN_DIR    "/pkg/bin"
+#define PKG_BIN_DIRECTORY    "/pkg/bin"
 
 #define PATHBUF 512
 
@@ -38,7 +38,7 @@ static void say(const char *fmt, ...) {
     __builtin_va_end(ap);
 }
 
-static int is_dir(const char *path) {
+static int is_directory(const char *path) {
     struct stat st;
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
@@ -49,29 +49,29 @@ static int exists(const char *path) {
 }
 
 static int mkdir_p(const char *path) {
-    char buf[PATHBUF];
+    char buffer[PATHBUF];
     size_t n = strlen(path);
-    if (n >= sizeof(buf)) {
+    if (n >= sizeof(buffer)) {
         return -1;
     }
-    memcpy(buf, path, n + 1);
+    memcpy(buffer, path, n + 1);
     for (size_t i = 1; i < n; i++) {
-        if (buf[i] != '/') {
+        if (buffer[i] != '/') {
             continue;
         }
-        buf[i] = '\0';
-        if (!is_dir(buf) && mkdir(buf, 0755) != 0 && !is_dir(buf)) {
+        buffer[i] = '\0';
+        if (!is_directory(buffer) && mkdir(buffer, 0755) != 0 && !is_directory(buffer)) {
             return -1;
         }
-        buf[i] = '/';
+        buffer[i] = '/';
     }
-    if (!is_dir(buf) && mkdir(buf, 0755) != 0 && !is_dir(buf)) {
+    if (!is_directory(buffer) && mkdir(buffer, 0755) != 0 && !is_directory(buffer)) {
         return -1;
     }
     return 0;
 }
 
-static unsigned char *read_whole(const char *path, size_t *len_out, size_t cap) {
+static unsigned char *read_whole(const char *path, size_t *length_out, size_t cap) {
     struct stat st;
     if (stat(path, &st) != 0) {
         return NULL;
@@ -86,8 +86,8 @@ static unsigned char *read_whole(const char *path, size_t *len_out, size_t cap) 
         return NULL;
     }
     size_t want = (size_t)st.st_size;
-    unsigned char *buf = malloc(want + 1);
-    if (!buf) {
+    unsigned char *buffer = malloc(want + 1);
+    if (!buffer) {
         close(fd);
         fprintf(stderr, "os: out of memory reading %s (%lu bytes)\n",
                 path, (unsigned long)want);
@@ -95,7 +95,7 @@ static unsigned char *read_whole(const char *path, size_t *len_out, size_t cap) 
     }
     size_t got = 0;
     while (got < want) {
-        long r = read(fd, buf + got, want - got);
+        long r = read(fd, buffer + got, want - got);
         if (r <= 0) {
             break;
         }
@@ -103,15 +103,15 @@ static unsigned char *read_whole(const char *path, size_t *len_out, size_t cap) 
     }
     close(fd);
     if (got != want) {
-        free(buf);
+        free(buffer);
         return NULL;
     }
-    buf[got] = '\0';
-    *len_out = got;
-    return buf;
+    buffer[got] = '\0';
+    *length_out = got;
+    return buffer;
 }
 
-static int write_whole(const char *path, const void *data, size_t len, int exec) {
+static int write_whole(const char *path, const void *data, size_t length, int exec) {
     (void)exec;
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
     if (fd < 0) {
@@ -119,8 +119,8 @@ static int write_whole(const char *path, const void *data, size_t len, int exec)
     }
     size_t done = 0;
     const unsigned char *p = data;
-    while (done < len) {
-        long w = write(fd, p + done, len - done);
+    while (done < length) {
+        long w = write(fd, p + done, length - done);
         if (w <= 0) {
             close(fd);
             return -1;
@@ -187,17 +187,17 @@ static index_entry_t index_entries[MAX_INDEX];
 static int index_count;
 static int index_loaded;
 
-static void read_key(const char *text, size_t len, const char *key, char *out, size_t cap) {
+static void read_key(const char *text, size_t length, const char *key, char *out, size_t cap) {
     size_t klen = strlen(key);
     size_t i = 0;
     out[0] = '\0';
-    while (i < len) {
+    while (i < length) {
         size_t start = i;
-        while (i < len && text[i] != '\n') {
+        while (i < length && text[i] != '\n') {
             i++;
         }
         size_t end = i;
-        if (i < len) {
+        if (i < length) {
             i++;
         }
         if (end - start > klen + 1 && strncmp(text + start, key, klen) == 0 &&
@@ -222,22 +222,22 @@ static int load_index(void) {
         return index_count;
     }
     index_loaded = 1;
-    size_t len = 0;
-    unsigned char *text = read_whole(PKG_INDEX, &len, 1024u * 1024u);
+    size_t length = 0;
+    unsigned char *text = read_whole(PKG_INDEX, &length, 1024u * 1024u);
     if (!text) {
         return 0;
     }
     size_t i = 0;
-    while (i < len && index_count < MAX_INDEX) {
+    while (i < length && index_count < MAX_INDEX) {
         size_t start = i;
         size_t end = i;
-        while (i < len) {
+        while (i < length) {
             size_t ls = i;
-            while (i < len && text[i] != '\n') {
+            while (i < length && text[i] != '\n') {
                 i++;
             }
             size_t le = i;
-            if (i < len) {
+            if (i < length) {
                 i++;
             }
             if (le == ls) {
@@ -282,13 +282,13 @@ static index_entry_t *find_in_index(const char *name) {
 static int installed_version(const char *name, char *out, size_t cap) {
     char path[PATHBUF];
     snprintf(path, sizeof(path), "%s/%s", PKG_DB_INST, name);
-    size_t len = 0;
-    unsigned char *text = read_whole(path, &len, 64u * 1024u);
+    size_t length = 0;
+    unsigned char *text = read_whole(path, &length, 64u * 1024u);
     if (!text) {
         return 0;
     }
     osp_manifest_t man;
-    int rc = os_package_parse_manifest((const char *)text, len, &man);
+    int rc = os_package_parse_manifest((const char *)text, length, &man);
     free(text);
     if (rc != OSP_OK) {
         return 0;
@@ -300,33 +300,33 @@ static int installed_version(const char *name, char *out, size_t cap) {
 static int read_installed(const char *name, osp_manifest_t *out) {
     char path[PATHBUF];
     snprintf(path, sizeof(path), "%s/%s", PKG_DB_INST, name);
-    size_t len = 0;
-    unsigned char *text = read_whole(path, &len, 64u * 1024u);
+    size_t length = 0;
+    unsigned char *text = read_whole(path, &length, 64u * 1024u);
     if (!text) {
         return 0;
     }
-    int rc = os_package_parse_manifest((const char *)text, len, out);
+    int rc = os_package_parse_manifest((const char *)text, length, out);
     free(text);
     return rc == OSP_OK;
 }
 
 static int registry_overflowed;
 
-static void registry_add_line(char *buf, size_t cap, size_t *len,
+static void registry_add_line(char *buffer, size_t cap, size_t *length,
                               uint32_t caps, const char *path) {
     char line[PATHBUF + 32];
     int n = snprintf(line, sizeof(line), "%x %s\n", (unsigned)caps, path);
-    if (n < 0 || *len + (size_t)n >= cap) {
+    if (n < 0 || *length + (size_t)n >= cap) {
         registry_overflowed = 1;
         return;
     }
-    memcpy(buf + *len, line, (size_t)n);
-    *len += (size_t)n;
+    memcpy(buffer + *length, line, (size_t)n);
+    *length += (size_t)n;
 }
 
 static int rewrite_registry(void) {
-    static char buf[24 * 1024];
-    size_t len = 0;
+    static char buffer[24 * 1024];
+    size_t length = 0;
     registry_overflowed = 0;
     const char *head =
         "# /pkg/db/caps - what each installed program may do.\n"
@@ -334,12 +334,12 @@ static int rewrite_registry(void) {
         "# <hex capability mask> <absolute path>. Masks are intersected with\n"
         "# CAP_PKG_MAX in the kernel, so a line here cannot grant more than a\n"
         "# package is ever allowed - see system_api/include/caps.h.\n";
-    len = strlen(head);
-    memcpy(buf, head, len);
+    length = strlen(head);
+    memcpy(buffer, head, length);
 
     DIR *d = opendir(PKG_DB_INST);
     if (!d) {
-        return write_whole(PKG_DB_CAPS, buf, len, 0);
+        return write_whole(PKG_DB_CAPS, buffer, length, 0);
     }
     struct dirent *de;
     static char names[MAX_INDEX][OSP_MAX_NAME];
@@ -368,21 +368,21 @@ static int rewrite_registry(void) {
             if (!*p) {
                 break;
             }
-            char cmd[OSP_MAX_NAME];
+            char command[OSP_MAX_NAME];
             size_t c = 0;
-            while (*p && *p != ' ' && *p != '\t' && c + 1 < sizeof(cmd)) {
-                cmd[c++] = *p++;
+            while (*p && *p != ' ' && *p != '\t' && c + 1 < sizeof(command)) {
+                command[c++] = *p++;
             }
-            cmd[c] = '\0';
+            command[c] = '\0';
             while (*p && *p != ' ' && *p != '\t') {
                 p++;
             }
             char real[PATHBUF], alias[PATHBUF];
             snprintf(real, sizeof(real), "%s/%s/%s/bin/%s",
-                     PKG_ROOT_DIR, man.name, man.version, cmd);
-            snprintf(alias, sizeof(alias), "%s/%s", PKG_BIN_DIR, cmd);
-            registry_add_line(buf, sizeof(buf), &len, caps, real);
-            registry_add_line(buf, sizeof(buf), &len, caps, alias);
+                     PKG_ROOT_DIRECTORY, man.name, man.version, command);
+            snprintf(alias, sizeof(alias), "%s/%s", PKG_BIN_DIRECTORY, command);
+            registry_add_line(buffer, sizeof(buffer), &length, caps, real);
+            registry_add_line(buffer, sizeof(buffer), &length, caps, alias);
         }
     }
     if (registry_overflowed) {
@@ -392,7 +392,7 @@ static int rewrite_registry(void) {
                         "nothing for no visible reason\n", PKG_DB_CAPS);
         return -1;
     }
-    return write_whole(PKG_DB_CAPS, buf, len, 0);
+    return write_whole(PKG_DB_CAPS, buffer, length, 0);
 }
 
 static int install_one(const char *name, int depth);
@@ -465,9 +465,9 @@ static int install_one(const char *name, int depth) {
     }
 
     char archive[PATHBUF];
-    snprintf(archive, sizeof(archive), "%s/%s", PKG_REPO_DIR, e->file);
-    size_t len = 0;
-    unsigned char *bytes = read_whole(archive, &len, PKG_MAX_ARCHIVE);
+    snprintf(archive, sizeof(archive), "%s/%s", PKG_REPO_DIRECTORY, e->file);
+    size_t length = 0;
+    unsigned char *bytes = read_whole(archive, &length, PKG_MAX_ARCHIVE);
     if (!bytes) {
         fprintf(stderr, "os: cannot read %s\n", archive);
         return 1;
@@ -480,7 +480,7 @@ static int install_one(const char *name, int depth) {
             free(bytes);
             return 1;
         }
-        sha256(bytes, len, got);
+        sha256(bytes, length, got);
         if (!sha256_equal(want, got)) {
             char hex[65];
             sha256_hex(got, hex);
@@ -493,7 +493,7 @@ static int install_one(const char *name, int depth) {
     }
 
     osp_t pkg;
-    int rc = os_package_open(bytes, len, &pkg);
+    int rc = os_package_open(bytes, length, &pkg);
     if (rc != OSP_OK) {
         fprintf(stderr, "os: %s: %s\n", archive, osp_strerror(rc));
         free(bytes);
@@ -533,7 +533,7 @@ static int install_one(const char *name, int depth) {
     }
 
     char root[PATHBUF];
-    snprintf(root, sizeof(root), "%s/%s/%s", PKG_ROOT_DIR,
+    snprintf(root, sizeof(root), "%s/%s/%s", PKG_ROOT_DIRECTORY,
              pkg.manifest.name, pkg.manifest.version);
     if (mkdir_p(root) != 0) {
         fprintf(stderr, "os: cannot create %s\n", root);
@@ -594,7 +594,7 @@ static int install_one(const char *name, int depth) {
     }
 
     if (pkg.manifest.provides[0]) {
-        mkdir_p(PKG_BIN_DIR);
+        mkdir_p(PKG_BIN_DIRECTORY);
         const char *p = pkg.manifest.provides;
         while (*p) {
             while (*p == ' ' || *p == '\t') {
@@ -603,22 +603,22 @@ static int install_one(const char *name, int depth) {
             if (!*p) {
                 break;
             }
-            char cmd[OSP_MAX_NAME];
+            char command[OSP_MAX_NAME];
             size_t c = 0;
-            while (*p && *p != ' ' && *p != '\t' && c + 1 < sizeof(cmd)) {
-                cmd[c++] = *p++;
+            while (*p && *p != ' ' && *p != '\t' && c + 1 < sizeof(command)) {
+                command[c++] = *p++;
             }
-            cmd[c] = '\0';
+            command[c] = '\0';
             while (*p && *p != ' ' && *p != '\t') {
                 p++;
             }
             char real[PATHBUF], alias[PATHBUF];
-            snprintf(real, sizeof(real), "%s/bin/%s", root, cmd);
-            snprintf(alias, sizeof(alias), "%s/%s", PKG_BIN_DIR, cmd);
+            snprintf(real, sizeof(real), "%s/bin/%s", root, command);
+            snprintf(alias, sizeof(alias), "%s/%s", PKG_BIN_DIRECTORY, command);
             if (!exists(real)) {
                 fprintf(stderr, "os: %s says it provides '%s' and has no "
                                 "bin/%s - the link is not made\n",
-                        name, cmd, cmd);
+                        name, command, command);
                 continue;
             }
             unlink(alias);
@@ -674,7 +674,7 @@ static int install_one(const char *name, int depth) {
         pkg.manifest.name, pkg.manifest.version, pkg.file_count, root);
     if (pkg.manifest.provides[0]) {
         say("os: %s is now on this machine as %s/<command>\n",
-            pkg.manifest.provides, PKG_BIN_DIR);
+            pkg.manifest.provides, PKG_BIN_DIRECTORY);
     }
     say("os: it may: %s\n", caps ? capnames : "nothing but read files and use the "
                                    "descriptors it is given");
@@ -731,22 +731,22 @@ static int command_remove(const char *name) {
         if (!*p) {
             break;
         }
-        char cmd[OSP_MAX_NAME];
+        char command[OSP_MAX_NAME];
         size_t c = 0;
-        while (*p && *p != ' ' && *p != '\t' && c + 1 < sizeof(cmd)) {
-            cmd[c++] = *p++;
+        while (*p && *p != ' ' && *p != '\t' && c + 1 < sizeof(command)) {
+            command[c++] = *p++;
         }
-        cmd[c] = '\0';
+        command[c] = '\0';
         while (*p && *p != ' ' && *p != '\t') {
             p++;
         }
         char alias[PATHBUF];
-        snprintf(alias, sizeof(alias), "%s/%s", PKG_BIN_DIR, cmd);
+        snprintf(alias, sizeof(alias), "%s/%s", PKG_BIN_DIRECTORY, command);
         unlink(alias);
     }
 
     char root[PATHBUF];
-    snprintf(root, sizeof(root), "%s/%s", PKG_ROOT_DIR, name);
+    snprintf(root, sizeof(root), "%s/%s", PKG_ROOT_DIRECTORY, name);
     if (remove_tree(root) != 0) {
         fprintf(stderr, "os: could not remove %s\n", root);
         return 1;
@@ -821,10 +821,10 @@ static int command_info(const char *name) {
     printf("caps:      %s\n", m->caps[0] ? m->caps : "(none)");
     printf("installed: %s", inst ? "yes, at " : "no\n");
     if (inst) {
-        printf("%s/%s/%s\n", PKG_ROOT_DIR, m->name, m->version);
+        printf("%s/%s/%s\n", PKG_ROOT_DIRECTORY, m->name, m->version);
     }
     if (e && !inst) {
-        printf("archive:   %s/%s (%lu bytes)\n", PKG_REPO_DIR, e->file, e->bytes);
+        printf("archive:   %s/%s (%lu bytes)\n", PKG_REPO_DIRECTORY, e->file, e->bytes);
     }
     return 0;
 }
@@ -842,15 +842,15 @@ static int verify_one(const char *name) {
         return 1;
     }
     char archive[PATHBUF];
-    snprintf(archive, sizeof(archive), "%s/%s", PKG_REPO_DIR, e->file);
-    size_t len = 0;
-    unsigned char *bytes = read_whole(archive, &len, PKG_MAX_ARCHIVE);
+    snprintf(archive, sizeof(archive), "%s/%s", PKG_REPO_DIRECTORY, e->file);
+    size_t length = 0;
+    unsigned char *bytes = read_whole(archive, &length, PKG_MAX_ARCHIVE);
     if (!bytes) {
         fprintf(stderr, "os: cannot read %s\n", archive);
         return 1;
     }
     osp_t pkg;
-    int rc = os_package_open(bytes, len, &pkg);
+    int rc = os_package_open(bytes, length, &pkg);
     if (rc != OSP_OK) {
         fprintf(stderr, "os: %s: %s\n", archive, osp_strerror(rc));
         free(bytes);
@@ -858,7 +858,7 @@ static int verify_one(const char *name) {
     }
 
     char root[PATHBUF];
-    snprintf(root, sizeof(root), "%s/%s/%s", PKG_ROOT_DIR, man.name, man.version);
+    snprintf(root, sizeof(root), "%s/%s/%s", PKG_ROOT_DIRECTORY, man.name, man.version);
     int bad = 0, missing = 0, checked = 0;
     for (uint32_t i = 0; i < pkg.file_count; i++) {
         const osp_file_t *f = &pkg.files[i];
@@ -923,16 +923,16 @@ static int command_verify(const char *name) {
     return rc;
 }
 
-#define PKG_PREINSTALL      PKG_REPO_DIR "/preinstall"
-#define PKG_DB_PREINSTALLED PKG_DB_DIR "/preinstalled"
+#define PKG_PREINSTALL      PKG_REPO_DIRECTORY "/preinstall"
+#define PKG_DB_PREINSTALLED PKG_DB_DIRECTORY "/preinstalled"
 
 static int list_has_line(const char *list, const char *name) {
     size_t n = strlen(name);
     const char *p = list;
     while (p && *p) {
         const char *eol = strchr(p, '\n');
-        size_t len = eol ? (size_t)(eol - p) : strlen(p);
-        if (len == n && strncmp(p, name, n) == 0) {
+        size_t length = eol ? (size_t)(eol - p) : strlen(p);
+        if (length == n && strncmp(p, name, n) == 0) {
             return 1;
         }
         p = eol ? eol + 1 : NULL;
@@ -941,8 +941,8 @@ static int list_has_line(const char *list, const char *name) {
 }
 
 static int command_preinstall(void) {
-    size_t len = 0;
-    char *list = (char *)read_whole(PKG_PREINSTALL, &len, 4096);
+    size_t length = 0;
+    char *list = (char *)read_whole(PKG_PREINSTALL, &length, 4096);
     if (!list) {
         return 0;
     }
@@ -982,7 +982,7 @@ static int command_preinstall(void) {
             changed = 1;
         }
     }
-    if (changed && (mkdir_p(PKG_DB_DIR) != 0 ||
+    if (changed && (mkdir_p(PKG_DB_DIRECTORY) != 0 ||
                     write_whole(PKG_DB_PREINSTALLED, record, rlen, 0) != 0)) {
         fprintf(stderr, "os: preinstall: could not record what was installed in %s\n",
                 PKG_DB_PREINSTALLED);
@@ -1012,13 +1012,13 @@ static void usage(void) {
 
 static int command_caps(void) {
     uint32_t mine = (uint32_t)sys_getcaps();
-    char buf[OSP_MAX_TEXT];
-    os_package_caps_to_names(mine, buf, sizeof(buf));
-    printf("this process:      %s\n", buf[0] ? buf : "(none)");
-    os_package_caps_to_names((uint32_t)CAP_PKG_MAX, buf, sizeof(buf));
-    printf("a package may ask: %s\n", buf);
-    os_package_caps_to_names((uint32_t)CAP_ALL & ~(uint32_t)CAP_PKG_MAX, buf, sizeof(buf));
-    printf("and never:         %s\n", buf);
+    char buffer[OSP_MAX_TEXT];
+    os_package_caps_to_names(mine, buffer, sizeof(buffer));
+    printf("this process:      %s\n", buffer[0] ? buffer : "(none)");
+    os_package_caps_to_names((uint32_t)CAP_PKG_MAX, buffer, sizeof(buffer));
+    printf("a package may ask: %s\n", buffer);
+    os_package_caps_to_names((uint32_t)CAP_ALL & ~(uint32_t)CAP_PKG_MAX, buffer, sizeof(buffer));
+    printf("and never:         %s\n", buffer);
     printf("an unlisted program under /pkg gets: %s\n",
            CAP_PKG_UNLISTED ? "something" : "nothing at all");
     return 0;
@@ -1034,8 +1034,8 @@ int main(int argc, char **argv) {
         usage();
         return 2;
     }
-    const char *cmd = argv[1];
-    if (strcmp(cmd, "install") == 0 && argc >= 3) {
+    const char *command = argv[1];
+    if (strcmp(command, "install") == 0 && argc >= 3) {
         int rc = 0;
         for (int i = 2; i < argc; i++) {
             if (argv[i][0] == '-') {
@@ -1047,32 +1047,32 @@ int main(int argc, char **argv) {
         }
         return rc;
     }
-    if (strcmp(cmd, "remove") == 0 && argc >= 3) {
+    if (strcmp(command, "remove") == 0 && argc >= 3) {
         return command_remove(argv[2]);
     }
-    if (strcmp(cmd, "list") == 0) {
+    if (strcmp(command, "list") == 0) {
         return command_list();
     }
-    if (strcmp(cmd, "available") == 0 || strcmp(cmd, "search") == 0) {
+    if (strcmp(command, "available") == 0 || strcmp(command, "search") == 0) {
         return command_available();
     }
-    if (strcmp(cmd, "info") == 0 && argc >= 3) {
+    if (strcmp(command, "info") == 0 && argc >= 3) {
         return command_info(argv[2]);
     }
-    if (strcmp(cmd, "verify") == 0) {
+    if (strcmp(command, "verify") == 0) {
         return command_verify(argc >= 3 && argv[2][0] != '-' ? argv[2] : NULL);
     }
-    if (strcmp(cmd, "caps") == 0) {
+    if (strcmp(command, "caps") == 0) {
         return command_caps();
     }
-    if (strcmp(cmd, "preinstall") == 0) {
+    if (strcmp(command, "preinstall") == 0) {
         return command_preinstall();
     }
-    if (strcmp(cmd, "help") == 0 || strcmp(cmd, "-h") == 0 ||
-        strcmp(cmd, "--help") == 0) {
+    if (strcmp(command, "help") == 0 || strcmp(command, "-h") == 0 ||
+        strcmp(command, "--help") == 0) {
         usage();
         return 0;
     }
-    fprintf(stderr, "os: '%s' is not a command. `os help` lists them.\n", cmd);
+    fprintf(stderr, "os: '%s' is not a command. `os help` lists them.\n", command);
     return 2;
 }

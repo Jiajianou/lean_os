@@ -34,7 +34,7 @@ static int exit_code;
 typedef struct Chunk {
     struct Chunk *next;
     size_t used, cap;
-    char *mem;
+    char *memory;
 } Chunk;
 
 typedef struct {
@@ -57,8 +57,8 @@ static void *arena_alloc(Arena *a, size_t n) {
         if (!c) {
             die_oom();
         }
-        c->mem = (char *)malloc(cap);
-        if (!c->mem) {
+        c->memory = (char *)malloc(cap);
+        if (!c->memory) {
             die_oom();
         }
         c->used = 0;
@@ -66,7 +66,7 @@ static void *arena_alloc(Arena *a, size_t n) {
         c->next = a->head;
         a->head = c;
     }
-    void *p = a->head->mem + a->head->used;
+    void *p = a->head->memory + a->head->used;
     a->head->used += n;
     return p;
 }
@@ -78,7 +78,7 @@ static void arena_free(Arena *a) {
     Chunk *c = a->head;
     while (c) {
         Chunk *next = c->next;
-        free(c->mem);
+        free(c->memory);
         free(c);
         c = next;
     }
@@ -98,18 +98,18 @@ static char *astrdup(const char *s) {
 
 typedef struct {
     char *p;
-    size_t len, cap;
+    size_t length, cap;
 } Sbuf;
 
 static void sb_init(Sbuf *b) {
     b->p = 0;
-    b->len = b->cap = 0;
+    b->length = b->cap = 0;
 }
 
 static void sb_putn(Sbuf *b, const char *s, size_t n) {
-    if (b->len + n + 1 > b->cap) {
+    if (b->length + n + 1 > b->cap) {
         size_t cap = b->cap ? b->cap * 2 : 64;
-        while (cap < b->len + n + 1) {
+        while (cap < b->length + n + 1) {
             cap *= 2;
         }
         char *p = (char *)realloc(b->p, cap);
@@ -119,9 +119,9 @@ static void sb_putn(Sbuf *b, const char *s, size_t n) {
         b->p = p;
         b->cap = cap;
     }
-    memcpy(b->p + b->len, s, n);
-    b->len += n;
-    b->p[b->len] = '\0';
+    memcpy(b->p + b->length, s, n);
+    b->length += n;
+    b->p[b->length] = '\0';
 }
 
 static void sb_putc(Sbuf *b, char c) {
@@ -440,8 +440,8 @@ static int string_cmp_qsort(const void *a, const void *b) {
 
 static void glob_expand(const char *pat, Vec *out) {
     char *slash = strrchr(pat, '/');
-    char dirbuf[PATH_MAX_LEN];
-    const char *dir;
+    char dirbuf[PATH_MAX_LENGTH];
+    const char *directory;
     const char *base;
 
     if (slash) {
@@ -456,19 +456,19 @@ static void glob_expand(const char *pat, Vec *out) {
             memcpy(dirbuf, pat, n);
             dirbuf[n] = '\0';
         }
-        dir = dirbuf;
+        directory = dirbuf;
         base = slash + 1;
     } else {
-        dir = ".";
+        directory = ".";
         base = pat;
     }
 
-    if (has_glob(dir)) {
+    if (has_glob(directory)) {
         vec_push(out, xstrdup(pat));
         return;
     }
 
-    DIR *d = opendir(dir);
+    DIR *d = opendir(directory);
     if (!d) {
         vec_push(out, xstrdup(pat));
         return;
@@ -530,7 +530,7 @@ typedef struct Redir {
 enum { RD_IN, RD_OUT, RD_APPEND, RD_DUP_OUT, RD_DUP_IN, RD_HEREDOC };
 
 typedef struct {
-    const char *src;
+    const char *source;
     size_t i;
     int incomplete;
     Redir *pending_here;
@@ -566,29 +566,29 @@ static void gather_heredocs(void) {
             Sbuf body;
             sb_init(&body);
             for (;;) {
-                if (!lx.src[lx.i]) {
+                if (!lx.source[lx.i]) {
                     lx.incomplete = 1;
                     break;
                 }
                 size_t start = lx.i;
-                while (lx.src[lx.i] && lx.src[lx.i] != '\n') {
+                while (lx.source[lx.i] && lx.source[lx.i] != '\n') {
                     lx.i++;
                 }
-                size_t len = lx.i - start;
-                const char *line = lx.src + start;
+                size_t length = lx.i - start;
+                const char *line = lx.source + start;
                 if (strip_tabs) {
-                    while (len > 0 && *line == '\t') {
+                    while (length > 0 && *line == '\t') {
                         line++;
-                        len--;
+                        length--;
                     }
                 }
-                if (lx.src[lx.i] == '\n') {
+                if (lx.source[lx.i] == '\n') {
                     lx.i++;
                 }
-                if (strlen(delim) == len && memcmp(line, delim, len) == 0) {
+                if (strlen(delim) == length && memcmp(line, delim, length) == 0) {
                     break;
                 }
-                sb_putn(&body, line, len);
+                sb_putn(&body, line, length);
                 sb_putc(&body, '\n');
             }
             h->word = astrdup(body.p ? body.p : "");
@@ -604,15 +604,15 @@ static Tok lex_next(void) {
     t.quoted = 0;
 
     for (;;) {
-        while (is_blank(lx.src[lx.i])) {
+        while (is_blank(lx.source[lx.i])) {
             lx.i++;
         }
-        if (lx.src[lx.i] == '\\' && lx.src[lx.i + 1] == '\n') {
+        if (lx.source[lx.i] == '\\' && lx.source[lx.i + 1] == '\n') {
             lx.i += 2;
             continue;
         }
-        if (lx.src[lx.i] == '#') {
-            while (lx.src[lx.i] && lx.src[lx.i] != '\n') {
+        if (lx.source[lx.i] == '#') {
+            while (lx.source[lx.i] && lx.source[lx.i] != '\n') {
                 lx.i++;
             }
             continue;
@@ -620,7 +620,7 @@ static Tok lex_next(void) {
         break;
     }
 
-    char c = lx.src[lx.i];
+    char c = lx.source[lx.i];
     if (!c) {
         return t;
     }
@@ -636,9 +636,9 @@ static Tok lex_next(void) {
     if (is_op_char(c)) {
         const char *two[] = { "&&", "||", ";;", "<<", ">>", ">&", "<&", ">|", 0 };
         for (int i = 0; two[i]; i++) {
-            if (c == two[i][0] && lx.src[lx.i + 1] == two[i][1]) {
+            if (c == two[i][0] && lx.source[lx.i + 1] == two[i][1]) {
                 lx.i += 2;
-                if (strcmp(two[i], "<<") == 0 && lx.src[lx.i] == '-') {
+                if (strcmp(two[i], "<<") == 0 && lx.source[lx.i] == '-') {
                     lx.i++;
                     t.type = T_OP;
                     t.text = astrdup("<<-");
@@ -659,22 +659,22 @@ static Tok lex_next(void) {
     Sbuf w;
     sb_init(&w);
     int quoted = 0;
-    while ((c = lx.src[lx.i]) != '\0') {
+    while ((c = lx.source[lx.i]) != '\0') {
         if (is_blank(c) || is_op_char(c)) {
             break;
         }
         if (c == '\\') {
-            if (lx.src[lx.i + 1] == '\n') {
+            if (lx.source[lx.i + 1] == '\n') {
                 lx.i += 2;
                 continue;
             }
-            if (!lx.src[lx.i + 1]) {
+            if (!lx.source[lx.i + 1]) {
                 lx.incomplete = 1;
                 lx.i++;
                 break;
             }
             sb_putc(&w, '\\');
-            sb_putc(&w, lx.src[lx.i + 1]);
+            sb_putc(&w, lx.source[lx.i + 1]);
             lx.i += 2;
             quoted = 1;
             continue;
@@ -683,10 +683,10 @@ static Tok lex_next(void) {
             quoted = 1;
             sb_putc(&w, c);
             lx.i++;
-            while (lx.src[lx.i] && lx.src[lx.i] != '\'') {
-                sb_putc(&w, lx.src[lx.i++]);
+            while (lx.source[lx.i] && lx.source[lx.i] != '\'') {
+                sb_putc(&w, lx.source[lx.i++]);
             }
-            if (!lx.src[lx.i]) {
+            if (!lx.source[lx.i]) {
                 lx.incomplete = 1;
                 break;
             }
@@ -698,32 +698,32 @@ static Tok lex_next(void) {
             quoted = 1;
             sb_putc(&w, c);
             lx.i++;
-            while (lx.src[lx.i] && lx.src[lx.i] != '"') {
-                if (lx.src[lx.i] == '\\' && lx.src[lx.i + 1]) {
-                    sb_putc(&w, lx.src[lx.i]);
-                    sb_putc(&w, lx.src[lx.i + 1]);
+            while (lx.source[lx.i] && lx.source[lx.i] != '"') {
+                if (lx.source[lx.i] == '\\' && lx.source[lx.i + 1]) {
+                    sb_putc(&w, lx.source[lx.i]);
+                    sb_putc(&w, lx.source[lx.i + 1]);
                     lx.i += 2;
                     continue;
                 }
-                if (lx.src[lx.i] == '`') {
-                    sb_putc(&w, lx.src[lx.i++]);
-                    while (lx.src[lx.i] && lx.src[lx.i] != '`') {
-                        if (lx.src[lx.i] == '\\' && lx.src[lx.i + 1]) {
-                            sb_putc(&w, lx.src[lx.i]);
+                if (lx.source[lx.i] == '`') {
+                    sb_putc(&w, lx.source[lx.i++]);
+                    while (lx.source[lx.i] && lx.source[lx.i] != '`') {
+                        if (lx.source[lx.i] == '\\' && lx.source[lx.i + 1]) {
+                            sb_putc(&w, lx.source[lx.i]);
                             lx.i++;
                         }
-                        sb_putc(&w, lx.src[lx.i++]);
+                        sb_putc(&w, lx.source[lx.i++]);
                     }
-                    if (lx.src[lx.i]) {
-                        sb_putc(&w, lx.src[lx.i++]);
+                    if (lx.source[lx.i]) {
+                        sb_putc(&w, lx.source[lx.i++]);
                     }
                     continue;
                 }
-                if (lx.src[lx.i] == '$' && lx.src[lx.i + 1] == '(') {
+                if (lx.source[lx.i] == '$' && lx.source[lx.i + 1] == '(') {
                     int depth = 0;
-                    sb_putc(&w, lx.src[lx.i++]);
+                    sb_putc(&w, lx.source[lx.i++]);
                     for (;;) {
-                        char d = lx.src[lx.i];
+                        char d = lx.source[lx.i];
                         if (!d) {
                             break;
                         }
@@ -740,9 +740,9 @@ static Tok lex_next(void) {
                     }
                     continue;
                 }
-                sb_putc(&w, lx.src[lx.i++]);
+                sb_putc(&w, lx.source[lx.i++]);
             }
-            if (!lx.src[lx.i]) {
+            if (!lx.source[lx.i]) {
                 lx.incomplete = 1;
                 break;
             }
@@ -753,10 +753,10 @@ static Tok lex_next(void) {
         if (c == '`') {
             sb_putc(&w, c);
             lx.i++;
-            while (lx.src[lx.i] && lx.src[lx.i] != '`') {
-                sb_putc(&w, lx.src[lx.i++]);
+            while (lx.source[lx.i] && lx.source[lx.i] != '`') {
+                sb_putc(&w, lx.source[lx.i++]);
             }
-            if (!lx.src[lx.i]) {
+            if (!lx.source[lx.i]) {
                 lx.incomplete = 1;
                 break;
             }
@@ -764,14 +764,14 @@ static Tok lex_next(void) {
             lx.i++;
             continue;
         }
-        if (c == '$' && (lx.src[lx.i + 1] == '(' || lx.src[lx.i + 1] == '{')) {
-            char open = lx.src[lx.i + 1];
+        if (c == '$' && (lx.source[lx.i + 1] == '(' || lx.source[lx.i + 1] == '{')) {
+            char open = lx.source[lx.i + 1];
             char close = open == '(' ? ')' : '}';
             int depth = 0;
             sb_putc(&w, '$');
             lx.i++;
             for (;;) {
-                char d = lx.src[lx.i];
+                char d = lx.source[lx.i];
                 if (!d) {
                     lx.incomplete = 1;
                     break;
@@ -806,7 +806,7 @@ static Tok lex_next(void) {
                 break;
             }
         }
-        if (all_digits && (lx.src[lx.i] == '<' || lx.src[lx.i] == '>')) {
+        if (all_digits && (lx.source[lx.i] == '<' || lx.source[lx.i] == '>')) {
             t.type = T_IONUM;
         }
     }
@@ -814,7 +814,7 @@ static Tok lex_next(void) {
 }
 
 enum {
-    N_SIMPLE, N_PIPE, N_AND, N_OR, N_SEQ, N_NOT, N_BG,
+    N_SIMPLE, N_PIPE, N_AND, N_OR, N_SEQUENCE, N_NOT, N_BG,
     N_IF, N_WHILE, N_UNTIL, N_FOR, N_CASE, N_SUBSHELL, N_GROUP, N_FUNC
 };
 
@@ -1226,10 +1226,10 @@ static Node *parse_command(void) {
         size_t save_i = lx.i;
         Tok save_tok = tok;
         size_t peek = lx.i;
-        while (is_blank(lx.src[peek])) {
+        while (is_blank(lx.source[peek])) {
             peek++;
         }
-        int looks_like_func = !was_quoted && lx.src[peek] == '(';
+        int looks_like_func = !was_quoted && lx.source[peek] == '(';
         if (looks_like_func) {
             advance();
         }
@@ -1351,7 +1351,7 @@ static Node *parse_list(const char *const *terminators) {
         if (!head) {
             head = n;
         } else {
-            Node *seq = node_new(N_SEQ);
+            Node *seq = node_new(N_SEQUENCE);
             seq->left = head;
             seq->right = n;
             head = seq;
@@ -1363,7 +1363,7 @@ static int exec_node(Node *n);
 static int exec_text(const char *text);
 
 typedef struct {
-    Sbuf cur;
+    Sbuf current;
     int started;
     int quoted_here;
     Vec *out;
@@ -1373,7 +1373,7 @@ typedef struct {
 } Ex;
 
 static void ex_flush(Ex *e) {
-    if (e->at_killed && !e->cur.p) {
+    if (e->at_killed && !e->current.p) {
         e->started = 0;
         e->quoted_here = 0;
         e->at_killed = 0;
@@ -1383,8 +1383,8 @@ static void ex_flush(Ex *e) {
     if (!e->started) {
         return;
     }
-    char *field = e->cur.p ? e->cur.p : xstrdup("");
-    if (!e->cur.p) {
+    char *field = e->current.p ? e->current.p : xstrdup("");
+    if (!e->current.p) {
         vec_push(e->out, field);
     } else if (e->glob && !opt_noglob && !e->quoted_here && has_glob(field)) {
         glob_expand(field, e->out);
@@ -1392,7 +1392,7 @@ static void ex_flush(Ex *e) {
     } else {
         vec_push(e->out, field);
     }
-    sb_init(&e->cur);
+    sb_init(&e->current);
     e->started = 0;
     e->quoted_here = 0;
 }
@@ -1401,7 +1401,7 @@ static void ex_add(Ex *e, const char *s, size_t n) {
     if (n) {
         e->at_killed = 0;
     }
-    sb_putn(&e->cur, s, n);
+    sb_putn(&e->current, s, n);
     e->started = 1;
 }
 
@@ -1426,43 +1426,43 @@ static void ex_add_split(Ex *e, const char *s) {
 }
 
 static char *capture_command(const char *text) {
-    int fds[2];
-    if (pipe(fds) != 0) {
+    int file_descriptors[2];
+    if (pipe(file_descriptors) != 0) {
         errmsg("cannot create a pipe for $( )", 0, 0);
         return xstrdup("");
     }
     pid_t pid = fork();
     if (pid < 0) {
-        close(fds[0]);
-        close(fds[1]);
+        close(file_descriptors[0]);
+        close(file_descriptors[1]);
         errmsg("cannot fork for $( )", 0, 0);
         return xstrdup("");
     }
     if (pid == 0) {
-        close(fds[0]);
-        if (fds[1] != 1) {
-            dup2(fds[1], 1);
-            close(fds[1]);
+        close(file_descriptors[0]);
+        if (file_descriptors[1] != 1) {
+            dup2(file_descriptors[1], 1);
+            close(file_descriptors[1]);
         }
         int st = exec_text(text);
         _exit(st);
     }
-    close(fds[1]);
+    close(file_descriptors[1]);
 
     Sbuf b;
     sb_init(&b);
-    char buf[512];
+    char buffer[512];
     long n;
-    while ((n = read(fds[0], buf, sizeof(buf))) > 0) {
-        sb_putn(&b, buf, (size_t)n);
+    while ((n = read(file_descriptors[0], buffer, sizeof(buffer))) > 0) {
+        sb_putn(&b, buffer, (size_t)n);
     }
-    close(fds[0]);
+    close(file_descriptors[0]);
     int status = 0;
     waitpid(pid, &status, 0);
     last_status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 
-    while (b.len > 0 && b.p[b.len - 1] == '\n') {
-        b.p[--b.len] = '\0';
+    while (b.length > 0 && b.p[b.length - 1] == '\n') {
+        b.p[--b.length] = '\0';
     }
     return b.p ? b.p : xstrdup("");
 }
@@ -1506,25 +1506,25 @@ static char *strip_affix(const char *value, const char *pat, int from_end, int l
     Sbuf b;
     sb_init(&b);
     for (size_t step = 0; step <= n; step++) {
-        size_t len = longest ? n - step : step;
+        size_t length = longest ? n - step : step;
         char *piece;
         if (from_end) {
-            piece = xstrdup(value + (n - len));
+            piece = xstrdup(value + (n - length));
         } else {
-            piece = (char *)malloc(len + 1);
+            piece = (char *)malloc(length + 1);
             if (!piece) {
                 die_oom();
             }
-            memcpy(piece, value, len);
-            piece[len] = '\0';
+            memcpy(piece, value, length);
+            piece[length] = '\0';
         }
         int hit = glob_match(pat, piece);
         free(piece);
         if (hit) {
             if (from_end) {
-                sb_putn(&b, value, n - len);
+                sb_putn(&b, value, n - length);
             } else {
-                sb_puts(&b, value + len);
+                sb_puts(&b, value + length);
             }
             return b.p ? b.p : xstrdup("");
         }
@@ -1557,10 +1557,10 @@ static void expand_braced_word(Ex *e, const char *word, int in_quotes) {
 static void expand_braced(Ex *e, const char *body, int in_quotes) {
     if (body[0] == '#' && body[1] && !strchr(":-+=?", body[1])) {
         char *v = parameter_value(body + 1);
-        char *len = xstrdup(number_to_string((long)strlen(v)));
+        char *length = xstrdup(number_to_string((long)strlen(v)));
         free(v);
-        ex_add(e, len, strlen(len));
-        free(len);
+        ex_add(e, length, strlen(length));
+        free(length);
         return;
     }
 
@@ -1942,13 +1942,13 @@ static void expand_dollar(Ex *e, const char **pp, int in_quotes) {
         }
         if (depth != 0 || q[0] != ')' || q[1] != ')') {
         } else {
-            size_t len = (size_t)(q - start);
-            char *raw = (char *)malloc(len + 1);
+            size_t length = (size_t)(q - start);
+            char *raw = (char *)malloc(length + 1);
             if (!raw) {
                 die_oom();
             }
-            memcpy(raw, start, len);
-            raw[len] = '\0';
+            memcpy(raw, start, length);
+            raw[length] = '\0';
             char *expanded = expand_one(raw);
             free(raw);
             char *result = arith_eval(expanded ? expanded : "");
@@ -1972,13 +1972,13 @@ static void expand_dollar(Ex *e, const char **pp, int in_quotes) {
                 }
             }
         }
-        size_t len = (size_t)(q - start);
-        char *text = (char *)malloc(len + 1);
+        size_t length = (size_t)(q - start);
+        char *text = (char *)malloc(length + 1);
         if (!text) {
             die_oom();
         }
-        memcpy(text, start, len);
-        text[len] = '\0';
+        memcpy(text, start, length);
+        text[length] = '\0';
         char *result = capture_command(text);
         free(text);
         if (in_quotes) {
@@ -2003,13 +2003,13 @@ static void expand_dollar(Ex *e, const char **pp, int in_quotes) {
                 }
             }
         }
-        size_t len = (size_t)(q - start);
-        char *body = (char *)malloc(len + 1);
+        size_t length = (size_t)(q - start);
+        char *body = (char *)malloc(length + 1);
         if (!body) {
             die_oom();
         }
-        memcpy(body, start, len);
-        body[len] = '\0';
+        memcpy(body, start, length);
+        body[length] = '\0';
         expand_braced(e, body, in_quotes);
         free(body);
         *pp = *q ? q + 1 : q;
@@ -2057,7 +2057,7 @@ static void expand_dollar(Ex *e, const char **pp, int in_quotes) {
 static void expand_word(const char *raw, Vec *out, int split, int do_glob) {
     Ex e;
     memset(&e, 0, sizeof(e));
-    sb_init(&e.cur);
+    sb_init(&e.current);
     e.out = out;
     e.split = split;
     e.glob = do_glob;
@@ -2178,7 +2178,7 @@ static char *expand_pattern(const char *raw) {
     vec_init(&v);
     Ex e;
     memset(&e, 0, sizeof(e));
-    sb_init(&e.cur);
+    sb_init(&e.current);
     e.out = &v;
     e.split = 0;
     e.glob = 0;
@@ -2228,7 +2228,7 @@ static int heredoc_file_descriptor(Redir *r, RedirSave *save) {
         Vec v;
         vec_init(&v);
         memset(&e, 0, sizeof(e));
-        sb_init(&e.cur);
+        sb_init(&e.current);
         e.out = &v;
         e.split = 0;
         e.glob = 0;
@@ -2272,37 +2272,37 @@ static int heredoc_file_descriptor(Redir *r, RedirSave *save) {
     } else {
         sb_puts(&text, r->word);
     }
-    int fds[2];
-    if (pipe(fds) != 0) {
+    int file_descriptors[2];
+    if (pipe(file_descriptors) != 0) {
         sb_free(&text);
         return -1;
     }
     pid_t pid = fork();
     if (pid < 0) {
-        close(fds[0]);
-        close(fds[1]);
+        close(file_descriptors[0]);
+        close(file_descriptors[1]);
         sb_free(&text);
         return -1;
     }
     if (pid == 0) {
-        close(fds[0]);
+        close(file_descriptors[0]);
         size_t off = 0;
-        while (off < text.len) {
-            long n = write(fds[1], text.p + off, text.len - off);
+        while (off < text.length) {
+            long n = write(file_descriptors[1], text.p + off, text.length - off);
             if (n <= 0) {
                 break;
             }
             off += (size_t)n;
         }
-        close(fds[1]);
+        close(file_descriptors[1]);
         _exit(0);
     }
-    close(fds[1]);
+    close(file_descriptors[1]);
     sb_free(&text);
     if (save && save->nhere < SH_MAX_REDIR) {
         save->here[save->nhere++] = pid;
     }
-    return fds[0];
+    return file_descriptors[0];
 }
 
 static int park_slot(int fd) {
@@ -2571,20 +2571,20 @@ static void trap_run_exit(void) {
 }
 
 static int run_builtin(int argc, char **argv) {
-    const char *cmd = argv[0];
+    const char *command = argv[0];
 
-    if (strcmp(cmd, ":") == 0 || strcmp(cmd, "true") == 0) {
+    if (strcmp(command, ":") == 0 || strcmp(command, "true") == 0) {
         return 0;
     }
-    if (strcmp(cmd, "false") == 0) {
+    if (strcmp(command, "false") == 0) {
         return 1;
     }
-    if (strcmp(cmd, "exit") == 0) {
+    if (strcmp(command, "exit") == 0) {
         flow = FLOW_EXIT;
         exit_code = argc > 1 ? atoi(argv[1]) : last_status;
         return exit_code;
     }
-    if (strcmp(cmd, "exec") == 0) {
+    if (strcmp(command, "exec") == 0) {
         if (argc == 1) {
             exec_keep_redirs = 1;
             return 0;
@@ -2598,7 +2598,7 @@ static int run_builtin(int argc, char **argv) {
         }
         return 127;
     }
-    if (strcmp(cmd, "trap") == 0) {
+    if (strcmp(command, "trap") == 0) {
         if (argc == 1) {
             for (int sig = 0; sig < TRAP_MAX_SIG; sig++) {
                 const char *action = (sig == 0) ? trap_exit_action
@@ -2641,19 +2641,19 @@ static int run_builtin(int argc, char **argv) {
         }
         return 0;
     }
-    if (strcmp(cmd, "return") == 0) {
+    if (strcmp(command, "return") == 0) {
         flow = FLOW_RETURN;
         return argc > 1 ? atoi(argv[1]) : last_status;
     }
-    if (strcmp(cmd, "break") == 0 || strcmp(cmd, "continue") == 0) {
-        flow = cmd[0] == 'b' ? FLOW_BREAK : FLOW_CONTINUE;
+    if (strcmp(command, "break") == 0 || strcmp(command, "continue") == 0) {
+        flow = command[0] == 'b' ? FLOW_BREAK : FLOW_CONTINUE;
         flow_levels = argc > 1 ? atoi(argv[1]) : 1;
         if (flow_levels < 1) {
             flow_levels = 1;
         }
         return 0;
     }
-    if (strcmp(cmd, "cd") == 0) {
+    if (strcmp(command, "cd") == 0) {
         const char *where = argc > 1 ? argv[1] : var_get("HOME");
         if (!where[0]) {
             where = PATH_HOME;
@@ -2662,22 +2662,22 @@ static int run_builtin(int argc, char **argv) {
             errmsg("cd: not a directory: ", where, 0);
             return 1;
         }
-        char buf[PATH_MAX_LEN];
-        if (getcwd(buf, sizeof(buf))) {
-            var_set("PWD", buf);
+        char buffer[PATH_MAX_LENGTH];
+        if (getcwd(buffer, sizeof(buffer))) {
+            var_set("PWD", buffer);
         }
         return 0;
     }
-    if (strcmp(cmd, "pwd") == 0) {
-        char buf[PATH_MAX_LEN];
-        if (!getcwd(buf, sizeof(buf))) {
+    if (strcmp(command, "pwd") == 0) {
+        char buffer[PATH_MAX_LENGTH];
+        if (!getcwd(buffer, sizeof(buffer))) {
             return 1;
         }
-        out_file_descriptor_string(1, buf);
+        out_file_descriptor_string(1, buffer);
         out_file_descriptor_string(1, "\n");
         return 0;
     }
-    if (strcmp(cmd, "echo") == 0) {
+    if (strcmp(command, "echo") == 0) {
         int start = 1;
         int newline = 1;
         if (argc > 1 && strcmp(argv[1], "-n") == 0) {
@@ -2695,7 +2695,7 @@ static int run_builtin(int argc, char **argv) {
         }
         return 0;
     }
-    if (strcmp(cmd, "export") == 0) {
+    if (strcmp(command, "export") == 0) {
         if (argc == 1) {
             for (Var *v = vars; v; v = v->next) {
                 if (v->exported) {
@@ -2721,20 +2721,20 @@ static int run_builtin(int argc, char **argv) {
         }
         return 0;
     }
-    if (strcmp(cmd, "unset") == 0) {
+    if (strcmp(command, "unset") == 0) {
         for (int i = 1; i < argc; i++) {
             var_unset(argv[i]);
         }
         return 0;
     }
-    if (strcmp(cmd, "env") == 0) {
+    if (strcmp(command, "env") == 0) {
         for (int i = 0; environ && environ[i]; i++) {
             out_file_descriptor_string(1, environ[i]);
             out_file_descriptor_string(1, "\n");
         }
         return 0;
     }
-    if (strcmp(cmd, "set") == 0) {
+    if (strcmp(command, "set") == 0) {
         if (argc == 1) {
             for (Var *v = vars; v; v = v->next) {
                 out_file_descriptor_string(1, v->name);
@@ -2805,7 +2805,7 @@ static int run_builtin(int argc, char **argv) {
         }
         return 0;
     }
-    if (strcmp(cmd, "shift") == 0) {
+    if (strcmp(command, "shift") == 0) {
         int n = argc > 1 ? atoi(argv[1]) : 1;
         if (n > position_count || n < 0) {
             return 1;
@@ -2819,7 +2819,7 @@ static int run_builtin(int argc, char **argv) {
         position_count -= n;
         return 0;
     }
-    if (strcmp(cmd, "read") == 0) {
+    if (strcmp(command, "read") == 0) {
         Sbuf line;
         sb_init(&line);
         int got = read_line_file_descriptor(0, &line);
@@ -2854,10 +2854,10 @@ static int run_builtin(int argc, char **argv) {
         sb_free(&line);
         return got ? 0 : 1;
     }
-    if (strcmp(cmd, "test") == 0 || strcmp(cmd, "[") == 0) {
+    if (strcmp(command, "test") == 0 || strcmp(command, "[") == 0) {
         return bi_test(argc, argv);
     }
-    if (strcmp(cmd, "eval") == 0) {
+    if (strcmp(command, "eval") == 0) {
         Sbuf b;
         sb_init(&b);
         for (int i = 1; i < argc; i++) {
@@ -2870,7 +2870,7 @@ static int run_builtin(int argc, char **argv) {
         sb_free(&b);
         return st;
     }
-    if (strcmp(cmd, ".") == 0 || strcmp(cmd, "source") == 0) {
+    if (strcmp(command, ".") == 0 || strcmp(command, "source") == 0) {
         if (argc < 2) {
             errmsg(".: needs a file", 0, 0);
             return 2;
@@ -2882,10 +2882,10 @@ static int run_builtin(int argc, char **argv) {
         }
         Sbuf text;
         sb_init(&text);
-        char buf[512];
+        char buffer[512];
         long n;
-        while ((n = read(fd, buf, sizeof(buf))) > 0) {
-            sb_putn(&text, buf, (size_t)n);
+        while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
+            sb_putn(&text, buffer, (size_t)n);
         }
         close(fd);
         int st = text.p ? exec_text(text.p) : 0;
@@ -2895,7 +2895,7 @@ static int run_builtin(int argc, char **argv) {
         }
         return st;
     }
-    if (strcmp(cmd, "wait") == 0) {
+    if (strcmp(command, "wait") == 0) {
         int st = 0;
         if (argc > 1) {
             int status = 0;
@@ -2911,7 +2911,7 @@ static int run_builtin(int argc, char **argv) {
         }
         return st;
     }
-    if (strcmp(cmd, "unalias") == 0) {
+    if (strcmp(command, "unalias") == 0) {
         return 0;
     }
     return 127;
@@ -3074,11 +3074,11 @@ static int exec_external(char **argv, Node *n) {
             const char *p = path;
             while (*p) {
                 const char *end = strchr(p, ':');
-                size_t len = end ? (size_t)(end - p) : strlen(p);
+                size_t length = end ? (size_t)(end - p) : strlen(p);
                 Sbuf full;
                 sb_init(&full);
-                sb_putn(&full, p, len);
-                if (len == 0 || p[len - 1] != '/') {
+                sb_putn(&full, p, length);
+                if (length == 0 || p[length - 1] != '/') {
                     sb_putc(&full, '/');
                 }
                 sb_puts(&full, argv[0]);
@@ -3198,12 +3198,12 @@ static int exec_simple(Node *n) {
 static int exec_pipeline(Node *n) {
     Node *stages[32];
     int count = 0;
-    Node *cur = n;
-    while (cur->kind == N_PIPE && count < 30) {
-        stages[count++] = cur->right;
-        cur = cur->left;
+    Node *current = n;
+    while (current->kind == N_PIPE && count < 30) {
+        stages[count++] = current->right;
+        current = current->left;
     }
-    stages[count++] = cur;
+    stages[count++] = current;
     for (int i = 0; i < count / 2; i++) {
         Node *t = stages[i];
         stages[i] = stages[count - 1 - i];
@@ -3213,8 +3213,8 @@ static int exec_pipeline(Node *n) {
     int in_file_descriptor = -1;
     pid_t pids[32];
     for (int i = 0; i < count; i++) {
-        int fds[2] = { -1, -1 };
-        if (i + 1 < count && pipe(fds) != 0) {
+        int file_descriptors[2] = { -1, -1 };
+        if (i + 1 < count && pipe(file_descriptors) != 0) {
             errmsg("cannot create a pipe", 0, 0);
             return 1;
         }
@@ -3228,10 +3228,10 @@ static int exec_pipeline(Node *n) {
                 dup2(in_file_descriptor, 0);
                 close(in_file_descriptor);
             }
-            if (fds[1] >= 0) {
-                close(fds[0]);
-                dup2(fds[1], 1);
-                close(fds[1]);
+            if (file_descriptors[1] >= 0) {
+                close(file_descriptors[0]);
+                dup2(file_descriptors[1], 1);
+                close(file_descriptors[1]);
             }
             int st = exec_node(stages[i]);
             _exit(st);
@@ -3240,9 +3240,9 @@ static int exec_pipeline(Node *n) {
         if (in_file_descriptor >= 0) {
             close(in_file_descriptor);
         }
-        if (fds[1] >= 0) {
-            close(fds[1]);
-            in_file_descriptor = fds[0];
+        if (file_descriptors[1] >= 0) {
+            close(file_descriptors[1]);
+            in_file_descriptor = file_descriptors[0];
         }
     }
 
@@ -3376,7 +3376,7 @@ static int exec_node_inner(Node *n) {
     switch (n->kind) {
         case N_SIMPLE:
             return exec_simple(n);
-        case N_SEQ: {
+        case N_SEQUENCE: {
             int st = exec_node(n->left);
             last_status = st;
             if (flow != FLOW_NONE) {
@@ -3511,7 +3511,7 @@ static int exec_text(const char *text) {
     memset(&a, 0, sizeof(a));
     current_arena = &a;
     memset(&lx, 0, sizeof(lx));
-    lx.src = text;
+    lx.source = text;
     parse_error = 0;
     parse_depth = 0;
     interactive = 0;
@@ -3536,25 +3536,25 @@ static int exec_text(const char *text) {
     return st;
 }
 
-static int read_line_interactive(Sbuf *buf) {
+static int read_line_interactive(Sbuf *buffer) {
     for (;;) {
         char c;
         long n = read(0, &c, 1);
         if (n <= 0) {
-            return buf->len > 0;
+            return buffer->length > 0;
         }
         if (c == '\n' || c == '\r') {
             write(1, "\n", 1);
             return 1;
         }
         if (c == '\b' || c == 0x7F) {
-            if (buf->len > 0) {
-                buf->p[--buf->len] = '\0';
+            if (buffer->length > 0) {
+                buffer->p[--buffer->length] = '\0';
                 write(1, "\b \b", 3);
             }
             continue;
         }
-        sb_putc(buf, c);
+        sb_putc(buffer, c);
         write(1, &c, 1);
     }
 }
@@ -3565,10 +3565,10 @@ static void interactive_loop(void) {
     interactive = 1;
 
     for (;;) {
-        char dir[PATH_MAX_LEN];
-        if (pending.len == 0) {
-            if (getcwd(dir, sizeof(dir))) {
-                out_file_descriptor_string(1, dir);
+        char directory[PATH_MAX_LENGTH];
+        if (pending.length == 0) {
+            if (getcwd(directory, sizeof(directory))) {
+                out_file_descriptor_string(1, directory);
             }
             out_file_descriptor_string(1, " $ ");
         } else {
@@ -3589,7 +3589,7 @@ static void interactive_loop(void) {
         memset(&a, 0, sizeof(a));
         current_arena = &a;
         memset(&lx, 0, sizeof(lx));
-        lx.src = pending.p;
+        lx.source = pending.p;
         parse_error = 0;
         parse_depth = 0;
         advance();
@@ -3622,10 +3622,10 @@ static int run_script_file(const char *path) {
     }
     Sbuf text;
     sb_init(&text);
-    char buf[1024];
+    char buffer[1024];
     long n;
-    while ((n = read(fd, buf, sizeof(buf))) > 0) {
-        sb_putn(&text, buf, (size_t)n);
+    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
+        sb_putn(&text, buffer, (size_t)n);
     }
     close(fd);
     int st = text.p ? exec_text(text.p) : 0;

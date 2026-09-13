@@ -27,11 +27,11 @@ int main(void) {
     check((conf.gateway & conf.mask) == (conf.ip & conf.mask),
           "the gateway is not on the same subnet as this machine");
 
-    int server = (int)sys_socket(OS_SOCK_DGRAM);
+    int server = (int)sys_socket(OS_SOCKET_DGRAM);
     check(server >= 0, "sys_socket returned no descriptor");
     check(sys_bind(server, TEST_PORT) == TEST_PORT, "sys_bind did not return the port it bound");
 
-    int client = (int)sys_socket(OS_SOCK_DGRAM);
+    int client = (int)sys_socket(OS_SOCKET_DGRAM);
     check(client >= 0, "a second sys_socket returned no descriptor");
     long ephemeral = sys_bind(client, 0);
     check(ephemeral >= 49152 && ephemeral <= 65535,
@@ -62,7 +62,7 @@ int main(void) {
     check(trunc == (long)sizeof(small), "a truncated recvfrom did not report the length it kept");
     check(sys_sockpoll(server) == 0, "the rest of a truncated datagram was left queued");
 
-    int taken = (int)sys_socket(OS_SOCK_DGRAM);
+    int taken = (int)sys_socket(OS_SOCKET_DGRAM);
     check(sys_bind(taken, TEST_PORT) < 0, "two sockets bound the same port");
     check(sys_bind(client, 9999) < 0, "an already-bound socket was bound a second time");
     sys_close(taken);
@@ -88,7 +88,7 @@ int main(void) {
     sys_close(client);
 
     for (int i = 0; i < 100; i++) {
-        int fd = (int)sys_socket(OS_SOCK_DGRAM);
+        int fd = (int)sys_socket(OS_SOCKET_DGRAM);
         if (fd < 0) {
             check(0, "the socket table ran out - a closed socket is not being freed");
             break;

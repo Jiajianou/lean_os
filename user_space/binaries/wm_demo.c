@@ -13,20 +13,20 @@
 int main(void) {
     int request_file_descriptors[2];
     int response_file_descriptors[2];
-    if (sys_pipe_open(WM_REQUEST_PIPE, request_file_descriptors) != 0 || sys_pipe_open(WM_RESPONSE_PIPE, response_file_descriptors) != 0) {
+    if (sys_pipe_open(WINDOW_MANAGER_REQUEST_PIPE, request_file_descriptors) != 0 || sys_pipe_open(WINDOW_MANAGER_RESPONSE_PIPE, response_file_descriptors) != 0) {
         sys_exit(1);
     }
 
-    wm_create_request_t req;
-    memset(&req, 0, sizeof(req));
-    req.width = WIN_W;
-    req.height = WIN_H;
-    req.client_pid = (int32_t)sys_getpid();
+    window_manager_create_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.width = WIN_W;
+    request.height = WIN_H;
+    request.client_pid = (int32_t)sys_getpid();
 
-    wm_create_response_t response;
+    window_manager_create_response_t response;
     int got_response = 0;
     for (int attempt = 0; attempt < 4 && !got_response; attempt++) {
-        if (sys_write(request_file_descriptors[1], &req, sizeof(req)) != (long)sizeof(req)) {
+        if (sys_write(request_file_descriptors[1], &request, sizeof(request)) != (long)sizeof(request)) {
             sys_exit(1);
         }
         long deadline = sys_uptime_ms() + 500;
@@ -38,14 +38,14 @@ int main(void) {
             if (sys_read(response_file_descriptors[0], &response, sizeof(response)) != (long)sizeof(response)) {
                 sys_exit(1);
             }
-            got_response = (response.client_pid == req.client_pid);
+            got_response = (response.client_pid == request.client_pid);
         }
     }
-    if (!got_response || response.shm_id < 0) {
+    if (!got_response || response.shared_memory_id < 0) {
         sys_exit(1);
     }
 
-    long vaddr = sys_shared_memory_map(response.shm_id);
+    long vaddr = sys_shared_memory_map(response.shared_memory_id);
     if (vaddr < 0) {
         sys_exit(1);
     }
